@@ -167,12 +167,13 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | Cx1/Cx2 + IN_SCOPE + ≤2文件 + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | **[AUTO-FIX]** 直接修 |
 | Cx2 + IN_SCOPE + 超2文件或触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
-| Cx3/Cx4                                                  | 任何 | 只输出方案，标注"需人工决策" |
+| **Cx3 IN_SCOPE**（manual 交互 `/fix`） | 任何 | **先过处置门**：AskUserQuestion → 处理措施 + 确认本次修，或 defer 原因；据结果修或记 defer，未处置阻塞切 `needs-check-fix` |
+| Cx3/Cx4（auto context）· Cx4 IN_SCOPE | 任何 | surface + 转人工，只输出方案；不自动修 / 不切下一阶段 label（Cx4 设计级默认 defer 记因） |
 | 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 3；pri-p0/判不定除外） |
 
 **不可自动执行**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
-> **auto context（无监督）vs manual context（交互 `/fix`）**：上表 **只有 [AUTO-FIX] 行**（≤2 文件 + 非禁域）能在**无监督自动路径**执行——pr-monitor `--mode=auto` 的 `Skill("fix")` 只跑这一档。「Cx2 超 2 文件或触禁域 → 执行推荐方案」「记录报告，标注阻塞」是 **manual context**（human 在场的交互 `/fix`）专属；无监督路径遇到这些一律 **surface + 转人工，绝不自动改**。Claude `Skill("fix")` 侧靠本表 + §不可自动执行清单自限。并发语义不可路径检测，留 prompt + Cx3 门兜底。（[AUTO-FIX] 禁止域 = 改底座 crate trait / migration / 组合根 / 并发语义。）
+> **auto context（无监督）vs manual context（交互 `/fix`）**：上表 **只有 [AUTO-FIX] 行**（≤2 文件 + 非禁域）能在**无监督自动路径**执行——pr-monitor `--mode=auto` 的 `Skill("fix")` 只跑这一档。「Cx2 超 2 文件或触禁域 → 执行推荐方案」「记录报告，标注阻塞」是 **manual context**（human 在场的交互 `/fix`）专属；无监督路径遇到这些一律 **surface + 转人工，绝不自动改**。Claude `Skill("fix")` 侧靠本表 + §不可自动执行清单自限。并发语义不可路径检测，留 prompt + Cx3 门兜底。**manual context 遇 IN_SCOPE Cx3 必经处置门**（AskUserQuestion：处理措施 + 确认本次修 / defer 原因，先于修复与切 label）；auto context 无 AskUserQuestion，遇 IN_SCOPE Cx3+ 一律 surface + 转人工、不切下一阶段 label。（[AUTO-FIX] 禁止域 = 改底座 crate trait / migration / 组合根 / 并发语义。）
 
 **何时用 AskUserQuestion**: 见文末 §沟通规则（默认自动决策，不逐条问）。
 
@@ -267,7 +268,7 @@ push 后按 `issues` B5 ① 验无文件冲突；通过后**立即**进步骤 3�
   - **逐条自动建 backlog issue**（建单单源命令见 `issues` B1）：finding 字段无损填 `backlog.md` body（现状←证据+三维根因+影响 / 修复方向←三级方案种子 / Files←file:line 全集 / Source←PR #<PR#> F<k> + `Discovered via /fix #<original>`）；四轴标签派生 `cx`←`[Cx…]` tag、`area`←finding 文件路径（PROJECT.md §2.1）、`type`←性质、`pri`←`[P…]`（默认 `pri-p2`）；先 `bash hack/automation/issue-labels.sh validate --labels "…"` 过门，再 `bash hack/automation/forge.sh issue-create "<T>" <body-file> "<L1,L2,...>"`，回显 #N/URL。
   - **安全闸门**：`pri-p0`（incident）→ 停下 AskUserQuestion；`validate` 失败（area/type 判不定）→ 标 `deferred=labels-underivable`，回退草稿待人工。
   - **追加机器块**（贴评论前，`<!-- pm:oos -->` 模板）：`bash hack/automation/pr-meta.sh emit-block --kind=oos --pr=<PR#> --oos='{"items":[{…,"issue":"#<N>"},…]}'`——**每个 item 必须带 `issue` 或 `deferred`（`pri-p0-incident`｜`labels-underivable`）之一**，否则 emit-block 拒绝（Hard 闸门）。输出追加到 pm:oos body 末尾，再走 `issues` B4 贴；正文每条回填 `✅ 已建 #N` 或 `🟡 deferred:<原因>`。
-- **切触发 label（OOS 留痕落地后）** → `bash hack/automation/forge.sh pr-set-labels <PR#> --add "pr-status/needs-check-fix" --remove "pr-status/needs-fix"`（待 `/pr-review --check` 验证；**fix 不再直接到 ready**）——OOS artifact（pm:oos/issue）已先落地、pm:fix 的 `🚦 OUT_OF_SCOPE` 指针不悬空，此刻 check-side 执行器可立即开始，无需等待 CI。**收尾不变式 artifact-before-trigger**：OOS 留痕（建 issue + 贴 pm:oos）必须在切此 label 之前完成，与 ship 阶段 8 同序。
+- **切触发 label（OOS 留痕 + IN_SCOPE Cx3 处置落地后）** → `bash hack/automation/forge.sh pr-set-labels <PR#> --add "pr-status/needs-check-fix" --remove "pr-status/needs-fix"`（待 `/pr-review --check` 验证；**fix 不再直接到 ready**）——OOS artifact（pm:oos/issue）已先落地、pm:fix 的 `🚦 OUT_OF_SCOPE` 指针不悬空，此刻 check-side 执行器可立即开始，无需等待 CI。**收尾不变式 artifact-before-trigger**：OOS 留痕（建 issue + 贴 pm:oos）**与 IN_SCOPE Cx3/Cx4 处置（manual：3.4 处置门已确认修毕 / defer 原因已记入 pm:fix；auto context：IN_SCOPE Cx3+ 一律 surface 转人工、不切此 label）**必须在切此 label 之前完成，与 ship 阶段 8 同序。
 - **未修 / 待办 finding**（非 OOS 的 Cx3+/RELATED deferred）→ §沟通规则闸门输出 `bash hack/automation/forge.sh issue-create "<T>" <body-file> "<backlog,pri-pX,area-XX,type-XX,cx-X>"` 建议命令（确认后跑，留 open；四轴标签必填，从 finding `[…Cx…]` tag 提取——建单单源命令见 `issues` B1；body 按 `backlog.md` 顶部字段映射**无损**填充，不得一句话带过；条件延后型加 `flag-cond` + Trigger，派生注明 `Discovered via /fix #<original>`）。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE），停下 AskUserQuestion 确认。建 issue 必须显式 `--label pri-pX`。
