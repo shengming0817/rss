@@ -75,6 +75,12 @@ tonic = "0.13"
 prost = "0.13"
 # 持久化（adapters 前瞻）
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）
+# 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
+typify = "0.7"
+schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
+prettyplease = "0.2"
+syn = { version = "2", features = ["full", "parsing"] }
+toml = "0.8"
 # 测试
 rstest = "0.24"
 mockall = "0.13"
