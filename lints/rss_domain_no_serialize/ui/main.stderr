@@ -1,0 +1,27 @@
+warning: domain 类型不应 derive serde `Serialize`/`Deserialize`（serde derive 冻结）
+  --> $DIR/main.rs:9:5
+   |
+LL |     pub struct UserEntity {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 只在 contract/DTO/generated 类型上序列化；把此类型移到 `dto`/`wire` 模块或经 From/TryFrom 转出 wire DTO。确需序列化时加 `#[allow(rss_domain_no_serialize)] // reason: ...`
+   = note: `#[warn(rss_domain_no_serialize)]` on by default
+
+warning: domain 类型不应 derive serde `Serialize`/`Deserialize`（serde derive 冻结）
+  --> $DIR/main.rs:15:5
+   |
+LL |     pub struct AuditRecord {
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 只在 contract/DTO/generated 类型上序列化；把此类型移到 `dto`/`wire` 模块或经 From/TryFrom 转出 wire DTO。确需序列化时加 `#[allow(rss_domain_no_serialize)] // reason: ...`
+
+warning: domain 类型不应 derive serde `Serialize`/`Deserialize`（serde derive 冻结）
+  --> $DIR/main.rs:62:9
+   |
+LL |         pub struct NestedEntity {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 只在 contract/DTO/generated 类型上序列化；把此类型移到 `dto`/`wire` 模块或经 From/TryFrom 转出 wire DTO。确需序列化时加 `#[allow(rss_domain_no_serialize)] // reason: ...`
+
+warning: 3 warnings emitted
+

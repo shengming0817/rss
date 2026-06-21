@@ -47,6 +47,15 @@ members = [
   # 契约派生（committed，被域依赖）
   "generated",
 ]
+# 自写 dylint lint workspace（nightly rustc_private，自成独立 workspace）——显式排除，
+# 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
+exclude = ["lints"]
+
+# 自写 dylint lint 注册入口；对 cargo build/test/check 惰性（仅 `cargo dylint` 读取），
+# 配合 exclude 使 stable 构建永不触碰 lints/ 的 nightly 工具链。
+# 运行：`cargo dylint --all`（须 `cargo install cargo-dylint dylint-link`）。见 lints/。
+[workspace.metadata.dylint]
+libraries = [{ path = "lints/rss_domain_no_serialize" }]
 
 [workspace.package]
 version = "0.0.0"

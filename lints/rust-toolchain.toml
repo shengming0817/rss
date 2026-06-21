@@ -1,0 +1,8 @@
+# dylint lint crate 须 nightly + rustc_private 组件（rustc-dev）。仅作用于 lints/ 子树，
+# 不影响根 stable 1.96 workspace（lints/ 已自成 workspace + 根 exclude）。
+# channel ↔ clippy_utils rev（见 rss_domain_no_serialize/Cargo.toml）须成对升级，勿单独改其一。
+# ref: dylint internal/template/rust-toolchain@v6.0.1
+[toolchain]
+channel = "nightly-2026-04-16"
+components = ["llvm-tools-preview", "rustc-dev"]
+profile = "minimal"
