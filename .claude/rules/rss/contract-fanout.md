@@ -18,7 +18,7 @@ HTTP path、auth 语义、consistency level、subscription role 时，必须做�
 ## 规则
 
 - contract 是跨域通信单源，共享 Rust 类型不是单源。
-- 破坏式 wire 变更走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新一份 `contract.toml` + `*.schema.json`）。
+- 破坏式 wire 变更走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新一份 `contract.toml` + `*.schema.json`）。**Pre-GA 窗口例外**：`api-versioning.md` §兼容窗口（至 2026-12-31）内允许原地改 active 版本，仍须完成本扇出闭环；窗口后才强制新版本目录。
 - generated diff 是一等审查材料。
 - 新增 contract kind 或 role 必须补 governance 与 codegen 测试。
 - 暂不支持的扇出项必须登记 GitHub Issue，不能写在 rules 中当计划占位。

@@ -48,6 +48,8 @@ listener auth chain 必须显式声明。无认证使用 `AuthNone`，`None` 是
 2. listener auth plan。
 3. bootstrap fail-fast 默认拒绝。
 
+> 例外（fail-closed）：`InternalListener` / `AdminListener` 不接受 route-level `Public` / `PasswordResetExempt` 降级——内部 / 管理面 listener 上的 route opt-out 必须被拒。优先级 1 的 route opt-out 仅适用于 `PrimaryListener` 等对外面 listener。
+
 域 crate 禁止构造 AuthPlan；组合根（assembly / bin crate）组装后通过 bootstrap option 注入。
 
 ## Option 范式

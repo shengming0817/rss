@@ -24,7 +24,7 @@ per-domain URL（`RSS_<DOMAIN>_AMQP_URL`，DOMAIN 大写，缺省回退 `RSS_AMQ
 发布或消费事件。凭据由 broker operator 外部配置（非 framework 派生，无 HKDF/派生层，原因：AMQP broker
 用户是外部对象，不存在 framework 可控的 master key）。
 
-distinct broker-URL 缺失时**启动期 fail-closed**，不静默降级回共享凭据；URL 含 user:pass，凭据 non-leak
+在 **split/per-domain 隔离拓扑**下，per-domain URL（`RSS_<DOMAIN>_AMQP_URL`）缺失必须**启动期 fail-closed**，不静默降级回共享 `RSS_AMQP_URL` / 共享凭据；非隔离（共享 broker）拓扑才允许回退 `RSS_AMQP_URL`。URL 含 user:pass，凭据 non-leak
 由 typed redaction funnel（Medium）守。权威语义见 `bootstrap::eventtransport` 模块的 rustdoc。
 
 ## 复用层选型（claimer / nonce，topology-gated）

@@ -82,7 +82,7 @@ self-scoped gate **contract-derived**：契约声明 `endpoints.http.resource:
 <pathParam>`（owner-scoped）或 `endpoints.http.selfScoped: true`（self-scoped），生成
 handler 经单一 `authn::require_permission_for_contract(contract_spec, resolver)` funnel 派生
 `require_permission_for_resource(path_param, perm)` / `require_permission_for_self(perm)`——业务
-slice 不手写 gate。`resource`/`selfScoped` 各 ⇒ permission、二者互斥（schema + `ContractSpec::validate`
+handler / 域 crate 不手写 gate。`resource`/`selfScoped` 各 ⇒ permission、二者互斥（schema + `ContractSpec::validate`
 + `cargo xtask` 治理校验 三重）。owner-scoped gate 把 canonical resource id（self-scoped 把
 调用者自身 subject）转发给 PDP。
 

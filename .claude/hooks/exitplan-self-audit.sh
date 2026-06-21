@@ -18,7 +18,7 @@ jq -nc '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: "措施符合彻底、不向后兼容 措施优雅简洁、AI HARD的原则吗"
+    permissionDecisionReason: "本计划是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD）？据此复核后重新退出 plan mode 即放行（每会话一次）。"
   }
 }'
 touch "$state"
