@@ -64,6 +64,7 @@ _az_wit_patch() {
     # Pass the auth header via a 0600 temp file (curl -H @file), NOT `-H "<token>"`:
     # an argv-visible Authorization header leaks the PAT/Bearer token to `ps`.
     hdr="$(mktemp "${TMPDIR:-/tmp}/forge-azhdr.XXXXXX")"
+    chmod 0600 "${hdr}"   # make the 0600 promise explicit, independent of mktemp's default
     printf '%s\n' "${auth}" > "${hdr}"
     if curl -fsS -X PATCH "${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workitems/${id}?api-version=7.1" \
         -H @"${hdr}" -H "Content-Type: application/json-patch+json" --data-binary @"${patch_file}" >/dev/null; then rc=0; else rc=$?; fi
@@ -339,15 +340,18 @@ _azure_issue_create() { # <title> <body-file> <label-csv> [type]
     # Create the work item first (title + type + tags via CLI args — these are metadata, not body).
     # Then PATCH the description via REST --in-file so body content never appears in process list.
     if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az boards work-item create --title %s --type %s --fields System.Tags=%s ; REST PATCH /wit/workitems/<id> System.Description (curl)\n' \
+        printf 'az boards work-item create --title %s --type "%s" --fields System.Tags=%s ; REST PATCH /wit/workitems/<id> System.Description (curl)\n' \
             "${title}" "${type}" "${tags}"
         return 0
     fi
+    # `jq -er '.id'` fail-fasts when create exits 0 but returns no id (exit 1 on
+    # null/missing) — never PATCH `/workitems/null`. pipefail carries an az failure.
     local wi_id
     wi_id="$(az boards work-item create --title "${title}" --type "${type}" \
         --fields "System.Tags=${tags}" \
         --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json \
-        | jq -r '.id')"
+        | jq -er '.id')" \
+        || { echo "forge azure: work-item create returned no id" >&2; return 1; }
     # PATCH description via REST JSON-Patch so body stays in a file (off argv — F5).
     local tmp rc
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwi.XXXXXX")"

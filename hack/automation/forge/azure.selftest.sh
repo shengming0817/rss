@@ -82,7 +82,8 @@ check "dry-run: az not invoked"        "clean"   "$(has "$out" 'SHOULD-NOT-RUN')
 ibody="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-ib.XXXXXX")"
 printf 'finding body line1\nline2\n' > "${ibody}"
 seen="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-seen.XXXXXX")"
-trap 'rm -f "${body}" "${ibody}" "${seen}"' EXIT
+patched="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-patched.XXXXXX")"
+trap 'rm -f "${body}" "${ibody}" "${seen}" "${patched}"' EXIT
 
 # Case I1: dry-run shape -> work-item create (with --type) + REST patch, never
 # `az devops invoke`.
@@ -91,7 +92,7 @@ out="$(_azure_issue_create "T" "${ibody}" "backlog,pri-p2" "Product Backlog Item
 DRY_RUN=0
 check "issue-create dry: zero exit"        "zero"  "$(zero "$rc")"
 check "issue-create dry: work-item create --type" "match" \
-    "$(printf '%s' "$out" | grep -q 'az boards work-item create .*--type Product Backlog Item' && echo match || echo nomatch)"
+    "$(printf '%s' "$out" | grep -q 'az boards work-item create .*--type "Product Backlog Item"' && echo match || echo nomatch)"
 check "issue-create dry: REST patch not invoke" "clean" "$(has "$out" 'devops invoke')"
 
 # Case I2: happy path -> create returns id 99, REST patch ok -> emits "#99".
@@ -106,6 +107,15 @@ _az_wit_patch() { return 1; }
 out="$(_azure_issue_create "T" "${ibody}" "backlog,pri-p2" "Product Backlog Item" 2>/dev/null)"; rc=$?
 check "issue-create patch-fail: non-zero"  "nonzero" "$(nonzero "$rc")"
 check "issue-create patch-fail: no #id"    "clean"   "$(has "$out" '#')"
+
+# Case I3b: create exits 0 but returns null id -> fail-fast, PATCH never sent
+# (else we'd PATCH `/workitems/null`). `_az_wit_patch` records a call to ${patched}.
+az() { case "$*" in *"boards work-item create"*) printf '{"id":null}\n' ;; *) printf '{}\n' ;; esac; }
+: > "${patched}"
+_az_wit_patch() { echo called > "${patched}"; return 0; }
+out="$(_azure_issue_create "T" "${ibody}" "backlog" "Product Backlog Item" 2>/dev/null)"; rc=$?
+check "issue-create null-id: non-zero"     "nonzero" "$(nonzero "$rc")"
+check "issue-create null-id: no patch sent" ""       "$(cat "${patched}")"
 
 # Case I4: explicit 4th arg type reaches `--type` (subshell records to file).
 az() { case "$*" in *"boards work-item create"*) printf '%s' "$*" > "${seen}"; printf '{"id":7}\n' ;; *) printf '{}\n' ;; esac; }
