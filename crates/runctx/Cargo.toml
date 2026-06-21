@@ -7,3 +7,10 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+# task_local! / LocalKey / TaskLocalFuture 均在 tokio core（rt feature；workspace 已含 rt-multi-thread）。
+# runctx 刻意不依赖 tracing —— 可观测 ID 走 consumer 的 span，控制流值入 RequestCtx，二者在
+# 依赖图上不可互通（ADR-001 §D1，Hard 边界）。同样不依赖 serde：RequestCtx 不可从 body 反序列化构造。
+tokio = { workspace = true }
+thiserror = { workspace = true }
