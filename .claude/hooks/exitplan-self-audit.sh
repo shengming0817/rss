@@ -9,7 +9,11 @@ input=$(cat)
 sid=$(printf '%s' "$input" | jq -r '.session_id // "default"')
 sid=$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9-')   # 消毒：杜绝路径穿越
 [ -n "$sid" ] || sid="default"
-state="${TMPDIR:-/tmp}/claude-exitplan-audited-${sid}"
+state_dir="${TMPDIR:-/tmp}/claude-selfaudit-$(id -u)"
+mkdir -p "$state_dir" 2>/dev/null || true
+chmod 700 "$state_dir" 2>/dev/null || true
+state="${state_dir}/exitplan-${sid}"
+[ -L "$state" ] && rm -f "$state"   # 拒绝 symlink 冒名
 
 [ -f "$state" ] && exit 0   # 已自检过 → 放行
 

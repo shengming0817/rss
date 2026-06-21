@@ -4,19 +4,7 @@
 
 ## 分层依赖（crate 图 + deny.toml 编译期强制）
 
-| crate 分组 | 允许依赖 | 禁止依赖 |
-|----|----------|----------|
-| 基础（`vocab`/`ids`/`secure`/`support`/`runctx`） | std、外部 crate | 引擎 / 服务 / 域 / adapters |
-| 引擎/原语（`consistency`/`primitives`） | 基础 | 服务 / 域 / adapters |
-| 服务（`httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`） | 基础、引擎 | 域 / adapters |
-| 域（`identity`/`settings`/…） | 基础、引擎、服务、`generated` | 其它域 crate、adapters |
-| `adapters/*` | 基础、引擎、服务 | 域 |
-| `generated`（contract 派生） | 基础、引擎 | 服务 / 域 / adapters |
-| 组合根（`bins/*`、`xtask`、`assemblies/*`） | 所有库 crate | 无 |
-
-cargo 拒绝循环依赖；禁依赖用 `cargo-deny`(deny.toml)、多余 / 未声明用 `cargo-udeps`、外部 API 面用 `cargo public-api` 守。
-
-> 分组划分与禁依赖以 `docs/rules/architecture.md` §分层 为准（单一事实源）；本表是 Rust 语言层速查。
+分组划分、允许 / 禁止依赖矩阵以 `docs/rules/architecture.md` §分层 为**单一事实源**，本文件不复制（避免第二结构真源）。Rust 语言层要点：cargo 拒绝循环依赖；禁依赖用 `cargo-deny`(deny.toml)、多余 / 未声明用 `cargo-udeps`、外部 API 面用 `cargo public-api` 守。
 
 ## DDD 分层（crate 内 module）
 
@@ -69,7 +57,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - 已提交 migration 只增不改；例外必须有 ADR 说明。
 - 新字段必须有默认值或允许 NULL。
 - 索引形态按阶段：pre-GA / 有序 migration 集 / 新建或空表用普通 `CREATE INDEX`（留在事务型 migration）；
-  `CONCURRENTLY` 仅用于 post-GA 给已填充、有在线流量的生产表加索引。详见 `adapters/postgres/migrations/README.md`。
+  `CONCURRENTLY` 仅用于 post-GA 给已填充、有在线流量的生产表加索引。详见 `adapters/postgres/migrations/` 的 README（迁移规范，随 postgres adapter 落地）。
 - 文件命名：`{序号}_{动词}_{对象}.sql`。
 
 ## 安全检查点

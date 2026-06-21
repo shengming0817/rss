@@ -30,6 +30,10 @@ tmp/
 /.codex-backups/
 
 # Local env / secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
 *.env.e2e
 .env.e2e
 .env.local

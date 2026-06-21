@@ -29,7 +29,11 @@ esac
 sid=$(printf '%s' "$input" | jq -r '.session_id // "default"')
 sid=$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9-')   # 消毒：杜绝路径穿越
 [ -n "$sid" ] || sid="default"
-state="${TMPDIR:-/tmp}/claude-fix-audited-${sid}"
+state_dir="${TMPDIR:-/tmp}/claude-selfaudit-$(id -u)"
+mkdir -p "$state_dir" 2>/dev/null || true
+chmod 700 "$state_dir" 2>/dev/null || true
+state="${state_dir}/fix-${sid}"
+[ -L "$state" ] && rm -f "$state"   # 拒绝 symlink 冒名
 
 # 待放行的重发（自检后再次发信号）→ 消费标记 + 放行；下个 /fix 又从 deny 开始
 [ -f "$state" ] && { rm -f "$state"; exit 0; }

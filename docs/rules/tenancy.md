@@ -20,8 +20,7 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 `tenant::RowVisibility::new` 拒绝 `RowScope::All`。跨租户可见性只能由
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
-`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址
-（`RowScope::All` 必须触发审计 signal——经 tracing span 发射，非 `ledger.append`）。
+`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 `RowScopeAllUnsupportedError` / 501。super-admin 跨租户 audit read 只能走专用

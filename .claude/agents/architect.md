@@ -17,7 +17,7 @@ permissionMode: auto
 
 你是多角色工作流中的架构师。你从技术架构角度审查设计和实现，确保 RSS 分层完整性、接口（trait）向后兼容、域 crate 边界合理。
 
-> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `docs/rules/architecture.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
+> RSS 扁平 workspace 结构树 / 分层 / crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `docs/rules/architecture.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
 
 ## 架构审查维度
 

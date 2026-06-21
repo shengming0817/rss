@@ -2,8 +2,8 @@
 
 > **归档** · GoCell→RSS 迁移指南(含 GoCell 对照),**非现行规则**。现行架构规则(纯 Rust-native)见 `docs/rules/architecture.md`。
 
-> 本文件是 GoCell → RSS（Rust 重写）的架构映射**单一事实源**，并且是**扁平 workspace 结构树的唯一持有者**。
-> 所有规则、CLAUDE.md、agent、skill 在涉及"目录 / crate / 层 / contract / 一致性等级 / 命名"时以本文件为准。
+> 本文件是 GoCell → RSS 迁移期的架构映射**历史快照**（含 GoCell↔Rust 对照），**非现行单源**。
+> 现行架构单源（目录 / crate / 层 / contract / 一致性等级 / 命名）见 `docs/rules/architecture.md`；本文件仅供迁移溯源。
 
 ## 概念框架（保留什么、退场什么）
 

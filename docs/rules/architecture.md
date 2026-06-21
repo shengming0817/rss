@@ -114,7 +114,7 @@ rss/
 | 必填依赖 | 非 `Option` 字段 + 构造器签名,缺了编不过 |
 | sealed / marker / newtype funnel | 模块可见性 + 私有字段 + sealed trait |
 | 值集冻结(HandleResult/Disposition/Status/result label) | `#[non_exhaustive]` enum + 穷尽 `match`,漏 case 编不过 |
-| 错误 message const + 错误码前缀 golden | `thiserror` enum variant(本就不是格式化字符串) |
+| 错误 message const | `thiserror` enum variant(const `&'static str`,非格式化字符串) |
 | 数据竞争 | `Send`/`Sync` 编译期 |
 | wire struct 字段/tag 冻结 | serde derive 单源生成 |
 | 进程隔离测试 | `cargo-nextest`(每测试独立进程,原生) |
@@ -133,6 +133,7 @@ rss/
 | mock(同模块)/ table-driven | `mockall` / `rstest` |
 | 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint) |
 | 治理脚本入口 | `cargo` + `xtask/` |
+| 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
 
 ### 三档 · Cargo 替不了,框架自建(RSS 真差异化)
 
