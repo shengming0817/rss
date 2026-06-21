@@ -6,7 +6,11 @@
 //!
 //! 「domain 类型不 derive Serialize——只有 contract/DTO/generated 类型可序列化到 wire」
 //! （rust-standards.md §DDD 分层、ai-robust.md serde derive 冻结）。serde 的 derive 对任何
-//! crate 自由可用、类型系统无法封闭，故以 dylint AST lint 承载（Medium，最强可用载体）。
+//! crate 自由可用、类型系统无法封闭，故以 dylint AST lint 承载（Medium-class 载体）。
+//!
+//! 强度现状（勿过度宣称）：v1 守的是 **`domain` 模块命名约定**（非完整域 crate 安全边界——实体放
+//! `entities`/`aggregate` 等模块不守护，完整覆盖待 #1054）；默认 `Warn`、经 `cargo dylint --all` **手动**跑，
+//! 接入 CI 成 fail-closed 门待 #1023。即：在 #1023/#1054 前是 registered + 手动跑的载体，**非已强制的 CI 门**。
 
 extern crate rustc_hir;
 extern crate rustc_middle;
