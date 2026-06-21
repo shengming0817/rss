@@ -1,0 +1,25 @@
+[package]
+name = "s3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+vocab = { path = "../../crates/vocab" }
+ids = { path = "../../crates/ids" }
+secure = { path = "../../crates/secure" }
+support = { path = "../../crates/support" }
+runctx = { path = "../../crates/runctx" }
+consistency = { path = "../../crates/consistency" }
+primitives = { path = "../../crates/primitives" }
+httpserve = { path = "../../crates/httpserve" }
+authn = { path = "../../crates/authn" }
+bootstrap = { path = "../../crates/bootstrap" }
+eventexec = { path = "../../crates/eventexec" }
+observ = { path = "../../crates/observ" }
+distributed = { path = "../../crates/distributed" }
+deviceloop = { path = "../../crates/deviceloop" }

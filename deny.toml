@@ -1,0 +1,63 @@
+# RSS cargo-deny：supply-chain 策略 + 分层强制（Medium 载体）。
+# 分层强制分级（见 plan / docs/rules/architecture.md §Rust 原生强制）：
+#   Hard① crate 依赖图：未声明就 import 不到。
+#   Hard② cargo 无环：下层依赖上层会闭环 → cargo 拒绝。
+#   Medium 本文件 wrappers：域 / adapter crate 只能被组合根依赖——补「同层互斥」「上层误依赖 leaf」。
+#   残留（无 back-path 的基础/引擎→上层边）→ 已登记 xtask source-centric lint（见 PR OOS）。
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+# 本仓成员均 publish = false，跳过其 license 校验（license 校验只针对外部依赖）。
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"     # pre-GA 容忍多版本；趋近 GA 收紧为 deny
+wildcards = "deny"             # 禁外部 `*` 版本依赖
+allow-wildcard-paths = true    # 但放行内部 workspace path 依赖（无版本即隐式 `*`，合法）
+deny = [
+  # 外部禁用（provider 收敛）
+  { crate = "openssl", use-instead = "rustls" },
+  { crate = "openssl-sys", use-instead = "rustls" },
+  # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖。
+  # 覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
+  { crate = "identity", wrappers = ["server", "rss", "xtask"] },
+  { crate = "settings", wrappers = ["server", "rss", "xtask"] },
+  { crate = "audit", wrappers = ["server", "rss", "xtask"] },
+  { crate = "contractreg", wrappers = ["server", "rss", "xtask"] },
+  { crate = "syshealth", wrappers = ["server", "rss", "xtask"] },
+  # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。
+  # 注意：裸后端名与 crates.io 同名 crate 冲突——本骨架空壳无外部依赖故安全；
+  # adapter 接线外部后端后须迁到 xtask source-centric lint（见 PR OOS：裸名×cargo-deny 命名冲突）。
+  { crate = "postgres", wrappers = ["server", "rss", "xtask"] },
+  { crate = "redis", wrappers = ["server", "rss", "xtask"] },
+  { crate = "amqp", wrappers = ["server", "rss", "xtask"] },
+  { crate = "mqtt", wrappers = ["server", "rss", "xtask"] },
+  { crate = "s3", wrappers = ["server", "rss", "xtask"] },
+  { crate = "oidc", wrappers = ["server", "rss", "xtask"] },
+  { crate = "grpc", wrappers = ["server", "rss", "xtask"] },
+  { crate = "otel", wrappers = ["server", "rss", "xtask"] },
+  { crate = "prometheus", wrappers = ["server", "rss", "xtask"] },
+  { crate = "vault", wrappers = ["server", "rss", "xtask"] },
+  { crate = "softca", wrappers = ["server", "rss", "xtask"] },
+  { crate = "ratelimit", wrappers = ["server", "rss", "xtask"] },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

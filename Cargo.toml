@@ -1,0 +1,94 @@
+# RSS 扁平 Cargo workspace（骨架）。
+# 结构树 / 分层 / 命名单一事实源：docs/rules/architecture.md §扁平 workspace 结构 + §分层。
+# 分层强制：crate 依赖图（Hard，编译期）+ deny.toml wrappers（Medium，CI）。见 deny.toml。
+[workspace]
+resolver = "2"
+members = [
+  # 基础（仅 std + 外部 crate，不依赖内部分组）
+  "crates/vocab",
+  "crates/ids",
+  "crates/secure",
+  "crates/support",
+  "crates/runctx",
+  # 引擎 / 原语（依赖基础）
+  "crates/consistency",
+  "crates/primitives",
+  # 服务（依赖基础 + 引擎）
+  "crates/httpserve",
+  "crates/authn",
+  "crates/bootstrap",
+  "crates/eventexec",
+  "crates/observ",
+  "crates/distributed",
+  "crates/deviceloop",
+  # 域（依赖基础 + 引擎 + 服务 + generated；互不依赖）
+  "crates/identity",
+  "crates/settings",
+  "crates/audit",
+  "crates/contractreg",
+  "crates/syshealth",
+  # adapters（实现基础 / 引擎 / 服务 trait；不被域依赖）
+  "adapters/postgres",
+  "adapters/redis",
+  "adapters/amqp",
+  "adapters/mqtt",
+  "adapters/s3",
+  "adapters/oidc",
+  "adapters/grpc",
+  "adapters/otel",
+  "adapters/prometheus",
+  "adapters/vault",
+  "adapters/softca",
+  "adapters/ratelimit",
+  # 组合根（可依赖所有库 crate）
+  "bins/server",
+  "bins/rss",
+  "xtask",
+  # 契约派生（committed，被域依赖）
+  "generated",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+
+# 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in；
+# 骨架阶段尚无成员引用——随后续单元增长。pin 仅前瞻，inert 不进 Cargo.lock。
+[workspace.dependencies]
+# 运行时 / 序列化 / 错误 / 日志
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+futures = "0.3"
+# HTTP / gRPC（服务层前瞻）
+axum = "0.8"
+tower = "0.5"
+tower-http = "0.6"
+tonic = "0.13"
+prost = "0.13"
+# 持久化（adapters 前瞻）
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+# 测试
+rstest = "0.24"
+mockall = "0.13"
+insta = "1"
+
+# 工程护栏（成员经 `[lints] workspace = true` 继承）。
+[workspace.lints.rust]
+unsafe_code = "forbid"          # 默认全局 forbid；例外按 crate 自定义 [lints] 解禁
+
+[workspace.lints.clippy]
+cognitive_complexity = "warn"   # CLAUDE.md ≤15（阈值在 clippy.toml）
+disallowed_methods = "warn"     # 具体列表在 clippy.toml（clock 注入纪律）
+disallowed_types = "warn"
+disallowed_macros = "warn"
+panic = "warn"                  # panic 纪律；测试模块 item-level #[allow] carve-out
+unwrap_used = "warn"
+expect_used = "warn"

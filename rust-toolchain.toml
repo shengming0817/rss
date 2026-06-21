@@ -1,0 +1,5 @@
+# 工具链钉选（复现优先于 "stable" 漂移）。趋近 GA 时随 MSRV 决策升版。
+[toolchain]
+channel = "1.96.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
