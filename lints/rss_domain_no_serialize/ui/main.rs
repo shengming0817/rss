@@ -1,5 +1,6 @@
 // rss_domain_no_serialize UI fixture（dylint_testing::ui_test_example 消费）。
-// golden 见 main.stderr：仅 `domain` 模块内 derive serde 的两个正例触发；dto 模块 / 无-derive 不触发。
+// golden 见 main.stderr：仅 `domain` 模块（含嵌套 `*::domain::*`）内 derive serde 的正例触发；
+// dto 模块 / 无-derive / 手写 impl 均不触发。
 #![allow(dead_code)]
 
 mod domain {
@@ -19,6 +20,16 @@ mod domain {
     pub struct PlainEntity {
         pub id: u64,
     }
+
+    // 反例 C：手写 `impl Serialize`（非 derive）→ 不触发（守 `automatically_derived` 门回归）。
+    pub struct HandWritten {
+        pub id: u64,
+    }
+    impl serde::Serialize for HandWritten {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_u64(self.id)
+        }
+    }
 }
 
 mod dto {
@@ -26,6 +37,16 @@ mod dto {
     #[derive(serde::Serialize)]
     pub struct UserDto {
         pub id: u64,
+    }
+}
+
+// 正例 3：嵌套 `*::domain::*` 形态 → 触发（守 `in_domain_module` 对 def-path 任意段匹配）。
+mod outer {
+    pub mod domain {
+        #[derive(serde::Serialize)]
+        pub struct NestedEntity {
+            pub id: u64,
+        }
     }
 }
 

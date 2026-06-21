@@ -62,6 +62,9 @@ deny = [
   { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "server", "rss", "xtask"] },
 ]
 
+# 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml
+# exclude），故下列 sources 策略**不覆盖** `lints/` 的依赖——其唯一 git 源 `clippy_utils`
+# （rust-lang 官方 rust-clippy，rev 与 nightly 配对）经人工审核，见 lints/README.md。
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

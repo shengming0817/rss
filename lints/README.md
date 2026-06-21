@@ -11,14 +11,22 @@ lint crate 链接 `rustc_private`，须用 **nightly** 工具链（见 `rust-too
 与根 **stable 1.96** workspace 完全隔离——`cargo build/test/clippy --workspace`（根）不会编译这里、
 不触碰 nightly。
 
+**隔离的副作用**：根 `deny.toml`（`[sources] unknown-git = "deny"` 等）也**不扫描** `lints/` 子 workspace。
+本子树唯一 git 依赖是 `clippy_utils`（rust-lang 官方 `rust-clippy` 仓库，`rev` 与 nightly channel 配对），经人工审核；
+`lints/Cargo.lock` **刻意提交**（与根 workspace 策略一致，保证 nightly + clippy_utils rev 可复现，勿删）。
+dylint 自写 lint 不走根 `[workspace.lints.clippy]`——与 clippy 是平行机制，只经 `cargo dylint` 触发。
+
 ## 前置
 
 ```bash
 cargo install cargo-dylint dylint-link
 ```
 
-`channel`（`rust-toolchain.toml`）与各 lint crate 的 `clippy_utils` git `rev` **成对**绑定（取自同一
-dylint 版本模板），升级须同步改两者，勿单独动其一。
+`channel`（`rust-toolchain.toml`）与各 lint crate 的 `clippy_utils` git `rev` **成对**绑定，升级须同步改两者
+（勿单独动其一，否则 nightly 与 clippy_utils ABI 不齐、编译失败、排查难）。升级步骤：① 取目标 dylint
+版本的 [releases](https://github.com/trailofbits/dylint/releases) → `internal/template/{rust-toolchain,Cargo.toml}`
+拿配对的 channel + `clippy_utils` rev；② 同步改 `lints/rust-toolchain.toml` 与各 `lints/*/Cargo.toml`；
+③ `cd lints && cargo test` 验证。
 
 ## 运行
 
@@ -31,8 +39,9 @@ cargo dylint list            # 列出已注册 lint
 cd lints/rss_domain_no_serialize && cargo test
 ```
 
-> CI 聚合（把 `cargo dylint` 接进 `cargo xtask verify` / make verify）是 **#1023** 的范围；本目录只保证
-> `cargo dylint --all` 独立可跑。
+> ⚠ **当前未接入 CI 门**：把 `cargo dylint` 接进 `cargo xtask verify` / make verify 是 **#1023** 的范围。
+> 在 #1023 完成前，本 lint 不在 CI 自动跑——须手动 `cargo dylint --all` 触发（实质处于「可手动跑、CI 不强制」
+> 的临时降级状态，未达强制 Medium）。本 PR（#1001）只保证 `cargo dylint --all` 独立可跑。
 
 ## 已落地 lint
 

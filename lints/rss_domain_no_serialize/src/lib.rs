@@ -35,6 +35,9 @@ dylint_linting::declare_late_lint! {
     /// `__Field`/`__Visitor` 等辅助类型。归属靠 `domain` 模块名约定（正向匹配，对齐 rust-standards.md
     /// §DDD 分层「实体/值对象/领域服务落 `domain` 模块」）——故只覆盖放在 `domain` 模块的实体；
     /// `dto`/`wire` 出口、xtask/config 解析 DTO、`generated` 等不在 `domain` 模块的类型不报。
+    /// **覆盖边界**：`domain` 按 def-path **段精确匹配**（非子串，`cross_domain` 等不误命中），覆盖嵌套
+    /// `*::domain::*`；但实体若放在**非 `domain` 命名**的模块（`entities`/`aggregate`/`models` 等）**不被守护**
+    /// ——v2 拟扩为 crate-scoped + 模块黑名单（见 backlog issue）。
     /// 确需序列化的 `domain` 模块类型用 `#[allow(rss_domain_no_serialize)] // reason: ...` 显式豁免。
     ///
     /// ### Example
