@@ -112,7 +112,8 @@ rss/
 │
 ├── examples/               # ssobff / todoorder / iotdevice / corebundlestarter
 ├── xtask/                  # 代码生成 + golden + 契约/一致性治理校验（替代 tools/ + hack/ + Makefile）
-└── generated/              # 契约派生的 committed crate（一等审查材料）；其余 codegen 默认走 build.rs OUT_DIR + insta，不落盘
+├── generated/              # 契约派生的 committed crate（一等审查材料）；其余 codegen 默认走 build.rs OUT_DIR + insta，不落盘
+└── actors.toml             # 外部 Actor 注册（参与 contract 但不属于域模型的系统）
 ```
 
 ### 结构相对 Go 的收缩
