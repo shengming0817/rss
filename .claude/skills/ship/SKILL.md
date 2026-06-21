@@ -118,9 +118,9 @@ cargo clippy --manifest-path worktrees/<wt>/Cargo.toml --workspace --all-targets
 ## 阶段 6：PR
 
 ```bash
-# 对标产出门（Soft→Medium）：PR body 必含 `ref:` 或一行 `本 PR 无需对标：<理由>`，缺则回阶段 1 补对标（不问人）
-# 先剥 HTML 注释（模版占位 `ref: framework file` 在注释里，不剥会假阳）
-grep -Eq 'ref: |本 PR 无需对标：' <(sed '/<!--/,/-->/d' <填好的 pull_request_template.md>) || { echo "对标缺失：补 ref: 或豁免句后重试"; exit 1; }
+# 对标产出门（Soft→Medium，守卫单源 + selftest 见 hack/automation/pr-benchmark-gate.sh）：
+# PR body 必含有效 `ref: {framework} {path}` 或非空 `本 PR 无需对标：<理由>`，缺则回阶段 1（不问人）
+bash hack/automation/pr-benchmark-gate.sh <填好的 pull_request_template.md> || exit 1
 git -C worktrees/<wt> push -u "$(bash hack/automation/forge.sh remote)" <branch>
 bash hack/automation/forge.sh pr-create "..." <填好的 pull_request_template.md> develop <branch>
 bash hack/automation/forge.sh pr-add-label <PR#> pr-status/in-progress   # 进入 ship→review→fix→check 流程（见 .github/project-template/PROJECT.md §5）
