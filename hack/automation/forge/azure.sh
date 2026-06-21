@@ -35,9 +35,11 @@
 _az_pr_url_base() { printf '%s/%s/_git/%s' "${ADO_ORG}" "${ADO_PROJECT}" "${ADO_REPO}"; }
 
 # Azure REST auth header for direct curl calls — used only where the az CLI is
-# broken (work-item System.Tags REPLACE: `az boards --fields` is add-only, and
-# `az devops invoke` PATCH hits an internal az error). Prefers the devops PAT
-# (same credential the rest of this backend uses); else a token from `az login`.
+# broken (every work-item field write: `az devops invoke --resource workitems`
+# PATCH-by-id resolves a route template carrying a `${type}` placeholder it can't
+# fill -> `KeyError: 'type'`; and `az boards --fields` is add-only for tags).
+# Prefers the devops PAT (same credential the rest of this backend uses); else a
+# token from `az login`.
 _az_auth_header() {
     if [ -n "${AZURE_DEVOPS_EXT_PAT:-}" ]; then
         printf 'Authorization: Basic %s' "$(printf ':%s' "${AZURE_DEVOPS_EXT_PAT}" | base64 | tr -d '\n')"
@@ -49,20 +51,37 @@ _az_auth_header() {
     fi
 }
 
-# _az_wit_replace_tags <id> <semicolon-joined-tags>: set System.Tags to exactly
-# the given set via REST op=replace (the ONLY reliable add+remove path).
-_az_wit_replace_tags() {
-    local id="$1" tags="$2" auth body hdr rc
+# _az_wit_patch <id> <json-patch-file>: PATCH a work item's fields via REST
+# JSON-Patch (the op array lives in the file, off argv — F5). This is the SINGLE
+# sanctioned WIT field-write path: `az devops invoke --resource workitems` PATCH
+# is broken (its route template needs a `${type}` route value PATCH-by-id has no
+# way to supply -> `KeyError: 'type'`), so description / discussion / tag writes
+# all funnel here.
+_az_wit_patch() {
+    local id="$1" patch_file="$2" auth hdr rc
     auth="$(_az_auth_header)" \
         || { echo "forge azure: no ADO credential (set AZURE_DEVOPS_EXT_PAT or run az login)" >&2; return 1; }
-    body="$(jq -nc --arg v "${tags}" '[{op:"replace",path:"/fields/System.Tags",value:$v}]')"
     # Pass the auth header via a 0600 temp file (curl -H @file), NOT `-H "<token>"`:
     # an argv-visible Authorization header leaks the PAT/Bearer token to `ps`.
     hdr="$(mktemp "${TMPDIR:-/tmp}/forge-azhdr.XXXXXX")"
+    chmod 0600 "${hdr}"   # make the 0600 promise explicit, independent of mktemp's default
     printf '%s\n' "${auth}" > "${hdr}"
     if curl -fsS -X PATCH "${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workitems/${id}?api-version=7.1" \
-        -H @"${hdr}" -H "Content-Type: application/json-patch+json" -d "${body}" >/dev/null; then rc=0; else rc=$?; fi
+        -H @"${hdr}" -H "Content-Type: application/json-patch+json" --data-binary @"${patch_file}" >/dev/null; then rc=0; else rc=$?; fi
     rm -f "${hdr}"
+    return "${rc}"
+}
+
+# _az_wit_replace_tags <id> <semicolon-joined-tags>: set System.Tags to exactly
+# the given set via REST op=replace (the ONLY reliable add+remove path).
+_az_wit_replace_tags() {
+    local id="$1" tags="$2" tmp rc
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-aztags.XXXXXX")"
+    jq -nc --arg v "${tags}" '[{op:"replace",path:"/fields/System.Tags",value:$v}]' > "${tmp}" || {
+        rc=$?; rm -f "${tmp}"; return "${rc}"
+    }
+    _az_wit_patch "${id}" "${tmp}"; rc=$?
+    rm -f "${tmp}"
     return "${rc}"
 }
 
@@ -321,16 +340,19 @@ _azure_issue_create() { # <title> <body-file> <label-csv> [type]
     # Create the work item first (title + type + tags via CLI args — these are metadata, not body).
     # Then PATCH the description via REST --in-file so body content never appears in process list.
     if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az boards work-item create --title %s --type %s --fields System.Tags=%s ; az devops invoke --area wit --resource workitems --http-method PATCH --in-file <desc-json>\n' \
+        printf 'az boards work-item create --title %s --type "%s" --fields System.Tags=%s ; REST PATCH /wit/workitems/<id> System.Description (curl)\n' \
             "${title}" "${type}" "${tags}"
         return 0
     fi
+    # `jq -er '.id'` fail-fasts when create exits 0 but returns no id (exit 1 on
+    # null/missing) — never PATCH `/workitems/null`. pipefail carries an az failure.
     local wi_id
     wi_id="$(az boards work-item create --title "${title}" --type "${type}" \
         --fields "System.Tags=${tags}" \
         --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json \
-        | jq -r '.id')"
-    # PATCH description via REST JSON-Patch so body stays in a file.
+        | jq -er '.id')" \
+        || { echo "forge azure: work-item create returned no id" >&2; return 1; }
+    # PATCH description via REST JSON-Patch so body stays in a file (off argv — F5).
     local tmp rc
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwi.XXXXXX")"
     jq -n --rawfile desc "${body_file}" \
@@ -339,10 +361,7 @@ _azure_issue_create() { # <title> <body-file> <label-csv> [type]
             rm -f "${tmp}"
             return "${rc}"
         }
-    az devops invoke --area wit --resource workitems \
-        --route-parameters "id=${wi_id}" \
-        --http-method PATCH --in-file "${tmp}" \
-        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null || rc=$?
+    _az_wit_patch "${wi_id}" "${tmp}" || rc=$?
     rm -f "${tmp}"
     [ "${rc:-0}" -eq 0 ] || return "${rc}"
     printf '#%s\n' "${wi_id}"
@@ -403,10 +422,7 @@ _azure_issue_close() { # <n> <reason-ignored> <comment>
                 rm -f "${tmp}"
                 return "${rc}"
             }
-        az devops invoke --area wit --resource workitems \
-            --route-parameters "id=${n}" \
-            --http-method PATCH --in-file "${tmp}" \
-            --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null || rc=$?
+        _az_wit_patch "${n}" "${tmp}" || rc=$?
         rm -f "${tmp}"
         [ "${rc:-0}" -eq 0 ] || return "${rc}"
     fi
@@ -430,7 +446,7 @@ _azure_issue_comment() { # <n> <body-file>
     # F5: comment body must NOT enter argv — use REST JSON-Patch --in-file.
     local n="$1" body_file="$2"
     if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az devops invoke --area wit --resource workitems --route-parameters id=%s --http-method PATCH --in-file <body-json> --api-version 7.1 --output json --org %s\n' \
+        printf 'REST PATCH /wit/workitems/%s System.History (curl, body off argv) --org %s\n' \
             "${n}" "${ADO_ORG}"
         return 0
     fi
@@ -442,10 +458,7 @@ _azure_issue_comment() { # <n> <body-file>
             rm -f "${tmp}"
             return "${rc}"
         }
-    az devops invoke --area wit --resource workitems \
-        --route-parameters "id=${n}" \
-        --http-method PATCH --in-file "${tmp}" \
-        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null || rc=$?
+    _az_wit_patch "${n}" "${tmp}" || rc=$?
     rm -f "${tmp}"
     [ "${rc:-0}" -eq 0 ] || return "${rc}"
 }
