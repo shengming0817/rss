@@ -18,7 +18,7 @@ permissionMode: auto
 
 ## 使用场景
 
-- 新建或重构 kernel/、cells/、runtime/、adapters/ crate 下的模块时，按 CLAUDE.md 的"参考框架"规则拉取对标源码
+- 新建或重构 `crates/`、`adapters/`、`bins/` 下的模块时，按 CLAUDE.md 的"参考框架"规则拉取对标源码
 - 研究某个开源项目的接口（trait）设计、生命周期、错误处理模式
 - 对比多个框架解决同一问题的方案
 - 为架构决策提供证据（源码引用 + 采纳/偏离理由）
@@ -36,6 +36,7 @@ permissionMode: auto
 
 - 优先使用 `WebFetch` 拉 GitHub raw 源码：`https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}`
 - 需要搜索关键字或发现新路径时用 `WebSearch`
+- 404 时换分支（master/main）重试；两次仍失败 → fail-loud 报 `路径失效：<url>`，不凭记忆猜测
 - 拉取后在本地内联阅读；超长文件分段拉取
 
 ### 3. 提取关键设计

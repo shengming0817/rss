@@ -45,7 +45,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 - **彻底**：根因 + 完整解法，范围内紧密相关的小工作一并纳入。自查「是否还藏 TODO/FIXME/follow-up、兼容代码、未列入范围的关联工作？」→ 合并进当前 PR 或写明 blocker 理由。
 - **不向后兼容**：删字段/改签名/换实现直接做。自查「是否留了 deprecation 别名、旧字段、兼容 shim、双路径？」→ 删掉或写明保留理由。
 - **优雅简洁**：最少代码改动达成目标，不引入新抽象层、不预设未来需求。自查「能否用更少的代码/抽象/新文件达成同样目标？」→ 简化或写明保留理由。
-- **开源对标**：阶段 1 必产至少一条 `ref: {framework} {path}@{ref}`（真实拉源码 + RSS 侧对应）。自查「是否真有 `ref:` 产出？」→ 无则二选一：① 回阶段 1 重跑 explorer 补对标；② 确属无对标场景（纯内部重构 / 治理文档 / 无同类框架）时在阶段 2 计划与 PR body 写明一行 `本 PR 无需对标：<理由>`。二者必居其一，禁止静默省略（由阶段 6 机器门校验）。
+- **开源对标**：阶段 1 必产至少一条 `ref: {framework} {path}@{ref}`（真实拉源码 + RSS 侧对应）。自查「是否真有 `ref:` 产出？」→ 无则二选一：① 回阶段 1 重跑 explorer 补对标；② 确属无对标场景（纯内部重构 / 治理文档 / 无同类框架）时在 PR body 写明一行 `本 PR 无需对标：<理由>`（理由合理性由阶段 7 reviewer 核查）。二者必居其一，禁止静默省略（由阶段 6 机器门校验）。
 
 ---
 
@@ -119,7 +119,8 @@ cargo clippy --manifest-path worktrees/<wt>/Cargo.toml --workspace --all-targets
 
 ```bash
 # 对标产出门（Soft→Medium）：PR body 必含 `ref:` 或一行 `本 PR 无需对标：<理由>`，缺则回阶段 1 补对标（不问人）
-grep -Eq 'ref: |本 PR 无需对标：' <填好的 pull_request_template.md> || { echo "对标缺失：补 ref: 或豁免句后重试"; exit 1; }
+# 先剥 HTML 注释（模版占位 `ref: framework file` 在注释里，不剥会假阳）
+grep -Eq 'ref: |本 PR 无需对标：' <(sed '/<!--/,/-->/d' <填好的 pull_request_template.md>) || { echo "对标缺失：补 ref: 或豁免句后重试"; exit 1; }
 git -C worktrees/<wt> push -u "$(bash hack/automation/forge.sh remote)" <branch>
 bash hack/automation/forge.sh pr-create "..." <填好的 pull_request_template.md> develop <branch>
 bash hack/automation/forge.sh pr-add-label <PR#> pr-status/in-progress   # 进入 ship→review→fix→check 流程（见 .github/project-template/PROJECT.md §5）
