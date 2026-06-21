@@ -1,5 +1,7 @@
 # Rust / Cargo
 /target/
+# 自写 dylint lint workspace 的构建产物（嵌套 workspace，根 /target/ 锚定不覆盖）
+lints/target/
 **/*.rs.bk
 *.pdb
 # Cargo.lock 提交（本仓库产出 binary：assemblies/ 与 bins/），故不忽略。

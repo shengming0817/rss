@@ -38,8 +38,9 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 
 1. **类型系统 / crate 依赖图**：用 Cargo `[dependencies]`、`pub(crate)` 可见性、sealed trait、
    trait 关联常量（类型 marker）、newtype、构造器必填参数表达约束——违反即编译错误。
-   域 crate 依赖不到其它域 crate、必填依赖非 `Option`、domain 类型不 derive `Serialize`
-   都属此档（见 `docs/rules/architecture.md` §Rust 原生强制（三档载体））。
+   域 crate 依赖不到其它域 crate、必填依赖非 `Option` 都属此档（见 `docs/rules/architecture.md`
+   §Rust 原生强制（三档载体））。（注：「domain 类型不 derive `Serialize`」serde derive 对任何 crate
+   自由可用、类型系统无法封闭，由 `dylint` 自写 lint `rss_domain_no_serialize` 二档强制——见同节二档表。）
 2. **schema / marker 单源派生代码（codegen funnel）**：build.rs / proc-macro 从声明源派生执行体，
    再用 golden 锁字节输出。
 3. **clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api**：crate-graph lint
@@ -63,8 +64,9 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 - **typed function choice**：不同语义拆成不同 API / 不同类型。
 - **newtype funnel**：字符串 / 原始值入口必须经单一 newtype 构造，独立语义不复用裸 `String`。
 - **input struct field exclusion**：公开输入类型不暴露不该由业务传入的字段。
-- **serde derive 冻结**：只在 contract / DTO 类型上 derive `Serialize`/`Deserialize`，domain 类型不 derive；
-  wire struct 字段集、`#[serde(rename)]`、类型身份用 golden 精确冻结。
+- **serde derive 冻结**：wire struct 字段集、`#[serde(rename)]`、类型身份用 golden 精确冻结（Hard，codegen 单源）。
+  「只在 contract / DTO 类型上 derive、domain 类型不 derive」serde derive 无法类型封闭，由 `dylint` lint
+  `rss_domain_no_serialize` 二档强制（见 `docs/rules/architecture.md` §二档）。
 - **codegen funnel + golden**：声明源经 build.rs / proc-macro 派生执行体，输出 drift 由字节 diff 暴露。
 
 新机制若不属于这些范本，先写 ADR 说明为何需要扩展范本。
