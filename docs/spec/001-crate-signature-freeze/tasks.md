@@ -4,7 +4,7 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 # Tasks: 全 crate trait/type 签名冻结（#997 / RW-G0.2）
 
-**Input**: Design documents from `/specs/001-crate-signature-freeze/`
+**Input**: Design documents from `docs/spec/001-crate-signature-freeze/`
 
 **Prerequisites**: plan.md ✓, spec.md ✓, research.md ✓, data-model.md ✓, contracts/ ✓
 

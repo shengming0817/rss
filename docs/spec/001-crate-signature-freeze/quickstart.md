@@ -22,8 +22,8 @@ cargo clippy -p <crate...> --all-targets -- -D warnings
 cargo nextest run -p <crate...>                  # 仅 shape 测试，无行为断言
 
 # 4. 封装面 baseline（仅基础/引擎层 PR-1/PR-2；入口由 PR-0 落地）
-cargo xtask public-api          # 生成/比对 baseline（包装 cargo-public-api，需 nightly rustdoc-json）
-cargo xtask public-api --check  # CI/本地漂移门：与 committed baseline 比对
+cargo xtask public-api          # 生成 baseline（包装 cargo-public-api，需 nightly rustdoc-json）
+cargo xtask public-api --check  # 漂移门：与 committed baseline 比对（不在 cargo xtask verify 聚合内）
 ```
 
 ## 各层预期结果

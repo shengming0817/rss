@@ -12,7 +12,7 @@
 |---|---|---|
 | 引擎 | `Clock`（待决项#2 是否迁入）、`IdempotencyStore`（如需 dyn） | dynosaur `dyn(box)` wrapper |
 | 服务 | `Publisher`/`Subscriber`、`Pdp`、session/refresh store、`DistLock`、`Transport`、`Signer` | dynosaur |
-| 生命周期 | `ManagedResource`（待决项#4：ADR-001 async_trait vs ADR-003 dynosaur 冲突，本 PR 统一 + 重评 ADR-001） | 待拍板 |
+| 生命周期 | `ManagedResource`（待决项#4 inter-ADR 冲突） | 暂遵 ADR-001（async_trait + `Arc<dyn>`）；PR-diport 统一→dynosaur 并同步重评 ADR-001 威胁矩阵 |
 | 域 | 各域仓储/领域服务 repo port（`SessionRepo`/`ConfigRepo`/…，`pub`） | dynosaur |
 
 ```rust

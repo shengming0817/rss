@@ -8,6 +8,10 @@
 //! 依赖：外部 `cargo-public-api`（`cargo install cargo-public-api`）+ nightly rustdoc-json
 //! （`rustup toolchain install nightly`）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
+//! **不在 `cargo xtask verify` 聚合门内**：verify（contract validate + codegen --check）须工具/网络
+//! 无关、人人可跑；public-api 依赖外部工具 + nightly，故为独立可选门（单独 `cargo xtask public-api --check`），
+//! 不污染 verify 的可移植性。
+//!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 —— 工具缺失 fail-fast，不静默成功。
 
 use crate::workspace_root;
@@ -44,7 +48,13 @@ pub(crate) fn run(check: bool) -> Result<()> {
             match std::fs::read_to_string(&path) {
                 Ok(expected) if expected == actual => {}
                 Ok(_) => drift.push((*krate).to_owned()),
-                Err(_) => missing.push((*krate).to_owned()),
+                // 仅「baseline 尚未生成」(NotFound) 降级为警告；其余 I/O 错误（权限/损坏）fail-fast。
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push((*krate).to_owned())
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("读 baseline 失败: {}", path.display()));
+                }
             }
         } else {
             std::fs::write(&path, &actual)
@@ -120,4 +130,48 @@ fn report(check: bool, drift: &[String], missing: &[String]) -> Result<()> {
     }
     eprintln!("public-api --check: 无 drift");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn report_generate_always_ok() {
+        assert!(report(false, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn report_check_clean_ok() {
+        assert!(report(true, &[], &[]).is_ok());
+    }
+
+    /// PR-0 阶段 baseline 未产出：check 模式下 missing-only 警告而非失败。
+    #[test]
+    fn report_check_missing_only_ok() {
+        assert!(report(true, &[], &v(&["vocab", "ids"])).is_ok());
+    }
+
+    #[test]
+    fn report_check_drift_fails() {
+        assert!(report(true, &v(&["vocab"]), &[]).is_err());
+    }
+
+    /// drift 优先 fail-fast，即便同时有 missing。
+    #[test]
+    fn report_check_drift_fails_even_with_missing() {
+        assert!(report(true, &v(&["vocab"]), &v(&["ids"])).is_err());
+    }
+
+    #[test]
+    fn baseline_dir_is_public_api_under_root() -> anyhow::Result<()> {
+        let dir = baseline_dir()?;
+        assert!(dir.ends_with("public-api"));
+        assert!(dir.parent().is_some());
+        Ok(())
+    }
 }

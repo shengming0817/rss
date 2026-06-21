@@ -57,6 +57,7 @@ fn run<S: IdemCheck>(s: &S) { /* 单态、零 box */ }
 - tenant/principal 经 `runctx::RequestCtx<T, P>`——**显式、不可变、sealed struct + `tokio::task_local!` 传播**。
 - 需把 ctx 喂 PDP / repo 处**显式传 `&RequestCtx`**（类型安全），不靠到处隐式读。
 - `RequestCtx` **私有字段 + 不 derive `Deserialize`**（body 构造不可表达，Hard）；只能从已认证通道构造。
+- **fail-closed（ADR-002 D6）**：ctx 访问器返回 `Result<_, MissingCtx>`，缺失即 **deny**（返回 `Err` / 401 / 403）；**禁** `.unwrap()` / `unwrap_or_default()` / 伪造 ctx——ctx 缺失被当 anonymous/default-tenant 放行即 fail-open 越权。
 - 可观测 ID（trace/correlation）一律走 `tracing` span，**不入 trait 签名**。
 - `tokio::spawn`/`spawn_blocking`/`std::thread` **不继承** task_local，必须重新 `scope`（ADR-002 §3）。
 
@@ -136,8 +137,10 @@ PR body 标 `ref: {framework} {path}@{ref}`（见 research.md），或「无需�
 | C12 dynosaur pin | **Medium（cargo-deny）** | deny.toml 注释 ID `=0.3.x` |
 | C8 覆盖率豁免 | **Medium（governance 测试）** | 签名 PR 声明 + CI 门豁免 todo!() 不可达 |
 | C10 错误 message const | **Hard/Medium** | `&'static str` 类型约束（Hard）+ clippy（Medium） |
+| C3 ctx fail-closed | **Hard + Medium** | 私有字段 + 无 Deserialize（Hard）；ctx 缺失 deny 的行为测试（Medium，ADR-002） |
+| C2 mock 形态 | **Soft（当前）→ 待 PR-diport 升 Medium/Hard** | dynosaur/native-AFIT 下 mockall 形态未定，暂依人工对照（Soft）；PR-diport 实测后回填本表并升档（data-model 待决项#6） |
 
-> 无 Soft 新增机制。C2（mock 形态）暂未定级——待 PR-diport 实测后按结论补本表。
+> 无 Soft **新增 enforcement 机制**；C2 的 Soft 是「评级待定」的临时状态（PR-diport 收口），非以 Soft 立项的约束。
 
 ---
 

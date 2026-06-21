@@ -38,7 +38,7 @@
 详见 ADR-004 C1–C12（`docs/architecture/202606220106-004-signature-conventions.md`）。要点：
 
 1. **async/dyn 二分**：DI port → dynosaur（`#[dynosaur::dynosaur(DynX = dyn(box) X)]`，定义于 diport）；L0 → native AFIT + 泛型静态分发。
-2. **mock**：同 crate `#[cfg(test)]`；dynosaur/native-AFIT 下 mockall 形态待验证（待决项#5）。
+2. **mock**：同 crate `#[cfg(test)]`；dynosaur/native-AFIT 下 mockall 形态待验证（待决项#6）。
 3. **ctx 传播**：`RequestCtx<T,P>`（sealed struct + task_local!，ADR-002 D2）；需 ctx 处显式传 `&RequestCtx`。
 4. **关闭逆序**：`ManagedResource` LIFO + 显式 `async fn shutdown`，无 async Drop（ADR-001）。
 5. **必填依赖/Clock**：`Box<DynX>` 构造器必填位置参；Clock 同范式，禁默认系统时钟（ADR-003 §4.3）。
@@ -62,7 +62,7 @@
 
 计划层重排引入 diport 后浮现的真实开放点（ADR-003 §8 亦留为开放风险）—— 此处显式登记 + 给推荐方向：
 
-1. **实体引用与分层序**：diport 的 `UserStore` 等 port 引用域实体（`User`/`Session`）。若实体留在域 crate（PR-4）而 diport 在 PR-3 前 → 反向依赖/层序倒置。**推荐**：diport port 仅引 `ids`/`vocab`/`generated` wire 类型 + 必要早冻的轻实体；域专属实体的归属由 PR-diport 定。
+1. **实体引用与分层序（架构约束，非选项）**：diport 是**服务层 crate**，按分层规则 **MUST NOT 依赖域 crate**（deny.toml 编译期强制）。故 diport port trait 的参数/返回实体类型 **MUST** 定义在基础层（`ids`/`vocab`）或 `generated`（wire 类型），**不得**引用域内实体（`User`/`Session` 等域专属类型）——否则 diport→域 反向依赖、层序倒置、deny.toml 红。ADR-003 §4.1 示例中的 `User` 须按此约束落在基础层/generated，或由 PR-diport 决定其归属（但不得让 diport 依赖域 crate）。这是设计约束，PR-diport 实施者不得将域实体引入 diport。
 2. **Clock / ManagedResource 归属**：ADR-003 §2/§4.3 把 Clock 列为 DI port→diport；原 spec 把 Clock 放 primitives（引擎）。**推荐**：`Clock`+`DynClock`、`ManagedResource`+`DynManagedResource` 迁入 diport；primitives 只留纯计算/静态引擎 trait。PR-diport 确认。
 3. **域 repo `pub(crate)`→`pub`**：DI port 迁 diport 即跨 crate → 失去 `pub(crate)` 封装；改由 deny.toml wrappers 限定实现方 crate 集（ADR-003 §4.2 方案②，Hard→Medium）。登记该偏离。
 4. **inter-ADR 冲突（ManagedResource）**：**ADR-001** 把 `ManagedResource` 定为 `#[async_trait]` + `Arc<dyn>`；**ADR-003** 通则是 DI 注入→dynosaur。二者对 `ManagedResource` 冲突。**推荐**：随 bootstrap shutdown 框架落地时统一为 dynosaur 并**同步重评 ADR-001 威胁矩阵**（ai-robust「ADR amendment 同步」）；在此之前 `ManagedResource` 暂遵 ADR-001（async_trait）。

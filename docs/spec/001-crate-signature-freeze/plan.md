@@ -2,7 +2,7 @@
 
 **Branch**: `001-crate-signature-freeze`（spec 目录；本次不切分支） | **Date**: 2026-06-21 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/001-crate-signature-freeze/spec.md`
+**Input**: Feature specification from `docs/spec/001-crate-signature-freeze/spec.md`
 
 ## Summary
 
@@ -63,7 +63,7 @@
 ### Documentation (this feature)
 
 ```text
-specs/001-crate-signature-freeze/
+docs/spec/001-crate-signature-freeze/
 ├── plan.md              # 本文件
 ├── research.md          # Phase 0：对标决策（dynosaur 派发、对标 ref、mock/测试策略）
 ├── data-model.md        # Phase 1：freeze unit / trait 分类 / conventions / diport 落地待决项

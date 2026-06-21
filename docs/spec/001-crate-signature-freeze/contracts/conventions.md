@@ -11,7 +11,7 @@
 | 项 | 约定（一句话） | 单源 |
 |---|---|---|
 | C1 async/dyn | DI port（provider-可换、I/O、L1–L4）→ **dynosaur**（native AFIT + `#[dynosaur::dynosaur(DynX = dyn(box) X)]`，定义于 `diport`，注入 `Box/Arc<DynX>`）；L0 纯计算/单实现 → native AFIT + 泛型静态分发 | ADR-004 C1 · ADR-003 §2/§4 |
-| C2 mock | 同 crate `#[cfg(test)]`，禁跨 crate 共享；**dynosaur/native-AFIT 下 mockall 形态待 diport spike 验证** | ADR-004 C2 · data-model 待决项#5 |
+| C2 mock | 同 crate `#[cfg(test)]`，禁跨 crate 共享；**dynosaur/native-AFIT 下 mockall 形态待 diport spike 验证** | ADR-004 C2 · data-model 待决项#6 |
 | C3 ctx | `runctx::RequestCtx<T,P>`（sealed struct + `task_local!`），需 ctx 处显式传 `&RequestCtx`；可观测 ID 走 tracing span 不入签名 | ADR-002 D2 |
 | C4 关闭逆序 | `ManagedResource` LIFO、显式 `async fn shutdown`、无 async Drop | ADR-001 |
 | C5 必填依赖/Clock | `Box<DynX>` 构造器必填位置参（非 Option）；Clock 同范式、禁默认系统时钟 | ADR-003 §4.3 |
