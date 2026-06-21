@@ -18,7 +18,7 @@
 | 代码生成（`generated` / build.rs / proc-macro） | `zeromicro/go-zero` goctl（`tools/goctl/api/gogen/`） | `oxidecomputer/typify`（`typify/src/lib.rs`）· `prettyplease` · `oxidecomputer/dropshot`(代码→OpenAPI) / `oxidecomputer/progenitor`(OpenAPI→client) |
 | 中间件（`httpserve` tower 层） | `go-kratos/kratos`（`middleware/middleware.go`） | `tower-rs/tower`（`tower/src/builder/`）/ `tower-http` · `linkerd/linkerd2-proxy`（Layer / mTLS 工业标杆） |
 | HTTP server（`httpserve`） | — | `tokio-rs/axum`（`axum/src/routing/`）· `oxidecomputer/dropshot`（`dropshot/src/lib.rs`） |
-| 事件驱动（`eventexec` / EventBus） | `ThreeDotsLabs/watermill`（`message/router.go` · `pubsub/gochannel/`） | `serverlesstechnology/cqrs`（`src/lib.rs`，CQRS/ES）· `oxidecomputer/steno`（`src/lib.rs`，saga 编排） |
+| 事件驱动（`eventexec` / EventBus） | `ThreeDotsLabs/watermill`（`message/router.go` · `pubsub/gochannel/`） | `serverlesstechnology/cqrs`（crate `cqrs-es`，`src/lib.rs`，CQRS/ES）· `oxidecomputer/steno`（`src/lib.rs`，saga 编排） |
 
 raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}`
 （branch 多为 `master` 或 `main`，404 时换分支重试；大文件先 `Grep`/`WebSearch` 定位行号再局部拉取）。
@@ -31,12 +31,12 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 
 | RSS 模块 / 关注点 | crate | primary 对标（owner/repo · 起点） | secondary |
 |-------------------|-------|----------------------------------|-----------|
-| reconcile L4 控制环 | `consistency` | `kube-rs/kube`（`kube-runtime/src/controller/mod.rs`） | `oxidecomputer/omicron` |
+| reconcile L4 控制环 | `consistency`（引擎）· `deviceloop`（设备 L4 消费者） | `kube-rs/kube`（`kube-runtime/src/controller/mod.rs`） | `oxidecomputer/omicron` |
 | saga L3 编排 | `consistency` / `eventexec` | `oxidecomputer/steno`（`src/lib.rs`） | `temporalio/sdk-rust`（`crates/sdk-core/src/lib.rs`） |
 | 分布式锁 / fencing / 共识 | `distributed` | `tikv/tikv`（`Cargo.toml`，raft / fencing） | `databendlabs/openraft`（`openraft/src/lib.rs`）· `tikv/raft-rs`（`src/raft.rs`） |
 | 证书 / PKI L4 | `deviceloop` | `rustls/rcgen`（`rcgen/src/lib.rs`）· `djc/instant-acme`（`src/lib.rs`） | `maxlambrecht/rust-spiffe`（`spiffe/src/lib.rs`）· cert-manager（概念，provider-agnostic 范式） |
 | 可观测性 | `observ` | tokio `tracing` · `vectordotdev/vector`（`src/lib.rs`，管道范式） | `open-telemetry/opentelemetry-rust`（`opentelemetry/src/lib.rs`） |
-| 授权 PDP / ABAC | `vocab` / `authn` | `casbin/casbin-rs`（`src/lib.rs`，RBAC/ABAC enforcer）· `eclipse-biscuit/biscuit-rust`（`biscuit-auth/src/lib.rs`，能力令牌） | `osohq/oso`（`languages/rust/oso/src/lib.rs`，**已弃用**，仅概念参考） |
+| 授权 PDP / ABAC | `vocab` / `authn` | `casbin/casbin-rs`（`src/lib.rs`，RBAC/ABAC enforcer）· `eclipse-biscuit/biscuit-rust`（`biscuit-auth/src/lib.rs`，能力令牌） | `osohq/oso`（**已弃用**，Oso 转 SaaS；仅作 Polar / ABAC 概念参考，**勿读源码实现**） |
 | 状态机 FSM | `consistency` / `deviceloop` | `mdeloof/statig`（`statig/src/lib.rs`） | typestate 模式 |
 | workspace 组织 | （根 workspace） | `oxidecomputer/omicron`（`Cargo.toml`）· `risingwavelabs/risingwave`（`Cargo.toml`） | `zed-industries/zed`（`Cargo.toml`） |
 | 错误模型 | `vocab` | `dtolnay/thiserror`（`src/lib.rs`，库错误枚举） | `shepmaster/snafu`（`src/lib.rs`，带 context，TiKV / GreptimeDB 在用） |
@@ -60,4 +60,4 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 模块新增 / 对标变更时同步本表，并与 `CLAUDE.md` §参考框架 概念表保持一致：
 **概念真源在 `CLAUDE.md`（保持 6 行精简概念图），坐标真源在本文件**（持完整 owner/repo + 起点路径，
 以及 CLAUDE.md 之外的扩展模块）。两处「模块对标表」前 6 行须**逐行同序、框架一致**（该一致性当前为人工 Soft 守，
-Medium 化路径见 backlog issue）。表中无匹配模块时，explorer 须 fail-loud（见 `.claude/agents/explorer.md` step 1），不静默吐空结论。
+Medium 化路径见 backlog #1041）。表中无匹配模块时，explorer 须 fail-loud（见 `.claude/agents/explorer.md` step 1），不静默吐空结论。
