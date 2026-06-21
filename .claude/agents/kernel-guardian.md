@@ -23,9 +23,9 @@ permissionMode: auto
 
 - **基础底座 crate 无上行/无 I/O 依赖**：基础层 crate（`vocab`/`ids`/`primitives`/`secure`/`support`/`runctx`）的 `Cargo.toml` `[dependencies]` 不得出现基建/域/adapters/bins crate，也不得出现第三方运行时（tokio/axum/sqlx 等）。基础层是底座灵魂，任何上行或 I/O 依赖都视为污染。
 - **用 deny.toml + crate 依赖图守层**：分层规则由 `deny.toml` + cargo 依赖图编译期/CI HARD 强制（域 crate 没在 Cargo.toml 声明就 import 不到，循环依赖 cargo 直接拒绝），取代 gocell 的 archtest/depguard import 扫描；`cargo-deny` / `cargo-udeps` 守多余/未声明依赖，`cargo public-api` / `cargo-semver-checks` 守封装面。
-- **用 sealed trait / newtype / 类型 marker 守约束**：port trait 用 sealed-trait 模式封闭（外部 crate 无法 impl）；sealed newtype（`ids` crate，私有字段=硬封）守标识入口；一致性等级用 trait 关联常量 `const CONSISTENCY: ConsistencyLevel`（类型级 marker）；必填依赖走构造器必填参数（非 `Option`，缺失即编译错误）。能编译期成立的约束，不退化成运行期校验。
+- **用 sealed trait / newtype / 类型 marker 守约束**：port trait 用 sealed-trait 模式封闭（外部 crate 无法 impl）；sealed newtype（`ids` crate，私有字段=硬封）守标识入口；一致性等级声明在 `contract.toml` 的 `consistencyLevel` 字段（决策 #1，非类型 marker）；必填依赖走构造器必填参数（非 `Option`，缺失即编译错误）。能编译期成立的约束，不退化成运行期校验。
 
-> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
+> RSS 扁平 workspace 结构树 / 分层 / crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `docs/rules/architecture.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
 
 ## 核心约束清单
 
@@ -40,7 +40,7 @@ permissionMode: auto
 - [ ] 扇出闭环（xtask 校验）: 每个契约消费在消费 crate 的 `Cargo.toml` `[dependencies]` 声明，且有对应 contract 测试或 waiver（waiver 未过期）
 - [ ] 格式合规: lifecycle in {draft, active, deprecated}; 无动态状态字段越界
 - [ ] Actor 归属: `contract.toml` owner 必须是域 crate 非外部 actor，或保留 sentinel `_framework`（框架归属：仅 http/event + lifecycle draft|deprecated，provider 端点亦须为 `_framework`）
-- [ ] 一致性级别: 新增 CUD 操作标注 L0-L4（trait 关联常量 `const CONSISTENCY`，声明源 `contract.toml` 的 consistencyLevel）
+- [ ] 一致性级别: 新增 CUD 操作标注 L0-L4（声明源 `contract.toml` 的 `consistencyLevel`）
 - [ ] 适配器接口: adapters/Xadapter 实现基础/基建/域定义的 trait，feature 门控
 - [ ] Assembly: `assembly.toml` 列出组合的域 crate 与 adapters
 - [ ] 契约版本: 跨域 contract 变更遵循版本目录兼容规则（api-versioning 轴 B，xtask 校验）

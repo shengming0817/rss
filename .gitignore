@@ -1,0 +1,48 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock 提交（本仓库产出 binary：assemblies/ 与 bins/），故不忽略。
+
+# Coverage
+*.profraw
+lcov.info
+coverage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+rust-project.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+/.claude/tools/
+tmp/
+*.tmp
+.codex-tmp/
+/.local-ci-runs/
+/.codex-backups/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.env.e2e
+.env.e2e
+.env.local
+*.env.local
+
+# Claude Code
+worktrees/
+.claude/scheduled_tasks.lock
+
+# Generated（选择性提交）
+# generated/ 由 `cargo xtask` 重新生成；具体提交策略见该目录 README
+bak/
