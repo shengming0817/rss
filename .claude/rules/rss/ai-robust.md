@@ -3,8 +3,7 @@
 RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量不可表达，
 至少做到机器可判定；纯口头约定不是可接受的新增 enforcement。
 
-> RSS 是 GoCell 的 Rust 重写。核心方向：GoCell 因 Go 类型系统弱，大量约束靠 archtest（Go 测试套件）
-> + governance rule + rustdoc 约定守；Rust 重写后**优先把约束上移到编译期**
+> 核心方向：**优先把约束上移到编译期**
 > ——crate 依赖图、`pub`/`pub(crate)` 可见性、sealed trait、trait 关联常量（类型 marker）、构造器必填参数、
 > cargo-deny / cargo-udeps / clippy lint。能在编译期免费成立的约束，绝不退化成运行期治理测试。
 > 哪些约束编译期天然成立见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
@@ -15,7 +14,7 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 
 - crate 依赖图 / 可见性约束（Cargo `[dependencies]`、`pub(crate)`、workspace 分层）
 - clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api 规则
-- `cargo xtask` governance 校验（运行期治理测试，替代 gocell `validate` / `check` CLI）
+- `cargo xtask` governance 校验（运行期治理测试）
 - bootstrap / init fail-fast guard
 - codegen funnel（build.rs / proc-macro）与 golden
 - sealed trait、trait 关联常量 marker、newtype、serde derive 边界冻结
@@ -56,11 +55,11 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 
 ## Hard 范本
 
-- **crate 图隔离**：约束表达为 "A 依赖不到 B"——不在 Cargo.toml 声明就 import 不到（替代 import archtest）。
+- **crate 图隔离**：约束表达为 "A 依赖不到 B"——不在 Cargo.toml 声明就 import 不到。
 - **可见性封装**：raw / 内部类型 `pub(crate)`，仅经公开 façade 暴露。
 - **sealed trait**：port trait 用 sealed-trait 模式封闭，外部 crate 无法实现 / 伪造。
 - **trait 关联常量 marker**：稳定语义落到类型级关联常量，编译期固定（一致性级是例外——已迁到 `contract.toml`，见 `docs/rules/architecture.md` 决策 #1）。
-- **构造器必填参数**：必填 service 依赖为非 `Option` 位置参，缺失即编译错误（替代生成 validate）。
+- **构造器必填参数**：必填 service 依赖为非 `Option` 位置参，缺失即编译错误。
 - **typed function choice**：不同语义拆成不同 API / 不同类型。
 - **newtype funnel**：字符串 / 原始值入口必须经单一 newtype 构造，独立语义不复用裸 `String`。
 - **input struct field exclusion**：公开输入类型不暴露不该由业务传入的字段。
@@ -72,7 +71,7 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 
 ## 静态守卫命名
 
-GoCell 的 archtest 文件命名约定，在 RSS 改为对应 Rust 静态守卫的命名：
+静态守卫命名约定：
 
 - **crate 图 / 依赖约束**：用 cargo-deny 规则（`deny.toml` 注释 ID）或 cargo-udeps，不需单独命名文件。
 - **clippy 自定义 lint**：lint id 用 `rss_{rule}`（kebab/snake，与 lint 注册名一致）。
@@ -92,7 +91,7 @@ CI、本地触发方式见 `xtask/`（`cargo xtask --help`）；规则文件不�
 - Soft：新增时 reject；既有 Soft 修改优先升级到 Medium 或 Hard。
 
 复审中尤其追问：该约束是否能从运行期治理测试上移到编译期（crate 图 / 可见性 / sealed trait /
-trait 关联常量 / 构造器必填参数）？能则必须上移，不接受 "已有 archtest 等价物" 作为停留运行期的理由。
+trait 关联常量 / 构造器必填参数）？能则必须上移，不接受 "已有运行期治理测试等价物" 作为停留运行期的理由。
 
 Funnel 类约束必须分别说明上游和下游强度。只锁 callsite 不是闭环 funnel。
 

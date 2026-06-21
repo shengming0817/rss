@@ -21,12 +21,12 @@ saga ADR 和 runbook 中。
 - consistency level 为 L3。
 - retry 和 timeout 是合法非负 duration。
 
-编排逻辑落在域 crate 的 saga 模块（不再是独立 slice 的 `role` 属性）；其 `kind: saga` 契约的 `consistencyLevel` 必须为 L3。
+编排逻辑落在域 crate 的 saga 模块；其 `kind: saga` 契约的 `consistencyLevel` 必须为 L3。
 
 ## 构造器
 
 `eventexec` crate 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /
-trait 对象），缺失即编译错误——替代 gocell 运行期的 nil-interface 校验。`Clock` 是构造器
+trait 对象），缺失即编译错误。`Clock` 是构造器
 位置参（trait 对象 / 泛型），禁止用 builder option 或 Config 字段传 clock、禁止默认取系统时钟。
 
 ## 参考

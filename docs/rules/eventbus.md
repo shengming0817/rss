@@ -88,8 +88,7 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 
 ## Service required deps
 
-service 必填依赖走构造器**必填参数**（非 `Option`）——缺失即编译错误，替代 gocell 的
-`gocell:"required"` tag + 生成 `validateRequired()`。可选依赖在构造器内或 builder 给默认值，
+service 必填依赖走构造器**必填参数**（非 `Option`）——缺失即编译错误。可选依赖在构造器内或 builder 给默认值，
 累加式 builder 在 `build()` 末尾 validate。
 
 ## 订阅注册

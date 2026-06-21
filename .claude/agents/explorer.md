@@ -18,7 +18,7 @@ permissionMode: auto
 
 ## 使用场景
 
-- 新建或重构 kernel/、cells/、runtime/、adapters/ crate 下的模块时，按 CLAUDE.md 的"参考框架"规则拉取对标源码
+- 新建或重构 crates/、adapters/ 下的模块时，按 CLAUDE.md 的"参考框架"规则拉取对标源码
 - 研究某个开源项目的接口（trait）设计、生命周期、错误处理模式
 - 对比多个框架解决同一问题的方案
 - 为架构决策提供证据（源码引用 + 采纳/偏离理由）
