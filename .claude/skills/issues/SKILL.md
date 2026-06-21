@@ -67,7 +67,7 @@ Wave 1（依赖深度1，取 pri 前4）:
   串行链 B（#c→#d 同改 foo.rs，按 pri）: [1] #c(p1·Cx2)  [2] #d(p2·Cx1)
 Wave 2（深度1溢出 + 依赖 Wave 1）:
   并行组 A: #e(p3·Cx1 深度1溢出)  #g(p1·Cx2 ←blocked-by #a)
-超窗(>W4，评论单列): #z(依赖链/装箱 >4)
+超窗(Wave 4 之后，评论单列): #z(依赖链/装箱越 W4)
 已完成(不动): #y
 ```
 
@@ -75,12 +75,16 @@ Wave 2（深度1溢出 + 依赖 Wave 1）:
 
 ```bash
 # 只追加评论；不编辑 epic body，不写 Project 字段。
-# 把评论正文写入临时文件，再经 forge 贴出
+# 把评论正文写入临时文件，再经 forge 贴出。
+# ⚠ Azure work-item 评论服务端强制 HTML 消毒（?format=markdown 也拦不住）：HTML 注释 <!-- --> 被整段剥离、
+#   裸 < / > 被编码成 &lt; / &gt;（代码围栏里显示字面量）。故 marker 用可见 token `pm:epic-wave`（不再用
+#   HTML 注释），正文全程不写裸尖括号 / 行首 blockquote（用「之后 / 越 W4」等措辞替代）。
+#   marker 现仅作可见锚点：就地更新去重是后续 forge upsert 能力（暂未接，评论仍 append）。
 cat > /tmp/epic-wave-comment.md <<'C'
-<!-- pm:epic-wave -->
-🌊 Epic 实施顺序更新：每 wave ≤4 容量装箱，OPEN 按 pri 排 Wave 1-4；wave 内标明并行组 / 串行链；已完成与超窗(>W4)单列。排序结果只写在本评论中，不写 Project 字段，不改 epic body。
+`pm:epic-wave`
+🌊 Epic 实施顺序更新：每 wave ≤4 容量装箱，OPEN 按 pri 排 Wave 1-4；wave 内标明并行组 / 串行链；已完成与超窗(Wave 4 之后)单列。排序结果只写在本评论中，不写 Project 字段，不改 epic body。
 
-<粘贴 A2 dry-run 表>
+粘贴 A2 dry-run 表（不带尖括号占位符）
 C
 bash hack/automation/forge.sh issue-comment <epic#> /tmp/epic-wave-comment.md
 ```

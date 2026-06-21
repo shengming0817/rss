@@ -14,8 +14,8 @@ labels（`epic` + `backlog` + `area-XX` + `pri-pX`）与 title `[EPIC] <能力�
 
 ## 实施顺序
 
-<!-- pm:epic-wave 评论承载实施顺序；技能只追加评论，不写看板 Wave 字段、不改 epic body。滚动：仅列 OPEN 的 Wave 1-4，已完成与超窗(>W4)单列 -->
+<!-- 实施顺序承载在「以可见 token pm:epic-wave 起头」的评论（Azure 剥离 HTML 注释，故 marker 用可见 token）；技能只追加评论，不写看板 Wave 字段、不改 epic body。滚动：仅列 OPEN 的 Wave 1-4，已完成与超窗(Wave 4 之后)单列 -->
 
 Wave 1: #aaa, #bbb
 Wave 2: #ccc（blocked-by #aaa）
-超窗(>W4): #fff
+超窗(Wave 4 之后): #fff
