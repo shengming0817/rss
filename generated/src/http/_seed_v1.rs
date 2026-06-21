@@ -25,6 +25,37 @@ pub mod error {
         }
     }
 }
+///`SeedEchoData`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "SeedEchoData",
+///  "type": "object",
+///  "required": [
+///    "echoed",
+///    "length"
+///  ],
+///  "properties": {
+///    "echoed": {
+///      "type": "string"
+///    },
+///    "length": {
+///      "type": "integer",
+///      "format": "int64"
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct SeedEchoData {
+    pub echoed: ::std::string::String,
+    pub length: i64,
+}
 ///`SeedEchoRequest`
 ///
 /// <details><summary>JSON schema</summary>
@@ -59,16 +90,26 @@ pub struct SeedEchoRequest {
 ///  "title": "SeedEchoResponse",
 ///  "type": "object",
 ///  "required": [
-///    "echoed",
-///    "length"
+///    "data"
 ///  ],
 ///  "properties": {
-///    "echoed": {
-///      "type": "string"
-///    },
-///    "length": {
-///      "type": "integer",
-///      "format": "int64"
+///    "data": {
+///      "title": "SeedEchoData",
+///      "type": "object",
+///      "required": [
+///        "echoed",
+///        "length"
+///      ],
+///      "properties": {
+///        "echoed": {
+///          "type": "string"
+///        },
+///        "length": {
+///          "type": "integer",
+///          "format": "int64"
+///        }
+///      },
+///      "additionalProperties": false
 ///    }
 ///  },
 ///  "additionalProperties": false
@@ -78,6 +119,5 @@ pub struct SeedEchoRequest {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SeedEchoResponse {
-    pub echoed: ::std::string::String,
-    pub length: i64,
+    pub data: SeedEchoData,
 }

@@ -6,6 +6,7 @@
 //!   `cargo xtask verify`                聚合门：contract validate + codegen --check（本地自验入口）
 mod codegen;
 mod contract;
+mod pathsafe;
 #[cfg(test)]
 mod testutil;
 
@@ -26,15 +27,16 @@ enum Command {
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
+///
+/// 精确 argv 匹配（fail-closed）：合法子命令后出现任何未声明尾参即 `Err`——杜绝
+/// `verify --bogus` / `contract validate --typo` 被静默吞掉而仍返回成功。
 fn parse_command(args: &[String]) -> Result<Command> {
-    match args.first().map(String::as_str) {
-        Some("codegen") => Ok(Command::Codegen {
-            check: args.iter().any(|a| a == "--check"),
-        }),
-        Some("contract") if args.get(1).map(String::as_str) == Some("validate") => {
-            Ok(Command::ContractValidate)
-        }
-        Some("verify") => Ok(Command::Verify),
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    match argv.as_slice() {
+        ["codegen"] => Ok(Command::Codegen { check: false }),
+        ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
+        ["contract", "validate"] => Ok(Command::ContractValidate),
+        ["verify"] => Ok(Command::Verify),
         other => {
             bail!(
                 "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | verify>"
@@ -114,12 +116,24 @@ mod tests {
         assert!(parse_command(&s(&["contract", "bogus"])).is_err());
     }
 
+    /// 合法子命令后的未知尾参必须 fail-closed（不被静默吞掉）。
+    #[test]
+    fn parse_command_rejects_trailing_unknown_args() {
+        assert!(parse_command(&s(&["verify", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["contract", "validate", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["codegen", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["codegen", "--check", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["codegen", "--check", "extra"])).is_err());
+    }
+
     #[test]
     fn dispatch_rejects_unknown_and_incomplete() {
         assert!(dispatch(&[]).is_err());
         assert!(dispatch(&["bogus".to_string()]).is_err());
         assert!(dispatch(&["contract".to_string()]).is_err()); // 缺 validate 子命令
         assert!(dispatch(&["contract".to_string(), "bogus".to_string()]).is_err());
+        // 尾参 fail-closed（dispatch 经 parse_command）。
+        assert!(dispatch(&["verify".to_string(), "--bogus".to_string()]).is_err());
     }
 
     #[test]

@@ -15,10 +15,11 @@
 use anyhow::{Context, Result, bail};
 use schemars::schema::RootSchema;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::{DiscoveredContract, discover};
+use crate::pathsafe;
 
 /// 入口：生成（`check=false`）或校验漂移（`check=true`）真实仓的 committed 派生码。
 pub(crate) fn run(check: bool) -> Result<()> {
@@ -50,6 +51,16 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
     for c in contracts {
         let kind_dir = c.manifest.kind.as_dir().to_string();
         let module = module_name(&c.manifest.domain, &c.manifest.version);
+        // 防御性安全校验：domain/version 派生的 module 名须为纯路径段，防 `../` 逃逸。
+        // codegen 可独立于 `contract validate` 运行，故不能依赖 R3/R7 已先收口字段——自守。
+        if pathsafe::is_unsafe_segment(&module) {
+            bail!(
+                "契约 {}/{}/{} 派生 module 名含路径分量（防逃逸）: {module}",
+                kind_dir,
+                c.manifest.domain,
+                c.manifest.version
+            );
+        }
         let rel = PathBuf::from(&kind_dir).join(format!("{module}.rs"));
         files.push((rel, render_contract(c)?));
         kinds.entry(kind_dir).or_default().insert(module);
@@ -101,16 +112,9 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     ))
 }
 
-/// 校验 schema 文件名为纯文件名（无路径分量）。
+/// 校验 schema 文件名为纯文件名（无路径分量）。防逃逸单源见 `crate::pathsafe`。
 fn validate_schema_filename(file: &str) -> Result<()> {
-    let p = std::path::Path::new(file);
-    let has_unsafe_component = p.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    });
-    if has_unsafe_component || file.contains('/') || file.contains('\\') {
+    if pathsafe::is_unsafe_segment(file) {
         bail!("schema 文件名含路径分量（防逃逸）: {file}");
     }
     Ok(())
@@ -377,5 +381,32 @@ mod tests {
     fn format_rust_rejects_invalid_syntax() {
         let result = format_rust("fn (");
         assert!(result.is_err(), "非法 Rust 须使 format_rust 返 Err");
+    }
+
+    /// F3 anti-vacuity（负向）：contract.toml 的 domain 含 `../` 时，codegen 须 bail（防逃逸），
+    /// 即使 `contract validate`（R3/R7）未先跑——codegen 自守。
+    #[test]
+    fn codegen_rejects_path_traversal_domain() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        // domain 写成 ../evil（磁盘段仍是 _seed）——模拟 authoring 字段逃逸尝试。
+        std::fs::write(
+            dir.join("contract.toml"),
+            "id = \"seed.echo\"\nkind = \"http\"\ndomain = \"../evil\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"LocalOnly\"\nlifecycle = \"draft\"\n[schemas]\nrequest = \"request.schema.json\"\nresponse = \"response.schema.json\"\n",
+        )?;
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"T\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        std::fs::write(
+            dir.join("request.schema.json"),
+            schema.replace("\"T\"", "\"R\""),
+        )?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            schema.replace("\"T\"", "\"S\""),
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(result.is_err(), "domain 含 ../ 时 codegen 须防逃逸 bail");
+        Ok(())
     }
 }

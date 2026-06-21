@@ -2,10 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "SeedEchoResponse",
   "type": "object",
-  "required": ["echoed", "length"],
+  "required": ["data"],
   "properties": {
-    "echoed": { "type": "string" },
-    "length": { "type": "integer", "format": "int64" }
+    "data": {
+      "title": "SeedEchoData",
+      "type": "object",
+      "required": ["echoed", "length"],
+      "properties": {
+        "echoed": { "type": "string" },
+        "length": { "type": "integer", "format": "int64" }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

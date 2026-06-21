@@ -1,13 +1,14 @@
 //! 契约元数据校验（R1–R5）——`cargo xtask contract validate`。
 //!
 //! INVARIANT: CONTRACT-FANOUT-01 — schema 引用完整性 + kind→形态一致（R4/R5）。
-//! INVARIANT: CONTRACT-FREEZE-01（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）
-//! 与路径↔字段一致（R3）。Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
+//! INVARIANT: CONTRACT-FREEZE-01（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）、
+//! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）。
+//! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝）见 `manifest.rs`（CONTRACT-FREEZE-01）。
 //!
 //! 规则执行顺序（注释编号 = 执行先后）：
-//!   R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape → R5 MissingSchema → R6 UnsafeSchemaPath
+//!   R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -17,6 +18,7 @@ use super::manifest::{
     SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
 use super::{DiscoveredContract, discover};
+use crate::pathsafe;
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,8 @@ pub(crate) enum Rule {
     MissingSchema,
     /// R6：schema 文件名须为纯文件名，不得含路径分量（防 `../` 逃逸）。
     UnsafeSchemaPath,
+    /// R7：authoring 标识符（domain/version/id/owner）语法须先收口（拼进派生路径 / module 名前）。
+    IdentSyntax,
 }
 
 /// 单条校验失败。
@@ -77,6 +81,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_schema_shape(&c.manifest, &label));
     findings.extend(rule_schema_files_exist(c, &label));
     findings.extend(rule_unsafe_schema_path(&c.manifest, &label));
+    findings.extend(rule_ident_syntax(&c.manifest, &label));
     findings
 }
 
@@ -187,21 +192,12 @@ fn rule_schema_files_exist(c: &DiscoveredContract, label: &str) -> Vec<Finding> 
 }
 
 /// R6：schema 文件名须为纯文件名（不含 `/`、`\`、`..` 分量或绝对路径），防路径逃逸。
+/// 防逃逸判定单源见 `crate::pathsafe`（codegen 写盘守卫同源）。
 fn rule_unsafe_schema_path(m: &ContractManifest, label: &str) -> Vec<Finding> {
-    use std::path::Component;
     m.schemas
         .declared_files()
         .into_iter()
-        .filter(|file| {
-            let p = std::path::Path::new(file);
-            p.components().any(|c| {
-                matches!(
-                    c,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            }) || file.contains('/')
-                || file.contains('\\')
-        })
+        .filter(|file| pathsafe::is_unsafe_segment(file))
         .map(|file| {
             finding(
                 Rule::UnsafeSchemaPath,
@@ -210,6 +206,84 @@ fn rule_unsafe_schema_path(m: &ContractManifest, label: &str) -> Vec<Finding> {
             )
         })
         .collect()
+}
+
+/// R7：authoring 标识符语法。domain/version/id 拼进派生 module 名 / 文件路径（见 codegen），
+/// owner 决定契约归属——四者须先收口形态，杜绝坏标识符流入生成路径或归属解析。
+/// 与 codegen 写盘前防逃逸守卫互为表里（author 端报友好错，codegen 端兜底自守）。
+fn rule_ident_syntax(m: &ContractManifest, label: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if !is_safe_segment(&m.domain) {
+        out.push(finding(
+            Rule::IdentSyntax,
+            label,
+            format!(
+                "domain 非法：须 [a-z0-9_]+、首字符 a-z 或 _、无路径分量，实为 {:?}",
+                m.domain
+            ),
+        ));
+    }
+    if !is_version(&m.version) {
+        out.push(finding(
+            Rule::IdentSyntax,
+            label,
+            format!("version 非法：须 v{{N}}（如 v1），实为 {:?}", m.version),
+        ));
+    }
+    if !is_dotted_id(&m.id) {
+        out.push(finding(
+            Rule::IdentSyntax,
+            label,
+            format!(
+                "id 非法：须点分小写名（如 seed.echo / config.entry-upserted），实为 {:?}",
+                m.id
+            ),
+        ));
+    }
+    if let ContractOwner::Domain(name) = &m.owner
+        && !is_domain_name(name)
+    {
+        out.push(finding(
+            Rule::IdentSyntax,
+            label,
+            format!(
+                "owner 非法：须合法域名（[a-z][a-z0-9_]*，不可空 / 不可 _ 前缀保留段）或 _framework，实为 {name:?}"
+            ),
+        ));
+    }
+    out
+}
+
+/// 路径段（domain 用）：非空、全 `[a-z0-9_]`、首字符 `a-z` 或 `_`（容 `_seed` 等保留段，
+/// 拒数字开头 / 大写 / `.`、`/`、`\` 等路径分量）。
+fn is_safe_segment(s: &str) -> bool {
+    matches!(s.bytes().next(), Some(b) if b.is_ascii_lowercase() || b == b'_')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// 版本段：`v{N}`，N 为非空数字串。
+fn is_version(s: &str) -> bool {
+    matches!(s.strip_prefix('v'), Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// 点分 id：每段首字符 `a-z`、余 `[a-z0-9-]`（如 `seed.echo`、`config.entry-upserted`）。
+/// 小写连字符同 RSS 事件命名约定（见 CLAUDE.md：`session.created` / `config.entry-upserted`），拒 camelCase。
+fn is_dotted_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.').all(|seg| {
+            matches!(seg.bytes().next(), Some(b) if b.is_ascii_lowercase())
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
+/// 域名（owner 用）：`[a-z][a-z0-9_]*`，非空、首字符字母（拒 `_` 前缀保留段与空串）。
+fn is_domain_name(s: &str) -> bool {
+    matches!(s.bytes().next(), Some(b) if b.is_ascii_lowercase())
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 #[cfg(test)]
@@ -507,5 +581,81 @@ mod tests {
         );
         let findings = rule_unsafe_schema_path(&m, "x");
         assert!(findings.is_empty());
+    }
+
+    /// R7 参数化红用例：domain/version/id 各非法形态须触发 IdentSyntax。
+    /// case：(domain, version, id)
+    #[rstest]
+    #[case("../evil", "v1", "seed.echo")] // domain 含路径分量
+    #[case("Bad", "v1", "seed.echo")] // domain 大写
+    #[case("9x", "v1", "seed.echo")] // domain 数字开头
+    #[case("_seed", "1", "seed.echo")] // version 非 v{N}
+    #[case("_seed", "v", "seed.echo")] // version 缺数字
+    #[case("_seed", "v1", "Seed.Echo")] // id 大写
+    #[case("_seed", "v1", "")] // id 空
+    #[case("_seed", "v1", "seed.")] // id 尾段空
+    fn r7_ident_syntax_rejects_malformed(
+        #[case] domain: &str,
+        #[case] version: &str,
+        #[case] id: &str,
+    ) {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.domain = domain.to_string();
+        m.version = version.to_string();
+        m.id = id.to_string();
+        let findings = rule_ident_syntax(&m, "x");
+        assert!(!findings.is_empty(), "应触发 IdentSyntax");
+        assert!(findings.iter().all(|f| f.rule == Rule::IdentSyntax));
+    }
+
+    /// R7 owner 红用例：Domain 空串 / `_` 前缀保留段 / 大写须触发 IdentSyntax。
+    #[rstest]
+    #[case("")]
+    #[case("_seed")]
+    #[case("_framework")] // 作为 Domain 出现（非 sentinel 解析路径）须拒
+    #[case("Bad")]
+    fn r7_owner_domain_rejects_malformed(#[case] owner: &str) {
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Domain(owner.to_string()),
+            http_schemas(),
+        );
+        let findings = rule_ident_syntax(&m, "x");
+        assert!(findings.iter().any(|f| f.rule == Rule::IdentSyntax));
+    }
+
+    /// R7 anti-vacuity（正向）：合法 framework / domain 契约不产生 IdentSyntax finding。
+    #[test]
+    fn r7_valid_fields_ok() {
+        let fw = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        assert!(rule_ident_syntax(&fw, "x").is_empty());
+        let dom = manifest(
+            ContractKind::Command,
+            ConsistencyLevel::LocalTx,
+            ContractOwner::Domain("identity".to_string()),
+            Schemas {
+                request: Some("request.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        assert!(rule_ident_syntax(&dom, "x").is_empty());
+        // 连字符 id（RSS 事件命名约定，如 config.entry-upserted）须合法。
+        let mut hyphen = dom.clone();
+        hyphen.id = "config.entry-upserted".to_string();
+        assert!(
+            rule_ident_syntax(&hyphen, "x").is_empty(),
+            "连字符 id 应合法"
+        );
     }
 }
