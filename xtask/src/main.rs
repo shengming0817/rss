@@ -4,9 +4,11 @@
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（R1–R6，CI 门）
 //!   `cargo xtask verify`                聚合门：contract validate + codegen --check（本地自验入口）
+//!   `cargo xtask public-api [--check]`  封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）
 mod codegen;
 mod contract;
 mod pathsafe;
+mod publicapi;
 #[cfg(test)]
 mod testutil;
 
@@ -24,6 +26,7 @@ enum Command {
     Codegen { check: bool },
     ContractValidate,
     Verify,
+    PublicApi { check: bool },
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -37,9 +40,11 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["contract", "validate"] => Ok(Command::ContractValidate),
         ["verify"] => Ok(Command::Verify),
+        ["public-api"] => Ok(Command::PublicApi { check: false }),
+        ["public-api", "--check"] => Ok(Command::PublicApi { check: true }),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | verify>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | verify | public-api [--check]>"
             )
         }
     }
@@ -55,6 +60,7 @@ fn dispatch(args: &[String]) -> Result<()> {
             eprintln!("verify: 全部通过（contract validate + codegen --check）");
             Ok(())
         }
+        Command::PublicApi { check } => publicapi::run(check),
     }
 }
 
@@ -109,6 +115,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_public_api_no_check() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["public-api"]))?,
+            Command::PublicApi { check: false }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_public_api_with_check() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["public-api", "--check"]))?,
+            Command::PublicApi { check: true }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn parse_command_unknown_returns_err() {
         assert!(parse_command(&[]).is_err());
         assert!(parse_command(&s(&["bogus"])).is_err());
@@ -124,6 +148,8 @@ mod tests {
         assert!(parse_command(&s(&["codegen", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--check", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--check", "extra"])).is_err());
+        assert!(parse_command(&s(&["public-api", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["public-api", "--check", "extra"])).is_err());
     }
 
     #[test]
