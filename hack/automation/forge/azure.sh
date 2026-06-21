@@ -95,7 +95,7 @@ _az_wit_patch() {
 _az_wit_comment() {
     local id="$1" body_file="$2" hdr tmp rc
     hdr="$(_az_auth_hdr_file)" || return 1
-    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azcmtbody.XXXXXX")"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azcmtbody.XXXXXX")" || { rm -f "${hdr}"; return 1; }
     jq -n --rawfile t "${body_file}" '{text:$t}' > "${tmp}" || { rc=$?; rm -f "${hdr}" "${tmp}"; return "${rc}"; }
     if curl -fsS -X POST \
         "${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workItems/${id}/comments?format=markdown&api-version=7.1-preview.4" \
@@ -386,7 +386,9 @@ _azure_issue_create() { # <title> <body-file> <label-csv> [type]
         || { echo "forge azure: work-item create returned no id" >&2; return 1; }
     # PATCH description via REST JSON-Patch so body stays in a file (off argv — F5).
     # The multilineFieldsFormat op makes System.Description render Markdown instead
-    # of literal text (the field defaults to HTML).
+    # of literal text (the field defaults to HTML). The value "Markdown" is the
+    # field-format enum (capitalised) — distinct from the Comments API
+    # `?format=markdown` query param (lowercase); both spellings are per Azure docs.
     # ref: azure-devops devblogs/markdown-support-arrives-for-work-items
     local tmp rc
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwi.XXXXXX")"
@@ -447,7 +449,8 @@ _azure_issue_close() { # <n> <reason-ignored> <comment>
     local n="$1" comment="$3" state="${AZURE_WI_CLOSE_STATE:-Done}"
     local -a cmd=(az boards work-item update --id "${n}" --state "${state}" --org "${ADO_ORG}" --output json)
     _dry "${cmd[@]}" && return 0
-    "${cmd[@]}" >/dev/null
+    # Fail-fast: don't append a close note to a work item whose state update failed.
+    "${cmd[@]}" >/dev/null || return $?
     # Add the discussion comment via the Comments API (Markdown). Write the argv
     # comment to a file first so it stays off curl's argv (F5).
     if [ -n "${comment}" ]; then

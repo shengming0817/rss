@@ -156,7 +156,8 @@ check "issue-create: multilineFieldsFormat Markdown op" "match" \
 # Case MD2: _az_wit_comment hits the Comments API with ?format=markdown at the
 # preview api-version that exposes CommentFormat. Stub auth + curl (capture argv).
 _az_auth_header() { printf 'Authorization: Basic x'; }
-curl() { printf '%s' "$*" > "${mdcap}"; return 0; }
+# space-join argv ("$@" not "$*"): IFS-independent, and keeps "-X POST" adjacent.
+curl() { printf '%s ' "$@" > "${mdcap}"; return 0; }
 : > "${mdcap}"
 _az_wit_comment 77 "${ibody}" >/dev/null; rc=$?
 check "_az_wit_comment: zero exit"          "zero"  "$(zero "$rc")"
@@ -178,8 +179,10 @@ check "issue-comment dry: comments?format=markdown" "match" \
 check "issue-comment dry: not System.History" "clean" "$(has "$out" 'System.History')"
 
 # Case MD4: issue-comment happy path funnels the body file through _az_wit_comment
-# (the markdown-rendering path), not _az_wit_patch (HTML System.History).
-_az_wit_patch() { return 0; }   # if called, MD4 stays nomatch (mdcap untouched)
+# (the markdown-rendering path), not _az_wit_patch (HTML System.History). Only
+# _az_wit_comment writes mdcap; _az_wit_patch is stubbed inert, so if issue-comment
+# took the wrong (System.History) path mdcap stays empty -> the assertion nomatch.
+_az_wit_patch() { return 0; }
 _az_wit_comment() { cp "$2" "${mdcap}"; return 0; }
 : > "${mdcap}"
 _azure_issue_comment 55 "${ibody}"; rc=$?
