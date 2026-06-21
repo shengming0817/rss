@@ -22,7 +22,7 @@ permissionMode: auto
 
 按派发 prompt 确定变更范围（PR diff / commit 范围 / 指定文件），必要时读 CLAUDE.md、`deny.toml` 和相关 `contract.toml` 确认约束。
 
-> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
+> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `docs/rules/architecture.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
 
 分层约束用于所有审查维度：跨域通信必须走 contracts，禁止域 crate 直接依赖另一个域 crate；新增 CUD 操作必须标注一致性级别（L0-L4，trait 关联常量 `const CONSISTENCY`）；涉及基础/基建/域/adapters crate 的 commit 须含 `ref:` 标记。
 

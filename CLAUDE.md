@@ -1,9 +1,11 @@
 # RSS 协作说明
 
-> RSS 是 GoCell 的 Rust 重写：保留 domain-native **治理**（原 GoCell cell-native；contract + L0–L4 一致性 + journeys 为单源），
-> 结构改用惯用 Rust workspace——**cell/slice 不再是结构实体**（无 cell.yaml/slice.yaml、无 cell/slice crate 外壳）。
-> 本文件是项目最高协作规范（无独立宪法文件）；架构概念如何落到扁平 crate、完整 workspace 结构树见
-> `.claude/rules/rss/rust-mapping.md`（架构映射单一事实源，结构树唯一持有者），分层 / 语言 / 治理细则见 `.claude/rules/rss/`。
+> RSS 是 GoCell 的 Rust 重写（GoCell 背景仅此一句；迁移对照归档见 `docs/prd/rust-mapping.md`，非规则）。
+> 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
+> workspace——无 cell/slice 结构外壳（无 cell.yaml/slice.yaml、无 cell/slice crate）。
+> 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
+> `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga）
+> 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api）。
 
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
@@ -22,7 +24,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 ### 分层结构（扁平 Cargo workspace）
 
 > 完整扁平布局（全部库 crate + adapters/contracts/bins/xtask/generated）是单一事实源，只在
-> `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构 维护一份；此处不复制，避免漂移。
+> `docs/rules/architecture.md` §扁平 workspace 结构 维护一份；此处不复制，避免漂移。
 
 根级治理载体（替代 gocell 的 archtest / hack / Makefile）：
 
@@ -46,7 +48,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 
 > 关键：gocell 靠 archtest 守的 "cell 只经 contract 通信"，在 Rust 由 crate 依赖图**自动守住**——域 crate
 > 没在 Cargo.toml 声明就 import 不到，且 `deny.toml` 禁止声明对兄弟域 crate 的依赖。详见
-> `.claude/rules/rss/rust-mapping.md` §分层 / §Rust 原生强制（三档载体）。
+> `docs/rules/architecture.md` §分层 / §Rust 原生强制（三档载体）。
 
 ### 域 crate 开发规则（cell/slice 外壳退场）
 
@@ -87,7 +89,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 
 主要实施者是 AI。新增/修改约束 enforcement 机制按 AI-robust 三档（Hard / Medium / Soft）评级；Soft 严禁立项。
 Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静态强制的约束，不要退化成运行期 archtest**。
-载体决策原则、review checklist 详见 `.claude/rules/rss/ai-robust.md`，静态强制清单见 `.claude/rules/rss/rust-mapping.md` §Rust 原生强制（三档载体）。
+载体决策原则、review checklist 详见 `.claude/rules/rss/ai-robust.md`，静态强制清单见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
 
 ## 参考框架
 

@@ -1,6 +1,6 @@
 # Rust 编码规范
 
-> 架构概念 / 域 crate / contract / 一致性等级 如何映射到 crate 见 `rust-mapping.md`。本文件只讲 Rust 语言层规范。
+> 架构概念 / 域 crate / contract / 一致性等级 如何映射到 crate 见 `docs/rules/architecture.md`。本文件只讲 Rust 语言层规范。
 
 ## 分层依赖（crate 图 + deny.toml 编译期强制）
 
@@ -16,7 +16,7 @@
 
 cargo 拒绝循环依赖；禁依赖用 `cargo-deny`(deny.toml)、多余 / 未声明用 `cargo-udeps`、外部 API 面用 `cargo public-api` 守。
 
-> 分组划分与禁依赖以 `rust-mapping.md` §分层 为准（单一事实源）；本表是 Rust 语言层速查。
+> 分组划分与禁依赖以 `docs/rules/architecture.md` §分层 为准（单一事实源）；本表是 Rust 语言层速查。
 
 ## DDD 分层（crate 内 module）
 

@@ -1,5 +1,7 @@
 # 架构概念 → Rust/Cargo 映射
 
+> **归档** · GoCell→RSS 迁移指南(含 GoCell 对照),**非现行规则**。现行架构规则(纯 Rust-native)见 `docs/rules/architecture.md`。
+
 > 本文件是 GoCell → RSS（Rust 重写）的架构映射**单一事实源**，并且是**扁平 workspace 结构树的唯一持有者**。
 > 所有规则、CLAUDE.md、agent、skill 在涉及"目录 / crate / 层 / contract / 一致性等级 / 命名"时以本文件为准。
 
@@ -171,7 +173,7 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
 
 **残留运行期/CI 检查**（类型系统 / crate 图管不到）显式为 **Medium（xtask/CI 门），严禁 Soft**：active subscriber
 存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由。AI-robust 规则集因此收缩，重心从
-"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 `ai-robust.md`）。
+"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 `.claude/rules/rss/ai-robust.md`）。
 
 ## 关键模式的 Rust 形态
 
