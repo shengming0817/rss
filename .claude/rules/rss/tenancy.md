@@ -33,11 +33,11 @@ audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 tenant scope 只能来自**已认证通道**：JWT tenant claim（→ ctx）或 service-token MAC 签名的
 `X-Tenant-ID` header（internal / pre-auth 路径，经 `endpoints.http.headers.X-Tenant-ID`
 populate-only 派生，adapter `tenant::parse_tenant_id` fail-closed）。**HTTP request body 不得携带
-`tenantId`**——body 是唯一不被 service-token MAC 覆盖的入口，body tenant 是未认证维度。contractgen
+`tenantId`**——body 是唯一不被 service-token MAC 覆盖的入口，body tenant 是未认证维度。契约 codegen
 （`build_http_dtos`）在不可绕的 request 路径拒绝任何声明 `tenantId` 的 HTTP request schema：upstream
 schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned call-site 是
 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立 call-site
-强制）；无豁免。符号 / 评级 / 盲区见 contractgen 的 tenant-in-body guard 模块 rustdoc。
+强制）；无豁免。符号 / 评级 / 盲区见 契约 codegen 的 tenant-in-body guard 模块 rustdoc。
 
 ## Principal claim source
 
@@ -155,5 +155,5 @@ opt-out 必须带非空 `endpoints.http.auth.reason`。ABAC mode 不带 reason�
 reason-without-opt-out 必须拒绝。permission 与 opt-out mode 互斥。
 HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必须拒绝。
 
-contractgen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
+契约 codegen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
 `cargo xtask` / governance 规则只做纵深检查，不能替代 codegen 强制门。
