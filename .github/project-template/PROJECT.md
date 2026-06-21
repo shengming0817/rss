@@ -14,7 +14,7 @@
 | 条目内容 / 状态描述 | forge issue/work-item body | 人 / 自动化 |
 | 领域 / 类型 / 优先级 / 复杂度 | Issue label（area / type / pri / cx） | CLI 显式 `--label` |
 | 进度状态 | 激活 forge 看板字段（Status；azure=Boards 状态列 / github=Project v2 Status / gitlab=board 列） | 看板 UI / 自动化 |
-| epic 实施顺序 | 最新 `<!-- pm:epic-wave -->` issue 评论 | `issues` 技能 |
+| epic 实施顺序 | 最新 `pm:epic-wave`（可见 token）issue 评论 | `issues` 技能 |
 | 父子关系 | 激活 forge 的父子关系（azure work-item parent/child / github sub-issue / gitlab parent），经 `forge.sh subissue-link` | 人 / 自动化 |
 
 > 本仓 issue/PR 全程经 forge 适配器 / 技能创建，body 读 `.github/project-template/` 下对应模版（`--body-file`）。

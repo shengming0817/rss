@@ -84,7 +84,7 @@ cat > /tmp/epic-wave-comment.md <<'C'
 `pm:epic-wave`
 🌊 Epic 实施顺序更新：每 wave ≤4 容量装箱，OPEN 按 pri 排 Wave 1-4；wave 内标明并行组 / 串行链；已完成与超窗(Wave 4 之后)单列。排序结果只写在本评论中，不写 Project 字段，不改 epic body。
 
-<粘贴 A2 dry-run 表>
+粘贴 A2 dry-run 表（不带尖括号占位符）
 C
 bash hack/automation/forge.sh issue-comment <epic#> /tmp/epic-wave-comment.md
 ```
