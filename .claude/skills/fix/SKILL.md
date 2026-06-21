@@ -169,12 +169,12 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | Cx1/Cx2 + IN_SCOPE + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | **[AUTO-FIX]** 直接修 |
 | Cx2 + IN_SCOPE + 触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
-| **Cx3/Cx4 IN_SCOPE** | 任何 | 不修，评估后自动 defer：按 `issues` B1 建 backlog issue 跟踪（记 `⏸ defer`），不 AskUserQuestion；`pri-p0` incident / 归属判不定例外停人工 |
+| **Cx3/Cx4 IN_SCOPE** | 任何 | 处置门判「当前 PR 修」or「defer」：**manual**（`/fix` 人在场）AskUserQuestion 判，defer 后自动建 issue（不二次确认）、记 `⏸ defer`，判修纳入本轮；**auto**（pr-monitor 无人）无法问 → 转人工、不切 label |
 | 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 4；pri-p0/判不定除外） |
 
 **不可自动执行**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
-> **auto（无监督，pr-monitor→`Skill("fix")`）vs manual（交互 `/fix`）**：只有 [AUTO-FIX] 行能在 auto 路径执行，判 Cx 优先读 `pr-meta.sh extract` 的 `findings.byCx`（机器块：`cx3==0 ∧ cx4==0 ∧ (cx1+cx2)>0`）。其余行（执行推荐方案 / 记录阻塞）是 manual 专属，auto 遇到一律 surface 转人工。**IN_SCOPE Cx3+**（manual / auto 同）：不修，评估后自动 defer + 按 `issues` B1 建 issue 跟踪（不 AskUserQuestion，`pri-p0` / 归属判不定例外），artifact 落地后照常切 label。（[AUTO-FIX] 禁止域 = 改底座 crate trait / migration / 组合根 / 并发语义。）
+> **auto（无监督，pr-monitor→`Skill("fix")`）vs manual（交互 `/fix`）**：只有 [AUTO-FIX] 行能在 auto 路径执行，判 Cx 优先读 `pr-meta.sh extract` 的 `findings.byCx`（机器块：`cx3==0 ∧ cx4==0 ∧ (cx1+cx2)>0`）。其余行（执行推荐方案 / 记录阻塞）是 manual 专属，auto 遇到一律 surface 转人工。**IN_SCOPE Cx3+**：manual 经处置门 AskUserQuestion 判修/defer，**判 defer 后自动建 issue（不二次确认）**；auto（pr-monitor）一律 surface 转人工、不切 label。（[AUTO-FIX] 禁止域 = 改底座 crate trait / migration / 组合根 / 并发语义。）
 
 **何时用 AskUserQuestion**: 见文末 §沟通规则（默认自动决策，不逐条问）。
 
@@ -257,7 +257,7 @@ cargo test -p consistency -p primitives -p vocab        # 改了底座 crate 时
 1. **提交**：`git add` 修复文件 → 按 4.1 commit/push；无 PR 才 `forge.sh pr-create "<title>" <body-file> develop <branch>`。
 2. **冲突预检（阻塞）**：`issues` B5 ① 验冲突，过则立即进 3（不等 CI）。
 3. **pm:fix**（`--kind=fix`）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
-4. **deferred 登记（先于切 label）**：所有 deferred——OOS finding + IN_SCOPE Cx3+ 自动 defer + 非 OOS 的 Cx3+/RELATED——**逐条自动**按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，留 open，不等确认，派生注 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿）。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
+4. **deferred 登记（先于切 label）**：所有 deferred——OOS finding + 处置门判定 defer 的 IN_SCOPE Cx3+/RELATED——**逐条自动**按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，留 open，**判定 defer 后直接建、不再二次确认**，派生注 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿）。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
 5. **切 label**：`forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
 6. **CI 异步收敛（非阻塞）**：`issues` B5 ② 等 CI（失败回阶段 1-4 再推），贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
 7. **延迟启监控（必做）**：评论 + label 完成后延迟约 10min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 监听 `needs-check-fix` 跑 `/pr-review --check`，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。完成后 **TaskUpdate → completed**。
@@ -274,7 +274,7 @@ Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri
 - 修复报告（已修）
 - 批量验证（审查报告）
 
-**验证**（4.6 已执行，此处复核，不再查找）：核对 fix 评论 + `pr-status` 已切；全部 deferred（OOS + 非 OOS Cx3+/RELATED）issue 已自动建 + 回填 #N（pri-p0/判不定除外）。
+**验证**（4.6 已执行，此处复核，不再查找）：核对 fix 评论 + `pr-status` 已切；全部 deferred（OOS + 处置门判 defer 的 Cx3+/RELATED）issue 已自动建 + 回填 #N（pri-p0/判不定除外）。
 
 ---
 
@@ -283,5 +283,5 @@ Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri
 **默认按分析结果自动决策。** 仅以下情况用 AskUserQuestion：
 - 无法定位问题代码
 - 测试失败且 4 轮回退后仍无法修正
-- **任何 deferred（OUT_OF_SCOPE / 非 OOS Cx3+/RELATED / IN_SCOPE Cx3+ 自动 defer / /fix 派生新问题）→ 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 4：先反思归属，再无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。**不逐条问、不等确认**；仅 `pri-p0`（incident）→ 停下 AskUserQuestion，或 area/type 判不定（`validate` 失败）→ 标 `deferred=labels-underivable` 回退草稿。
+- **OUT_OF_SCOPE / 处置门判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 4：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。处置门「修/defer」的判断仍 AskUserQuestion；**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）→ 停下 AskUserQuestion，或 area/type 判不定（`validate` 失败）→ 标 `deferred=labels-underivable` 回退草稿。
 - pri-p0 红线升级（incident-driven 或安全 CVE）

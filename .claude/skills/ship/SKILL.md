@@ -1,6 +1,6 @@
 ---
 name: ship
-description: "全流程实施：探索→计划→worktree→TDD→实施→PR→review→/fix Cx1/Cx2→收尾汇报。L1(跳过探索,1 reviewer)/L2(单agent探索,1 reviewer)/L3(默认,三agent探索,按diff行数1/2/3/6 reviewer自动)"
+description: "全流程实施：探索→计划→worktree→TDD→实施→PR→review→/fix Cx1/Cx2→人工确认。L1(跳过探索,1 reviewer)/L2(单agent探索,1 reviewer)/L3(默认,三agent探索,按diff行数1/2/3/6 reviewer自动)"
 argument-hint: "[--level=L1|L2|L3] <#issue-number 或任务描述>"
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ---
@@ -9,9 +9,9 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 > **多沟通原则（默认多问、有歧义即停）**：L2/L3 在创建 worktree（阶段 3）**之前**必须完整呈现「方案方向
 > （阶段 1）+ 改动计划（阶段 2）」并经 AskUserQuestion 确认——不在未对齐时就开工。实施中（阶段 5）surface
-> 阶段性进度与 blocker；阶段 7→8 呈现内置 review findings 表，**Cx1/Cx2 IN_SCOPE 自动修**；**IN_SCOPE
-> Cx3/Cx4 不修，评估后自动 defer + 建 issue 跟踪**（不 AskUserQuestion，`pri-p0` incident / 归属判不定例外）。
-> 归属 / 取舍不清仍停下问。任何方案歧义 / 范围不清 / 取舍没把握 → 停下问，不默默假设。
+> 阶段性进度与 blocker；阶段 7→8 呈现内置 review findings 表，**Cx1/Cx2 IN_SCOPE 自动修**；**每条 IN_SCOPE
+> Cx3（及 Cx4）经处置门 AskUserQuestion 判「当前 PR 修」or「defer」**——判 defer 后**自动建 issue 跟踪（不二次确认）**，判修则纳入本轮。
+> 归属 / 取舍不清也停下问。任何方案歧义 / 范围不清 / 取舍没把握 → 停下问，不默默假设。
 
 剥离 `--level=` flag 后，剩余参数匹配 `^#?[0-9]+$` 时视为 issue 号，先 `bash hack/automation/forge.sh issue-view <N>` 拉取作为任务上下文；后续阶段以 issue title/body 替代自由文本任务描述，阶段 6 PR body 追加 `$(bash hack/automation/forge.sh pr-close-ref <N>)`。`state != "open"`（closed / merged 等）或 `issue-view` 失败均用 AskUserQuestion 让用户裁定是否继续。
 
@@ -156,7 +156,7 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 > **pm:* 评论统一**：填 `pr-comment.md` 模板（无损 `file:line` + 详表入 `<details>`）+ `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块到 body 末尾 + `issues` B4 贴（回显 URL）。
 
 1. **打印 + 留痕**：窗口完整打印内置 findings 表（P/Cx + IN_SCOPE/OOS 归属 + `file:line`，输出纪律见 `PROJECT.md` §5），贴 pm:ship 留痕。
-2. **Cx3 评估 + Cx1/Cx2 自动修**：IN_SCOPE Cx3/Cx4 不修，评估后自动 defer——按 `issues` B1 建 backlog issue 跟踪（pm:ship 记 `⏸ defer`），不 AskUserQuestion。再 Cx1/Cx2 IN_SCOPE 自动修（派 `developer` agent 按 [AUTO-FIX] Edit-Test 修，不逐条问）。`pri-p0` incident / 归属判不定仍 AskUserQuestion。
+2. **Cx3 处置门（阻塞，先于自动修与切 label）**：每条 IN_SCOPE Cx3/Cx4 用 AskUserQuestion 判「当前 PR 修」or「defer」——判修（pm:ship 记 `✅ 已修`）；判 defer → **自动**按 `issues` B1 建 issue 跟踪（pm:ship 记 `⏸ defer`，**不再二次确认**）；Cx4 默认 defer。处置完再 Cx1/Cx2 IN_SCOPE 自动修（派 `developer` agent 按 [AUTO-FIX] Edit-Test 修，不逐条问）。归属/取舍没把握仍 AskUserQuestion。
 3. **推送 + 冲突预检（阻塞）**：`git -C worktrees/<wt> push`，按 `issues` B5 ① 验冲突（冲突则 `git merge "$(bash hack/automation/forge.sh remote)/develop" --no-edit` 再 push），过则立即进 4（不等 CI）。
 4. **pm:ship**（`--kind=ship`）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
 5. **OOS → 建 issue + pm:oos**（有 OOS 时）：逐条按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，派生注 `Discovered via /ship`）；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿；贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
@@ -164,20 +164,20 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 7. **CI 异步收敛（非阻塞）**：`bash hack/automation/forge.sh ci-watch <PR#>`（azure 无 CI 返回 `no-ci` → 降级本地 `make verify`，不贴 pm:ci）；有 CI 按 `issues` B5 ② 熔断、失败回 `fix` 再推，贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
 8. **延迟启监控（必做）**：评论 + label 完成后延迟约 10min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 监听 `needs-review-again` 跑 review，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。
 
-> **收尾不变式（artifact-before-trigger）**：切 `needs-review-again`（步骤 6）前，全部 deferred 的 issue 已建——OOS（步骤 5）+ IN_SCOPE Cx3/Cx4 defer（步骤 2）——pm:ship 指针不悬空；CI（步骤 7）异步在后。
+> **收尾不变式（artifact-before-trigger）**：切 `needs-review-again`（步骤 6）前，全部 deferred 的 issue 已建——OOS（步骤 5）+ 处置门判 defer 的 IN_SCOPE Cx3/Cx4（步骤 2）——pm:ship 指针不悬空；CI（步骤 7）异步在后。
 > ship 到此结束。再审（codex / `/pr-review`）后续修走 `/fix <PR#>`。
 
 ---
 
-## 阶段 9：收尾汇报
+## 阶段 9：人工确认
 
 ```
 PR: #<编号> <URL>
 评论: <pm:ship 评论 URL，含 #issuecomment-<id>（来自 issues B4 回显）>
 已完成：TDD / 实施 / PR / review（实跑 reviewer 数：按 diff 1/2/3/6 自动） / Cx1-Cx2 fix / CI 绿
 
-已 defer 问题（**已自动建 issue 跟踪，无需人工确认**）——本表仅摘要 + 指针；完整无损详表（证据/三维根因/三级方案种子）见 pm:ship
-评论的 `<details>`；OOS + IN_SCOPE Cx3+/RELATED 的 issue #N / deferred 原因见本 PR 的 pm:oos / pm:ship 评论：
+已处置问题——处置门已判修/defer，**defer 项已自动建 issue 跟踪**；本表仅摘要 + 指针；完整无损详表（证据/三维根因/三级方案种子）见 pm:ship
+评论的 `<details>`；OOS + 判 defer 的 Cx3+/RELATED 的 issue #N / 原因见本 PR 的 pm:oos / pm:ship 评论：
 | # | Finding (file:line) | Cx | 归属 | 建议方案 | 原因 |
 |---|---------------------|----|------|---------|----|
 ```
