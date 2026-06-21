@@ -68,33 +68,23 @@ _az_wit_replace_tags() {
 
 _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
     local title="$1" body_file="$2" base="$3" head="$4"
-    # F5: description must NOT enter argv (process-list exposure).
-    # Use az devops invoke REST POST with --in-file so the body stays in a file.
-    # dry-run emits a stable placeholder — no random /tmp path, no body content.
+    # Azure's `az devops invoke --resource pullRequests` does not map to the
+    # documented PR-create endpoint for POST. Use the stable `az repos pr create`
+    # command here; accepted tradeoff: PR description enters argv.
     if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az devops invoke --area git --resource pullRequests --http-method POST --route-parameters project=%s repositoryId=%s --in-file <body-json> --api-version 7.1 --output json --org %s\n' \
-            "${ADO_PROJECT}" "${ADO_REPO}" "${ADO_ORG}"
+        printf 'az repos pr create --title %s --description <body> --target-branch %s --source-branch %s --repository %s --org %s --project %s --output json\n' \
+            "${title}" "${base}" "${head}" "${ADO_REPO}" "${ADO_ORG}" "${ADO_PROJECT}"
         return 0
     fi
-    local tmp rc out
-    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azpr.XXXXXX")"
-    # jq --rawfile reads the file without shell interpolation; no argv exposure.
-    jq -n \
-        --arg title "${title}" \
-        --arg src "refs/heads/${head}" \
-        --arg tgt "refs/heads/${base}" \
-        --rawfile desc "${body_file}" \
-        '{title:$title, description:$desc, sourceRefName:$src, targetRefName:$tgt}' > "${tmp}" || {
-            rc=$?
-            rm -f "${tmp}"
-            return "${rc}"
-        }
-    out="$(az devops invoke --area git --resource pullRequests \
-        --http-method POST \
-        --route-parameters "project=${ADO_PROJECT}" "repositoryId=${ADO_REPO}" \
-        --in-file "${tmp}" --api-version 7.1 --output json --org "${ADO_ORG}")" || rc=$?
-    rm -f "${tmp}"
-    [ "${rc:-0}" -eq 0 ] || return "${rc}"
+    local desc out
+    desc="$(cat "${body_file}")" || return
+    out="$(az repos pr create \
+        --title "${title}" \
+        --description "${desc}" \
+        --target-branch "${base}" \
+        --source-branch "${head}" \
+        --repository "${ADO_REPO}" \
+        --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)"
     printf '%s' "${out}" | jq -r --arg base "$(_az_pr_url_base)" '"\($base)/pullrequest/\(.pullRequestId)"'
 }
 
