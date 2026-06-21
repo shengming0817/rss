@@ -45,6 +45,13 @@ check "az-fail: returns non-zero"      "nonzero" "$(nonzero "$rc")"
 check "az-fail: no pullrequest/null"   "clean"   "$(has "$out" 'pullrequest/null')"
 check "az-fail: empty stdout"          ""        "$out"
 
+# Case 1b: az fails AND writes stdout -> still fail-fast, no URL leaks (the
+# function returns before the trailing `printf '%s' "${out}" | jq` line).
+az() { printf 'partial-output{not json}'; return 1; }
+out="$(_azure_pr_create "t" "${body}" develop feature 2>/dev/null)"; rc=$?
+check "az-fail+stdout: returns non-zero" "nonzero" "$(nonzero "$rc")"
+check "az-fail+stdout: empty stdout"     ""        "$out"
+
 # Case 2: az ok with pullRequestId -> correct URL, zero exit.
 az() { printf '{"pullRequestId":42}\n'; }
 out="$(_azure_pr_create "t" "${body}" develop feature)"; rc=$?

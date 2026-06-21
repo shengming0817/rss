@@ -167,8 +167,8 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | Cx1/Cx2 + IN_SCOPE + ≤2文件 + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | **[AUTO-FIX]** 直接修 |
 | Cx2 + IN_SCOPE + 超2文件或触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
-| **Cx3 IN_SCOPE**（manual 交互 `/fix`） | 任何 | **先过处置门**：AskUserQuestion → 处理措施 + 确认本次修，或 defer 原因；据结果修或记 defer，未处置阻塞切 `needs-check-fix` |
-| Cx3/Cx4（auto context）· Cx4 IN_SCOPE | 任何 | surface + 转人工，只输出方案；不自动修 / 不切下一阶段 label（Cx4 设计级默认 defer 记因） |
+| **Cx3/Cx4 IN_SCOPE**（manual 交互 `/fix`） | 任何 | **先过处置门**：AskUserQuestion → 处理措施 + 确认本次修，或 defer 原因（Cx4 设计级默认 defer 记因）；据结果修或记 defer，未处置阻塞切 `needs-check-fix` |
+| Cx3/Cx4（auto context，pr-monitor） | 任何 | surface + 转人工，只输出方案；不自动修 / 不切下一阶段 label |
 | 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 3；pri-p0/判不定除外） |
 
 **不可自动执行**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。

@@ -139,9 +139,9 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 ```
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
-  → ship：内置 6 维 reviewer + /fix Cx1/Cx2 → 贴 pm:ship → 冲突预检 + CI 绿（capability-gated：激活 forge=azure 无 CI，ci-* 返回 no-ci，CI 收敛降级本地 make verify，不贴 pm:ci）
-  → IN_SCOPE Cx3/Cx4 处置门：每条经 AskUserQuestion 确认本次修 或 defer（原因），未处置不切 label
+  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 确认本次修 或 defer 原因，未处置不切 label）→ /fix Cx1/Cx2 → 贴 pm:ship（含处置结果）+ OOS 留痕 → 冲突预检
   → 切 pr-status/needs-review-again（首审唯一使用点）→ 外部 app 实时监听并执行 review
+  → 切 label 后 CI 异步收敛（非阻塞；capability-gated：激活 forge=azure 无 CI，ci-* 返回 no-ci，CI 收敛降级本地 make verify，不贴 pm:ci）
   → 延迟 ~10min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
@@ -151,10 +151,10 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 /fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
   → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
-  → triage + 修复 → 贴 pm:fix → 冲突预检 + CI 绿（capability-gated，同上）
-  → IN_SCOPE Cx3/Cx4 处置门（manual：确认修 / defer 原因；auto：转人工不切）
+  → triage + IN_SCOPE Cx3/Cx4 处置门（manual：确认修 / defer 原因；auto：转人工不切）+ 修复 → 贴 pm:fix（含处置结果）→ 冲突预检
   → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix（待验证）
   → 外部 app 实时监听并执行 /pr-review --check
+  → 切 label 后 CI 异步收敛（非阻塞；capability-gated，同上）
   → 延迟 ~10min 必须启动 pr-monitor --mode=auto 监听 check 交接
 
 /pr-review <PR#> --check（验证上一轮 findings 是否修复 + 抓回归）
