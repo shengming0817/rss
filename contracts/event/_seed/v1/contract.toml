@@ -1,0 +1,12 @@
+# Seed event 契约（draft）——payload 形态冻结 + codegen 证明，不接 subscriber。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+id = "seed.thing-happened"
+kind = "event"
+domain = "_seed"
+version = "v1"
+owner = "_framework"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
