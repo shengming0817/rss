@@ -30,7 +30,7 @@
 | input struct field exclusion（公开输入类型不暴露 tenantId 等） | 私有字段 + builder | archtest → **编译器** |
 | 穷尽处理（HandleResult/Disposition/Status 值集冻结） | `match` + `#[non_exhaustive]` enum，漏一个 case 即编译错 | Medium → **Hard** |
 | reflect schema freeze（反射冻结 wire struct 字段集/tag） | derive 宏从单源生成，无需冻结 | 不再需要 |
-| codegen funnel + golden（contractgen 渲染 + 字节 diff） | proc-macro（编译期 derive） | Hard，但比 golden diff 更强 |
+| codegen funnel + golden（contractgen 渲染 + 字节 diff） | `build.rs` + `typify` 派生（默认）+ `insta` 快照（proc-macro 仅局部） | Hard，编译期单源 + 快照锁字节 |
 
 结论：**GoCell 现有治理机器的相当一部分会塌缩进编译器**。对一个声称「主要实施者是 AI、错误要不可表达」的项目，这是逻辑上最自洽的一步。
 
@@ -78,7 +78,7 @@ GoCell 极度 interface-heavy —— Composition Root DI（SharedDeps、CellModu
 
 ### 4. 编译 / AI 迭代回路变慢 —— 对「AI 主实施」是持续税
 
-CLAUDE.md 写明「主要实施者是 AI」，工作流是严格 TDD 红→绿 + ship/fix 紧循环。Go 编译快是这套打法的硬资产；Rust 慢编译 + 重 proc-macro 展开会拉长每一次 red→green。工作量虽不计，但**迭代延迟是持续成本，不是一次性**。
+CLAUDE.md 写明「主要实施者是 AI」，工作流是严格 TDD 红→绿 + ship/fix 紧循环。Go 编译快是这套打法的硬资产；Rust 慢编译 + 重 derive / 代码生成展开会拉长每一次 red→green。工作量虽不计，但**迭代延迟是持续成本，不是一次性**。
 
 ### 5. 云原生生态成熟度
 

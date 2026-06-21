@@ -29,7 +29,7 @@
 | required-deps codegen（`gocell:"required"`→`validateRequired`） | 非 `Option` 字段 + 构造器签名，缺了编不过——codegen 整个删 |
 | sealed / marker / newtype funnel（几十个 + archtest 守） | 模块可见性 + 私有字段 |
 | 值集冻结（HandleResult/Disposition/Status/result label） | `#[non_exhaustive]` enum + 穷尽 `match`，漏 case 编不过 |
-| `MESSAGE-CONST-LITERAL` + error prefix golden | `thiserror` enum variant（本就不是格式化字符串） |
+| `MESSAGE-CONST-LITERAL`（错误 message const literal） | `thiserror` enum variant（本就不是格式化字符串）；错误码前缀 golden / 所有权**不在此档**，仍需 Medium `cargo xtask` 治理 |
 | 数据竞争（race detector 运行时抽查） | `Send`/`Sync` 编译期 |
 | reflect schema freeze（冻结 wire struct 字段/tag） | derive 单源生成，无需冻结 |
 | 进程隔离测试 harness | `cargo-nextest`（每测试独立进程，原生） |
@@ -38,7 +38,7 @@
 
 | GoCell 机制 | Rust 载体 |
 |---|---|
-| clock 注入强制 / 禁直调 `time` / 禁特定 import | `clippy.toml` 的 `disallowed-methods`/`disallowed-types` + `cargo clippy -D warnings` |
+| clock 注入强制 / 禁直调 `time` / 禁特定 import | `clippy.toml` 的 `disallowed-methods`/`disallowed-types` + `cargo clippy -- -D warnings` |
 | panic 纪律（`panicregister`） | clippy `panic`/`unwrap_used`/`expect_used` deny + 行级 `#[allow]` carve-out |
 | codegen funnel（contractgen/cellgen 模板 + 单一 Render 出口） | `build.rs` + `typify`/`prettyplease`（或 `xtask` 生成 committed crate） |
 | golden 漂移（`VerifyInWorktree` 字节 diff） | `insta` 快照（`cargo insta review`） |
@@ -64,6 +64,8 @@
 ---
 
 ## 二、精简 workspace 结构
+
+> 下方为 2026-06-21 评估期结构快照；**现行权威结构树的唯一持有者 = `docs/rules/architecture.md` §扁平 workspace 结构**，以其为准（本文已冻结，不随之演进）。
 
 ```
 rss/
@@ -142,7 +144,7 @@ rss/
 |---|---|
 | 构建 / 分层强制 | `cargo build` + workspace 依赖图 |
 | 禁依赖 / license / 漏洞 | `cargo-deny`（`deny.toml`） |
-| lint / 纪律（clock/panic/import） | `cargo clippy -D warnings` + `clippy.toml` |
+| lint / 纪律（clock/panic/import） | `cargo clippy -- -D warnings` + `clippy.toml` |
 | 格式 | `cargo fmt`（rustfmt） |
 | 测试（进程隔离） | `cargo-nextest` |
 | golden / 快照 | `insta`（`cargo insta`） |

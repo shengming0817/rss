@@ -103,7 +103,7 @@ archtest/治理规则随每阶段同步长；契约扇出闭环从 P0 起强制�
 
 接 [gocell-rust-tradeoff.md](./gocell-rust-tradeoff.md) 的分析，整体顺序不变，但：
 
-- **P0 变轻**：codegen funnel + golden → proc-macro（折进编译期）；archtest 贯穿线里很大一块塌进类型系统，治理工作量前移且缩小。
+- **P0 变轻**：codegen funnel + golden → `build.rs` + `typify` 派生 + `insta` 快照（默认；proc-macro 仅局部折进编译期）；archtest 贯穿线里很大一块塌进类型系统，治理工作量前移且缩小。
 - **新增 P1.5「context 传播 + DI 策略」设计 spike**：Rust 没有 `context.Context`，而 P2 组合根重度依赖 ctxkeys 全程穿透 + `dyn Trait` DI——**必须在动 P2 之前先定**任务本地存储 / 显式 Context struct 的方案，否则 P2 之后到处返工。（**已决议**：落为 `runctx` crate——可观测 ID 走 `tracing` span、控制流值走显式 `RequestCtx`，不再是开放二选一。）
 - **P3/P6/P7 后台环**（relay/sweeper/reconcile fan-out）要预留 tokio 结构化并发 + CancellationToken 的设计预算，比 Go 的 `go func()` 重。
 

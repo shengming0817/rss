@@ -26,7 +26,7 @@
 | gocell CI 项 | 作用 | Rust 去向 | 保留? |
 |---|---|---|---|
 | build-test（go build，5 分片） | 编译 | `cargo build --workspace --all-features --all-targets` | **保留↑**（顺带吸收分层/required-deps/sealed/穷尽 → 编译错） |
-| golangci-lint（PR diff 模式） | lint | `cargo clippy --all-targets --all-features -D warnings` + `clippy.toml` | **保留**（+吸收 clock/import/panic 纪律 archtest） |
+| golangci-lint（PR diff 模式） | lint | `cargo clippy --all-targets --all-features -- -D warnings` + `clippy.toml` | **保留**（+吸收 clock/import/panic 纪律 archtest） |
 | gofumpt | 格式 | `cargo fmt --check` | 保留 |
 | 单测（5 分片）+ 覆盖率门 | 测试/覆盖 | `cargo nextest run --workspace` + `cargo llvm-cov` 阈值 | 保留（进程隔离原生，**分片多余**） |
 | integration-test（testcontainers） | 集成 | `cargo nextest` + `testcontainers-rs` | 保留（同形） |
@@ -40,7 +40,7 @@
 | security-static：CodeQL | 数据流 SAST | CodeQL Rust（**preview，弱于 Go**） | 保留但**弱化** |
 | security-static：Semgrep | 模式 SAST | Semgrep Rust（规则较薄） | 保留但弱化 |
 | os-smoke（mac/win 矩阵） | 跨平台 | `cargo build/test` matrix | 按需保留（控制面常 Linux-only） |
-| examples-smoke（启 ssobff，/readyz） | 启动冒烟 | 启 `server` bin + curl `/healthz` | 保留（同形） |
+| examples-smoke（启 ssobff，/readyz） | 启动冒烟 | 启 `server` bin + curl `/readyz` | 保留（同形） |
 | —（gocell 在 governance 里做 authoring-schema SemVer） | 公共 API SemVer（轴 A） | `cargo-semver-checks` + `cargo-public-api` | **对应保留/强化**（原生破坏式 API 检查） |
 | nightly adapter 集成（mqtt-tls/otel） | adapter 真集成 | 同形 nightly（若该 adapter 在） | 保留 |
 | sonarcloud | 覆盖聚合 + 质量门 | `cargo llvm-cov`→Sonar（可选）；质量门大半被 clippy 吸收 | 可选保留 |
@@ -49,7 +49,7 @@
 ## 三、Rust 版实际保留的 CI 闸门（精简后）
 
 1. **`cargo build --workspace --all-features --all-targets`** — 编译即闸门（吃掉分层/required/sealed/穷尽/数据竞争一大半）
-2. **`cargo clippy -D warnings` + `clippy.toml`** — lint + clock/import/panic 纪律（`disallowed-methods`/`disallowed-types`）
+2. **`cargo clippy -- -D warnings` + `clippy.toml`** — lint + clock/import/panic 纪律（`disallowed-methods`/`disallowed-types`）
 3. **`cargo fmt --check`**
 4. **`cargo nextest run`（+ testcontainers 集成）** + **`cargo llvm-cov`** 覆盖率阈值（引擎与基础 crate `consistency`/`primitives`/`vocab`/`ids` ≥90% / 新增 ≥80%，沿用 gocell 覆盖率口径）
 5. **`cargo-deny`** — advisories（漏洞）+ bans（=分层）+ licenses + sources，一把抓
@@ -57,7 +57,7 @@
 7. **`cargo insta`** — 生成代码/wire schema 的 golden 快照
 8. **`xtask` 校验器** — 契约扇出闭环 + L0–L4 一致性 governance + wire 版本策略（**三档里语言无关、框架自建的那部分，原样留**）
 9. **`cargo-semver-checks` + `cargo-public-api`** — 公共 API SemVer（轴 A）
-10. **examples-smoke**（启 server + /healthz）、**SAST**（Semgrep + CodeQL-Rust preview，弱化）、**release**
+10. **examples-smoke**（启 server + /readyz）、**SAST**（Semgrep + CodeQL-Rust preview，弱化）、**release**
 
 > 一个聚合入口 `cargo xtask verify`（或 `cargo xtask ci`）可把 build/clippy/fmt/nextest/llvm-cov/deny/insta/dylint/xtask-validators 串成本地与 CI 同源的一条命令——对应 gocell 的 `make verify`（也契合 azure `no-ci` 时降级本地跑的现实）。
 
@@ -80,5 +80,5 @@ gocell 那 11 个 workflow 在 Rust 下大致收敛成：
 ## 六、待核实 / 决策点
 
 1. **CodeQL Rust 成熟度**：截至 2026-01 为 preview，弱于 Go SAST；若要强 SAST 需评估当时状态，或更依赖 clippy 安全 lint + `cargo-deny` advisories。
-2. **覆盖率阈值口径**（**已定**）：沿用 gocell 覆盖率纪律——引擎与基础 crate（`consistency`/`primitives`/`vocab`/`ids`）≥90%、新增 ≥80%（见 `docs/rules/rust-standards.md`）。
+2. **覆盖率阈值口径**（**已定**）：沿用 gocell 覆盖率纪律——引擎与基础 crate（`consistency`/`primitives`/`vocab`/`ids`）≥90%、新增 ≥80%（见 `.claude/rules/rss/rust-standards.md`）。
 3. **runner/forge**：CI 落 GitHub Actions vs Azure Pipelines vs 纯本地 `cargo xtask verify`（与当前 azure `no-ci` 现实对齐）——决定 workflow 文件形态，但闸门集合不变。
