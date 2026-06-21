@@ -20,8 +20,8 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 `tenant::RowVisibility::new` 拒绝 `RowScope::All`。跨租户可见性只能由
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
-`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与
-FR-007 强制审计同址。
+`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址
+（`RowScope::All` 必须触发审计 signal）。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 `RowScopeAllUnsupportedError` / 501。super-admin 跨租户 audit read 只能走专用
@@ -37,8 +37,7 @@ populate-only 派生，adapter `tenant::parse_tenant_id` fail-closed）。**HTTP
 （`build_http_dtos`）在不可绕的 request 路径拒绝任何声明 `tenantId` 的 HTTP request schema：upstream
 schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned call-site 是
 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立 call-site
-强制）；无豁免。符号 / 评级 / 盲区见 contractgen 的 tenant-in-body guard 模块与
-`HTTP-REQUEST-TENANT-HEADER-ONLY-01` 测试 rustdoc、ADR `202606021200-1160`。
+强制）；无豁免。符号 / 评级 / 盲区见 contractgen 的 tenant-in-body guard 模块 rustdoc。
 
 ## Principal claim source
 
@@ -79,20 +78,19 @@ RLS policy shape 由 schema guard 检查。app-serving role 必须非 owner 且�
 ## Resource ownership
 
 path-param 标识的 resource ownership 是 PDP ABAC 决策，不是 handler 短路。owner-scoped /
-self-scoped gate **contract-derived**（#2355）：契约声明 `endpoints.http.resource:
+self-scoped gate **contract-derived**：契约声明 `endpoints.http.resource:
 <pathParam>`（owner-scoped）或 `endpoints.http.selfScoped: true`（self-scoped），生成
 handler 经单一 `auth::require_permission_for_contract(contract_spec, resolver)` funnel 派生
 `require_permission_for_resource(path_param, perm)` / `require_permission_for_self(perm)`——业务
-slice 不手写 gate。`resource`/`selfScoped` 各 ⇒ permission、二者互斥（schema + FMT-42 +
-`ContractSpec::validate` 三重）。owner-scoped gate 把 canonical resource id（self-scoped 把
+slice 不手写 gate。`resource`/`selfScoped` 各 ⇒ permission、二者互斥（schema + `ContractSpec::validate`
++ `cargo xtask` 治理校验 三重）。owner-scoped gate 把 canonical resource id（self-scoped 把
 调用者自身 subject）转发给 PDP。
 
 - baseline ownership 用 `subject.sub == resource.id` 判定。
 - **owner vs admin 同 permission**：同一 owner-scoped action（如 `user:write`）既用于带
   resource 的 owner 路由（改自己），也用于不带 resource 的 admin 路由（coarse，改任意）。
-  故 HTTP **不照搬** gRPC FMT-41 的「owner-scoped permission ⇒ resource 必填」（会误拒 admin
-  路由）；`resource` 是 per-route 授权选择，不从 permission 派生。详见 ADR
-  `202606201500-2355`。
+  故 HTTP **不照搬** gRPC 侧「owner-scoped permission ⇒ resource 必填」规则（会误拒 admin
+  路由）；`resource` 是 per-route 授权选择，不从 permission 派生。
 - 空或非 canonical path-param 不等于 self；resource 不可解析时规则不命中并
   fail-closed。
 - delegated ownership 用 `subject.sub == resource.owner`，owner 由 PIP lookup 供给。
@@ -146,7 +144,7 @@ HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
 `endpoints.http.permission` overlay 派生，生成 handler 通过
 `auth::require_permission_for_contract(contract_spec, resolver)` 解析并进入同一 PDP 路径。owner-scoped
 （`endpoints.http.resource`）/ self-scoped（`endpoints.http.selfScoped`）由该同一 funnel 按
-`contract_spec.{resource, self_scoped}` 三分支派生，见 §Resource ownership 与 ADR `202606201500-2355`。
+`contract_spec.{resource, self_scoped}` 三分支派生，见 §Resource ownership。
 
 每个 `lifecycle: active` 且 `codegen` 的 HTTP 契约必须声明恰好一个 AuthZ mode：
 
@@ -159,13 +157,3 @@ HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必
 
 contractgen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
 `cargo xtask` / governance 规则只做纵深检查，不能替代 codegen 强制门。
-
-## References
-
-- 规则文件职责：`docs/guides/agent-instruction-surfaces.md`
-- ABAC / permission 接线：`docs/architecture/202606121400-1348-adr-pr10a-authz-wiring.md`
-- audit / RLS / 跨租户读取：`docs/architecture/202606131900-1810-adr-super-admin-cross-tenant-audit-read.md`
-- RowScope=all FR-007 审计 signal（tracing 决议，非 ledger.append）：`docs/architecture/202606201357-1761-adr-rowscopeall-audit-signal-tracing.md`
-- HTTP AuthZ mode：`docs/architecture/202606190847-2020-adr-authz-default-abac.md`
-- gRPC 授权：`docs/architecture/202605260000-adr-grpc-transport-adapter.md`
-- HTTP owner/self-scoped contract-derived gate：`docs/architecture/202606201500-2355-adr-http-owner-scoped-contract-derived-authz.md`

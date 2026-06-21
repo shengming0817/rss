@@ -6,9 +6,9 @@
 
 ## 适用范围
 
-reconcile 是 L4 desired-state 收敛控制环：周期观察一个 cell **自己 OWN** 的非终态实体
-（设备命令、证书行、trust score），把每个驱动趋向 desired。收敛权属于消费 cell——框架只
-提供 Loop harness，cell 在 `Reconcile` 内对自己的实体表行使写权。
+reconcile 是 L4 desired-state 收敛控制环：周期观察一个域 crate **自己 OWN** 的非终态实体
+（设备命令、证书行、trust score），把每个驱动趋向 desired。收敛权属于消费域 crate——框架只
+提供 Loop harness，域 crate 在 `Reconcile` 内对自己的实体表行使写权。
 
 reconcile **不是业务编排器**（那是 saga），**不是 CQRS 读模型构建器**（那是 projection
 harness）。三者正交，边界见下。
@@ -31,8 +31,7 @@ harness）。三者正交，边界见下。
 `Builder::new` 第二参 `tenancy` 是必填 sealed `Tenancy`（`Tenancy::single_tenant()` / `Tenancy::tenant_scoped()`，
 仿 `Clock` 位置参约定，非可漏链的 `with_*`）：reconciler 在 tenantless system 身份下发射命令（Claimer key 落
 `_notenant`），故必须显式声明该命名空间是否正确。漏声明=编译错（构造器必填参数）；TenantScoped
-reconciler 须自行在 command-id 编码 tenant 维度（框架不验证 body，残留盲区）。评级与盲区见
-`RECONCILE-TENANCY-DECLARED-01`（在 Rust 由构造器必填 sealed 参数从类型层强制）与 ADR `202606101200-1821`。
+reconciler 须自行在 command-id 编码 tenant 维度（框架不验证 body，残留盲区）。由 builder fail-fast + 类型系统（Hard）强制：构造器必填 sealed 参数使漏传无法编译。
 
 ## Leader-elect
 
@@ -53,7 +52,6 @@ L3 最终一致可用 projection / saga；reconcile 用于 L4 跨不可靠边界
 
 ## 参考
 
-- ADR：`docs/architecture/202605291600-661-adr-kernel-reconcile-design.md`
 - 权威 rustdoc：`crates/consistency/src/reconcile/mod.rs` 模块级文档 §Enforced invariants
 - Invariants：`RECONCILE-*` 族完整清单、符号与盲区以对应守卫（类型系统 / clippy lint / `#[test]`·
   `rstest` 纵深，可执行真源）与 `crates/consistency/src/reconcile/mod.rs` §Enforced invariants 为准；

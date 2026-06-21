@@ -33,12 +33,12 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 | 级别 | 语义 | 测试要求 |
 |------|------|----------|
 | L0 | 本地纯计算 | 表驱动单元测试（`rstest` 参数化） |
-| L1 | 单 cell 本地事务 | 事务完整性测试 |
+| L1 | 单域 crate 本地事务 | 事务完整性测试 |
 | L2 | 本地事务 + outbox | outbox 原子性 + consumer 幂等 |
-| L3 | 跨 cell 最终一致 | replay + 投影重建 |
+| L3 | 跨域最终一致 | replay + 投影重建 |
 | L4 | 长延迟设备闭环 | 状态机、超时、重试、迟到消息 |
 
-级别声明在 `contract.toml` 的 `consistencyLevel` 字段（与 wire 语义同源），由 `cargo xtask` 校验。L2 覆盖由 `L2-OUTBOX-ATOMICITY-COVERAGE-01` 守卫。
+级别声明在 `contract.toml` 的 `consistencyLevel` 字段（与 wire 语义同源），由 `cargo xtask` 校验。L2 覆盖由 `cargo xtask` 原子性+幂等治理测试（Medium）守。
 
 ## 工程护栏
 
@@ -55,7 +55,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - DB 字段 snake_case。
 - JSON、query、path、event header 字段 camelCase（`#[serde(rename_all = "camelCase")]`）。
 - 错误使用 `vocab`(error) + `thiserror`。
-- mock 放 `#[cfg(test)]` 模块或 `mockall`；cell 单测不依赖平台 adapter crate。
+- mock 放 `#[cfg(test)]` 模块或 `mockall`；域 crate 单测不依赖平台 adapter crate。
 - 集成测试用 `tests/` 目录 + `#[cfg(feature = "integration")]` feature 明确隔离（替代 Go build tag）。
 
 ## 覆盖率

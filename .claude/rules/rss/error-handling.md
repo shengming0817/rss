@@ -29,7 +29,7 @@ runtime 数据。runtime 数据进入两条 typed 通道：
   4xx 可下发，5xx 强制 strip。
 - `with_internal(InternalAttr)`：只进服务端日志，永不进 wire。
 
-相关守卫：`MESSAGE-CONST-LITERAL-01`、`DETAILS-SEALED-FIELD-FROZEN-01`。
+由 const literal 检查（编译期 `&'static str` 类型约束，Hard）与 sealed 字段冻结（类型系统，Hard）守。
 
 ## Panic
 
@@ -41,7 +41,7 @@ panic!("{}", panic_register::approved("reason", value));
 ```
 
 `reason` 是 kebab-case literal。A/B 类 programmer error 使用 `vocab` 的 assertion 形态；
-框架 rethrow 保留原 panic payload。其它 panic 形态由 `PANIC-REGISTERED-01` 拦截。
+框架 rethrow 保留原 panic payload。其它 panic 形态由 clippy `panic` / `unwrap_used` deny（Medium）拦截。
 
 ## Carve-out
 
@@ -54,6 +54,6 @@ crate-level。新增或删除 carve-out 必须同步修改 ADR registry 和 lint
 
 1. 注册到 `vocab` 前缀所有权集合或外部 crate 注册入口。
 2. 更新 prefix golden。
-3. 通过 `ERRCODE-PREFIX-OWNERSHIP-01`。
+3. 通过 `cargo xtask` 前缀所有权治理测试（Medium）。
 
-in-repo cell mint 新前缀时，平台 registry 也必须更新；单靠 cell 注册入口不满足静态扫描。
+in-repo 域 crate mint 新前缀时，平台 registry 也必须更新；单靠域 crate 注册入口不满足静态扫描。

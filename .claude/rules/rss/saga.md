@@ -31,7 +31,4 @@ trait 对象），缺失即编译错误——替代 gocell 运行期的 nil-inte
 
 ## 参考
 
-- ADR：`docs/architecture/202606021000-adr-saga-l3-orchestration-engine.md`
-- ADR：`docs/architecture/202606051200-1609-adr-saga-journal-projection-source.md`
-- Runbook：`docs/ops/saga-runbook.md`
 - 扇出规则：`.claude/rules/rss/contract-fanout.md`

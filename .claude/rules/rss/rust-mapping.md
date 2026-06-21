@@ -1,17 +1,20 @@
 # 架构概念 → Rust/Cargo 映射
 
 > 本文件是 GoCell → RSS（Rust 重写）的架构映射**单一事实源**，并且是**扁平 workspace 结构树的唯一持有者**。
-> 所有规则、CLAUDE.md、agent、skill 在涉及"目录 / crate / 层 / contract / 一致性等级 / cell 治理语义"时以本文件为准。
+> 所有规则、CLAUDE.md、agent、skill 在涉及"目录 / crate / 层 / contract / 一致性等级 / 命名"时以本文件为准。
 
 ## 概念框架（保留什么、退场什么）
 
-RSS 保留 GoCell 的 **cell-native 治理**——bounded context 之间只经 **contract** 通信、操作按 **L0–L4 一致性等级**
-分类、**journeys** 为验收单源；但**去掉 cell/slice 结构外壳**：不再有 `cell.yaml`/`slice.yaml`、不再有
-`cell-{id}`/`slice-{id}` crate、不再有 `crates/cells/{cell}/slices/` 嵌套。
+RSS 保留 GoCell 的 **domain-native 治理**（原 GoCell 称 cell-native，随单元更名一并改）——bounded context 之间只经
+**contract** 通信、操作按 **L0–L4 一致性等级**分类、**journeys** 为验收单源；但**去掉 cell/slice 结构外壳**：不再有
+`cell.yaml`/`slice.yaml`、不再有 `cell-{id}`/`slice-{id}` crate、不再有 `crates/cells/{cell}/slices/` 嵌套。
 
-- 一个 bounded context（治理语义上的 "Cell"）= 一个**域 crate**（identity/settings/audit/contractreg/syshealth）。
-- 原 "Slice" = 域 crate 内的 **feature 模块**（不再是独立 crate）；intra-crate 用 `pub(crate)` 封装。
-- "Cell/Slice" 仅作**治理语义**保留在 contract 归属与一致性等级讨论中，**不再是结构实体**。
+**命名（单源，全仓统一）**：
+
+- **架构风格**称 **`domain-native`**（原 cell-native）：bounded context 只经 contract 通信 + L0–L4 分类 + journeys 验收。
+- **单元一律叫「域 crate（domain）」**——一个 bounded context = 一个域 crate（identity/settings/audit/contractreg/syshealth），即原 GoCell 的 "Cell"。派生表述统一为 **跨域 / per-domain / `domain` metric label / `RSS_<DOMAIN>_*` env / `Domain*` 类型**。
+- 原 "Slice" = 域 crate 内 **feature 模块**（`pub(crate)` 封装），不再是独立 crate；"Slice" 作为词一并退场。
+- **全仓零 "cell"**——仅在引用 GoCell 旧系统（对标 / 被替代机制）或命名已删除旧物（`cell.yaml`、`cell-{id}` crate 等）时出现。
 
 适配原则：**先问哪些 GoCell 手搓的治理机器能被 Cargo/rustc/官方工具链直接吃掉，剩下的才自己写**——
 结果是目录大幅收缩成常规 Rust workspace（见 §扁平 workspace 结构、§Rust 原生强制）。
@@ -20,7 +23,7 @@ RSS 保留 GoCell 的 **cell-native 治理**——bounded context 之间只经 *
 
 | GoCell 概念 | Rust/Cargo 载体 | 说明 |
 |------------|----------------|------|
-| bounded context（治理语义 "Cell"） | **域 crate**（library） | identity/settings/...；跨 context 只经 contract |
+| bounded context（原 GoCell "Cell"） | **域 crate**（library） | identity/settings/...；跨域只经 contract |
 | 原 "Slice" | 域 crate 内 **feature 模块** | 不再是 crate；intra-crate 用 `pub(crate)` 封装 |
 | Contract | `contracts/{kind}/{domain}/{version}/` 的 `contract.toml` + `*.schema.json` 声明源 | typify/xtask 派生 Rust 进 `generated/` crate；跨边界唯一 wire 载体 |
 | Contract 归属 | `owner` = 域 crate 名 / `_framework`（sentinel） | provider-agnostic 中立契约归框架 |
@@ -172,7 +175,7 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
 
 ## 关键模式的 Rust 形态
 
-- **组合根 / `module()`**：域 crate 暴露 `pub fn module() -> CellModule`；adapter↔域绑定在 `bins/server` /
+- **组合根 / `module()`**：域 crate 暴露 `pub fn module() -> DomainModule`；adapter↔域绑定在 `bins/server` /
   assembly 用构造器注入完成（无独立 cellmodules 层）。GoCell 的 `cellmodules/{eventtransport,replaydeps,sagaprojectiondeps}`
   等 topology-gated resolver 内联为 `bootstrap` 子模块（按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖）。
 - **Init fail-fast**：`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`；必填依赖走构造器必填参数

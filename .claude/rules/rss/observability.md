@@ -11,13 +11,12 @@
 
 日志使用 `tracing`（结构化字段 + span）。禁止 Debug dump 完整请求、响应或 payload。
 错误日志必须带与当前上下文匹配的结构化定位字段，敏感值必须先清洗。
-request、tenant、cell、correlation 在对应上下文存在时必须透传；启动期、
+request、tenant、domain、correlation 在对应上下文存在时必须透传；启动期、
 全局错误和工具路径使用 service、component、operation、error 等可定位字段。
 
 ## Redaction
 
-errcode 的 Message、Public Details、Internal Details 三层分工见
-`docs/architecture/202605051730-adr-errcode-message-pii-safety.md`。
+errcode 的 Message、Public Details、Internal Details 三层分工见 `error-handling.md`。
 
 trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redaction：
 
@@ -32,8 +31,8 @@ trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redact
 
 - 依赖可用性 probe 用 `_ready` 后缀。
 - 运行时操作 probe 不带 `_ready`。
-- probe 名是运维契约，改名必须同步 docs/ops、dashboard、alert。
-- cell repo readiness 由 cell 边界显式注册，禁止静默吞掉缺失 repo。
+- probe 名是运维契约，改名必须同步运维文档、dashboard、alert。
+- 域 crate repo readiness 由域 crate 边界显式注册，禁止静默吞掉缺失 repo。
 - remote peer readiness 只探测 resolved endpoint 的 TCP 可达性，不反向调用对端 `/readyz`。
 - peer 不可达只影响 readiness，不影响 liveness。
 
@@ -43,15 +42,15 @@ error；server log 是主诊断通道；trace 默认跳过 health endpoint。
 ## Metrics Label
 
 metric label 值集必须冻结或经 typed enum 入口。新增 label value 同步更新 schema、
-tests 和 docs/ops。高 cardinality 输入不能直接进入 label。
+tests 和运维文档。高 cardinality 输入不能直接进入 label。
 
-### HTTP Metrics cell Label
+### HTTP Metrics domain Label
 
-HTTP Metrics `cell` Label 与 gRPC metrics 的 `cell` label 必须来自 assembly 声明的
+HTTP Metrics `domain` Label 与 gRPC metrics 的 `domain` label 必须来自 assembly 声明的
 closed set。缺失、未知、越界归 `_runtime` 或 fail-fast，具体由 sealed resolver 定义。
 禁止业务代码手写裸 string label。
 
-gRPC unary 和 stream 中间件（tower layer）顺序必须保证 cell attribution 在 metrics 和
+gRPC unary 和 stream 中间件（tower layer）顺序必须保证 domain attribution 在 metrics 和
 access log 之前完成。
 
 ### Reconcile Metrics result Label
@@ -66,9 +65,9 @@ tests、dashboard、alert 与 middleware emit site。
 
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
-## Cross-cell Transport
+## Cross-domain Transport
 
-跨 cell 同步 HTTP contract 调用经 `distributed` 的 transport seam（`CellTransport` trait）时，
+跨域同步 HTTP contract 调用经 `distributed` 的 transport seam（`DomainTransport` trait）时，
 必须记录：
 
 - `transport_mode`：仅允许 `in_proc`、`remote`。
@@ -82,10 +81,10 @@ NoopTracer——构造器以 typed 形态传入，从类型层杜绝 remote span
 
 ## Redis Namespace
 
-Redis key namespace 使用 owner 维度表达：cell、role、resource。禁止把 service token、
+Redis key namespace 使用 owner 维度表达：domain、role、resource。禁止把 service token、
 outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 
-`_runtime` 只用于框架级、无 cell 上下文的 shared-infra 原语。当前允许：
+`_runtime` 只用于框架级、无 domain 上下文的 shared-infra 原语。当前允许：
 
 - outbox 消费幂等 claimer：`_runtime:{eventID}:lease|done`
 - HTTP 幂等 store：`_runtime:<tenant>:{key}:resp|lease|fp`

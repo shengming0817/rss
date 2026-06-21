@@ -17,7 +17,7 @@ HTTP path、auth 语义、consistency level、subscription role 时，必须做�
 
 ## 规则
 
-- contract 是跨 cell 通信单源，共享 Rust 类型不是单源。
+- contract 是跨域通信单源，共享 Rust 类型不是单源。
 - 破坏式 wire 变更走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新一份 `contract.toml` + `*.schema.json`）。
 - generated diff 是一等审查材料。
 - 新增 contract kind 或 role 必须补 governance 与 codegen 测试。
@@ -31,12 +31,10 @@ HTTP path、auth 语义、consistency level、subscription role 时，必须做�
 - **中立、provider-agnostic** 契约（正确性要求 provider 可互换，如设备身份/证书签发）由**框架**归属：
   `owner: _framework`（保留 sentinel）。不绑单一 consumer 域——对齐 cert-manager/SPIFFE/k8s 范式。
 - owner→域 crate 解析**只经 `c.owner().domain()`**（框架 owner 返回 `None`）；禁止直接索引 `project.domains[c.owner]`。
-- 框架归属今仅 http/event；`lifecycle: active` 须在某 `assembly.toml` 的 `frameworkContracts` 声明且经 `bootstrap::validate_framework_serving` 验证 route group 已挂载（serving-scan，#2037）；否则须为 draft|deprecated。
+- 框架归属今仅 http/event；`lifecycle: active` 须在某 `assembly.toml` 的 `frameworkContracts` 声明且经 `bootstrap::validate_framework_serving` 验证 route group 已挂载；否则须为 draft|deprecated。
 
-完整机制、威胁矩阵、评级见 ADR `docs/architecture/202606130635-1939-adr-framework-owned-contract.md`，
-符号/盲区见 `crates/vocab/src/contract/owner.rs`、governance 规则 FRAMEWORK-OWNED-CONTRACT-SCOPED-01（`xtask`）；
-owner→域 crate 收口（CONTRACT-OWNER-DOMAIN-FUNNEL-01）在 Rust 由 sealed enum + `owner().domain()` API
-（类型系统强制 `Framework` 无法解析成域）守，无需照搬 archtest 文件。
+owner→域 crate 收口由 sealed enum + `owner().domain()` API（类型系统强制 `Framework` 无法解析成域）守，无需运行期 guard。
+符号/盲区见 `crates/vocab/src/contract/owner.rs`。
 
 ## Implementation matrix
 

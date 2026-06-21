@@ -1,4 +1,4 @@
-# Cell 实现模式
+# 域 crate 实现模式
 
 ## 序列化边界
 
@@ -16,7 +16,7 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 或手写进 `contracts/` 声明源 / `generated/` crate 之外的任何共享 crate。跨域只通过 contract 通信。
 
 同形 decode 在多个 consumer 中重复是架构成本，不用共享 Rust 类型消除。若同一 schema
-被五个及以上 cell 消费，再走 codegen 路线（build.rs / proc-macro）生成 payload 类型。
+被五个及以上域 crate 消费，再走 codegen 路线（build.rs / proc-macro）生成 payload 类型。
 
 ## internal 模块
 
@@ -25,9 +25,9 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 
 ## Init fail-fast
 
-`Cell::init(&self, reg: &mut Registry) -> Result<(), KernelError>` 中必须：
+`Domain::init(&self, reg: &mut Registry) -> Result<(), KernelError>` 中必须：
 
-- 调 `BaseCell::init`
+- 调 `BaseDomain::init`
 - 注册 routes、subscribers、probes 时返回 `Err(...)` 而不是 `panic!`
 - 对必填 handler / service 依赖 fail-fast（必填依赖优先走构造器必填参数，缺失即编译错误）
 - 不在 init 中做外部 I/O 或 spawn tokio task

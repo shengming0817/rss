@@ -1,11 +1,11 @@
 # RSS 协作说明
 
-> RSS 是 GoCell 的 Rust 重写：保留 cell-native **治理**（contract + L0–L4 一致性 + journeys 为单源），
+> RSS 是 GoCell 的 Rust 重写：保留 domain-native **治理**（原 GoCell cell-native；contract + L0–L4 一致性 + journeys 为单源），
 > 结构改用惯用 Rust workspace——**cell/slice 不再是结构实体**（无 cell.yaml/slice.yaml、无 cell/slice crate 外壳）。
 > 本文件是项目最高协作规范（无独立宪法文件）；架构概念如何落到扁平 crate、完整 workspace 结构树见
 > `.claude/rules/rss/rust-mapping.md`（架构映射单一事实源，结构树唯一持有者），分层 / 语言 / 治理细则见 `.claude/rules/rss/`。
 
-cell-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
+domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
 ## 工作方式
 
@@ -50,7 +50,7 @@ cell-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开�
 
 ### 域 crate 开发规则（cell/slice 外壳退场）
 
-- 一个 bounded context（治理语义 "Cell"）= 一个**域 crate**；原 Slice = 域 crate 内 **feature 模块**，不再是独立 crate。
+- 一个 bounded context = 一个**域 crate**（原 GoCell "Cell"）；原 Slice = 域 crate 内 **feature 模块**，不再是独立 crate。
 - 无 `cell.yaml`/`slice.yaml`：契约元数据落 `contract.toml`（id / kind / consistencyLevel / owner / endpoints / auth …），
   `contractUsages` ⇒ 域 crate 的 `Cargo.toml [dependencies]`（声明即约束，编译期强制）。
 - 跨域只通过 **contract** 通信（crate 依赖图 + deny.toml 强制）；纯计算库 crate（L0）可被同一 assembly 内兄弟 crate 直接 path 依赖。
@@ -61,9 +61,9 @@ cell-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开�
 | 级别 | 含义 | 场景 |
 |------|------|------|
 | L0 LocalOnly | 单 slice 内部本地处理 | 纯计算、校验 |
-| L1 LocalTx | 单 cell 本地事务 | session 创建、审计写入 |
+| L1 LocalTx | 单域 crate 本地事务 | session 创建、审计写入 |
 | L2 OutboxFact | 本地事务 + outbox 发布 | session.created 事件、config.entry-upserted 事件 |
-| L3 WorkflowEventual | 跨 cell 最终一致 | 查询投影、CQRS、Saga |
+| L3 WorkflowEventual | 跨域最终一致 | 查询投影、CQRS、Saga |
 | L4 DeviceLatent | 设备长延迟闭环 | 命令回执、证书续期、状态收敛 |
 
 等级声明在 `contract.toml` 的 `consistencyLevel` 字段（与 wire 语义同源，决策 #1），由 `cargo xtask` 校验；不放域 crate manifest。
@@ -96,7 +96,7 @@ Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静�
 | 模块 | 对标框架 | Rust 生态参考 |
 |------|---------|--------------|
 | 域 crate 生命周期 / init + 契约校验 | Kubernetes | kube-rs |
-| Cell 运行时 / 依赖注入 | Uber fx | 构造器注入 / shaku |
+| 域 crate 运行时 / 依赖注入 | Uber fx | 构造器注入 / shaku |
 | 代码生成 | go-zero goctl | proc-macro / build.rs |
 | 中间件 | Kratos | tower |
 | HTTP | — | axum |

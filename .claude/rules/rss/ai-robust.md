@@ -78,7 +78,7 @@ GoCell 的 archtest 文件命名约定，在 RSS 改为对应 Rust 静态守卫�
 - **clippy 自定义 lint**：lint id 用 `rss_{rule}`（kebab/snake，与 lint 注册名一致）。
 - **运行期治理 `#[test]`**：单条独立规则测试函数 `{rule}`；同主题三条及以上集中到
   `{theme}_invariants` 测试模块。
-- **不变式 ID**：守卫的 rustdoc / 测试头必须列 `INVARIANT: <ID>`（如 `L2-OUTBOX-ATOMICITY-COVERAGE-01`）。
+- **不变式 ID**：守卫的 rustdoc / 测试头必须列 `INVARIANT: <ID>`（格式：`<THEME>-<RULE>-NN`）。
 - **内容扫描 / governance 规则**：必须有 synthetic red case 和 anti-vacuity（守卫不能恒真）。
 
 CI、本地触发方式见 `xtask/`（`cargo xtask --help`）；规则文件不复制执行细节。

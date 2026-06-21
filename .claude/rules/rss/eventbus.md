@@ -6,31 +6,26 @@
 `bootstrap::eventtransport::resolve(clk, topo, cfg)` 按 `Topology` 单源选型：
 
 - demo / memory 拓扑 → 进程内 `eventexec` 的 eventbus（Publisher == Subscriber 同实例）。
-- postgres 拓扑 → 真实 broker（RabbitMQ，从 `RSS_<CELLID>_AMQP_URL`，缺省回退
+- postgres 拓扑 → 真实 broker（RabbitMQ，从 `RSS_<DOMAIN>_AMQP_URL`，缺省回退
   `RSS_AMQP_URL`）；缺 broker URL 启动期 fail-closed，**不静默降级回 in-memory**（relay
   必须把已持久化的 outbox entry 发到 broker，而非进程内 bus，否则跨进程/重启丢事件）。
 
 in-memory bus **仅** demo 拓扑可达：**组合根**（`bins/server` + `examples/ssobff`）
-生产代码禁止直接依赖 `eventexec` 的 eventbus 模块——优先用 sealed port trait + `pub(crate)`
-可见性从类型层封闭进程内 bus（替代 depguard `corebundle-no-direct-eventbus` /
-`ssobff-no-direct-eventbus` 的 `COREBUNDLE-EVENTBUS-FUNNEL-01` 路径级 import ban）。扩展新
+生产代码禁止直接依赖 `eventexec` 的 eventbus 模块——用 sealed port trait + `pub(crate)`
+可见性从类型层封闭进程内 bus（Hard，编译期不可达）。扩展新
 broker（mqtt）在 `bootstrap::eventtransport` 的 `BrokerKind` match 加分支 + 暴露选择 env，不在本约束外另开旁路。
-权威语义见 `bootstrap::eventtransport` 模块的 rustdoc 与 ADR `202606131500-1940`。
+权威语义见 `bootstrap::eventtransport` 模块的 rustdoc。
 
-## per-cell AMQP vhost/credential 隔离
+## per-domain AMQP vhost/credential 隔离
 
-per-cell URL（`RSS_<CELLID>_AMQP_URL`，CELLID 大写，缺省回退 `RSS_AMQP_URL`）携带 per-cell
-凭据（user:pass）和 vhost，是 per-cell 凭据/vhost 隔离的 **seam**。**目标安全模型**（split 拓扑）：operator
-为每个 cell provision 独立 vhost/AMQP user，使每个进程只持有访问自身 broker 资源所需凭据、无法跨 cell
+per-domain URL（`RSS_<DOMAIN>_AMQP_URL`，DOMAIN 大写，缺省回退 `RSS_AMQP_URL`）携带 per-domain
+凭据（user:pass）和 vhost，是 per-domain 凭据/vhost 隔离的 **seam**。**目标安全模型**（split 拓扑）：operator
+为每个域 crate provision 独立 vhost/AMQP user，使每个进程只持有访问自身 broker 资源所需凭据、无法跨域
 发布或消费事件。凭据由 broker operator 外部配置（非 framework 派生，无 HKDF/派生层，原因：AMQP broker
 用户是外部对象，不存在 framework 可控的 master key）。
 
-**当前可运行边界（非目标态）**：distinct per-cell broker URL 尚不可启用——broker 侧 egress-only fail-closed（运行期
-per-cell broker 隔离 blocked-by #2366，ingress N-router），故当前唯一可运行配置是所有 cell 用同一 URL（共享同一 AMQP
-凭据）。注：per-cell DB 池/relay fan-out 已由 **#2341 独立落地**（distinct DSN → N keyed pool/relay 实例），但不解除
-broker 的 distinct-URL fail-closed（DB 与 broker 资源不对称，二者不再 in-lockstep 解除）。当前**已生效**
-的控制 = distinct broker-URL fail-closed + 凭据 non-leak（由 `AMQP-URL-REDACTION-FUNNEL-01` Medium typed funnel 守），
-**非** live per-cell 凭据隔离。权威语义见 `bootstrap::eventtransport` 模块的 rustdoc 与 ADR `202606131500-1940`。
+distinct broker-URL 缺失时**启动期 fail-closed**，不静默降级回共享凭据；URL 含 user:pass，凭据 non-leak
+由 typed redaction funnel（Medium）守。权威语义见 `bootstrap::eventtransport` 模块的 rustdoc。
 
 ## 复用层选型（claimer / nonce，topology-gated）
 
@@ -38,9 +33,8 @@ broker 的 distinct-URL fail-closed（DB 与 broker 资源不对称，二者不�
 `bootstrap::replaydeps::resolve(ctx, clk, topo)` 按 `Topology` 单源选型：demo/single-pod → in-memory；
 real multi-pod → Redis-backed（client 作 ManagedResource），缺 Redis 配置启动期 fail-closed。两个
 组合根（`bins/server` + `examples/ssobff`）复用同一 crate，不各自接线 in-memory 原语。`idempotency::InMemClaimer::new`
-/ `auth::InMemoryNonceStore::new` 在这两个 root 内**仅** `bootstrap::replaydeps::resolve` 的 demo 分支可达——优先用
-sealed resolver + `pub(crate)` 构造器从类型层封闭（替代 archtest `REPLAYDEPS-INMEM-FUNNEL-01`
-调用级 AST 扫描）。bus / claimer / nonce 三 funnel 合起来确保组合根内每个 in-memory
+/ `auth::InMemoryNonceStore::new` 在这两个 root 内**仅** `bootstrap::replaydeps::resolve` 的 demo 分支可达——用
+sealed resolver + `pub(crate)` 构造器从类型层封闭（Hard，编译期不可达）。bus / claimer / nonce 三 funnel 合起来确保组合根内每个 in-memory
 单 pod 原语只经 sealed resolver 可达。权威语义见 `bootstrap::replaydeps` 模块的 rustdoc。
 
 ## saga 投影资源选型（journal / checkpoint / dead-letter / locker，topology-gated）
@@ -48,7 +42,7 @@ sealed resolver + `pub(crate)` 构造器从类型层封闭（替代 archtest `RE
 saga-journal CQRS 投影消费者的运行依赖经 `bootstrap::sagaprojectiondeps::resolve(ctx, clk, topo, cfg)`
 按 `Topology` 单源选型（bootstrap::eventtransport / bootstrap::replaydeps 的第 3 个 sibling resolver）：saga journal（与
 Coordinator 共用，再以 `journal::GlobalReader` 喂投影）+ `projection::OwnerCheckpointStore` +
-`projection::DeadLetterStore`（poison-event sink，#2110）+ 投影 `TxRunner` + 每投影 leader `distlock::Locker`：
+`projection::DeadLetterStore`（poison-event sink）+ 投影 `TxRunner` + 每投影 leader `distlock::Locker`：
 
 - demo/memory → `MemJournal` + `MemOwnerCheckpointStore` + `MemDeadLetterStore` + in-process locker + `DemoTxRunner`。
 - postgres → PG `PgJournal` + PG `ProjectionCheckpointStore` + PG `SagaProjectionDeadLetterStore` + PG `TxManager`；单 pod in-process
@@ -59,8 +53,7 @@ Coordinator 共用，再以 `journal::GlobalReader` 喂投影）+ `projection::O
 
 in-process 单 pod 锁原语 `distlock::InProcessDriver::new` 在 wiring 层（`bins/*` / 组合根 crate /
 `examples/*`）**仅** `bootstrap::sagaprojectiondeps::resolve` 的 demo 分支可达——优先用 sealed resolver +
-`pub(crate)` 构造器从类型层封闭 `adapters/*` 的 in-process driver（替代 archtest
-`SAGA-PROJECTION-DEPS-INMEM-FUNNEL-01` 调用级 AST 扫描）。这是 bus / claimer / nonce 之外**第 4 个**
+`pub(crate)` 构造器从类型层封闭 `adapters/*` 的 in-process driver（Hard，编译期不可达）。这是 bus / claimer / nonce 之外**第 4 个**
 sealed 单 pod 原语 funnel。权威语义见 `bootstrap::sagaprojectiondeps` 模块的 rustdoc。
 
 ## ConsumerBase
@@ -103,7 +96,7 @@ service 必填依赖走构造器**必填参数**（非 `Option`）——缺失�
 
 订阅单源是域 crate 的 `Cargo.toml [dependencies]`（+ `contract.toml` 订阅声明）。codegen
 （build.rs / proc-macro）从 metadata 派生注册代码；业务不手写平行 registry。订阅必须同时绑定
-`ContractId`、`CellId`、consumer group。
+`ContractId`、`DomainId`、consumer group。
 
 webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata，派生到
 `generated`（`generated/`），运行时 registration 只消费派生结果。
@@ -120,17 +113,14 @@ webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata�
 命令 dispatch 通过 generated typed API 和 Claimer 两阶段去重。producer 侧 key、
 consumer 侧 claim、组合根 wiring 必须同源；不得新增裸字符串 dispatch。
 
-producer 与 consumer **双侧**都收口到 codegen typed API：cell 经生成式
+producer 与 consumer **双侧**都收口到 codegen typed API：域 crate 经生成式
 `<cmd>::emit_async` / `<cmd>::emit_async_from_idempotency_key`（per-command wrapper，bake
 DispatchId + 锁 payload 为 `Request`）发命令，**不**直调 runtime `command::emit_async`
-（裸 DispatchId）。三层嵌套 funnel：业务 → 生成 wrapper（`COMMAND-ASYNC-EMIT-CALLER-01`
-锁两个 runtime emit 出口的调用方为 generated/runtime） → runtime `command::emit_async`
-（`COMMAND-ASYNC-EMIT-FUNNEL-01` 锁裸 `outbox::emit`/`Entry::new` 命令 topic 构造）→
-`outbox::Entry::new`。consumer 侧对称由 `COMMAND-ASYNC-DISPATCH-CALLER-01` +
-`COMMAND-DISPATCH-REGISTER-CALLER-01` 锁。wrapper 存在性 codegen+golden Hard；caller funnel
-在 Rust 优先用 sealed API + `pub(crate)` 可见性把裸 `emit` 出口封进 generated/runtime crate
-（编译期强制，比 Go 的 type-aware scan Medium funnel 更强，解除 #2059 的 Go 天花板）。
-符号/盲区见对应 rustdoc 与 ADR `202606040550-1044`。
+（裸 DispatchId）。三层嵌套 funnel：业务 → 生成 wrapper（锁两个 runtime emit 出口的调用方为 generated/runtime）
+→ runtime `command::emit_async`（锁裸 `outbox::emit`/`Entry::new` 命令 topic 构造）→
+`outbox::Entry::new`。consumer 侧对称收口（dispatch caller + register caller 两道）。wrapper 存在性由 codegen + golden（Hard）守；
+caller funnel 用 sealed API + `pub(crate)` 可见性把裸 `emit` 出口封进 generated/runtime crate
+（Hard，编译期强制，比 Go 的 type-aware scan funnel 更强）。符号/盲区见对应 rustdoc。
 
 ## Projection
 
@@ -138,13 +128,12 @@ projection consumer 必须 wire `bootstrap::with_consumer_base`。投影事件�
 `consistency::ProjectionEvent` trait；outbox entry 与 saga journal event 都实现该 trait。
 retained journal、checkpoint、tailer 的完整约束以对应 rustdoc 和 ADR 为准。
 
-outbox 派生投影的 durable journal（`projection_events`，EPIC #1504）由 emit 期同事务双写
-装饰器写入：append 收口单一 sanctioned 路径（`PROJECTION-EVENT-JOURNAL-APPEND-CALLER-01`），
-双写 topic 集从域 crate 的投影声明（`contract.toml` / proc-macro 标注）派生、非手写（`PROJECTION-EVENT-JOURNAL-TOPIC-ALLOWLIST-DERIVED-01`）。
-append-only 主守卫是 serving role 的 DB 引擎 `REVOKE UPDATE, DELETE`（migration 058，Hard、不可绕）；
-code-level `DELETE`/`TRUNCATE projection_events` 字面量另由 clippy lint / 类型层守卫
-（`PROJECTION-EVENT-JOURNAL-NO-DELETE-01`，含 anti-vacuity + RED/GREEN fixture）守。盲区/评级/
-符号以对应 rustdoc 与 ADR `202606071600-1504` 为准。
+outbox 派生投影的 durable journal（`projection_events`）由 emit 期同事务双写
+装饰器写入：append 收口单一 sanctioned 路径（sealed 写入入口），
+双写 topic 集从域 crate 的投影声明（`contract.toml` / proc-macro 标注）派生、非手写。
+append-only 主守卫是 serving role 的 DB 引擎 `REVOKE UPDATE, DELETE`（migration 内 GRANT 收紧，Hard、不可绕）；
+code-level `DELETE`/`TRUNCATE projection_events` 字面量另由 clippy lint（Medium，含 anti-vacuity + RED/GREEN fixture）守。
+盲区/评级/符号以对应 rustdoc 为准。
 
 ## 命名与 payload
 
