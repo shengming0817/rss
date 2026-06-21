@@ -1,0 +1,34 @@
+# Contract: 服务层接缝（PR-3）
+
+> httpserve / authn / bootstrap / eventexec / observ / distributed / deviceloop。范式见 conventions.md（单源 ADR-004），对标见 research.md D3/D4/D5。
+>
+> **重排（ADR-003）**：本层的 **DI 注入 port trait**（PDP/Publisher/Subscriber/session store/distlock/transport/signer…）已收敛到 `diport` crate（PR-diport，dynosaur）。PR-3 只冻服务层**非 DI 接缝**——type / 穷尽 enum / sync `Fn` / 生命周期编排。
+
+| crate | 冻结接缝（非 DI 部分） | 派发范式 | spike/对标 |
+|---|---|---|---|
+| **httpserve** | `RouteGroup{listener,prefix,register}`、`Route{method,path,contract_id,public}`、`ListenerKind`(穷尽 enum Primary/Internal/Health/Admin)、复用 `tower::Layer`/`Service` | register=同步 `Fn(Router)->Result<Router>`（非 trait object） | ref: tower/axum |
+| **authn** | jwt/session/refresh 值类型、`Principal`（RowScope 派生）类型；ctx 遵 ADR-002 显式传 `&RequestCtx` | type + 函数；**PDP/session store dyn port → diport** | authplan 类型在 primitives::authplan |
+| **bootstrap** | `Domain::init(&self,&mut Registry)->Result<(),KernelError>`、`Registry`、`module()->DomainModule`、shutdown 编排（持 `ManagedResource` LIFO） | init=sync 不 I/O/spawn；`ManagedResource` 遵 **ADR-001**（待 diport 拍板是否迁 + 是否 dynosaur 化，见 data-model 待决项#4） | shutdown ADR-001；ref: kube-rs/fx |
+| **eventexec** | `Disposition`(Ack/Nack/Requeue 穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型别名、`SubscribeInitializer`、saga executor·tailer/command 接缝；subscribe 返回 `impl Stream+Send` | type/enum/函数；**Publisher/Subscriber dyn port → diport** | ref: watermill |
+| **observ** | metrics(label 闭值集)/logging 值类型、audit sink 接缝 | type/enum；**dyn sink port → diport** | metrics label 闭值集 |
+| **distributed** | distlock/cas/transport 值类型 | **dyn port → diport** | — |
+| **deviceloop** | cert lifecycle·signing（L4）状态机类型 | 态机 type；**signer dyn port → diport** | L4 reconcile |
+
+要点：服务层依赖基础+引擎（+ diport 的 DI port trait），**不依赖域/adapters**。所有 listener auth chain 显式声明（无 `None`）。`finalize_auth` 接缝声明但 body=todo!()。
+
+```rust
+// bootstrap — Domain init（fail-fast，不 panic / 不 I/O）
+pub trait Domain: Send + Sync + 'static {
+    fn init(&self, reg: &mut Registry) -> Result<(), KernelError>;  // body: todo!()
+}
+
+// eventexec — 非 DI 接缝：穷尽 enum + 函数类型别名（Publisher/Subscriber trait 见 diport）
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Disposition { Ack, Nack, Requeue { /* delay */ } }
+pub type HandlerFn = std::sync::Arc<dyn Fn(Message) -> futures::future::BoxFuture<'static, Disposition> + Send + Sync>;
+
+// diport（PR-diport）— DI port 用 dynosaur，非本文件
+// #[dynosaur::dynosaur(DynPublisher = dyn(box) Publisher)]
+// pub trait Publisher: Send + Sync { async fn publish(&self, topic: &str, events: &[Event]) -> Result<(), BusError>; }
+```
