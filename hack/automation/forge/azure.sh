@@ -448,7 +448,13 @@ _azure_issue_close() { # <n> <reason-ignored> <comment>
     # POST discussion via REST --in-file.
     local n="$1" comment="$3" state="${AZURE_WI_CLOSE_STATE:-Done}"
     local -a cmd=(az boards work-item update --id "${n}" --state "${state}" --org "${ADO_ORG}" --output json)
-    _dry "${cmd[@]}" && return 0
+    if _dry "${cmd[@]}"; then
+        # dry-run must model BOTH side effects: the state update AND, when a comment
+        # is given, the Markdown Comments API step the real path runs below.
+        [ -n "${comment}" ] && printf 'REST POST /wit/workItems/%s/comments?format=markdown (curl, body off argv) --org %s\n' \
+            "${n}" "${ADO_ORG}"
+        return 0
+    fi
     # Fail-fast: don't append a close note to a work item whose state update failed.
     "${cmd[@]}" >/dev/null || return $?
     # Add the discussion comment via the Comments API (Markdown). Write the argv

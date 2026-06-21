@@ -198,6 +198,24 @@ check "issue-close ok: zero exit"           "zero"  "$(zero "$rc")"
 check "issue-close ok: comment via _az_wit_comment" "match" \
     "$(grep -q 'close note via md' "${mdcap}" && echo match || echo nomatch)"
 
+# Case MD6: issue-close dry-run models BOTH side effects — state update AND, when a
+# comment is given, the Markdown Comments API step (regression: dry-run returned
+# right after the state update, hiding the comment side effect).
+DRY_RUN=1
+out="$(_azure_issue_close 55 "" "## closed via md")"; rc=$?
+DRY_RUN=0
+check "issue-close dry: zero exit"          "zero"  "$(zero "$rc")"
+check "issue-close dry: state update shown" "match" \
+    "$(printf '%s' "$out" | grep -q 'work-item update' && echo match || echo nomatch)"
+check "issue-close dry: comment step shown" "match" \
+    "$(printf '%s' "$out" | grep -q 'comments?format=markdown' && echo match || echo nomatch)"
+# anti-vacuity: empty comment -> only the state update, no comment step printed.
+DRY_RUN=1
+out="$(_azure_issue_close 55 "" "")"; rc=$?
+DRY_RUN=0
+check "issue-close dry empty: zero exit"    "zero"  "$(zero "$rc")"
+check "issue-close dry empty: no comment step" "clean" "$(has "$out" 'comments?format=markdown')"
+
 # Case CFG: forge.conf regression — backlog WI type must be a real Scrum type,
 # never "Issue" (this project's Scrum process template has no "Issue" -> VS402323).
 # shellcheck source=/dev/null
