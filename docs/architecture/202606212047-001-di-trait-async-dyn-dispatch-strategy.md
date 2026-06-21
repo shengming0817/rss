@@ -93,15 +93,12 @@ workspace 默认的 `forbid`）并对 dynosaur 生成点做目标 `#[allow(unsaf
 // crates/diport/src/store.rs
 use std::sync::Arc;
 
-mod private {
-    pub trait Sealed {}
-}
-
 /// dynosaur 生成 dyn-compatible 的 `DynUserStore` wrapper；static 路径零开销，dyn 路径才 box。
-/// 注：`private::Sealed` supertrait 仅在 §4.2 选项 ①（impl 收回 diport）时保留；本 ADR 倾向 ②，届时去掉
-/// supertrait，实现方 crate 集改由 deny.toml wrappers 限定（见 §4.2 / §8 风险 2）。
+/// 实现方限制：本模板按方案 ②（adapter 独立 crate 实现）——port trait **不带** sealed supertrait，
+/// 「谁可 impl」由 `deny.toml` wrappers 限定（cargo-deny Medium，见 §4.2 / §8 风险 2）。
+/// 仅当改选方案 ①（adapter impl 收回 `diport`）才加 `mod private { pub trait Sealed {} }` + `private::Sealed` supertrait。
 #[dynosaur::dynosaur(DynUserStore = dyn(box) UserStore)]
-pub trait UserStore: private::Sealed + Send + Sync {
+pub trait UserStore: Send + Sync {
     async fn find_by_id(&self, id: UserId) -> Result<User, StoreError>;
     async fn save(&self, user: &User) -> Result<(), StoreError>;
 
@@ -130,12 +127,13 @@ impl UserStore for PgUserStore {            // native AFIT impl，无 #[async_tr
 }
 ```
 
-> **sealing 的根本张力（§8 风险 2）**：§4.1 的 `private::Sealed` supertrait 只能在**定义 crate（`diport`）
+> **sealing 的根本张力（§8 风险 2）**：sealed-trait（`private::Sealed` supertrait）只能在**定义 crate（`diport`）
 > 内**封闭；而 adapter 是**独立 crate**——sealed-trait 无法「只放行某个外部 crate impl」。故集中到 `diport`
 > 后，DI port trait **无法**对其 adapter 实现方 sealing。落地二选一（本 ADR 倾向 ②，保持 adapter crate 独立）：
 > **①** port impl 收回 `diport` 内（sealing 成立，但 adapter 逻辑入 diport）；**②** 放弃跨 crate sealing，改由
 > `deny.toml` wrappers 限定「可依赖 `diport` 并 impl port trait」的 crate 集（cargo-deny，**Medium**）。
-> 上方骨架按 ② 写（adapter 不 `impl Sealed`），`private::Sealed` 仅当选 ① 时保留。
+> §4.1 trait 模板 + 上方 adapter 骨架**统一按 ② 写**（trait 无 sealed supertrait、adapter 不 `impl Sealed`），
+> 可直接复制编译，**单一可执行路径**；若改选 ①，§4.1 加回 `private::Sealed` supertrait + `mod private` 且 adapter impl 收回 `diport`。
 
 ### 4.3 构造器必填注入（Clock 同范式）
 
@@ -209,7 +207,7 @@ let svc = SessionService::new(store, clock, publisher);
 **禁**（破坏 dyn-compatible）：泛型方法 `fn f<T>(..)`、返回 `Self`、返回 `impl Trait`、`where Self: Sized`、
 `Clone` supertrait（`dyn` 不能 Clone）、未在 `dyn` 处指定的关联类型。
 **须**：每方法 `&self`/`&mut self`、参数 / 返回为具体类型或 `Box<dyn _>`、supertrait 仅
-`private::Sealed + Send + Sync`、带 `async fn shutdown`。
+`Send + Sync`（方案 ② 默认；实现方 crate 集由 `deny.toml` wrappers 限定，见 §4.2——选方案 ① 时再加 `private::Sealed`）、带 `async fn shutdown`。
 
 ---
 
@@ -243,7 +241,8 @@ trait 集中到 `diport` 后**无法对独立 adapter crate sealing**（§4.2）
 改 cargo-deny wrappers（Medium）限定实现方 crate 集。即「外部无法 impl」从类型系统 Hard 降为 cargo-deny
 Medium。
 
-> 三条偏离须在 `diport` crate 实落时**同步回写** `rust-standards.md §工程护栏` 与 `domain-patterns.md`
+> 三条偏离须在 `diport` crate 实落时**同步回写** `docs/rules/architecture.md`（§扁平 workspace 结构树 + §分层，
+> **架构单一事实源**，登记 `diport` 服务层 crate）、`rust-standards.md §工程护栏` 与 `domain-patterns.md`
 > （见 §8 follow-up）——本 doc-only PR 不改规则文件（规则提前引用尚不存在的 crate 反而制造漂移）。
 
 ---
@@ -279,13 +278,14 @@ Medium。
 
 **follow-up（本 doc-only PR 不做；归属下游 `diport` 落地单元——epic #991 的 G1/W/Join 子项跟踪，不在此重复建 issue）**：
 
-- `diport` crate 落地（service 层）+ pin dynosaur `=0.3.x`。
+- **结构单源回写（`diport` 落地同 PR，三处一并改防漂移）**：`docs/rules/architecture.md` §扁平 workspace 结构树
+  + §分层（登记 `diport` 服务层 crate）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers。
 - `deny.toml` wrappers（Medium）：「可依赖 `dynosaur`」限定到 `diport`、「可依赖 `diport` 并 impl port trait」
   限定到允许的 adapter crate 集；clippy / cargo-deny 守 unsafe 仅准 `diport`。
 - 首个 port trait 落地：加 `trybuild` dyn-compatible compile-pass / compile-fail 用例（Medium 回归锁）。
 - `bootstrap` shutdown 框架：按注册逆序执行 `shutdown()`（把 §7 末条从 Soft 升 Medium）——**前置项**，先于
   port trait 大规模落地。
-- 回写 `rust-standards.md §工程护栏`（`diport` forbid 例外）+ `domain-patterns.md`（DI port 集中例外）。
+- 回写 `rust-standards.md §工程护栏`（`diport` forbid 例外）+ `domain-patterns.md`（DI port 集中例外 + port trait sealing 由 sealed-trait 改 cargo-deny wrappers）。
 - **复评触发**：dynosaur 发 1.0 时复评（破坏式 API / unsafe 收口 / forbid 兼容）；若 1.0 前实测三项开放
   风险任一不可接受，按 §5 以 async-trait 为对照重评。
 
