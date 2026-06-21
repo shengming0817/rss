@@ -139,8 +139,9 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 ```
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
-  → ship：内置 6 维 reviewer + /fix Cx1/Cx2 → 贴 pm:ship → 冲突预检 + CI 绿（capability-gated：激活 forge=azure 无 CI，ci-* 返回 no-ci，CI 收敛降级本地 make verify，不贴 pm:ci）
+  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 确认本次修 或 defer 原因，未处置不切 label）→ /fix Cx1/Cx2 → 贴 pm:ship（含处置结果）+ OOS 留痕 → 冲突预检
   → 切 pr-status/needs-review-again（首审唯一使用点）→ 外部 app 实时监听并执行 review
+  → 切 label 后 CI 异步收敛（非阻塞；capability-gated：激活 forge=azure 无 CI，ci-* 返回 no-ci，CI 收敛降级本地 make verify，不贴 pm:ci）
   → 延迟 ~10min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
@@ -150,9 +151,10 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 /fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
   → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
-  → triage + 修复 → 贴 pm:fix → 冲突预检 + CI 绿（capability-gated，同上）
+  → triage + IN_SCOPE Cx3/Cx4 处置门（manual：确认修 / defer 原因；auto：转人工不切）+ 修复 → 贴 pm:fix（含处置结果）→ 冲突预检
   → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix（待验证）
   → 外部 app 实时监听并执行 /pr-review --check
+  → 切 label 后 CI 异步收敛（非阻塞；capability-gated，同上）
   → 延迟 ~10min 必须启动 pr-monitor --mode=auto 监听 check 交接
 
 /pr-review <PR#> --check（验证上一轮 findings 是否修复 + 抓回归）
@@ -164,6 +166,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
+> **IN_SCOPE Cx3 处置门**：ship/fix 切触发 label 前，每条 IN_SCOPE Cx3（及 Cx4）必经处置门——人工确认本次修（带处理措施）或显式 defer（带原因），与 OOS artifact-before-trigger 同序；`遗留（需人工决策）` 等未决态不得带过切 label。auto context（pr-monitor `--mode=auto`）无 AskUserQuestion，遇 IN_SCOPE Cx3+ 一律转人工、不切下一阶段 label。
 > **输出纪律**（ship/review/fix/check 各阶段共用单源）：每阶段**窗口完整打印是主输出、PR 评论是无损留痕，两者都做缺一不可**——评论是 `/fix` 与再审（codex / `/pr-review`）提取 findings 的唯一来源（每条带 `file:line`、无损详表入 `<details>`，无损约定见 `pr-comment.md`）。skill 不重述此纪律，引用本条。
 > 评论格式模板单源 = `.github/project-template/pr-comment.md`。
 

@@ -76,7 +76,7 @@ _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
             "${title}" "${base}" "${head}" "${ADO_REPO}" "${ADO_ORG}" "${ADO_PROJECT}"
         return 0
     fi
-    local desc out
+    local desc out rc
     desc="$(cat "${body_file}")" || return
     out="$(az repos pr create \
         --title "${title}" \
@@ -84,8 +84,14 @@ _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
         --target-branch "${base}" \
         --source-branch "${head}" \
         --repository "${ADO_REPO}" \
-        --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)"
-    printf '%s' "${out}" | jq -r --arg base "$(_az_pr_url_base)" '"\($base)/pullrequest/\(.pullRequestId)"'
+        --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)" || rc=$?
+    # Fail-fast on az error (sibling _azure_* verbs all do this; F-regression if
+    # omitted: empty ${out} below jq'd into a `.../pullrequest/null` fake URL).
+    [ "${rc:-0}" -eq 0 ] || return "${rc}"
+    # jq -e: exit non-zero when pullRequestId is absent/null so a malformed (but
+    # 0-exit) response can't yield a `.../pullrequest/null` URL either.
+    printf '%s' "${out}" | jq -e -r --arg base "$(_az_pr_url_base)" \
+        'if (.pullRequestId // null) != null then "\($base)/pullrequest/\(.pullRequestId)" else error("pr-create: no pullRequestId in response") end'
 }
 
 _azure_pr_comment() { # <pr> <body-file> -> comment URL
