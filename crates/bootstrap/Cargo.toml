@@ -20,11 +20,11 @@ consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 # 关闭逆序编排范式（无 async Drop）。tokio::time 做有界超时、spawn 做 panic 隔离，
 # tokio-util::CancellationToken 做关闭取消广播；async-trait 让 ManagedResource 可 dyn 分发。
+# 关闭失败用本 crate typed ShutdownError（thiserror）表达，不在公共 port 暴露 anyhow。
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

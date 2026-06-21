@@ -36,14 +36,19 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
 引入 `crates/bootstrap/src/shutdown.rs`，三件套：
 
 1. **`ManagedResource` trait**（`async_trait`，`Send + Sync + 'static`）——资源关闭契约：
-   `async fn shutdown(&self) -> anyhow::Result<()>` + `fn name(&self)` + `fn shutdown_timeout(&self)`。
+   `async fn shutdown(&self) -> Result<(), ShutdownError>` + `fn name(&self)` + `fn shutdown_timeout(&self)`。
+   失败用 typed `ShutdownError`（本 crate `thiserror`）而非 `anyhow`：`Display` 仅安全摘要常量、
+   原始错误仅作内部 `source`——公共 port 不暴露 `anyhow`、不泄漏 adapter runtime 信息（PII 边界）。
 2. **`ShutdownStack`**——注册栈：`Vec<Arc<dyn ManagedResource>>` 按注册顺序排列，持有 root
-   `CancellationToken`。
-3. **两阶段逆序驱动器**——`ShutdownStack::shutdown(self)`：
-   - **阶段 1 · 广播（并发、无序）**：`root_token.cancel()`，所有经 `child_token()` 派生的后台
-     task 同时感知关闭、开始自行退出。
+   `CancellationToken`。token 经 `register_with_token(|token| …)` funnel 由本 stack 派生注入；
+   无后台 task 资源经 `register_detached(…)`（无 `pub child_token`，发放即收口于注册）。
+3. **两阶段逆序驱动器**——`ShutdownStack::shutdown(self)` / `shutdown_within(self, total_budget)`：
+   - **阶段 1 · 广播（并发、无序）**：`root_token.cancel()`，所有经 `register_with_token` 注入的
+     后台 task 同时感知关闭、开始自行退出。
    - **阶段 2 · 逆序确认（串行、有序）**：按注册逆序（LIFO）逐个 `await` 每个资源的 `shutdown()`，
      per-resource 超时 + panic 隔离，**遇错继续**，聚合所有失败返回 `Vec<ResourceShutdownError>`。
+   - **整体预算（可选）**：`shutdown_within` 附加 cancel-safe 总预算上界（单一共享 deadline），
+     预算耗尽时剩余资源记 `BudgetExhausted` 由驱动器自身聚合——**不**交外层 `timeout`。
 
 ### 2.1 为什么两阶段都要
 
@@ -73,10 +78,15 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
 | `SHUTDOWN-TIMEOUT-BOUNDED-01` | 每个资源关闭有 per-resource 超时上界 | Medium | `tokio::time::timeout(budget, …)` 包裹 + 测试断言 |
 | `SHUTDOWN-PANIC-ISOLATE-01` | 下游资源 `shutdown` panic 被隔离，不击穿驱动循环 | Medium | `tokio::spawn` + `JoinError` 捕获 + 测试断言 |
 | `SHUTDOWN-NO-PANIC-ON-ERROR-01` | 关闭路径自身绝不 `panic!`/`unwrap`/`expect`，失败走 `Result` | Medium | clippy `panic`/`unwrap_used`/`expect_used` deny |
+| `SHUTDOWN-TOKEN-FUNNEL-01` | 后台 task 取消 token 只能经 `register_with_token` 由本 stack 派生注入；无 task 资源经 `register_detached` 显式声明 | Medium→ | **无 `pub child_token`**（裸 token 发放无公开入口，可见性收口，编译期）+ 两入口覆盖全部注册路径。资源仍可忽略注入 token（sealed handle 才 Hard，见 §5 follow-up） |
+| `SHUTDOWN-BUDGET-CANCEL-SAFE-01` | 整体预算由驱动器内部 `shutdown_within` 承担（cancel-safe），不交外层 `timeout` | Medium | 驱动器内单一共享 deadline + `BudgetExhausted` 聚合 + 测试断言；rustdoc 危险说明禁外层 timeout（footgun 防护） |
 
 > 强度说明（AI-robust）：仅 `SHUTDOWN-SINGLE-SHOT-01` 是 **Hard**——消费 self 让违反在类型层
-> 不可表达。其余靠代码结构 + 测试断言守，违反**可表达**但 CI 测试会抓 → **Medium**，不虚标为 Hard。
-> 把 LIFO / continue-on-error 上移到编译期（如 typestate）成本高于收益，登记为可选 follow-up。
+> 不可表达。`SHUTDOWN-TOKEN-FUNNEL-01` 的 token 发放经 `pub(crate)` 可见性收口于注册 funnel
+> （编译期半 Hard：外部无法裸取 token），但「资源构造时是否真用注入 token」仍需 sealed handle 才
+> 能编译期锁死（§5 follow-up），故记 **Medium→**。其余靠代码结构 + 测试断言守，违反**可表达**但
+> CI 测试会抓 → **Medium**，不虚标为 Hard。把 LIFO / continue-on-error 上移到编译期（如
+> typestate）成本高于收益，登记为可选 follow-up。
 >
 > 红线（运维语义，不可降级，与强度评级无关）：关闭路径**绝不能** panic-on-error、**绝不能**漏关资源、
 > 超时**必须**有界。「部分失败必须继续 + 聚合错误」是 §1 依赖泄漏问题的直接对策。
@@ -95,20 +105,30 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
 #[async_trait::async_trait]
 pub trait ManagedResource: Send + Sync + 'static {
     fn name(&self) -> &str;
-    async fn shutdown(&self) -> anyhow::Result<()>;
+    async fn shutdown(&self) -> Result<(), ShutdownError>;       // typed，非 anyhow
     fn shutdown_timeout(&self) -> Duration { DEFAULT_SHUTDOWN_TIMEOUT } // 默认 30s
 }
+
+// typed 关闭错误：Display 安全摘要常量，原始错误仅作内部 source（PII 边界，不暴露 anyhow）。
+pub struct ShutdownError { /* source: Box<dyn Error + Send + Sync> */ }
+impl ShutdownError { pub fn new<E: Error + Send + Sync + 'static>(source: E) -> Self; }
 
 pub struct ShutdownStack { /* root_token, resources */ }
 
 impl ShutdownStack {
     pub fn new(root_token: CancellationToken) -> Self;     // root 必填（构造器位置参）
-    pub fn child_token(&self) -> CancellationToken;        // 派生给资源后台 task（构造器注入）
-    pub fn register(&mut self, resource: Arc<dyn ManagedResource>); // 注册顺序 = 依赖顺序
-    pub async fn shutdown(self) -> Vec<ResourceShutdownError>;      // 两阶段；空 = 全成功
+    // 有后台 task：token 由本 stack 派生、闭包内经构造器注入（注册即收口，无 pub child_token）。
+    pub fn register_with_token<F>(&mut self, make: F)
+        where F: FnOnce(CancellationToken) -> Arc<dyn ManagedResource>;
+    // 无后台 task / 不接广播：显式 no-token 入口（声明有意，而非忘记接线）。
+    pub fn register_detached(&mut self, resource: Arc<dyn ManagedResource>);
+    pub async fn shutdown(self) -> Vec<ResourceShutdownError>;             // 两阶段；空 = 全成功
+    pub async fn shutdown_within(self, total_budget: Duration)            // 同上 + cancel-safe 整体预算
+        -> Vec<ResourceShutdownError>;
 }
 
-// thiserror：Failed(anyhow) | TimedOut(Duration) | Panicked，包成 ResourceShutdownError{name, kind}
+// thiserror：Failed(ShutdownError) | TimedOut(Duration) | Panicked | BudgetExhausted，
+//            包成 ResourceShutdownError{name, kind}
 ```
 
 ### 4.1 消费侧接线范式（P2 落地，本 spike 仅冻结接缝）
@@ -120,15 +140,21 @@ impl ShutdownStack {
 //   1. DB pool        2. outbox relay(依赖 pool)   3. event consumer
 //   4. background worker      5. HTTP listener(最后注册 → LIFO 最先关，先停外部流量)
 //
+// 有后台 task 的资源经 register_with_token 注入 token；纯 drain 资源经 register_detached：
+//   stack.register_with_token(|tok| Arc::new(OutboxRelay::new(pool.clone(), tok)));
+//   stack.register_detached(Arc::new(SyncBuffer::new()));
+//
 // 驱动（P2 实现）：
-//   tokio::select! { _ = sigterm() => {}, _ = ctrl_c() => {} }   // 感知
-//   let failures = stack.shutdown().await;                       // 两阶段关闭
+//   tokio::select! { _ = sigterm() => {}, _ = ctrl_c() => {} }            // 感知
+//   let failures = stack.shutdown_within(grace - buffer).await;           // 两阶段 + 整体预算
 //   if !failures.is_empty() { for f in &failures { error!(%f) } exit(1) }
 ```
 
-`register` 与 `child_token` 拆开（不让 `register` 返回 token），因为资源经**构造器注入** token
-（RSS「必填依赖走构造器位置参」），需在 `register` 之前先 `child_token()` 拿到 token 再构造资源。
-`child_token()` 须在 `shutdown` 前调用——`shutdown` 已 `cancel` 后再派生的 token 是已 cancelled 态。
+token 发放并入注册 funnel（`register_with_token(|token| …)`）：资源经**构造器注入** token
+（RSS「必填依赖走构造器位置参」），闭包先收到本 stack 派生的 child token 再构造资源——
+「该资源后台 task 监听本 stack 广播」由注册路径强制，**无 `pub child_token`** 裸入口（早先把
+`register`/`child_token` 拆开依赖调用方记得先取 token，是 Soft 约定；funnel 把它收口到编译期可见性，
+见 §3 `SHUTDOWN-TOKEN-FUNNEL-01`）。无后台 task 的资源经 `register_detached` 显式声明不接广播。
 
 实现者若需在 `shutdown(&self)`（`&self`，因驱动器 `Arc` 持有以 spawn 隔离 panic）中消费内部
 mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装后 `take()`（见 trait rustdoc）。
@@ -141,7 +167,10 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
 
 - 关闭顺序、错误聚合、超时、panic 隔离全部显式可测，替代 Go `defer` 的隐式 LIFO。
 - 接缝冻结：`ManagedResource` 是各 adapter（postgres / amqp / relay …）将实现的稳定 port，
-  P3+ 资源接入时不需重开此接缝。
+  P3+ 资源接入时不需重开此接缝——故关键约束（typed 错误、token 发放、整体预算）**在冻结时一并收口**，
+  不留给调用方记忆或事后破坏式补：取消 token 经 `register_with_token` funnel 发放（无裸 `child_token`）、
+  关闭失败用 typed `ShutdownError`（公共 port 不暴露 `anyhow`、Display 安全摘要）、整体预算经 cancel-safe
+  `shutdown_within` 承担。
 - 单次性是编译期 Hard（消费 self）；其余不变式 Medium，由代码结构 + 测试断言 + clippy deny 守（见 §3）。
 
 **代价 / 偏离**
@@ -153,10 +182,16 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
   阻塞型 task 若 `await` 会重新无界等待、破坏超时上界，故不 await，由进程退出回收。代价是被依赖
   资源关闭前可能存在极短的「hung task 仍持旧句柄」窗口（cancel 广播已令其进入退出路径，已最小化）。
 - 超时后 hung task `abort` 不强杀进程——与 k8s `terminationGracePeriodSeconds` 语义一致
-  （grace 后 SIGKILL 是 kubelet 职责）。**风险**：当前无整体 deadline，N 个资源串行 LIFO、各自
-  最坏 `DEFAULT_SHUTDOWN_TIMEOUT`(30s)，最坏总耗时 ≈ N×30s 可能超过 grace period，导致 SIGKILL
-  到来时尾部资源（最先注册的 DB pool）未及关闭。缓解：重 I/O 之外资源应 `shutdown_timeout()` 调小；
-  P2 整体 deadline（< grace − buffer）封顶总耗时。30s 默认对齐 k8s grace 默认，单资源合理。
+  （grace 后 SIGKILL 是 kubelet 职责）。N 个资源串行 LIFO、各自最坏 `DEFAULT_SHUTDOWN_TIMEOUT`(30s)，
+  per-resource 累加最坏 ≈ N×30s 可能超过 grace period。**封顶**：`shutdown_within(total_budget)`
+  以 cancel-safe 单一共享 deadline 把**总**耗时封在 `total_budget` 内（P2 注入 `< grace − buffer`）；
+  预算耗尽时剩余资源记 `BudgetExhausted` 由驱动器自身聚合，**不**交外层 `timeout`（外层取消会在 LIFO
+  中途 drop future、中断后续关闭——见 §3 `SHUTDOWN-BUDGET-CANCEL-SAFE-01`）。重 I/O 之外资源仍应
+  `shutdown_timeout()` 调小，30s 默认对齐 k8s grace 默认。
+- `shutdown_within` 预算耗尽时，**正在关闭**的当前资源其 spawn task 随 future drop 而 detach（非
+  `abort`，因驱动器已不持其句柄），由进程退出回收——与上条「超时 hung task 不 await join」同一权衡
+  （关闭路径，进程即将退出）。整体预算用单一共享 deadline 而非 per-resource 余额分配，因后者需测
+  per-resource elapsed（`Instant` 被 clippy 禁、待注入 `Clock`），属下方延后项。
 
 **已延后（非本 spike 范围，登记去向，非藏 TODO）**
 
@@ -165,8 +200,10 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
 | SIGTERM/SIGINT 信号驱动 + k8s grace period 接线 | P2 装配骨架（rewrite-sequence P2） | 属进程组合根接线，本 spike 只冻结 `ShutdownStack` 接缝 |
 | 真实资源 adapter（DB pool / relay …）实现 `ManagedResource` | P3+（随各 adapter 落地） | 资源本体在后续阶段 |
 | 关闭时延 metric / 耗时测量（注入 `Clock`） | 待 `primitives::Clock` 落地后接入 | `primitives` 当前为空骨架；超时强制已用 `tokio::time`（运行时时钟，测试经 `start_paused` 控制），不裸调 `Instant`（clippy 禁） |
-| 整体 shutdown deadline（叠加在 per-resource 超时之上） | P2（与信号 grace period 一并） | 需要进程级时间预算，属接线层 |
-| 关闭错误日志经 `secure::redact_error` 清洗（observability.md §redaction） | 随 P3+ 真实 adapter 接入 + `secure` redaction 模块落地 | `secure` 当前为空骨架；本 spike 无真实 adapter、无敏感值流经，故错误仅记 top-level Display（非 `{:#}` 全链）缩小 PII 面，redaction 待 sink 真有敏感值时接 |
+| 整体预算的 **grace-period 值注入**（机制已落地为 `shutdown_within`） | P2（与信号 grace period 一并） | 机制（cancel-safe 单一共享 deadline + `BudgetExhausted` 聚合）本 spike 已冻结于驱动器；仅「`total_budget = grace − buffer`」值来自进程级接线层 |
+| 整体预算的 **per-resource 余额精化**（`min(per_resource, 全局剩余)`，替代单一共享 deadline） | 待 `primitives::Clock` 落地（可选优化） | 需测 per-resource elapsed，`Instant` 被 clippy 禁；当前单一共享 deadline 已满足「总耗时封顶」语义，余额分配是后续可选精度提升 |
+| 关闭错误日志经 `secure::redact_error` 清洗（observability.md §redaction） | 随 P3+ 真实 adapter 接入 + `secure` redaction 模块落地 | typed `ShutdownError` 已落地（`anyhow` 移出公共 port、Display 安全摘要、原始 source 仅内部保留**当前不打印**）；`secure` 当前为空骨架，redaction **调用**待其落地后接入，届时业务错误分支改为 `warn!(error = %secure::redact_error(&source))` |
+| `ManagedResource` 资源构造时**强制使用**注入 token（sealed resource handle，把 `SHUTDOWN-TOKEN-FUNNEL-01` Medium→ 升 Hard） | 可选 follow-up（GitHub Issue） | 当前 funnel 收口 token *发放*（无裸 `child_token`），但资源仍可在构造中忽略注入 token；sealed handle 才能编译期锁死「后台 task 必用本 stack token」，成本高于本 spike 收益 |
 
 > Clock 边界：超时**强制**由 `tokio::time::timeout`（runtime 时钟）承担，可经 `tokio::time::pause`
 > 确定性测试；耗时**测量**（日志/metric）未来用注入 `Clock`。二者分层、不冲突。
@@ -185,7 +222,7 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
   —— Rust `close()` 串行有序关闭 + `Vec<(name, Box<Error>)>` 聚合 + drain（先发信号、释放 waitgroup、
   等 handler 收敛）。
 - `ref: hyperium/hyper-util src/server/graceful.rs@master` + `tokio-rs/axum examples/graceful-shutdown@main`
-  —— `with_graceful_shutdown` 连接 drain；HTTP listener 是「最先注册、LIFO 最后关」的资源（先停外部流量）。
+  —— `with_graceful_shutdown` 连接 drain；HTTP listener 是「**最后**注册、LIFO **最先**关」的资源（先停外部流量，与 §4.1 注册示例一致）。
 - `ref: tokio-rs/tokio tokio/src/runtime/task/harness.rs@master` —— `panic::catch_unwind` → `JoinError`，
   印证 `tokio::spawn` 隔离下游 panic 的正确性。
 - `ref: Finomnis/tokio-graceful-shutdown tests/integration_test.rs@main` —— `#[tokio::test(start_paused)]`
@@ -197,7 +234,10 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
 
 | 变更 | contract | generated | crate | tests | docs |
 |------|----------|-----------|-------|-------|------|
-| `ManagedResource` + `ShutdownStack` + 两阶段 LIFO 驱动器 | —（非 wire 契约，进程内 port） | — | `crates/bootstrap/src/shutdown.rs`、`lib.rs`、`Cargo.toml` | `shutdown.rs` `#[cfg(test)]` 8 例（逆序/继续-聚合/超时/panic 隔离/取消/空/单/全错） | 本 ADR |
+| `ManagedResource` + `ShutdownStack` + 两阶段 LIFO 驱动器 | —（非 wire 契约，进程内 port） | — | `crates/bootstrap/src/shutdown.rs`、`lib.rs`、`Cargo.toml` | `shutdown.rs` `#[cfg(test)]` 13 例（逆序/继续-聚合/超时/panic 隔离/取消/空/单/全错 + token funnel/typed-error PII 边界/整体预算耗尽×2/充裕预算） | 本 ADR |
+| token funnel（`register_with_token`/`register_detached`，移除 `pub child_token`/`register`） | — | — | `crates/bootstrap/src/shutdown.rs` | `cancellation_broadcast_*`（funnel 注入）+ 全测试经 `register_detached` | 本 ADR §3/§4.1 |
+| typed `ShutdownError`（移除公共 port 的 `anyhow`，drop `anyhow` 依赖） | — | — | `crates/bootstrap/src/shutdown.rs`、`Cargo.toml` | `shutdown_error_display_is_safe_summary_only`（PII 边界） | 本 ADR §2/§5 |
+| `shutdown_within` 整体预算（cancel-safe，`BudgetExhausted`） | — | — | `crates/bootstrap/src/shutdown.rs` | `shutdown_within_*` 3 例 | 本 ADR §3/§5 |
 | `tokio-util` 入 workspace 依赖 | — | — | 根 `Cargo.toml [workspace.dependencies]` | cargo-deny bans/licenses ok | 本 ADR §5 |
 
 > 本 ADR 不涉及跨域 wire 契约（无 schema/generated 扇出）：`ManagedResource` 是进程内关闭 port，
