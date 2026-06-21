@@ -12,7 +12,7 @@
 
 ## errcode
 
-- 对外错误使用 `rss-errcode`（库错误枚举 `thiserror`，错误码经 `rss-errcode` 命名空间）；
+- 对外错误使用 `vocab`（库错误枚举 `thiserror`，错误码经 `vocab` 命名空间）；
   应用边界可 `anyhow`。
 - exported crate-scope 裸 `pub static ERR_*` / `pub const ERR_*` 哨兵错误禁止；
   库错误用 `thiserror` 枚举表达。
@@ -22,7 +22,7 @@
 
 ## Message 与 PII
 
-`rss-errcode` 错误的 message 必须是 `&'static str` const literal，不能用 `format!` 拼
+`vocab` 错误的 message 必须是 `&'static str` const literal，不能用 `format!` 拼
 runtime 数据。runtime 数据进入两条 typed 通道：
 
 - `with_details(PublicString/PublicInt/PublicBool/PublicDuration/PublicTime)`：
@@ -40,7 +40,7 @@ runtime 数据。runtime 数据进入两条 typed 通道：
 panic!("{}", panic_register::approved("reason", value));
 ```
 
-`reason` 是 kebab-case literal。A/B 类 programmer error 使用 `rss-errcode` 的 assertion 形态；
+`reason` 是 kebab-case literal。A/B 类 programmer error 使用 `vocab` 的 assertion 形态；
 框架 rethrow 保留原 panic payload。其它 panic 形态由 `PANIC-REGISTERED-01` 拦截。
 
 ## Carve-out
@@ -52,7 +52,7 @@ crate-level。新增或删除 carve-out 必须同步修改 ADR registry 和 lint
 
 新增 `ERR_<SEG>_` namespace 或 whole-code entry 必须：
 
-1. 注册到 `rss-errcode` 前缀所有权集合或外部 crate 注册入口。
+1. 注册到 `vocab` 前缀所有权集合或外部 crate 注册入口。
 2. 更新 prefix golden。
 3. 通过 `ERRCODE-PREFIX-OWNERSHIP-01`。
 

@@ -1,7 +1,7 @@
 # Saga 引擎规则
 
 本文件只保留当前行为约束。完整盲区、符号清单、评级证明写在
-`crates/cmd/check`（saga 不变量校验）、`rss-kernel` 的 governance 模块（saga 规则）、
+`xtask`（saga 不变量校验）、`consistency` crate 的 governance 模块（saga 规则）、
 saga ADR 和 runbook 中。
 
 ## 架构语义
@@ -21,11 +21,11 @@ saga ADR 和 runbook 中。
 - consistency level 为 L3。
 - retry 和 timeout 是合法非负 duration。
 
-slice 使用 `role: orchestrate` 时，所属 cell 必须声明 L3。
+编排逻辑落在域 crate 的 saga 模块（不再是独立 slice 的 `role` 属性）；其 `kind: saga` 契约的 `consistencyLevel` 必须为 L3。
 
 ## 构造器
 
-`rss-runtime` 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /
+`eventexec` crate 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /
 trait 对象），缺失即编译错误——替代 gocell 运行期的 nil-interface 校验。`Clock` 是构造器
 位置参（trait 对象 / 泛型），禁止用 builder option 或 Config 字段传 clock、禁止默认取系统时钟。
 

@@ -68,7 +68,7 @@ adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
 ## Cross-cell Transport
 
-跨 cell 同步 HTTP contract 调用经 `rss-runtime` 的 transport seam（`CellTransport` trait）时，
+跨 cell 同步 HTTP contract 调用经 `distributed` 的 transport seam（`CellTransport` trait）时，
 必须记录：
 
 - `transport_mode`：仅允许 `in_proc`、`remote`。

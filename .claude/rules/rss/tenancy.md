@@ -20,7 +20,7 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 `tenant::RowVisibility::new` 拒绝 `RowScope::All`。跨租户可见性只能由
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
-`RowScope::All` 只能从 `rss-runtime` auth 的 super-admin 派生路径进入业务；派生必须与
+`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与
 FR-007 强制审计同址。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
@@ -107,7 +107,7 @@ ownership 规则。
 ## Authorizer 与 PDP
 
 Authorizer 经组合根（bootstrap 的 `with_primary_authorizer`）注入 primary listener
-request context。Cell 不依赖兄弟 Cell 的 Authorizer crate。
+request context。域 crate 不依赖兄弟域 crate 的 Authorizer。
 
 强依赖缺失必须 fail-fast；可解析的 Authorizer 在 bootstrap router build（Init 后、
 serve 前）预解析。缺失的 provider 在启动期 fail-fast（构造器必填参数缺失即编译期 / 启动期
@@ -158,7 +158,7 @@ reason-without-opt-out 必须拒绝。permission 与 opt-out mode 互斥。
 HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必须拒绝。
 
 contractgen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
-`rss validate` / governance 规则只做纵深检查，不能替代 codegen 强制门。
+`cargo xtask` / governance 规则只做纵深检查，不能替代 codegen 强制门。
 
 ## References
 

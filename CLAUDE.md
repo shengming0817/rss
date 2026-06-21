@@ -1,10 +1,11 @@
 # RSS 协作说明
 
-> RSS 是 GoCell 的 Rust 重写：保留 Cell-native 架构与治理模型，语言载体换成 Rust/Cargo。
-> 本文件是项目最高协作规范（无独立宪法文件）；Cell/Slice/contract/一致性等级如何落到 Rust 见
-> `.claude/rules/rss/rust-mapping.md`（架构映射单一事实源），分层 / 语言 / 治理细则见 `.claude/rules/rss/`。
+> RSS 是 GoCell 的 Rust 重写：保留 cell-native **治理**（contract + L0–L4 一致性 + journeys 为单源），
+> 结构改用惯用 Rust workspace——**cell/slice 不再是结构实体**（无 cell.yaml/slice.yaml、无 cell/slice crate 外壳）。
+> 本文件是项目最高协作规范（无独立宪法文件）；架构概念如何落到扁平 crate、完整 workspace 结构树见
+> `.claude/rules/rss/rust-mapping.md`（架构映射单一事实源，结构树唯一持有者），分层 / 语言 / 治理细则见 `.claude/rules/rss/`。
 
-Cell-native Rust 工程底座。只保留稳定的开发规则和架构约束。
+cell-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
 ## 工作方式
 
@@ -18,43 +19,42 @@ Cell-native Rust 工程底座。只保留稳定的开发规则和架构约束。
 
 ## 核心架构约束
 
-### 分层结构（Cargo workspace）
+### 分层结构（扁平 Cargo workspace）
 
-```
-Cargo.toml                — [workspace] 根 + [workspace.dependencies] 统一版本
-crates/framework/kernel/  — rss-kernel：Cell/Slice 运行时 + 治理原语（底座灵魂），仅依赖 std + serde + serde_yaml
-crates/framework/runtime/ — rss-runtime：通用运行时（http(axum) / auth / worker / observability），子能力用 feature 切分
-crates/framework/{errcode,ctx,httputil,query}/ — 共享工具 crate（纯）
-crates/cells/{cell}/       — 平台 Cell：cell/（组合 crate，持 cell.yaml）+ slices/{slice}/（slice crate，持 slice.yaml）
-crates/contracts/{kind}/{domain}/v{N}/ — 跨 Cell 边界契约 crate（纯类型 + served/client trait，按 wire 版本一个 crate）
-crates/adapters/{name}/    — 外部系统适配（postgres / redis / rabbitmq / websocket / s3 / oidc），实现 kernel/runtime trait
-crates/cmd/{name}/         — CLI 入口 bin crate（rss validate / scaffold / generate / check / verify）
-crates/generated/          — 代码生成产物（build.rs / proc-macro），禁止手工编辑
-assemblies/{name}/         — 物理打包：bin crate + assembly.yaml
-journeys/                  — 平台 Journey 验收规格（J-*.yaml）+ status-board.yaml
-fixtures/                  — 测试夹具（fixture-*.yaml）
-examples/{name}/           — 示例 crate
-actors.yaml                — 外部 Actor 注册
-```
+> 完整扁平布局（全部库 crate + adapters/contracts/bins/xtask/generated）是单一事实源，只在
+> `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构 维护一份；此处不复制，避免漂移。
 
-### 依赖规则（crate 图编译期强制）
+根级治理载体（替代 gocell 的 archtest / hack / Makefile）：
 
-- `rss-kernel` 不依赖 runtime / adapters / cells（只依赖 std + serde + serde_yaml）
-- cell / slice crate 只依赖 `rss-*`(framework) + `contract-*` +（L0）兄弟 cell crate，**绝不依赖其它 Cell 的 crate**
-- `rss-runtime` 可依赖 kernel + pkg crate，不依赖 cells / adapters
-- `adapter-*` 实现 kernel / runtime 定义的 trait，不被 cell 直接依赖（经组合根注入）
-- assembly / bin crate 是组合根，可依赖所有层（绑定 cell↔adapter）
-- cargo 不允许循环依赖 → 分层无环天然成立；校验用 `cargo-deny` / `cargo-udeps`
+- `Cargo.toml` — `[workspace] members` + `[workspace.dependencies]` 统一版本
+- `deny.toml` — cargo-deny：分层禁依赖 + license + advisory（**分层强制载体**：兄弟域 crate 互不可依赖）
+- `clippy.toml` — `disallowed-methods`/`disallowed-types`（clock / panic / import 纪律）
+- `rust-toolchain.toml` / `.config/nextest.toml` — 工具链固定 / 进程隔离测试
 
-> 关键：gocell 靠 archtest 守的 "Cell 只经 contract 通信"，在 Rust 由 crate 依赖图**自动守住**——
-> cell crate 没在 Cargo.toml 声明就 import 不到。详见 `.claude/rules/rss/rust-mapping.md` §Rust 原生强制。
+要点：库 crate 全部扁平在 `crates/`；域逻辑是普通 crate（identity / settings / audit / contractreg / syshealth），
+原 slice 是域 crate 内 feature 模块；`adapters/`、`contracts/`、`bins/`、`xtask/`、`generated/` 在根级。分层不靠
+目录嵌套，靠 `deny.toml` + Cargo 依赖图编译期强制（不声明就 import 不到）。
 
-### Cell 开发规则
+### 依赖规则（crate 图 + deny.toml 编译期强制）
 
-- 每个 Cell 必须有 cell.yaml（必填：id / type / consistencyLevel / owner / schema.primary / verify.smoke）
-- 每个 Slice 必须有 slice.yaml（必填：id / belongsToCell / contractUsages / verify.unit / verify.contract / allowedFiles）
-- Cell 之间只通过 contract 通信；L0 Cell（纯计算 crate）可被同一 assembly 内的兄弟 Cell 直接 path 依赖
-- Slice = crate；`contractUsages` = 该 crate `Cargo.toml` 的 `[dependencies]`（声明即约束）
+- **基础**（`vocab`/`ids`/`secure`/`support`/`runctx`）只依赖 std + 外部 crate，不依赖内部其它分组。
+- **引擎/原语**（`consistency`/`primitives`）依赖基础；不依赖服务 / 域 / adapters。
+- **服务**（`httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`）依赖基础 + 引擎；不依赖域 / adapters。
+- **域**（`identity`/`settings`/…）依赖基础 + 引擎 + 服务 + `generated`；**互不依赖**（跨域只经 contract）；不依赖 adapters。
+- **adapters/** 实现上层 trait，不被域依赖（经组合根注入）；**bins/** / **xtask/** / **assemblies/** 是组合根，可依赖所有库 crate。
+- cargo 拒绝循环依赖 → 分层无环天然成立；`cargo-deny`(deny.toml) 表达禁依赖、`cargo-udeps` 抓多余/未声明、`cargo public-api` 守封装面。
+
+> 关键：gocell 靠 archtest 守的 "cell 只经 contract 通信"，在 Rust 由 crate 依赖图**自动守住**——域 crate
+> 没在 Cargo.toml 声明就 import 不到，且 `deny.toml` 禁止声明对兄弟域 crate 的依赖。详见
+> `.claude/rules/rss/rust-mapping.md` §分层 / §Rust 原生强制。
+
+### 域 crate 开发规则（cell/slice 外壳退场）
+
+- 一个 bounded context（治理语义 "Cell"）= 一个**域 crate**；原 Slice = 域 crate 内 **feature 模块**，不再是独立 crate。
+- 无 `cell.yaml`/`slice.yaml`：契约元数据落 `contract.toml`（id / kind / consistencyLevel / owner / endpoints / auth …），
+  `contractUsages` ⇒ 域 crate 的 `Cargo.toml [dependencies]`（声明即约束，编译期强制）。
+- 跨域只通过 **contract** 通信（crate 依赖图 + deny.toml 强制）；纯计算库 crate（L0）可被同一 assembly 内兄弟 crate 直接 path 依赖。
+- 域内类型用 `pub(crate)` 封装（原 DTO 作用域 A/B 合一）；跨域 wire 类型只经 contract（`contracts/` 声明 → `generated/`）。
 
 ### 一致性等级（L0-L4）
 
@@ -66,15 +66,15 @@ actors.yaml                — 外部 Actor 注册
 | L3 WorkflowEventual | 跨 cell 最终一致 | 查询投影、CQRS、Saga |
 | L4 DeviceLatent | 设备长延迟闭环 | 命令回执、证书续期、状态收敛 |
 
-等级在 Rust 是类型级 marker：`impl Cell { const CONSISTENCY: ConsistencyLevel = ...; }`；cell.yaml 仍存供工具消费。
+等级声明在 `contract.toml` 的 `consistencyLevel` 字段（与 wire 语义同源，决策 #1），由 `cargo xtask` 校验；不放域 crate manifest。
 
 ## Rust 编码规范
 
-- 错误用 `rss-errcode` + `thiserror`（库错误枚举），应用边界可 `anyhow`；新错误码命名空间须注册所有权并更新 golden，见 `.claude/rules/rss/error-handling.md`
+- 错误用 `vocab`(error) + `thiserror`（库错误枚举），应用边界可 `anyhow`；新错误码命名空间须注册所有权并更新 golden，见 `.claude/rules/rss/error-handling.md`
 - 日志 / 追踪用 `tracing`（结构化字段 + span）
 - DB 字段 `snake_case`，JSON/Query/Path `camelCase`（serde rename）
 - clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
-- 新增/修改代码覆盖率 ≥ 80%，`rss-kernel` 层 ≥ 90%（表驱动 `#[test]` / `rstest`）
+- 新增/修改代码覆盖率 ≥ 80%，引擎与基础 crate（`consistency` / `primitives` / `vocab` / `ids`）≥ 90%（表驱动 `#[test]` / `rstest`）
 - `cargo fmt` + `cargo clippy -- -D warnings` 必须干净
 
 ## 修改代码前
@@ -95,7 +95,7 @@ Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静�
 
 | 模块 | 对标框架 | Rust 生态参考 |
 |------|---------|--------------|
-| Cell/Slice 声明模型 + 生命周期 + 校验 | Kubernetes | kube-rs |
+| 域 crate 生命周期 / init + 契约校验 | Kubernetes | kube-rs |
 | Cell 运行时 / 依赖注入 | Uber fx | 构造器注入 / shaku |
 | 代码生成 | go-zero goctl | proc-macro / build.rs |
 | 中间件 | Kratos | tower |

@@ -1,7 +1,7 @@
 # Reconcile 控制环规则
 
 本文件只保留当前行为约束。完整 invariant 清单、符号、盲区写在
-`crates/framework/kernel/src/reconcile/mod.rs` 模块级 rustdoc §Enforced invariants、
+`crates/consistency/src/reconcile/mod.rs` 模块级 rustdoc §Enforced invariants、
 对应 `RECONCILE-*` 守卫（类型系统 / clippy lint / `#[test]` 纵深，见 §参考）和 reconcile ADR 中。
 
 ## 适用范围
@@ -40,7 +40,7 @@ reconciler 须自行在 command-id 编码 tenant 维度（框架不验证 body�
 - wire 后整环 leader-gated：仅 lease holder dispatch；丢 lease 取消 lease-scoped `CancellationToken` 中断在途 reconcile。
 - **leader ≠ fencing**：跨副本正确性靠单调 `LeaseToken.epoch` 注入 `FencedWriter`（写路径 CAS）+
   消费方幂等，绝不靠 lease 本身。
-- `LeaderElector` trait 实现只允许在 `crates/adapters/{redis,postgres}`（`adapter-redis` / `adapter-postgres`）+
+- `LeaderElector` trait 实现只允许在 `adapters/{redis,postgres}`（裸后端名，无前缀）+
   `reconciletest` fake；adapter 选型 Redis vs PG 按部署形态决定。
 
 ## 与 saga / projection 边界
@@ -54,7 +54,7 @@ L3 最终一致可用 projection / saga；reconcile 用于 L4 跨不可靠边界
 ## 参考
 
 - ADR：`docs/architecture/202605291600-661-adr-kernel-reconcile-design.md`
-- 权威 rustdoc：`crates/framework/kernel/src/reconcile/mod.rs` 模块级文档 §Enforced invariants
+- 权威 rustdoc：`crates/consistency/src/reconcile/mod.rs` 模块级文档 §Enforced invariants
 - Invariants：`RECONCILE-*` 族完整清单、符号与盲区以对应守卫（类型系统 / clippy lint / `#[test]`·
-  `rstest` 纵深，可执行真源）与 `crates/framework/kernel/src/reconcile/mod.rs` §Enforced invariants 为准；
+  `rstest` 纵深，可执行真源）与 `crates/consistency/src/reconcile/mod.rs` §Enforced invariants 为准；
   规则文件不另维护清单。能编译期强制的不退化成运行期测试。

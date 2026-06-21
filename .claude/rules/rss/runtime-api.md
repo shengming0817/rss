@@ -2,18 +2,19 @@
 
 ## Auth crate
 
-Kernel auth plan 类型来自 `rss-kernel` 的 `auth` 模块（`rss_kernel::auth`）。当同一文件也 `use`
-`rss-runtime` 的 `auth` 模块时，kernel auth 用 `use rss_kernel::auth as kauth;` 别名消歧。
+auth plan 类型来自 `primitives` 的 `authplan` 模块（`primitives::authplan`）；PDP / 会话 / Principal / jwt
+在 `authn` crate。二者分属不同 crate、import 各自路径，无需别名消歧。
 
-`cell::Registrar`、listener 常量和 route group 类型位于 `rss_kernel::cell`。
+`Registrar` 与生命周期 trait（域 crate 在治理语义上实现的 "Cell" 生命周期）位于 `bootstrap`；listener 常量与
+route group 类型位于 `httpserve`。
 
 ## RouteGroup
 
 Cell 在 `init(&self, reg: &mut Registry)` 中通过 `reg.route_group(...)` 声明 listener、prefix、register
 闭包。闭包返回 `Result<(), _>`，错误必须冒泡到 bootstrap；禁止 `expect` / `unwrap` 风格 panic。
 
-业务路由使用 `rss_runtime::auth::mount(router, auth::Route { .. })`（router 为 axum `Router`）。
-`auth::Route.contract` 承载 method、path、contract ID。Public 和 password-reset-exempt 只能通过
+业务路由使用 `httpserve::mount(router, httpserve::Route { .. })`（router 为 axum `Router`）。
+`Route.contract` 承载 method、path、contract ID。Public 和 password-reset-exempt 只能通过
 route 字段显式声明。
 
 ## Listener

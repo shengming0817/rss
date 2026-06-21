@@ -1,93 +1,186 @@
-# Cell/Slice 模型 → Rust/Cargo 映射
+# 架构概念 → Rust/Cargo 映射
 
-> 本文件是 GoCell → RSS（Rust 重写）的架构映射单一事实源。所有规则、CLAUDE.md、
-> agent、skill 在涉及"层 / Cell / Slice / contract / 一致性等级"时以本文件为准。
+> 本文件是 GoCell → RSS（Rust 重写）的架构映射**单一事实源**，并且是**扁平 workspace 结构树的唯一持有者**。
+> 所有规则、CLAUDE.md、agent、skill 在涉及"目录 / crate / 层 / contract / 一致性等级 / cell 治理语义"时以本文件为准。
+
+## 概念框架（保留什么、退场什么）
+
+RSS 保留 GoCell 的 **cell-native 治理**——bounded context 之间只经 **contract** 通信、操作按 **L0–L4 一致性等级**
+分类、**journeys** 为验收单源；但**去掉 cell/slice 结构外壳**：不再有 `cell.yaml`/`slice.yaml`、不再有
+`cell-{id}`/`slice-{id}` crate、不再有 `crates/cells/{cell}/slices/` 嵌套。
+
+- 一个 bounded context（治理语义上的 "Cell"）= 一个**域 crate**（identity/settings/audit/contractreg/syshealth）。
+- 原 "Slice" = 域 crate 内的 **feature 模块**（不再是独立 crate）；intra-crate 用 `pub(crate)` 封装。
+- "Cell/Slice" 仅作**治理语义**保留在 contract 归属与一致性等级讨论中，**不再是结构实体**。
+
+适配原则：**先问哪些 GoCell 手搓的治理机器能被 Cargo/rustc/官方工具链直接吃掉，剩下的才自己写**——
+结果是目录大幅收缩成常规 Rust workspace（见 §扁平 workspace 结构、§Rust 原生强制）。
 
 ## 核心结论
 
 | GoCell 概念 | Rust/Cargo 载体 | 说明 |
 |------------|----------------|------|
-| **Slice** | **crate（library）** | 最精确的对应：crate 是编译 / 依赖 / 封装 / 测试的单元 |
-| **Slice 的 `contractUsages`** | crate `Cargo.toml` 的 `[dependencies]` | 声明即约束，**编译器强制**——没声明的 contract 物理上 import 不到 |
-| **Contract** | **crate（纯类型 + trait，按 wire 版本一个 crate）** | `contract-{kind}-{domain}-v{N}`，只放 DTO / event / command + served/client trait |
-| **Cell** | **一组 slice crate + 一个 cell 组合 crate + `cell.yaml`** | 比单 crate 高一层；cell crate 是唯一知道全部 slice 的组合根 |
-| **L0 Cell（纯计算）** | 普通 library crate，兄弟 Cell 可直接 path 依赖 | 对应 "L0 可被同 assembly 兄弟 Cell 直接 import" |
-| **Assembly** | **binary crate（或 workspace）** | 依赖闭包就是物理打包；`assembly.yaml` 作为声明式清单驱动 scaffold |
-| **一致性等级 L0–L4** | trait 关联常量 `const CONSISTENCY: ConsistencyLevel` | 类型级 marker（AI-robust Hard 载体），`cell.yaml` 仍存供工具消费 |
-| **层（kernel/runtime/pkg/...）** | workspace 内的 crate 分组 | 见下方 crate 布局 |
+| bounded context（治理语义 "Cell"） | **域 crate**（library） | identity/settings/...；跨 context 只经 contract |
+| 原 "Slice" | 域 crate 内 **feature 模块** | 不再是 crate；intra-crate 用 `pub(crate)` 封装 |
+| Contract | `contracts/{kind}/{domain}/{version}/` 的 `contract.toml` + `*.schema.json` 声明源 | typify/xtask 派生 Rust 进 `generated/` crate；跨边界唯一 wire 载体 |
+| Contract 归属 | `owner` = 域 crate 名 / `_framework`（sentinel） | provider-agnostic 中立契约归框架 |
+| Assembly | `assemblies/{name}/` 的 `assembly.toml`（+ `bins/server` / bin crate） | 依赖闭包 = 物理打包 |
+| 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 | 与 wire 语义同源（决策 #1）；不放域 crate manifest |
+| 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
-**一句话**：cargo 的 **crate ≈ Slice/Contract/Adapter**，**workspace ≈ Assembly**，
-**Cell** 是 crate 之上的一层薄约定。更关键的是——Rust 的**类型系统 + crate 依赖图原生强制了
-gocell 需要 archtest 才能守住的大部分静态架构约束**（见 §Rust 原生强制）。
+一句话：cargo 的 **crate ≈ 域 / 服务 / adapter / contract 派生体**，**workspace ≈ assembly**；更关键的是——
+Rust 的**类型系统 + crate 依赖图原生强制了 gocell 需要 archtest 才能守住的大部分静态架构约束**（见 §Rust 原生强制）。
 
-## Crate 布局（目标结构，本轮不落地代码）
+## 扁平 workspace 结构（结构树唯一持有者）
 
 ```
-Cargo.toml                       # [workspace] 根 + [workspace.dependencies] 统一版本
-crates/
-  framework/
-    kernel/        → rss-kernel    Cell/Slice/Contract/Reconciler/EventBus trait + ConsistencyLevel + 治理原语；仅依赖 std + serde + serde_yaml
-    runtime/       → rss-runtime   http(axum)/auth/worker/observability(tracing+otel)，子能力用 feature 切分
-    errcode/       → rss-errcode   错误码命名空间（替代 framework/pkg/errcode）
-    ctx/ httputil/ query/          framework/pkg/* 的其余共享工具，各自独立 crate（纯）
-  contracts/
-    {kind}/{domain}/v{N}/  → contract-{kind}-{domain}-v{N}   纯类型 + served/client trait，无业务逻辑
-  cells/
-    {cell}/
-      cell/        → cell-{id}      组合 crate：依赖本 Cell 的 slice crate，暴露 pub fn module()，持 cell.yaml + smoke 测试
-      internal/    → cell-{id}-internal  （可选）scope-B 跨 slice 共享类型，仅本 Cell 的兄弟 slice 可依赖
-      slices/{slice}/ → slice-{id}  slice crate：持 slice.yaml + unit/contract 测试
-  adapters/
-    postgres/ redis/ rabbitmq/ websocket/ s3/ oidc/ → adapter-*   实现 kernel/runtime 定义的 trait，feature 选编
-  cmd/{name}/      → bin crate（clap）  CLI：rss validate / scaffold / generate / check / verify
-  generated/       → 代码生成产物（build.rs / proc-macro 产出），禁止手工编辑
-assemblies/{name}/ → bin crate + assembly.yaml
-journeys/          J-*.yaml + status-board.yaml（语言无关，原样保留）
-fixtures/          fixture-*.yaml
-examples/{name}/   示例 crate
-actors.yaml        外部 Actor 注册
+rss/
+├── Cargo.toml            # [workspace] members + [workspace.dependencies] 统一版本
+├── deny.toml             # cargo-deny：分层禁依赖 + license + advisory（分层强制载体）
+├── clippy.toml           # disallowed-methods/types/macros（clock/panic/import 纪律）
+├── rust-toolchain.toml
+├── .config/nextest.toml  # cargo-nextest（进程隔离 / 重试）
+├── crates/               # 全部库 crate，扁平（Rust 惯例，非 Go 式分层目录）
+│   ├── vocab/            # error(thiserror) / authz / tenant / query（基础词汇）
+│   ├── ids/              # sealed newtype（私有字段 = 硬封）
+│   ├── secure/           # redaction / aead / cookie / pathsafe
+│   ├── support/          # http / pg / validation 杂项
+│   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
+│   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
+│   ├── primitives/       # clock / crypto / authplan / healthz / circuitbreaker / lifecycle
+│   ├── httpserve/        # axum router / middleware / health
+│   ├── authn/            # jwt / session / refresh / PDP / Principal
+│   ├── bootstrap/        # composition / config / shutdown / worker
+│   ├── eventexec/        # outbox relay / eventbus / saga executor·tailer / command
+│   ├── deviceloop/       # cert lifecycle·signing（L4）
+│   ├── observ/           # metrics / logging / grpc interceptor / audit / websocket
+│   ├── distributed/      # distlock / cas / transport
+│   ├── identity/         # 域：身份 / 会话 / RBAC / ABAC（原 accesscore）
+│   ├── settings/         # 域：版本化配置 / flag（原 configcore，避开 config 重名）
+│   ├── audit/            # 域：审计链（原 auditcore）
+│   ├── contractreg/      # 域：运行时契约 submit / list（原 registrycore）
+│   └── syshealth/        # 域：健康聚合（原 syscore）
+├── adapters/             # 一 adapter 一 crate + feature 门控；裸后端名（adapters/ 路径消歧）
+│   ├── postgres/ redis/ amqp/ mqtt/ s3/
+│   ├── oidc/ grpc/ otel/ prometheus/ vault/
+│   └── softca/ ratelimit/
+├── bins/
+│   ├── server/           # 部署二进制（原 corebundle）
+│   └── rss/              # 薄 cli：只放 xtask/cargo 干不了的运行时命令（产品/二进制名仅此处保留）
+├── contracts/            # ★ 跨边界单源：{kind}/{domain}/{version}/contract.toml + *.schema.json（typify 消费）
+├── assemblies/           # ★ 物理打包（assembly.toml）
+├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml
+├── fixtures/             # ★ 测试夹具（fixture-*.toml）
+├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
+├── xtask/                # codegen + golden + 契约/一致性治理校验（替代 tools/ + hack/ + Makefile）
+├── generated/            # 契约派生的 committed crate（一等审查材料）；其余 codegen 走 build.rs OUT_DIR + insta
+└── actors.toml           # 外部 Actor 注册（参与 contract 但不属于域模型的系统）
 ```
 
-## 依赖规则（由 crate 图编译期强制）
+命名规约：crate 名一律 **concat 无 dash、不加 `rss-` 前缀**——路径已表达分层与归属，产品名 `rss` 只保留在
+`bins/rss` 一处。仅当扁平 `crates/` 里和外部依赖 crate 真重名又缺路径语境时才加限定：`httpserve`（避开
+`http`）、`authn`（避开 `auth`）、`settings`（避开 `config`）；`adapters/` 下用裸后端名，与自身依赖同名的
+（`redis`/`prometheus`）在 `Cargo.toml` 用 `package = "..."` 重命名外部依赖即可，不污染 crate 名。
 
-- `rss-kernel` 只依赖 std + serde + serde_yaml，**不依赖** runtime / adapters / cells。
-- cell / slice crate 的 `[dependencies]` 只能含 `rss-*`(framework)、`contract-*`、（L0）兄弟 cell crate；
-  **绝不依赖其它 Cell 的 crate**——因为 Rust import 必须先在 Cargo.toml 声明，此规则**由依赖图自动守住**，
-  替代 gocell 的 "cells 只经 contract 通信" archtest。
-- `adapter-*` 实现 kernel/runtime 的 trait，不被 cell 直接依赖（经组合根注入）。
-- cargo 不允许 crate 循环依赖 → 分层无环天然成立。
-- 校验：`cargo-deny` / `cargo-udeps`（未声明 / 多余依赖）/ `cargo public-api`（封装面）。
+## 旧→新映射（从嵌套 cell/slice 设计迁移）
 
-## Rust 原生强制（替代 gocell 的治理 / archtest）
+| 旧引用（rss-* / 嵌套 / cell-slice） | 新扁平载体 |
+|---|---|
+| `rss-kernel`（Cell/Slice/Contract/Reconciler/EventBus trait + ConsistencyLevel + 治理原语） | 拆分：`consistency`(引擎态机+trait+L0–L4) + `vocab`(error/authz/tenant/query) + `primitives`(clock/crypto/authplan/healthz/circuitbreaker/lifecycle) + `ids`(sealed newtype)；**不再有单一 kernel crate** |
+| `rss-runtime` http/router/middleware/health | `httpserve` |
+| `rss-runtime` auth(jwt/session/PDP/Principal/RowScope 派生) | `authn`（auth plan 类型在 `primitives::authplan`） |
+| `rss-runtime` composition/config/shutdown/worker | `bootstrap` |
+| `rss-runtime` eventbus/relay/saga executor·tailer/command | `eventexec` |
+| `rss-runtime` observability(metrics/logging/grpc interceptor/audit/websocket) | `observ` |
+| `rss-runtime` transport/distlock/cas | `distributed` |
+| `rss-errcode` | `vocab`（error，thiserror） |
+| framework/pkg `ctx` / `httputil`·`validation`·pg / `query` | `runctx` / `support` / `vocab` |
+| redaction/aead/cookie/pathsafe | `secure` |
+| cert lifecycle·signing(L4) | `deviceloop` |
+| `crates/cells/{cell}`（accesscore/configcore/auditcore/registrycore/syscore） | 域 crate `identity`/`settings`/`audit`/`contractreg`/`syshealth`；slice→域 crate 内 feature 模块 |
+| `crates/cmd/{name}` | `bins/rss`(运行时 CLI) + `xtask`(治理/codegen 校验) + `bins/server`(部署) |
+| `crates/adapters/{name}` / `adapter-*` 前缀 | `adapters/{name}`（根级，裸后端名，无前缀） |
+| `crates/generated/` | `generated/`（根级 committed crate） |
+| Contract = crate `contract-{kind}-{domain}-v{N}` | `contracts/{kind}/{domain}/{version}/contract.toml + *.schema.json` 声明源 → 派生进 `generated/` crate |
+| 一致性级 = `impl Cell { const CONSISTENCY }` | `contract.toml` 的 `consistencyLevel` 字段（与 wire 同源，决策 #1） |
+| 契约归属 `ownerCell: <id>` / `_framework` | `owner` = 域 crate 名 / `_framework`（cell 外壳退场，归属落到域 crate） |
+| DTO 作用域 A/B（cells/{cell}/slices、cell-{id}-internal crate） | 域 crate 内 `pub(crate)` 模块类型（A/B 合一）；C 仍为 contract（`generated`） |
+| `cell.yaml` / `slice.yaml` 声明源 | 删除；`contractUsages` ⇒ 域 crate 的 `Cargo.toml [dependencies]`；其余元数据 ⇒ `contract.toml` |
 
-这是 "更好的兼容方案" 的核心：gocell 因 Go 类型系统弱，靠 archtest + governance rule + codegen
-funnel + type marker + godoc 约定（AI-robust 三档载体）守约束。在 Rust 里很多约束**编译期免费成立**：
+## 分层（crate 图 + deny.toml 编译期强制）
 
-| gocell 治理（Go + archtest） | Rust 原生强制 |
-|------------------------------|--------------|
-| "Cell 只经 contract 通信"（import archtest） | crate 依赖图：cell crate 依赖不到其它 cell crate，只能依赖 `contract-*` |
-| `contractUsages` 声明且与 import 一致 | Cargo `[dependencies]` 即声明；多余 / 未用经 `cargo-udeps` |
-| 分层依赖规则（kernel ⊄ runtime…） | workspace crate 图 + `cargo-deny`；循环依赖 cargo 直接拒绝 |
-| `allowedFiles` / slice 封装 | crate 边界 + `pub(crate)` 可见性 |
-| sealed marker type（godoc + archtest） | sealed-trait 模式（编译器强制） |
-| 一致性等级 marker | trait 关联常量 `const CONSISTENCY`（类型级） |
-| "public Option 不收 raw infra 接口" | newtype + sealed port trait，raw 类型 `pub(crate)` |
-| 必填 service 依赖（`gocell:"required"` + 生成 validate） | 构造器必填参数（非 `Option`）→ 缺失即编译错误 |
-| "禁止把 domain entity 序列化到 wire" | 只在 contract crate 类型上 derive `Serialize`；domain 类型不 derive |
+- **基础** `vocab`/`ids`/`secure`/`support`/`runctx`：仅 std + 外部 crate（serde/thiserror/uuid…），不依赖内部其它分组。
+- **引擎/原语** `consistency`/`primitives`：依赖基础；不依赖服务/域/adapters。
+- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`：依赖基础+引擎；不依赖域/adapters。
+- **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`：依赖基础+引擎+服务+`generated`（contract 派生）；
+  **互不依赖**（跨域只经 contract）；不依赖 adapters。
+- **adapters/**：实现基础/引擎/服务定义的 trait；**不被域依赖**（组合根注入）。
+- **bins/**、**xtask/**、**assemblies/**：组合根，可依赖所有库 crate。
+- **generated/**：contract 派生，被域依赖。
+- 强制：cargo 拒绝循环依赖（分层无环天然成立）；`cargo-deny`(deny.toml) 表达禁依赖；`cargo-udeps` 抓多余/未声明；
+  `cargo public-api` 守封装面。
 
-**仍需运行期治理 / CI 的**（类型系统管不到）：active subscriber 存在性、contract 扇出完整性、
-migration 只增不改、覆盖率阈值、no-op 业务理由。AI-robust 规则集因此收缩，重心从 "archtest"
-迁到 "crate-graph lint + clippy + 类型系统"。
+> 关键：gocell 靠 archtest 守的 "cell 只经 contract 通信"，在 Rust 由 crate 依赖图**自动守住**——域 crate
+> 没在 Cargo.toml 声明就 import 不到，且 `deny.toml` 禁止声明对兄弟域 crate 的依赖。
+
+## Rust 原生强制（三档载体）
+
+这是 "更好的兼容方案" 的核心：gocell 因 Go 类型系统弱，靠 archtest + governance rule + codegen funnel +
+type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免费成立**。
+
+### 一档（Hard）· rustc/Cargo 直接吸收（整类 archtest 消失，写都不用写）
+
+| gocell 手搓机制 | Cargo/rustc 原生 |
+|---|---|
+| 分层依赖治理（depguard + `CROSS-MODULE-IMPORT` archtest + go.work 多模块） | workspace 成员 + 依赖图：不在 Cargo.toml 声明就 import 不到 |
+| required-deps codegen（`gocell:"required"`→`validateRequired`） | 非 `Option` 字段 + 构造器签名，缺了编不过——codegen 整个删 |
+| sealed / marker / newtype funnel（几十个 + archtest 守） | 模块可见性 + 私有字段 + sealed trait |
+| 值集冻结（HandleResult/Disposition/Status/result label） | `#[non_exhaustive]` enum + 穷尽 `match`，漏 case 编不过 |
+| `MESSAGE-CONST-LITERAL` + error prefix golden | `thiserror` enum variant（本就不是格式化字符串） |
+| 数据竞争（race detector 运行时抽查） | `Send`/`Sync` 编译期 |
+| reflect schema freeze（冻结 wire struct 字段/tag） | serde derive 单源生成，无需冻结 |
+| 进程隔离测试 harness | `cargo-nextest`（每测试独立进程，原生） |
+
+### 二档（Medium）· Cargo 生态既有工具（配置 / 少量代码，不是重写）
+
+| gocell 机制 | Rust 载体 |
+|---|---|
+| clock 注入强制 / 禁直调 `time` / 禁特定 import | `clippy.toml` 的 `disallowed-methods`/`disallowed-types` + `cargo clippy -D warnings` |
+| panic 纪律（`panicregister`） | clippy `panic`/`unwrap_used`/`expect_used` deny + 行级 `#[allow]` carve-out |
+| codegen funnel（contractgen/cellgen 模板 + 单一 Render 出口） | `build.rs` + `typify`/`prettyplease`（或 `xtask` 生成 committed crate） |
+| golden 漂移（`VerifyInWorktree` 字节 diff） | `insta` 快照（`cargo insta review`） |
+| Go API / authoring-schema SemVer（轴 A） | `cargo-semver-checks` + `cargo-public-api` |
+| DB migration 命名空间 | `sqlx::migrate!` |
+| depgraph / graph export | `cargo tree` / `cargo-depgraph` |
+| mock（同模块）/ table-driven | `mockall` / `rstest` |
+| 残留真要 AST 级的少数 funnel（某 callsite） | `dylint`（自写 clippy lint） |
+| `hack/` + Makefile + `nogo` 自定义分析器 | `cargo` + `xtask/` |
+
+### 三档 · Cargo 替不了，框架自建（RSS 真差异化）
+
+| 机制 | 载体 | 评级 |
+|---|---|---|
+| contracts 跨边界单源 + 扇出闭环 | `xtask` 校验器 | Medium（CI 门） |
+| L0–L4 一致性声明 + governance（拓扑/引用完整性/格式） | `xtask` | Medium（CI 门） |
+| wire contract 版本目录（轴 B） | `xtask` | Medium（CI 门） |
+| 组合根 DI 接线（SharedDeps / `module()`） | 手工 `main` + `bootstrap` crate | — |
+| outbox/saga/reconcile/projection 引擎 + topology-gated resolver | tokio 自写（`consistency` 态机 + `eventexec` 执行 + 各 deps resolver） | — |
+
+**残留运行期/CI 检查**（类型系统 / crate 图管不到）显式为 **Medium（xtask/CI 门），严禁 Soft**：active subscriber
+存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由。AI-robust 规则集因此收缩，重心从
+"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 `ai-robust.md`）。
 
 ## 关键模式的 Rust 形态
 
-- **组合根 / `Module()`**：cell crate 暴露 `pub fn module() -> CellModule`；adapter↔cell 绑定在
-  assembly / bin crate 用构造器注入完成（替代 `cellmodules` 层）。
-- **Init fail-fast**：`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`；必填依赖走构造器参数
+- **组合根 / `module()`**：域 crate 暴露 `pub fn module() -> CellModule`；adapter↔域绑定在 `bins/server` /
+  assembly 用构造器注入完成（无独立 cellmodules 层）。GoCell 的 `cellmodules/{eventtransport,replaydeps,sagaprojectiondeps}`
+  等 topology-gated resolver 内联为 `bootstrap` 子模块（按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖）。
+- **Init fail-fast**：`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`；必填依赖走构造器必填参数
   （编译期）；init 内不做 I/O、不 spawn task。
-- **Adapter sealed marker**：newtype 包裹原始 client（`struct PgStore(PgPool)`）实现 kernel trait，
-  port trait 用 sealed-trait 封闭，外部 crate 无法实现。
-- **DTO 作用域**：A=slice crate 内 `pub(crate)` / 私有；B=`cell-{id}-internal` crate；
-  C=contract crate（跨 Cell 唯一 wire 载体）。
-- **错误**：`rss-errcode` + `thiserror`（库错误枚举）；应用边界可 `anyhow`。错误码命名空间注册 + golden。
-- **代码生成**：`build.rs` / proc-macro 作为 codegen funnel（比 go:generate 更强），产物入 `generated/`。
+- **Adapter sealed marker**：newtype 包裹原始 client（`struct PgStore(PgPool)`）实现服务 trait，port trait 用
+  sealed-trait 封闭，外部 crate 无法实现，raw 保持 `pub(crate)`。
+- **DTO 作用域**：域内 = `pub(crate)` 模块类型（原 A/B 档合一）；跨域 wire = contract（`contracts/` 声明 →
+  `generated/` crate，原 C 档）。
+- **错误**：`vocab`(error) + `thiserror`（库错误枚举）；应用边界可 `anyhow`。错误码命名空间注册 + golden。
+- **代码生成**：`build.rs` / proc-macro / `xtask` 作为 codegen funnel（比 go:generate 更强），产物入 `generated/`
+  （committed，一等审查材料）或 `OUT_DIR` + `insta`。

@@ -9,13 +9,11 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 
 | 档 | 适用 | 位置 |
 |----|------|------|
-| A | 单 slice 自用 | `crates/cells/{cell}/slices/{slice}/`（slice crate 内 `pub(crate)` / 私有） |
-| B | 同 cell 多 slice 共享 | `crates/cells/{cell}/internal/`（`cell-{id}-internal` crate 的 `dto` / `domain` 模块） |
-| C | 跨 cell wire 类型 | 禁止手写共享 crate，使用 contract schema 或 generated contract |
+| 域内 | 域 crate 内自用 / 跨 feature 模块共享（原 A/B 合一） | 域 crate 内 `dto` / `domain` 模块的 `pub(crate)` / 私有类型 |
+| 跨域 | 跨域 wire 类型（原 C） | 禁止手写共享 crate，使用 contract（`contracts/` 声明 → `generated/`） |
 
-禁止把跨 cell 事件 DTO 放到 framework 共享 crate（`crates/framework/*`）、
-`crates/cells/{cell}/events/`、`crates/contracts/.../*.rs` 或 `crates/framework/runtime/`。
-跨 cell 只通过 contract 通信。
+禁止把跨域事件 DTO 放到基础 / 服务 crate（`vocab` / `support` / `runctx` 等）、域 crate 的 `events` 模块，
+或手写进 `contracts/` 声明源 / `generated/` crate 之外的任何共享 crate。跨域只通过 contract 通信。
 
 同形 decode 在多个 consumer 中重复是架构成本，不用共享 Rust 类型消除。若同一 schema
 被五个及以上 cell 消费，再走 codegen 路线（build.rs / proc-macro）生成 payload 类型。
@@ -36,7 +34,7 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 
 ## Sealed marker wrapper
 
-cell/slice public Option 不接收 raw infra trait。raw adapter 先在 cell 边界用 newtype 包成
+域 crate / 服务 public Option 不接收 raw infra trait。raw adapter 先在域 crate 边界用 newtype 包成
 sealed marker type，再注入 service。port trait 用 sealed-trait 模式封闭（编译器强制，外部 crate
 无法实现），raw 类型保持 `pub(crate)`。
 

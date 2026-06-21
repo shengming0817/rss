@@ -24,16 +24,16 @@ contract 的破坏式变更——含在 **active 版本上**新增 / 收紧 requ
 版本目录。依据：pre-GA 阶段 rss 无外部 wire 消费方，全部 in-repo 调用方随同一 PR 原子更新，
 版本目录隔离（其价值是保护可独立演进的消费方）此时为纯仪式。原地破坏式变更**仍须**：
 
-- 完成契约扇出闭环（schema → generated → slice metadata → tests → docs，见 `contract-fanout.md`）；
+- 完成契约扇出闭环（schema → generated → 域 crate metadata（`Cargo.toml` / `contract.toml`）→ tests → docs，见 `contract-fanout.md`）；
 - 在 PR 说明动机。
 
 **窗口结束后（2026-12-31 起，趋近 GA）**：恢复严格隔离——破坏式 wire 变更用新版本目录，
 不在旧版本上偷改语义；下文 §何时升级版本 与 §内部 API 的升版要求严格生效。窗口到期前须复核
 本条：rss 进入 GA 或出现外部 wire 消费方时即提前收紧，否则显式续期（"暂定" 上限 2026-12-31）。
 
-**本 wire 破坏窗口仅限 HTTP / event / command wire contract（轴 B）**；Rust crate 公开 API
-（`rss-kernel`、`rss-runtime` 的组合 API、contract crate exported 符号）+ authoring schema
-（`cell.yaml` / `contract.yaml` / `slice.yaml` / `assembly.yaml`）走 SemVer，见
+**本 wire 破坏窗口仅限 HTTP / event / command wire contract（轴 B）**；库 crate 公开 API
+（`vocab` / `consistency` / `bootstrap` 等库 crate 的 exported 符号、`generated` 契约派生类型）+ authoring schema
+（`contract.toml` / `assembly.toml`）走 SemVer，见
 ADR `docs/architecture/202606131200-1088-adr-rust-api-authoring-schema-semver-policy.md`（轴 A）。
 crate 公开 API 面用 `cargo public-api` 守。
 
@@ -41,19 +41,19 @@ crate 公开 API 面用 `cargo public-api` 守。
 
 `/internal/v1/` 是服务间控制面，不是绕过版本策略的后门。internal contract 同样需要：
 
-- contract.yaml 声明鉴权和 caller
+- contract.toml 声明鉴权和 caller
 - path、schema、handler、generated code 同步
 - 破坏式 wire 变更新增版本（Pre-GA 窗口期内同 §兼容窗口，可原地改 active 版本）
 
 ## Setup / bootstrap 路径
 
-没有顶级 `/api/v1/setup/` 命名空间。首启动引导端点和所有业务端点一样挂在所属 Cell 的版本化
-前缀下，遵循同一 `/api/v{N}/{cell}/...` 约定（框架归属契约 `ownerCell: _framework` 无绑定 Cell，
+没有顶级 `/api/v1/setup/` 命名空间。首启动引导端点和所有业务端点一样挂在所属域 crate 的版本化
+前缀下，遵循同一 `/api/v{N}/{domain}/...` 约定（框架归属契约 `owner: _framework` 无绑定域，
 使用 contract domain 作为路径段，如 `/api/v1/deviceidentity/...`、`/api/v1/devicestate`，
 per ADR 202606130635-1939）：
 
-- bootstrap admin：`/api/v{N}/{cell}/setup/admin`（如 `/api/v1/access/setup/admin`）
-- setup status：`/api/v{N}/{cell}/setup/status`
+- bootstrap admin：`/api/v{N}/{domain}/setup/admin`（如 `/api/v1/access/setup/admin`）
+- setup status：`/api/v{N}/{domain}/setup/status`
 
 「setup」的特殊性在鉴权与生命周期，不在路径位置：
 
@@ -62,9 +62,9 @@ per ADR 202606130635-1939）：
 - pre-auth 阶段经 `X-Tenant-ID` header 解析租户（此时还没有 JWT claim）。
 
 bootstrap admin 路径形状由单一谓词 `metadata::is_bootstrap_path`
-（`^/api/v\d+/[^/]+/setup/admin$`，强制带 cell 段）锁定；治理规则 `FMT-28` 只允许
-`auth.bootstrap:true` 出现在匹配该谓词的路径上，缺 cell 段的 `/api/v1/setup/admin` 被
-fail-closed 拒绝。破坏式 wire 变更照常走所属 Cell 的版本目录升级，与上文规则一致。
+（`^/api/v\d+/[^/]+/setup/admin$`，强制带 domain 段）锁定；治理规则 `FMT-28` 只允许
+`auth.bootstrap:true` 出现在匹配该谓词的路径上，缺 domain 段的 `/api/v1/setup/admin` 被
+fail-closed 拒绝。破坏式 wire 变更照常走所属域 crate 的版本目录升级，与上文规则一致。
 
 参考 ADR：`docs/architecture/202605061600-adr-bootstrap-admin-boundary.md`、
 `docs/architecture/202606021200-1160-adr-pre-auth-tenant-header-contract.md`。

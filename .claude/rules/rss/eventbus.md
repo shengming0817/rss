@@ -3,19 +3,19 @@
 ## 事件传输选型（topology-gated）
 
 组合根（assembly / bin crate）的 `outbox::Publisher`/`outbox::Subscriber` 经
-`eventtransport::resolve(clk, topo, cfg)` 按 `Topology` 单源选型：
+`bootstrap::eventtransport::resolve(clk, topo, cfg)` 按 `Topology` 单源选型：
 
-- demo / memory 拓扑 → 进程内 `rss-runtime` 的 eventbus（Publisher == Subscriber 同实例）。
+- demo / memory 拓扑 → 进程内 `eventexec` 的 eventbus（Publisher == Subscriber 同实例）。
 - postgres 拓扑 → 真实 broker（RabbitMQ，从 `RSS_<CELLID>_AMQP_URL`，缺省回退
   `RSS_AMQP_URL`）；缺 broker URL 启动期 fail-closed，**不静默降级回 in-memory**（relay
   必须把已持久化的 outbox entry 发到 broker，而非进程内 bus，否则跨进程/重启丢事件）。
 
-in-memory bus **仅** demo 拓扑可达：**组合根**（`crates/cmd/corebundle` + `examples/ssobff`）
-生产代码禁止直接依赖 `rss-runtime` 的 eventbus 模块——优先用 sealed port trait + `pub(crate)`
+in-memory bus **仅** demo 拓扑可达：**组合根**（`bins/server` + `examples/ssobff`）
+生产代码禁止直接依赖 `eventexec` 的 eventbus 模块——优先用 sealed port trait + `pub(crate)`
 可见性从类型层封闭进程内 bus（替代 depguard `corebundle-no-direct-eventbus` /
 `ssobff-no-direct-eventbus` 的 `COREBUNDLE-EVENTBUS-FUNNEL-01` 路径级 import ban）。扩展新
-broker（mqtt）在 `eventtransport` 的 `BrokerKind` match 加分支 + 暴露选择 env，不在本约束外另开旁路。
-权威语义见 `eventtransport` crate 的 rustdoc 与 ADR `202606131500-1940`。
+broker（mqtt）在 `bootstrap::eventtransport` 的 `BrokerKind` match 加分支 + 暴露选择 env，不在本约束外另开旁路。
+权威语义见 `bootstrap::eventtransport` 模块的 rustdoc 与 ADR `202606131500-1940`。
 
 ## per-cell AMQP vhost/credential 隔离
 
@@ -30,23 +30,23 @@ per-cell broker 隔离 blocked-by #2366，ingress N-router），故当前唯一�
 凭据）。注：per-cell DB 池/relay fan-out 已由 **#2341 独立落地**（distinct DSN → N keyed pool/relay 实例），但不解除
 broker 的 distinct-URL fail-closed（DB 与 broker 资源不对称，二者不再 in-lockstep 解除）。当前**已生效**
 的控制 = distinct broker-URL fail-closed + 凭据 non-leak（由 `AMQP-URL-REDACTION-FUNNEL-01` Medium typed funnel 守），
-**非** live per-cell 凭据隔离。权威语义见 `eventtransport` crate 的 rustdoc 与 ADR `202606131500-1940`。
+**非** live per-cell 凭据隔离。权威语义见 `bootstrap::eventtransport` 模块的 rustdoc 与 ADR `202606131500-1940`。
 
 ## 复用层选型（claimer / nonce，topology-gated）
 
 组合根的 outbox 消费幂等 claimer + 内部 listener service-token nonce store 同样经
-`replaydeps::resolve(ctx, clk, topo)` 按 `Topology` 单源选型：demo/single-pod → in-memory；
+`bootstrap::replaydeps::resolve(ctx, clk, topo)` 按 `Topology` 单源选型：demo/single-pod → in-memory；
 real multi-pod → Redis-backed（client 作 ManagedResource），缺 Redis 配置启动期 fail-closed。两个
-组合根（corebundle + ssobff）复用同一 crate，不各自接线 in-memory 原语。`idempotency::InMemClaimer::new`
-/ `auth::InMemoryNonceStore::new` 在这两个 root 内**仅** `replaydeps::resolve` 的 demo 分支可达——优先用
+组合根（`bins/server` + `examples/ssobff`）复用同一 crate，不各自接线 in-memory 原语。`idempotency::InMemClaimer::new`
+/ `auth::InMemoryNonceStore::new` 在这两个 root 内**仅** `bootstrap::replaydeps::resolve` 的 demo 分支可达——优先用
 sealed resolver + `pub(crate)` 构造器从类型层封闭（替代 archtest `REPLAYDEPS-INMEM-FUNNEL-01`
 调用级 AST 扫描）。bus / claimer / nonce 三 funnel 合起来确保组合根内每个 in-memory
-单 pod 原语只经 sealed resolver 可达。权威语义见 `replaydeps` crate 的 rustdoc。
+单 pod 原语只经 sealed resolver 可达。权威语义见 `bootstrap::replaydeps` 模块的 rustdoc。
 
 ## saga 投影资源选型（journal / checkpoint / dead-letter / locker，topology-gated）
 
-saga-journal CQRS 投影消费者的运行依赖经 `sagaprojectiondeps::resolve(ctx, clk, topo, cfg)`
-按 `Topology` 单源选型（eventtransport / replaydeps 的第 3 个 sibling resolver）：saga journal（与
+saga-journal CQRS 投影消费者的运行依赖经 `bootstrap::sagaprojectiondeps::resolve(ctx, clk, topo, cfg)`
+按 `Topology` 单源选型（bootstrap::eventtransport / bootstrap::replaydeps 的第 3 个 sibling resolver）：saga journal（与
 Coordinator 共用，再以 `journal::GlobalReader` 喂投影）+ `projection::OwnerCheckpointStore` +
 `projection::DeadLetterStore`（poison-event sink，#2110）+ 投影 `TxRunner` + 每投影 leader `distlock::Locker`：
 
@@ -57,11 +57,11 @@ Coordinator 共用，再以 `journal::GlobalReader` 喂投影）+ `projection::O
 - fail-closed：postgres 缺 pool / multi-pod 缺 Redis → 启动期报错，**不静默降级**回 in-memory
   journal（丢重启事件）或 in-process locker（多副本各自当 leader 双投影）。
 
-in-process 单 pod 锁原语 `distlock::InProcessDriver::new` 在 wiring 层（`crates/cmd/*` / 组合根 crate /
-`examples/*`）**仅** `sagaprojectiondeps::resolve` 的 demo 分支可达——优先用 sealed resolver +
-`pub(crate)` 构造器从类型层封闭 `adapter-*` 的 in-process driver（替代 archtest
+in-process 单 pod 锁原语 `distlock::InProcessDriver::new` 在 wiring 层（`bins/*` / 组合根 crate /
+`examples/*`）**仅** `bootstrap::sagaprojectiondeps::resolve` 的 demo 分支可达——优先用 sealed resolver +
+`pub(crate)` 构造器从类型层封闭 `adapters/*` 的 in-process driver（替代 archtest
 `SAGA-PROJECTION-DEPS-INMEM-FUNNEL-01` 调用级 AST 扫描）。这是 bus / claimer / nonce 之外**第 4 个**
-sealed 单 pod 原语 funnel。权威语义见 `sagaprojectiondeps` crate 的 rustdoc。
+sealed 单 pod 原语 funnel。权威语义见 `bootstrap::sagaprojectiondeps` 模块的 rustdoc。
 
 ## ConsumerBase
 
@@ -101,12 +101,12 @@ service 必填依赖走构造器**必填参数**（非 `Option`）——缺失�
 
 ## 订阅注册
 
-订阅单源是 `slice.yaml contractUsages`（= crate `Cargo.toml` 的 `[dependencies]`）。codegen
+订阅单源是域 crate 的 `Cargo.toml [dependencies]`（+ `contract.toml` 订阅声明）。codegen
 （build.rs / proc-macro）从 metadata 派生注册代码；业务不手写平行 registry。订阅必须同时绑定
 `ContractId`、`CellId`、consumer group。
 
 webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata，派生到
-`generated`（`crates/generated/`），运行时 registration 只消费派生结果。
+`generated`（`generated/`），运行时 registration 只消费派生结果。
 
 ## DLX 与幂等
 
@@ -135,12 +135,12 @@ DispatchId + 锁 payload 为 `Request`）发命令，**不**直调 runtime `comm
 ## Projection
 
 projection consumer 必须 wire `bootstrap::with_consumer_base`。投影事件载体使用
-`cellvocab::ProjectionEvent` trait；outbox entry 与 saga journal event 都实现该 trait。
+`consistency::ProjectionEvent` trait；outbox entry 与 saga journal event 都实现该 trait。
 retained journal、checkpoint、tailer 的完整约束以对应 rustdoc 和 ADR 为准。
 
 outbox 派生投影的 durable journal（`projection_events`，EPIC #1504）由 emit 期同事务双写
 装饰器写入：append 收口单一 sanctioned 路径（`PROJECTION-EVENT-JOURNAL-APPEND-CALLER-01`），
-双写 topic 集从 `slice.yaml` 投影声明派生、非手写（`PROJECTION-EVENT-JOURNAL-TOPIC-ALLOWLIST-DERIVED-01`）。
+双写 topic 集从域 crate 的投影声明（`contract.toml` / proc-macro 标注）派生、非手写（`PROJECTION-EVENT-JOURNAL-TOPIC-ALLOWLIST-DERIVED-01`）。
 append-only 主守卫是 serving role 的 DB 引擎 `REVOKE UPDATE, DELETE`（migration 058，Hard、不可绕）；
 code-level `DELETE`/`TRUNCATE projection_events` 字面量另由 clippy lint / 类型层守卫
 （`PROJECTION-EVENT-JOURNAL-NO-DELETE-01`，含 anti-vacuity + RED/GREEN fixture）守。盲区/评级/
