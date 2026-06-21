@@ -2,13 +2,12 @@
 
 > 本文件是 RSS **架构单一事实源**,并且是**扁平 workspace 结构树的唯一持有者**。
 > 所有规则、CLAUDE.md、agent、skill 在涉及"目录 / crate / 层 / contract / 一致性等级 / 命名"时以本文件为准。
-> (RSS 是 GoCell 的 Rust 重写;GoCell→Rust 迁移对照归档见 `docs/prd/rust-mapping.md`,非现行规则。)
+> (GoCell→RSS 迁移对照归档见 `docs/prd/rust-mapping.md`,历史快照、非现行规则。)
 
 ## 架构风格(domain-native)
 
 RSS 采用 **domain-native 治理**:bounded context 之间只经 **contract** 通信、操作按 **L0–L4 一致性等级**分类、
-**journeys** 为验收单源。结构上是惯用 Rust workspace——**不存在 cell/slice 结构外壳**(无 `cell.yaml`/`slice.yaml`、
-无按 cell/slice 命名的 crate、无嵌套 `crates/cells/{cell}/slices/` 目录)。
+**journeys** 为验收单源。结构上是惯用扁平 Rust workspace(见 §扁平 workspace 结构)。
 
 适配原则:**能用 Cargo/rustc/官方工具链直接强制的约束,就不自己写治理机器**——目录因此收缩成常规 Rust
 workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
@@ -19,7 +18,6 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 - **单元一律叫「域 crate（domain）」**——一个 bounded context = 一个域 crate(identity/settings/audit/contractreg/syshealth)。
   派生表述统一为 **跨域 / per-domain / `domain` metric label / `RSS_<DOMAIN>_*` env / `Domain*` 类型**。
 - 域 crate 内的 **feature 模块**(`pub(crate)` 封装)承载更细的边界,不是独立 crate。
-- **全仓零 "cell"/"slice"**——仅在引用被替代的旧系统或命名已删除旧物时出现。
 - crate 名一律 **concat 无 dash、不加 `rss-` 前缀**——路径已表达分层与归属,产品名 `rss` 只保留在 `bins/rss` 一处。
   仅当扁平 `crates/` 与外部依赖 crate 真重名又缺路径语境时才加限定:`httpserve`(避开 `http`)、`authn`(避开 `auth`)、
   `settings`(避开 `config`);`adapters/` 下用裸后端名,与自身依赖同名的(`redis`/`prometheus`)在 `Cargo.toml` 用
@@ -81,7 +79,7 @@ rss/
 ├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml
 ├── fixtures/             # ★ 测试夹具（fixture-*.toml）
 ├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
-├── xtask/                # codegen + golden + 契约/一致性治理校验（替代 tools/ + hack/ + Makefile）
+├── xtask/                # codegen + golden + 契约/一致性治理校验
 ├── generated/            # 契约派生的 committed crate（一等审查材料）；其余 codegen 走 build.rs OUT_DIR + insta
 └── actors.toml           # 外部 Actor 注册（参与 contract 但不属于域模型的系统）
 ```

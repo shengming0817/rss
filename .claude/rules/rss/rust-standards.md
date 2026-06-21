@@ -33,7 +33,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - clippy 认知复杂度 ≤ 15（`#![warn(clippy::cognitive_complexity)]`）。
 - 同义字符串重复三次及以上抽 `const`。
 - no-op、fallback、空实现必须写业务理由（`// reason:`）。
-- 必填 service 依赖走构造器**必填参数**（非 `Option`）——缺失即编译错误，替代 gocell 的 `gocell:"required"` 生成校验。
+- 必填 service 依赖走构造器**必填参数**（非 `Option`）——缺失即编译错误。
 - `Clock` 是构造器位置参（trait 对象 / 泛型）；禁止用 builder option 或 Config 字段传 clock，禁止默认取系统时钟。
 - 优先 `&[T]` / `impl Iterator` 入参；避免无谓 `clone`；公共错误类型用 `thiserror`。
 - `unsafe` 必须带 `// SAFETY:` 注释并经 review；默认 `#![forbid(unsafe_code)]`，例外按 crate 解禁。
@@ -44,7 +44,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - JSON、query、path、event header 字段 camelCase（`#[serde(rename_all = "camelCase")]`）。
 - 错误使用 `vocab`(error) + `thiserror`。
 - mock 放 `#[cfg(test)]` 模块或 `mockall`；域 crate 单测不依赖平台 adapter crate。
-- 集成测试用 `tests/` 目录 + `#[cfg(feature = "integration")]` feature 明确隔离（替代 Go build tag）。
+- 集成测试用 `tests/` 目录 + `#[cfg(feature = "integration")]` feature 明确隔离。
 
 ## 覆盖率
 

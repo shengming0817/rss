@@ -1,8 +1,7 @@
 # RSS 协作说明
 
-> RSS 是 GoCell 的 Rust 重写（GoCell 背景仅此一句；迁移对照归档见 `docs/prd/rust-mapping.md`，非规则）。
 > 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
-> workspace——无 cell/slice 结构外壳（无 cell.yaml/slice.yaml、无 cell/slice crate）。
+> workspace。
 > 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
 > `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga）
 > 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api）。
@@ -26,7 +25,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 > 完整扁平布局（全部库 crate + adapters/contracts/bins/xtask/generated）是单一事实源，只在
 > `docs/rules/architecture.md` §扁平 workspace 结构 维护一份；此处不复制，避免漂移。
 
-根级治理载体（替代 gocell 的 archtest / hack / Makefile）：
+根级治理载体：
 
 - `Cargo.toml` — `[workspace] members` + `[workspace.dependencies]` 统一版本
 - `deny.toml` — cargo-deny：分层禁依赖 + license + advisory（**分层强制载体**：兄弟域 crate 互不可依赖）
@@ -34,7 +33,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 - `rust-toolchain.toml` / `.config/nextest.toml` — 工具链固定 / 进程隔离测试
 
 要点：库 crate 全部扁平在 `crates/`；域逻辑是普通 crate（identity / settings / audit / contractreg / syshealth），
-原 slice 是域 crate 内 feature 模块；`adapters/`、`contracts/`、`bins/`、`xtask/`、`generated/` 在根级。分层不靠
+feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/`、`xtask/`、`generated/` 在根级。分层不靠
 目录嵌套，靠 `deny.toml` + Cargo 依赖图编译期强制（不声明就 import 不到）。
 
 ### 依赖规则（crate 图 + deny.toml 编译期强制）
@@ -46,17 +45,17 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 - **adapters/** 实现上层 trait，不被域依赖（经组合根注入）；**bins/** / **xtask/** / **assemblies/** 是组合根，可依赖所有库 crate。
 - cargo 拒绝循环依赖 → 分层无环天然成立；`cargo-deny`(deny.toml) 表达禁依赖、`cargo-udeps` 抓多余/未声明、`cargo public-api` 守封装面。
 
-> 关键：gocell 靠 archtest 守的 "cell 只经 contract 通信"，在 Rust 由 crate 依赖图**自动守住**——域 crate
+> 关键：跨域只经 contract 通信，由 crate 依赖图**自动守住**——域 crate
 > 没在 Cargo.toml 声明就 import 不到，且 `deny.toml` 禁止声明对兄弟域 crate 的依赖。详见
 > `docs/rules/architecture.md` §分层 / §Rust 原生强制（三档载体）。
 
-### 域 crate 开发规则（cell/slice 外壳退场）
+### 域 crate 开发规则
 
-- 一个 bounded context = 一个**域 crate**（原 GoCell "Cell"）；原 Slice = 域 crate 内 **feature 模块**，不再是独立 crate。
-- 无 `cell.yaml`/`slice.yaml`：契约元数据落 `contract.toml`（id / kind / consistencyLevel / owner / endpoints / auth …），
+- 一个 bounded context = 一个**域 crate**；feature 模块是域 crate 内的子单元，不是独立 crate。
+- 契约元数据落 `contract.toml`（id / kind / consistencyLevel / owner / endpoints / auth …），
   `contractUsages` ⇒ 域 crate 的 `Cargo.toml [dependencies]`（声明即约束，编译期强制）。
 - 跨域只通过 **contract** 通信（crate 依赖图 + deny.toml 强制）；纯计算库 crate（L0）可被同一 assembly 内兄弟 crate 直接 path 依赖。
-- 域内类型用 `pub(crate)` 封装（原 DTO 作用域 A/B 合一）；跨域 wire 类型只经 contract（`contracts/` 声明 → `generated/`）。
+- 域内类型用 `pub(crate)` 封装；跨域 wire 类型只经 contract（`contracts/` 声明 → `generated/`）。
 
 ### 一致性等级（L0-L4）
 
@@ -88,7 +87,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 ## AI-robust 治理章程
 
 主要实施者是 AI。新增/修改约束 enforcement 机制按 AI-robust 三档（Hard / Medium / Soft）评级；Soft 严禁立项。
-Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静态强制的约束，不要退化成运行期 archtest**。
+Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静态强制的约束，不要退化成运行期治理测试**。
 载体决策原则、review checklist 详见 `.claude/rules/rss/ai-robust.md`，静态强制清单见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
 
 ## 参考框架

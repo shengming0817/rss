@@ -11,7 +11,7 @@ HTTP path、auth 语义、consistency level、subscription role 时，必须做�
 |------|----------|
 | contract schema | request/response/payload 字段、required、enum、format |
 | generated code | handler、client、types、registration glue |
-| 域 crate metadata | `Cargo.toml [dependencies]`（= 原 `contractUsages`）+ `contract.toml`（role、field、consistencyLevel、verify target） |
+| 域 crate metadata | `Cargo.toml [dependencies]` + `contract.toml`（role、field、consistencyLevel、verify target） |
 | journey/fixture | 测试输入和验收路径是否仍匹配 |
 | governance / crate-graph lint | 是否需要新增或更新机器守卫（`cargo-deny` / clippy lint / 类型系统） |
 

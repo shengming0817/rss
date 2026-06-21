@@ -9,8 +9,8 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 
 | 档 | 适用 | 位置 |
 |----|------|------|
-| 域内 | 域 crate 内自用 / 跨 feature 模块共享（原 A/B 合一） | 域 crate 内 `dto` / `domain` 模块的 `pub(crate)` / 私有类型 |
-| 跨域 | 跨域 wire 类型（原 C） | 禁止手写共享 crate，使用 contract（`contracts/` 声明 → `generated/`） |
+| 域内 | 域 crate 内自用 / 跨 feature 模块共享 | 域 crate 内 `dto` / `domain` 模块的 `pub(crate)` / 私有类型 |
+| 跨域 | 跨域 wire 类型 | 禁止手写共享 crate，使用 contract（`contracts/` 声明 → `generated/`） |
 
 禁止把跨域事件 DTO 放到基础 / 服务 crate（`vocab` / `support` / `runctx` 等）、域 crate 的 `events` 模块，
 或手写进 `contracts/` 声明源 / `generated/` crate 之外的任何共享 crate。跨域只通过 contract 通信。
