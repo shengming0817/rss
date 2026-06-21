@@ -42,25 +42,30 @@ impl<T, P> RequestCtx<T, P> {
 /// `RequestCtx<vocab::tenant::TenantId, _PrincipalFacet>`（ADR-001 §D3，单点迁移）。
 pub type AppCtx = RequestCtx<TenantSlot, PrincipalSlot>;
 
-/// spike tenant 占位 newtype。
-// reason: 接缝冻结期的最小可测 payload；W 阶段由 `vocab::tenant::TenantId` 取代。
+/// spike tenant 占位 newtype。**非 consumer API**（`#[doc(hidden)]`）：W 阶段由
+/// `vocab::tenant::TenantId`（带「空值 / nil 非法」校验，见 `docs/rules/tenancy.md`）取代。
+/// 故此处刻意不在占位 newtype 上重复 tenant 格式校验——校验随真类型一并落地。
+// reason: 接缝冻结期的最小可测 payload；标 doc(hidden) 防 consumer 误把它当长期 tenant 类型。
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantSlot(String);
 
 impl TenantSlot {
-    /// 构造占位 tenant（仅 spike）。
+    /// 构造占位 tenant（仅 spike / 测试）。
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 }
 
-/// spike principal 占位 newtype。
-// reason: 同上；W 阶段由 authn 的 principal facet（trait 擦除）取代，runctx 不直接持有具体 Principal。
+/// spike principal 占位 newtype。**非 consumer API**（`#[doc(hidden)]`）：W 阶段由 authn 的
+/// principal facet（trait 擦除）取代，runctx 不直接持有具体 `Principal`。
+// reason: 同上；标 doc(hidden) 防 consumer 误用为长期 principal 类型。
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrincipalSlot(String);
 
 impl PrincipalSlot {
-    /// 构造占位 principal（仅 spike）。
+    /// 构造占位 principal（仅 spike / 测试）。
     pub fn new(subject: impl Into<String>) -> Self {
         Self(subject.into())
     }

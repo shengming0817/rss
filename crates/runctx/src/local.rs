@@ -8,7 +8,6 @@
 
 use crate::ctx::AppCtx;
 use std::future::Future;
-use tokio::task::futures::TaskLocalFuture;
 
 tokio::task_local! {
     // 单一 monomorphized 实例（一个进程一套 auth 模型 —— ADR-001 §后果 R1）。
@@ -17,8 +16,10 @@ tokio::task_local! {
 
 /// 在 `fut` 执行期间绑定 `ctx`。框架信任边界（httpserve middleware / authn）每请求调一次。
 ///
-/// 返回 tokio 的 `TaskLocalFuture`（零额外分配，绑定生命周期 = 被 await 的 future）。
-pub fn scope<F>(ctx: AppCtx, fut: F) -> TaskLocalFuture<AppCtx, F>
+/// 返回**不透明** `Future`（隐藏 tokio 内部 `TaskLocalFuture`，consumer 签名不被实现类型绑定）；
+/// 零额外分配，绑定生命周期 = 被 await 的 future。
+#[must_use = "scope 返回的 future 不 await 不会绑定 ctx"]
+pub fn scope<F>(ctx: AppCtx, fut: F) -> impl Future<Output = F::Output>
 where
     F: Future,
 {
@@ -46,7 +47,7 @@ pub struct MissingCtx;
 #[cfg(test)]
 mod tests {
     use crate::ctx::{AppCtx, PrincipalSlot, RequestCtx, TenantSlot};
-    use crate::local::{MissingCtx, scope, try_current};
+    use crate::local::{MissingCtx, scope, try_current, try_with};
 
     fn sample(tenant: &str, principal: &str) -> AppCtx {
         RequestCtx::new(TenantSlot::new(tenant), PrincipalSlot::new(principal))
@@ -69,6 +70,25 @@ mod tests {
     #[tokio::test]
     async fn current_outside_scope_does_not_panic() {
         assert!(try_current().is_err());
+    }
+
+    // try_with 是免 clone 主入口：scope 内借用 ctx 求值。
+    #[tokio::test]
+    async fn try_with_inside_scope_borrows_payload() {
+        let tenant = scope(sample("t1", "u1"), async {
+            try_with(|ctx| ctx.tenant().clone())
+        })
+        .await;
+        assert_eq!(tenant, Ok(TenantSlot::new("t1")));
+    }
+
+    // try_with fail-closed：无 scope 时 Err，且闭包根本不被调用（绝不在缺 ctx 时跑业务）。
+    #[tokio::test]
+    async fn try_with_outside_scope_is_err_without_invoking_closure() {
+        let called = std::cell::Cell::new(false);
+        let r = try_with(|_| called.set(true));
+        assert_eq!(r, Err(MissingCtx));
+        assert!(!called.get(), "ctx 缺失时闭包不应被调用");
     }
 
     // 嵌套：内层 scope 遮蔽外层；内层 future 完成后外层快照恢复。
@@ -98,6 +118,10 @@ mod tests {
         let a = tokio::spawn(scope(sample("ta", "ua"), async { try_current() }));
         let b = tokio::spawn(scope(sample("tb", "ub"), async { try_current() }));
         let (ra, rb) = tokio::join!(a, b);
+        // 先显式断言 JoinHandle 未 panic / abort —— 否则 .ok() 会把 JoinError 静默成 None，
+        // 让「任务失败」与「ctx 缺失」无法区分。
+        assert!(ra.is_ok(), "task a join failed: {ra:?}");
+        assert!(rb.is_ok(), "task b join failed: {rb:?}");
         assert_eq!(ra.ok(), Some(Ok(sample("ta", "ua"))));
         assert_eq!(rb.ok(), Some(Ok(sample("tb", "ub"))));
     }
@@ -121,6 +145,16 @@ mod tests {
         })
         .await;
         assert_eq!(propagated, Some(Ok(sample("t", "p"))));
+    }
+
+    // spawn_blocking 同样不继承 task_local（lib.rs 文档三情形之一）：子闭包 fail-closed。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_blocking_does_not_inherit_ctx() {
+        let seen = scope(sample("t", "p"), async {
+            tokio::task::spawn_blocking(try_current).await.ok()
+        })
+        .await;
+        assert_eq!(seen, Some(Err(MissingCtx)));
     }
 
     // 边界错误消息稳定（覆盖 MissingCtx Display）。

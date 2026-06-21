@@ -21,6 +21,19 @@
 //! `tokio::spawn` / `spawn_blocking` / `std::thread` **不继承** task_local：跨任务须显式
 //! 「spawn 前 [`try_current`] 捕获 → 子任务 [`scope`] 重绑」，否则子任务 fail-closed（ADR-001 §后果 R2）。
 //!
+//! # consumer 接线示例（仅示意，runctx 不依赖 axum / tracing）
+//!
+//! ```ignore
+//! // httpserve middleware：认证后边界绑定一次，并把可观测 ID 写进 tracing span（D1：ID 入 span，不入 ctx）。
+//! async fn ctx_layer(req: Request, next: Next) -> Response {
+//!     let ctx = runctx::RequestCtx::new(tenant, principal); // tenant/principal 来自已认证通道
+//!     let span = tracing::info_span!("request", trace_id = %trace, correlation = %corr); // 可观测 ID 走 span
+//!     runctx::scope(ctx, next.run(req).instrument(span)).await
+//! }
+//! // 深层 handler：fail-closed 取用。
+//! let tenant = runctx::try_with(|c| c.tenant().clone()).map_err(|_| Error::Unauthenticated)?;
+//! ```
+//!
 //! 对标：`ref: tokio tokio/src/task/task_local.rs`（`LocalKey::scope` / `try_with`）。
 
 pub mod ctx;

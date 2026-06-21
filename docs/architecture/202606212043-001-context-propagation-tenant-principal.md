@@ -136,7 +136,9 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 **负向 / 摩擦**：
 - 泛型 `RequestCtx<T, P>` 的类型参数会出现在 consumer 签名；用 `AppCtx` 别名收口，consumer 名别名而非裸泛型，
   (b) 迁移时改一处。
-- spawn / blocking / std::thread 不继承 ctx 是 footgun（R2）——靠范式 + 测试 + 后续候选 dylint 兜。
+- spawn / blocking / std::thread 不继承 ctx 是 footgun（R2）。**运行时**已 fail-closed（子任务读到 `Err`，
+  测试锁定 `tokio::spawn` / `spawn_blocking`）；但**静态防误用**（拦截「忘记重绑」的 callsite）当前是 Soft，
+  升级到 Medium 须落 dylint，已登记 follow-up 4。
 
 **下游影响**：httpserve middleware（绑 `scope`）、authn（构造 `RequestCtx` + 派生 `Principal`/`row_visibility`）、
 后台环 crate（`eventexec` / reconcile 扇出必须捕获-重绑 ctx）——均为后续 W 阶段 feature。
@@ -145,7 +147,9 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 1. base 层规则措辞改为 enumerated intra-base DAG（`architecture.md` §分层 + `CLAUDE.md`），sanction
    `runctx → vocab/ids` 边并加 `INVARIANT`；
 2. `architecture.md` 决策表内联回填「决策 #2 → 本 ADR」（仿决策 #1 体例）；
-3. 随引入 `vocab::tenant::TenantId` 的 feature 把 `AppCtx` 的 tenant 换成具体类型。
+3. 随引入 `vocab::tenant::TenantId` 的 feature 把 `AppCtx` 的 tenant 换成具体类型；
+4. dylint `rss_spawn_missing_scope`：静态拦截「子任务内读 ctx 却未在外层重绑」的 callsite，
+   把 spawn footgun 的静态防误用从 Soft 升到 Medium（见 §威胁矩阵）。
 
 ## 5. 威胁矩阵（Threat Model）
 
@@ -154,7 +158,8 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 | request body 携带 `tenantId` 冒充租户 | 跨租户写 | `RequestCtx` 私有字段 + 无 `Deserialize`（body 构造不可表达）；契约 codegen 拒绝 `tenantId` request schema | **Hard**（类型 + codegen funnel） |
 | ctx 缺失被当作 anonymous / default-tenant 放行 | fail-open 越权 | 读访问器返回 `Result`，缺失 = `Err(MissingCtx)`，无 panicking / 伪造路径；PDP 缺租户 deny | **Hard**（类型）+ **Medium**（fail-closed 行为测试） |
 | tenant / principal 被塞进 tracing span 后被下游误当授权源 | 授权基于可丢弃 / 可改写信号 | runctx **不依赖 tracing**，API 面无「ctx→span」通道 | **Hard**（crate 依赖图） |
-| spawn / blocking 出的任务静默丢 ctx → 后台环 anonymous | 后台越权 / fail-open | 子任务无 ctx 即 `Err`（fail-closed）；范式强制「捕获-重绑」+ 测试锁定 + 候选 dylint | **Medium**（fail-closed + 范式测试；dylint 候选） |
+| spawn / blocking 出的任务**运行时**丢 ctx → 子任务读到空 | 后台越权 / fail-open | 子任务无 ctx 即 `Err(MissingCtx)`，调用方 fail-closed | **Medium**（fail-closed 运行时行为 + 测试锁定 `tokio::spawn` / `spawn_blocking` 不继承） |
+| consumer **静态忘记**在子任务「捕获-重绑」ctx | 同上 | 当前仅范式文档 + 测试演示（不拦截误用 callsite） | **Soft**（不达标）→ 升级路径：dylint `rss_spawn_missing_scope`，登记 backlog（见 §后果 follow-up 4） |
 | `RowScope::All` 经非 super-admin 路径泄漏 | 全租户读 | runctx 不构造 RowScope；派生在 authn super-admin 路径 + 强制 audit ledger（`tenancy.md`） | 引用 `tenancy.md`（非本 ADR 新增） |
 
 ## 6. 备选方案（Alternatives Considered）
