@@ -1,4 +1,4 @@
-# ADR-001：context 控制流值传播（tenant / principal）
+# ADR-002：context 控制流值传播（tenant / principal）
 
 > 状态：Accepted · 日期：2026-06-21 · 架构决策序列：**决策 #2** · spike：RW-G0.4（#994）· epic：#991
 >
@@ -10,7 +10,7 @@
 >
 > 落地：`crates/runctx`（reference seam）
 >
-> 本文同时确立 RSS 的 **ADR 模板**（首份 ADR）：背景 / 决策 / 范式 / 后果 / 威胁矩阵 / 备选。
+> 本文同时确立 RSS 的 **ADR 模板**：背景 / 决策 / 范式 / 后果 / 威胁矩阵 / 备选。
 
 ---
 
