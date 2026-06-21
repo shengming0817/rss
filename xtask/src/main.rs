@@ -4,7 +4,9 @@
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（R1–R6，CI 门）
 //!   `cargo xtask verify`                聚合门：contract validate + codegen --check（本地自验入口）
-//!   `cargo xtask public-api [--check]`  封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）
+//!   `cargo xtask public-api [--layer basis|engine] [--check] [--allow-missing]`
+//!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）；
+//!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
 mod codegen;
 mod contract;
 mod pathsafe;
@@ -23,10 +25,16 @@ fn main() -> Result<()> {
 /// 可测纯枚举：命令解析结果，与 IO 执行分离。
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
-    Codegen { check: bool },
+    Codegen {
+        check: bool,
+    },
     ContractValidate,
     Verify,
-    PublicApi { check: bool },
+    PublicApi {
+        check: bool,
+        allow_missing: bool,
+        layer: Option<publicapi::Layer>,
+    },
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -40,14 +48,45 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["contract", "validate"] => Ok(Command::ContractValidate),
         ["verify"] => Ok(Command::Verify),
-        ["public-api"] => Ok(Command::PublicApi { check: false }),
-        ["public-api", "--check"] => Ok(Command::PublicApi { check: true }),
+        ["public-api", rest @ ..] => parse_public_api(rest),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | verify | public-api [--check]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | verify | public-api [--layer basis|engine] [--check] [--allow-missing]>"
             )
         }
     }
+}
+
+/// 解析 `public-api` 的可选 flag（fail-closed：未知 flag / 缺 layer 值 / 非法 layer 即 `Err`）。
+fn parse_public_api(args: &[&str]) -> Result<Command> {
+    let mut check = false;
+    let mut allow_missing = false;
+    let mut layer = None;
+    let mut it = args.iter();
+    while let Some(&tok) = it.next() {
+        match tok {
+            "--check" => check = true,
+            "--allow-missing" => allow_missing = true,
+            "--layer" => {
+                let val = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--layer 缺少值；用法: --layer basis|engine"))?;
+                layer = Some(match *val {
+                    "basis" => publicapi::Layer::Basis,
+                    "engine" => publicapi::Layer::Engine,
+                    other => bail!("未知 layer: {other}；用法: --layer basis|engine"),
+                });
+            }
+            other => bail!(
+                "public-api 未知参数: {other}；用法: --layer basis|engine | --check | --allow-missing"
+            ),
+        }
+    }
+    Ok(Command::PublicApi {
+        check,
+        allow_missing,
+        layer,
+    })
 }
 
 fn dispatch(args: &[String]) -> Result<()> {
@@ -60,7 +99,11 @@ fn dispatch(args: &[String]) -> Result<()> {
             eprintln!("verify: 全部通过（contract validate + codegen --check）");
             Ok(())
         }
-        Command::PublicApi { check } => publicapi::run(check),
+        Command::PublicApi {
+            check,
+            allow_missing,
+            layer,
+        } => publicapi::run(check, allow_missing, layer),
     }
 }
 
@@ -115,21 +158,63 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_public_api_no_check() -> anyhow::Result<()> {
+    fn parse_command_public_api_bare() -> anyhow::Result<()> {
         assert_eq!(
             parse_command(&s(&["public-api"]))?,
-            Command::PublicApi { check: false }
+            Command::PublicApi {
+                check: false,
+                allow_missing: false,
+                layer: None
+            }
         );
         Ok(())
     }
 
     #[test]
-    fn parse_command_public_api_with_check() -> anyhow::Result<()> {
+    fn parse_command_public_api_check_allow_missing() -> anyhow::Result<()> {
         assert_eq!(
-            parse_command(&s(&["public-api", "--check"]))?,
-            Command::PublicApi { check: true }
+            parse_command(&s(&["public-api", "--check", "--allow-missing"]))?,
+            Command::PublicApi {
+                check: true,
+                allow_missing: true,
+                layer: None
+            }
         );
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_public_api_layer_basis() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["public-api", "--layer", "basis"]))?,
+            Command::PublicApi {
+                check: false,
+                allow_missing: false,
+                layer: Some(publicapi::Layer::Basis)
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_public_api_layer_engine_check() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["public-api", "--layer", "engine", "--check"]))?,
+            Command::PublicApi {
+                check: true,
+                allow_missing: false,
+                layer: Some(publicapi::Layer::Engine)
+            }
+        );
+        Ok(())
+    }
+
+    /// public-api flag fail-closed：非法 layer 值 / 缺 layer 值 / 未知 flag 均 `Err`。
+    #[test]
+    fn parse_command_public_api_rejects_bad_flags() {
+        assert!(parse_command(&s(&["public-api", "--layer", "bogus"])).is_err());
+        assert!(parse_command(&s(&["public-api", "--layer"])).is_err()); // 缺值
+        assert!(parse_command(&s(&["public-api", "--bogus"])).is_err());
     }
 
     #[test]
