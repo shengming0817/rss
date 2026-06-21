@@ -1,8 +1,8 @@
 # RSS 协作说明
 
-> 本文件是 `.specify/memory/constitution.md`（RSS 项目宪法）的实施细则。当二者冲突时，以宪法为准。
 > RSS 是 GoCell 的 Rust 重写：保留 Cell-native 架构与治理模型，语言载体换成 Rust/Cargo。
-> Cell/Slice/contract/一致性等级如何落到 Rust 见 `.claude/rules/rss/rust-mapping.md`（架构映射单一事实源）。
+> 本文件是项目最高协作规范（无独立宪法文件）；Cell/Slice/contract/一致性等级如何落到 Rust 见
+> `.claude/rules/rss/rust-mapping.md`（架构映射单一事实源），分层 / 语言 / 治理细则见 `.claude/rules/rss/`。
 
 Cell-native Rust 工程底座。只保留稳定的开发规则和架构约束。
 
