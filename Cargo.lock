@@ -6,15 +6,8 @@ version = 4
 name = "amqp"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -154,15 +147,8 @@ version = "0.0.0"
 name = "grpc"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -212,15 +198,8 @@ version = "0.0.0"
 name = "mqtt"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -245,15 +224,8 @@ dependencies = [
 name = "oidc"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -265,15 +237,8 @@ dependencies = [
 name = "otel"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -285,15 +250,8 @@ dependencies = [
 name = "postgres"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -316,15 +274,8 @@ dependencies = [
 name = "prometheus"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -336,15 +287,8 @@ dependencies = [
 name = "ratelimit"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -356,15 +300,8 @@ dependencies = [
 name = "redis"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -384,15 +321,8 @@ version = "0.0.0"
 name = "s3"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -433,15 +363,8 @@ dependencies = [
 name = "softca"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",
@@ -478,15 +401,8 @@ dependencies = [
 name = "vault"
 version = "0.0.0"
 dependencies = [
- "authn",
- "bootstrap",
  "consistency",
- "deviceloop",
- "distributed",
- "eventexec",
- "httpserve",
  "ids",
- "observ",
  "primitives",
  "runctx",
  "secure",

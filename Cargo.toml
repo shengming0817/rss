@@ -74,7 +74,7 @@ tower-http = "0.6"
 tonic = "0.13"
 prost = "0.13"
 # 持久化（adapters 前瞻）
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）
 # 测试
 rstest = "0.24"
 mockall = "0.13"
@@ -89,6 +89,6 @@ cognitive_complexity = "warn"   # CLAUDE.md ≤15（阈值在 clippy.toml）
 disallowed_methods = "warn"     # 具体列表在 clippy.toml（clock 注入纪律）
 disallowed_types = "warn"
 disallowed_macros = "warn"
-panic = "warn"                  # panic 纪律；测试模块 item-level #[allow] carve-out
-unwrap_used = "warn"
-expect_used = "warn"
+panic = "deny"                  # panic 纪律（rust-standards.md/error-handling.md 要求 deny）；测试模块 item-level #[allow] carve-out
+unwrap_used = "deny"
+expect_used = "deny"

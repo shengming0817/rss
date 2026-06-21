@@ -2,4 +2,5 @@
 [toolchain]
 channel = "1.96.0"
 profile = "minimal"
-components = ["rustfmt", "clippy"]
+# llvm-tools-preview 供 cargo-llvm-cov 覆盖率工具（CLAUDE.md 覆盖率门）使用。
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

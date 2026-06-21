@@ -9,6 +9,11 @@ disallowed-methods = [
   { path = "std::time::SystemTime::now", reason = "同上：用 Clock trait，禁默认取系统时钟" },
   { path = "tokio::time::Instant::now", reason = "同上：Clock trait（tokio 变体）", allow-invalid = true },
   { path = "chrono::Utc::now", reason = "同上：用 Clock trait，禁直调 chrono", allow-invalid = true },
+  # 衍生时延读取——绕过 now() 仍能测时，一并禁（PR #137 review B3）。
+  { path = "std::time::Instant::elapsed", reason = "同上：经注入 Clock 计算时延，禁直接 elapsed" },
+  { path = "std::time::Instant::duration_since", reason = "同上：禁绕过 Clock 的时延计算" },
+  { path = "std::time::SystemTime::elapsed", reason = "同上：禁直接 elapsed" },
+  { path = "tokio::time::Instant::elapsed", reason = "同上（tokio 变体）", allow-invalid = true },
 ]
 
 # 预留：跨域 wire 不裸传强类型标识等纪律，随类型落地补充。

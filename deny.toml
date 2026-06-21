@@ -36,6 +36,8 @@ deny = [
   { crate = "openssl-sys", use-instead = "rustls" },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖。
   # 覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
+  # ⚠ INVARIANT(LAYER-WRAP-01)：新增任何组合根 crate（assembly/bin）须同步加入下列每条 wrappers，
+  #   否则其对域/adapter/generated 的合法依赖会被 deny 误拦。此一致性的持久守卫见 PR #137 OOS（xtask 治理 lint）。
   { crate = "identity", wrappers = ["server", "rss", "xtask"] },
   { crate = "settings", wrappers = ["server", "rss", "xtask"] },
   { crate = "audit", wrappers = ["server", "rss", "xtask"] },
@@ -56,6 +58,8 @@ deny = [
   { crate = "vault", wrappers = ["server", "rss", "xtask"] },
   { crate = "softca", wrappers = ["server", "rss", "xtask"] },
   { crate = "ratelimit", wrappers = ["server", "rss", "xtask"] },
+  # generated（contract 派生 wire 类型）只能被域 crate + 组合根依赖（防服务/引擎/基础层误依赖）。
+  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "server", "rss", "xtask"] },
 ]
 
 [sources]
