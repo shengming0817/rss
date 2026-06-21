@@ -78,9 +78,16 @@ GoCell（Go）用单一 `context.Context` 同时承载两类语义完全不同�
 `RequestCtx` **只**能从已认证通道构造：JWT tenant claim（验签后）或 service-token-MAC 的 `X-Tenant-ID`
 header（`docs/rules/tenancy.md` §Tenant source）。**HTTP request body 不得携带 tenantId**——body 是未认证维度。
 
-类型层强制：`RequestCtx` 私有字段（sealed 构造，唯一入口 `new`）+ **不 derive `Deserialize`**
-⇒ 「从 body 反序列化出一个 RequestCtx」在类型上**不可表达**。上游另由契约 codegen 拒绝声明 `tenantId`
-的 request schema（`tenancy.md`，Hard）。
+类型层强制分两条，强度不同，须如实区分：
+
+- **body 反序列化构造不可表达（Hard）**：`RequestCtx` 私有字段 + **不 derive `Deserialize`** ⇒ 「从 body
+  反序列化出一个 RequestCtx」在类型上不可表达。上游另由契约 codegen 拒绝声明 `tenantId` 的 request schema（`tenancy.md`，Hard）。
+- **下游 crate 直接 `new` 伪造不可表达（Hard，具体 `AppCtx`）**：具体 `AppCtx` 的 payload（`TenantSlot`/`PrincipalSlot`）
+  构造器是 `#[cfg(test)] pub(crate)` + 字段私有 ⇒ 外部 crate **无构造路径**，无法 mint 一个 `AppCtx`（crate 可见性，Hard）。
+  slot 类型不进 crate 根公开 API。`Debug` 手写 redacted（不打印 payload），杜绝 `?ctx` 泄露授权 PII。
+- **泛型 `RequestCtx::new` 的 trusted-caller 门（W 阶段）**：泛型构造对任意 `T/P` 开放——「只在已认证通道构造」
+  这一条对泛型入口当前仍是**约定**（rustdoc/ADR），其类型化（sealed capability，由 authn 验签后持有并传入）随 authn 落
+  W 阶段；届时具体实例化已收敛为受信 `vocab::TenantId` + authn principal facet，trusted-caller 成 Hard。
 
 ### D6 — fail-closed：ctx 缺失即 deny
 
@@ -139,6 +146,11 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 - spawn / blocking / std::thread 不继承 ctx 是 footgun（R2）。**运行时**已 fail-closed（子任务读到 `Err`，
   测试锁定 `tokio::spawn` / `spawn_blocking`）；但**静态防误用**（拦截「忘记重绑」的 callsite）当前是 Soft，
   升级到 Medium 须落 dylint，已登记 follow-up 4。
+  - **生产 consumer 接入前置门（避免以 Accepted ADR 合入 Soft）**：在 dylint `rss_spawn_missing_scope`（#1031）
+    落地前，**生产 crate（httpserve / authn / eventexec / reconcile 等）不得采用 spawn-跨任务-ctx 传播**；
+    spike 期仅 runctx 自测演示该范式。即 Soft **不是被接受的永久态**，而是有明确前置门 + backlog 跟踪的过渡态——
+    本机制的运行时不变式（fail-closed）已是 Medium，静态防误用在生产采用前必须先到 Medium。该前置门由本 ADR 声明，
+    采用方 PR 经 review 核对（生产 spawn-传播 callsite 出现即要求 #1031 已合）。
 
 **下游影响**：httpserve middleware（绑 `scope`）、authn（构造 `RequestCtx` + 派生 `Principal`/`row_visibility`）、
 后台环 crate（`eventexec` / reconcile 扇出必须捕获-重绑 ctx）——均为后续 W 阶段 feature。
@@ -156,10 +168,12 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 | 威胁 | 后果 | 缓解 | enforcement 档位 |
 |------|------|------|------------------|
 | request body 携带 `tenantId` 冒充租户 | 跨租户写 | `RequestCtx` 私有字段 + 无 `Deserialize`（body 构造不可表达）；契约 codegen 拒绝 `tenantId` request schema | **Hard**（类型 + codegen funnel） |
+| 下游 crate 直接 `RequestCtx::new` 伪造 `AppCtx` | 伪造 tenant/principal 越权 | 具体 `AppCtx` 的 slot 构造器 `#[cfg(test)] pub(crate)` + 字段私有 ⇒ 外部无构造路径；泛型 `new` 的 trusted-caller capability 随 authn 落 W 阶段 | **Hard**（具体 `AppCtx`，crate 可见性）+ 约定→W 阶段 Hard（泛型入口） |
+| `?ctx` / 断言 / 日志泄露 tenant/principal 原值 | 授权 PII 入日志 | 手写 redacted `Debug`（不打印 payload、不要求 `T/P: Debug`）；slot Debug 同样 redacted | **Hard**（类型，payload 在 Debug 通道不可达） |
 | ctx 缺失被当作 anonymous / default-tenant 放行 | fail-open 越权 | 读访问器返回 `Result`，缺失 = `Err(MissingCtx)`，无 panicking / 伪造路径；PDP 缺租户 deny | **Hard**（类型）+ **Medium**（fail-closed 行为测试） |
 | tenant / principal 被塞进 tracing span 后被下游误当授权源 | 授权基于可丢弃 / 可改写信号 | runctx **不依赖 tracing**，API 面无「ctx→span」通道 | **Hard**（crate 依赖图） |
 | spawn / blocking 出的任务**运行时**丢 ctx → 子任务读到空 | 后台越权 / fail-open | 子任务无 ctx 即 `Err(MissingCtx)`，调用方 fail-closed | **Medium**（fail-closed 运行时行为 + 测试锁定 `tokio::spawn` / `spawn_blocking` 不继承） |
-| consumer **静态忘记**在子任务「捕获-重绑」ctx | 同上 | 当前仅范式文档 + 测试演示（不拦截误用 callsite） | **Soft**（不达标）→ 升级路径：dylint `rss_spawn_missing_scope`，登记 backlog（见 §后果 follow-up 4） |
+| consumer **静态忘记**在子任务「捕获-重绑」ctx | 同上 | 范式文档 + 测试演示 + **生产采用前置门**（#1031 dylint 合入前生产 crate 禁用 spawn-传播，见 §后果 R2） | **Soft**（静态拦截）→ 但生产采用被前置门挡住（review 核对）→ dylint #1031 落地即 **Medium** |
 | `RowScope::All` 经非 super-admin 路径泄漏 | 全租户读 | runctx 不构造 RowScope；派生在 authn super-admin 路径 + 强制 audit ledger（`tenancy.md`） | 引用 `tenancy.md`（非本 ADR 新增） |
 
 ## 6. 备选方案（Alternatives Considered）

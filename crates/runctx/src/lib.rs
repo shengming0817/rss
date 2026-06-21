@@ -39,5 +39,7 @@
 pub mod ctx;
 pub mod local;
 
-pub use ctx::{AppCtx, PrincipalSlot, RequestCtx, TenantSlot};
+// slot 占位类型不进 crate 根公开 API（`#[doc(hidden)]` + `pub(crate)` 构造，外部不可伪造）；
+// consumer 经 AppCtx 不透明持有，经访问器借用（ADR-001 §D5）。W 阶段换真类型时一并清理。
+pub use ctx::{AppCtx, RequestCtx};
 pub use local::{MissingCtx, scope, try_current, try_with};

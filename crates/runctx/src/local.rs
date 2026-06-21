@@ -163,11 +163,24 @@ mod tests {
         assert!(MissingCtx.to_string().contains("request context missing"));
     }
 
-    // RequestCtx 是 Clone + Debug 的不可变快照（覆盖 derive）。
+    // RequestCtx 是 Clone 的不可变快照；Debug 必须脱敏（绝不泄 tenant/principal payload，F2/ADR §D1）。
     #[test]
-    fn request_ctx_is_clone_and_debug() {
-        let ctx = sample("t", "p");
+    fn request_ctx_clone_eq_and_debug_redacted() {
+        let ctx = sample("SECRET_TENANT", "SECRET_PRINCIPAL");
         assert_eq!(ctx, ctx.clone());
-        assert!(format!("{ctx:?}").contains("RequestCtx"));
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("RequestCtx"), "应出类型名: {dbg}");
+        assert!(dbg.contains("redacted"), "应标 redacted: {dbg}");
+        assert!(
+            !dbg.contains("SECRET"),
+            "Debug 不得泄露 tenant/principal payload: {dbg}"
+        );
+    }
+
+    // slot 的 Debug 同样脱敏（assert_eq! 失败消息走 Debug，不该裸打印 payload）。
+    #[test]
+    fn slot_debug_is_redacted() {
+        assert!(!format!("{:?}", TenantSlot::new("SECRET")).contains("SECRET"));
+        assert!(!format!("{:?}", PrincipalSlot::new("SECRET")).contains("SECRET"));
     }
 }
