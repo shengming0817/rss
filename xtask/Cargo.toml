@@ -5,5 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+typify = { workspace = true }
+schemars = { workspace = true }
+prettyplease = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+
 [lints]
 workspace = true

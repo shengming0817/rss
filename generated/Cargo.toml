@@ -5,5 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+# typify 派生码用全限定 ::serde::{Serialize,Deserialize}（derive feature）。仅此一项依赖——
+# 所有 codegen 机器（typify/schemars/syn）留在 xtask，见 docs/rules/architecture.md §83/§126。
+serde = { workspace = true }
+
 [lints]
 workspace = true
