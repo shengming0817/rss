@@ -16,14 +16,14 @@ request、tenant、domain、correlation 在对应上下文存在时必须透传�
 
 ## Redaction
 
-errcode 的 Message、Public Details、Internal Details 三层分工见 `error-handling.md`。
+errcode 的 Message、Public Details、Internal Details 三层分工见 `error-handling.md` §Message 与 PII。
 
 trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redaction：
 
-- span error 统一走 `redaction::redact_error`。
+- span error 统一走 `secure::redact_error`。
 - span string attribute 先按 key 判敏感，再做 free-form scrub。
 - tracing subscriber 对敏感 field 做统一清洗。
-- `last_error` 持久化走同一 redaction crate。
+- `last_error` 持久化走同一 `secure` crate（redaction 模块）。
 
 没有业务 opt-out。需要原始诊断时走受控服务端日志，不写入 trace 或 wire。
 
@@ -31,7 +31,7 @@ trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redact
 
 - 依赖可用性 probe 用 `_ready` 后缀。
 - 运行时操作 probe 不带 `_ready`。
-- probe 名是运维契约，改名必须同步运维文档、dashboard、alert。
+- probe 名是运维契约，改名必须同步运维文档、tests、dashboard、alert。
 - 域 crate repo readiness 由域 crate 边界显式注册，禁止静默吞掉缺失 repo。
 - remote peer readiness 只探测 resolved endpoint 的 TCP 可达性，不反向调用对端 `/readyz`。
 - peer 不可达只影响 readiness，不影响 liveness。

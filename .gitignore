@@ -2,7 +2,7 @@
 /target/
 **/*.rs.bk
 *.pdb
-# Cargo.lock 提交（本仓库产出 binary：assemblies/ 与 crates/cmd/），故不忽略。
+# Cargo.lock 提交（本仓库产出 binary：assemblies/ 与 bins/），故不忽略。
 
 # Coverage
 *.profraw
@@ -40,5 +40,5 @@ worktrees/
 .claude/scheduled_tasks.lock
 
 # Generated（选择性提交）
-# crates/generated/ 由 `rss generate` 重新生成；具体提交策略见该目录 README
+# generated/ 由 `cargo xtask` 重新生成；具体提交策略见该目录 README
 bak/

@@ -21,7 +21,7 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
 `RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址
-（`RowScope::All` 必须触发审计 signal）。
+（`RowScope::All` 必须触发审计 signal——经 tracing span 发射，非 `ledger.append`）。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 `RowScopeAllUnsupportedError` / 501。super-admin 跨租户 audit read 只能走专用
@@ -63,10 +63,10 @@ RLS policy shape 由 schema guard 检查。app-serving role 必须非 owner 且�
 
 业务端点授权走 PDP 决策，不在 handler 硬编 role-name 字面量。
 
-- 路由门禁用 `auth::require_permission(authz::Permission)`、
-  `auth::require_permission_for_resource(path_param, perm)` 或
-  `auth::require_permission_for_contract(...)`，不用 `auth::any_role` / `auth::self_or` /
-  `auth::require_any_role` 做授权分支。
+- 路由门禁用 `authn::require_permission(authz::Permission)`、
+  `authn::require_permission_for_resource(path_param, perm)` 或
+  `authn::require_permission_for_contract(...)`，不用 `authn::any_role` / `authn::self_or` /
+  `authn::require_any_role` 做授权分支。
 - `authz::Permission` 是 sealed 闭值集（枚举 / sealed 类型）；业务代码经 accessor 函数
   （如 `authz::perm_audit_read()`）取得 permission，不传 role 字符串。
 - handler 不手写 `Principal::has_role` 或遍历 `Principal.roles` 做授权。
@@ -80,7 +80,7 @@ RLS policy shape 由 schema guard 检查。app-serving role 必须非 owner 且�
 path-param 标识的 resource ownership 是 PDP ABAC 决策，不是 handler 短路。owner-scoped /
 self-scoped gate **contract-derived**：契约声明 `endpoints.http.resource:
 <pathParam>`（owner-scoped）或 `endpoints.http.selfScoped: true`（self-scoped），生成
-handler 经单一 `auth::require_permission_for_contract(contract_spec, resolver)` funnel 派生
+handler 经单一 `authn::require_permission_for_contract(contract_spec, resolver)` funnel 派生
 `require_permission_for_resource(path_param, perm)` / `require_permission_for_self(perm)`——业务
 slice 不手写 gate。`resource`/`selfScoped` 各 ⇒ permission、二者互斥（schema + `ContractSpec::validate`
 + `cargo xtask` 治理校验 三重）。owner-scoped gate 把 canonical resource id（self-scoped 把
@@ -121,7 +121,7 @@ RLS 维护 tenant 边界。
 
 ## gRPC 授权
 
-非 public gRPC RPC 进入 runtime 后由 auth 拦截器（tower layer）调同一 `auth::Authorizer`
+非 public gRPC RPC 进入 runtime 后由 auth 拦截器（tower layer）调同一 `authn::Authorizer`
 做 PDP gate，不在 handler 手写谓词。
 
 - method -> permission 由契约 `endpoints.grpc.methods[].permission` overlay 派生。
@@ -142,7 +142,7 @@ RLS 维护 tenant 边界。
 
 HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
 `endpoints.http.permission` overlay 派生，生成 handler 通过
-`auth::require_permission_for_contract(contract_spec, resolver)` 解析并进入同一 PDP 路径。owner-scoped
+`authn::require_permission_for_contract(contract_spec, resolver)` 解析并进入同一 PDP 路径。owner-scoped
 （`endpoints.http.resource`）/ self-scoped（`endpoints.http.selfScoped`）由该同一 funnel 按
 `contract_spec.{resource, self_scoped}` 三分支派生，见 §Resource ownership。
 

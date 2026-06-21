@@ -46,7 +46,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 
 > 关键：gocell 靠 archtest 守的 "cell 只经 contract 通信"，在 Rust 由 crate 依赖图**自动守住**——域 crate
 > 没在 Cargo.toml 声明就 import 不到，且 `deny.toml` 禁止声明对兄弟域 crate 的依赖。详见
-> `.claude/rules/rss/rust-mapping.md` §分层 / §Rust 原生强制。
+> `.claude/rules/rss/rust-mapping.md` §分层 / §Rust 原生强制（三档载体）。
 
 ### 域 crate 开发规则（cell/slice 外壳退场）
 
@@ -60,7 +60,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 
 | 级别 | 含义 | 场景 |
 |------|------|------|
-| L0 LocalOnly | 单 slice 内部本地处理 | 纯计算、校验 |
+| L0 LocalOnly | 域 crate 内本地纯计算 | 纯计算、校验 |
 | L1 LocalTx | 单域 crate 本地事务 | session 创建、审计写入 |
 | L2 OutboxFact | 本地事务 + outbox 发布 | session.created 事件、config.entry-upserted 事件 |
 | L3 WorkflowEventual | 跨域最终一致 | 查询投影、CQRS、Saga |
@@ -87,7 +87,7 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 
 主要实施者是 AI。新增/修改约束 enforcement 机制按 AI-robust 三档（Hard / Medium / Soft）评级；Soft 严禁立项。
 Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静态强制的约束，不要退化成运行期 archtest**。
-载体决策原则、review checklist 详见 `.claude/rules/rss/ai-robust.md`，静态强制清单见 `.claude/rules/rss/rust-mapping.md` §Rust 原生强制。
+载体决策原则、review checklist 详见 `.claude/rules/rss/ai-robust.md`，静态强制清单见 `.claude/rules/rss/rust-mapping.md` §Rust 原生强制（三档载体）。
 
 ## 参考框架
 

@@ -7,7 +7,7 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 > + governance rule + rustdoc 约定守；Rust 重写后**优先把约束上移到编译期**
 > ——crate 依赖图、`pub`/`pub(crate)` 可见性、sealed trait、trait 关联常量（类型 marker）、构造器必填参数、
 > cargo-deny / cargo-udeps / clippy lint。能在编译期免费成立的约束，绝不退化成运行期治理测试。
-> 哪些约束编译期天然成立见 `rust-mapping.md` §Rust 原生强制。
+> 哪些约束编译期天然成立见 `rust-mapping.md` §Rust 原生强制（三档载体）。
 
 ## 适用范围
 
@@ -40,7 +40,7 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 1. **类型系统 / crate 依赖图**：用 Cargo `[dependencies]`、`pub(crate)` 可见性、sealed trait、
    trait 关联常量（类型 marker）、newtype、构造器必填参数表达约束——违反即编译错误。
    域 crate 依赖不到其它域 crate、必填依赖非 `Option`、domain 类型不 derive `Serialize`
-   都属此档（见 `rust-mapping.md` §Rust 原生强制）。
+   都属此档（见 `rust-mapping.md` §Rust 原生强制（三档载体））。
 2. **schema / marker 单源派生代码（codegen funnel）**：build.rs / proc-macro 从声明源派生执行体，
    再用 golden 锁字节输出。
 3. **clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api**：crate-graph lint

@@ -74,7 +74,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 
 ## 安全检查点
 
-- 新端点加 JWT 或显式 `auth::Route { public: true }`。
+- 新端点加 JWT 或显式 `httpserve::Route { public: true }`。
 - `/internal/v1/` 必须声明 caller、鉴权和网络隔离。
 - 列表接口强制分页，`limit` 上限 500。
 - 生产配置禁止 localhost fallback 和 noop publisher。
