@@ -33,8 +33,8 @@
 |-------|------|--------|
 | `area-kernel` | 底座/生命周期 + Bootstrap 启停编排 | `crates/bootstrap` `crates/primitives` `crates/runctx` `crates/ids` |
 | `area-auth` | 认证 + 授权 | `crates/authn` `crates/identity` `adapters/oidcadapter` |
-| `area-http` | Contract 注册/发现 + HTTP 入站 | `crates/httpserve` `crates/contractreg` `adapters/grpcadapter` |
-| `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/consistency` `crates/eventexec` `crates/deviceloop` `adapters/amqpadapter` `adapters/mqttadapter` |
+| `area-http` | Contract 注册/发现 + HTTP 入站 | `crates/httpserve` `crates/contractreg` `adapters/grpcadapter` `adapters/ratelimit` |
+| `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/consistency` `crates/eventexec` `crates/deviceloop` `adapters/amqpadapter` `adapters/mqttadapter` `adapters/softca` |
 | `area-data` | Config 热更新 + 持久化/加密 + 分布式锁 | `crates/settings` `crates/secure` `crates/support` `crates/distributed` `adapters/pgadapter` `adapters/redisadapter` `adapters/vaultadapter` `adapters/s3adapter` |
 | `area-observability` | Metrics / Tracing / Logging | `crates/observ` `crates/audit` `adapters/oteladapter` `adapters/promadapter` |
 | `area-tooling` | 分层治理/crate 依赖图 + deny.toml + codegen/工具链 | `xtask/` `bins/rss` `deny.toml` `clippy.toml` `contracts/`（治理） |
