@@ -24,7 +24,7 @@ permissionMode: auto
 - crate 级别的 `//!` 模块文档（`lib.rs`）必须存在且描述清晰
 - 框架 API 的使用示例放在 rustdoc doc-test（` ``` ` 代码块）中
 
-### OpenAPI Spec（适用于 rss-runtime 的 http 层和 examples）
+### OpenAPI Spec（适用于 `httpserve` crate 的 http 层和 examples）
 - 从已实现的 handler 代码提取 API 端点信息
 - 响应格式统一: `{"data": ..., "total": ..., "page": ..., "pageSize": ...}`
 - 错误格式统一: `{"error": {"code": "ERR_...", "message": "...", "details": [{"key": "...", "value": ...}]}}` （`details` 是 `array<{key,value}>`，5xx 强制空数组）
@@ -43,8 +43,8 @@ permissionMode: auto
 1. **Phase 总结报告** — 目标、完成情况、关键决策、技术变更摘要、已知风险、下一 Phase 建议
 2. **变更日志** — 必须基于 `git log` 生成初稿，按 Conventional Commits 分组整理，不手写
 3. **Tech Debt 汇总** — 从当前 Phase 延迟项提取条目，合并到全局 registry（只追加不删除）
-4. **架构文档更新** — 如有结构变化（新 crate/新 Cell/新 adapter），更新架构文档
-5. **新人 Onboarding 审查** — 从新人视角审查文档链路：README → 启动步骤 → Cell/Slice 架构理解 → API 文档（rustdoc）→ 术语表覆盖
+4. **架构文档更新** — 如有结构变化（新 crate/新域/新 adapter），更新架构文档
+5. **新人 Onboarding 审查** — 从新人视角审查文档链路：README → 启动步骤 → 扁平 workspace 分层（基础/基建/域/adapters/bins）+ deny.toml 架构理解 → API 文档（rustdoc）→ 术语表覆盖
 
 ## 约束
 

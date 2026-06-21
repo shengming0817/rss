@@ -25,8 +25,8 @@ permissionMode: auto
 2. **范围蔓延** — 是否包含超出本 Phase 范围的功能？是否应延迟到后续 Phase？
 3. **Phase 依赖** — 本 Phase 的功能是否依赖尚未完成的前置 Phase？
 4. **优先级合理性** — 功能需求优先级是否与 Phase 目标匹配？
-5. **版本兼容窗口** — API 变更是否在 semver 兼容窗口内？是否需要 major version bump？
-6. **Cell/Slice 交付策略** — 哪些 Cell/Slice 应该在本 Phase 交付？交付顺序是否合理？
+5. **版本兼容窗口** — API 变更是否在 semver 兼容窗口内（`cargo-semver-checks` / `cargo public-api`）？是否需要 major version bump？
+6. **域 crate 交付策略** — 哪些域 crate / crate 内 feature 模块应该在本 Phase 交付？交付顺序是否合理？
 
 每条建议标注类别：
 - `[范围蔓延]` — 超出本 Phase 范围
@@ -45,5 +45,5 @@ Phase 结束时：
 ## 约束
 
 - 范围判断基于产品上下文的 Scope Boundary，不自行定义范围
-- 版本建议基于 RSS 的 semver 策略
+- 版本建议基于 RSS 的 semver 策略（crate 公共 API 用 `cargo-semver-checks`）
 - 不评审技术实现细节（由架构师负责）

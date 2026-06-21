@@ -75,7 +75,7 @@ git worktree add worktrees/<type>/<issue#-short-name> -b <type>/<issue#-short-na
 
 ## 阶段 4：TDD — 先写测试
 
-在 worktree 中先写 `#[cfg(test)]` 测试（或 `tests/` 集成测试），覆盖正常/边界/错误路径（rss-kernel ≥ 90%，其余 ≥ 80%）。运行 `cargo test --manifest-path worktrees/<wt>/Cargo.toml --workspace` 确认测试先 **FAIL**，再进入实施。
+在 worktree 中先写 `#[cfg(test)]` 测试（或 `tests/` 集成测试），覆盖正常/边界/错误路径（底座 crate `consistency` / `primitives` / `vocab` ≥ 90%，其余 ≥ 80%）。运行 `cargo nextest run --manifest-path worktrees/<wt>/Cargo.toml --workspace`（或 `cargo test --manifest-path worktrees/<wt>/Cargo.toml --workspace`）确认测试先 **FAIL**，再进入实施。
 
 ---
 

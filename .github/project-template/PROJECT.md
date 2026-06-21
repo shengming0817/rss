@@ -29,16 +29,16 @@
 
 ### 2.1 area-XX（领域，1 个，8 选）
 
-| Label | 领域 | 主要包 |
+| Label | 领域 | 主要 crate |
 |-------|------|--------|
-| `area-kernel` | Cell 声明/生命周期 + Bootstrap 启停编排 | `crates/framework/kernel/src/{cell,assembly}` `crates/framework/runtime/{bootstrap,shutdown,worker}` |
-| `area-auth` | 认证 + 授权 | `crates/framework/runtime/auth`（authn / authz / policy / refresh） |
-| `area-http` | Contract 注册/发现 + HTTP 入站 | `crates/framework/kernel/src/{wrapper,registry}` `crates/framework/runtime/http/*` |
-| `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/framework/kernel/src/{outbox,idempotency,saga}` `crates/framework/runtime/{outbox,saga,eventrouter}` |
-| `area-data` | Config 热更新 + 持久化/加密 + 分布式锁 | `crates/framework/runtime/config` `crates/framework/kernel/src/{persistence,crypto}` `crates/framework/runtime/distlock` `crates/adapters/{postgres,redis,vault}` |
-| `area-observability` | Metrics / Tracing / Logging | `crates/framework/runtime/observability/*` `crates/adapters/{prometheus,otel}` `crates/framework/redaction` |
-| `area-tooling` | 元数据治理/crate 依赖图守卫 + codegen/工具链 | `crates/framework/kernel/src/{metadata,governance}` + crate 依赖图/clippy 守卫 + `crates/cmd/rss` |
-| `area-cross` | 跨 ≥4 领域 / 无明确归属 | — |
+| `area-kernel` | 底座/生命周期 + Bootstrap 启停编排 | `crates/bootstrap` `crates/primitives` `crates/runctx` `crates/ids` |
+| `area-auth` | 认证 + 授权 | `crates/authn` `crates/identity` `adapters/oidcadapter` |
+| `area-http` | Contract 注册/发现 + HTTP 入站 | `crates/httpserve` `crates/contractreg` `adapters/grpcadapter` |
+| `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/consistency` `crates/eventexec` `crates/deviceloop` `adapters/amqpadapter` `adapters/mqttadapter` |
+| `area-data` | Config 热更新 + 持久化/加密 + 分布式锁 | `crates/settings` `crates/secure` `crates/support` `crates/distributed` `adapters/pgadapter` `adapters/redisadapter` `adapters/vaultadapter` `adapters/s3adapter` |
+| `area-observability` | Metrics / Tracing / Logging | `crates/observ` `crates/audit` `adapters/oteladapter` `adapters/promadapter` |
+| `area-tooling` | 分层治理/crate 依赖图 + deny.toml + codegen/工具链 | `xtask/` `bins/rss` `deny.toml` `clippy.toml` `contracts/`（治理） |
+| `area-cross` | 跨 ≥4 领域 / 无明确归属 | `crates/vocab` `crates/syshealth` + 跨 ≥4 域 |
 
 ### 2.2 type-XX（类型，1 个，8 选）
 
@@ -90,8 +90,8 @@
 | **P3** | 触发型 / 可延后 / 性能微调 / 文档完善 | |
 
 **架构/去重/抽象命中信号**（任一即命中 → P3 升 P2、P2 升 P1，P1 维持）：type ∈ {arch-opt/refactor/debt} 且描述含
-*统一/合并/拆分/抽象/converge/unify/dedup/single source/funnel/sealed/Hard 升级* ；或触及 `crates/framework/kernel/` 多模块 /
-crate 依赖图·clippy typed funnel / ≥3 cell；或 AI-robust Soft→Hard / Funnel 双向锁未闭合；或影响 ≥3 领域。
+*统一/合并/拆分/抽象/converge/unify/dedup/single source/funnel/sealed/Hard 升级* ；或触及 `crates/primitives` / `crates/consistency` 等多个核心 crate /
+crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI-robust Soft→Hard / Funnel 双向锁未闭合；或影响 ≥3 领域。
 
 **触发型例外**：`flag-cond` 风格触发型条目，若其守护的 invariant 已被 Medium clippy lint/cargo-deny/governance 守住（CI 绿），
 架构信号升级**封顶 P2**。**反向降级**：纯 feat/bug 触发型无业务推动、或"推测性/无 benchmark/待审视"无明确 outcome
@@ -102,9 +102,9 @@ crate 依赖图·clippy typed funnel / ≥3 cell；或 AI-robust Soft→Hard / F
 | 级 | 文件域 | 类型加载 | 典型 |
 |----|--------|---------|------|
 | **Cx1** | 单文件 / 同文件 ≤3 处 | 不需类型推导 | 改字面量、补 rustdoc、加单测 |
-| **Cx2** | 同 crate ≤5 文件 | 可能需 clippy lint / cargo-deny 单条 | 加方法、抽 helper、补 governance 守卫单条 |
+| **Cx2** | 同 crate ≤5 文件 | 可能需 clippy/dylint lint / deny.toml 单条 | 加方法、抽 helper、补 governance 守卫单条 |
 | **Cx3** | 跨 crate 5–15 文件 | 需 sealed trait / 类型系统强制 | trait 扩字段 + 多实现同步、funnel 双向锁、ADR amendment |
-| **Cx4** | ≥15 文件 / ≥3 领域 | 跨 crate 类型变更 + proc-macro/codegen | trait ctx 透传、cell 接口重构、codegen 链路改造 |
+| **Cx4** | ≥15 文件 / ≥3 领域 | 跨 crate 类型变更 + build.rs/proc-macro codegen | trait ctx 透传、域 crate 接口重构、codegen 链路改造 |
 
 > Cx 由 `cx-1`..`cx-4` label 承载（§2.6）。Cx5+ 必须拆为多 item / 多 wave。
 

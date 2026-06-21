@@ -75,7 +75,7 @@ CONFIRMED 后、修复前，先构造一个能**复现问题**的测试用例：
 
 判定依据（按顺序检查）：
 1. 修复涉及多少个文件？（`Grep` 搜索所有受影响的调用点）
-2. 是否需要修改 `rss-kernel` crate 的 trait 或类型？
+2. 是否需要修改底座 crate（`consistency` / `primitives` / `vocab` 等）的 trait 或类型？
 3. 是否需要修改数据库 schema（migration）？
 4. 是否影响组合根（assembly / bin crate）的组装逻辑？
 5. 同类问题在其他模块是否重复出现？（1 处=局部，3+=系统性）
@@ -152,7 +152,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | **下迭代做** | 设计级问题 / 改动量 200+ 行 / 需要先完成其他前置工作 |
 | **记录不做** | 理论风险但实际不触发 / 修复代价远大于收益 |
 
-**Q2: 能不能现在做？** 检查：已有 issue 依赖、活跃分支冲突、rss-kernel trait 消费方。
+**Q2: 能不能现在做？** 检查：已有 issue 依赖、活跃分支冲突、底座 crate（`consistency` / `primitives` / `vocab`）trait 消费方。
 
 **Q3: 最小修复的有效期？** 给出彻底方案的建议时间窗口。
 
@@ -164,7 +164,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 | 复杂度                                                      | 条件 | 决策 |
 |----------------------------------------------------------|------|-----|
-| Cx1/Cx2 + IN_SCOPE + ≤2文件 + 不改 rss-kernel trait/migration/组合根/并发语义 | 全满足 | **[AUTO-FIX]** 直接修 |
+| Cx1/Cx2 + IN_SCOPE + ≤2文件 + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | **[AUTO-FIX]** 直接修 |
 | Cx2 + IN_SCOPE + 超2文件或触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
 | Cx3/Cx4                                                  | 任何 | 只输出方案，标注"需人工决策" |
@@ -172,7 +172,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 **不可自动执行**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
-> **auto context（无监督）vs manual context（交互 `/fix`）**：上表 **只有 [AUTO-FIX] 行**（≤2 文件 + 非禁域）能在**无监督自动路径**执行——pr-monitor `--mode=auto` 的 `Skill("fix")` 只跑这一档。「Cx2 超 2 文件或触禁域 → 执行推荐方案」「记录报告，标注阻塞」是 **manual context**（human 在场的交互 `/fix`）专属；无监督路径遇到这些一律 **surface + 转人工，绝不自动改**。Claude `Skill("fix")` 侧靠本表 + §不可自动执行清单自限。并发语义不可路径检测，留 prompt + Cx3 门兜底。（[AUTO-FIX] 禁止域 = 改 rss-kernel trait / migration / 组合根 / 并发语义。）
+> **auto context（无监督）vs manual context（交互 `/fix`）**：上表 **只有 [AUTO-FIX] 行**（≤2 文件 + 非禁域）能在**无监督自动路径**执行——pr-monitor `--mode=auto` 的 `Skill("fix")` 只跑这一档。「Cx2 超 2 文件或触禁域 → 执行推荐方案」「记录报告，标注阻塞」是 **manual context**（human 在场的交互 `/fix`）专属；无监督路径遇到这些一律 **surface + 转人工，绝不自动改**。Claude `Skill("fix")` 侧靠本表 + §不可自动执行清单自限。并发语义不可路径检测，留 prompt + Cx3 门兜底。（[AUTO-FIX] 禁止域 = 改底座 crate trait / migration / 组合根 / 并发语义。）
 
 **何时用 AskUserQuestion**: 见文末 §沟通规则（默认自动决策，不逐条问）。
 
@@ -203,11 +203,11 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 ### 4.1 Commit 格式
 
 在当前分支直接修改。Commit: `fix(<scope>): <问题简述>` + 根因 + 复杂度 + Refs + Co-Authored-By。
-scope 按层：kernel/runtime/cells/pkg。安全约束：只 add 修复文件（不 add -A）；不 amend。
+scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `identity` / `eventexec` / `postgres`）。安全约束：只 add 修复文件（不 add -A）；不 amend。
 
 ### 4.2 执行代码修改（逐编辑测试循环）
 
-> **批量并行**：4+ 条 finding 时按 Cell crate（cells/kernel/runtime/adapters/pkg）聚类派发 `developer` sub-agent（**同 crate 同 agent** 防写冲突，组内串行执行下面循环）；并发 4-9→2 / ≥10→3；≤3 条由主 agent 直接处理。triage 同理可按聚类并行（`Explore`）。
+> **批量并行**：4+ 条 finding 时按 crate（扁平 workspace 的 `crates/*` 域/底座 crate、`adapters/*`、`bins/*`）聚类派发 `developer` sub-agent（**同 crate 同 agent** 防写冲突，组内串行执行下面循环）；并发 4-9→2 / ≥10→3；≤3 条由主 agent 直接处理。triage 同理可按聚类并行（`Explore`）。
 
 对每个任务，执行 Edit-Test Loop + 状态更新：
 
@@ -230,7 +230,7 @@ scope 按层：kernel/runtime/cells/pkg。安全约束：只 add 修复文件（
 cargo build --workspace
 cargo test -p <修改的 crate>
 cargo test -p <修改的 crate> --features integration   # 涉及并发 / 集成时
-cargo test -p rss-kernel                                # 改了 kernel 时
+cargo test -p consistency -p primitives -p vocab        # 改了底座 crate 时
 ```
 
 ### 4.4 测试失败处理（分层回退）

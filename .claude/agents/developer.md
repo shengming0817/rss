@@ -27,7 +27,7 @@ memory: project
 | **批量 Cx1/Cx2 Finding**（调用方提供清单或 review 报告路径） | ✅ |
 | 小范围重构（不改 trait/公共 API、不跨 3+ crate） | ✅ |
 | 根因分析、多方案对比、需复现步骤才能确认的问题 | ❌ 停手，回报调用方升级处理 |
-| 架构变更、kernel trait 修改、Cx3/Cx4 | ❌ 转 `architect` + 人工 |
+| 架构变更、底座 crate trait 修改、Cx3/Cx4 | ❌ 转 `architect` + 人工 |
 | PR / Phase 审查 | ❌ 转 `reviewer` |
 
 ## 输入要求（调用方必须提供）
@@ -51,10 +51,10 @@ memory: project
 
 - `Read` 目标文件（批量时先 Read review 报告解析清单）
 - `Grep` 相关调用点确认影响范围
-- 如果单条实际影响超过 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API） → 立即停止，回报调用方升级处理
+- 如果单条实际影响超过 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API / 需改 deny.toml 分层） → 立即停止，回报调用方升级处理
 - 批量模式下：先全部判一遍复杂度，Cx3/Cx4 条目剔除并回报，只处理剩余 Cx1/Cx2
 
-### 2. 检查对标约束（kernel/cells/runtime/adapters crate 下修改时）
+### 2. 检查对标约束（基础/基建/域/adapters crate 下修改时）
 
 按 CLAUDE.md 的"参考框架"规则：
 - 查 `docs/references/framework-comparison.md` 找当前模块对标
@@ -71,19 +71,19 @@ memory: project
 
 ### 4. 补/改测试
 
-- 新增代码必须有对应测试（`rss-kernel` ≥ 90%，其他 ≥ 80%）
+- 新增代码必须有对应测试（底座 crate `consistency`/`primitives`/`vocab` ≥ 90%，其他 ≥ 80%）
 - 表驱动测试（`#[test]` / `rstest` 参数化）覆盖边界用例
 
 ### 5. 验证与收尾
 
 - 最终一次完整 `cargo build --workspace && cargo test -p <修改的 crate>`，提交前 `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
-- 涉及 rss-kernel → 额外跑 `cargo test -p rss-kernel`
+- 涉及底座 crate（`consistency`/`primitives`/`vocab` 等）→ 额外跑 `cargo test -p <底座 crate>`
 - **单任务报告**：改了什么文件、测试结果、遗留项（如有）
 - **批量任务报告**：逐条列状态表（✅ FIXED / ⚠ ESCALATE / ⏭ SKIPPED-Cx3+），末尾给改动文件汇总与统一测试结果
 
 ## 编码规范（必须遵守）
 
-- 错误用 `rss-errcode` + `thiserror`（库错误枚举），应用边界可 `anyhow`；不裸 `panic!` 对外
+- 错误用 `vocab` 错误模型 + `thiserror`（库错误枚举），应用边界可 `anyhow`；不裸 `panic!` 对外
 - 日志 / 追踪用 `tracing`（结构化字段 + span），不 `println!`
 - DB `snake_case`，JSON/Query/Path `camelCase`（`#[serde(rename_all = "camelCase")]`）
 - clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
@@ -91,12 +91,12 @@ memory: project
 - HTTP 错误响应格式 `{"error": {"code","message","details"}}`
 - EventBus consumer 必须有声明注释（见 `.claude/rules/rss/eventbus.md`）
 
-## 分层约束（必须遵守，crate 图编译期强制）
+## 分层约束（必须遵守，扁平 workspace，deny.toml + crate 图编译期强制）
 
-- rss-kernel 不依赖 runtime/adapters/cells
-- cell crate 不直接依赖 adapter-*（经组合根注入）
-- 跨 Cell 只通过 contract crate
-- 新增 CUD 操作标注一致性级别（L0-L4，trait 关联常量 `const CONSISTENCY`）
+- 基础底座 crate（vocab/ids/primitives/secure/support/runctx）不依赖基建/域/adapters，也不依赖第三方运行时
+- 域 crate（identity/settings/audit/contractreg/syshealth）不直接依赖 adapters/*（经组合根注入）
+- 跨域只通过 contracts（声明在消费 crate 的 `Cargo.toml` `[dependencies]`）
+- 新增 CUD 操作标注一致性级别（L0-L4，trait 关联常量 `const CONSISTENCY`，声明源 `contract.toml`）
 
 ## Git 约束
 
@@ -114,7 +114,7 @@ memory: project
 - 对标约束不清晰，需 `explorer` 先研究
 
 **单条跳过 + 继续下一条**（仅批量模式）:
-- 某条实际复杂度超出 Cx2（跨 3+ crate / 需改 kernel trait / 需 migration） → 标 `⏭ SKIPPED-Cx3+`
+- 某条实际复杂度超出 Cx2（跨 3+ crate / 需改底座 crate trait / 需 migration） → 标 `⏭ SKIPPED-Cx3+`
 - 某条 3 轮 Edit-Test Loop 仍失败 → 回滚该条 + 标 `⚠ ESCALATE`
 
 ## 约束

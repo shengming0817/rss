@@ -20,32 +20,32 @@ permissionMode: auto
 
 ## 上下文获取（审查前必须完成）
 
-按派发 prompt 确定变更范围（PR diff / commit 范围 / 指定文件），必要时读 CLAUDE.md 和相关 slice.yaml / cell.yaml 确认约束。
+按派发 prompt 确定变更范围（PR diff / commit 范围 / 指定文件），必要时读 CLAUDE.md、`deny.toml` 和相关 `contract.toml` 确认约束。
 
-## RSS 分层约束（所有维度通用，crate 图编译期强制）
+## RSS 分层约束（所有维度通用，扁平 workspace，deny.toml + crate 图编译期强制）
 
-- `rss-kernel` 不得依赖 `rss-runtime`、`adapter-*`、cell crate
-- cell crate 不得直接依赖 `adapter-*`（经组合根注入解耦）
-- 跨 Cell 通信必须走 contract crate，禁止直接依赖另一个 Cell 的 crate（含其 `cell-{id}-internal`）
-- 新增 CUD 操作必须标注一致性级别（L0-L4，trait 关联常量 `const CONSISTENCY`）
-- 涉及 `kernel/cells/runtime/adapters` crate 的 commit 须含 `ref:` 标记
+- 基础底座 crate（`vocab`/`ids`/`primitives`/`secure`/`support`/`runctx`）不得依赖基建/域/adapters crate，也不得依赖第三方运行时
+- 域 crate（`identity`/`settings`/`audit`/`contractreg`/`syshealth`）不得直接依赖 `adapters/*`（经组合根注入解耦）
+- 跨域通信必须走 contracts，禁止域 crate 直接依赖另一个域 crate（`deny.toml` 禁依赖规则）
+- 新增 CUD 操作必须标注一致性级别（L0-L4，trait 关联常量 `const CONSISTENCY`，声明源 `contract.toml`）
+- 涉及基础/基建/域/adapters crate 的 commit 须含 `ref:` 标记
 
 ## 审查维度
 
 ### 1. 架构合规
-RSS 分层依赖方向（crate 图 / cargo-deny）、Cell 聚合边界、rss-kernel trait/公共 API 稳定性（`cargo public-api`）、adapter-* trait 实现、assembly/bin crate 装配职责、一致性级别标注、跨 Cell contract 版本语义
+RSS 扁平分层依赖方向（`deny.toml` / crate 图 / cargo-deny）、域 crate 聚合边界、底座 trait/公共 API 稳定性（`cargo public-api` / `cargo-semver-checks`）、adapters/Xadapter trait 实现、bins/server 组合根装配职责、一致性级别标注、跨域 contract 版本语义
 
 ### 2. 安全/权限
 JWT 中间件覆盖、`/internal/v1/` 调用方声明与鉴权、数据暴露风险（敏感字段持久化边界）、输入校验/SQL 注入/XSS、生产配置安全（无 localhost 回退/noop publisher）
 
 ### 3. 测试/回归
-覆盖率（rss-kernel ≥90%，新增 ≥80%，`cargo-llvm-cov`）、contract test、journey test 场景闭环、边界用例（空值/极端值/并发）、关键一致性测试、L2+ outbox/幂等测试
+覆盖率（底座 crate consistency/primitives/vocab ≥90%，新增 ≥80%，`cargo-llvm-cov`）、contract test、journey test 场景闭环、边界用例（空值/极端值/并发）、关键一致性测试、L2+ outbox/幂等测试
 
 ### 4. 运维/部署
 migration 安全性（up/down 对、默认值、CONCURRENTLY）、readiness 真实性（非仅 ping）、relay/worker 生命周期接入（tokio task）、CI 覆盖、依赖干净度（`cargo-deny` / `cargo-udeps` / `cargo audit`）
 
 ### 5. 可维护性/DX
-rustdoc 清晰度、认知复杂度 ≤15（`clippy::cognitive_complexity`）、字符串常量抽取（≥3 次抽 `const`）、命名规范（DB snake_case / JSON camelCase）、`rss-errcode` + `thiserror` 统一、`tracing` 结构化日志、`cargo fmt` / `cargo clippy -- -D warnings` 干净
+rustdoc 清晰度、认知复杂度 ≤15（`clippy::cognitive_complexity`）、字符串常量抽取（≥3 次抽 `const`）、命名规范（DB snake_case / JSON camelCase）、`vocab` 错误模型 + `thiserror` 统一、`tracing` 结构化日志、`cargo fmt` / `cargo clippy -- -D warnings` 干净
 
 ### 6. 产品/用户体验
 CRUD 完整性、错误提示友好度、API 响应格式统一 `{"data":...}`、列表分页强制（≤500）、HTTP 状态码正确性
