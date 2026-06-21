@@ -33,6 +33,10 @@ check() { # <name> <expected> <actual>
 nonzero() { [ "$1" -ne 0 ] && echo nonzero || echo zero; }
 zero()    { [ "$1" -eq 0 ] && echo zero || echo nonzero; }
 has()     { printf '%s' "$1" | grep -q "$2" && echo dirty || echo clean; }
+# `_dry` lives in forge.sh (not sourced here); faithfully stub it so functions
+# that gate on it (e.g. _azure_issue_close) behave: print + return 0 under
+# DRY_RUN=1, else return 1 so the real path runs.
+_dry() { [ "${DRY_RUN:-0}" = "1" ] || return 1; local IFS=' '; printf '%s\n' "$*"; return 0; }
 
 body="$(mktemp "${TMPDIR:-/tmp}/azure-selftest.XXXXXX")"
 printf 'PR body line1\nline2\n' > "${body}"
@@ -83,7 +87,8 @@ ibody="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-ib.XXXXXX")"
 printf 'finding body line1\nline2\n' > "${ibody}"
 seen="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-seen.XXXXXX")"
 patched="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-patched.XXXXXX")"
-trap 'rm -f "${body}" "${ibody}" "${seen}" "${patched}"' EXIT
+mdcap="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-mdcap.XXXXXX")"
+trap 'rm -f "${body}" "${ibody}" "${seen}" "${patched}" "${mdcap}"' EXIT
 
 # Case I1: dry-run shape -> work-item create (with --type) + REST patch, never
 # `az devops invoke`.
@@ -130,6 +135,86 @@ export AZURE_WI_TYPE_BACKLOG="Product Backlog Item"
 _azure_issue_create "T" "${ibody}" "backlog" >/dev/null
 check "issue-create default type"          "match" \
     "$(grep -q -- '--type Product Backlog Item' "${seen}" && echo match || echo nomatch)"
+
+# ---- markdown rendering (work item description + comments) -------------------
+# Azure work-item large-text fields (System.Description) and the legacy discussion
+# field (System.History) default to HTML, so raw markdown renders literally. The
+# description must carry a /multilineFieldsFormat op; comments must go through the
+# dedicated Comments API (?format=markdown), NOT a System.History JSON-Patch.
+
+# Case MD1: issue-create description patch carries BOTH the value op and the
+# multilineFieldsFormat=Markdown op (else markdown renders as plain text).
+az() { case "$*" in *"boards work-item create"*) printf '{"id":99}\n' ;; *) printf '{}\n' ;; esac; }
+_az_wit_patch() { cp "$2" "${mdcap}"; return 0; }
+: > "${mdcap}"
+_azure_issue_create "T" "${ibody}" "backlog" "Product Backlog Item" >/dev/null
+check "issue-create: System.Description value op present" "match" \
+    "$(jq -e 'any(.[]; .path=="/fields/System.Description")' "${mdcap}" >/dev/null 2>&1 && echo match || echo nomatch)"
+check "issue-create: multilineFieldsFormat Markdown op" "match" \
+    "$(jq -e 'any(.[]; .path=="/multilineFieldsFormat/System.Description" and .value=="Markdown")' "${mdcap}" >/dev/null 2>&1 && echo match || echo nomatch)"
+
+# Case MD2: _az_wit_comment hits the Comments API with ?format=markdown at the
+# preview api-version that exposes CommentFormat. Stub auth + curl (capture argv).
+_az_auth_header() { printf 'Authorization: Basic x'; }
+# space-join argv ("$@" not "$*"): IFS-independent, and keeps "-X POST" adjacent.
+curl() { printf '%s ' "$@" > "${mdcap}"; return 0; }
+: > "${mdcap}"
+_az_wit_comment 77 "${ibody}" >/dev/null; rc=$?
+check "_az_wit_comment: zero exit"          "zero"  "$(zero "$rc")"
+check "_az_wit_comment: comments?format=markdown url" "match" \
+    "$(grep -q 'workItems/77/comments?format=markdown' "${mdcap}" && echo match || echo nomatch)"
+check "_az_wit_comment: api-version 7.1-preview.4" "match" \
+    "$(grep -q 'api-version=7.1-preview.4' "${mdcap}" && echo match || echo nomatch)"
+check "_az_wit_comment: POST method"        "match" \
+    "$(grep -q -- '-X POST' "${mdcap}" && echo match || echo nomatch)"
+unset -f curl _az_auth_header   # restore real curl/auth for any later case
+
+# Case MD3: issue-comment dry-run names the Comments API, never System.History.
+DRY_RUN=1
+out="$(_azure_issue_comment 55 "${ibody}")"; rc=$?
+DRY_RUN=0
+check "issue-comment dry: zero exit"        "zero"  "$(zero "$rc")"
+check "issue-comment dry: comments?format=markdown" "match" \
+    "$(printf '%s' "$out" | grep -q 'comments?format=markdown' && echo match || echo nomatch)"
+check "issue-comment dry: not System.History" "clean" "$(has "$out" 'System.History')"
+
+# Case MD4: issue-comment happy path funnels the body file through _az_wit_comment
+# (the markdown-rendering path), not _az_wit_patch (HTML System.History). Only
+# _az_wit_comment writes mdcap; _az_wit_patch is stubbed inert, so if issue-comment
+# took the wrong (System.History) path mdcap stays empty -> the assertion nomatch.
+_az_wit_patch() { return 0; }
+_az_wit_comment() { cp "$2" "${mdcap}"; return 0; }
+: > "${mdcap}"
+_azure_issue_comment 55 "${ibody}"; rc=$?
+check "issue-comment ok: zero exit"         "zero"  "$(zero "$rc")"
+check "issue-comment ok: body via _az_wit_comment" "match" \
+    "$(grep -q 'finding body line1' "${mdcap}" && echo match || echo nomatch)"
+
+# Case MD5: issue-close discussion comment also goes through _az_wit_comment.
+az() { printf '{}\n'; }   # work-item update --state returns ok
+: > "${mdcap}"
+_azure_issue_close 55 "" "close note via md" ; rc=$?
+check "issue-close ok: zero exit"           "zero"  "$(zero "$rc")"
+check "issue-close ok: comment via _az_wit_comment" "match" \
+    "$(grep -q 'close note via md' "${mdcap}" && echo match || echo nomatch)"
+
+# Case MD6: issue-close dry-run models BOTH side effects — state update AND, when a
+# comment is given, the Markdown Comments API step (regression: dry-run returned
+# right after the state update, hiding the comment side effect).
+DRY_RUN=1
+out="$(_azure_issue_close 55 "" "## closed via md")"; rc=$?
+DRY_RUN=0
+check "issue-close dry: zero exit"          "zero"  "$(zero "$rc")"
+check "issue-close dry: state update shown" "match" \
+    "$(printf '%s' "$out" | grep -q 'work-item update' && echo match || echo nomatch)"
+check "issue-close dry: comment step shown" "match" \
+    "$(printf '%s' "$out" | grep -q 'comments?format=markdown' && echo match || echo nomatch)"
+# anti-vacuity: empty comment -> only the state update, no comment step printed.
+DRY_RUN=1
+out="$(_azure_issue_close 55 "" "")"; rc=$?
+DRY_RUN=0
+check "issue-close dry empty: zero exit"    "zero"  "$(zero "$rc")"
+check "issue-close dry empty: no comment step" "clean" "$(has "$out" 'comments?format=markdown')"
 
 # Case CFG: forge.conf regression — backlog WI type must be a real Scrum type,
 # never "Issue" (this project's Scrum process template has no "Issue" -> VS402323).
