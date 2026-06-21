@@ -111,6 +111,3 @@ Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静�
 
 格式：`yyyyMMddHHmm-编号-实际功能或问题.md`
 示例：`202603281443-022-compliance-api-review.md`
-
-适用范围：`docs/architecture/` (ADR)、`docs/plans/` (实施计划)、`docs/reviews/` 等时间序载体。
-`docs/guides/` / `docs/ops/` 等长期参考文档按主题名命名，不需要时间戳前缀。
