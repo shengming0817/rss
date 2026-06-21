@@ -14,7 +14,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ## 输入解析
 优先级：**PR 号**（裸数字先按 PR 试 → `bash hack/automation/pr-comments.sh latest <N> pr-review` 取最新一条 pm:pr-review body 作为 findings 源；**只取最新一轮**——该 body 的 `<details>` 无损详表即本轮 findings；为空 → 无待修 review，报告退出。回退：pr-review body 为空时取最新一条 codex review/comment。**跳过**自己上一轮的 `pm:ship`/`pm:fix`/`pm:ci`/`pm:oos` 留痕（已处理）与早于该最新 review 的旧 `pm:pr-review`，**不回头处理上一轮已 triage 的 findings**）> **文件:行号** > **自然语言**（Grep/Glob）。**issue 号不再受理**——裸数字一律先按 PR 解析；issue 状态核查 + triage 收敛到 `issues` 技能（判定后建议 `/ship #<N>` 或 file:line）。
 
-**熔断闸门（PR 输入）**：读 `bash hack/automation/pr-meta.sh round <PR#>` / `extract`——`round ≥ 3` 或 `cycle.exhausted` 或 `next.agent == "human"` → 打印「review↔fix 已达 3 轮上限，转人工」退出，不修。（manual `/fix` 人在场可续；auto 路径 pr-monitor→`Skill("fix")` 靠此守 3 轮上限。）
+**熔断闸门（PR 输入）**：先 `bash hack/automation/pr-meta.sh extract <PR#>`（EC=0 读 `cycle.exhausted` / `next.agent`；EC≠0 无块/stale → 降级 `pr-meta.sh round`）——`cycle.exhausted == true` 或 `next.agent == "human"` 或 `round ≥ 3` → 打印「review↔fix 已达 3 轮上限，转人工」退出，不修。（manual `/fix` 人在场可续；auto 路径 pr-monitor→`Skill("fix")` 靠此守 3 轮上限。）
 
 ---
 
