@@ -30,6 +30,7 @@ permissionMode: auto
 - 查 `docs/references/framework-comparison.md` 找到当前模块对应的 primary/secondary 对标文件路径
 - 用户明确指定的外部项目 → 直接使用
 - 未指定 → 在 framework-comparison.md 中找同类模块的对标
+- **fail-loud**：锚点缺失 / 为空 / 表中无匹配项 → 返回 `对标锚点缺失：<模块>` 并停止，不凭记忆吐空结论
 
 ### 2. 拉取源码
 
