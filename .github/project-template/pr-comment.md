@@ -30,7 +30,7 @@
 <!-- pm:ship -->
 ## 🛠 ship review + fix
 
-**reviewer** <数> · **Findings** <总数>（已修 Cx1/Cx2 <n> · 遗留 Cx3/Cx4 <m> · OUT_OF_SCOPE <k>）
+**reviewer** <数> · **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
 - **F1** [P1·Cx2·安全] `path/to/file.rs:120` — <一句话> → ✅ 已修
 - **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：<原因>（或 ✅ 已修（人工确认））
@@ -62,7 +62,7 @@
 <!-- pm:fix -->
 ## 🔁 fix（findings triage + fix）
 
-**Findings** <总数>（已修 Cx1/Cx2 <n> · 遗留 Cx3/Cx4 <m> · OUT_OF_SCOPE <k>）
+**Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
 - **F1** [P1·Cx2·安全] `path/to/file.rs:120` — <一句话> → ✅ 已修
 - **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：<原因>（或 ✅ 已修（人工确认））
