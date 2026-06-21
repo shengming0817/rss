@@ -1,6 +1,6 @@
 # ADR-001：DI trait 的 async + dyn 派发策略与 Arc 样板范式
 
-- **状态**：Accepted（spike RW-G0.5 决策；下游 G1/W/Join 单元据此实落）
+- **状态**：Accepted（**派发策略方向**：采用 dynosaur）；**实现可行性待验证**——§8 三项开放风险须在 `diport` 落地 spike 中验证，任一不可接受则触发 §5 的 async-trait 复评路径
 - **日期**：2026-06-21
 - **关联**：issue #995 [RW-G0.5] · epic #991 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
@@ -62,13 +62,16 @@ dynosaur 宏展开会把 `unsafe { core::mem::transmute(...) }`（把 trait obje
 覆盖**——所以承载 dynosaur trait 的 crate 必须真正把 `forbid` 降为 `deny`。
 
 **决策**：DI port trait 定义 + 其 dynosaur `Dyn*` wrapper **集中到一个专用服务层 crate `diport`**
-（命名待评审）。**只有 `diport`** 把 crate 根降为 `#![deny(unsafe_code)]` 并对 dynosaur 生成点做目标
-`#[allow(unsafe_code)]`；**其余所有 crate（基础 / 引擎 / 服务 / 域 / adapters / bins）保持
-`#![forbid(unsafe_code)]` 不变**。
+（命名待评审）。**只有 `diport`** 在自己的 `Cargo.toml [lints]` 中把 `unsafe_code` 设为 `deny`（覆盖
+workspace 默认的 `forbid`）并对 dynosaur 生成点做目标 `#[allow(unsafe_code)]`；其余所有 crate 继续
+`[lints] workspace = true` 继承 `forbid`。
 
-收敛的强度来自一个免费的编译期事实：**非-`diport` crate 既然仍 `forbid`，任何在 `diport` 之外
-invoke dynosaur 宏 → 展开出 unsafe → 当场编译失败**。「dynosaur 只能在 `diport` 用」因此是 crate
-属性强制的 **Hard** 约束，不靠口头纪律（§7）。
+**收敛的真正守卫是 crate 依赖图 + cargo-deny（Medium），不是 per-crate forbid（后者可被覆盖）。**
+准确说：① 要 invoke `#[dynosaur::dynosaur(...)]` 宏，crate 必须**声明对 `dynosaur` 的依赖**；
+② `deny.toml` wrappers 把「可依赖 `dynosaur`」限定到 `diport` 一个 crate（cargo-deny，**Medium**，CI 门）——
+没有依赖就 import 不到宏、也就展开不出 unsafe。per-crate `#![forbid(unsafe_code)]` 只是**可被成员
+`[lints]` 覆盖的纵深防御默认**（workspace lints 是 opt-in 继承、非硬上限，见 Cargo workspace 文档），
+**不**单独构成编译期 Hard——故本约束按 **Medium** 登记（§7），不夸大为 Hard。
 
 > 收敛的代价是偏离「port trait 属域 crate `internal/ports`」（§6 偏离 2）。DI infra port 不是跨域 wire——
 > 跨域通信仍只经 contract，本偏离不触碰「契约是跨域通信单源」。
@@ -79,18 +82,24 @@ invoke dynosaur 宏 → 展开出 unsafe → 当场编译失败**。「dynosaur 
 
 ### 4.1 port trait 定义（在 `diport`）
 
-```rust
-// crates/diport/src/store.rs
-#![deny(unsafe_code)] // crate 根用 deny（非 forbid），使 dynosaur 生成点的 #[allow] 能生效
+`diport` 的 `Cargo.toml` **不**写 `[lints] workspace = true`，而是显式
+`[lints.rust] unsafe_code = "deny"`（覆盖 workspace 默认 `forbid`，使 crate 根 / 生成点的目标 `#[allow]`
+能生效——`forbid` 下 `#[allow]` 无效，`deny` 下有效）：
 
+```rust
+// crates/diport/src/lib.rs
+#![deny(unsafe_code)] // crate 根：deny（非 forbid），仅本 crate；其余 crate 继承 workspace forbid
+
+// crates/diport/src/store.rs
 use std::sync::Arc;
 
 mod private {
     pub trait Sealed {}
 }
 
-/// INVARIANT: DIPORT-SEALED-01 — 外部 crate 无法实现（private::Sealed 不可见）。
 /// dynosaur 生成 dyn-compatible 的 `DynUserStore` wrapper；static 路径零开销，dyn 路径才 box。
+/// 注：`private::Sealed` supertrait 仅在 §4.2 选项 ①（impl 收回 diport）时保留；本 ADR 倾向 ②，届时去掉
+/// supertrait，实现方 crate 集改由 deny.toml wrappers 限定（见 §4.2 / §8 风险 2）。
 #[dynosaur::dynosaur(DynUserStore = dyn(box) UserStore)]
 pub trait UserStore: private::Sealed + Send + Sync {
     async fn find_by_id(&self, id: UserId) -> Result<User, StoreError>;
@@ -102,25 +111,31 @@ pub trait UserStore: private::Sealed + Send + Sync {
 }
 ```
 
-### 4.2 sealed marker wrapper + 实现（在域 crate / adapter）
+### 4.2 adapter 实现（在 adapter crate）
 
-raw adapter client 先 newtype 包成 `pub(crate)` sealed marker，再实现 port trait——域 / adapter crate
+raw adapter client 先 newtype 包成 `pub(crate)`，再实现 port trait——adapter crate
 **保持 `#![forbid(unsafe_code)]`**（只 import `diport` 的 trait + `Dyn*`，自己不 invoke dynosaur 宏）：
 
 ```rust
 // adapters/postgres/src/user_store.rs  （forbid(unsafe_code) 不变）
-use diport::{UserStore, store::private::Sealed};
+use diport::UserStore;
 
 pub(crate) struct PgUserStore(sqlx::PgPool); // raw client 保持 pub(crate)
-
-impl Sealed for PgUserStore {}
 
 impl UserStore for PgUserStore {            // native AFIT impl，无 #[async_trait]
     async fn find_by_id(&self, id: UserId) -> Result<User, StoreError> { /* sqlx ... */ }
     async fn save(&self, user: &User) -> Result<(), StoreError> { /* ... */ }
+    // reason: sqlx::PgPool::close() 返回 ()，无错误路径——其它有错误路径的 port（Signer/Publisher）须用 `?`
     async fn shutdown(&self) -> Result<(), StoreError> { self.0.close().await; Ok(()) }
 }
 ```
+
+> **sealing 的根本张力（§8 风险 2）**：§4.1 的 `private::Sealed` supertrait 只能在**定义 crate（`diport`）
+> 内**封闭；而 adapter 是**独立 crate**——sealed-trait 无法「只放行某个外部 crate impl」。故集中到 `diport`
+> 后，DI port trait **无法**对其 adapter 实现方 sealing。落地二选一（本 ADR 倾向 ②，保持 adapter crate 独立）：
+> **①** port impl 收回 `diport` 内（sealing 成立，但 adapter 逻辑入 diport）；**②** 放弃跨 crate sealing，改由
+> `deny.toml` wrappers 限定「可依赖 `diport` 并 impl port trait」的 crate 集（cargo-deny，**Medium**）。
+> 上方骨架按 ② 写（adapter 不 `impl Sealed`），`private::Sealed` 仅当选 ① 时保留。
 
 ### 4.3 构造器必填注入（Clock 同范式）
 
@@ -146,13 +161,21 @@ impl SessionService {
 }
 ```
 
-> `Box<Dyn*>` 还是 `Arc<Dyn*>`？需要跨 `tokio::spawn` 多处共享同一 provider → `Arc`；单一所有者 →
-> `Box`。两者都满足 `Send + Sync + 'static`（trait 定义处已声明 `Send + Sync`）。
+> `Box<Dyn*>` 还是 `Arc<Dyn*>`？单一所有者 → `Box`；需要跨 `tokio::spawn` / 多 service 共享同一 provider
+> → `Arc`（`Box` 不能 clone 共享）。两者都满足 `Send + Sync + 'static`（trait 定义处已声明 `Send + Sync`）。
+> 共享场景示例：
+>
+> ```rust
+> let publisher: Arc<DynEventPublisher> = Arc::new(DynEventPublisher::new_box(AmqpPublisher::..));
+> let p = Arc::clone(&publisher);
+> tokio::spawn(async move { p.publish(evt).await }); // Arc 可 move 进 'static task；Box 不行
+> ```
 
 ### 4.4 组合根装配 + 逆序关闭（无 async Drop）
 
 ```rust
 // bins/server/src/main.rs  （forbid(unsafe_code) 不变）
+// CAUTION: new_box / from_box 是 dynosaur pre-1.0（=0.3.x）API，升级前先查 changelog（§8 风险 3）
 let store = DynUserStore::new_box(PgUserStore(pool));        // dynosaur v0.3 API：new_box
 let clock = DynClock::new_box(SystemClock);                  // prod clock 只在组合根构造
 let publisher = DynEventPublisher::new_box(AmqpPublisher::connect(...).await?);
@@ -177,6 +200,10 @@ let svc = SessionService::new(store, clock, publisher);
 具体：`UserStore`/`SessionStore`/`CertSigner`/`EventPublisher`/`Pdp`/`Clock` → 动态；`vocab` 错误格式化、
 `ids` 校验、`consistency` 状态机转移、`tower::Layer` 中间件 → 静态。
 
+> 表中「用 `mockall` mock 注入测试」**只适用于已经走 `Box<Dyn*>`/`Arc<Dyn*>` 的动态依赖**——可 mock
+> 不是选动态的理由。L0 静态依赖的单测用 `#[cfg(test)]` 模块内的直接 impl 替身，不引入 dynosaur wrapper、
+> 不破坏「L0 保持 forbid 干净」。
+
 ### 4.6 dyn 对象安全 dos / don'ts（port trait 写法约束）
 
 **禁**（破坏 dyn-compatible）：泛型方法 `fn f<T>(..)`、返回 `Self`、返回 `impl Trait`、`where Self: Sized`、
@@ -200,10 +227,9 @@ let svc = SessionService::new(store, clock, publisher);
 
 ## 6. 与 RSS 既有规则的契合 / 偏离
 
-**契合**（范式不破坏既有 Hard）：构造器必填参（ai-robust Hard）；sealed-trait + `pub(crate)` 封装；
-Adapter sealed marker（`PgUserStore(PgPool)` 保持 `pub(crate)`）；Clock 构造器位置参（rust-standards）；
-Init fail-fast（`Arc/Box<Dyn*>` 由组合根构造后注入，`init()` 不做 I/O / 不构造连接）；跨域只经 contract
-（DI port ≠ 跨域 wire，不触碰）。
+**契合**（范式不破坏既有 Hard）：构造器必填参（ai-robust Hard）；raw client `pub(crate)` 封装
+（`PgUserStore(PgPool)`）；Clock 构造器位置参（rust-standards）；Init fail-fast（`Arc/Box<Dyn*>` 由组合根
+构造后注入，`init()` 不做 I/O / 不构造连接）；跨域只经 contract（DI port ≠ 跨域 wire，不触碰）。
 
 **偏离 1**：`#![forbid(unsafe_code)]` 全局默认 → **`diport` 例外**（`deny` + 目标 `allow`）。理由：dynosaur
 生成点的 transmute 无法在 `forbid` 下编译；收敛到单一 crate 使其余全仓保持 `forbid`（§3）。
@@ -212,7 +238,12 @@ Init fail-fast（`Arc/Box<Dyn*>` 由组合根构造后注入，`init()` 不做 I
 理由：unsafe 收敛要求宏调用集中（§3）。澄清：DI infra port 是 provider-agnostic 基础设施 trait，**不是**
 跨域 wire 类型；跨域通信单源仍是 contract，本偏离不削弱该不变式。
 
-> 这两条偏离须在 `diport` crate 实落时**同步回写** `rust-standards.md §工程护栏` 与 `domain-patterns.md`
+**偏离 3（部分）**：domain-patterns「port trait 用 sealed-trait 封闭」在**同 crate**内仍成立，但 DI port
+trait 集中到 `diport` 后**无法对独立 adapter crate sealing**（§4.2）——本 ADR 倾向放弃跨 crate sealing、
+改 cargo-deny wrappers（Medium）限定实现方 crate 集。即「外部无法 impl」从类型系统 Hard 降为 cargo-deny
+Medium。
+
+> 三条偏离须在 `diport` crate 实落时**同步回写** `rust-standards.md §工程护栏` 与 `domain-patterns.md`
 > （见 §8 follow-up）——本 doc-only PR 不改规则文件（规则提前引用尚不存在的 crate 反而制造漂移）。
 
 ---
@@ -221,11 +252,11 @@ Init fail-fast（`Arc/Box<Dyn*>` 由组合根构造后注入，`init()` 不做 I
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
-| **unsafe 只能出现在 `diport`** | **Hard（编译期，免费）** | **保留**非-`diport` crate 的 `#![forbid(unsafe_code)]`——在别处用 dynosaur 即展开 unsafe → 当场编不过。不靠纪律。 |
+| **unsafe 只能出现在 `diport`** | **Medium（cargo-deny）** | `deny.toml` wrappers 把「可依赖 `dynosaur`」限定到 `diport`——无依赖即 import 不到宏、展开不出 unsafe（§3）。per-crate `forbid` 是**可被成员 `[lints]` 覆盖**的纵深防御默认，**不**单独构成编译期 Hard，故按 Medium 登记。 |
 | **DI port trait 必须 dyn-compatible** | **Hard（编译器）** | 写出非 dyn-safe trait，`Box<Dyn*>`/`Arc<Dyn*>` 直接编不过。`trybuild` compile-fail 用例仅作 **Medium 回归锁**（锁错误形态），列 §8 follow-up。 |
 | **必填 DI 依赖非 Option** | **Hard（类型系统）** | 构造器必填位置参 `Box<Dyn*>`，缺失即编译错误（ai-robust 范本）。 |
-| **dynosaur 版本 pin + `diport` unsafe allowlist** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：unsafe 仅准 `diport`、dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |
-| **shutdown 逆序关闭** | **Medium（bootstrap 框架）** | 逆序类型系统管不到（无 async Drop）；由 `bootstrap` 按注册逆序统一执行 `shutdown()`，把它从 Soft 升 Medium——**禁止**退化成「组合根手记顺序」的 Soft 纪律。 |
+| **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |
+| **shutdown 逆序关闭** | **Soft（当前）→ Medium（`bootstrap` 框架落地后）** | 逆序类型系统管不到（无 async Drop）。`bootstrap` shutdown 框架（§8 follow-up，**尚未落地**）按注册逆序统一执行 `shutdown()` 后升 Medium；在此之前为 Soft，故该框架是 `diport` 实落的**前置项**而非可选 follow-up——**禁止**长期停留在「组合根手记顺序」的 Soft 纪律。 |
 
 ---
 
@@ -233,21 +264,27 @@ Init fail-fast（`Arc/Box<Dyn*>` 由组合根构造后注入，`init()` 不做 I
 
 **开放风险（`diport` crate 实落前必须验证，dynosaur pre-1.0 的不确定面）**：
 
-1. **目标 `#[allow]` 可达性**：dynosaur 是否自带 `#[allow(unsafe_code)]` 于生成点？若否，需 item-level
-   包裹机制把 allow 局限到生成项——**不得**用 module/crate-level carve-out（与 error-handling.md §Carve-out
-   「carve-out 只能 item-level」冲突）。须实测 `cargo expand` 确认。
-2. **sealed + dynosaur 共存**：dynosaur 生成的 `DynUserStore` wrapper 能否 impl `private::Sealed`
-   supertrait（其生成代码 module path 与 `Sealed` 定义处一致）？若不能，须在 `diport` 内为每个 `Dyn*` 显式
-   补 `impl Sealed`，或放宽 sealing。须实测。
+1. **目标 `#[allow]` 可达性 + carve-out 登记**：dynosaur 是否自带 `#[allow(unsafe_code)]` 于生成点？若否，
+   需 item-level 包裹机制把 allow 局限到生成项——**不得**用 module/crate-level carve-out（与 error-handling.md
+   §Carve-out「carve-out 只能 item-level」冲突）。须实测 `cargo expand` 确认。**无论自带或手写**，只要 unsafe
+   出现在 `diport`，即构成一次 carve-out 事件——须按 error-handling.md §Carve-out 同步更新 ADR registry +
+   lint 配置映射，并在展开点提供 `// SAFETY:`（或 `diport` rustdoc INVARIANT 集中登记）阐明 transmute 的
+   lifetime-擦除安全假设（rust-standards §工程护栏「unsafe 必须带 `// SAFETY:`」）。
+2. **跨 crate sealing 不可行（见 §4.2）**：sealed-trait 只能在定义 crate `diport` 内封闭，adapter 是独立
+   crate → DI port trait 无法对其 adapter 实现方 sealing。落地须在 §4.2 ①（impl 收回 diport）/ ②（放弃跨
+   crate sealing，cargo-deny wrappers 限定实现方 crate 集）间定夺；本 ADR 倾向 ②。须 `diport` 落地确认。
 3. **dynosaur v0.3 API 稳定性**：`new_box` / `from_box` / bridge impl 仍在破坏式演进；pin `=0.3.x` 并在
-   升级时审 changelog。
+   升级时审 changelog。供应链 advisory 由 `deny.toml [advisories]`（全量 advisory 扫描 + `yanked = "deny"`）
+   自动覆盖，无需显式 ignore。
 
-**follow-up（登记，本 doc-only PR 不做）**：
+**follow-up（本 doc-only PR 不做；归属下游 `diport` 落地单元——epic #991 的 G1/W/Join 子项跟踪，不在此重复建 issue）**：
 
 - `diport` crate 落地（service 层）+ pin dynosaur `=0.3.x`。
-- `deny.toml` / clippy Medium 守卫：unsafe 仅准 `diport`、dynosaur 仅准 `diport` 依赖。
+- `deny.toml` wrappers（Medium）：「可依赖 `dynosaur`」限定到 `diport`、「可依赖 `diport` 并 impl port trait」
+  限定到允许的 adapter crate 集；clippy / cargo-deny 守 unsafe 仅准 `diport`。
 - 首个 port trait 落地：加 `trybuild` dyn-compatible compile-pass / compile-fail 用例（Medium 回归锁）。
-- `bootstrap` shutdown 框架：按注册逆序执行 `shutdown()`（把 §7 末条落到 Medium）。
+- `bootstrap` shutdown 框架：按注册逆序执行 `shutdown()`（把 §7 末条从 Soft 升 Medium）——**前置项**，先于
+  port trait 大规模落地。
 - 回写 `rust-standards.md §工程护栏`（`diport` forbid 例外）+ `domain-patterns.md`（DI port 集中例外）。
 - **复评触发**：dynosaur 发 1.0 时复评（破坏式 API / unsafe 收口 / forbid 兼容）；若 1.0 前实测三项开放
   风险任一不可接受，按 §5 以 async-trait 为对照重评。
