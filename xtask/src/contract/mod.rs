@@ -1,6 +1,6 @@
 //! 契约声明源（`contracts/`）的发现 / 解析 / 校验。
-pub mod manifest;
-pub mod validate;
+pub(crate) mod manifest;
+pub(crate) mod validate;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -9,18 +9,18 @@ use manifest::ContractManifest;
 
 /// 一个已发现并解析的契约：目录 + 元数据 + 磁盘路径派生的 kind/domain/version 段。
 #[derive(Debug, Clone)]
-pub struct DiscoveredContract {
+pub(crate) struct DiscoveredContract {
     /// 契约目录（含 `contract.toml`）。
-    pub dir: PathBuf,
+    pub(crate) dir: PathBuf,
     /// 磁盘段 `{kind}/{domain}/{version}`（相对 `contracts/` 根），供 R3 路径↔字段一致校验。
-    pub path_kind: String,
-    pub path_domain: String,
-    pub path_version: String,
-    pub manifest: ContractManifest,
+    pub(crate) path_kind: String,
+    pub(crate) path_domain: String,
+    pub(crate) path_version: String,
+    pub(crate) manifest: ContractManifest,
 }
 
 /// 递归发现 `contracts_root` 下全部 `contract.toml`，解析为 `DiscoveredContract`，按目录排序（确定性）。
-pub fn discover(contracts_root: &Path) -> Result<Vec<DiscoveredContract>> {
+pub(crate) fn discover(contracts_root: &Path) -> Result<Vec<DiscoveredContract>> {
     let mut toml_paths = Vec::new();
     collect_contract_tomls(contracts_root, &mut toml_paths)?;
     toml_paths.sort();
@@ -72,7 +72,7 @@ fn collect_contract_tomls(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// 取 dir 相对 contracts_root 的末 3 段（kind/domain/version）。层级不符返回 `None`。
-fn path_segments(contracts_root: &Path, dir: &Path) -> Option<(String, String, String)> {
+pub(crate) fn path_segments(contracts_root: &Path, dir: &Path) -> Option<(String, String, String)> {
     let rel = dir.strip_prefix(contracts_root).ok()?;
     let segs: Vec<&str> = rel
         .components()
@@ -83,5 +83,42 @@ fn path_segments(contracts_root: &Path, dir: &Path) -> Option<(String, String, S
             Some((kind.to_string(), domain.to_string(), version.to_string()))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_segments_three_segments_returns_some() {
+        let root = std::path::Path::new("/contracts");
+        let dir = std::path::Path::new("/contracts/http/_seed/v1");
+        let result = path_segments(root, dir);
+        assert_eq!(
+            result,
+            Some(("http".to_string(), "_seed".to_string(), "v1".to_string()))
+        );
+    }
+
+    #[test]
+    fn path_segments_two_segments_returns_none() {
+        let root = std::path::Path::new("/contracts");
+        let dir = std::path::Path::new("/contracts/http/_seed");
+        assert!(path_segments(root, dir).is_none());
+    }
+
+    #[test]
+    fn path_segments_four_segments_returns_none() {
+        let root = std::path::Path::new("/contracts");
+        let dir = std::path::Path::new("/contracts/http/_seed/v1/extra");
+        assert!(path_segments(root, dir).is_none());
+    }
+
+    #[test]
+    fn path_segments_root_equals_dir_returns_none() {
+        let root = std::path::Path::new("/contracts");
+        let dir = std::path::Path::new("/contracts");
+        assert!(path_segments(root, dir).is_none());
     }
 }

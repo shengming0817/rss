@@ -15,7 +15,8 @@ contracts/{kind}/{domain}/{version}/
 ```
 
 - `kind` ∈ `http` | `event` | `command` | `saga`
-- `domain` = 域 crate 名，或 `_` 前缀保留段（如 `_seed`）；`_framework` 是 owner sentinel，不是 domain
+- `domain`：合法值 = 域 crate 名，或 `_` 前缀保留段（如 `_seed`）。**注意**：`domain` 是目录段，与契约归属无关。
+- `owner`：合法值 = 域名（如 `identity`），或 `_framework` sentinel（provider-agnostic 中立契约，不绑定 domain 目录）。`_framework` 是 owner 字段的保留值，**不对应任何目录段**。
 - `version` = `v{N}`
 
 ## contract.toml 字段（冻结，`#[serde(deny_unknown_fields)]`）
@@ -31,17 +32,29 @@ contracts/{kind}/{domain}/{version}/
 | `lifecycle` | `draft`/`active`/`deprecated`（`active` 才需 assembly 接线，见 contract-fanout.md） | 是 |
 | `[schemas]` | `request`/`response`/`payload` → schema 文件名 | 按 kind |
 
-校验规则（`cargo xtask contract validate`）：`saga` ⇒ `consistencyLevel=WorkflowEventual`；`owner=_framework` ⇒ `kind ∈ {http,event}`；
-磁盘路径段 `{kind}/{domain}/{version}` 须等于 manifest 字段；声明的每个 schema 文件须存在；kind→schema 形态须一致
-（http 需 request+response、event/saga 需 payload、command 需 request）。
+校验规则（`cargo xtask contract validate`，R1–R6 ↔ `Rule` 枚举）：
+
+| 编号 | Rule 枚举名 | 描述 |
+|------|-------------|------|
+| R1 | `SagaConsistency` | `kind=saga` ⇒ `consistencyLevel=WorkflowEventual` |
+| R2 | `FrameworkKind` | `owner=_framework` ⇒ `kind ∈ {http,event}` |
+| R3 | `PathMismatch` | 磁盘路径段 `{kind}/{domain}/{version}` 须等于 manifest 字段 |
+| R4 | `SchemaShape` | kind→schema 形态须一致（http 需 request+response、event/saga 需 payload、command 需 request） |
+| R5 | `MissingSchema` | 声明的每个 schema 文件须存在于契约目录 |
+| R6 | `UnsafeSchemaPath` | schema 文件名须为纯文件名，不得含 `../`、绝对路径等路径分量（防逃逸） |
 
 ## schema.json
 
 - 每个 JSON Schema 的 `title` 字段是生成的 Rust 类型名，必须**唯一且 PascalCase**。
 - camelCase 属性名（如 `thingId`）由 typify 生成为 snake_case Rust 字段 + `#[serde(rename)]`（wire camelCase / Rust snake，符合 RSS 命名）。
-- 种子契约避免 `format: uuid` / `format: date-time`——防 `generated/` 引入 uuid/chrono 依赖（`generated/` 仅依赖 serde）。
+- `format: int64`/`format: int32` → typify 生成原生整数类型（`i64`/`i32`），无外部依赖，可用。
+- 种子契约避免 `format: uuid`（引入 `uuid` crate）和 `format: date-time`（引入 `chrono` crate）——防 `generated/` 引入超出 `serde` 的额外依赖。其他 `format` 按 typify 映射处理。
 
 ## 派生（committed，一等审查材料）
 
 `cargo xtask codegen` 经 typify+prettyplease 把 `*.schema.json` 派生进 `generated/` crate（committed `generated/src/{kind}/{domain}_{version}.rs`）；
 `cargo xtask codegen --check` 重生成并 diff 已提交文件，漂移即失败（CI 门）。**勿手改 `generated/src/**`**——派生 diff 是一等审查材料。
+
+`cargo xtask verify`（= `contract validate` + `codegen --check`）是本地聚合治理门：依次跑元数据校验再跑漂移检测，任一失败即停止。在无 CI 环境（如 Azure 限流）时可用此命令本地自验。
+
+per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的专属 block）留各自后续单元，届时扩展 `ContractManifest`（属预期附加演进，非破坏冻结；backlog 跟踪）。

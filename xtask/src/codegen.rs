@@ -15,14 +15,13 @@
 use anyhow::{Context, Result, bail};
 use schemars::schema::RootSchema;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
-use crate::contract::manifest::Schemas;
 use crate::contract::{DiscoveredContract, discover};
 
 /// 入口：生成（`check=false`）或校验漂移（`check=true`）真实仓的 committed 派生码。
-pub fn run(check: bool) -> Result<()> {
+pub(crate) fn run(check: bool) -> Result<()> {
     let root = crate::workspace_root()?;
     generate(
         &root.join("contracts"),
@@ -75,7 +74,16 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
     let mut space = TypeSpace::new(&settings);
-    for schema_file in ordered_schema_files(&c.manifest.schemas) {
+    let source = format!(
+        "contracts/{}/{}/{}/",
+        c.manifest.kind.as_dir(),
+        c.manifest.domain,
+        c.manifest.version
+    );
+    for schema_file in c.manifest.schemas.declared_files() {
+        // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
+        validate_schema_filename(schema_file)
+            .with_context(|| format!("契约 {source} 的 schema 文件名不安全: {schema_file}"))?;
         let path = c.dir.join(schema_file);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读 schema {}", path.display()))?;
@@ -86,12 +94,6 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
             .map_err(|e| anyhow::anyhow!("typify 派生 {}: {e}", path.display()))?;
     }
     let parsed = syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
-    let source = format!(
-        "contracts/{}/{}/{}/",
-        c.manifest.kind.as_dir(),
-        c.manifest.domain,
-        c.manifest.version
-    );
     Ok(format!(
         "{}{}",
         generated_header(&source),
@@ -99,16 +101,19 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     ))
 }
 
-/// schema 文件按确定性顺序（request → response → payload）喂进 TypeSpace。
-fn ordered_schema_files(s: &Schemas) -> Vec<&str> {
-    [
-        s.request.as_deref(),
-        s.response.as_deref(),
-        s.payload.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+/// 校验 schema 文件名为纯文件名（无路径分量）。
+fn validate_schema_filename(file: &str) -> Result<()> {
+    let p = std::path::Path::new(file);
+    let has_unsafe_component = p.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    });
+    if has_unsafe_component || file.contains('/') || file.contains('\\') {
+        bail!("schema 文件名含路径分量（防逃逸）: {file}");
+    }
+    Ok(())
 }
 
 /// 文件头：`@generated` 标记。派生码经 typify→prettyplease→rustfmt 三段成形（见模块 doc），勿手改。
@@ -135,6 +140,7 @@ fn render_lib_rs<'a>(kinds: impl Iterator<Item = &'a String>) -> String {
 }
 
 /// rust-analyzer 模式：内容一致则 noop；`check` 下漂移即 `bail`；否则写盘（建父目录）。
+/// 漂移错误消息附带 contracts/ 源路径，便于作者定位触发变更的契约。
 fn ensure_file_contents(path: &Path, contents: &str, check: bool) -> Result<()> {
     let normalized = normalize(contents);
     let current = std::fs::read_to_string(path).ok();
@@ -142,9 +148,14 @@ fn ensure_file_contents(path: &Path, contents: &str, check: bool) -> Result<()> 
         return Ok(());
     }
     if check {
+        // 从 @generated 头提取 contracts/ 源路径，辅助作者定位。
+        let source_hint = extract_source_from_header(&normalized)
+            .map(|s| format!("（来源：{s}）"))
+            .unwrap_or_default();
         bail!(
-            "派生漂移：{} 与 contracts/ 不一致。跑 `cargo xtask codegen` 重生成并提交。",
-            path.display()
+            "派生漂移：{} 与 contracts/ 不一致{}。跑 `cargo xtask codegen` 重生成并提交。",
+            path.display(),
+            source_hint,
         );
     }
     if let Some(parent) = path.parent() {
@@ -156,6 +167,15 @@ fn ensure_file_contents(path: &Path, contents: &str, check: bool) -> Result<()> 
     Ok(())
 }
 
+/// 从 `@generated` 注释行提取 `Source:` 后的路径。
+fn extract_source_from_header(contents: &str) -> Option<&str> {
+    contents
+        .lines()
+        .next()
+        .and_then(|line| line.split("Source:").nth(1))
+        .map(str::trim)
+}
+
 fn normalize(s: &str) -> String {
     let mut out = s.trim_end().to_string();
     out.push('\n');
@@ -165,7 +185,7 @@ fn normalize(s: &str) -> String {
 /// 经 rustfmt 规范化（与 `cargo fmt` 同一 formatter）——派生 committed 文件须 rustfmt-canonical，
 /// 否则 `cargo fmt --all` 会重排 prettyplease 输出（如 `fn fmt(..)` 换行）造成 codegen 漂移。
 /// 用 rust-toolchain.toml 钉的 rustfmt（component）；edition 显式 2024 与 generated crate 一致。
-fn format_rust(code: &str) -> Result<String> {
+pub(crate) fn format_rust(code: &str) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut child = Command::new("rustfmt")
@@ -233,14 +253,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn unique_tmp() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("rss-xtask-codegen-{}-{n}", std::process::id()))
-    }
+    use crate::testutil::unique_tmp;
 
     /// 在 `root/contracts/http/_seed/v1` 落一个最小 http 契约。
     fn seed_http(root: &Path) -> Result<()> {
@@ -262,6 +275,19 @@ mod tests {
         Ok(())
     }
 
+    /// 在 `root/contracts/event/_seed/v1` 落一个最小 event 契约。
+    fn seed_event(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/event/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            "id = \"seed.happened\"\nkind = \"event\"\ndomain = \"_seed\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"OutboxFact\"\nlifecycle = \"draft\"\n[schemas]\npayload = \"payload.schema.json\"\n",
+        )?;
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
+        std::fs::write(dir.join("payload.schema.json"), schema)?;
+        Ok(())
+    }
+
     #[test]
     fn module_name_joins_domain_version() {
         assert_eq!(module_name("_seed", "v1"), "_seed_v1");
@@ -275,7 +301,7 @@ mod tests {
 
     #[test]
     fn generate_then_check_is_clean_and_idempotent() -> anyhow::Result<()> {
-        let root = unique_tmp();
+        let root = unique_tmp("codegen");
         seed_http(&root)?;
         let contracts = root.join("contracts");
         let gen_src = root.join("generated/src");
@@ -293,7 +319,7 @@ mod tests {
     #[test]
     fn check_fails_on_injected_drift() -> anyhow::Result<()> {
         // anti-vacuity（负向）：篡改 committed 文件后 --check 必失。
-        let root = unique_tmp();
+        let root = unique_tmp("codegen");
         seed_http(&root)?;
         let contracts = root.join("contracts");
         let gen_src = root.join("generated/src");
@@ -308,7 +334,7 @@ mod tests {
     #[test]
     fn check_fails_on_orphan_file() -> anyhow::Result<()> {
         // anti-vacuity（负向）：多出无契约支撑的 .rs 必失。
-        let root = unique_tmp();
+        let root = unique_tmp("codegen");
         seed_http(&root)?;
         let contracts = root.join("contracts");
         let gen_src = root.join("generated/src");
@@ -322,5 +348,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(after.is_ok(), "写模式应已删孤儿");
         Ok(())
+    }
+
+    /// 多 kind 测试：同时含 http + event 两个契约，lib.rs 须同时含 `pub mod event;` 与 `pub mod http;`。
+    #[test]
+    fn generate_multi_kind_produces_both_mod_entries() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        seed_event(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let lib_rs = std::fs::read_to_string(gen_src.join("lib.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            lib_rs.contains("pub mod event;"),
+            "lib.rs 缺 event mod: {lib_rs}"
+        );
+        assert!(
+            lib_rs.contains("pub mod http;"),
+            "lib.rs 缺 http mod: {lib_rs}"
+        );
+        Ok(())
+    }
+
+    /// format_rust 失败路径：传非法 Rust 须返回 Err。
+    #[test]
+    fn format_rust_rejects_invalid_syntax() {
+        let result = format_rust("fn (");
+        assert!(result.is_err(), "非法 Rust 须使 format_rust 返 Err");
     }
 }

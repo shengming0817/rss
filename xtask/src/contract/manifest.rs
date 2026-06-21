@@ -3,28 +3,34 @@
 //! INVARIANT: CONTRACT-FREEZE-01 — `ContractManifest` 字段集 + 枚举即 `contract.toml` 格式的
 //! 单一事实源（Hard，类型层）：`#[serde(deny_unknown_fields)]` + 非 `Option` 枚举字段使「坏格式」
 //! 解析即 `Err`，错误不可表达。新增/删字段须同步 `contracts/README.md` 与种子 golden。
+//! Hard 类型层部分（字段冻结、枚举解析拒绝）在本文件；运行期跨字段不变式见 `validate.rs`（CONTRACT-FREEZE-01）。
 
 use serde::Deserialize;
+
+/// schema 键名常量——DRY 于 validate + codegen 双处引用（消除裸串重复）。
+pub(crate) const SCHEMA_KEY_REQUEST: &str = "request";
+pub(crate) const SCHEMA_KEY_RESPONSE: &str = "response";
+pub(crate) const SCHEMA_KEY_PAYLOAD: &str = "payload";
 
 /// `contract.toml` 的解析目标。字段集冻结——见模块 INVARIANT。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContractManifest {
-    pub id: String,
-    pub kind: ContractKind,
-    pub domain: String,
-    pub version: String,
-    pub owner: ContractOwner,
+pub(crate) struct ContractManifest {
+    pub(crate) id: String,
+    pub(crate) kind: ContractKind,
+    pub(crate) domain: String,
+    pub(crate) version: String,
+    pub(crate) owner: ContractOwner,
     #[serde(rename = "consistencyLevel")]
-    pub consistency_level: ConsistencyLevel,
-    pub lifecycle: Lifecycle,
+    pub(crate) consistency_level: ConsistencyLevel,
+    pub(crate) lifecycle: Lifecycle,
     #[serde(default)]
-    pub schemas: Schemas,
+    pub(crate) schemas: Schemas,
 }
 
 impl ContractManifest {
     /// 解析 `contract.toml` 文本。坏枚举 / 未知字段 / 缺字段即 `Err`（CONTRACT-FREEZE-01）。
-    pub fn from_toml_str(text: &str) -> Result<Self, toml::de::Error> {
+    pub(crate) fn from_toml_str(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
     }
 }
@@ -32,7 +38,7 @@ impl ContractManifest {
 /// 契约种类。`kind` 决定 wire 形态与 codegen 走向；磁盘段 `contracts/{kind}/...` 与之同源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ContractKind {
+pub(crate) enum ContractKind {
     Http,
     Event,
     Command,
@@ -41,7 +47,7 @@ pub enum ContractKind {
 
 impl ContractKind {
     /// 磁盘目录段（与 `contracts/{kind}/...` 路径一致）。
-    pub fn as_dir(self) -> &'static str {
+    pub(crate) fn as_dir(self) -> &'static str {
         match self {
             ContractKind::Http => "http",
             ContractKind::Event => "event",
@@ -53,7 +59,7 @@ impl ContractKind {
 
 /// L0–L4 一致性等级（与 wire 语义同源，决策 #1）。拼写大小写敏感。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub enum ConsistencyLevel {
+pub(crate) enum ConsistencyLevel {
     LocalOnly,
     LocalTx,
     OutboxFact,
@@ -64,7 +70,7 @@ pub enum ConsistencyLevel {
 /// 契约生命周期。`active` 才需 assembly 接线（见 contract-fanout.md §契约归属）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Lifecycle {
+pub(crate) enum Lifecycle {
     Draft,
     Active,
     Deprecated,
@@ -76,7 +82,7 @@ pub enum Lifecycle {
 /// （`Framework` 类型层无法解析成域）收口到 `vocab::ContractOwner`，属后续单元
 /// （见 .claude/rules/rss/contract-fanout.md §契约归属），本单元不预置未用 API。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContractOwner {
+pub(crate) enum ContractOwner {
     Domain(String),
     Framework,
 }
@@ -92,16 +98,30 @@ impl<'de> Deserialize<'de> for ContractOwner {
     }
 }
 
-/// 契约声明的 schema 文件名（按 kind 取用子集；缺省全 `None`，由 validate R5 报形态错）。
+/// 契约声明的 schema 文件名（按 kind 取用子集；缺省全 `None`，由 validate R4 报形态错）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Schemas {
+pub(crate) struct Schemas {
     #[serde(default)]
-    pub request: Option<String>,
+    pub(crate) request: Option<String>,
     #[serde(default)]
-    pub response: Option<String>,
+    pub(crate) response: Option<String>,
     #[serde(default)]
-    pub payload: Option<String>,
+    pub(crate) payload: Option<String>,
+}
+
+impl Schemas {
+    /// 已声明的 schema 文件名，顺序 request → response → payload（DRY 单源，供 codegen + validate 复用）。
+    pub(crate) fn declared_files(&self) -> Vec<&str> {
+        [
+            self.request.as_deref(),
+            self.response.as_deref(),
+            self.payload.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -184,5 +204,28 @@ mod tests {
     fn rejects_unknown_schema_key() {
         let toml = VALID_HTTP.replace("request = ", "bogus = \"x\"\nrequest = ");
         assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn schemas_declared_files_returns_present_in_order() {
+        let s = Schemas {
+            request: Some("request.schema.json".to_string()),
+            response: Some("response.schema.json".to_string()),
+            payload: None,
+        };
+        assert_eq!(
+            s.declared_files(),
+            vec!["request.schema.json", "response.schema.json"]
+        );
+
+        let s2 = Schemas {
+            request: None,
+            response: None,
+            payload: Some("payload.schema.json".to_string()),
+        };
+        assert_eq!(s2.declared_files(), vec!["payload.schema.json"]);
+
+        let s3 = Schemas::default();
+        assert!(s3.declared_files().is_empty());
     }
 }

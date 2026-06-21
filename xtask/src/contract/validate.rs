@@ -4,38 +4,47 @@
 //! INVARIANT: CONTRACT-FREEZE-01（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）
 //! 与路径↔字段一致（R3）。Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
+//! Hard 类型层部分（字段集冻结、枚举解析拒绝）见 `manifest.rs`（CONTRACT-FREEZE-01）。
+//!
+//! 规则执行顺序（注释编号 = 执行先后）：
+//!   R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape → R5 MissingSchema → R6 UnsafeSchemaPath
 
 use anyhow::{Result, bail};
 use std::path::Path;
 
-use super::manifest::{ConsistencyLevel, ContractKind, ContractManifest, ContractOwner};
+use super::manifest::{
+    ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, SCHEMA_KEY_PAYLOAD,
+    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+};
 use super::{DiscoveredContract, discover};
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rule {
+pub(crate) enum Rule {
     /// R1：`kind = saga` ⇒ `consistencyLevel = WorkflowEventual`。
     SagaConsistency,
     /// R2：`owner = _framework` ⇒ `kind ∈ {http, event}`。
     FrameworkKind,
     /// R3：磁盘段 `{kind}/{domain}/{version}` 须等于 manifest 字段。
     PathMismatch,
-    /// R4：声明的每个 schema 文件须存在于契约目录。
-    MissingSchema,
-    /// R5：kind→schema 形态须一致（http 需 request+response、event/saga 需 payload、command 需 request）。
+    /// R4：kind→schema 形态须一致（http 需 request+response、event/saga 需 payload、command 需 request）。
     SchemaShape,
+    /// R5：声明的每个 schema 文件须存在于契约目录。
+    MissingSchema,
+    /// R6：schema 文件名须为纯文件名，不得含路径分量（防 `../` 逃逸）。
+    UnsafeSchemaPath,
 }
 
 /// 单条校验失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Finding {
-    pub rule: Rule,
-    pub contract: String,
-    pub detail: String,
+pub(crate) struct Finding {
+    pub(crate) rule: Rule,
+    pub(crate) contract: String,
+    pub(crate) detail: String,
 }
 
 /// 入口：校验真实仓 `contracts/`，有失败则 `bail`。
-pub fn run() -> Result<()> {
+pub(crate) fn run() -> Result<()> {
     let contracts_root = crate::workspace_root()?.join("contracts");
     let (count, findings) = validate_root(&contracts_root)?;
     if findings.is_empty() {
@@ -58,7 +67,7 @@ pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding
     Ok((contracts.len(), findings))
 }
 
-/// 对单契约跑 R1–R5。
+/// 对单契约跑 R1–R6（执行顺序即编号顺序）。
 pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     let label = c.dir.display().to_string();
     let mut findings = Vec::new();
@@ -67,6 +76,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_path_match(c, &label));
     findings.extend(rule_schema_shape(&c.manifest, &label));
     findings.extend(rule_schema_files_exist(c, &label));
+    findings.extend(rule_unsafe_schema_path(&c.manifest, &label));
     findings
 }
 
@@ -135,16 +145,16 @@ fn rule_path_match(c: &DiscoveredContract, label: &str) -> Option<Finding> {
     Some(finding(Rule::PathMismatch, label, diffs.join("；")))
 }
 
-/// R5：kind→schema 形态一致。返回缺失的必需 schema 声明（可多条）。
+/// R4：kind→schema 形态一致。返回缺失的必需 schema 声明（可多条）。
 fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let s = &m.schemas;
     let required: &[(&str, bool)] = match m.kind {
         ContractKind::Http => &[
-            ("request", s.request.is_some()),
-            ("response", s.response.is_some()),
+            (SCHEMA_KEY_REQUEST, s.request.is_some()),
+            (SCHEMA_KEY_RESPONSE, s.response.is_some()),
         ],
-        ContractKind::Event | ContractKind::Saga => &[("payload", s.payload.is_some())],
-        ContractKind::Command => &[("request", s.request.is_some())],
+        ContractKind::Event | ContractKind::Saga => &[(SCHEMA_KEY_PAYLOAD, s.payload.is_some())],
+        ContractKind::Command => &[(SCHEMA_KEY_REQUEST, s.request.is_some())],
     };
     required
         .iter()
@@ -159,9 +169,11 @@ fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
         .collect()
 }
 
-/// R4：声明的每个 schema 文件须存在。
+/// R5：声明的每个 schema 文件须存在。
 fn rule_schema_files_exist(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
-    declared_schema_files(&c.manifest.schemas)
+    c.manifest
+        .schemas
+        .declared_files()
         .into_iter()
         .filter(|file| !c.dir.join(file).is_file())
         .map(|file| {
@@ -174,30 +186,39 @@ fn rule_schema_files_exist(c: &DiscoveredContract, label: &str) -> Vec<Finding> 
         .collect()
 }
 
-fn declared_schema_files(s: &super::manifest::Schemas) -> Vec<&str> {
-    [
-        s.request.as_deref(),
-        s.response.as_deref(),
-        s.payload.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+/// R6：schema 文件名须为纯文件名（不含 `/`、`\`、`..` 分量或绝对路径），防路径逃逸。
+fn rule_unsafe_schema_path(m: &ContractManifest, label: &str) -> Vec<Finding> {
+    use std::path::Component;
+    m.schemas
+        .declared_files()
+        .into_iter()
+        .filter(|file| {
+            let p = std::path::Path::new(file);
+            p.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            }) || file.contains('/')
+                || file.contains('\\')
+        })
+        .map(|file| {
+            finding(
+                Rule::UnsafeSchemaPath,
+                label,
+                format!("schema 文件名含路径分量（防逃逸）: {file}"),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::contract::manifest::{Lifecycle, Schemas};
+    use crate::testutil::unique_tmp;
+    use rstest::rstest;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn unique_tmp() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("rss-xtask-validate-{}-{n}", std::process::id()))
-    }
 
     fn manifest(
         kind: ContractKind,
@@ -238,7 +259,7 @@ mod tests {
     #[test]
     fn green_http_contract_has_no_findings() -> anyhow::Result<()> {
         // anti-vacuity（正向）：全合法契约不产生任何 finding。
-        let dir = unique_tmp();
+        let dir = unique_tmp("validate");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("request.schema.json"), "{}")?;
         std::fs::write(dir.join("response.schema.json"), "{}")?;
@@ -300,6 +321,24 @@ mod tests {
         );
     }
 
+    /// R2 新增：kind=Saga + owner=Framework → 应触发 FrameworkKind。
+    #[test]
+    fn r2_framework_saga_rejected() {
+        let m = manifest(
+            ContractKind::Saga,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Framework,
+            Schemas {
+                payload: Some("payload.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        assert_eq!(
+            rule_framework_kind(&m, "x").map(|f| f.rule),
+            Some(Rule::FrameworkKind)
+        );
+    }
+
     #[test]
     fn r2_framework_http_ok_and_domain_command_ok() {
         let http = manifest(
@@ -321,8 +360,25 @@ mod tests {
         assert!(rule_framework_kind(&cmd, "x").is_none());
     }
 
-    #[test]
-    fn r3_path_mismatch_detected() {
+    /// R3 参数化：各段不符 / 三段全符。
+    /// 每 case：(path_kind, path_domain, path_version, manifest_domain, manifest_version, expect_finding)
+    #[rstest]
+    // 全符 → 无 finding
+    #[case("http", "_seed", "v1", "_seed", "v1", false)]
+    // kind 段不符
+    #[case("event", "_seed", "v1", "_seed", "v1", true)]
+    // domain 段不符
+    #[case("http", "other", "v1", "_seed", "v1", true)]
+    // version 段不符
+    #[case("http", "_seed", "v2", "_seed", "v1", true)]
+    fn r3_path_match_parametrized(
+        #[case] path_kind: &str,
+        #[case] path_domain: &str,
+        #[case] path_version: &str,
+        #[case] manifest_domain: &str,
+        #[case] manifest_version: &str,
+        #[case] expect_finding: bool,
+    ) {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
@@ -330,16 +386,85 @@ mod tests {
             http_schemas(),
         );
         let mut c = discovered(m, PathBuf::from("/x"));
-        c.path_domain = "other".to_string(); // 段 ≠ 字段 _seed
+        c.manifest.domain = manifest_domain.to_string();
+        c.manifest.version = manifest_version.to_string();
+        c.path_kind = path_kind.to_string();
+        c.path_domain = path_domain.to_string();
+        c.path_version = path_version.to_string();
+        let result = rule_path_match(&c, "x");
         assert_eq!(
-            rule_path_match(&c, "x").map(|f| f.rule),
-            Some(Rule::PathMismatch)
+            result.map(|f| f.rule),
+            if expect_finding {
+                Some(Rule::PathMismatch)
+            } else {
+                None
+            }
         );
     }
 
     #[test]
-    fn r4_missing_schema_file_detected() -> anyhow::Result<()> {
-        let dir = unique_tmp();
+    fn r4_command_needs_request() {
+        let m = manifest(
+            ContractKind::Command,
+            ConsistencyLevel::LocalTx,
+            ContractOwner::Domain("identity".to_string()),
+            Schemas::default(), // 无 request
+        );
+        let findings = rule_schema_shape(&m, "x");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::SchemaShape);
+    }
+
+    #[test]
+    fn r4_saga_needs_payload() {
+        let m = manifest(
+            ContractKind::Saga,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Domain("identity".to_string()),
+            Schemas::default(), // 无 payload
+        );
+        let findings = rule_schema_shape(&m, "x");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::SchemaShape);
+    }
+
+    #[test]
+    fn r4_http_missing_response_shape() {
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            Schemas {
+                request: Some("request.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        let findings = rule_schema_shape(&m, "x");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::SchemaShape);
+    }
+
+    #[test]
+    fn r4_event_needs_payload() {
+        let m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            Schemas::default(),
+        );
+        let findings = rule_schema_shape(&m, "x");
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.rule == Rule::SchemaShape)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn r5_missing_schema_file_detected() -> anyhow::Result<()> {
+        let dir = unique_tmp("validate");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("request.schema.json"), "{}")?; // 只建 request，缺 response
         let m = manifest(
@@ -356,36 +481,31 @@ mod tests {
     }
 
     #[test]
-    fn r5_http_missing_response_shape() {
+    fn r6_unsafe_schema_path_dotdot_rejected() {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
             ContractOwner::Framework,
             Schemas {
-                request: Some("request.schema.json".to_string()),
+                request: Some("../x/request.schema.json".to_string()),
+                response: Some("response.schema.json".to_string()),
                 ..Schemas::default()
             },
         );
-        let findings = rule_schema_shape(&m, "x");
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::SchemaShape);
+        let findings = rule_unsafe_schema_path(&m, "x");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().all(|f| f.rule == Rule::UnsafeSchemaPath));
     }
 
     #[test]
-    fn r5_event_needs_payload() {
+    fn r6_safe_schema_path_ok() {
         let m = manifest(
-            ContractKind::Event,
-            ConsistencyLevel::OutboxFact,
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
             ContractOwner::Framework,
-            Schemas::default(),
+            http_schemas(),
         );
-        let findings = rule_schema_shape(&m, "x");
-        assert_eq!(
-            findings
-                .iter()
-                .filter(|f| f.rule == Rule::SchemaShape)
-                .count(),
-            1
-        );
+        let findings = rule_unsafe_schema_path(&m, "x");
+        assert!(findings.is_empty());
     }
 }
