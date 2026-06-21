@@ -12,7 +12,7 @@ extern crate rustc_hir;
 extern crate rustc_middle;
 extern crate rustc_span;
 
-use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::diagnostics::span_lint_hir_and_then;
 use rustc_hir::def::DefKind;
 use rustc_hir::{Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
@@ -103,10 +103,14 @@ impl<'tcx> LateLintPass<'tcx> for RssDomainNoSerialize {
             return;
         }
 
-        // 在域类型「定义处」报告，而非 derive 生成的 impl span（后者属宏展开，lint 会被 rustc 抑制）。
-        span_lint_and_then(
+        // 在域类型「定义处」报告（而非 derive 生成的 impl span——宏展开会被 rustc 抑制）；并用 self
+        // 类型的 HirId 解析 lint 级别，使该类型上的 `#[allow(rss_domain_no_serialize)]` 逃生门生效
+        // （impl 是 `#[automatically_derived]`，按 impl 上下文解析级别会忽略 struct 上的 allow）。
+        let self_hir = cx.tcx.local_def_id_to_hir_id(self_did.expect_local());
+        span_lint_hir_and_then(
             cx,
             RSS_DOMAIN_NO_SERIALIZE,
+            self_hir,
             cx.tcx.def_span(self_did),
             "domain 类型不应 derive serde `Serialize`/`Deserialize`（serde derive 冻结）",
             |diag| {
