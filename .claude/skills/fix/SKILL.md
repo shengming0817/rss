@@ -256,8 +256,8 @@ cargo test -p consistency -p primitives -p vocab        # 改了底座 crate 时
 
 1. **提交**：`git add` 修复文件 → 按 4.1 commit/push；无 PR 才 `forge.sh pr-create "<title>" <body-file> develop <branch>`。
 2. **冲突预检（阻塞）**：`issues` B5 ① 验冲突，过则立即进 3（不等 CI）。
-3. **pm:fix**（`--kind=fix`）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
-4. **deferred 登记（先于切 label）**：所有 deferred——OOS finding + 处置门判定 defer 的 IN_SCOPE Cx3+/RELATED——**逐条自动**按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，留 open，**判定 defer 后直接建、不再二次确认**，派生注 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿）。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
+3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 处置门判定 defer 的 IN_SCOPE Cx3+/RELATED——**逐条自动**按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，留 open，**判定 defer 后直接建、不再二次确认**，派生注 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿）。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
+4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
 5. **切 label**：`forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
 6. **CI 异步收敛（非阻塞）**：`issues` B5 ② 等 CI（失败回阶段 1-4 再推），贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
 7. **延迟启监控（必做）**：评论 + label 完成后延迟约 10min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 监听 `needs-check-fix` 跑 `/pr-review --check`，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。完成后 **TaskUpdate → completed**。

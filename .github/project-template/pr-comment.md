@@ -33,7 +33,7 @@
 **reviewer** <数> · **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
 - **F1** [P1·Cx2·安全] `path/to/file.rs:120` — <一句话> → ✅ 已修
-- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：<原因>（或 ✅ 已修（人工确认））
+- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：已建 #N（<原因>）（或 ✅ 已修（人工确认））
 - **F3** [P2·Cx2·运维] `other/pkg/z.rs:64` — <一句话> → 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）
 
 <details><summary>完整详表（根因 + 证据 + 建议 + 方案种子，/fix 读此）</summary>
@@ -46,7 +46,7 @@
 **F2** [P2·Cx3·DX] `path/to/x.rs:88`（IN_SCOPE）
 - 证据：`<code 片段>`
 - 三级方案种子：最小 <…> / 彻底 <…> / 重构 <…>
-- 处置（处置门二选一，非未决）：⏸ defer（人工确认，原因：<…>）｜或 ✅ 已修（人工确认：<措施>，commit <sha>）
+- 处置（处置门判修/defer，非未决）：⏸ defer（已建 #N，原因：<…>）｜或 ✅ 已修（人工确认：<措施>，commit <sha>）
 </details>
 
 **下一步**：切 `pr-status/needs-review-again`（待再审：codex / `/pr-review`）。
@@ -65,7 +65,7 @@
 **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
 - **F1** [P1·Cx2·安全] `path/to/file.rs:120` — <一句话> → ✅ 已修
-- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：<原因>（或 ✅ 已修（人工确认））
+- **F2** [P2·Cx3·DX] `path/to/x.rs:88` — <一句话> → ⏸ defer：已建 #N（<原因>）（或 ✅ 已修（人工确认））
 - **F3** [P2·Cx2·运维] `other/pkg/z.rs:64` — <一句话> → 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）
 
 <details><summary>完整详表（triage 依据 + 证据 + 建议，下次 fix 读此）</summary>
@@ -76,7 +76,7 @@
 
 **F2** [P2·Cx3·DX] `path/to/x.rs:88`（IN_SCOPE，处置门）
 - 三级方案种子：最小 <…> / 彻底 <…> / 重构 <…>
-- 处置（处置门二选一，非未决）：⏸ defer（人工确认，原因 + 升级窗口：<…>）｜或 ✅ 已修（人工确认：<措施>，commit <sha>）
+- 处置（处置门判修/defer，非未决）：⏸ defer（已建 #N，原因 + 升级窗口：<…>）｜或 ✅ 已修（人工确认：<措施>，commit <sha>）
 </details>
 
 **下一步**：切 `pr-status/needs-check-fix`（待 `/pr-review --check` 验证；fix 不直接到 ready）。
