@@ -1,4 +1,4 @@
-# ADR-001：DI trait 的 async + dyn 派发策略与 Arc 样板范式
+# ADR-003：DI trait 的 async + dyn 派发策略与 Arc 样板范式
 
 - **状态**：Accepted（**派发策略方向**：采用 dynosaur）；**实现可行性待验证**——§8 三项开放风险须在 `diport` 落地 spike 中验证，任一不可接受则触发 §5 的 async-trait 复评路径
 - **日期**：2026-06-21
@@ -19,8 +19,7 @@ trait 的 async 方法如何做动态派发**。
 每个 impl 各异的 opaque type，尺寸不定，无法进 vtable，trait 因此非 dyn-compatible（object-unsafe）。
 直接写 `Arc<dyn Store>` 会得到 `error[E0038]: the trait cannot be made into an object`。
 
-当前 workspace 为骨架：`crates/` 全部仅 `lib.rs`、无任何 trait 定义，`docs/architecture/` 仅
-`.gitkeep`——这是**首个 ADR（编号 001）**，是 greenfield 决策，不存在向后兼容包袱。
+当前 workspace 为骨架：`crates/` 全部仅 `lib.rs`、无任何 trait 定义——本 ADR（**编号 003**）属 G0「接缝冻结」批次，是 greenfield 决策，不存在向后兼容包袱。
 
 本 ADR 产出：① 派发策略决策；② 可被下游直接套用的「Arc 样板范式」；③ 与 RSS 既有 Hard/Medium 治理
 规则的契合 / 偏离登记；④ 落地前须验证的开放风险与 follow-up。
