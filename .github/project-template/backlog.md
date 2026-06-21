@@ -28,4 +28,4 @@ labels（`backlog` + `area-XX` + `type-XX` + `pri-pX` + `cx-X`）与 title `[<ID
 
 ## Source
 
-<来源：PR #<N> finding <Fk> / review path / issue#；OOS 自动建单加 `Discovered via /ship|/fix #<N>`>
+<来源：`PR #<N> finding <Fk>` / review path / issue#；OOS 自动建单加 `Discovered via /ship|/fix #<N>`>
