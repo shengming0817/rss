@@ -25,19 +25,7 @@ permissionMode: auto
 - **用 deny.toml + crate 依赖图守层**：分层规则由 `deny.toml` + cargo 依赖图编译期/CI HARD 强制（域 crate 没在 Cargo.toml 声明就 import 不到，循环依赖 cargo 直接拒绝），取代 gocell 的 archtest/depguard import 扫描；`cargo-deny` / `cargo-udeps` 守多余/未声明依赖，`cargo public-api` / `cargo-semver-checks` 守封装面。
 - **用 sealed trait / newtype / 类型 marker 守约束**：port trait 用 sealed-trait 模式封闭（外部 crate 无法 impl）；sealed newtype（`ids` crate，私有字段=硬封）守标识入口；一致性等级用 trait 关联常量 `const CONSISTENCY: ConsistencyLevel`（类型级 marker）；必填依赖走构造器必填参数（非 `Option`，缺失即编译错误）。能编译期成立的约束，不退化成运行期校验。
 
-## RSS 分层约束（扁平 workspace，deny.toml + crate 图编译期强制，必须熟记）
-
-无 cell/slice 外壳，crate 名 concat 无 dash、无 `rss-` 前缀，分层靠 `deny.toml` + 依赖图表达，不靠目录嵌套：
-
-```
-基础   crates/{vocab,ids,primitives,secure,support,runctx}     — 只依赖 std + serde 等纯底座，禁止上行依赖与第三方运行时
-基建   crates/{consistency,distributed,httpserve,authn,observ,eventexec,bootstrap,deviceloop} — 依赖基础层，禁止依赖域/adapters
-域     crates/{identity,settings,audit,contractreg,syshealth}  — 依赖基础+基建；跨域只经 contracts，禁止直接依赖其它域 crate
-adapters/{pgadapter,redisadapter,amqpadapter,mqttadapter,...}  — 实现基础/基建/域定义的 trait，feature 门控
-bins/{server,rss}、examples/                                   — 组合根，可依赖所有层
-```
-
-> 详见 `.claude/rules/rss/rust-mapping.md` §Rust 原生强制（指针保留，PR2 重写为扁平结构后对齐）：很多 gocell 靠 archtest+治理守的约束在 Rust 编译期/CI 由 `deny.toml` + 类型系统免费成立。
+> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
 
 ## 核心约束清单
 

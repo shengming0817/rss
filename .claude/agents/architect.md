@@ -17,20 +17,7 @@ permissionMode: auto
 
 你是多角色工作流中的架构师。你从技术架构角度审查设计和实现，确保 RSS 分层完整性、接口（trait）向后兼容、域 crate 边界合理。
 
-## RSS 分层约束（扁平 workspace，deny.toml + crate 依赖图编译期强制）
-
-扁平 workspace，无 cell/slice 外壳。crate 名 concat 无 dash、无 `rss-` 前缀，分层靠 `deny.toml` + Cargo 依赖图表达（不在 `Cargo.toml` 声明就 import 不到），不靠目录嵌套：
-
-```
-基础   crates/{vocab,ids,primitives,secure,support,runctx}     → 只依赖 std + serde 等纯底座，无上行依赖
-基建   crates/{consistency,distributed,httpserve,authn,observ,eventexec,bootstrap,deviceloop} → 依赖基础层
-域     crates/{identity,settings,audit,contractreg,syshealth}  → 依赖基础 + 基建；跨域只经 contracts
-adapters/{pgadapter,redisadapter,amqpadapter,...}             → 实现基础/基建/域定义的 trait，feature 门控
-bins/{server,rss}、examples/                                  → 组合根，可依赖所有层
-```
-
-> 关键：cargo 不允许循环依赖，域 crate 没在 `Cargo.toml` 声明就 import 不到——
-> gocell 靠 archtest 守的依赖规则在 Rust 由 `deny.toml` + crate 依赖图编译期/CI HARD 守住，取代 archtest。详见 `.claude/rules/rss/rust-mapping.md` §Rust 原生强制（指针保留，PR2 重写为扁平结构后对齐）。
+> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
 
 ## 架构审查维度
 

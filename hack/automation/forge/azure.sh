@@ -67,12 +67,30 @@ _az_wit_replace_tags() {
 }
 
 _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
-    local title="$1" body="$2" base="$3" head="$4"
-    local -a cmd=(az repos pr create --title "${title}" --description "$(cat "${body}")"
-        --target-branch "${base}" --source-branch "${head}"
-        --repository "${ADO_REPO}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)
-    _dry "${cmd[@]}" && return 0
-    "${cmd[@]}" | jq -r --arg base "$(_az_pr_url_base)" '"\($base)/pullrequest/\(.pullRequestId)"'
+    local title="$1" body_file="$2" base="$3" head="$4"
+    # F5: description must NOT enter argv (process-list exposure).
+    # Use az devops invoke REST POST with --in-file so the body stays in a file.
+    # dry-run emits a stable placeholder — no random /tmp path, no body content.
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf 'az devops invoke --area git --resource pullRequests --http-method POST --route-parameters project=%s repositoryId=%s --in-file <body-json> --api-version 7.1 --output json --org %s\n' \
+            "${ADO_PROJECT}" "${ADO_REPO}" "${ADO_ORG}"
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azpr.XXXXXX")"
+    # jq --rawfile reads the file without shell interpolation; no argv exposure.
+    jq -n \
+        --arg title "${title}" \
+        --arg src "refs/heads/${head}" \
+        --arg tgt "refs/heads/${base}" \
+        --rawfile desc "${body_file}" \
+        '{title:$title, description:$desc, sourceRefName:$src, targetRefName:$tgt}' > "${tmp}"
+    local out; out="$(az devops invoke --area git --resource pullRequests \
+        --http-method POST \
+        --route-parameters "project=${ADO_PROJECT}" "repositoryId=${ADO_REPO}" \
+        --in-file "${tmp}" --api-version 7.1 --output json --org "${ADO_ORG}")"
+    rm -f "${tmp}"
+    printf '%s' "${out}" | jq -r --arg base "$(_az_pr_url_base)" '"\($base)/pullrequest/\(.pullRequestId)"'
 }
 
 _azure_pr_comment() { # <pr> <body-file> -> comment URL
@@ -290,13 +308,32 @@ _azure_pipeline_policy() { # <name> <repo> <branch> <display-name>
 
 # --- Work Items (issue-* verbs map to Azure Boards) --------------------------
 _azure_issue_create() { # <title> <body-file> <label-csv> [type]
-    local title="$1" body="$2" labels="$3" type="${4:-${AZURE_WI_TYPE_BACKLOG}}"
+    local title="$1" body_file="$2" labels="$3" type="${4:-${AZURE_WI_TYPE_BACKLOG}}"
     local tags; tags="$(printf '%s' "${labels}" | tr ',' ';')"
-    local -a cmd=(az boards work-item create --title "${title}" --type "${type}"
-        --description "$(cat "${body}")" --fields "System.Tags=${tags}"
-        --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json)
-    _dry "${cmd[@]}" && return 0
-    "${cmd[@]}" | jq -r '"#\(.id)"'
+    # F5: description must NOT enter argv.
+    # Create the work item first (title + type + tags via CLI args — these are metadata, not body).
+    # Then PATCH the description via REST --in-file so body content never appears in process list.
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf 'az boards work-item create --title %s --type %s --fields System.Tags=%s ; az devops invoke --area wit --resource workitems --http-method PATCH --in-file <desc-json>\n' \
+            "${title}" "${type}" "${tags}"
+        return 0
+    fi
+    local wi_id
+    wi_id="$(az boards work-item create --title "${title}" --type "${type}" \
+        --fields "System.Tags=${tags}" \
+        --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json \
+        | jq -r '.id')"
+    # PATCH description via REST JSON-Patch so body stays in a file.
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwi.XXXXXX")"
+    jq -n --rawfile desc "${body_file}" \
+        '[{op:"add",path:"/fields/System.Description",value:$desc}]' > "${tmp}"
+    az devops invoke --area wit --resource workitems \
+        --route-parameters "id=${wi_id}" \
+        --http-method PATCH --in-file "${tmp}" \
+        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null
+    rm -f "${tmp}"
+    printf '#%s\n' "${wi_id}"
 }
 
 _azure_issue_view() { # <n> -> {number,title,body,state(open|closed),labels}
@@ -338,10 +375,24 @@ _azure_issue_edit_labels() { # <n> --add a,b --remove c,d
 _azure_issue_close() { # <n> <reason-ignored> <comment>
     # Close state is process-template dependent (AZURE_WI_CLOSE_STATE; Basic=Done,
     # Agile/CMMI=Closed). Basic process has NO "Closed" state.
+    # F5: comment content must NOT enter argv — pass state change separately, then
+    # POST discussion via REST --in-file.
     local n="$1" comment="$3" state="${AZURE_WI_CLOSE_STATE:-Done}"
-    local -a cmd=(az boards work-item update --id "${n}" --state "${state}" --discussion "${comment}" --org "${ADO_ORG}" --output json)
+    local -a cmd=(az boards work-item update --id "${n}" --state "${state}" --org "${ADO_ORG}" --output json)
     _dry "${cmd[@]}" && return 0
     "${cmd[@]}" >/dev/null
+    # Add discussion comment via REST JSON-Patch so comment text stays off argv.
+    if [ -n "${comment}" ]; then
+        local tmp
+        tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azclose.XXXXXX")"
+        jq -n --arg c "${comment}" \
+            '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}"
+        az devops invoke --area wit --resource workitems \
+            --route-parameters "id=${n}" \
+            --http-method PATCH --in-file "${tmp}" \
+            --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null
+        rm -f "${tmp}"
+    fi
 }
 
 _azure_issue_list() { # <search> <state: open|closed|all> -> WIQL result (id list)
@@ -359,9 +410,22 @@ _azure_issue_list() { # <search> <state: open|closed|all> -> WIQL result (id lis
 }
 
 _azure_issue_comment() { # <n> <body-file>
-    local -a cmd=(az boards work-item update --id "$1" --discussion "$(cat "$2")" --org "${ADO_ORG}" --output json)
-    _dry "${cmd[@]}" && return 0
-    "${cmd[@]}" >/dev/null
+    # F5: comment body must NOT enter argv — use REST JSON-Patch --in-file.
+    local n="$1" body_file="$2"
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf 'az devops invoke --area wit --resource workitems --route-parameters id=%s --http-method PATCH --in-file <body-json> --api-version 7.1 --output json --org %s\n' \
+            "${n}" "${ADO_ORG}"
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwicmt.XXXXXX")"
+    jq -n --rawfile c "${body_file}" \
+        '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}"
+    az devops invoke --area wit --resource workitems \
+        --route-parameters "id=${n}" \
+        --http-method PATCH --in-file "${tmp}" \
+        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null
+    rm -f "${tmp}"
 }
 
 _azure_subissue_link() { # <parent> <child>

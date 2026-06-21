@@ -91,12 +91,9 @@ memory: project
 - HTTP 错误响应格式 `{"error": {"code","message","details"}}`
 - EventBus consumer 必须有声明注释（见 `.claude/rules/rss/eventbus.md`）
 
-## 分层约束（必须遵守，扁平 workspace，deny.toml + crate 图编译期强制）
+> RSS 扁平 workspace 结构树 / 5 层分层（基础·基建·域·adapters·bins）/ crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `.claude/rules/rss/rust-mapping.md` §扁平 workspace 结构、§分层（PR2 重写为扁平结构后对齐）。本文件不复制结构表。
 
-- 基础底座 crate（vocab/ids/primitives/secure/support/runctx）不依赖基建/域/adapters，也不依赖第三方运行时
-- 域 crate（identity/settings/audit/contractreg/syshealth）不直接依赖 adapters/*（经组合根注入）
-- 跨域只通过 contracts（声明在消费 crate 的 `Cargo.toml` `[dependencies]`）
-- 新增 CUD 操作标注一致性级别（L0-L4，trait 关联常量 `const CONSISTENCY`，声明源 `contract.toml`）
+升级判据：单条任务若实际影响超出 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API / 需改 `deny.toml` 分层） → 立即停止，回报调用方升级处理。
 
 ## Git 约束
 
