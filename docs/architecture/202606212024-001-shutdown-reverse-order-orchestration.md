@@ -66,16 +66,26 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
 
 | ID | 不变式 | 强度 | 载体 |
 |----|--------|------|------|
-| `SHUTDOWN-LIFO-ORDER-01` | 关闭顺序 = 注册顺序逆序（后注册先关，被依赖后关） | Hard | `Vec` + `.rev()` 结构保证；测试断言 |
-| `SHUTDOWN-CONTINUE-ON-ERROR-01` | 任一资源失败/超时/panic 必须**继续**关后续，禁 fail-fast | Hard | 驱动循环无 early-return；测试断言 |
-| `SHUTDOWN-ERROR-AGGREGATE-01` | 所有 per-resource 失败聚合返回 `Vec`，不丢弃 | Hard | `Vec` 收集；测试断言 |
-| `SHUTDOWN-TIMEOUT-BOUNDED-01` | 每个资源关闭有 per-resource 超时上界 | Hard | `tokio::time::timeout(budget, …)` 包裹 |
-| `SHUTDOWN-PANIC-ISOLATE-01` | 下游资源 `shutdown` panic 被隔离，不击穿驱动循环 | Hard | `tokio::spawn` + `JoinError` 捕获；测试断言 |
-| `SHUTDOWN-SINGLE-SHOT-01` | double-shutdown / 关闭后注册不可表达 | Hard | `shutdown(self)` 消费 self（move 语义） |
+| `SHUTDOWN-SINGLE-SHOT-01` | double-shutdown / 关闭后注册不可表达 | **Hard** | `shutdown(self)` 消费 self（move 语义）——违反在类型层不可表达 |
+| `SHUTDOWN-LIFO-ORDER-01` | 关闭顺序 = 注册顺序逆序（后注册先关，被依赖后关） | Medium | `Vec` + `.rev()` 代码结构 + 测试断言（类型系统不阻止改回正序） |
+| `SHUTDOWN-CONTINUE-ON-ERROR-01` | 任一资源失败/超时/panic 必须**继续**关后续，禁 fail-fast | Medium | 驱动循环无 early-return + 测试断言（类型系统不阻止未来加 `?`） |
+| `SHUTDOWN-ERROR-AGGREGATE-01` | 所有 per-resource 失败聚合返回 `Vec`，不丢弃 | Medium | `Vec` 收集 + `#[must_use]` + 测试断言 |
+| `SHUTDOWN-TIMEOUT-BOUNDED-01` | 每个资源关闭有 per-resource 超时上界 | Medium | `tokio::time::timeout(budget, …)` 包裹 + 测试断言 |
+| `SHUTDOWN-PANIC-ISOLATE-01` | 下游资源 `shutdown` panic 被隔离，不击穿驱动循环 | Medium | `tokio::spawn` + `JoinError` 捕获 + 测试断言 |
 | `SHUTDOWN-NO-PANIC-ON-ERROR-01` | 关闭路径自身绝不 `panic!`/`unwrap`/`expect`，失败走 `Result` | Medium | clippy `panic`/`unwrap_used`/`expect_used` deny |
 
-> 红线：关闭路径**绝不能** panic-on-error、**绝不能**漏关资源、超时**必须**有界。
-> 「部分失败必须继续 + 聚合错误」是 §1 依赖泄漏问题的直接对策，不可降级。
+> 强度说明（AI-robust）：仅 `SHUTDOWN-SINGLE-SHOT-01` 是 **Hard**——消费 self 让违反在类型层
+> 不可表达。其余靠代码结构 + 测试断言守，违反**可表达**但 CI 测试会抓 → **Medium**，不虚标为 Hard。
+> 把 LIFO / continue-on-error 上移到编译期（如 typestate）成本高于收益，登记为可选 follow-up。
+>
+> 红线（运维语义，不可降级，与强度评级无关）：关闭路径**绝不能** panic-on-error、**绝不能**漏关资源、
+> 超时**必须**有界。「部分失败必须继续 + 聚合错误」是 §1 依赖泄漏问题的直接对策。
+>
+> `ManagedResource` **不 sealed**：各 adapter 实现它经组合根注入是预期用例（对照 `Domain` 生命周期
+> trait），故不封闭——与 domain-patterns「sealed port」阻止外部伪造的场景不同。
+>
+> 测试 carve-out 登记（ADR registry 尚未建立，暂记于此）：`shutdown.rs` 测试 mock 用 item-level
+> `#[allow(clippy::panic)]` 刻意 panic 以验证 `SHUTDOWN-PANIC-ISOLATE-01`；ADR registry 落地后迁入。
 
 ---
 
@@ -118,6 +128,10 @@ impl ShutdownStack {
 
 `register` 与 `child_token` 拆开（不让 `register` 返回 token），因为资源经**构造器注入** token
 （RSS「必填依赖走构造器位置参」），需在 `register` 之前先 `child_token()` 拿到 token 再构造资源。
+`child_token()` 须在 `shutdown` 前调用——`shutdown` 已 `cancel` 后再派生的 token 是已 cancelled 态。
+
+实现者若需在 `shutdown(&self)`（`&self`，因驱动器 `Arc` 持有以 spawn 隔离 panic）中消费内部
+mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装后 `take()`（见 trait rustdoc）。
 
 ---
 
@@ -128,14 +142,21 @@ impl ShutdownStack {
 - 关闭顺序、错误聚合、超时、panic 隔离全部显式可测，替代 Go `defer` 的隐式 LIFO。
 - 接缝冻结：`ManagedResource` 是各 adapter（postgres / amqp / relay …）将实现的稳定 port，
   P3+ 资源接入时不需重开此接缝。
-- 多数不变式是编译期 Hard（move 语义 / `Vec.rev()` / 类型），少数 Medium 由 clippy deny 守。
+- 单次性是编译期 Hard（消费 self）；其余不变式 Medium，由代码结构 + 测试断言 + clippy deny 守（见 §3）。
 
 **代价 / 偏离**
 
 - per-resource panic 隔离用 `tokio::spawn`，要求 `ManagedResource: Send + Sync + 'static`
   并 `Arc` 持有——比裸 `&dyn` 重，但换来「一个 adapter panic 不漏关其它资源」的零信任鲁棒性。
-- 超时后 hung task 被 `abort()`（drop future），不强杀进程——与 k8s `terminationGracePeriodSeconds`
-  语义一致（grace 后 SIGKILL 是 kubelet 职责，非进程自身）。
+- 超时后 hung task 被 `abort()` 后**不 `await` 等其 join** 即继续下一个资源——刻意为之以保
+  `SHUTDOWN-TIMEOUT-BOUNDED`：尊重取消的 task 会在 `abort` 后即刻 drop 释放句柄；忽略取消的
+  阻塞型 task 若 `await` 会重新无界等待、破坏超时上界，故不 await，由进程退出回收。代价是被依赖
+  资源关闭前可能存在极短的「hung task 仍持旧句柄」窗口（cancel 广播已令其进入退出路径，已最小化）。
+- 超时后 hung task `abort` 不强杀进程——与 k8s `terminationGracePeriodSeconds` 语义一致
+  （grace 后 SIGKILL 是 kubelet 职责）。**风险**：当前无整体 deadline，N 个资源串行 LIFO、各自
+  最坏 `DEFAULT_SHUTDOWN_TIMEOUT`(30s)，最坏总耗时 ≈ N×30s 可能超过 grace period，导致 SIGKILL
+  到来时尾部资源（最先注册的 DB pool）未及关闭。缓解：重 I/O 之外资源应 `shutdown_timeout()` 调小；
+  P2 整体 deadline（< grace − buffer）封顶总耗时。30s 默认对齐 k8s grace 默认，单资源合理。
 
 **已延后（非本 spike 范围，登记去向，非藏 TODO）**
 
@@ -145,6 +166,7 @@ impl ShutdownStack {
 | 真实资源 adapter（DB pool / relay …）实现 `ManagedResource` | P3+（随各 adapter 落地） | 资源本体在后续阶段 |
 | 关闭时延 metric / 耗时测量（注入 `Clock`） | 待 `primitives::Clock` 落地后接入 | `primitives` 当前为空骨架；超时强制已用 `tokio::time`（运行时时钟，测试经 `start_paused` 控制），不裸调 `Instant`（clippy 禁） |
 | 整体 shutdown deadline（叠加在 per-resource 超时之上） | P2（与信号 grace period 一并） | 需要进程级时间预算，属接线层 |
+| 关闭错误日志经 `secure::redact_error` 清洗（observability.md §redaction） | 随 P3+ 真实 adapter 接入 + `secure` redaction 模块落地 | `secure` 当前为空骨架；本 spike 无真实 adapter、无敏感值流经，故错误仅记 top-level Display（非 `{:#}` 全链）缩小 PII 面，redaction 待 sink 真有敏感值时接 |
 
 > Clock 边界：超时**强制**由 `tokio::time::timeout`（runtime 时钟）承担，可经 `tokio::time::pause`
 > 确定性测试；耗时**测量**（日志/metric）未来用注入 `Clock`。二者分层、不冲突。
