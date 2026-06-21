@@ -22,8 +22,8 @@
 
 raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}`
 （branch 多为 `master` 或 `main`，404 时换分支重试；大文件先 `Grep`/`WebSearch` 定位行号再局部拉取）。
-默认分支为 `master` 的：`tikv/tikv` · `tikv/raft-rs` · `vectordotdev/vector` · `dtolnay/thiserror` ·
-`shepmaster/snafu` · `rust-lang/rust-analyzer` · `casbin/casbin-rs`；其余多为 `main`。
+默认分支为 `master` 的：`AzureMarker/shaku` · `tikv/tikv` · `tikv/raft-rs` · `vectordotdev/vector` ·
+`dtolnay/thiserror` · `shepmaster/snafu` · `rust-lang/rust-analyzer` · `casbin/casbin-rs`；其余多为 `main`。
 
 ## 按模块扩展对标（CLAUDE.md 6 行之外）
 
