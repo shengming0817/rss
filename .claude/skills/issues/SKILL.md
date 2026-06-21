@@ -125,7 +125,7 @@ bash hack/automation/forge.sh issue-create \
 ```bash
 bash hack/automation/forge.sh issue-edit-labels <N> --add "area-data" --remove "area-eventing"   # 改领域
 bash hack/automation/forge.sh issue-edit-labels <N> --add "type-debt" --remove ""               # 加类型
-bash hack/automation/forge.sh issue-close <N> "completed" "Fixed in PR #<NNN>"                  # 修复闭合
+bash hack/automation/forge.sh issue-close <N> "completed" "Fixed in PR <NNN>"                    # 修复闭合
 bash hack/automation/forge.sh issue-close <N> "not planned" "<理由>"                            # wontfix
 ```
 

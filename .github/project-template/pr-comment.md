@@ -52,7 +52,7 @@
 **下一步**：切 `pr-status/needs-review-again`（待再审：codex / `/pr-review`）。
 
 ---
-🤖 PR #<N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
+🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
 <!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=ship` 生成追加于此（phase/verdict/round 派生见 §机器块）；勿手填 base64 -->
 ```
 
@@ -82,7 +82,7 @@
 **下一步**：切 `pr-status/needs-check-fix`（待 `/pr-review --check` 验证；fix 不直接到 ready）。
 
 ---
-🤖 PR #<N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
+🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
 <!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=fix` 生成追加于此（phase/verdict/round 派生见 §机器块）；勿手填 base64 -->
 ```
 
@@ -119,7 +119,7 @@
 **结论**：<一句话理由>
 
 ---
-🤖 PR #<N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
+🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
 <!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=pr-review --phase=review|check --verdict=<结论>` 生成追加于此（round 派生见 §机器块）；勿手填 base64 -->
 ```
 
@@ -138,7 +138,7 @@
 - `<check-name>` — <url>
 
 ---
-🤖 PR #<N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
+🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
 <!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=ci --ci='<json>'` 生成追加于此（verdict 由 ci.failedChecks 派生，round 派生见 §机器块）；勿手填 base64 -->
 ```
 
@@ -158,10 +158,10 @@
 - 三级方案种子：最小 <…> / 彻底 <…> / 重构 <…>
 - 影响范围：直接 <…> / 间接 <…> / 同类 <Grep N 处>
 - Files：`other/pkg/z.rs:64` `other/pkg/w.rs:30`
-- → ✅ 已建 issue **#<N>** <url>（body 按 backlog.md：现状←证据+根因+影响 / 修复方向←方案种子 / Files←上行 / Source←PR #<N> F3；四轴 `backlog,pri-p2,area-XX,type-XX,cx-2`，cx 从 finding `[…Cx…]` tag 取，此例 F3=Cx2）
+- → ✅ 已建 issue **#<N>** <url>（body 按 backlog.md：现状←证据+根因+影响 / 修复方向←方案种子 / Files←上行 / Source←`PR #<N> F3`；四轴 `backlog,pri-p2,area-XX,type-XX,cx-2`，cx 从 finding `[…Cx…]` tag 取，此例 F3=Cx2）
   - 无法自动建时改记 `🟡 deferred:<pri-p0-incident｜labels-underivable>` + 草稿命令 `bash hack/automation/forge.sh issue-create "[<ID>] <标题>" <backlog.md> "backlog,pri-pX,area-XX,type-XX,cx-X"`
 
 ---
-🤖 PR #<N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
+🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
 <!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=oos --oos='{"items":[…]}'` 生成追加于此（items 各 finding 携 fileLine/rootCause/solutionSeeds + 处置 `issue`｜`deferred`，二者必居其一否则 emit 拒绝；phase/verdict/round 派生见 §机器块）；勿手填 base64 -->
 ```
