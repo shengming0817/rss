@@ -28,6 +28,11 @@
 #     PATCH errors); NOT atomic (backlog).
 #   - issue-close: state is process-template dependent (AZURE_WI_CLOSE_STATE;
 #     Basic process = Done, NOT Closed).
+#   - markdown: System.Description / System.History default to HTML (raw markdown
+#     renders literally). Descriptions carry a /multilineFieldsFormat=Markdown op;
+#     comments go through the dedicated Comments API (?format=markdown,
+#     api-version 7.1-preview.4) — the only path honouring a comment format — NOT a
+#     System.History JSON-Patch.
 #
 # Sourced by forge.sh; relies on its globals: DRY_RUN, _dry, PM_COMMENT_MARKER_RE,
 # ADO_ORG/ADO_PROJECT/ADO_REPO, AZURE_REMOTE, AZURE_TRUSTED_AUTHORS, AZURE_WI_TYPE_*.
@@ -51,24 +56,51 @@ _az_auth_header() {
     fi
 }
 
+# _az_auth_hdr_file: write the ADO auth header to a fresh 0600 temp file and echo
+# its path (caller rm's it). SINGLE source for the PAT-off-argv discipline shared
+# by every direct REST curl call (_az_wit_patch / _az_wit_comment): the token goes
+# via `curl -H @file`, NEVER `-H "<token>"` — an argv-visible Authorization header
+# leaks the PAT/Bearer token to `ps`.
+_az_auth_hdr_file() {
+    local auth hdr
+    auth="$(_az_auth_header)" \
+        || { echo "forge azure: no ADO credential (set AZURE_DEVOPS_EXT_PAT or run az login)" >&2; return 1; }
+    hdr="$(mktemp "${TMPDIR:-/tmp}/forge-azhdr.XXXXXX")"
+    chmod 0600 "${hdr}"   # make the 0600 promise explicit, independent of mktemp's default
+    printf '%s\n' "${auth}" > "${hdr}"
+    printf '%s' "${hdr}"
+}
+
 # _az_wit_patch <id> <json-patch-file>: PATCH a work item's fields via REST
 # JSON-Patch (the op array lives in the file, off argv — F5). This is the SINGLE
 # sanctioned WIT field-write path: `az devops invoke --resource workitems` PATCH
 # is broken (its route template needs a `${type}` route value PATCH-by-id has no
-# way to supply -> `KeyError: 'type'`), so description / discussion / tag writes
-# all funnel here.
+# way to supply -> `KeyError: 'type'`), so description / tag writes all funnel here.
 _az_wit_patch() {
-    local id="$1" patch_file="$2" auth hdr rc
-    auth="$(_az_auth_header)" \
-        || { echo "forge azure: no ADO credential (set AZURE_DEVOPS_EXT_PAT or run az login)" >&2; return 1; }
-    # Pass the auth header via a 0600 temp file (curl -H @file), NOT `-H "<token>"`:
-    # an argv-visible Authorization header leaks the PAT/Bearer token to `ps`.
-    hdr="$(mktemp "${TMPDIR:-/tmp}/forge-azhdr.XXXXXX")"
-    chmod 0600 "${hdr}"   # make the 0600 promise explicit, independent of mktemp's default
-    printf '%s\n' "${auth}" > "${hdr}"
+    local id="$1" patch_file="$2" hdr rc
+    hdr="$(_az_auth_hdr_file)" || return 1
     if curl -fsS -X PATCH "${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workitems/${id}?api-version=7.1" \
         -H @"${hdr}" -H "Content-Type: application/json-patch+json" --data-binary @"${patch_file}" >/dev/null; then rc=0; else rc=$?; fi
     rm -f "${hdr}"
+    return "${rc}"
+}
+
+# _az_wit_comment <id> <body-file>: add a work-item discussion comment rendered as
+# Markdown via the dedicated Comments API. System.Description / System.History
+# default to HTML, so a JSON-Patch write to System.History renders markdown
+# literally; only the comments endpoint honours a format. `?format=markdown` at
+# api-version 7.1-preview.4 is where CommentFormat (markdown|html) is exposed
+# (ref: azure-devops-rest wit/comments/add-comment@7.1-preview.4). Body off argv
+# via --data-binary @file — F5.
+_az_wit_comment() {
+    local id="$1" body_file="$2" hdr tmp rc
+    hdr="$(_az_auth_hdr_file)" || return 1
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azcmtbody.XXXXXX")"
+    jq -n --rawfile t "${body_file}" '{text:$t}' > "${tmp}" || { rc=$?; rm -f "${hdr}" "${tmp}"; return "${rc}"; }
+    if curl -fsS -X POST \
+        "${ADO_ORG}/${ADO_PROJECT}/_apis/wit/workItems/${id}/comments?format=markdown&api-version=7.1-preview.4" \
+        -H @"${hdr}" -H "Content-Type: application/json" --data-binary @"${tmp}" >/dev/null; then rc=0; else rc=$?; fi
+    rm -f "${hdr}" "${tmp}"
     return "${rc}"
 }
 
@@ -353,10 +385,14 @@ _azure_issue_create() { # <title> <body-file> <label-csv> [type]
         | jq -er '.id')" \
         || { echo "forge azure: work-item create returned no id" >&2; return 1; }
     # PATCH description via REST JSON-Patch so body stays in a file (off argv — F5).
+    # The multilineFieldsFormat op makes System.Description render Markdown instead
+    # of literal text (the field defaults to HTML).
+    # ref: azure-devops devblogs/markdown-support-arrives-for-work-items
     local tmp rc
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwi.XXXXXX")"
     jq -n --rawfile desc "${body_file}" \
-        '[{op:"add",path:"/fields/System.Description",value:$desc}]' > "${tmp}" || {
+        '[{op:"add",path:"/fields/System.Description",value:$desc},
+          {op:"add",path:"/multilineFieldsFormat/System.Description",value:"Markdown"}]' > "${tmp}" || {
             rc=$?
             rm -f "${tmp}"
             return "${rc}"
@@ -412,17 +448,13 @@ _azure_issue_close() { # <n> <reason-ignored> <comment>
     local -a cmd=(az boards work-item update --id "${n}" --state "${state}" --org "${ADO_ORG}" --output json)
     _dry "${cmd[@]}" && return 0
     "${cmd[@]}" >/dev/null
-    # Add discussion comment via REST JSON-Patch so comment text stays off argv.
+    # Add the discussion comment via the Comments API (Markdown). Write the argv
+    # comment to a file first so it stays off curl's argv (F5).
     if [ -n "${comment}" ]; then
         local tmp rc
         tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azclose.XXXXXX")"
-        jq -n --arg c "${comment}" \
-            '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}" || {
-                rc=$?
-                rm -f "${tmp}"
-                return "${rc}"
-            }
-        _az_wit_patch "${n}" "${tmp}" || rc=$?
+        printf '%s' "${comment}" > "${tmp}"
+        _az_wit_comment "${n}" "${tmp}" || rc=$?
         rm -f "${tmp}"
         [ "${rc:-0}" -eq 0 ] || return "${rc}"
     fi
@@ -443,24 +475,15 @@ _azure_issue_list() { # <search> <state: open|closed|all> -> WIQL result (id lis
 }
 
 _azure_issue_comment() { # <n> <body-file>
-    # F5: comment body must NOT enter argv — use REST JSON-Patch --in-file.
+    # Comment renders as Markdown via the Comments API (?format=markdown); the
+    # legacy System.History JSON-Patch path is HTML-only. F5: body off argv.
     local n="$1" body_file="$2"
     if [ "${DRY_RUN}" = "1" ]; then
-        printf 'REST PATCH /wit/workitems/%s System.History (curl, body off argv) --org %s\n' \
+        printf 'REST POST /wit/workItems/%s/comments?format=markdown (curl, body off argv) --org %s\n' \
             "${n}" "${ADO_ORG}"
         return 0
     fi
-    local tmp rc
-    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwicmt.XXXXXX")"
-    jq -n --rawfile c "${body_file}" \
-        '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}" || {
-            rc=$?
-            rm -f "${tmp}"
-            return "${rc}"
-        }
-    _az_wit_patch "${n}" "${tmp}" || rc=$?
-    rm -f "${tmp}"
-    [ "${rc:-0}" -eq 0 ] || return "${rc}"
+    _az_wit_comment "${n}" "${body_file}"
 }
 
 _azure_subissue_link() { # <parent> <child>
