@@ -1,0 +1,20 @@
+[package]
+name = "bootstrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎」只连基础+引擎，不依赖兄弟服务
+# （resolver 等需要的服务由组合根 bins/server / assembly 注入，不在此预连）。见 PR #137 review F1。
+[dependencies]
+vocab = { path = "../vocab" }
+ids = { path = "../ids" }
+secure = { path = "../secure" }
+support = { path = "../support" }
+runctx = { path = "../runctx" }
+consistency = { path = "../consistency" }
+primitives = { path = "../primitives" }

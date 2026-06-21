@@ -1,0 +1,16 @@
+[package]
+name = "primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+vocab = { path = "../vocab" }
+ids = { path = "../ids" }
+secure = { path = "../secure" }
+support = { path = "../support" }
+runctx = { path = "../runctx" }

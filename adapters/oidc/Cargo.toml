@@ -1,0 +1,20 @@
+[package]
+name = "oidc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# adapter 只依赖基础 + 引擎；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
+# 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
+[dependencies]
+vocab = { path = "../../crates/vocab" }
+ids = { path = "../../crates/ids" }
+secure = { path = "../../crates/secure" }
+support = { path = "../../crates/support" }
+runctx = { path = "../../crates/runctx" }
+consistency = { path = "../../crates/consistency" }
+primitives = { path = "../../crates/primitives" }

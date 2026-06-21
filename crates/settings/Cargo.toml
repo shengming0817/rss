@@ -1,0 +1,26 @@
+[package]
+name = "settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+vocab = { path = "../vocab" }
+ids = { path = "../ids" }
+secure = { path = "../secure" }
+support = { path = "../support" }
+runctx = { path = "../runctx" }
+consistency = { path = "../consistency" }
+primitives = { path = "../primitives" }
+httpserve = { path = "../httpserve" }
+authn = { path = "../authn" }
+bootstrap = { path = "../bootstrap" }
+eventexec = { path = "../eventexec" }
+observ = { path = "../observ" }
+distributed = { path = "../distributed" }
+deviceloop = { path = "../deviceloop" }
+generated = { path = "../../generated" }

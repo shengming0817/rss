@@ -1,0 +1,23 @@
+# RSS clippy 配置（Medium 载体）。具体禁用列表在此；lint 开关等级在根 Cargo.toml
+# [workspace.lints.clippy]（两层缺一不可）。见 .claude/rules/rss/rust-standards.md。
+cognitive-complexity-threshold = 15
+
+# clock 注入纪律：禁直调系统时钟，强制经构造器位置参注入的 Clock trait。
+# tokio / chrono 路径在骨架未进依赖图，allow-invalid 防「路径无法解析」误报。
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "注入 Clock trait（构造器位置参），见 rust-standards.md §工程护栏" },
+  { path = "std::time::SystemTime::now", reason = "同上：用 Clock trait，禁默认取系统时钟" },
+  { path = "tokio::time::Instant::now", reason = "同上：Clock trait（tokio 变体）", allow-invalid = true },
+  { path = "chrono::Utc::now", reason = "同上：用 Clock trait，禁直调 chrono", allow-invalid = true },
+  # 衍生时延读取——绕过 now() 仍能测时，一并禁（PR #137 review B3）。
+  { path = "std::time::Instant::elapsed", reason = "同上：经注入 Clock 计算时延，禁直接 elapsed" },
+  { path = "std::time::Instant::duration_since", reason = "同上：禁绕过 Clock 的时延计算" },
+  { path = "std::time::SystemTime::elapsed", reason = "同上：禁直接 elapsed" },
+  { path = "tokio::time::Instant::elapsed", reason = "同上（tokio 变体）", allow-invalid = true },
+]
+
+# 预留：跨域 wire 不裸传强类型标识等纪律，随类型落地补充。
+disallowed-types = []
+
+# 预留：panic 纪律主要走 [workspace.lints.clippy] panic/unwrap_used/expect_used，此处随宏纪律补充。
+disallowed-macros = []

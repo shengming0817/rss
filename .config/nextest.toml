@@ -1,0 +1,23 @@
+# RSS cargo-nextest 配置。进程隔离为 nextest 原生（每测试独立进程），无需配置键。
+# 配合 reconcile L4 / saga 状态机 / projection 的幂等性守卫（见 docs/rules/）。
+[profile.default]
+retries = 0
+fail-fast = true
+slow-timeout = { period = "60s", terminate-after = 3 }
+leak-timeout = "200ms"
+
+[profile.ci]
+fail-fast = false
+retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" }
+slow-timeout = { period = "120s", terminate-after = 2 }
+leak-timeout = "200ms"
+final-status-level = "slow"
+
+# 集成测试两个正交轴：编译期 feature 门 #[cfg(feature = "integration")] 决定是否编入二进制；
+# 下面 filter 仅在已编入的集成测试上做运行期串行调度（按测试名匹配，非 feature 门）。
+[test-groups]
+integration = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/integration/)'
+test-group = "integration"
