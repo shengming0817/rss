@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shengming0817/rss/hack/automation/schema/pr-meta.v1.json",
+  "title": "rss-pr-meta v1",
+  "description": "Machine-readable provenance + dispatch protocol carried in a hidden HTML comment after the human-readable footer of every pm:ship / pm:fix / pm:pr-review / pm:ci / pm:oos PR comment. Wire form: a single-line `<!-- rss-pr-meta:v1 <standard-base64(JSON)> -->`. Standard base64 (alphabet A-Za-z0-9+/=, never `-`) is used instead of base64url because CommonMark forbids `--` inside an HTML comment body; base64url's `-` could emit `--` and demote the whole block to visible text. Consumed by the external PR app and /pr-monitor fallback to dispatch the next review<->fix step and enforce the 3-round circuit breaker. Produced solely by hack/automation/pr-meta.sh emit-block, which derives phase/verdict/cycle.round from the producer's --kind plus `schema`, `cycle.exhausted`, `next`, and `idempotencyKey`. pm:ci records CI check outcomes; pm:oos records out-of-scope findings for future gh issue filing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "repo", "pr", "kind", "phase", "tool",
+    "baseRef", "headRef", "headSha", "session", "worktree",
+    "verdict", "findings", "cycle", "next", "idempotencyKey"
+  ],
+  "properties": {
+    "schema": {
+      "const": "rss-pr-meta/v1",
+      "description": "Schema version discriminator. The marker token `rss-pr-meta:v1` mirrors this."
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[^/ ]+/[^/ ]+$",
+      "description": "owner/name slug, e.g. shengming0817/rss."
+    },
+    "pr": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "PR number."
+    },
+    "kind": {
+      "enum": ["ship", "fix", "pr-review", "ci", "oos"],
+      "description": "Comment marker family (pm:ship / pm:fix / pm:pr-review / pm:ci / pm:oos)."
+    },
+    "phase": {
+      "enum": ["ship", "review", "fix", "check"],
+      "description": "Pipeline stage. pr-review uses phase to distinguish a normal review (review) from a --check verification (check). ci uses check; oos uses review."
+    },
+    "tool": {
+      "enum": ["claude-code", "codex"],
+      "description": "Tool that produced the comment."
+    },
+    "baseRef": {
+      "type": "string",
+      "minLength": 1,
+      "description": "PR base branch (develop)."
+    },
+    "headRef": {
+      "type": "string",
+      "minLength": 1,
+      "description": "PR head branch name."
+    },
+    "headSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full head commit SHA. Freshness anchor: a consumer compares this against the live headRefOid and discards a stale block."
+    },
+    "session": {
+      "type": ["string", "null"],
+      "description": "Producer session id, or null if unavailable."
+    },
+    "worktree": {
+      "type": ["string", "null"],
+      "description": "Producer worktree path, or null when working on develop directly."
+    },
+    "verdict": {
+      "enum": ["needs-review-again", "approved", "changes-requested", "ready", "needs-check-fix", "ci-failed", "ci-green", "oos-filed"],
+      "description": "Workflow conclusion, bound to the real label state machine (pr-status/* and pr-review/* — see .github/project-template/PROJECT.md §2.5/§5)."
+    },
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "fixed", "unresolved", "blocking", "byP", "byCx"],
+      "description": "Machine summary of this round's findings.",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "fixed": { "type": "integer", "minimum": 0, "description": "Cx1/Cx2 IN_SCOPE auto-fixed this round." },
+        "unresolved": { "type": "integer", "minimum": 0, "description": "Cx3/Cx4 + deferred/OOS left for human." },
+        "blocking": { "type": "integer", "minimum": 0, "description": "Must-fix-before-merge count (typically unresolved P0/P1)." },
+        "byP": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p0", "p1", "p2", "p3"],
+          "properties": {
+            "p0": { "type": "integer", "minimum": 0 },
+            "p1": { "type": "integer", "minimum": 0 },
+            "p2": { "type": "integer", "minimum": 0 },
+            "p3": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "byCx": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cx1", "cx2", "cx3", "cx4"],
+          "properties": {
+            "cx1": { "type": "integer", "minimum": 0 },
+            "cx2": { "type": "integer", "minimum": 0 },
+            "cx3": { "type": "integer", "minimum": 0 },
+            "cx4": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "cycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["round", "maxRounds", "exhausted"],
+      "description": "Circuit breaker for the automated review<->fix loop. round = number of completed fix rounds for this PR; exhausted = round >= maxRounds. When exhausted and verdict is changes-requested, emit forces next.agent=human so the external app and /pr-monitor stop dispatching and escalate.",
+      "properties": {
+        "round": { "type": "integer", "minimum": 0 },
+        "maxRounds": { "type": "integer", "minimum": 1 },
+        "exhausted": { "type": "boolean" }
+      }
+    },
+    "next": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "command", "sandbox", "triggerLabel", "requiresSameHeadSha"],
+      "description": "Dispatch directive, derived by emit from (verdict, cycle). Never hand-written by producers.",
+      "properties": {
+        "agent": {
+          "enum": ["claude", "codex", "human", null],
+          "description": "Executor that handles the next step, or null for a terminal verdict (approved/ready/ci-green)."
+        },
+        "command": {
+          "type": ["string", "null"],
+          "description": "Advisory command the next agent runs, or null."
+        },
+        "sandbox": {
+          "type": "boolean",
+          "description": "Whether the next step should run sandboxed."
+        },
+        "triggerLabel": {
+          "type": ["string", "null"],
+          "description": "The pr-status/* label whose presence triggers the next executor, or null."
+        },
+        "requiresSameHeadSha": {
+          "type": "boolean",
+          "description": "Whether the next executor must verify headSha is unchanged before acting."
+        }
+      }
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Derived {repo}#{pr}@{headSha}:{kind}/{phase}#{round}. Lets an executor dedup repeated dispatch on the same comment."
+    },
+    "ci": {
+      "type": ["object", "null"],
+      "description": "CI check outcome data, present only for pm:ci comments, null otherwise.",
+      "additionalProperties": false,
+      "properties": {
+        "failedChecks": {
+          "type": "array",
+          "description": "List of failed CI check names and URLs.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "url"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "url": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "passedChecks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of checks that passed."
+        },
+        "totalChecks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of checks run."
+        }
+      }
+    },
+    "oos": {
+      "type": ["object", "null"],
+      "description": "Out-of-scope findings data, present only for pm:oos comments, null otherwise. Each item is a lossless per-finding record that has been auto-filed as a backlog issue (carries `issue`) or explicitly deferred for human action (carries `deferred`).",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "description": "Per-finding OOS records. Each item carries the full finding detail plus its disposition: exactly one of a filed `issue` ref or a closed-enum `deferred` reason. The XOR is declared here in oneOf (schema single source) AND enforced in pr-meta.sh validate_kind_facts on emit+decode. Note: the funnel guarantees a disposition is present, not that it is correct (a real filed issue / right labels) — that is the ship/fix skill's responsibility, not machine-checked.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fileLine", "rootCause", "solutionSeeds"],
+            "oneOf": [
+              { "required": ["issue"] },
+              { "required": ["deferred"] }
+            ],
+            "properties": {
+              "fileLine": {
+                "type": "string",
+                "minLength": 1,
+                "description": "File path and line reference (e.g. 'crates/framework/kernel/src/foo.rs:42')."
+              },
+              "rootCause": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "arch", "history"],
+                "properties": {
+                  "code": { "type": "string", "minLength": 1 },
+                  "arch": { "type": "string", "minLength": 1 },
+                  "history": { "type": "string", "minLength": 1 }
+                }
+              },
+              "solutionSeeds": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["minimal", "thorough", "refactor"],
+                "properties": {
+                  "minimal": { "type": "string", "minLength": 1 },
+                  "thorough": { "type": "string", "minLength": 1 },
+                  "refactor": { "type": "string", "minLength": 1 }
+                }
+              },
+              "issue": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Filed backlog issue ref (e.g. '#1234' or full URL). Present when ship/fix auto-filed this finding via the issues B1 gh issue create. Exactly one of `issue` or `deferred` must be set per item (XOR enforced in pr-meta.sh validate_kind_facts)."
+              },
+              "deferred": {
+                "enum": ["pri-p0-incident", "labels-underivable"],
+                "description": "Closed-enum reason this finding was NOT auto-filed and is staged for human action instead: pri-p0-incident (a P0 incident needs human triage before filing) or labels-underivable (area/type could not be derived to pass the issue-labels.sh four-axis gate). Exactly one of `issue` or `deferred` per item."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
