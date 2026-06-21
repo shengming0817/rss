@@ -76,7 +76,7 @@ _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
             "${ADO_PROJECT}" "${ADO_REPO}" "${ADO_ORG}"
         return 0
     fi
-    local tmp
+    local tmp rc out
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azpr.XXXXXX")"
     # jq --rawfile reads the file without shell interpolation; no argv exposure.
     jq -n \
@@ -84,17 +84,22 @@ _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
         --arg src "refs/heads/${head}" \
         --arg tgt "refs/heads/${base}" \
         --rawfile desc "${body_file}" \
-        '{title:$title, description:$desc, sourceRefName:$src, targetRefName:$tgt}' > "${tmp}"
-    local out; out="$(az devops invoke --area git --resource pullRequests \
+        '{title:$title, description:$desc, sourceRefName:$src, targetRefName:$tgt}' > "${tmp}" || {
+            rc=$?
+            rm -f "${tmp}"
+            return "${rc}"
+        }
+    out="$(az devops invoke --area git --resource pullRequests \
         --http-method POST \
         --route-parameters "project=${ADO_PROJECT}" "repositoryId=${ADO_REPO}" \
-        --in-file "${tmp}" --api-version 7.1 --output json --org "${ADO_ORG}")"
+        --in-file "${tmp}" --api-version 7.1 --output json --org "${ADO_ORG}")" || rc=$?
     rm -f "${tmp}"
+    [ "${rc:-0}" -eq 0 ] || return "${rc}"
     printf '%s' "${out}" | jq -r --arg base "$(_az_pr_url_base)" '"\($base)/pullrequest/\(.pullRequestId)"'
 }
 
 _azure_pr_comment() { # <pr> <body-file> -> comment URL
-    local pr="$1" body="$2" tmp
+    local pr="$1" body="$2" tmp rc out
     # dry-run: emit a stable placeholder — skip mktemp so no random path leaks (F14).
     if [ "${DRY_RUN}" = "1" ]; then
         printf 'az devops invoke --area git --resource pullRequestThreads --route-parameters project=%s repositoryId=%s pullRequestId=%s --http-method POST --in-file <body-file> --api-version 7.1 --output json --org %s\n' \
@@ -103,11 +108,17 @@ _azure_pr_comment() { # <pr> <body-file> -> comment URL
     fi
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azcomment.XXXXXX")"
     # JSON-escape the markdown body via --rawfile; commentType 1 = text, status 1 = active.
-    jq -n --rawfile c "${body}" '{comments:[{parentCommentId:0, content:$c, commentType:1}], status:1}' > "${tmp}"
+    jq -n --rawfile c "${body}" '{comments:[{parentCommentId:0, content:$c, commentType:1}], status:1}' > "${tmp}" || {
+        rc=$?
+        rm -f "${tmp}"
+        return "${rc}"
+    }
     local -a cmd=(az devops invoke --area git --resource pullRequestThreads
         --route-parameters "project=${ADO_PROJECT}" "repositoryId=${ADO_REPO}" "pullRequestId=${pr}"
         --http-method POST --in-file "${tmp}" --api-version 7.1 --output json --org "${ADO_ORG}")
-    local out; out="$("${cmd[@]}")"; rm -f "${tmp}"
+    out="$("${cmd[@]}")" || rc=$?
+    rm -f "${tmp}"
+    [ "${rc:-0}" -eq 0 ] || return "${rc}"
     printf '%s' "${out}" | jq -r --arg base "$(_az_pr_url_base)" --arg pr "${pr}" '"\($base)/pullrequest/\($pr)?discussionId=\(.id)"'
 }
 
@@ -324,15 +335,20 @@ _azure_issue_create() { # <title> <body-file> <label-csv> [type]
         --org "${ADO_ORG}" --project "${ADO_PROJECT}" --output json \
         | jq -r '.id')"
     # PATCH description via REST JSON-Patch so body stays in a file.
-    local tmp
+    local tmp rc
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwi.XXXXXX")"
     jq -n --rawfile desc "${body_file}" \
-        '[{op:"add",path:"/fields/System.Description",value:$desc}]' > "${tmp}"
+        '[{op:"add",path:"/fields/System.Description",value:$desc}]' > "${tmp}" || {
+            rc=$?
+            rm -f "${tmp}"
+            return "${rc}"
+        }
     az devops invoke --area wit --resource workitems \
         --route-parameters "id=${wi_id}" \
         --http-method PATCH --in-file "${tmp}" \
-        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null
+        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null || rc=$?
     rm -f "${tmp}"
+    [ "${rc:-0}" -eq 0 ] || return "${rc}"
     printf '#%s\n' "${wi_id}"
 }
 
@@ -383,15 +399,20 @@ _azure_issue_close() { # <n> <reason-ignored> <comment>
     "${cmd[@]}" >/dev/null
     # Add discussion comment via REST JSON-Patch so comment text stays off argv.
     if [ -n "${comment}" ]; then
-        local tmp
+        local tmp rc
         tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azclose.XXXXXX")"
         jq -n --arg c "${comment}" \
-            '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}"
+            '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}" || {
+                rc=$?
+                rm -f "${tmp}"
+                return "${rc}"
+            }
         az devops invoke --area wit --resource workitems \
             --route-parameters "id=${n}" \
             --http-method PATCH --in-file "${tmp}" \
-            --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null
+            --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null || rc=$?
         rm -f "${tmp}"
+        [ "${rc:-0}" -eq 0 ] || return "${rc}"
     fi
 }
 
@@ -417,15 +438,20 @@ _azure_issue_comment() { # <n> <body-file>
             "${n}" "${ADO_ORG}"
         return 0
     fi
-    local tmp
+    local tmp rc
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azwicmt.XXXXXX")"
     jq -n --rawfile c "${body_file}" \
-        '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}"
+        '[{op:"add",path:"/fields/System.History",value:$c}]' > "${tmp}" || {
+            rc=$?
+            rm -f "${tmp}"
+            return "${rc}"
+        }
     az devops invoke --area wit --resource workitems \
         --route-parameters "id=${n}" \
         --http-method PATCH --in-file "${tmp}" \
-        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null
+        --api-version 7.1 --output json --org "${ADO_ORG}" >/dev/null || rc=$?
     rm -f "${tmp}"
+    [ "${rc:-0}" -eq 0 ] || return "${rc}"
 }
 
 _azure_subissue_link() { # <parent> <child>

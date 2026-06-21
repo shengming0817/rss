@@ -21,7 +21,7 @@
 > - **标准 base64（非 url）**：CommonMark 禁 HTML 注释正文含 `--`；标准 base64 字母表 `A-Za-z0-9+/=` 无 `-`，结构上不可能产 `--`/`-->`（base64url 含 `-`，会破块）。
 > - schema 单源 = `hack/automation/schema/pr-meta.v1.json`；helper = `hack/automation/pr-meta.sh`（`emit-block`/`decode`/`extract`/`round`/`selftest`）。消费侧只接受 canonical 块（派生字段必须 = emit-block 由块自身 facts 重算结果，防伪造）+ 仅信 `bash hack/automation/forge.sh pr-comments-json` 已过滤的受信 pm 评论（各 backend 信任来源：github=author_association OWNER/MEMBER/COLLABORATOR；azure/gitlab=`*_TRUSTED_AUTHORS` allowlist；过滤逻辑单源在 `forge.sh` 各 backend）。**人读 footer 不动其格式**——footer 人读、机器块 dispatch，二者并存。
 > - **kind 列表**：`ship`（pm:ship）/ `fix`（pm:fix）/ `pr-review`（pm:pr-review）/ `ci`（pm:ci）/ `oos`（pm:oos）。phase/verdict/round 派生见上方 `derive_facts` 单源条。ci 类型 capability-gated：激活 forge=azure 无 CI（Pipelines 额度有限、不迁移），ci-* 返回 no-ci，不贴 pm:ci。
-> - **protocol 健全性测试**：`bash hack/automation/pr-meta.sh selftest` + `bash hack/automation/pr-handoff-contract-selftest.sh`（离线，无网络，make verify 自动触发）。
+> - **protocol 健全性测试**：`bash hack/automation/pr-meta.sh selftest` 可直接运行；统一 `make verify` 聚合入口与 `pr-handoff-contract-selftest.sh` 迁移尚未落地。
 
 ## ship 评论（`<!-- pm:ship -->`）
 
