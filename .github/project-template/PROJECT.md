@@ -132,7 +132,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 |------|------|------|
 | `pr-status/needs-review-again` | `kind=ship` + `verdict=needs-review-again` + `next.triggerLabel=pr-status/needs-review-again` | `codex review` |
 | `pr-status/needs-check-fix` | `kind=fix` + `verdict=needs-check-fix` + `next.triggerLabel=pr-status/needs-check-fix` | `/pr-review --check` |
-| `pr-status/needs-fix` | `kind=pr-review` + `verdict=changes-requested` + `next.triggerLabel=pr-status/needs-fix` | `/fix`（`/pr-monitor` 检测 needs-fix 即接力；Cx / scope / 熔断判定由 `/fix` 自理，读 `pr-meta round`/`byCx`） |
+| `pr-status/needs-fix` | `kind=pr-review` + `verdict=changes-requested` + `next.triggerLabel=pr-status/needs-fix` | `/fix`（`/pr-monitor` 过 handoff 门——fresh canonical block + verdict + same-head + next 一致——才接力；Cx / scope 判定下放 `/fix`，读 finding 文件 + `byCx`） |
 
 离线契约测试直接运行：`bash hack/automation/pr-meta.sh selftest`（离线，无网络）；统一 `make verify` 聚合入口 + `pr-handoff-contract-selftest.sh` 迁移尚未落地（backlog）。
 

@@ -1,6 +1,6 @@
 ---
 name: pr-monitor
-description: "PR 状态自动接力检查器：ship/fix 收尾约 10min 后必须启动；读取外部 app/review 已产生的 label + 最新机器块，检测到 needs-fix 即接力 /fix——Cx/scope/熔断判定全由 /fix 自理。pr-monitor 自身不贴评论、不切 label。"
+description: "PR 状态自动接力检查器：ship/fix 收尾约 10min 后必须启动；读取外部 app/review 已产生的 label + 最新机器块，过 handoff 机器门（fresh canonical block + verdict + same-head + next 一致）才接力 /fix——Cx/scope 判定下放 /fix。pr-monitor 自身不贴评论、不切 label。"
 argument-hint: "<PR#> --mode=auto [--role fix|review]"
 allowed-tools: [Bash, Read, Skill, Agent]
 ---
@@ -62,20 +62,33 @@ esac; shift; done
 |------|------|---------|
 | `pr-status/ready` ∈ labels | label 含 | "PR #N 已 ready，监控结束" |
 | PR state != open | `state != "open"` | "PR #N 已关闭（state=$STATE），监控结束" |
+| 熔断 | block `cycle.exhausted` 或 `round ≥ 3` 或 `next.agent == "human"` | "PR #N 熔断：review↔fix 已达 3 轮上限，转人工" |
 
-> ready/closed 是终止出口；review↔fix 3 轮熔断已下放 `/fix` 自判（fix 输入解析的熔断闸门读 `pr-meta.sh round`）。ship/fix 经延迟单次调用本技能、跑完即止。
+> ready/closed/熔断 是终止出口。ship/fix 经延迟单次调用本技能、跑完即止。
 
-### §3.2 调 fix（有 needs-fix 即接力）
+### §3.2 调 fix（handoff 机器门全过才接力）
 
-`pr-status/needs-fix` ∈ labels → host LLM in-session 调用 `Skill("fix", args="<N>")`。Cx / scope / 能否修 / 熔断（3 轮上限）全由 fix 自读评论 + 机器块（`pr-meta.sh extract` / `round`）判定——pr-monitor 不做机器门判定。
+**label 只是入口提示，最新 fresh canonical 机器块 + live head 才是可执行事实**（对标 Prow Tide / Zuul gating——不凭单一 label 信号 dispatch）。dispatch 前用 `pr-meta.sh extract` 读最新块，下列**全机器可判定**的门全过才接力：
 
-fix 会贴 pm:fix + 切 `pr-status/needs-check-fix`；pr-monitor 本次单次调用到此结束。后续 `/pr-review --check` 由外部 app 监听触发，再由 fix 收尾延迟约 10 分钟启动下一次 pr-monitor 接力。
+| handoff 门（全过才 dispatch） | 判定 |
+|------|------|
+| `pr-status/needs-fix` ∈ labels | label check |
+| fresh canonical review 块 | `extract` EC=0 且 latest block `kind == "pr-review"`（stale / 无块 → 不过）|
+| review 结论一致 | block `verdict == "changes-requested"` |
+| 下一跳一致 | block `next.agent == "claude"` 且 `next.command == "/fix"` |
+| 触发 label 一致 | block `next.triggerLabel == "pr-status/needs-fix"` 且该 label 仍在 PR |
+| same head | block `next.requiresSameHeadSha == true`（`extract` 已比对 live headSha，stale 失败）|
+
+全过 → host LLM in-session 调用 `Skill("fix", args="<N>")`。**Cx / scope / 能否修由 fix 自判**（读 finding 文件 + `byCx`）——pr-monitor 只守 handoff 真实性 + freshness 这层机器门，不做 Cx 判定（去掉原 Cx1/Cx2 window）。
+
+stale 块 / 旧 head review / 手工错贴 label → 门不过 → 不 dispatch，落 §3.3 报告。fix 接力后贴 pm:fix + 切 `pr-status/needs-check-fix`；pr-monitor 本次到此结束。后续 `/pr-review --check` 由外部 app 监听触发，再由 fix 收尾延迟约 10min 启动下一次接力。
 
 ### §3.3 不自动修的情况（只报告，不 AskUserQuestion）
 
 - **`pr-status/needs-review-again`**：窗口打印 "PR #N 待外部 app 执行首轮 review；如需手动兜底，运行 `/pr-monitor <N> --mode=auto --role=review`"。
 - **`pr-status/needs-check-fix`**：窗口打印 "PR #N 待外部 app 执行 `/pr-review --check`；如需手动兜底，运行 `/pr-monitor <N> --mode=auto --role=review`"。
 - **无 `pr-status/needs-fix`**：窗口打印 "PR #N 暂无待修 label，本次接力结束"。
+- **needs-fix 在但 handoff 门不过**（stale 块 / 旧 head / verdict·next 不一致）：窗口打印 "PR #N 有 needs-fix 但最新机器块 stale 或与 live head/label 不一致，不自动接力——等外部 app 对当前 head 重新 review"。
 
 ### §3.4 冲突解（复用 issues B5）
 

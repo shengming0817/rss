@@ -7,7 +7,7 @@
 > **评论即 review 结果，无损（关键约定）**：评论是 `/fix <PR#>` 提取 findings 的**唯一来源**。
 > 每条 Finding **必带 `file:line`**（fix 据此定位，不重新 review），根因 + 证据 + 建议 + 三级方案种子写进 `<details>`（人看摘要、fix 读详表，两不丢）。
 > **OUT_OF_SCOPE finding 同享无损区，不准降级成计数 `OUT_OF_SCOPE <k>`**：每条 OOS 带 file:line + 证据 + 三维根因（代码/架构/历史）+ 三级方案种子 + Files 列表 + **处置（自动建的 issue #N 或 `deferred` 原因）**，由 ship/fix **自动 `bash hack/automation/forge.sh issue-create`**（body 按 `backlog.md` 字段映射：现状←证据+根因+影响 / 修复方向←方案种子 / Files←file:line 全集 / Source←`PR #<N> finding <Fk>`）无损成文，详记入独立 pm:oos 评论。
-> **IN_SCOPE Cx3/Cx4 必带处置，不准停留在 `遗留`**：每条 IN_SCOPE Cx3（及 Cx4）在切触发 label 之前经 AskUserQuestion 处置（ship 阶段 8 步骤 2 / fix 3.4 处置门），评论里必标 `✅ 已修（人工确认）` 或 `⏸ defer：<原因>`——`⏸ 遗留（需人工决策）` 这类**未决态不得带过切 label**。
+> **IN_SCOPE Cx3/Cx4 必带处置，不准停留在 `遗留`**：每条 IN_SCOPE Cx3（及 Cx4）在切触发 label 之前经处置门（ship 阶段 8 步骤 2 / fix 3.4）AskUserQuestion 判「当前 PR 修」or「defer」，评论里必标 `✅ 已修（人工确认）` 或 `⏸ defer：已建 #N（<原因>）`（判 defer 后自动建 issue、不二次确认）——`⏸ 遗留（需人工决策）` 这类**未决态不得带过切 label**。
 > **禁止有损浓缩**——只写计数 / 模糊一句话会让 fix 与后续建 issue 丢失定位与根因，违背本约定。
 
 ## 机器块（`rss-pr-meta:v1`，隐藏，自动化执行器消费）

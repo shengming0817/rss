@@ -155,7 +155,7 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 
 > **pm:* 评论统一**：填 `pr-comment.md` 模板（无损 `file:line` + 详表入 `<details>`）+ `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块到 body 末尾 + `issues` B4 贴（回显 URL）。
 
-1. **打印 + 留痕**：窗口完整打印内置 findings 表（P/Cx + IN_SCOPE/OOS 归属 + `file:line`，输出纪律见 `PROJECT.md` §5），贴 pm:ship 留痕。
+1. **打印**：窗口完整打印内置 findings 表（P/Cx + IN_SCOPE/OOS 归属 + `file:line`，输出纪律见 `PROJECT.md` §5）。pm:ship 留痕在步骤 4 唯一贴（不在此重复贴）。
 2. **Cx3 处置门（阻塞，先于自动修与切 label）**：每条 IN_SCOPE Cx3/Cx4 用 AskUserQuestion 判「当前 PR 修」or「defer」——判修（pm:ship 记 `✅ 已修`）；判 defer → **自动**按 `issues` B1 建 issue 跟踪（pm:ship 记 `⏸ defer`，**不再二次确认**）；Cx4 默认 defer。处置完再 Cx1/Cx2 IN_SCOPE 自动修（派 `developer` agent 按 [AUTO-FIX] Edit-Test 修，不逐条问）。归属/取舍没把握仍 AskUserQuestion。
 3. **推送 + 冲突预检（阻塞）**：`git -C worktrees/<wt> push`，按 `issues` B5 ① 验冲突（冲突则 `git merge "$(bash hack/automation/forge.sh remote)/develop" --no-edit` 再 push），过则立即进 4（不等 CI）。
 4. **pm:ship**（`--kind=ship`）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
