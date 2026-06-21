@@ -74,6 +74,59 @@ check "dry-run: prints az repos pr create" "match" \
     "$(printf '%s' "$out" | grep -q '^az repos pr create ' && echo match || echo nomatch)"
 check "dry-run: az not invoked"        "clean"   "$(has "$out" 'SHOULD-NOT-RUN')"
 
+# ---- _azure_issue_create ----------------------------------------------------
+# Regression: the work-item description back-fill must NOT go through
+# `az devops invoke --resource workitems PATCH` (its route template needs a
+# {type} placeholder PATCH-by-id can't fill -> KeyError: 'type'). It funnels
+# through `_az_wit_patch` (REST curl), same path the tags-replace already uses.
+ibody="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-ib.XXXXXX")"
+printf 'finding body line1\nline2\n' > "${ibody}"
+seen="$(mktemp "${TMPDIR:-/tmp}/azure-selftest-seen.XXXXXX")"
+trap 'rm -f "${body}" "${ibody}" "${seen}"' EXIT
+
+# Case I1: dry-run shape -> work-item create (with --type) + REST patch, never
+# `az devops invoke`.
+DRY_RUN=1
+out="$(_azure_issue_create "T" "${ibody}" "backlog,pri-p2" "Product Backlog Item")"; rc=$?
+DRY_RUN=0
+check "issue-create dry: zero exit"        "zero"  "$(zero "$rc")"
+check "issue-create dry: work-item create --type" "match" \
+    "$(printf '%s' "$out" | grep -q 'az boards work-item create .*--type Product Backlog Item' && echo match || echo nomatch)"
+check "issue-create dry: REST patch not invoke" "clean" "$(has "$out" 'devops invoke')"
+
+# Case I2: happy path -> create returns id 99, REST patch ok -> emits "#99".
+az() { case "$*" in *"boards work-item create"*) printf '{"id":99}\n' ;; *) printf '{}\n' ;; esac; }
+_az_wit_patch() { return 0; }
+out="$(_azure_issue_create "T" "${ibody}" "backlog,pri-p2" "Product Backlog Item")"; rc=$?
+check "issue-create ok: emits #99"         "#99"   "$out"
+check "issue-create ok: zero exit"         "zero"  "$(zero "$rc")"
+
+# Case I3: description patch fails -> fail-fast (non-zero), no id leaked.
+_az_wit_patch() { return 1; }
+out="$(_azure_issue_create "T" "${ibody}" "backlog,pri-p2" "Product Backlog Item" 2>/dev/null)"; rc=$?
+check "issue-create patch-fail: non-zero"  "nonzero" "$(nonzero "$rc")"
+check "issue-create patch-fail: no #id"    "clean"   "$(has "$out" '#')"
+
+# Case I4: explicit 4th arg type reaches `--type` (subshell records to file).
+az() { case "$*" in *"boards work-item create"*) printf '%s' "$*" > "${seen}"; printf '{"id":7}\n' ;; *) printf '{}\n' ;; esac; }
+_az_wit_patch() { return 0; }
+_azure_issue_create "T" "${ibody}" "backlog" "Bug" >/dev/null
+check "issue-create type passthrough"      "match" \
+    "$(grep -q -- '--type Bug' "${seen}" && echo match || echo nomatch)"
+
+# Case I5: omitted type falls back to AZURE_WI_TYPE_BACKLOG default.
+export AZURE_WI_TYPE_BACKLOG="Product Backlog Item"
+: > "${seen}"
+_azure_issue_create "T" "${ibody}" "backlog" >/dev/null
+check "issue-create default type"          "match" \
+    "$(grep -q -- '--type Product Backlog Item' "${seen}" && echo match || echo nomatch)"
+
+# Case CFG: forge.conf regression — backlog WI type must be a real Scrum type,
+# never "Issue" (this project's Scrum process template has no "Issue" -> VS402323).
+# shellcheck source=/dev/null
+( . "${HERE}/../forge.conf" >/dev/null 2>&1; [ -n "${AZURE_WI_TYPE_BACKLOG}" ] && [ "${AZURE_WI_TYPE_BACKLOG}" != "Issue" ] ); cfgrc=$?
+check "forge.conf backlog type valid"      "zero"  "$(zero "$cfgrc")"
+
 if [ "${fail}" -eq 0 ]; then
     echo "PASS azure.selftest.sh"
 else
