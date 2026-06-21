@@ -65,7 +65,17 @@ SCHEMA_FILE="${REPO_ROOT}/hack/automation/schema/pr-meta.v1.json"
 # repo-slug). Path overridable via RSS_FORGE_SH for offline selftests.
 FORGE_SH="${RSS_FORGE_SH:-${REPO_ROOT}/hack/automation/forge.sh}"
 forge() { bash "${FORGE_SH}" "$@"; }
-REPO_SLUG="$(forge repo-slug)"
+# REPO_SLUG is resolved lazily (on first use) so that offline subcommands
+# (decode, selftest) never invoke forge.  Online paths (emit-block, extract,
+# round) call repo_slug() which populates the cache on first call.
+_REPO_SLUG=""
+repo_slug() {
+    if [[ -z "${_REPO_SLUG}" ]]; then
+        _REPO_SLUG="$(forge repo-slug)" \
+            || { echo "pr-meta: forge repo-slug failed" >&2; return 1; }
+    fi
+    printf '%s' "${_REPO_SLUG}"
+}
 # pm:* comment protocol helper — single fetch/sort/filter point (ADR forge C1).
 PRCOMMENTS_SH="${RSS_PRCOMMENTS_SH:-${REPO_ROOT}/hack/automation/pr-comments.sh}"
 
@@ -1161,7 +1171,7 @@ cmd_emit_block() {
     minimal="$(jq -nc \
         --arg kind "${kind}" \
         --argjson pr "${pr}" \
-        --arg repo "${REPO_SLUG}" \
+        --arg repo "$(repo_slug)" \
         --arg baseRef "${base_ref}" \
         --arg headRef "${head_ref}" \
         --arg headSha "${head_sha}" \
@@ -1208,7 +1218,7 @@ cmd_extract() {
         || { echo "pr-meta extract: pr-comments.sh bodies failed" >&2; return 1; }
     live_sha="$(forge pr-refs "${pr}" | jq -r '.headSha')" \
         || { echo "pr-meta extract: forge pr-refs failed" >&2; return 1; }
-    printf '%s\n' "${bodies}" | py extract "${SCHEMA_FILE}" "${REPO_SLUG}" "${pr}" "${live_sha}"
+    printf '%s\n' "${bodies}" | py extract "${SCHEMA_FILE}" "$(repo_slug)" "${pr}" "${live_sha}"
 }
 
 cmd_round() {
@@ -1217,7 +1227,7 @@ cmd_round() {
     local bodies
     bodies="$(fetch_trusted_bodies "${pr}")" \
         || { echo "pr-meta round: pr-comments.sh bodies failed" >&2; return 1; }
-    printf '%s\n' "${bodies}" | py maxround "${SCHEMA_FILE}" "${REPO_SLUG}" "${pr}"
+    printf '%s\n' "${bodies}" | py maxround "${SCHEMA_FILE}" "$(repo_slug)" "${pr}"
 }
 
 cmd_selftest() { py selftest "${SCHEMA_FILE}"; }

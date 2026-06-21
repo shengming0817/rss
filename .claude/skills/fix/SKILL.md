@@ -7,7 +7,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 # 问题诊断与修复
 
-> 真源 = GitHub Issues + Project v2 #3；label / 评级 rubric（P + Cx）见 `.github/project-template/PROJECT.md`；issue/PR/label/评论原子操作规范见 `issues`（Part B）。
+> 真源 = 激活 forge 的 issue/work-item tracker + 看板（GitHub Issues+Project v2 / Azure Boards / GitLab issues，经 `forge.sh` 适配）；label / 评级 rubric（P + Cx）见 `.github/project-template/PROJECT.md`；issue/PR/label/评论原子操作规范见 `issues`（Part B）。
 
 ---
 

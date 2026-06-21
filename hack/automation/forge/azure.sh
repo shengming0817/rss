@@ -77,13 +77,18 @@ _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
 
 _azure_pr_comment() { # <pr> <body-file> -> comment URL
     local pr="$1" body="$2" tmp
+    # dry-run: emit a stable placeholder — skip mktemp so no random path leaks (F14).
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf 'az devops invoke --area git --resource pullRequestThreads --route-parameters project=%s repositoryId=%s pullRequestId=%s --http-method POST --in-file <body-file> --api-version 7.1 --output json --org %s\n' \
+            "${ADO_PROJECT}" "${ADO_REPO}" "${pr}" "${ADO_ORG}"
+        return 0
+    fi
     tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azcomment.XXXXXX")"
     # JSON-escape the markdown body via --rawfile; commentType 1 = text, status 1 = active.
     jq -n --rawfile c "${body}" '{comments:[{parentCommentId:0, content:$c, commentType:1}], status:1}' > "${tmp}"
     local -a cmd=(az devops invoke --area git --resource pullRequestThreads
         --route-parameters "project=${ADO_PROJECT}" "repositoryId=${ADO_REPO}" "pullRequestId=${pr}"
         --http-method POST --in-file "${tmp}" --api-version 7.1 --output json --org "${ADO_ORG}")
-    if _dry "${cmd[@]}"; then rm -f "${tmp}"; return 0; fi
     local out; out="$("${cmd[@]}")"; rm -f "${tmp}"
     printf '%s' "${out}" | jq -r --arg base "$(_az_pr_url_base)" --arg pr "${pr}" '"\($base)/pullrequest/\($pr)?discussionId=\(.id)"'
 }
@@ -168,8 +173,13 @@ _azure_pr_comments_json() { # <pr> -> [{createdAt,author,url,body,kind}] trusted
 }
 
 # _azure_fetch_pr_refs <base> <head>: refresh the remote-tracking refs so a local
-# diff isn't computed against a stale tip (F10). Best-effort; ignore offline failure.
-_azure_fetch_pr_refs() { git fetch -q "${AZURE_REMOTE}" "$1" "$2" 2>/dev/null || true; }
+# diff isn't computed against a stale tip (F10). Fail-fast on fetch error so stale
+# refs don't silently produce wrong diffs.
+_azure_fetch_pr_refs() {
+    git fetch -q "${AZURE_REMOTE}" \
+        "+refs/heads/$1:refs/remotes/${AZURE_REMOTE}/$1" \
+        "+refs/heads/$2:refs/remotes/${AZURE_REMOTE}/$2"
+}
 
 _azure_pr_diff() { # <pr> (local git; ADO REST has no unified-diff text)
     local pr="$1"

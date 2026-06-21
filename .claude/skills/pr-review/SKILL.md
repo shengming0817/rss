@@ -45,9 +45,14 @@ git worktree list   # 从输出中找 [<BRANCH>] 所在行，其首列路径即�
 
 ```bash
 REMOTE=$(bash hack/automation/forge.sh remote)
-git fetch "$REMOTE" <BRANCH>
-git worktree add --detach worktrees/review-pr<N> "$REMOTE/<BRANCH>"   # 已存在则改用 git -C ... reset --hard "$REMOTE/<BRANCH>" 刷新
+HEAD_SHA=$(bash hack/automation/forge.sh pr-refs <N> | jq -r .headSha)
+# 显式 refspec fetch，确保远端分支本地 tracking ref 同步
+git fetch "$REMOTE" "+refs/heads/<BRANCH>:refs/remotes/$REMOTE/<BRANCH>"
+git worktree add --detach worktrees/review-pr<N> "$REMOTE/<BRANCH>"   # 已存在则改用 git -C worktrees/review-pr<N> reset --hard "$REMOTE/<BRANCH>" 刷新
 WORKTREE="$(git rev-parse --show-toplevel)/worktrees/review-pr<N>"
+# 校验 worktree HEAD 与 forge 返回的 headSha 一致，防止基于陈旧/错误 ref 做 review
+ACTUAL_SHA=$(git -C "$WORKTREE" rev-parse HEAD)
+[[ "$ACTUAL_SHA" == "$HEAD_SHA" ]] || { echo "错误：worktree HEAD $ACTUAL_SHA != forge headSha $HEAD_SHA，请检查 fetch 是否最新"; exit 1; }
 ```
 
 创建失败 → 报错退出，不静默回退。情况 B 在阶段 5 末尾追加：`🧹 清理：git worktree remove worktrees/review-pr<N>`。
@@ -65,9 +70,9 @@ WORKTREE="$(git rev-parse --show-toplevel)/worktrees/review-pr<N>"
 以下读取全部以 `$WORKTREE` 为根；改动文件清单只提供 repo-relative path
 输入，不作为文件内容来源。
 
-必读：CLAUDE.md + `docs/guides/agent-instruction-surfaces.md` +
-`.github/project-template/PROJECT.md` §3（P/Cx 评级单源）+
-`.claude/rules/rss/*.md`。rules 已瘦身，pr-review 阶段全量读取，避免本审查流程因条件过滤漏加载规则。
+必读：CLAUDE.md + `.claude/rules/rss/*.md`（repo 级规则，develop/PR 合入后可用；若任一文件缺失则 fail-fast，不执行后续审查流程）+
+`.github/project-template/PROJECT.md` §3（P/Cx 评级单源）。
+rules 已瘦身，pr-review 阶段全量读取，避免本审查流程因条件过滤漏加载规则。
 
 ---
 

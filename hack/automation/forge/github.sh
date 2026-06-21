@@ -53,12 +53,12 @@ _github_pr_refs() { # <pr> -> {baseRef,headRef,headSha}
 # (author_association OWNER/MEMBER/COLLABORATOR) AND a pm:* protocol comment
 # (F3 trust boundary). Consumed via pr-comments.sh (fetch/sort/filter).
 _github_pr_comments_json() { # <pr> -> [{createdAt,author,url,body,kind}] trusted pm:* comments
-    # per_page=100 (no --paginate): a PR's pm:* comment count is well under one page.
+    # --paginate fetches all pages; --slurp merges the per-page arrays into one flat array.
     local ep
-    ep="repos/$(_gh_slug)/issues/$1/comments?per_page=100"
-    _dry gh api "${ep}" && return 0
-    gh api "${ep}" \
-        --jq "[ .[] | select((.author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\") and (.body | test(\"${PM_COMMENT_MARKER_RE}\"))) | {createdAt: .created_at, author: .user.login, url: .html_url, body: .body, kind: (.body | capture(\"<!-- pm:(?<k>ship|fix|pr-review|ci|oos) -->\") | .k)} ]"
+    ep="repos/$(_gh_slug)/issues/$1/comments"
+    _dry gh api --paginate "${ep}" && return 0
+    gh api --paginate --slurp "${ep}" \
+        --jq "[ .[][] | select((.author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\") and (.body | test(\"${PM_COMMENT_MARKER_RE}\"))) | {createdAt: .created_at, author: .user.login, url: .html_url, body: .body, kind: (.body | capture(\"<!-- pm:(?<k>ship|fix|pr-review|ci|oos) -->\") | .k)} ]"
 }
 
 _github_pr_diff() { _dry gh pr diff "$1" --repo "$(_gh_slug)" && return 0; gh pr diff "$1" --repo "$(_gh_slug)"; }
