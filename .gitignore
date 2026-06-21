@@ -25,6 +25,8 @@ Thumbs.db
 /.claude/tools/
 tmp/
 *.tmp
+.tmp
+.azlogs
 .codex-tmp/
 /.local-ci-runs/
 /.codex-backups/
@@ -42,6 +44,13 @@ tmp/
 # Claude Code
 worktrees/
 .claude/scheduled_tasks.lock
+.claude/agent-memory/
+
+# Azure CLI（仓库目录下生成的运行时缓存，不入库）
+.azconfig/
+
+# 个人本地随笔（见 docs/notes/README.md，不属于项目文档）
+docs/notes/
 
 # Generated（选择性提交）
 # generated/ 由 `cargo xtask` 重新生成；具体提交策略见该目录 README
