@@ -1,47 +1,47 @@
-error[E0038]: the trait `NonDynCompatiblePort` is not dyn compatible
-  --> tests/ui/dyn_incompatible_fail.rs:11:18
+error[E0038]: the trait `RawAsyncPort` is not dyn compatible
+  --> tests/ui/dyn_incompatible_fail.rs:12:18
    |
-11 | fn make() -> Box<dyn NonDynCompatiblePort> {
-   |                  ^^^^^^^^^^^^^^^^^^^^^^^^ `NonDynCompatiblePort` is not dyn compatible
+12 | fn make() -> Box<dyn RawAsyncPort> {
+   |                  ^^^^^^^^^^^^^^^^ `RawAsyncPort` is not dyn compatible
    |
 note: for a trait to be dyn compatible it needs to allow building a vtable
       for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
-  --> tests/ui/dyn_incompatible_fail.rs:4:8
+  --> tests/ui/dyn_incompatible_fail.rs:5:14
    |
- 3 | trait NonDynCompatiblePort {
-   |       -------------------- this trait is not dyn compatible...
- 4 |     fn handle<T>(&self, value: T);
-   |        ^^^^^^ ...because method `handle` has generic type parameters
-   = help: consider moving `handle` to another trait
+ 4 | trait RawAsyncPort {
+   |       ------------ this trait is not dyn compatible...
+ 5 |     async fn run(&self) -> u32;
+   |              ^^^ ...because method `run` is `async`
+   = help: consider moving `run` to another trait
 
-error[E0038]: the trait `NonDynCompatiblePort` is not dyn compatible
- --> tests/ui/dyn_incompatible_fail.rs:8:20
+error[E0038]: the trait `RawAsyncPort` is not dyn compatible
+ --> tests/ui/dyn_incompatible_fail.rs:9:20
   |
-8 |     let _: Box<dyn NonDynCompatiblePort> = make();
-  |                    ^^^^^^^^^^^^^^^^^^^^ `NonDynCompatiblePort` is not dyn compatible
+9 |     let _: Box<dyn RawAsyncPort> = make();
+  |                    ^^^^^^^^^^^^ `RawAsyncPort` is not dyn compatible
   |
 note: for a trait to be dyn compatible it needs to allow building a vtable
       for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
- --> tests/ui/dyn_incompatible_fail.rs:4:8
+ --> tests/ui/dyn_incompatible_fail.rs:5:14
   |
-3 | trait NonDynCompatiblePort {
-  |       -------------------- this trait is not dyn compatible...
-4 |     fn handle<T>(&self, value: T);
-  |        ^^^^^^ ...because method `handle` has generic type parameters
-  = help: consider moving `handle` to another trait
+4 | trait RawAsyncPort {
+  |       ------------ this trait is not dyn compatible...
+5 |     async fn run(&self) -> u32;
+  |              ^^^ ...because method `run` is `async`
+  = help: consider moving `run` to another trait
 
-error[E0038]: the trait `NonDynCompatiblePort` is not dyn compatible
- --> tests/ui/dyn_incompatible_fail.rs:8:44
+error[E0038]: the trait `RawAsyncPort` is not dyn compatible
+ --> tests/ui/dyn_incompatible_fail.rs:9:36
   |
-8 |     let _: Box<dyn NonDynCompatiblePort> = make();
-  |                                            ^^^^^^ `NonDynCompatiblePort` is not dyn compatible
+9 |     let _: Box<dyn RawAsyncPort> = make();
+  |                                    ^^^^^^ `RawAsyncPort` is not dyn compatible
   |
 note: for a trait to be dyn compatible it needs to allow building a vtable
       for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
- --> tests/ui/dyn_incompatible_fail.rs:4:8
+ --> tests/ui/dyn_incompatible_fail.rs:5:14
   |
-3 | trait NonDynCompatiblePort {
-  |       -------------------- this trait is not dyn compatible...
-4 |     fn handle<T>(&self, value: T);
-  |        ^^^^^^ ...because method `handle` has generic type parameters
-  = help: consider moving `handle` to another trait
+4 | trait RawAsyncPort {
+  |       ------------ this trait is not dyn compatible...
+5 |     async fn run(&self) -> u32;
+  |              ^^^ ...because method `run` is `async`
+  = help: consider moving `run` to another trait

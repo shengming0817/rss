@@ -355,6 +355,8 @@ mod tests {
 
     impl MockResource {
         // 经 dynosaur `DynManagedResource::new_box` 包成 dyn wrapper（native AFIT impl，无 async_trait）。
+        // 注：`Arc::clone(log)` 是测试 log 的共享（与 `shutdown_one` 不再 Arc::clone resource 无关——
+        // resource 现以 Box move 进 spawn，见 shutdown_one 注释）。
         fn boxed(name: &str, behavior: Behavior, log: &Log) -> Box<DynManagedResource<'static>> {
             DynManagedResource::new_box(Self {
                 name: name.to_owned(),

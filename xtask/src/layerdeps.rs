@@ -190,6 +190,10 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
 ///
 /// INVARIANT: DIPORT-MACRO-CONFINE-01 —— DI port 的 dyn-dispatch 宏（dynosaur）+ Send 变体生成
 ///   （trait-variant）只能被 `diport` 依赖（DI port trait + Dyn wrapper 集中到 DI-infra 单一 crate）。
+///
+/// **不变量（防漂移）**：左元素必须是**外部** crate（不在 workspace 成员集），右元素是唯一允许依赖它的
+/// **内部** crate。若误把内部 crate 放左元素，下方 stale/反向② 旁路会静默放过其分层依赖违规——故新增条目
+/// 须确保左元素是外部依赖名（与 `Cargo.toml [workspace.dependencies]` 对应），而非 workspace 成员。
 const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &str)] =
     &[("dynosaur", "diport"), ("trait-variant", "diport")];
 
@@ -893,6 +897,14 @@ mod tests {
             ban("trait-variant", &["diport"]),
         ];
         assert!(check_wrappers(&wrapper_fixture_members(), &bans).is_empty());
+    }
+
+    // DiPort 层成员本身不需要分层 ban entry（只有 Domain/Adapter/Generated 需要）——
+    // 守 `_ => continue` 正向旁路非恒错：仅含一个 diport 成员、无 ban 时 findings 为空。
+    #[test]
+    fn check_wrappers_diport_layer_needs_no_ban_entry() {
+        let members = vec![m("diport", "crates/diport", Some(Layer::DiPort))];
+        assert!(check_wrappers(&members, &[]).is_empty());
     }
 
     #[test]

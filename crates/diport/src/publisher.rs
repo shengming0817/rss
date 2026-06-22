@@ -4,10 +4,26 @@ use dynosaur::dynosaur;
 
 /// 发布失败。
 ///
-/// PII 边界：`Display` 仅安全摘要常量；adapter 原始错误待行为 PR 经 `#[source]` 内部保留。
+/// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；adapter 原始错误经
+/// [`PublisherError::new`] 包成 [`std::error::Error::source`] 内部保留，**不进默认日志**。
 #[derive(Debug, thiserror::Error)]
 #[error("publish failed")]
-pub struct PublisherError;
+pub struct PublisherError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl PublisherError {
+    /// 把 adapter 内部错误包成发布失败。原始错误仅作 internal source 保留，不经 `Display` 暴露（PII 边界）。
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
 
 /// 事件发布 provider DI port（async）。
 ///
@@ -21,9 +37,14 @@ pub struct PublisherError;
 // dynosaur `DynPublisher` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
 pub trait PublisherLocal {
     /// 向 `topic` 发布 `payload`（provider-agnostic 字节）。
+    ///
+    /// event metadata（correlation / tenant / content-type 等 outbox envelope 字段）由 `eventexec` /
+    /// outbox 层在调用前编码进 `payload`——DI infra port 不在类型层结构化 envelope（ADR-003 §6 偏离 2，
+    /// 跨域 wire 单源仍是 contract）。
     async fn publish(&self, topic: &str, payload: &[u8]) -> Result<(), PublisherError>;
 
-    /// 异步释放 provider 资源（无 async Drop）。
+    /// 异步释放 provider 资源（无 async Drop）。有 infra 资源的 adapter 应同时 `impl ManagedResource`
+    /// 由 `bootstrap::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Signer::shutdown`]）。
     async fn shutdown(&self) -> Result<(), PublisherError>;
 }
 
@@ -42,10 +63,14 @@ mod smoke {
         }
     }
 
-    #[tokio::test]
+    // multi_thread + spawn：验证 boxed future Send（trait_variant Send 变体），与真实 spawn 场景对齐。
+    #[tokio::test(flavor = "multi_thread")]
     async fn publisher_is_dyn_injectable() {
         let publisher: Box<DynPublisher> = DynPublisher::new_box(NoopPublisher);
-        assert!(publisher.publish("topic", b"evt").await.is_ok());
-        assert!(publisher.shutdown().await.is_ok());
+        let joined = tokio::spawn(async move {
+            publisher.publish("topic", b"evt").await.is_ok() && publisher.shutdown().await.is_ok()
+        })
+        .await;
+        assert!(matches!(joined, Ok(true)));
     }
 }

@@ -16,6 +16,22 @@
 //! - **sync DI port**（`Clock`）：sync trait 天然 dyn-compatible，经 `Box<dyn Clock>` 注入，
 //!   **不需** dynosaur（仅 async port 需要）。
 //!
+//! ## 新增一个 async DI port（三步，照 `signer.rs` 抄）
+//!
+//! 1. 新建 `crates/diport/src/<port>.rs`，写基 trait（**非** Send，命名 `<Port>Local`），叠加两个属性宏：
+//!    ```ignore
+//!    #[trait_variant::make(MyPort: Send)]                       // 生成 Send 变体 `MyPort`
+//!    #[dynosaur(pub DynMyPort = dyn(box) MyPort, bridge(dyn))]  // 据 Send 变体生成 dyn wrapper（pub 必加）
+//!    #[allow(async_fn_in_trait)] // reason: Send 由 trait_variant 变体 + dynosaur wrapper 承载
+//!    pub trait MyPortLocal { async fn do_it(&self) -> Result<(), MyPortError>; }
+//!    ```
+//! 2. 在本 `lib.rs` **只 re-export** Send 变体 `MyPort` + `DynMyPort` + 错误类型——**不**导出基 trait
+//!    `MyPortLocal`（否则同名方法在 glob import 下解析歧义，见落地结论 / ADR-003）。
+//! 3. `deny.toml` 的 dynosaur/trait-variant wrapper 已限定到本 crate，无需改；新外部宏依赖才需登记。
+//!
+//! **消费侧**（域 / 服务 / adapter）：`impl MyPort for ...`（Send 变体，**非** `MyPortLocal`）；组合根经
+//! `DynMyPort::new_box(impl)` / `new_arc(impl)` 构造 `Box<DynMyPort>` / `Arc<DynMyPort>` 注入（必填构造器位置参）。
+//!
 //! ## sealing（ADR-003 §4.2 方案 ②）
 //!
 //! DI port trait 集中到独立 crate 后，sealed-trait（仅定义 crate 内封闭）无法对独立 adapter crate

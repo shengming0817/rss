@@ -4,11 +4,27 @@ use dynosaur::dynosaur;
 
 /// 签名失败。
 ///
-/// PII 边界（替代 `anyhow` 暴露在公共 port）：`Display` 仅输出 provider 无关的安全摘要常量；
-/// adapter 内部原始错误待行为 PR 经 `#[source]` 内部保留、不进默认日志（参 [`crate::ShutdownError`]）。
+/// PII 边界（替代 `anyhow` 暴露在公共 port，与 [`crate::ShutdownError`] 同范式）：`Display` 仅输出
+/// provider 无关的安全摘要常量（不含 runtime 数据）；adapter 内部原始错误经 [`SignerError::new`] 包成
+/// [`std::error::Error::source`] 内部保留，**不进默认日志**（待 `secure` redaction funnel 落地后清洗记录）。
 #[derive(Debug, thiserror::Error)]
 #[error("signing failed")]
-pub struct SignerError;
+pub struct SignerError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl SignerError {
+    /// 把 adapter 内部错误包成签名失败。原始错误仅作 internal source 保留，不经 `Display` 暴露（PII 边界）。
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
 
 /// 签名 provider DI port（async）。
 ///
@@ -28,6 +44,10 @@ pub trait SignerLocal {
     async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignerError>;
 
     /// 异步释放 provider 资源（无 async Drop；infra teardown 显式异步）。
+    ///
+    /// 与 [`crate::ManagedResource::shutdown`] 的关系：有 infra 资源（连接 / 句柄）的 signer adapter
+    /// 应**同时** `impl ManagedResource`，由 `bootstrap::ShutdownStack` 统一逆序编排关闭；本方法是
+    /// port-local 关闭路径（非 ShutdownStack 编排场景，或 provider 自身的轻量释放）。
     async fn shutdown(&self) -> Result<(), SignerError>;
 }
 
@@ -46,10 +66,15 @@ mod smoke {
         }
     }
 
-    #[tokio::test]
+    // multi_thread + spawn：boxed future 须 Send（trait_variant Send 变体）才能跨 worker 调度——
+    // current-thread 不暴露 Send 违规，故用 multi_thread 真正验证 dyn 注入的 Send 语义。
+    #[tokio::test(flavor = "multi_thread")]
     async fn signer_is_dyn_injectable() {
         let signer: Box<DynSigner> = DynSigner::new_box(NoopSigner);
-        assert!(signer.sign(b"payload").await.is_ok());
-        assert!(signer.shutdown().await.is_ok());
+        let joined = tokio::spawn(async move {
+            signer.sign(b"payload").await.is_ok() && signer.shutdown().await.is_ok()
+        })
+        .await;
+        assert!(matches!(joined, Ok(true)));
     }
 }

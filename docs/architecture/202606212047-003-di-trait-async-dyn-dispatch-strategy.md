@@ -113,7 +113,13 @@ workspace 默认的 `forbid`）并对 dynosaur 生成点做目标 `#[allow(unsaf
 
 ### 4.1 port trait 定义（在 `diport`）
 
-`diport` 的 `Cargo.toml` **不**写 `[lints] workspace = true`，而是显式
+> ⚠ **本节示例代码已被落地实测替换——落地形态以顶部「落地结论」+ `crates/diport/src/signer.rs` 为准**：
+> ① `diport` **用** `[lints] workspace = true`（无 forbid→deny 例外、无 `#![deny(unsafe_code)]` 覆盖、无目标
+> `#[allow]`，见落地结论 1）；② 单 `#[dynosaur(...)]` 生成的 boxed future **非 Send**，DI port 须改
+> `#[trait_variant::make(X: Send)]` + `#[dynosaur(pub DynX = dyn(box) X, bridge(dyn))]`（落地结论 3），下方
+> `pub trait UserStore: Send + Sync` 单宏模板会产出非 Send `DynX`、在 `tokio::spawn` 处编不过。下文仅存原始推理。
+
+`diport` 的 `Cargo.toml`（**原设**，已废）**不**写 `[lints] workspace = true`，而是显式
 `[lints.rust] unsafe_code = "deny"`（覆盖 workspace 默认 `forbid`，使 crate 根 / 生成点的目标 `#[allow]`
 能生效——`forbid` 下 `#[allow]` 无效，`deny` 下有效）：
 
