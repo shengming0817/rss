@@ -40,7 +40,7 @@ set -euo pipefail
 _VALID_AREAS="area-kernel area-auth area-http area-eventing area-data area-observability area-tooling area-cross"
 
 # type-XX: 8 choices (PROJECT.md §2.2)
-_VALID_TYPES="type-feat type-bug type-refactor type-arch-opt type-doc type-test type-debt type-fu"
+_VALID_TYPES="type-enhancement type-bug type-refactor type-arch-opt type-doc type-test type-debt type-fu"
 
 # _member VALUE SET_STRING -> 0 if VALUE is a word in SET_STRING, else 1.
 _member() {
@@ -109,14 +109,20 @@ _require_one() {
 # membership against _VALID_AREAS/_VALID_TYPES (PROJECT.md §2.1/§2.2). GitHub time:
 # server-side label existence provided this backstop. Azure Boards tags are free-text
 # so the validator must enforce it explicitly (F8 regression fix).
+# _validate_labels CSV [TIER] -> 0 ok | 2 violation.
+# TIER (PROJECT.md §1.1 Work Item Type 三层映射): pbi|feature|epic|"" — the structure
+# axis. Container tiers (epic/feature) carry area+pri only and forbid type/cx; the PBI
+# leaf requires area+type+pri+cx. Empty TIER infers from the `epic` label (else pbi) so
+# the label-only callers (B1 PBI gate, epic-label create) keep working; Feature has no
+# label marker by design (tier is the native Work Item Type), so it needs `--tier feature`.
 _validate_labels() {
-    local labels
+    local labels tier="${2:-}"
     labels="$(_normalize "$1")"
 
     # Out of scope: only backlog issues are governed.
     printf '%s\n' "${labels}" | grep -qx 'backlog' || return 0
 
-    local area type pri pri_any cx cx_any is_epic
+    local area type pri pri_any cx cx_any is_epic container=0
     area="$(_count '^area-' "${labels}")"
     type="$(_count '^type-' "${labels}")"
     pri="$(_count '^pri-p[0-3]$' "${labels}")"
@@ -124,6 +130,12 @@ _validate_labels() {
     cx="$(_count '^cx-[1-4]$' "${labels}")"
     cx_any="$(_count '^cx-' "${labels}")"
     is_epic="$(_count '^epic$' "${labels}")"
+    # Effective tier: explicit --tier wins; else `epic` label => epic container; else pbi.
+    case "${tier}" in
+        epic|feature) container=1 ;;
+        pbi)          container=0 ;;
+        *)            [[ "${is_epic}" -gt 0 ]] && container=1 ;;
+    esac
 
     local rc=0
     _require_one 'area' "${area}" || rc=1
@@ -137,11 +149,16 @@ _validate_labels() {
     # side label enforcement provided; Azure Boards tags are free-text so we enforce
     # here instead.
     _check_axis_member 'area-' "${_VALID_AREAS}" "${labels}" || rc=1
-    if [[ "${is_epic}" -gt 0 ]]; then
-        # epic 不贴 cx; type not required for epic (epic create cmd omits it).
-        # cx_any (not cx) so a cx-unknown / typo on an epic is also rejected.
+    if [[ "${container}" -gt 0 ]]; then
+        # Container tiers (epic/feature) carry area+pri only — forbid cx AND type
+        # (§1.1: 跨多 PR、无单一 diff). cx_any/type (not cx) so a cx-unknown / typo is
+        # also rejected on a container.
         if [[ "${cx_any}" -gt 0 ]]; then
-            echo "  - epic must not carry cx-* (epic 不贴 cx)" >&2
+            echo "  - epic/feature container must not carry cx-* (§1.1)" >&2
+            rc=1
+        fi
+        if [[ "${type}" -gt 0 ]]; then
+            echo "  - epic/feature container must not carry type-* (§1.1)" >&2
             rc=1
         fi
     else
@@ -161,7 +178,7 @@ _validate_labels() {
 # ---- subcommands ------------------------------------------------------------
 
 cmd_validate() {
-    local labels="" issue="" have_labels=0
+    local labels="" issue="" have_labels=0 tier=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --labels)   [[ $# -ge 2 ]] || { echo "issue-labels validate: --labels requires a value" >&2; return 64; }
@@ -170,9 +187,18 @@ cmd_validate() {
             --issue)    [[ $# -ge 2 ]] || { echo "issue-labels validate: --issue requires a value" >&2; return 64; }
                         issue="$2"; shift 2 ;;
             --issue=*)  issue="${1#*=}"; shift ;;
+            --tier)     [[ $# -ge 2 ]] || { echo "issue-labels validate: --tier requires a value" >&2; return 64; }
+                        tier="$2"; shift 2 ;;
+            --tier=*)   tier="${1#*=}"; shift ;;
             *) echo "issue-labels validate: unknown flag '$1'" >&2; return 64 ;;
         esac
     done
+
+    # --tier (PROJECT.md §1.1): structure axis. pbi leaf (default) vs epic/feature container.
+    case "${tier}" in
+        ""|pbi|feature|epic) ;;
+        *) echo "issue-labels validate: invalid --tier '${tier}' (pbi|feature|epic)" >&2; return 64 ;;
+    esac
 
     if [[ -n "${issue}" ]]; then
         local forge_sh view
@@ -186,7 +212,7 @@ cmd_validate() {
     fi
 
     local rc=0
-    _validate_labels "${labels}" || rc=$?
+    _validate_labels "${labels}" "${tier}" || rc=$?
     return "${rc}"
 }
 
@@ -216,6 +242,21 @@ cmd_selftest() {
     _expect "epic-ok"       0 --labels "epic,backlog,area-tooling,pri-p2"
     # epic must not carry cx
     _expect "epic-with-cx"  2 --labels "epic,backlog,area-tooling,pri-p2,cx-1"
+    # epic is a container: must not carry type either (§1.1 tier mapping)
+    _expect "epic-with-type" 2 --labels "epic,backlog,area-tooling,type-debt,pri-p2"
+    # --- tier axis (PROJECT.md §1.1): container tiers forbid type/cx, leaf requires both ---
+    # Feature container (no epic label) recognized via --tier: area+pri only -> ok
+    _expect "feature-ok"        0 --labels "backlog,area-tooling,pri-p2" --tier feature
+    # Feature container must not carry cx / type
+    _expect "feature-with-cx"   2 --labels "backlog,area-tooling,pri-p2,cx-1" --tier feature
+    _expect "feature-with-type" 2 --labels "backlog,area-tooling,type-debt,pri-p2" --tier feature
+    # explicit --tier epic equivalent to epic label
+    _expect "epic-tier-flag-ok" 0 --labels "backlog,area-tooling,pri-p2" --tier epic
+    # explicit --tier pbi: leaf still requires type+cx
+    _expect "pbi-tier-explicit" 0 --labels "backlog,area-tooling,type-debt,pri-p2,cx-1" --tier pbi
+    _expect "pbi-tier-missing-cx" 2 --labels "backlog,area-tooling,type-debt,pri-p2" --tier pbi
+    # invalid tier value -> usage error
+    _expect "bad-tier"         64 --labels "backlog,area-tooling,pri-p2" --tier bogus
     # not a backlog issue -> out of scope, ok
     _expect "non-backlog"   0 --labels "area-tooling,type-debt,pri-p2"
     # tolerates whitespace + orthogonal flag labels
@@ -238,7 +279,9 @@ cmd_selftest() {
     _expect "area-typo"      2 --labels "backlog,area-typo,type-bug,pri-p2,cx-2"
     _expect "type-bogus"     2 --labels "backlog,area-tooling,type-bogus,pri-p2,cx-2"
     # member validation: all valid area and type values pass
-    _expect "all-areas-valid" 0 --labels "backlog,area-cross,type-feat,pri-p1,cx-3"
+    _expect "all-areas-valid" 0 --labels "backlog,area-cross,type-enhancement,pri-p1,cx-3"
+    # renamed away from Azure "Feature" WIT collision: legacy type-feat rejected for new issues
+    _expect "type-feat-renamed" 2 --labels "backlog,area-cross,type-feat,pri-p1,cx-3"
     # epic with invalid area must also be rejected
     _expect "epic-area-typo" 2 --labels "epic,backlog,area-typo,pri-p2"
     # usage errors: missing flag value / no flag at all -> 64

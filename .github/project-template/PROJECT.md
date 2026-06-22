@@ -21,7 +21,23 @@
 
 **新建 backlog**：`bash hack/automation/forge.sh issue-create "[<ID>] ..." <填好的 backlog.md> "backlog,pri-pX,area-XX,type-XX,cx-X"`。area/type/pri/cx 四轴必须显式贴（cx 取值见 §2.6/§3.2，无 unknown sentinel）；建单前先经 `hack/automation/issue-labels.sh validate` 校验完整性（`issues` B1 强制门）。
 
-**新建 epic**：`bash hack/automation/forge.sh issue-create "[EPIC] ..." <填好的 epic.md> "epic,backlog,pri-pX,area-XX"`；子任务用激活 forge 的父子关系关联（azure work-item parent/child / github sub-issue / gitlab parent），经 `forge.sh subissue-link`。epic 不贴 cx（跨多 PR、无单一 diff）。
+**新建 epic / feature**（容器层）：见 §1.1 三层映射。Epic / Feature 按当前流程在 Azure Boards UI 手工建（脚本化时 `issue-create` 第 4 参传 Work Item Type，body 读 `epic.md` / `feature.md`）；子任务经 `forge.sh subissue-link` 关联原生父子关系。容器不贴 `cx` / `type`（跨多 PR、无单一 diff）。
+
+---
+
+### 1.1 Work Item Type 三层映射（Azure：Epic ▷ Feature ▷ PBI）
+
+work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 的 `type-XX` 标签（变更性质轴）**正交**——勿混用：
+
+| 层 | Azure Work Item Type | 含义 | parent | 允许的标签轴 |
+|----|---------------------|------|--------|------------|
+| 顶 | **Epic** | 能力工程聚合（如整个 Rust 重写迁移） | — | `epic` `backlog` `area` `pri` |
+| 中 | **Feature** | 能力块 / 门控阶段（**跨多 PR**） | Epic | `backlog` `area` `pri` |
+| 叶 | **Product Backlog Item** | 可交付增量（**≈ 一个 PR**） | Feature（无则挂 Epic） | `backlog` `area` `pri` **`cx` `type`** |
+
+- **`cx` 与 `type-XX` 是叶子（PBI）专属轴**：Epic / Feature 是跨多 PR 的容器、无单一 diff，**不贴** `cx` / `type-XX`（§2.6 / §3.2 同源）。
+- **父子链 = Epic→Feature→PBI**（经 `forge.sh subissue-link` 写原生父子关系）；同层（PBI↔PBI / Feature↔Feature）不互作父子。
+- 容器层（Epic / Feature）按当前流程在 Azure Boards UI 手工建；`forge.conf` 的 `AZURE_WI_TYPE_EPIC` / `AZURE_WI_TYPE_FEATURE` 供脚本化建容器时指定类型。建单门 `issue-labels.sh validate` 经 `--tier pbi|feature|epic` 区分结构层（Work Item Type 是验证器输入，不靠标签集推断容器/叶子）：PBI 叶子（默认 `--tier pbi`）要求 area+type+pri+cx；Epic / Feature 容器（`--tier epic|feature`）要求 area+pri、**禁止** type/cx。
 
 ---
 
@@ -42,8 +58,10 @@
 
 ### 2.2 type-XX（类型，1 个，8 选）
 
-`type-feat`（新功能）/ `type-bug`（缺陷）/ `type-refactor`（重构）/ `type-arch-opt`（架构优化）/
+`type-enhancement`（新功能）/ `type-bug`（缺陷）/ `type-refactor`（重构）/ `type-arch-opt`（架构优化）/
 `type-doc`（文档）/ `type-test`（测试）/ `type-debt`（技术债）/ `type-fu`（PR follow-up）
+
+> `type-XX` 是 **PBI 叶子专属轴**（§1.1），与 Work Item Type 层级轴正交；`type-enhancement`（变更性质=新功能）与 Azure 的 `Feature` 类型（容器层级）是两个轴，勿混。
 
 ### 2.3 pri-XX（优先级，1 个，CLI 显式贴）
 
@@ -72,7 +90,7 @@
 
 ### 2.6 cx-XX（复杂度，1 个，必填 CLI 贴）
 
-`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic 不贴（跨多 PR、无单一 diff）。非 epic backlog issue 的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫（`issues` B1 建单前强制门；selftest 直接运行：`bash hack/automation/issue-labels.sh selftest`；`make verify` 聚合入口已落地（#1023，聚合 Rust 代码门），bash selftest 折入仍 backlog）。
+`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic / feature 容器不贴（跨多 PR、无单一 diff，§1.1）。PBI 叶子的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫（`issues` B1 建单前强制门；selftest 直接运行：`bash hack/automation/issue-labels.sh selftest`；`make verify` 聚合入口已落地（#1023，聚合 Rust 代码门），bash selftest 折入仍 backlog）。
 
 ---
 

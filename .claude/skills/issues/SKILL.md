@@ -101,7 +101,9 @@ bash hack/automation/forge.sh issue-comment <epic#> /tmp/epic-wave-comment.md
 
 > issue/PR 的 forge 编排，是 issue/PR/label/评论**固定命令形态的单源**——ship/fix/pr-review 引用本部分，不重印命令。body 骨架见 `.github/project-template/` 的 `backlog.md` / `epic.md` / `pull_request_template.md`；PR 评论格式见 `pr-comment.md`；label / 字段 / 评级 rubric 见 `PROJECT.md`。本部分不复制模版内容。
 
-## B1. 新建 backlog issue
+## B1. 新建 backlog issue（PBI 叶子）
+
+> B1 建的是 **PBI 叶子**（Work Item Type = Product Backlog Item，≈ 一个 PR），validate 默认 `--tier pbi` 守四轴。容器层 Epic / Feature 走 §1.1 三层映射（Azure UI 手工建、不贴 `cx` / `type`）；脚本化建容器时校验用 `issue-labels.sh validate --tier feature|epic`（要求 area+pri、禁止 type/cx）。
 
 四轴 label 齐全（area + type + pri + cx）+ `backlog`，全部 CLI 显式贴（pri/cx 必填，cx 无 unknown sentinel）：
 
@@ -119,7 +121,7 @@ bash hack/automation/forge.sh issue-create \
 - **area-XX**（1 个，8 选）：见 `.github/project-template/PROJECT.md` §2.1。
 - **type-XX**（1 个，8 选）：见 §2.2。
 - **pri-pX**：评级 rubric 见 `.github/project-template/PROJECT.md` §3。`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident-driven，停下 AskUserQuestion 确认。
-- **cx-X**（必填）：复杂度 rubric 见 `.github/project-template/PROJECT.md` §3.2 / §2.6。建单前必须定级并显式指定 `cx-X` label（与 pri 对称，无 unknown sentinel——定不到级也要就近取一档）；finding 派生从 `[…Cx…]` tag 取。epic 例外（不贴 cx）。
+- **cx-X**（必填）：复杂度 rubric 见 `.github/project-template/PROJECT.md` §3.2 / §2.6。建单前必须定级并显式指定 `cx-X` label（与 pri 对称，无 unknown sentinel——定不到级也要就近取一档）；finding 派生从 `[…Cx…]` tag 取。epic / feature 容器例外（不贴 cx / type，§1.1）。
 - **flag-cond**（可选）：条件延后型加此 label + body 写 `## Trigger`。
 
 > P0 红线不得默认贴。area/type/cx 漏贴时用 `bash hack/automation/forge.sh issue-edit-labels <N> --add "area-X" --remove ""` 补；建单前 `issue-labels.sh validate` 强制门正常会先拦截，此为绕过门（raw web UI）后的补救。
@@ -133,7 +135,7 @@ bash hack/automation/forge.sh issue-close <N> "completed" "Fixed in PR <NNN>"   
 bash hack/automation/forge.sh issue-close <N> "not planned" "<理由>"                            # wontfix
 ```
 
-epic 用 `epic` label + forge 原生父子关系（不手写 body task list）。子任务关联用 forge issue 页或 `bash hack/automation/forge.sh subissue-link <epic#> <child#>`。wave 排序见 Part A。
+容器层 Epic / Feature（§1.1 三层映射）= 原生 Work Item Type + `forge.sh subissue-link` 写原生父子（不手写 body task list）；Epic 另贴 `epic` label。父子链 Epic→Feature→PBI：`bash hack/automation/forge.sh subissue-link <epic#> <feature#>` / `subissue-link <feature#> <pbi#>`。wave 排序见 Part A。
 
 ## B3. PR 状态 label 流转（编排）
 

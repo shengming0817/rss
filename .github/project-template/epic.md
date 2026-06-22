@@ -1,7 +1,8 @@
 <!--
-Epic issue body 模版 — 经 `bash hack/automation/forge.sh issue-create "[EPIC] <能力级标题>" <填好的本文件> "epic,backlog,area-XX,pri-pX"` 创建。
-labels（`epic` + `backlog` + `area-XX` + `pri-pX`）与 title `[EPIC] <能力级标题>` 由建 issue 的一方用显式标签参数给。
-子任务用激活 forge 的父子关系关联（azure work-item parent/child / github sub-issue / gitlab parent），经 `forge.sh subissue-link`（不在 body 手写 task list）。
+Epic body 模版 — 顶层容器（Work Item Type = Epic，PROJECT.md §1.1 三层映射的顶层）。
+按当前流程在 Azure Boards UI 手工建；脚本化时先过门 `bash hack/automation/issue-labels.sh validate --labels "epic,backlog,area-XX,pri-pX" --tier epic`，再 `bash hack/automation/forge.sh issue-create "[EPIC] <能力级标题>" <填好的本文件> "epic,backlog,area-XX,pri-pX" "$AZURE_WI_TYPE_EPIC"`（第 4 参指定 Epic 类型）。
+labels = `epic` + `backlog` + `area-XX` + `pri-pX`（容器不贴 `cx` / `type` —— §1.1 / §2.6）。
+子项是 **Feature**（再下挂 PBI），用原生父子关系经 `forge.sh subissue-link` 关联（不在 body 手写 task list）。
 -->
 
 ## 目标 / 范围
