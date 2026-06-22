@@ -3,7 +3,11 @@
 #   Hard① crate 依赖图：未声明就 import 不到。
 #   Hard② cargo 无环：下层依赖上层会闭环 → cargo 拒绝。
 #   Medium 本文件 wrappers：域 / adapter crate 只能被组合根依赖——补「同层互斥」「上层误依赖 leaf」。
-#   残留（无 back-path 的基础/引擎→上层边）→ 已登记 xtask source-centric lint（见 PR OOS）。
+#   Medium `cargo xtask layer-deps`（source-centric，接入 verify）：读各成员 Cargo.toml [dependencies]，
+#     按 §分层 矩阵全覆盖（含本 wrappers 表达不了的「无 back-path 基础/引擎→上层」反向边），
+#     并守本文件 wrappers ⟷ 源分类一致性（LAYER-DEPS-06）。免疫裸名×crates.io 命名冲突。
+#   下列 wrappers 暂留作 defense-in-depth；adapter 接外部后端（裸名与 crates.io 冲突生效）时迁出，
+#     分层全权交 layer-deps（issue #1022「重构」种子，gate 在彼时）。
 [graph]
 all-features = true
 
@@ -37,7 +41,8 @@ deny = [
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖。
   # 覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
   # ⚠ INVARIANT(LAYER-WRAP-01)：新增任何组合根 crate（assembly/bin）须同步加入下列每条 wrappers，
-  #   否则其对域/adapter/generated 的合法依赖会被 deny 误拦。此一致性的持久守卫见 PR #137 OOS（xtask 治理 lint）。
+  #   否则其对域/adapter/generated 的合法依赖会被 deny 误拦。此一致性的持久守卫 = `cargo xtask layer-deps`
+  #   的 LAYER-DEPS-06（wrappers ⟷ 源分类交叉核对，接入 verify CI 门；issue #1022 落地）。
   { crate = "identity", wrappers = ["server", "rss", "xtask"] },
   { crate = "settings", wrappers = ["server", "rss", "xtask"] },
   { crate = "audit", wrappers = ["server", "rss", "xtask"] },

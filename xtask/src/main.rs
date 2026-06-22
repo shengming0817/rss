@@ -3,12 +3,15 @@
 //! 子命令：
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（R1–R6，CI 门）
-//!   `cargo xtask verify`                聚合门：contract validate + codegen --check（本地自验入口）
+//!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
+//!   `cargo xtask verify`                聚合门：contract validate + layer-deps + codegen --check（本地自验入口）
 //!   `cargo xtask public-api [--layer basis|engine] [--check] [--allow-missing]`
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
 mod codegen;
 mod contract;
+mod layerdeps;
+mod layers;
 mod pathsafe;
 mod publicapi;
 #[cfg(test)]
@@ -29,6 +32,7 @@ enum Command {
         check: bool,
     },
     ContractValidate,
+    LayerDeps,
     Verify,
     PublicApi {
         check: bool,
@@ -47,11 +51,12 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen"] => Ok(Command::Codegen { check: false }),
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["contract", "validate"] => Ok(Command::ContractValidate),
+        ["layer-deps"] => Ok(Command::LayerDeps),
         ["verify"] => Ok(Command::Verify),
         ["public-api", rest @ ..] => parse_public_api(rest),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | verify | public-api [--layer basis|engine] [--check] [--allow-missing]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | verify | public-api [--layer basis|engine] [--check] [--allow-missing]>"
             )
         }
     }
@@ -93,10 +98,12 @@ fn dispatch(args: &[String]) -> Result<()> {
     match parse_command(args)? {
         Command::Codegen { check } => codegen::run(check),
         Command::ContractValidate => contract::validate::run(),
+        Command::LayerDeps => layerdeps::run(),
         Command::Verify => {
             contract::validate::run()?;
+            layerdeps::run()?;
             codegen::run(true)?;
-            eprintln!("verify: 全部通过（contract validate + codegen --check）");
+            eprintln!("verify: 全部通过（contract validate + layer-deps + codegen --check）");
             Ok(())
         }
         Command::PublicApi {
@@ -148,6 +155,12 @@ mod tests {
             parse_command(&s(&["contract", "validate"]))?,
             Command::ContractValidate
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_layer_deps() -> anyhow::Result<()> {
+        assert_eq!(parse_command(&s(&["layer-deps"]))?, Command::LayerDeps);
         Ok(())
     }
 
@@ -229,6 +242,7 @@ mod tests {
     #[test]
     fn parse_command_rejects_trailing_unknown_args() {
         assert!(parse_command(&s(&["verify", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["layer-deps", "--bogus"])).is_err());
         assert!(parse_command(&s(&["contract", "validate", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--check", "--bogus"])).is_err());

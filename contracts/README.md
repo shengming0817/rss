@@ -57,6 +57,6 @@ contracts/{kind}/{domain}/{version}/
 `cargo xtask codegen` 经 typify+prettyplease 把 `*.schema.json` 派生进 `generated/` crate（committed `generated/src/{kind}/{domain}_{version}.rs`）；
 `cargo xtask codegen --check` 重生成并 diff 已提交文件，漂移即失败（CI 门）。**勿手改 `generated/src/**`**——派生 diff 是一等审查材料。
 
-`cargo xtask verify`（= `contract validate` + `codegen --check`）是本地聚合治理门：依次跑元数据校验再跑漂移检测，任一失败即停止。在无 CI 环境（如 Azure 限流）时可用此命令本地自验。
+`cargo xtask verify`（= `contract validate` + `layer-deps` + `codegen --check`）是本地聚合治理门：依次跑元数据校验、分层依赖校验、漂移检测，任一失败即停止。在无 CI 环境（如 Azure 限流）时可用此命令本地自验。
 
 per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的专属 block）留各自后续单元，届时扩展 `ContractManifest`（属预期附加演进，非破坏冻结；backlog 跟踪）。

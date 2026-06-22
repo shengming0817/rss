@@ -140,12 +140,15 @@ rss/
 | contracts 跨边界单源 + 扇出闭环 | `xtask` 校验器 | Medium(CI 门) |
 | L0–L4 一致性声明 + governance(拓扑/引用完整性/格式) | `xtask` | Medium(CI 门) |
 | wire contract 版本目录(轴 B) | `xtask` | Medium(CI 门) |
+| 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml [dependencies] 按 §分层 矩阵校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..06) | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 
 **残留运行期/CI 检查**(类型系统 / crate 图管不到)显式为 **Medium(xtask/CI 门),严禁 Soft**:active subscriber
-存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由。治理重心在 "crate-graph lint + clippy +
-类型系统"(见 `.claude/rules/rss/ai-robust.md`)。
+存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
+守已声明边的「下层依赖上层成环」；不成环的反向边 / 兄弟域互斥 / adapter·generated scope 由 `cargo xtask layer-deps`
+source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
+`.claude/rules/rss/ai-robust.md`)。
 
 ## 关键模式的 Rust 形态
 

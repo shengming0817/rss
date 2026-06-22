@@ -13,22 +13,20 @@
 //! 依赖：外部 `cargo-public-api`（`cargo install cargo-public-api`）+ nightly rustdoc-json
 //! （`rustup toolchain install nightly`）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
-//! **不在 `cargo xtask verify` 聚合门内**：verify（contract validate + codegen --check）须工具/网络
+//! **不在 `cargo xtask verify` 聚合门内**：verify（contract validate + layer-deps + codegen --check）须工具/网络
 //! 无关、人人可跑；public-api 依赖外部工具 + nightly，故为独立可选门（单独 `cargo xtask public-api --check`），
 //! 不污染 verify 的可移植性。
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 —— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 —— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
 
+use crate::layers::{BASIS_CRATES, ENGINE_CRATES};
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// 基础层（PR-1 验收集）。
-const BASIS_CRATES: &[&str] = &["vocab", "ids", "secure", "support", "runctx"];
-/// 引擎层（PR-2 验收集）。
-const ENGINE_CRATES: &[&str] = &["consistency", "primitives"];
+// 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
 
 /// 封装面 baseline 的目标层。无 `--layer` 时取 basis + engine 全集（收口 GATE 用）。
 /// 服务/域/adapters 内部接缝多变，不入 baseline。
