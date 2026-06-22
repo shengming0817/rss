@@ -14,7 +14,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ## 输入解析
 优先级：**PR 号**（裸数字先按 PR 试 → `bash hack/automation/pr-comments.sh latest <N> pr-review` 取最新一条 pm:pr-review body 作为 findings 源；**只取最新一轮**——该 body 的 `<details>` 无损详表即本轮 findings；为空 → 无待修 review，报告退出。回退：pr-review body 为空时取最新一条 codex review/comment。**跳过**自己上一轮的 `pm:ship`/`pm:fix`/`pm:ci`/`pm:oos` 留痕（已处理）与早于该最新 review 的旧 `pm:pr-review`，**不回头处理上一轮已 triage 的 findings**）> **文件:行号** > **自然语言**（Grep/Glob）。**issue 号不再受理**——裸数字一律先按 PR 解析；issue 状态核查 + triage 收敛到 `issues` 技能（判定后建议 `/ship #<N>` 或 file:line）。
 
-**熔断闸门（PR 输入）**：先 `bash hack/automation/pr-meta.sh extract <PR#>`（EC=0 读 `cycle.exhausted` / `next.agent`；EC≠0 无块/stale → 降级 `pr-meta.sh round`）——`cycle.exhausted == true` 或 `next.agent == "human"` 或 `round ≥ 3` → 打印「review↔fix 已达 3 轮上限，转人工」退出，不修。（manual `/fix` 人在场可续；auto 路径 pr-monitor→`Skill("fix")` 靠此守 3 轮上限。）
+**熔断闸门（PR 输入）**：先 `bash hack/automation/pr-meta.sh extract <PR#>`（EC=0 读 `cycle.exhausted` / `next.agent`；EC≠0 无块/stale → 降级 `pr-meta.sh round`）——`cycle.exhausted == true` 或 `next.agent == "human"` 或 `round ≥ 3` → 打印「review↔fix 已达 3 轮上限，转人工」退出，不修。（`next.agent=human` / `exhausted` = 自动闭环停派、交回人接管，非禁止 /fix 技能本身；后续由人处理。）
 
 ---
 
@@ -162,21 +162,21 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 文件级改动清单 + 验证命令（`cargo build` / `cargo test` / `cargo test`（涉及并发时配 `--features integration` 或 `loom`））。
 
-### 3.4 执行决策（自动，不逐条问用户）
+### 3.4 执行决策
 
 | 复杂度                                                      | 条件 | 决策 |
 |----------------------------------------------------------|------|-----|
-| Cx1/Cx2 + IN_SCOPE + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | **[AUTO-FIX]** 直接修 |
+| Cx1/Cx2 + IN_SCOPE + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | 直接修 |
 | Cx2 + IN_SCOPE + 触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
-| **Cx3/Cx4 IN_SCOPE** | 任何 | 处置门判「当前 PR 修」or「defer」：**manual**（`/fix` 人在场）AskUserQuestion 判，defer 后自动建 issue（不二次确认）、记 `⏸ defer`，判修纳入本轮；**auto**（pr-monitor 无人）无法问 → 转人工、不切 label |
+| **Cx3/Cx4 IN_SCOPE** | 任何 | 经处置门 AskUserQuestion 判「当前 PR 修」or「defer」：判修记 `✅ 已修`、纳入本轮；判 defer 后自动建 issue（不二次确认）、记 `⏸ defer`。Cx4 默认 defer |
 | 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 4；pri-p0/判不定除外） |
 
-**不可自动执行**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
+**不可直接修（须经处置门或推荐方案）**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
-> **auto（无监督，pr-monitor→`Skill("fix")`）vs manual（交互 `/fix`）**：只有 [AUTO-FIX] 行能在 auto 路径执行，判 Cx 优先读 `pr-meta.sh extract` 的 `findings.byCx`（机器块：`cx3==0 ∧ cx4==0 ∧ (cx1+cx2)>0`）。其余行（执行推荐方案 / 记录阻塞）是 manual 专属，auto 遇到一律 surface 转人工。**IN_SCOPE Cx3+**：manual 经处置门 AskUserQuestion 判修/defer，**判 defer 后自动建 issue（不二次确认）**；auto（pr-monitor）一律 surface 转人工、不切 label。（[AUTO-FIX] 禁止域 = 改底座 crate trait / migration / 组合根 / 并发语义。）
+> 判 Cx 优先读 `pr-meta.sh extract` 的 `findings.byCx`（`cx3==0 ∧ cx4==0 ∧ (cx1+cx2)>0` = 无 Cx3+）。
 
-**何时用 AskUserQuestion**: 见文末 §沟通规则（默认自动决策，不逐条问）。
+**何时用 AskUserQuestion**: 见文末 §沟通规则（Cx3+ 经处置门 AskUserQuestion；其余默认按 3.4 表处置，不逐条问）。
 
 ### 3.5 执行前任务清单（阶段 3 → 4 门禁）
 
