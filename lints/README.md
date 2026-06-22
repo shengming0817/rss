@@ -39,9 +39,10 @@ cargo dylint list            # 列出已注册 lint
 cd lints/rss_domain_no_serialize && cargo test
 ```
 
-> ⚠ **当前未接入 CI 门**：把 `cargo dylint` 接进 `cargo xtask verify` / make verify 是 **#1023** 的范围。
-> 在 #1023 完成前，本 lint 不在 CI 自动跑——须手动 `cargo dylint --all` 触发（实质处于「可手动跑、CI 不强制」
-> 的临时降级状态，未达强制 Medium）。本 PR（#1001）只保证 `cargo dylint --all` 独立可跑。
+> ✅ **已接入聚合门（#1023）**：`cargo dylint --all` 现是 `cargo xtask verify` / `make verify` 的一步，并经
+> `DYLINT_RUSTFLAGS=-D warnings` 升为 **fail-closed**（默认 `Warn` 的注册 lint 违例即让 verify 非零退出）。
+> 激活 forge=azure 无 CI ⇒ verify 是治理门的唯一实际 gate（提交前 / ship·fix 收尾跑）。
+> **仍在 #1054**：覆盖面仍是 `domain` 模块命名约定（非完整域 crate 边界）——见下「强度现状」。
 
 ## 已落地 lint
 

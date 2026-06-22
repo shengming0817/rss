@@ -41,8 +41,9 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
    域 crate 依赖不到其它域 crate、必填依赖非 `Option` 都属此档（见 `docs/rules/architecture.md`
    §Rust 原生强制（三档载体））。（注：「domain 类型不 derive `Serialize`」serde derive 对任何 crate
    自由可用、类型系统无法封闭，由 `dylint` 自写 lint `rss_domain_no_serialize` 承载（二档载体）——见同节二档表。
-   v1 覆盖 `domain` 模块命名约定、可手动 `cargo dylint --all` 跑；接入 CI 成 fail-closed 门待 #1023、
-   完整域 crate 覆盖待 #1054——在此之前是 registered 载体而非已强制的门。）
+   v1 覆盖 `domain` 模块命名约定；已接入聚合门（#1023）：`cargo dylint --all` 是 `cargo xtask verify` 一步、
+   经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（azure 无 CI ⇒ verify 是唯一实际 gate，Medium）；完整域 crate
+   覆盖待 #1054。）
 2. **schema / marker 单源派生代码（codegen funnel）**：build.rs / proc-macro 从声明源派生执行体，
    再用 golden 锁字节输出。
 3. **clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api**：crate-graph lint
@@ -69,7 +70,7 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 - **serde derive 冻结**：wire struct 字段集、`#[serde(rename)]`、类型身份用 golden 精确冻结（Hard，codegen 单源）。
   「只在 contract / DTO 类型上 derive、domain 类型不 derive」serde derive 无法类型封闭，由 `dylint` lint
   `rss_domain_no_serialize` 承载（二档载体，见 `docs/rules/architecture.md` §二档）。v1 守 `domain` 模块命名
-  约定（非完整域 crate 边界）；接入 CI 门待 #1023、完整覆盖待 #1054——在此之前 registered + 手动跑，未成强制门。
+  约定（非完整域 crate 边界）；已接入 `cargo xtask verify`（`-D warnings` fail-closed，#1023 完成）、完整覆盖待 #1054。
 - **codegen funnel + golden**：声明源经 build.rs / proc-macro 派生执行体，输出 drift 由字节 diff 暴露。
 
 新机制若不属于这些范本，先写 ADR 说明为何需要扩展范本。

@@ -9,8 +9,9 @@
 //! crate 自由可用、类型系统无法封闭，故以 dylint AST lint 承载（Medium-class 载体）。
 //!
 //! 强度现状（勿过度宣称）：v1 守的是 **`domain` 模块命名约定**（非完整域 crate 安全边界——实体放
-//! `entities`/`aggregate` 等模块不守护，完整覆盖待 #1054）；默认 `Warn`、经 `cargo dylint --all` **手动**跑，
-//! 接入 CI 成 fail-closed 门待 #1023。即：在 #1023/#1054 前是 registered + 手动跑的载体，**非已强制的 CI 门**。
+//! `entities`/`aggregate` 等模块不守护，完整覆盖待 #1054）。已接入聚合门（#1023）：`cargo dylint --all` 是
+//! `cargo xtask verify` 的一步，经 `DYLINT_RUSTFLAGS=-D warnings` 升为 **fail-closed**（违例即让 verify 非零）；
+//! azure 无 CI ⇒ verify 是唯一实际 gate（Medium：靠提交前 / 收尾跑）。覆盖面扩至完整域 crate 边界仍待 #1054。
 
 extern crate rustc_hir;
 extern crate rustc_middle;

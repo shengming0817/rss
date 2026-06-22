@@ -129,7 +129,7 @@ rss/
 | DB migration 命名空间 | `sqlx::migrate!` |
 | 依赖图导出 | `cargo tree` / `cargo-depgraph` |
 | mock(同模块)/ table-driven | `mockall` / `rstest` |
-| 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)；首条 `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01)——符号/红例/盲区见 `lints/rss_domain_no_serialize/` rustdoc，运行 `cargo dylint --all`（CI 门接入待 #1023，在此前手动跑） |
+| 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)；首条 `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01)——符号/红例/盲区见 `lints/rss_domain_no_serialize/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（#1023 完成）；完整域 crate 覆盖待 #1054 |
 | 治理脚本入口 | `cargo` + `xtask/` |
 | 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
 

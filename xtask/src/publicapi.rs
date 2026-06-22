@@ -13,9 +13,9 @@
 //! 依赖：外部 `cargo-public-api`（`cargo install cargo-public-api`）+ nightly rustdoc-json
 //! （`rustup toolchain install nightly`）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
-//! **不在 `cargo xtask verify` 聚合门内**：verify（contract validate + layer-deps + codegen --check）须工具/网络
-//! 无关、人人可跑；public-api 依赖外部工具 + nightly，故为独立可选门（单独 `cargo xtask public-api --check`），
-//! 不污染 verify 的可移植性。
+//! **不在 `cargo xtask verify` 聚合门内**：verify 聚合每次代码改动的强制门（fmt/build/clippy/nextest/deny/
+//! dylint + meta）；public-api 是**库封装面 baseline 冻结门**（轴 A SemVer，需 nightly rustdoc-json 重新生成
+//! baseline），语义与触发节奏不同，故为独立可选门（单独 `cargo xtask public-api --check`）。
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 —— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 —— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。

@@ -72,7 +72,7 @@
 
 ### 2.6 cx-XX（复杂度，1 个，必填 CLI 贴）
 
-`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic 不贴（跨多 PR、无单一 diff）。非 epic backlog issue 的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫（`issues` B1 建单前强制门；selftest 直接运行：`bash hack/automation/issue-labels.sh selftest`；统一 `make verify` 聚合入口 + 其余 selftest 迁移尚未落地（backlog））。
+`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic 不贴（跨多 PR、无单一 diff）。非 epic backlog issue 的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫（`issues` B1 建单前强制门；selftest 直接运行：`bash hack/automation/issue-labels.sh selftest`；`make verify` 聚合入口已落地（#1023，聚合 Rust 代码门），bash selftest 折入仍 backlog）。
 
 ---
 
@@ -134,7 +134,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 | `pr-status/needs-check-fix` | `kind=fix` + `verdict=needs-check-fix` + `next.triggerLabel=pr-status/needs-check-fix` | `/pr-review --check` |
 | `pr-status/needs-fix` | `kind=pr-review` + `verdict=changes-requested` + `next.triggerLabel=pr-status/needs-fix` | `/fix`（`/pr-monitor` 过 handoff 门——fresh canonical block + verdict + same-head + next 一致——才接力；Cx / scope 判定下放 `/fix`，读 finding 文件 + `byCx`） |
 
-离线契约测试直接运行：`bash hack/automation/pr-meta.sh selftest`（离线，无网络）；统一 `make verify` 聚合入口 + `pr-handoff-contract-selftest.sh` 迁移尚未落地（backlog）。
+离线契约测试直接运行：`bash hack/automation/pr-meta.sh selftest`（离线，无网络）；`make verify` 聚合入口已落地（#1023，聚合 Rust 代码门），bash selftest（`pr-handoff-contract-selftest.sh` 等）折入仍 backlog。
 
 ```
 /ship <issue>

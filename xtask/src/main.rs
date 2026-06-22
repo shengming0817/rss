@@ -4,7 +4,11 @@
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（R1–R6，CI 门）
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
-//!   `cargo xtask verify`                聚合门：contract validate + layer-deps + codegen --check（本地自验入口）
+//!   `cargo xtask verify [--fast] [--allow-missing-tools]`
+//!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract
+//!                                      validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
+//!                                      `--fast` 只跑无需编译的步（fmt+meta+deny）；`--allow-missing-tools` 缺外部
+//!                                      工具时显式宽限（默认 fail-closed）。详见 `verify.rs`。
 //!   `cargo xtask public-api [--layer basis|engine] [--check] [--allow-missing]`
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
@@ -16,6 +20,7 @@ mod pathsafe;
 mod publicapi;
 #[cfg(test)]
 mod testutil;
+mod verify;
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
@@ -33,7 +38,10 @@ enum Command {
     },
     ContractValidate,
     LayerDeps,
-    Verify,
+    Verify {
+        fast: bool,
+        allow_missing_tools: bool,
+    },
     PublicApi {
         check: bool,
         allow_missing: bool,
@@ -52,14 +60,33 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["contract", "validate"] => Ok(Command::ContractValidate),
         ["layer-deps"] => Ok(Command::LayerDeps),
-        ["verify"] => Ok(Command::Verify),
+        ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | verify | public-api [--layer basis|engine] [--check] [--allow-missing]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing]>"
             )
         }
     }
+}
+
+/// 解析 `verify` 的可选 flag（fail-closed：未知 flag 即 `Err`）。
+fn parse_verify(args: &[&str]) -> Result<Command> {
+    let mut fast = false;
+    let mut allow_missing_tools = false;
+    for &tok in args {
+        match tok {
+            "--fast" => fast = true,
+            "--allow-missing-tools" => allow_missing_tools = true,
+            other => bail!(
+                "verify 未知参数: {other}；用法: cargo xtask verify [--fast] [--allow-missing-tools]"
+            ),
+        }
+    }
+    Ok(Command::Verify {
+        fast,
+        allow_missing_tools,
+    })
 }
 
 /// 解析 `public-api` 的可选 flag（fail-closed：未知 flag / 缺 layer 值 / 非法 layer 即 `Err`）。
@@ -99,13 +126,10 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Codegen { check } => codegen::run(check),
         Command::ContractValidate => contract::validate::run(),
         Command::LayerDeps => layerdeps::run(),
-        Command::Verify => {
-            contract::validate::run()?;
-            layerdeps::run()?;
-            codegen::run(true)?;
-            eprintln!("verify: 全部通过（contract validate + layer-deps + codegen --check）");
-            Ok(())
-        }
+        Command::Verify {
+            fast,
+            allow_missing_tools,
+        } => verify::run(fast, allow_missing_tools),
         Command::PublicApi {
             check,
             allow_missing,
@@ -165,9 +189,48 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_verify() -> anyhow::Result<()> {
-        assert_eq!(parse_command(&s(&["verify"]))?, Command::Verify);
+    fn parse_command_verify_bare() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["verify"]))?,
+            Command::Verify {
+                fast: false,
+                allow_missing_tools: false
+            }
+        );
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_verify_flags() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["verify", "--fast"]))?,
+            Command::Verify {
+                fast: true,
+                allow_missing_tools: false
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["verify", "--allow-missing-tools"]))?,
+            Command::Verify {
+                fast: false,
+                allow_missing_tools: true
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["verify", "--fast", "--allow-missing-tools"]))?,
+            Command::Verify {
+                fast: true,
+                allow_missing_tools: true
+            }
+        );
+        Ok(())
+    }
+
+    /// verify flag fail-closed：未知 flag 即 `Err`（不被静默吞掉）。
+    #[test]
+    fn parse_command_verify_rejects_unknown_flag() {
+        assert!(parse_command(&s(&["verify", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["verify", "--fast", "extra"])).is_err());
     }
 
     #[test]
