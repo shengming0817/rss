@@ -22,6 +22,7 @@ name = "amqp"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -441,6 +442,7 @@ name = "grpc"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -695,6 +697,7 @@ name = "mqtt"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -723,6 +726,7 @@ name = "oidc"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -742,6 +746,7 @@ name = "otel"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -767,6 +772,7 @@ name = "postgres"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -846,6 +852,7 @@ name = "prometheus"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -874,6 +881,7 @@ name = "ratelimit"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -887,6 +895,7 @@ name = "redis"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -1008,6 +1017,7 @@ name = "s3"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -1216,6 +1226,7 @@ name = "softca"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
@@ -1596,6 +1607,7 @@ name = "vault"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",

@@ -29,21 +29,24 @@ pub(crate) struct SessionView { /* 域内只读投影，pub(crate) */ }
 
 ## PR-5 adapters 层（12 crate）
 
-adapters 实现 `diport`（及引擎）定义的 trait；**不被域依赖**（组合根注入），自身**不定义新 trait**——只冻 sealed-marker newtype 骨架 + native AFIT impl 签名。
+adapters 实现 `diport` 定义的 DI port trait；**不被域依赖**（组合根注入），自身**不定义新 trait**——只冻 **unit sealed-marker**（raw client 字段延迟 W 阶段）+ native AFIT impl 已冻 diport trait 签名。
 
-| 分组 | adapters | 实现的上层 trait（举例） |
+| 分组 | adapters | PR-5 impl 的**已冻** diport DI port trait |
 |---|---|---|
-| 核心存储/消息 | postgres, redis, amqp | diport: repo/store/Publisher/Subscriber |
-| 设备 | mqtt, softca | diport: 设备 transport / 证书签发 |
-| REST/外部 | s3, oidc, grpc, otel, prometheus, vault, ratelimit | diport: 对应 DI port |
+| 全部 12 | postgres, redis, amqp, mqtt, s3, oidc, grpc, otel, prometheus, vault, softca, ratelimit | `ManagedResource`（生命周期 shutdown，普适） |
+| 发布 | amqp, mqtt | 另 impl `Publisher` |
+| 签名 | vault, softca | 另 impl `Signer` |
 
-要点：`pub struct PgStore(pub(crate) sqlx::PgPool);` raw client `pub(crate)`，外部无法触达；**native AFIT** impl diport trait body=todo!()。adapter crate **保持 `#![forbid(unsafe_code)]`**（只 import diport trait + `Dyn*`，自己不 invoke dynosaur 宏，ADR-003 §4.2）。adapters 本身不 mock（域 crate mock 的是 diport trait）。PR-5 与 PR-4 触不同 crate→可并行。
+> 注：repo/store/设备 transport/证书签发/metrics/Subscriber 等更专的 trait diport 现**未冻**，待 W 阶段定义后再 impl；故 PR-5 仅 impl 已冻的 4 个 DI port trait。
+
+要点：PR-5 冻 **unit sealed-marker**（`pub struct PgStore;`，无 raw client 字段——字段延迟 W 阶段接后端时填入、届时 `pub(crate)` 不泄漏），**native AFIT** impl 已冻 diport DI port trait body=todo!()。adapter crate **保持 `#![forbid(unsafe_code)]`**（只 import diport trait + `Dyn*`，自己不 invoke dynosaur 宏，ADR-003 §4.2）。adapters 本身不 mock（域 crate mock 的是 diport trait）。PR-5 与 PR-4 触不同 crate→可并行。
 
 ```rust
-// adapters/postgres — sealed-marker newtype（forbid(unsafe_code) 不变）
-use diport::SessionRepo;                       // import diport trait（不 invoke dynosaur 宏）
-pub struct PgStore(pub(crate) sqlx::PgPool);    // raw client pub(crate)
-impl SessionRepo for PgStore {                  // native AFIT impl，无 #[async_trait]
-    async fn find(&self, _id: SessionId) -> Result<Option<Session>, IdentityError> { todo!() }
+// adapters/postgres — unit sealed-marker（forbid(unsafe_code) 不变；raw client 字段延迟 W）
+use diport::{ManagedResource, ShutdownError};  // import 已冻 diport trait（不 invoke dynosaur 宏）
+pub struct PgStore;                            // W 阶段接后端时加 `pub(crate) sqlx::PgPool` 字段
+impl ManagedResource for PgStore {             // native AFIT impl，无 #[async_trait]
+    fn name(&self) -> &str { todo!() }
+    async fn shutdown(&self) -> Result<(), ShutdownError> { todo!() }
 }
 ```

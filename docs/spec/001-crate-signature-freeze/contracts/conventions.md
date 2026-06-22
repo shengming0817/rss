@@ -16,7 +16,7 @@
 | C4 关闭逆序 | `ManagedResource` LIFO、显式 `async fn shutdown`、无 async Drop | ADR-001 |
 | C5 必填依赖/Clock | `Box<DynX>` 构造器必填位置参（非 Option）；Clock 同范式、禁默认系统时钟 | ADR-003 §4.3 |
 | C6 serde | domain 不 derive Serialize/Deserialize；仅 contract/DTO（generated） | rust-standards |
-| C7 sealed/newtype | DI port trait **不跨 crate sealed**（deny.toml wrappers 限定实现方，ADR-003 §4.2 方案②）；adapter raw client `pub(crate)` newtype | ADR-003 §4.2 |
+| C7 sealed/newtype | DI port trait **不跨 crate sealed**（deny.toml wrappers 收敛宏依赖；impl-sealing 未机器强制、待 #1060；ADR-003 §4.2 方案②）；adapter PR-5 冻 unit sealed-marker，raw client `pub(crate)` 字段延迟 W | ADR-003 §4.2 |
 | C8 覆盖率豁免 | 签名 PR body=`todo!()` 不可达 → PR body 声明覆盖率延迟到行为 PR | — |
 | C9 对标 ref | PR body 标 `ref: {framework} {path}@{ref}` 或「无需对标：<理由>」 | research.md |
 | C10 错误 | `vocab` + `thiserror` 枚举；message `&'static str` const literal | error-handling |

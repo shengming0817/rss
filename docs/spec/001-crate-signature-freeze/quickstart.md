@@ -38,7 +38,7 @@ cargo xtask public-api --check --allow-missing # 仅 PR-0 自检：宽限「base
 | **PR-diport** | `cargo build -p diport` 绿；DI port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（dynosaur 仅 diport）；ADR-003 §8 三风险已验证；architecture.md/deny.toml/rust-standards/domain-patterns 已回写 |
 | **PR-3** 服务 | 7 服务 crate `cargo build` 绿；`Domain::init` 返回 Result（不 panic）；非 DI 接缝（RouteGroup/Disposition/HandlerFn）冻结；DI port 已在 diport；不依赖域/adapters |
 | **PR-4** 域 | 5 域 crate `cargo build` 绿；域间无 import（deny 绿）；domain 类型未 derive Serialize（编译/grep 核）；DI repo port 已在 diport |
-| **PR-5** adapters | 12 adapter `cargo build` 绿；raw client `pub(crate)`（不泄漏）；native AFIT impl diport trait；adapter 保持 forbid(unsafe_code)；不被任何域 crate 依赖（deny 绿） |
+| **PR-5** adapters | 12 adapter `cargo build` 绿；unit sealed-marker，native AFIT impl 已冻 diport trait（ManagedResource + Signer/Publisher）；raw client 字段延迟 W（届时 `pub(crate)` 不泄漏）；adapter 保持 forbid(unsafe_code)；不被任何域 crate 依赖（deny 绿） |
 | **GATE** 收口 | `cargo build --workspace` 全绿 + 签名 review 通过 → 放行 W 宽扇出 (#1000–#1016) |
 
 ## 并行拆分建议（增并行度）

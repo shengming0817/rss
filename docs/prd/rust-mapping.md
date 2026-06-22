@@ -182,8 +182,9 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
   等 topology-gated resolver 内联为 `bootstrap` 子模块（按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖）。
 - **Init fail-fast**：`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`；必填依赖走构造器必填参数
   （编译期）；init 内不做 I/O、不 spawn task。
-- **Adapter sealed marker**：newtype 包裹原始 client（`struct PgStore(PgPool)`）实现服务 trait，port trait 用
-  sealed-trait 封闭，外部 crate 无法实现，raw 保持 `pub(crate)`。
+- **Adapter sealed marker**：unit sealed-marker（`struct PgStore;`）以 native AFIT impl diport 已冻 DI port
+  trait（`ManagedResource` 普适 + `Signer`/`Publisher` 按职责）；DI port **不**跨 crate sealed（ADR-003 §4.2
+  方案②——impl-sealing 未机器强制、待 #1060）；raw client（如 `PgPool`，`pub(crate)` 不泄漏）字段延迟到 W 阶段接后端时填入。
 - **DTO 作用域**：域内 = `pub(crate)` 模块类型（原 A/B 档合一）；跨域 wire = contract（`contracts/` 声明 →
   `generated/` crate，原 C 档）。
 - **错误**：`vocab`(error) + `thiserror`（库错误枚举）；应用边界可 `anyhow`。错误码命名空间注册 + golden。

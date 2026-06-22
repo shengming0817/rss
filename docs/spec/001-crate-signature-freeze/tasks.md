@@ -121,19 +121,25 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 ### PR-5 adapters 层（门: TD05（PR-diport）；与 PR-4 并行；同层 12 crate 并行）
 
-- [ ] T028 [P] [US3] 冻结 `adapters/postgres`：`PgStore(pub(crate) PgPool)` sealed newtype + **native AFIT** impl diport repo/store trait(todo!())。raw client 不泄漏；crate 保持 forbid(unsafe_code)（不 invoke dynosaur 宏）。测试: build smoke
-- [ ] T029 [P] [US3] 冻结 `adapters/redis`：sealed newtype + native AFIT impl diport trait。测试: build smoke
-- [ ] T030 [P] [US3] 冻结 `adapters/amqp`：sealed newtype + native AFIT impl diport Publisher/Subscriber。测试: build smoke
-- [ ] T031 [P] [US3] 冻结 `adapters/mqtt`：sealed newtype + impl 设备 transport trait。测试: build smoke
-- [ ] T032 [P] [US3] 冻结 `adapters/s3`：sealed newtype + impl 对象存储 trait。测试: build smoke
-- [ ] T033 [P] [US3] 冻结 `adapters/oidc`：sealed newtype + impl 上层 trait。测试: build smoke
-- [ ] T034 [P] [US3] 冻结 `adapters/grpc`：sealed newtype + impl transport/interceptor trait。测试: build smoke
-- [ ] T035 [P] [US3] 冻结 `adapters/otel`：sealed newtype + impl 可观测 trait。测试: build smoke
-- [ ] T036 [P] [US3] 冻结 `adapters/prometheus`：sealed newtype + impl metrics trait。测试: build smoke
-- [ ] T037 [P] [US3] 冻结 `adapters/vault`：sealed newtype + impl secret/crypto trait。测试: build smoke
-- [ ] T038 [P] [US3] 冻结 `adapters/softca`：sealed newtype + impl 证书签发 trait。测试: build smoke
-- [ ] T039 [P] [US3] 冻结 `adapters/ratelimit`：sealed newtype + impl 限流 trait。测试: build smoke
-- [ ] T040 [US3] PR-5 验收（门: T028–T039）：12 adapter `cargo build` + clippy 绿；raw client `pub(crate)`（核）；adapter crate 保持 forbid(unsafe_code)；不被任何域 crate 依赖（deny 绿）。**开 PR-5，body 标覆盖率豁免 + ref**
+- [x] T028 [P] [US3] 冻结 `adapters/postgres`：`PgStore` sealed-marker + **native AFIT** impl diport `ManagedResource`(todo!())。crate 保持 forbid(unsafe_code)（不 invoke dynosaur 宏）。测试: build smoke
+- [x] T029 [P] [US3] 冻结 `adapters/redis`：sealed-marker `RedisStore` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T030 [P] [US3] 冻结 `adapters/amqp`：sealed-marker `AmqpPublisher` + native AFIT impl `Publisher` + `ManagedResource`。测试: build smoke
+- [x] T031 [P] [US3] 冻结 `adapters/mqtt`：sealed-marker `MqttPublisher` + native AFIT impl `Publisher` + `ManagedResource`。测试: build smoke
+- [x] T032 [P] [US3] 冻结 `adapters/s3`：sealed-marker `S3Store` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T033 [P] [US3] 冻结 `adapters/oidc`：sealed-marker `OidcProvider` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T034 [P] [US3] 冻结 `adapters/grpc`：sealed-marker `GrpcServer` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T035 [P] [US3] 冻结 `adapters/otel`：sealed-marker `OtelExporter` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T036 [P] [US3] 冻结 `adapters/prometheus`：sealed-marker `PromExporter` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T037 [P] [US3] 冻结 `adapters/vault`：sealed-marker `VaultSigner` + native AFIT impl `Signer` + `ManagedResource`。测试: build smoke
+- [x] T038 [P] [US3] 冻结 `adapters/softca`：sealed-marker `SoftCaSigner` + native AFIT impl `Signer` + `ManagedResource`。测试: build smoke
+- [x] T039 [P] [US3] 冻结 `adapters/ratelimit`：sealed-marker `RateLimiter` + native AFIT impl `ManagedResource`。测试: build smoke
+- [x] T040 [US3] PR-5 验收（门: T028–T039）：12 adapter `cargo build` + clippy 绿；adapter crate 保持 forbid(unsafe_code)；不被任何域 crate 依赖（deny 绿）。**开 PR-5，body 标覆盖率豁免 + ref**
+
+> **PR-5 实施决策（与原任务文本的偏离，记录于此保持 spec tracker 诚实）**
+>
+> 1. **raw client 字段统一延迟到 W 阶段**（含 postgres）：diport 现仅冻 4 个 DI port trait（`Clock`/`Signer`/`Publisher`/`ManagedResource`），无 repo/store/transport/metrics/限流 trait——原任务文本里的这些 trait 名不存在，故 adapter 只 impl 已冻的 4 个。sealed-marker 均为 **unit struct**（无 raw client 字段）；「raw client `pub(crate)` 不泄漏」作为 W 阶段约定记录在每个 crate 的 rustdoc，字段在接后端时填入。原计划 postgres 用 `sqlx::PgPool` 做唯一范例，但其 `tls-rustls` 树拉入 `webpki-roots`（`CDLA-Permissive-2.0`，不在 license allowlist）触 `cargo deny licenses` 红——为不扩 allowlist / 不引入整棵 sqlx 供应链树（仅为 todo!() 范例），postgres 亦改 unit 标记，与其余 11 一致（决策见 PR 说明）。
+> 2. **trait 映射**：全部 12 impl `ManagedResource`（生命周期 shutdown 通用）；vault/softca 另 impl `Signer`，amqp/mqtt 另 impl `Publisher`。
+> 3. **implementer-allowlist（#1060）仍 deferred**：cargo-deny 限依赖非 impl，无干净静态载体（见 ADR-003 落地结论 2 / deny.toml 注释）。本 PR 让 adapter 成为 port trait 首批真实 impl，allowlist 强制待 #1060。
 
 **Checkpoint**: US3 完成 → 全部接缝冻结。
 

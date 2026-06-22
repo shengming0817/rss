@@ -52,16 +52,16 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 
 ### User Story 3 - 域+adapters 层接缝冻结（Priority: P3）
 
-下游实现者要填域 crate（identity/settings/audit/contractreg/syshealth）与 12 个 adapters 的 body 时，能拿到冻结的域 port trait（仓储/领域服务）与 adapter sealed-marker 接缝。域 crate 引用 `generated`（契约派生 wire 类型）；adapters 以 sealed newtype 实现服务/引擎层 trait。
+下游实现者要填域 crate（identity/settings/audit/contractreg/syshealth）与 12 个 adapters 的 body 时，能拿到冻结的域 port trait（仓储/领域服务）与 adapter sealed-marker 接缝。域 crate 引用 `generated`（契约派生 wire 类型）；adapters 以 **unit sealed-marker** native AFIT impl diport **已冻** DI port trait（`ManagedResource`/`Signer`/`Publisher`），raw client 字段延迟 W 阶段。
 
 **Why this priority**: 最外层、扇出面最宽（5 域 + 12 adapter = 17 单元），且依赖 P1+P2 全部冻结、并软依赖 `generated` 契约类型（#998 产出）。放最后，且本层本身就是 W 扇出的主体，签名冻结后即逐单元放行。
 
-**Independent Test**: 每个域 crate `cargo build` 通过（域间互不依赖，经 deny.toml 强制）；域内 `pub(crate)` port trait 的 mock 可构造；每个 adapter 的 sealed-marker newtype 骨架（如 `struct PgStore(PgPool)`）能 `impl` 对应服务 trait 且 raw client 保持 `pub(crate)`。
+**Independent Test**: 每个域 crate `cargo build` 通过（域间互不依赖，经 deny.toml 强制）；域内 `pub(crate)` port trait 的 mock 可构造；每个 adapter 的 unit sealed-marker（如 `struct PgStore;`）能 native AFIT `impl` 已冻 diport DI port trait（raw client 字段延迟 W、届时保持 `pub(crate)`）。
 
 **Acceptance Scenarios**:
 
 1. **Given** P1+P2 签名已冻结、`generated` 契约类型可用，**When** 冻结域 crate 的 `pub(crate)` 仓储/服务 trait 签名，**Then** 五个域 crate `cargo build` 通过且域间无 import（deny.toml 绿）。
-2. **Given** 某 adapter（如 postgres），**When** 以 sealed newtype 实现上层 port trait 的 todo!() 骨架，**Then** 编译通过、raw client 不泄漏（`pub(crate)`）、不被任何域 crate 依赖。
+2. **Given** 某 adapter（如 postgres），**When** 以 unit sealed-marker native AFIT impl 已冻 diport DI port trait 的 todo!() 骨架，**Then** 编译通过、不被任何域 crate 依赖（raw client 字段延迟 W、届时 `pub(crate)` 不泄漏）。
 3. **Given** 全部 17 单元签名冻结，**When** 运行 `cargo build --workspace`，**Then** 整个 workspace 编译通过。
 
 ---
@@ -72,7 +72,7 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 - **dynosaur 跨 crate sealing 不可行 × mockall**：ADR-003 §4.2——DI port trait 集中到 `diport` 后无法对独立 adapter crate sealing，改 deny.toml wrappers 限定实现方（Hard→Medium）；mockall 在 native-AFIT/dynosaur 下的形态 ADR-003 未覆盖，列 PR-diport 待验证（data-model 待决项#6）。
 - **覆盖率门误伤**：body=todo!() 不可达，覆盖率必然偏低。处理：签名冻结 PR 在说明中声明"覆盖率延迟到行为 PR"，避免 80% 门触发红。
 - **域层引用未生成的 generated 类型**：若 #998 未产出 `generated`，域层签名无法引用具体 wire 类型。处理：域层 PR 软依赖 #998；可先用占位/最小类型冻结非 wire 部分，wire 引用部分待 #998。
-- **adapters 无独立 trait 可冻**：adapters 实现上层 trait，自身通常不定义新 trait。处理：adapter 单元只冻 sealed-marker newtype 骨架 + impl 签名，不强造 trait。
+- **adapters 无独立 trait 可冻**：adapters 实现上层 trait，自身通常不定义新 trait。处理：adapter 单元只冻 unit sealed-marker + native AFIT impl 已冻 diport trait 签名，不强造 trait。
 
 ## Requirements *(mandatory)*
 
@@ -98,7 +98,7 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 - **conventions 地基**：trait 写法 + mock + ctx + 覆盖率约定的单源（**ADR-004**），被所有签名单元引用。
 - **DI port trait**：provider-可换、经 dynosaur `DynX` wrapper 注入的接缝（`Box/Arc<DynX>`）；收敛进 `diport` crate；需 dyn-compatible + mockall mock。
 - **diport crate**：DI port trait + dynosaur wrapper + unsafe 收敛（forbid→deny 例外）的专用服务层 crate（ADR-003，新建于 PR-diport）。
-- **sealed-marker newtype**：adapter 包裹 raw client 以 native AFIT 实现 diport trait 的范式（raw 保持 `pub(crate)`，crate 保持 forbid）。
+- **sealed-marker newtype**：adapter 以 native AFIT 实现 diport DI port trait 的范式（PR-5 冻 unit struct；raw client 字段在 W 阶段接后端时填入、保持 `pub(crate)`；crate 保持 forbid）。
 - **spike 依赖门**：ADR-001/002/003 决议 + diport 落地门作为签名实施的前置条件（非规划前置）。
 
 ## Success Criteria *(mandatory)*

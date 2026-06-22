@@ -80,8 +80,8 @@ domain 类型**不** derive `Serialize`/`Deserialize`；仅 contract/DTO（`gene
 
 ### C7. sealed / newtype（← ADR-003 §4.2）
 
-- **DI port trait 不跨 crate sealed**：集中到 `diport` 后，sealed-trait 无法「只放行某外部 adapter crate impl」→ 采**方案②**：放弃跨 crate sealing。`deny.toml` wrapper 收敛 **dynosaur/trait-variant 宏依赖**到 `diport`（保证 port 只在此定义）——但 cargo-deny **限依赖非 impl**，且域 crate 也依赖 `diport` 消费端口，故「谁可 impl」**当前未机器强制**（落地实测，见 ADR-003 落地结论 2）；implementer-allowlist 待 PR-5（#1060）。
-- adapter：`pub struct PgStore(pub(crate) sqlx::PgPool);` raw client `pub(crate)`，**native AFIT** impl diport trait；adapter crate 保持 `#![forbid(unsafe_code)]`（不 invoke dynosaur 宏）。
+- **DI port trait 不跨 crate sealed**：集中到 `diport` 后，sealed-trait 无法「只放行某外部 adapter crate impl」→ 采**方案②**：放弃跨 crate sealing。`deny.toml` wrapper 收敛 **dynosaur/trait-variant 宏依赖**到 `diport`（保证 port 只在此定义）——但 cargo-deny **限依赖非 impl**，且域 crate 也依赖 `diport` 消费端口，故「谁可 impl」**当前未机器强制**（落地实测，见 ADR-003 落地结论 2）；implementer-allowlist 仍待 **#1060**（PR-5 已落 12 个 adapter 真实 impl，但 cargo-deny 无法限 impl 站点）。
+- adapter（PR-5 落地口径）：签名冻结期为 **unit sealed-marker**（`pub struct PgStore;`，无 raw client 字段），以 **native AFIT** impl diport **已冻** DI port trait（`ManagedResource` 普适 + `Signer`/`Publisher` 按职责）body=`todo!()`；raw client 字段（如 `sqlx::PgPool`，保持 `pub(crate)` 不泄漏）延迟到 W 阶段接后端时填入。adapter crate 保持 `#![forbid(unsafe_code)]`（不 invoke dynosaur 宏）。
 
 ### C8. 覆盖率豁免
 

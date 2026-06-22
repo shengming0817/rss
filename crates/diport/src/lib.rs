@@ -41,7 +41,7 @@
 //! 只在 `diport` 定义，DIPORT-MACRO-CONFINE-01）——它**不**约束「谁可 **impl** port trait」：
 //! cargo-deny 只能限依赖、不能限 impl 站点，且域 crate 也合法依赖 `diport`（为**消费**端口而非 impl）。
 //! 故 port trait 的 **impl-sealing 当前未机器强制**（「外部无法 impl」由类型系统 Hard 降为「尚无守卫」）——
-//! implementer-allowlist（限 production impl 到 adapter/组合根）待 PR-5 落地，跟踪 **issue #1060**。
+//! implementer-allowlist（限 production impl 到 adapter/组合根）仍无机器载体——PR-5 已落 adapter 真实 impl，跟踪 **issue #1060**。
 //!
 //! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01
 //!

@@ -163,8 +163,9 @@ source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "cr
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖)。
 - **Init fail-fast**:`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`;必填依赖走构造器必填参数
   (编译期);init 内不做 I/O、不 spawn task。
-- **Adapter sealed marker**:newtype 包裹原始 client(`struct PgStore(PgPool)`)实现服务 trait,port trait 用
-  sealed-trait 封闭,外部 crate 无法实现,raw 保持 `pub(crate)`。
+- **Adapter sealed marker**:unit sealed-marker(`struct PgStore;`)以 native AFIT impl diport 已冻 DI port
+  trait(`ManagedResource` 普适 + `Signer`/`Publisher` 按职责);DI port **不**跨 crate sealed(ADR-003 §4.2
+  方案②——impl-sealing 未机器强制、待 #1060);raw client(如 `PgPool`,`pub(crate)` 不泄漏)的字段延迟到 W 阶段接后端时填入。
 - **DTO 作用域**:域内 = `pub(crate)` 模块类型;跨域 wire = contract(`contracts/` 声明 → `generated/` crate)。
 - **错误**:`vocab`(error) + `thiserror`(库错误枚举);应用边界可 `anyhow`。错误码命名空间注册 + golden。
 - **代码生成**:`build.rs` / proc-macro / `xtask` 作为 codegen funnel,产物入 `generated/`(committed,一等审查材料)

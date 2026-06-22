@@ -44,8 +44,9 @@ deny = [
   # 注：实测 dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（diport 无 unsafe
   #   例外），故本 wrapper 是「DI port 集中」架构守卫（Medium），非 unsafe 收敛。
   # port-trait impl-sealing（谁可 impl port trait）：cargo-deny 限「依赖」非「impl」，且域 crate 也依赖
-  #   diport（消费端口而非 impl），无法用单一 wrapper 表达「仅 adapter 可 impl」；本轮无 adapter 实 impl
-  #   （骨架），implementer-allowlist 待 PR-5 adapter 落地补（见 PR OOS）。
+  #   diport（消费端口而非 impl），无法用单一 wrapper 表达「仅 adapter 可 impl」；PR-5 已落 12 个 adapter
+  #   真实 impl（unit sealed-marker + native AFIT impl ManagedResource/Signer/Publisher），但 impl 站点仍
+  #   无机器强制，implementer-allowlist 由 #1060 跟踪。
   { crate = "dynosaur", wrappers = ["diport"] },
   { crate = "trait-variant", wrappers = ["diport"] },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖。

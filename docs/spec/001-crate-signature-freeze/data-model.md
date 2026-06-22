@@ -31,7 +31,7 @@
 | **生命周期 trait** | diport / bootstrap | `ManagedResource`（**inter-ADR 待决**：ADR-001=async_trait vs ADR-003=dynosaur，见待决项） | automock | LIFO 由 bootstrap 显式 await，无 async Drop |
 | **服务非 DI 接缝**（type/enum/sync） | httpserve, eventexec, observ… | type/enum + sync `Fn`（非 trait object） | — | RouteGroup/Route/ListenerKind/Disposition/HandlerFn |
 | **域内类型**（pub(crate)） | identity, settings… | DTO + 非 DI 域逻辑（DI port 已迁 diport） | — | domain 不 derive Serialize |
-| **adapter sealed-marker** | adapters/* | native AFIT impl diport port trait（无新 trait、不 invoke dynosaur 宏，保持 forbid） | 不 mock | `struct PgStore(pub(crate) PgPool)` |
+| **adapter sealed-marker** | adapters/* | native AFIT impl diport 已冻 DI port trait（ManagedResource 普适 + Signer/Publisher 按职责；无新 trait、不 invoke dynosaur 宏，保持 forbid） | 不 mock | `struct PgStore;`（unit；raw client 字段延迟 W） |
 
 ## 实体 3：Conventions 项（单源 = ADR-004，被全部签名引用）
 

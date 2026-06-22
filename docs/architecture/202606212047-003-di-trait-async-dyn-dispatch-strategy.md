@@ -22,7 +22,7 @@ dynosaur 0.3 落地 spike 实测，三项开放风险结论 + 对原 ADR 的修�
 2. **§8 风险 2（跨 crate sealing）→ 方案 ②**：DI port trait 不带 sealed supertrait；「谁可 impl」由 `deny.toml`
    wrapper 限定可依赖 `dynosaur`/`trait-variant`/`diport` 的 crate 集（cargo-deny Medium，INVARIANT
    DIPORT-MACRO-CONFINE-01，`layer-deps` 守 wrapper⟷源一致）。cargo-deny 限「依赖」非「impl」的残余缺口
-   （域 crate 也依赖 diport 来消费端口）+ 本轮无 adapter 实 impl → implementer-allowlist 待 PR-5（OOS）。
+   （域 crate 也依赖 diport 来消费端口）：PR-5 已落 adapter 真实 impl，但 impl 站点仍无机器载体，implementer-allowlist 待 #1060。
 3. **§8 风险 3（v0.3 API）→ 修订**：真实构造 API = `DynX::new_box` / `new_arc` / `from_box` / `from_mut`
    （§4 示例 `new_box`/`new_arc` 正确；README 的 `boxed` 形态为旧版）。**新增**：`dyn(box)` 默认 boxed future
    **非 Send**；DI port 须在多线程 runtime 跨 spawn → 用 `#[trait_variant::make(X: Send)]` 生成 Send 变体 +
