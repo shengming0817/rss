@@ -57,7 +57,10 @@ exclude = ["lints"]
 # 配合 exclude 使 stable 构建永不触碰 lints/ 的 nightly 工具链。
 # 运行：`cargo dylint --all`（须 `cargo install cargo-dylint dylint-link`）。见 lints/。
 [workspace.metadata.dylint]
-libraries = [{ path = "lints/rss_domain_no_serialize" }]
+libraries = [
+  { path = "lints/rss_domain_no_serialize" },
+  { path = "lints/rss_spawn_missing_scope" },
+]
 
 [workspace.package]
 version = "0.0.0"

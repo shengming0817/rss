@@ -144,13 +144,18 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 - 泛型 `RequestCtx<T, P>` 的类型参数会出现在 consumer 签名；用 `AppCtx` 别名收口，consumer 名别名而非裸泛型，
   (b) 迁移时改一处。
 - spawn / blocking / std::thread 不继承 ctx 是 footgun（R2）。**运行时**已 fail-closed（子任务读到 `Err`，
-  测试锁定 `tokio::spawn` / `spawn_blocking`）；但**静态防误用**（拦截「忘记重绑」的 callsite）当前是 Soft，
-  升级到 Medium 须落 dylint，已登记 follow-up 4。
-  - **生产 consumer 接入前置门（避免以 Accepted ADR 合入 Soft）**：在 dylint `rss_spawn_missing_scope`（#1031）
-    落地前，**生产 crate（httpserve / authn / eventexec / reconcile 等）不得采用 spawn-跨任务-ctx 传播**；
-    spike 期仅 runctx 自测演示该范式。即 Soft **不是被接受的永久态**，而是有明确前置门 + backlog 跟踪的过渡态——
-    本机制的运行时不变式（fail-closed）已是 Medium，静态防误用在生产采用前必须先到 Medium。该前置门由本 ADR 声明，
-    采用方 PR 经 review 核对（生产 spawn-传播 callsite 出现即要求 #1031 已合）。
+  测试锁定 `tokio::spawn` / `spawn_blocking`）；**静态防误用**（拦截「忘记重绑」的 callsite）原为 Soft，
+  现由 dylint `rss_spawn_missing_scope`（#1031）承载，**对其覆盖的 spawn 入口升到 Medium**（见 §威胁矩阵 + follow-up 4）。
+  - **生产 consumer 接入前置门——按覆盖入口部分解除（勿过度宣称）**：#1031 落地前曾要求**生产 crate（httpserve /
+    authn / eventexec / reconcile 等）不得采用 spawn-跨任务-ctx 传播**（避免以 Accepted ADR 合入 Soft，spike 期仅
+    runctx 自测演示）。lint **只覆盖自由函数 `tokio::spawn` / `tokio::task::spawn_blocking`** 形式，对其而言静态防误用
+    已到 Medium——**这两类形式的前置门解除**：生产 crate 可采用「捕获-重绑」范式，漏重绑由 lint 在 `cargo xtask verify`
+    中 fail-closed 拦截。
+  - **lint 不覆盖的 spawn 入口前置门仍在（Soft，人工 review gate）**：方法形式 spawn（`JoinSet::spawn` / `spawn_on`、
+    `LocalSet::spawn_local`，parent 为 impl 被排除）、`std::thread::spawn`、以及被 wrapper fn 包装的 `tokio::spawn`
+    （callsite crate 名非 `tokio`）——这些入口同样不继承 task_local，但 lint **不报**，故承载 ctx 传播仍属 Soft，
+    必须人工 review gate（不得无守采用）。完整盲区（含 intraprocedural、`#[cfg(test)]` 默认不扫）见
+    `lints/rss_spawn_missing_scope/` rustdoc `### Known problems`。
 
 **下游影响**：httpserve middleware（绑 `scope`）、authn（构造 `RequestCtx` + 派生 `Principal`/`row_visibility`）、
 后台环 crate（`eventexec` / reconcile 扇出必须捕获-重绑 ctx）——均为后续 W 阶段 feature。
@@ -160,8 +165,11 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
    `runctx → vocab/ids` 边并加 `INVARIANT`；
 2. `architecture.md` 决策表内联回填「决策 #2 → 本 ADR」（仿决策 #1 体例）；
 3. 随引入 `vocab::tenant::TenantId` 的 feature 把 `AppCtx` 的 tenant 换成具体类型；
-4. dylint `rss_spawn_missing_scope`：静态拦截「子任务内读 ctx 却未在外层重绑」的 callsite，
-   把 spawn footgun 的静态防误用从 Soft 升到 Medium（见 §威胁矩阵）。
+4. ~~dylint `rss_spawn_missing_scope`：静态拦截「子任务内读 ctx 却未在外层重绑」的 callsite，
+   把 spawn footgun 的静态防误用从 Soft 升到 Medium（见 §威胁矩阵）。~~ **已落地（#1031）**：见 §威胁矩阵
+   该行——**自由函数 `tokio::spawn`/`spawn_blocking` 形式**已改 Medium、其前置门解除；未覆盖入口（JoinSet 方法 /
+   spawn_local / std::thread / wrapper-fn）仍 Soft（§后果 R2）。lint 在 `lints/rss_spawn_missing_scope/`（INVARIANT
+   SPAWN-CTX-REBIND-01）。**后续**：扩 lint 覆盖未覆盖入口、或 `CtxBound` 类型 Hard 化（§6）——按需另立 issue。
 
 ## 5. 威胁矩阵（Threat Model）
 
@@ -173,7 +181,7 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 | ctx 缺失被当作 anonymous / default-tenant 放行 | fail-open 越权 | 读访问器返回 `Result`，缺失 = `Err(MissingCtx)`，无 panicking / 伪造路径；PDP 缺租户 deny | **Hard**（类型）+ **Medium**（fail-closed 行为测试） |
 | tenant / principal 被塞进 tracing span 后被下游误当授权源 | 授权基于可丢弃 / 可改写信号 | runctx **不依赖 tracing**，API 面无「ctx→span」通道 | **Hard**（crate 依赖图） |
 | spawn / blocking 出的任务**运行时**丢 ctx → 子任务读到空 | 后台越权 / fail-open | 子任务无 ctx 即 `Err(MissingCtx)`，调用方 fail-closed | **Medium**（fail-closed 运行时行为 + 测试锁定 `tokio::spawn` / `spawn_blocking` 不继承） |
-| consumer **静态忘记**在子任务「捕获-重绑」ctx | 同上 | 范式文档 + 测试演示 + **生产采用前置门**（#1031 dylint 合入前生产 crate 禁用 spawn-传播，见 §后果 R2） | **Soft**（静态拦截）→ 但生产采用被前置门挡住（review 核对）→ dylint #1031 落地即 **Medium** |
+| consumer **静态忘记**在子任务「捕获-重绑」ctx | 同上 | dylint `rss_spawn_missing_scope`（#1031 已落）：AST 级拦截 **自由函数 `tokio::spawn`/`tokio::task::spawn_blocking`** 子任务体内读 `runctx::try_*` 而未在外层 `runctx::scope(...)` 重绑的 callsite；经 `cargo xtask verify` 的 `DYLINT_RUSTFLAGS=-D warnings` fail-closed。符号/红例/盲区见 `lints/rss_spawn_missing_scope/` rustdoc（INVARIANT SPAWN-CTX-REBIND-01） | **Medium（仅覆盖入口）**：自由函数 `tokio::spawn`/`spawn_blocking` = dylint AST lint，CI fail-closed，其前置门已解除。**未覆盖入口仍 Soft**：方法形式（`JoinSet::spawn`/`spawn_on`、`LocalSet::spawn_local`）、`std::thread::spawn`、wrapper-fn 包装的 spawn lint 不报，承载 ctx 传播须人工 review gate（见 §后果 R2）。Hard 化须 `CtxBound` 类型（覆盖全部入口、侵入 consumer 签名，见 §6，未立项） |
 | `RowScope::All` 经非 super-admin 路径泄漏 | 全租户读 | runctx 不构造 RowScope；派生在 authn super-admin 路径 + 强制 audit ledger（`tenancy.md`） | 引用 `tenancy.md`（非本 ADR 新增） |
 
 ## 6. 备选方案（Alternatives Considered）

@@ -15,6 +15,7 @@ lint crate 链接 `rustc_private`，须用 **nightly** 工具链（见 `rust-too
 本子树唯一 git 依赖是 `clippy_utils`（rust-lang 官方 `rust-clippy` 仓库，`rev` 与 nightly channel 配对），经人工审核；
 `lints/Cargo.lock` **刻意提交**（与根 workspace 策略一致，保证 nightly + clippy_utils rev 可复现，勿删）。
 dylint 自写 lint 不走根 `[workspace.lints.clippy]`——与 clippy 是平行机制，只经 `cargo dylint` 触发。
+新增 lint 引入新的 git/registry 依赖时须人工核查（因根 `deny.toml` 不覆盖本子 workspace）。
 
 ## 前置
 
@@ -35,6 +36,9 @@ cargo install cargo-dylint dylint-link
 cargo dylint --all
 cargo dylint list            # 列出已注册 lint
 
+# 所有 lint 自测（对 lints/ 子 workspace 跑全部 UI 测试）
+cd lints && cargo test --workspace
+
 # 单个 lint 自测（UI 测试，自动取 lints/ 的 nightly）
 cd lints/rss_domain_no_serialize && cargo test
 ```
@@ -49,9 +53,13 @@ cd lints/rss_domain_no_serialize && cargo test
 | lint id | INVARIANT | 守的约束 |
 |---------|-----------|---------|
 | `rss_domain_no_serialize` | SERDE-DOMAIN-FREEZE-01 | domain 实体禁 derive serde `Serialize`/`Deserialize`（只有 contract/DTO/`generated` 可序列化到 wire）。默认 `Warn`。 |
+| `rss_spawn_missing_scope` | SPAWN-CTX-REBIND-01 | `tokio::spawn`/`spawn_blocking` 子任务体内读 `runctx::try_with`/`try_current`，却未在外层 `runctx::scope(...)` 重绑 ctx（spawn footgun 静态防误用，ADR-002）。默认 `Warn`。仅 intraprocedural；`#[cfg(test)]` 子树因 `cargo dylint --all` 默认不带 `--all-targets` 不被扫（故 `runctx` 自测的 footgun 演示不报，也无 stable 构建 `unknown_lints` 之虞）。 |
 
-逃生门：确需序列化的非 DTO 类型，在该类型上加
-`#[allow(rss_domain_no_serialize)] // reason: ...`（与仓库 item-level carve-out 纪律一致）。
+逃生门：确需豁免的 callsite（如确需序列化的非 DTO 类型、确需读裸 ctx 的 spawn），在该 item 上加
+`#[allow(<lint_id>)] // reason: ...`（与仓库 item-level carve-out 纪律一致）。
 每条 lint 的符号 / 红例 / 盲区单源在其 `src/lib.rs` rustdoc。新增 lint：复制
 [dylint 模板](https://github.com/trailofbits/dylint/tree/master/internal/template) 到
 `lints/<rss_xxx>/`，加进本目录 `Cargo.toml` members + 根 `[workspace.metadata.dylint] libraries`。
+**ui example target 名取唯一 `<lint>_ui`**（非裸 `ui`）：多个 lint crate 同名 example 在 `cargo test --workspace`
+会产生 artifact 路径碰撞（Cargo 警告、未来或升 hard error，见 rust-lang/cargo#6313）；`src/lib.rs` 的
+`ui_test_example(env!("CARGO_PKG_NAME"), "<lint>_ui")` 第二参须同步，golden 仍随源文件名 `ui/main.stderr`。

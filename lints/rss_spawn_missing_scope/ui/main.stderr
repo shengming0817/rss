@@ -1,0 +1,51 @@
+warning: spawn 出的子任务不继承 ctx：子任务体内读 `runctx::try_with`/`try_current` 前须在外层 `runctx::scope(...)` 重绑
+  --> $DIR/main.rs:14:34
+   |
+LL |     let _ = tokio::spawn(async { try_current() });
+   |                                  ^^^^^^^^^^^^^
+   |
+   = help: 捕获父 ctx 再重绑：`let ctx = runctx::try_current()?; tokio::spawn(runctx::scope(ctx, async { /* try_current() => Ok */ }));`。确需读裸 ctx 时加 `#[allow(rss_spawn_missing_scope)] // reason: ...`
+   = note: `#[warn(rss_spawn_missing_scope)]` on by default
+
+warning: spawn 出的子任务不继承 ctx：子任务体内读 `runctx::try_with`/`try_current` 前须在外层 `runctx::scope(...)` 重绑
+  --> $DIR/main.rs:16:44
+   |
+LL |     let _ = tokio::task::spawn_blocking(|| try_with(|_c| ()));
+   |                                            ^^^^^^^^^^^^^^^^^
+   |
+   = help: 捕获父 ctx 再重绑：`let ctx = runctx::try_current()?; tokio::spawn(runctx::scope(ctx, async { /* try_current() => Ok */ }));`。确需读裸 ctx 时加 `#[allow(rss_spawn_missing_scope)] // reason: ...`
+
+warning: spawn 出的子任务不继承 ctx：子任务体内读 `runctx::try_with`/`try_current` 前须在外层 `runctx::scope(...)` 重绑
+  --> $DIR/main.rs:18:41
+   |
+LL |     let _ = tokio::task::spawn_blocking(try_current);
+   |                                         ^^^^^^^^^^^
+   |
+   = help: 捕获父 ctx 再重绑：`let ctx = runctx::try_current()?; tokio::spawn(runctx::scope(ctx, async { /* try_current() => Ok */ }));`。确需读裸 ctx 时加 `#[allow(rss_spawn_missing_scope)] // reason: ...`
+
+warning: spawn 出的子任务不继承 ctx：子任务体内读 `runctx::try_with`/`try_current` 前须在外层 `runctx::scope(...)` 重绑
+  --> $DIR/main.rs:41:38
+   |
+LL |         let _ = tokio::spawn(async { try_current() });
+   |                                      ^^^^^^^^^^^^^
+   |
+   = help: 捕获父 ctx 再重绑：`let ctx = runctx::try_current()?; tokio::spawn(runctx::scope(ctx, async { /* try_current() => Ok */ }));`。确需读裸 ctx 时加 `#[allow(rss_spawn_missing_scope)] // reason: ...`
+
+warning: spawn 出的子任务不继承 ctx：子任务体内读 `runctx::try_with`/`try_current` 前须在外层 `runctx::scope(...)` 重绑
+  --> $DIR/main.rs:47:17
+   |
+LL |         let _ = try_with(|_| try_current());
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 捕获父 ctx 再重绑：`let ctx = runctx::try_current()?; tokio::spawn(runctx::scope(ctx, async { /* try_current() => Ok */ }));`。确需读裸 ctx 时加 `#[allow(rss_spawn_missing_scope)] // reason: ...`
+
+warning: spawn 出的子任务不继承 ctx：子任务体内读 `runctx::try_with`/`try_current` 前须在外层 `runctx::scope(...)` 重绑
+  --> $DIR/main.rs:47:30
+   |
+LL |         let _ = try_with(|_| try_current());
+   |                              ^^^^^^^^^^^^^
+   |
+   = help: 捕获父 ctx 再重绑：`let ctx = runctx::try_current()?; tokio::spawn(runctx::scope(ctx, async { /* try_current() => Ok */ }));`。确需读裸 ctx 时加 `#[allow(rss_spawn_missing_scope)] // reason: ...`
+
+warning: 6 warnings emitted
+

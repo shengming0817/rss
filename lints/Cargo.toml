@@ -4,4 +4,4 @@
 # 注册入口：根 Cargo.toml [workspace.metadata.dylint] libraries。运行：仓库根 `cargo dylint --all`。
 [workspace]
 resolver = "2"
-members = ["rss_domain_no_serialize"]
+members = ["rss_domain_no_serialize", "rss_spawn_missing_scope"]

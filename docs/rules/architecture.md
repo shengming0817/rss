@@ -134,7 +134,7 @@ rss/
 | DB migration 命名空间 | `sqlx::migrate!` |
 | 依赖图导出 | `cargo tree` / `cargo-depgraph` |
 | mock(同模块)/ table-driven | `mockall` / `rstest` |
-| 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)；首条 `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01)——符号/红例/盲区见 `lints/rss_domain_no_serialize/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（#1023 完成）；完整域 crate 覆盖待 #1054 |
+| 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)。已落地：① `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01；完整域 crate 覆盖待 #1054)、② `rss_spawn_missing_scope`(`tokio::spawn`/`spawn_blocking` 子任务读 `runctx::try_*` 未在外层 `runctx::scope` 重绑，INVARIANT SPAWN-CTX-REBIND-01；#1031)——符号/红例/盲区见各 `lints/<lint>/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（#1023 完成） |
 | 治理脚本入口 | `cargo` + `xtask/` |
 | 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
 | DI port + dynosaur 收敛到 `diport` | `deny.toml` wrapper：`dynosaur`/`trait-variant` 只准 `diport` 依赖（DI port trait + Dyn wrapper 单一依赖点，INVARIANT DIPORT-MACRO-CONFINE-01；`layer-deps` 守 wrapper⟷源一致）。注：dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（实测，ADR-003 §8），故 `diport` 无 forbid 例外、无 unsafe carve-out——本约束是「DI port 集中」架构守卫，非 unsafe 收敛 |
