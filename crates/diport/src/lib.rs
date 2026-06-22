@@ -61,5 +61,5 @@ pub use clock::Clock;
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
 };
-pub use publisher::{DynPublisher, Publisher, PublisherError};
-pub use signer::{DynSigner, Signer, SignerError};
+pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
+pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};

@@ -26,6 +26,68 @@ impl SignerError {
     }
 }
 
+/// 签名 key 标识——provider 据此选 key + fail-closed 策略校验。newtype funnel（私有字段，单一构造入口）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyId(String);
+
+impl KeyId {
+    /// 由字符串构造 key 标识。
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    /// 借出底层标识。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 签名用途——provider 据此 fail-closed 策略归因 + 审计。opaque newtype：值集随消费域（deviceloop 证书签发）
+/// 细化，不在 DI-infra 层冻结闭值集。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigningPurpose(String);
+
+impl SigningPurpose {
+    /// 由字符串构造用途标识。
+    pub fn new(purpose: impl Into<String>) -> Self {
+        Self(purpose.into())
+    }
+    /// 借出底层用途。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 签名结果字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature(Vec<u8>);
+
+impl Signature {
+    /// 由字节构造签名。
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+    /// 借出签名字节。
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// typed 签名请求（零信任边界）：provider 据 `key` / `purpose` 做 fail-closed 策略校验 + 审计归因，
+/// **杜绝裸 message 盲签**。
+///
+/// **租户 / 调用者**经 ambient [`runctx::RequestCtx`] 解析（tenant / principal 是请求级 context 值，
+/// 非 sign-request 字段；provider 从 ctx 取做 RLS / ABAC），不重复进本请求。字段集随消费域（deviceloop
+/// 证书签发）细化——pre-GA 窗口可原地加字段（algorithm / correlation），是可演进接缝，非 production-final 冻结面。
+#[derive(Debug, Clone)]
+pub struct SignRequest {
+    /// 目标签名 key。
+    pub key: KeyId,
+    /// 签名用途（fail-closed 归因）。
+    pub purpose: SigningPurpose,
+    /// 待签字节。
+    pub message: Vec<u8>,
+}
+
 /// 签名 provider DI port（async）。
 ///
 /// 公开 [`Signer`] 是 **Send 变体**（adapters `impl Signer for ...`），[`DynSigner`] 是其
@@ -34,20 +96,14 @@ impl SignerError {
 ///
 /// dyn-safe 约束（ADR-003 §4.6）：方法 `&self`、参数 / 返回为具体类型、supertrait 仅 Send、
 /// 带 `async fn shutdown`（无 async Drop）。
-///
-/// ⚠ **代表性最小 port（feasibility 范式，非 production-final）**：本 PR（PR-diport）冻结 Signer 仅为
-/// 验证 async crypto port 的 dynosaur Send 派发范式。当前 `sign(&[u8])` 是**裸签**——production 签名 port
-/// 须改 typed request（key/tenant/purpose/algorithm/caller，供 provider fail-closed 策略校验 + 审计归因，
-/// 零信任边界），随**证书签发域（deviceloop）**落地设计，跟踪 **issue #1061**。**禁止** adapter 按当前裸
-/// 形态落 production impl。（pre-GA wire 窗口允许届时原地收紧，见 api-versioning §兼容窗口。）
 #[trait_variant::make(Signer: Send)]
 #[dynosaur(pub DynSigner = dyn(box) Signer, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `Signer` 变体 +
 // dynosaur `DynSigner` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
 pub trait SignerLocal {
-    /// 对 `message` 签名，返回签名字节。
-    async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignerError>;
+    /// 按 typed [`SignRequest`] 签名（provider 先据 key/purpose + ctx 租户 fail-closed 校验，再签 `message`）。
+    async fn sign(&self, request: SignRequest) -> Result<Signature, SignerError>;
 
     /// 异步释放 provider 资源（无 async Drop；infra teardown 显式异步）。
     ///
@@ -60,12 +116,20 @@ pub trait SignerLocal {
 #[cfg(test)]
 mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynSigner>` 动态注入。
-    use super::{DynSigner, Signer, SignerError};
+    use super::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
+
+    fn sample_request() -> SignRequest {
+        SignRequest {
+            key: KeyId::new("key-1"),
+            purpose: SigningPurpose::new("device-cert"),
+            message: b"payload".to_vec(),
+        }
+    }
 
     struct NoopSigner;
     impl Signer for NoopSigner {
-        async fn sign(&self, _message: &[u8]) -> Result<Vec<u8>, SignerError> {
-            Ok(Vec::new())
+        async fn sign(&self, _request: SignRequest) -> Result<Signature, SignerError> {
+            Ok(Signature::new(Vec::new()))
         }
         async fn shutdown(&self) -> Result<(), SignerError> {
             Ok(())
@@ -78,7 +142,7 @@ mod smoke {
     async fn signer_is_dyn_injectable() {
         let signer: Box<DynSigner> = DynSigner::new_box(NoopSigner);
         let joined = tokio::spawn(async move {
-            signer.sign(b"payload").await.is_ok() && signer.shutdown().await.is_ok()
+            signer.sign(sample_request()).await.is_ok() && signer.shutdown().await.is_ok()
         })
         .await;
         assert!(matches!(joined, Ok(true)));
@@ -89,7 +153,7 @@ mod smoke {
     mockall::mock! {
         TestSigner {}
         impl Signer for TestSigner {
-            async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignerError>;
+            async fn sign(&self, request: SignRequest) -> Result<Signature, SignerError>;
             async fn shutdown(&self) -> Result<(), SignerError>;
         }
     }
@@ -97,9 +161,10 @@ mod smoke {
     #[tokio::test(flavor = "multi_thread")]
     async fn mockall_mock_loads_into_dyn_signer() {
         let mut mock = MockTestSigner::new();
-        mock.expect_sign().returning(|_| Ok(vec![1, 2, 3]));
+        mock.expect_sign()
+            .returning(|_| Ok(Signature::new(vec![1, 2, 3])));
         let signer: Box<DynSigner> = DynSigner::new_box(mock);
-        let joined = tokio::spawn(async move { signer.sign(b"x").await }).await;
-        assert!(matches!(joined, Ok(Ok(ref sig)) if sig == &[1, 2, 3]));
+        let joined = tokio::spawn(async move { signer.sign(sample_request()).await }).await;
+        assert!(matches!(joined, Ok(Ok(ref sig)) if sig.as_bytes() == [1, 2, 3]));
     }
 }

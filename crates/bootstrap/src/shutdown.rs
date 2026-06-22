@@ -32,6 +32,8 @@
 //!   [`ShutdownStack::shutdown_within`] 承担（cancel-safe），**不**交外层 `timeout` 取消包裹
 //!   （外层取消会在 LIFO 中途 drop future、中断后续关闭、泄漏被依赖资源）。
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 // ManagedResource port trait + ShutdownError + DEFAULT_SHUTDOWN_TIMEOUT 已迁入 diport（DI-infra 层，
@@ -56,7 +58,7 @@ pub enum ShutdownFailureKind {
     #[error("panicked during shutdown")]
     Panicked,
     /// 整体 shutdown 预算（[`ShutdownStack::shutdown_within`]）耗尽，本资源未及关闭被跳过
-    /// （cancel-safe：驱动器不再 await，残留后台 task 由进程退出回收）。
+    /// （cancel-safe：驱动器不再 await；在飞资源的 task 已 `abort`，剩余资源从未启动）。
     #[error("skipped: overall shutdown budget exhausted")]
     BudgetExhausted,
 }
@@ -158,8 +160,8 @@ impl ShutdownStack {
 
     /// 同 [`shutdown`](Self::shutdown)，但附加**整体预算上界**（cancel-safe）：在 per-resource
     /// 超时之上再封顶**总**耗时。预算耗尽时，当前及剩余未关资源记为
-    /// [`ShutdownFailureKind::BudgetExhausted`]——驱动器**不再 await**（cancel-safe，残留后台
-    /// task 由进程退出回收），由驱动器自身聚合，**不**把取消安全交给外层 `timeout`
+    /// [`ShutdownFailureKind::BudgetExhausted`]——驱动器**不再 await**（cancel-safe；在飞资源的 task
+    /// 经 `abort` 取消），由驱动器自身聚合，**不**把取消安全交给外层 `timeout`
     /// （`INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01`）。
     ///
     /// 预算实现为单一共享 deadline（[`tokio::time::sleep`]），跨资源复用——不测 per-resource
@@ -186,18 +188,15 @@ impl ShutdownStack {
         let mut failures = Vec::new();
         let mut resources = self.resources.into_iter().rev();
         while let Some(resource) = resources.next() {
-            let name = resource.name().to_owned();
-            tokio::select! {
-                // biased：先判预算耗尽，再尝试关闭——预算已过则不再启动新关闭。
-                biased;
-                () = &mut deadline => {
-                    // SHUTDOWN-BUDGET-CANCEL-SAFE-01：整体预算耗尽，当前 + 剩余资源全部记
-                    // BudgetExhausted（不 await，cancel-safe），残留后台 task 由进程退出回收。
+            // shutdown_one 内部单 select 整体预算 vs per-resource；预算耗尽时 abort 在飞 task 后返回
+            // Exhausted（cancel-safe，不再 detach 等进程退出回收，SHUTDOWN-BUDGET-CANCEL-SAFE-01）。
+            match shutdown_one(resource, deadline.as_mut()).await {
+                ShutdownStep::Exhausted(name) => {
                     drain_budget_exhausted(name, &mut resources, &mut failures);
                     break;
                 }
-                outcome = shutdown_one(resource) => {
-                    if let Err(failure) = outcome {
+                ShutdownStep::Done(failure) => {
+                    if let Some(failure) = failure {
                         failures.push(failure);
                     }
                 }
@@ -227,7 +226,8 @@ async fn budget_deadline(budget: Option<Duration>) {
 }
 
 /// 整体预算耗尽：把当前及剩余未关资源全部记为 [`ShutdownFailureKind::BudgetExhausted`]
-/// （cancel-safe：不 await，残留后台 task 由进程退出回收）。
+/// （cancel-safe：不 await）。当前在飞资源的 shutdown task 已由 [`shutdown_one`] 在返回
+/// [`ShutdownStep::Exhausted`] 前 `abort`；剩余资源从未启动 task，此处仅记录。
 fn drain_budget_exhausted<I>(
     current_name: String,
     remaining: &mut I,
@@ -253,13 +253,27 @@ fn budget_exhausted(name: String) -> ResourceShutdownError {
     }
 }
 
-/// 关闭单个资源：per-resource 超时 + panic 隔离 + tracing span。
+/// 单资源关闭推进结果（`run` 据此决定继续或熔断）。
+enum ShutdownStep {
+    /// 整体预算在本资源在飞时耗尽——其 shutdown task 已 `abort`；当前 + 剩余资源记 BudgetExhausted。
+    Exhausted(String),
+    /// 资源关闭完成（`None` = 干净）或失败（`Some`，交 `run` 聚合，不中断循环
+    /// `INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01`）。
+    Done(Option<ResourceShutdownError>),
+}
+
+/// 关闭单个资源：单 `select` 整体预算 vs per-resource（超时 + panic 隔离）+ tracing span。
 ///
-/// 返回 `Err` 仅表示该资源关闭失败（交由 [`ShutdownStack::shutdown`] 聚合），
-/// 不中断驱动循环（`INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01`）。
-async fn shutdown_one(
+/// `deadline` 是 `run` 持有的**共享**整体预算 future（跨资源复用同一 deadline，cancel-safe）。
+/// 预算先判（`biased`）：耗尽则 **abort 在飞 task**（非阻塞，cancel-safe，不 detach 等进程退出回收，
+/// `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01`）→ 返回 [`ShutdownStep::Exhausted`]。
+async fn shutdown_one<D>(
     resource: Box<DynManagedResource<'static>>,
-) -> Result<(), ResourceShutdownError> {
+    deadline: Pin<&mut D>,
+) -> ShutdownStep
+where
+    D: Future<Output = ()>,
+{
     let name = resource.name().to_owned();
     let budget = resource.shutdown_timeout();
     let span = tracing::info_span!(
@@ -274,40 +288,57 @@ async fn shutdown_one(
         // boxed future: Send via trait_variant）——无需 Arc 共享（name/budget 已在前读取）。
         let mut handle = tokio::spawn(async move { resource.shutdown().await });
 
-        // timeout → JoinError → shutdown 三层 Result：超时 / task 异常终止 / 业务错误。
-        // 日志级别按 observability.md：业务 Err 是降级（warn）；超时 / panic 资源状态未知，
-        // 属正确性失败（error），需专项告警。
-        let kind = match timeout(budget, &mut handle).await {
-            Ok(Ok(Ok(()))) => {
-                tracing::debug!("resource shut down cleanly");
-                return Ok(());
-            }
-            // 业务错误：资源优雅上报 Err（降级，warn）。错误内容 held 为 ShutdownError 内部
-            // source，**不打印**——Display 是安全摘要常量、原始 source 待 redaction funnel
-            // （secure::redact_error，ADR-001 §5 延后）落地后经清洗记录。span 已含 resource 名。
-            Ok(Ok(Err(source))) => {
-                tracing::warn!("resource shutdown returned error");
-                ShutdownFailureKind::Failed(source)
-            }
-            // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 —— 下游 panic 被 spawn 隔离，仅本资源失败。
-            Ok(Err(join_err)) => {
-                // 未超时分支的 JoinError 只可能来自 panic（驱动器从不 abort 未超时 task）；
-                // is_cancelled 理论不可达，仍保守上报、不静默吞。
-                if join_err.is_cancelled() {
-                    tracing::warn!("resource shutdown task cancelled unexpectedly");
-                }
-                tracing::error!("resource shutdown panicked (state unknown)");
-                ShutdownFailureKind::Panicked
-            }
-            // INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01 —— per-resource 超时有界，hung task abort 后继续。
-            Err(_elapsed) => {
-                handle.abort(); // 停止 hung task，避免后台泄漏（进程退出前回收）。
-                tracing::error!("resource shutdown timed out (state unknown)");
-                ShutdownFailureKind::TimedOut(budget)
-            }
+        // 单 select：整体预算 vs per-resource（timeout 包 task）。biased：先判预算。`&mut handle`
+        // 的借用随 select 返回 `resolved` 释放——故后续 match 可再借 handle 做 abort（顺序不重叠）。
+        let resolved = tokio::select! {
+            biased;
+            () = deadline => None,
+            out = timeout(budget, &mut handle) => Some(out),
         };
 
-        Err(ResourceShutdownError { name, kind })
+        match resolved {
+            // 整体预算耗尽：abort 在飞 task（cancel-safe，非阻塞）。
+            None => {
+                handle.abort();
+                tracing::error!(
+                    "overall shutdown budget exhausted; in-flight resource shutdown aborted"
+                );
+                ShutdownStep::Exhausted(name)
+            }
+            // timeout → JoinError → shutdown 三层 Result：超时 / task 异常终止 / 业务错误。
+            // 日志级别按 observability.md：业务 Err 降级（warn）；超时 / panic 资源状态未知（error）。
+            Some(out) => {
+                let kind = match out {
+                    Ok(Ok(Ok(()))) => {
+                        tracing::debug!("resource shut down cleanly");
+                        None
+                    }
+                    // 业务错误：资源优雅上报 Err。source **不打印**——Display 是安全摘要常量、原始
+                    // source 待 redaction funnel（secure::redact_error，ADR-001 §5 延后）清洗后记录。
+                    Ok(Ok(Err(source))) => {
+                        tracing::warn!("resource shutdown returned error");
+                        Some(ShutdownFailureKind::Failed(source))
+                    }
+                    // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 —— 下游 panic 被 spawn 隔离，仅本资源失败。
+                    Ok(Err(join_err)) => {
+                        // 未超时分支的 JoinError 只可能来自 panic（驱动器从不 abort 未超时 task）；
+                        // is_cancelled 理论不可达，仍保守上报、不静默吞。
+                        if join_err.is_cancelled() {
+                            tracing::warn!("resource shutdown task cancelled unexpectedly");
+                        }
+                        tracing::error!("resource shutdown panicked (state unknown)");
+                        Some(ShutdownFailureKind::Panicked)
+                    }
+                    // INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01 —— per-resource 超时有界，hung task abort 后继续。
+                    Err(_elapsed) => {
+                        handle.abort(); // 停止 hung task，避免后台泄漏。
+                        tracing::error!("resource shutdown timed out (state unknown)");
+                        Some(ShutdownFailureKind::TimedOut(budget))
+                    }
+                };
+                ShutdownStep::Done(kind.map(|kind| ResourceShutdownError { name, kind }))
+            }
+        }
     }
     .instrument(span)
     .await
@@ -316,6 +347,7 @@ async fn shutdown_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// 共享调用序列记录器：每个 mock 资源在 shutdown 时 push 自己的 name，
@@ -641,5 +673,72 @@ mod tests {
 
         assert!(failures.is_empty());
         assert_eq!(entries(&log), vec!["only"]);
+    }
+
+    /// 持 Drop guard 的 hung 资源：shutdown future 被 abort（task drop）时 guard.Drop 置位；
+    /// 若退化回 detach（drop JoinHandle、task 后台续跑），future 不 drop、guard 不置位。
+    struct AbortProbe {
+        name: String,
+        // shutdown task 的 future 被 drop 时（abort 生效）置 true。
+        aborted: Arc<AtomicBool>,
+    }
+
+    impl AbortProbe {
+        fn boxed(name: &str, aborted: &Arc<AtomicBool>) -> Box<DynManagedResource<'static>> {
+            DynManagedResource::new_box(Self {
+                name: name.to_owned(),
+                aborted: Arc::clone(aborted),
+            })
+        }
+    }
+
+    impl ManagedResource for AbortProbe {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        // per-resource 超时远大于整体预算 → 整体预算先耗尽（触发 abort 路径，而非 per-resource timeout）。
+        fn shutdown_timeout(&self) -> Duration {
+            Duration::from_secs(3600)
+        }
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            struct Guard(Arc<AtomicBool>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _guard = Guard(Arc::clone(&self.aborted));
+            // sleep(MAX) 是 timer：start_paused 下「所有 task 阻塞于 timer」成立、虚拟时钟自动推进到
+            // 最近 deadline（整体预算）；预算耗尽 → 驱动器 abort 本 task → future drop → guard 置位。
+            tokio::time::sleep(Duration::MAX).await;
+            Ok(())
+        }
+    }
+
+    // SHUTDOWN-BUDGET-CANCEL-SAFE-01（F2）：整体预算耗尽时**abort 在飞 task**（非 detach）。
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_within_budget_exhausted_aborts_in_flight_task() {
+        let aborted = Arc::new(AtomicBool::new(false));
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+        stack.register_detached(AbortProbe::boxed("hang", &aborted));
+
+        let failures = stack.shutdown_within(Duration::from_secs(3)).await;
+
+        assert_eq!(failures.len(), 1);
+        assert!(matches!(
+            failures[0].kind,
+            ShutdownFailureKind::BudgetExhausted
+        ));
+        // abort 是协作式：让运行时处理取消、drop 掉 task future（guard 随之 drop）。
+        for _ in 0..1000 {
+            if aborted.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            aborted.load(Ordering::SeqCst),
+            "整体预算耗尽时在飞 shutdown task 必须被 abort（future+guard 已 drop），而非 detach 续跑"
+        );
     }
 }
