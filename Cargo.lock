@@ -125,6 +125,7 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
  "vocab",
 ]
 
@@ -479,6 +480,7 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
  "vocab",
 ]
 
