@@ -126,7 +126,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 ## 5. PR 流程（ship → review → fix → check）
 
-**外部 app handoff contract**：外部 app 是 `needs-review-again` / `needs-check-fix` 的实时消费者；`/pr-monitor` 是 ship/fix 收尾约 10min 后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、未重复领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
+**外部 app handoff contract**：外部 app 是 `needs-review-again` / `needs-check-fix` 的实时消费者；`/pr-monitor` 是 ship/fix 收尾约 15min 后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、未重复领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
 
 | live label | latest block | allowed dispatch |
 |------|------|------|
@@ -142,7 +142,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
   → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 判「当前 PR 修」or「defer」，判 defer 后自动建 issue、不二次确认）→ /fix Cx1/Cx2 → 贴 pm:ship（含处置结果）+ deferred 留痕 → 冲突预检
   → 切 pr-status/needs-review-again（首审唯一使用点）→ 外部 app 实时监听并执行 review
   → 切 label 后 CI 异步收敛（非阻塞；capability-gated：激活 forge=azure 无 CI，ci-* 返回 no-ci，CI 收敛降级本地 make verify，不贴 pm:ci）
-  → 延迟 ~10min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
+  → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
   → 贴 findings 评论（codex / pm:pr-review）
@@ -155,7 +155,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
   → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix（待验证）
   → 外部 app 实时监听并执行 /pr-review --check
   → 切 label 后 CI 异步收敛（非阻塞；capability-gated，同上）
-  → 延迟 ~10min 必须启动 pr-monitor --mode=auto 监听 check 交接
+  → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听 check 交接
 
 /pr-review <PR#> --check（验证上一轮 findings 是否修复 + 抓回归）
   → 逐条核对当前代码：✅已修复 / ❌未修复 / ⚠️回归 / 🔧部分 → 贴 pm:pr-review（--check）

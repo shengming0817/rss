@@ -260,7 +260,7 @@ cargo test -p consistency -p primitives -p vocab        # 改了底座 crate 时
 4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
 5. **切 label**：`forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
 6. **CI 异步收敛（非阻塞）**：`issues` B5 ② 等 CI（失败回阶段 1-4 再推），贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
-7. **延迟启监控（必做）**：评论 + label 完成后延迟约 10min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 监听 `needs-check-fix` 跑 `/pr-review --check`，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。完成后 **TaskUpdate → completed**。
+7. **延迟启监控（必做）**：评论 + label 完成后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 监听 `needs-check-fix` 跑 `/pr-review --check`，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）停 AskUserQuestion。
 

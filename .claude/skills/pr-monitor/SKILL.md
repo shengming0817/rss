@@ -1,13 +1,13 @@
 ---
 name: pr-monitor
-description: "PR 状态自动接力检查器：ship/fix 收尾约 10min 后必须启动；读取外部 app/review 已产生的 label + 最新机器块，过 handoff 机器门（fresh canonical block + verdict + same-head + next 一致）才接力 /fix——Cx/scope 判定下放 /fix。pr-monitor 自身不贴评论、不切 label。"
+description: "PR 状态自动接力检查器：ship/fix 收尾约 15min 后必须启动；读取外部 app/review 已产生的 label + 最新机器块，过 handoff 机器门（fresh canonical block + verdict + same-head + next 一致）才接力 /fix——Cx/scope 判定下放 /fix。pr-monitor 自身不贴评论、不切 label。"
 argument-hint: "<PR#> --mode=auto [--role fix|review]"
 allowed-tools: [Bash, Read, Skill, Agent]
 ---
 
 # pr-monitor — PR 状态自动接力检查器（fix 侧）
 
-> **适用场景**：ship/fix 推完 PR 后，延迟约 10 分钟必须启动一次 `/pr-monitor <PR#> --mode=auto`。外部 app 负责实时监听 `pr-status/needs-review-again` / `pr-status/needs-check-fix` 并执行 review/check；本技能只检查这些流程产出的 label + 机器块，并在满足自动门时接力 `/fix`。
+> **适用场景**：ship/fix 推完 PR 后，延迟约 15 分钟必须启动一次 `/pr-monitor <PR#> --mode=auto`。外部 app 负责实时监听 `pr-status/needs-review-again` / `pr-status/needs-check-fix` 并执行 review/check；本技能只检查这些流程产出的 label + 机器块，并在满足自动门时接力 `/fix`。
 >
 > **单 tick 模型**：每次调用只做一次检查就返回；不携带 tick payload、不写文件，状态全部从 PR 实时读取（label + 最新机器块）。
 
@@ -81,7 +81,7 @@ esac; shift; done
 
 全过 → host LLM in-session 调用 `Skill("fix", args="<N>")`。**Cx / scope / 能否修由 fix 自判**（读 finding 文件 + `byCx`）——pr-monitor 只守 handoff 真实性 + freshness 这层机器门，不做 Cx 判定（去掉原 Cx1/Cx2 window）。
 
-stale 块 / 旧 head review / 手工错贴 label → 门不过 → 不 dispatch，落 §3.3 报告。fix 接力后贴 pm:fix + 切 `pr-status/needs-check-fix`；pr-monitor 本次到此结束。后续 `/pr-review --check` 由外部 app 监听触发，再由 fix 收尾延迟约 10min 启动下一次接力。
+stale 块 / 旧 head review / 手工错贴 label → 门不过 → 不 dispatch，落 §3.3 报告。fix 接力后贴 pm:fix + 切 `pr-status/needs-check-fix`；pr-monitor 本次到此结束。后续 `/pr-review --check` 由外部 app 监听触发，再由 fix 收尾延迟约 15min 启动下一次接力。
 
 ### §3.3 不自动修的情况（只报告，不 AskUserQuestion）
 

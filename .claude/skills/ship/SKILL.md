@@ -162,7 +162,7 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 5. **pm:ship**（`--kind=ship`，OOS artifact 已存在、指针有效）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
 6. **切 label**：`bash hack/automation/forge.sh pr-set-labels <PR#> --add pr-status/needs-review-again --remove pr-status/in-progress`。
 7. **CI 异步收敛（非阻塞）**：`bash hack/automation/forge.sh ci-watch <PR#>`（azure 无 CI 返回 `no-ci` → 降级本地 `make verify`，不贴 pm:ci）；有 CI 按 `issues` B5 ② 熔断、失败回 `fix` 再推，贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
-8. **延迟启监控（必做）**：评论 + label 完成后延迟约 10min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 监听 `needs-review-again` 跑 review，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。
+8. **延迟启监控（必做）**：评论 + label 完成后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 监听 `needs-review-again` 跑 review，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。
 
 > **收尾不变式（artifact-before-summary/trigger）**：OOS issue + pm:oos（步骤 4）+ 处置门判 defer 的 IN_SCOPE Cx3/Cx4 issue（步骤 2）必须先于 pm:ship（步骤 5）落地——pm:ship 的 OOS 指针指向已存在的 pm:oos，不悬空；再切 `needs-review-again`（步骤 6）；CI（步骤 7）异步在后。
 > ship 到此结束。再审（codex / `/pr-review`）后续修走 `/fix <PR#>`。
