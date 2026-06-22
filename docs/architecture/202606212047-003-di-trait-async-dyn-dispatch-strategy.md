@@ -1,10 +1,38 @@
 # ADR-003：DI trait 的 async + dyn 派发策略与 Arc 样板范式
 
-- **状态**：Accepted（**派发策略方向**：采用 dynosaur）；**实现可行性待验证**——§8 三项开放风险须在 `diport` 落地 spike 中验证，任一不可接受则触发 §5 的 async-trait 复评路径
-- **日期**：2026-06-21
-- **关联**：issue #995 [RW-G0.5] · epic #991 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
+- **状态**：Accepted + **Landed**（PR-diport #1049，2026-06-22）。派发策略（dynosaur）已落地；§8 三项开放风险已实测，结论见下「落地结论」——**dynosaur 可行，且比本 ADR 原设更简**（无 unsafe 例外）。
+- **日期**：2026-06-21（落地回写：2026-06-22）
+- **关联**：issue #995 [RW-G0.5] · epic #991 · 落地单元 #1049 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
+
+---
+
+## 落地结论（PR-diport #1049，覆盖 §3/§4/§7/§8）
+
+dynosaur 0.3 落地 spike 实测，三项开放风险结论 + 对原 ADR 的修订（**冲突段落以本节为准**）：
+
+1. **§8 风险 1（unsafe carve-out）→ 不存在**：实测 dynosaur 0.3 宏生成的 `unsafe transmute` 经 **def-site
+   hygiene** 不触发 consumer crate 的 `unsafe_code` lint——`diport` 即便 `#![forbid(unsafe_code)]` 也编译通过
+   （anti-vacuity 已验证 forbid 对 `diport` 手写 unsafe 仍生效）。故 **§3 的「必须把 forbid 降为 deny」例外
+   不需要**：`diport` 与其它 crate 一致 `[lints] workspace = true`（继承 forbid），无 forbid→deny 例外、
+   无 `#[allow(unsafe_code)]`、无 error-handling §Carve-out 登记项。**威胁重评**：原 §3「unsafe 注入消费 crate」
+   的威胁前提在 0.3 不成立；`diport` 的存在理由降为纯架构（DI port 集中 + 单一 dyn-dispatch 依赖点），
+   unsafe 收敛不再是动机。dynosaur exact-pin `=0.3.0`，升级须复测本不变式（`diport` rustdoc DIPORT-UNSAFE-HYGIENE-01）。
+2. **§8 风险 2（跨 crate sealing）→ 方案 ②**：DI port trait 不带 sealed supertrait；「谁可 impl」由 `deny.toml`
+   wrapper 限定可依赖 `dynosaur`/`trait-variant`/`diport` 的 crate 集（cargo-deny Medium，INVARIANT
+   DIPORT-MACRO-CONFINE-01，`layer-deps` 守 wrapper⟷源一致）。cargo-deny 限「依赖」非「impl」的残余缺口
+   （域 crate 也依赖 diport 来消费端口）+ 本轮无 adapter 实 impl → implementer-allowlist 待 PR-5（OOS）。
+3. **§8 风险 3（v0.3 API）→ 修订**：真实构造 API = `DynX::new_box` / `new_arc` / `from_box` / `from_mut`
+   （§4 示例 `new_box`/`new_arc` 正确；README 的 `boxed` 形态为旧版）。**新增**：`dyn(box)` 默认 boxed future
+   **非 Send**；DI port 须在多线程 runtime 跨 spawn → 用 `#[trait_variant::make(X: Send)]` 生成 Send 变体 +
+   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 据此生成 Send 的 `DynX`（需 `trait-variant` crate，同 exact-pin）。
+   公开 Send 变体 `X` + `DynX`；非 Send 基 trait `XLocal` 不在 crate 根 re-export（避免方法解析歧义）。
+4. **§4.3 Clock 修订**：`Clock` 是 **sync** trait（`fn now(&self) -> SystemTime`），天然 dyn-compatible →
+   经 `Box<dyn Clock>` 注入，**不需** dynosaur / 无 `DynClock`（dynosaur 仅为 async fn in trait 的 dyn 派发）。
+5. **ManagedResource（§7 末条 + 跨 ADR-001 冲突）→ 已收敛**：迁入 `diport` 改 dynosaur Send 变体；`bootstrap`
+   `ShutdownStack` 以 `Box<DynManagedResource<'static>>` 持有并 `tokio::spawn` 隔离 panic——`Box` 仅需 `Send`
+   （免 `Arc` 的 `Send+Sync`），并去掉原 `Arc::clone`。ADR-001 威胁矩阵同步重评（见 ADR-001 落地回写）。
 
 ---
 
@@ -55,10 +83,14 @@ async-trait 的新派范式——**静态分发路径零开销、仅 dyn 路径�
 
 ## 3. unsafe 收敛：专用 `diport` crate（边界决策）
 
+> ⚠ **本节原设前提已被落地实测推翻——以顶部「落地结论」为准**：dynosaur 0.3 的 unsafe 经 def-site
+> hygiene **不触发** consumer forbid，故 `diport` **无需** forbid→deny 例外、无 `#[allow]` carve-out。
+> 下文「必须把 forbid 降为 deny」「目标 `#[allow]`」仅存原始推理记录，不代表落地形态。
+
 dynosaur 宏展开会把 `unsafe { core::mem::transmute(...) }`（把 trait object 的局部 lifetime 擦除到
-`'static`，layout 不变、仅编译期成立）**注入到调用宏的消费 crate**。而 RSS 默认
-`#![forbid(unsafe_code)]`（rust-standards §工程护栏，**Hard**），且 **`forbid` 无法被内层 `#[allow]`
-覆盖**——所以承载 dynosaur trait 的 crate 必须真正把 `forbid` 降为 `deny`。
+`'static`，layout 不变、仅编译期成立）注入到调用宏的消费 crate。原设：RSS 默认
+`#![forbid(unsafe_code)]`（rust-standards §工程护栏，**Hard**），且 `forbid` 无法被内层 `#[allow]`
+覆盖——故曾推断承载 dynosaur trait 的 crate 须把 `forbid` 降为 `deny`（**实测不需要**，见落地结论 1）。
 
 **决策**：DI port trait 定义 + 其 dynosaur `Dyn*` wrapper **集中到一个专用服务层 crate `diport`**
 （命名待评审）。**只有 `diport`** 在自己的 `Cargo.toml [lints]` 中把 `unsafe_code` 设为 `deny`（覆盖
@@ -250,7 +282,7 @@ Medium。
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
-| **unsafe 只能出现在 `diport`** | **Medium（cargo-deny）** | `deny.toml` wrappers 把「可依赖 `dynosaur`」限定到 `diport`——无依赖即 import 不到宏、展开不出 unsafe（§3）。per-crate `forbid` 是**可被成员 `[lints]` 覆盖**的纵深防御默认，**不**单独构成编译期 Hard，故按 Medium 登记。 |
+| **dynosaur / trait-variant 只能被 `diport` 依赖**（原「unsafe 只能出现在 `diport`」） | **Medium（cargo-deny）** | `deny.toml` wrapper 把「可依赖 `dynosaur`/`trait-variant`」限定到 `diport`（INVARIANT DIPORT-MACRO-CONFINE-01，`layer-deps` 守 wrapper⟷源）。**落地修订（结论 1）**：dynosaur 0.3 的 unsafe 不触发 consumer forbid，故本约束的动机是 **DI port 集中 + 单一 dyn-dispatch 依赖点**（架构），**非** unsafe 收敛；`diport` 无 forbid 例外。 |
 | **DI port trait 必须 dyn-compatible** | **Hard（编译器）** | 写出非 dyn-safe trait，`Box<Dyn*>`/`Arc<Dyn*>` 直接编不过。`trybuild` compile-fail 用例仅作 **Medium 回归锁**（锁错误形态），列 §8 follow-up。 |
 | **必填 DI 依赖非 Option** | **Hard（类型系统）** | 构造器必填位置参 `Box<Dyn*>`，缺失即编译错误（ai-robust 范本）。 |
 | **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |

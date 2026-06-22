@@ -3,19 +3,22 @@
 //! 规则单源 = `docs/rules/architecture.md §分层`。被 `layerdeps`（source-centric 分层依赖 lint）
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
-//! 分类策略：`crates/*` 按 crate 名查四层 const 表（basis/engine/service/domain）；
+//! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain）；
 //! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
-//! INVARIANT: LAYER-DEPS-00 —— 四层 const 表与 architecture.md §分层 同源；矩阵 `allows`
+//! INVARIANT: LAYER-DEPS-00 —— 五层 const 表与 architecture.md §分层 同源；矩阵 `allows`
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（仅 std + 外部 crate，不依赖内部其它分组）。
 pub(crate) const BASIS_CRATES: &[&str] = &["vocab", "ids", "secure", "support", "runctx"];
 /// 引擎 / 原语层（依赖基础）。
 pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives"];
-/// 服务层（依赖基础 + 引擎）。
+/// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
+/// DI port trait 单源 + dynosaur 单一 dyn-dispatch 依赖点（ADR-003）。
+pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
+/// 服务层（依赖基础 + 引擎 + DI-infra）。
 pub(crate) const SERVICE_CRATES: &[&str] = &[
     "httpserve",
     "authn",
@@ -34,6 +37,8 @@ pub(crate) const DOMAIN_CRATES: &[&str] =
 pub(crate) enum Layer {
     Basis,
     Engine,
+    /// DI-infra（diport）：基础 / 引擎 之上、服务 / 域 / adapter 之下。
+    DiPort,
     Service,
     Domain,
     Adapter,
@@ -43,7 +48,7 @@ pub(crate) enum Layer {
 }
 
 /// 按 crate 名 + 成员路径（相对 workspace root，如 `crates/vocab` / `adapters/redis` /
-/// `bins/server` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查四层；其余按路径前缀。
+/// `bins/server` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if member_path == "generated" {
@@ -65,6 +70,9 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
         if ENGINE_CRATES.contains(&crate_name) {
             return Some(Layer::Engine);
         }
+        if DIPORT_CRATES.contains(&crate_name) {
+            return Some(Layer::DiPort);
+        }
         if SERVICE_CRATES.contains(&crate_name) {
             return Some(Layer::Service);
         }
@@ -77,23 +85,26 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 
 /// 分层依赖矩阵：`from` 是否允许直接依赖 `to`（仅工作区内部边；外部 crate 不经此函数）。
 /// 规则单源 = architecture.md §分层（**逐字编码，不放宽**）：基础仅 std+外部、引擎依赖基础、
-/// 服务依赖基础+引擎、域依赖基础+引擎+服务+generated（兄弟域互不依赖）、adapter 实现基础/引擎/服务
-/// trait。**同层横向依赖一律禁**（§分层 未授予任一分组同层依赖；基础"仅 std+外部"直接排除基础互依赖）——
-/// fail-closed：只放行 §分层 显式授予的下行边。generated 仅需基础；root 依赖一切。
+/// DI-infra 依赖基础+引擎、服务依赖基础+引擎+DI-infra、域依赖基础+引擎+DI-infra+服务+generated
+/// （兄弟域互不依赖）、adapter 实现基础/引擎/DI-infra/服务 trait。**同层横向依赖一律禁**（§分层
+/// 未授予任一分组同层依赖；基础"仅 std+外部"直接排除基础互依赖）——fail-closed：只放行 §分层
+/// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
-    use Layer::{Adapter, Basis, Domain, Engine, Generated, Root, Service};
+    use Layer::{Adapter, Basis, DiPort, Domain, Engine, Generated, Root, Service};
     match from {
         // 组合根可依赖所有库 crate。
         Root => true,
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
         Generated => to == Basis,
-        // adapter：基础 + 引擎 + 服务（实现其 trait）；禁兄弟 adapter（§分层 未授予）/ 域 / generated。
-        Adapter => matches!(to, Basis | Engine | Service),
-        // 域：基础 + 引擎 + 服务 + generated；禁兄弟域（跨域只经 contract）/ adapter。
-        Domain => matches!(to, Basis | Engine | Service | Generated),
-        // 服务：基础 + 引擎；禁兄弟服务（§分层 未授予）/ 域 / adapter / generated。
-        Service => matches!(to, Basis | Engine),
-        // 引擎：仅基础；禁兄弟引擎（§分层 未授予）/ 服务及以上。
+        // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务；禁兄弟 adapter / 域 / generated。
+        Adapter => matches!(to, Basis | Engine | DiPort | Service),
+        // 域：基础 + 引擎 + DI-infra + 服务 + generated；禁兄弟域（跨域只经 contract）/ adapter。
+        Domain => matches!(to, Basis | Engine | DiPort | Service | Generated),
+        // 服务：基础 + 引擎 + DI-infra（消费 DI port）；禁兄弟服务（§分层 未授予）/ 域 / adapter / generated。
+        Service => matches!(to, Basis | Engine | DiPort),
+        // DI-infra：基础 + 引擎（port 签名引用其类型）；禁服务及以上（无 back-path）/ 兄弟 DI-infra。
+        DiPort => matches!(to, Basis | Engine),
+        // 引擎：仅基础；禁兄弟引擎（§分层 未授予）/ DI-infra 及以上。
         Engine => to == Basis,
         // 基础：仅 std + 外部 crate，不依赖任何内部成员（含兄弟基础）。
         Basis => false,
@@ -109,6 +120,7 @@ mod tests {
     #[case("vocab", "crates/vocab", Some(Layer::Basis))]
     #[case("runctx", "crates/runctx", Some(Layer::Basis))]
     #[case("consistency", "crates/consistency", Some(Layer::Engine))]
+    #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
     #[case("bootstrap", "crates/bootstrap", Some(Layer::Service))]
     #[case("identity", "crates/identity", Some(Layer::Domain))]
@@ -139,6 +151,7 @@ mod tests {
         let cases: &[(&[&str], Layer)] = &[
             (BASIS_CRATES, Layer::Basis),
             (ENGINE_CRATES, Layer::Engine),
+            (DIPORT_CRATES, Layer::DiPort),
             (SERVICE_CRATES, Layer::Service),
             (DOMAIN_CRATES, Layer::Domain),
         ];
@@ -164,13 +177,21 @@ mod tests {
     #[case(Layer::Domain, Layer::Generated, true)]
     #[case(Layer::Adapter, Layer::Service, true)]
     #[case(Layer::Generated, Layer::Basis, true)]
+    // DI-infra 下行授予边：diport 依赖基础+引擎；服务/域/adapter 可依赖 diport。
+    #[case(Layer::DiPort, Layer::Basis, true)]
+    #[case(Layer::DiPort, Layer::Engine, true)]
+    #[case(Layer::Service, Layer::DiPort, true)]
+    #[case(Layer::Domain, Layer::DiPort, true)]
+    #[case(Layer::Adapter, Layer::DiPort, true)]
     // Root 全开。
     #[case(Layer::Root, Layer::Domain, true)]
     #[case(Layer::Root, Layer::Adapter, true)]
     #[case(Layer::Root, Layer::Generated, true)]
+    #[case(Layer::Root, Layer::DiPort, true)]
     // 同层横向依赖：禁（§分层 未授予任一分组同层依赖）。
     #[case(Layer::Basis, Layer::Basis, false)]
     #[case(Layer::Engine, Layer::Engine, false)]
+    #[case(Layer::DiPort, Layer::DiPort, false)]
     #[case(Layer::Service, Layer::Service, false)]
     #[case(Layer::Adapter, Layer::Adapter, false)]
     #[case(Layer::Domain, Layer::Domain, false)]
@@ -185,6 +206,14 @@ mod tests {
     #[case(Layer::Adapter, Layer::Domain, false)]
     #[case(Layer::Adapter, Layer::Generated, false)]
     #[case(Layer::Generated, Layer::Service, false)]
+    // DI-infra back-path / 跨界：禁——diport 不依赖服务及以上；引擎/基础/generated 不依赖 diport。
+    #[case(Layer::DiPort, Layer::Service, false)]
+    #[case(Layer::DiPort, Layer::Domain, false)]
+    #[case(Layer::DiPort, Layer::Adapter, false)]
+    #[case(Layer::DiPort, Layer::Generated, false)]
+    #[case(Layer::Engine, Layer::DiPort, false)]
+    #[case(Layer::Basis, Layer::DiPort, false)]
+    #[case(Layer::Generated, Layer::DiPort, false)]
     fn allows_matrix(#[case] from: Layer, #[case] to: Layer, #[case] want: bool) {
         assert_eq!(allows(from, to), want);
     }

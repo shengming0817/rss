@@ -54,7 +54,8 @@ rss/
 │   ├── support/          # http / pg / validation 杂项
 │   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
 │   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
-│   ├── primitives/       # clock / crypto / authplan / healthz / circuitbreaker / lifecycle
+│   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
+│   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源（Clock / Signer / Publisher / ManagedResource…）+ dynosaur Dyn wrapper
 │   ├── httpserve/        # axum router / middleware / health
 │   ├── authn/            # jwt / session / refresh / PDP / Principal
 │   ├── bootstrap/        # composition / config / shutdown / worker
@@ -87,11 +88,15 @@ rss/
 ## 分层(crate 图 + deny.toml 编译期强制)
 
 - **基础** `vocab`/`ids`/`secure`/`support`/`runctx`:仅 std + 外部 crate(serde/thiserror/uuid…),不依赖内部其它分组。
-- **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖服务/域/adapters。
-- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎;不依赖域/adapters。
-- **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+服务+`generated`(contract 派生);
+- **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖 DI-infra/服务/域/adapters。
+- **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
+  可替换 provider 的 DI port trait 单源(Clock/Signer/Publisher/ManagedResource…)+ dynosaur Dyn wrapper;
+  集中收敛使 DI port 与 dynosaur 依赖只此一处(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——
+  服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
+- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。
+- **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。
-- **adapters/**:实现基础/引擎/服务定义的 trait;**不被域依赖**(组合根注入)。
+- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。
 - **bins/**、**xtask/**、**assemblies/**:组合根,可依赖所有库 crate。
 - **generated/**:contract 派生,被域依赖。
 - 强制:cargo 拒绝循环依赖(分层无环天然成立);`cargo-deny`(deny.toml) 表达禁依赖;`cargo-udeps` 抓多余/未声明;
@@ -132,6 +137,7 @@ rss/
 | 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)；首条 `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01)——符号/红例/盲区见 `lints/rss_domain_no_serialize/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（#1023 完成）；完整域 crate 覆盖待 #1054 |
 | 治理脚本入口 | `cargo` + `xtask/` |
 | 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
+| DI port + dynosaur 收敛到 `diport` | `deny.toml` wrapper：`dynosaur`/`trait-variant` 只准 `diport` 依赖（DI port trait + Dyn wrapper 单一依赖点，INVARIANT DIPORT-MACRO-CONFINE-01；`layer-deps` 守 wrapper⟷源一致）。注：dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（实测，ADR-003 §8），故 `diport` 无 forbid 例外、无 unsafe carve-out——本约束是「DI port 集中」架构守卫，非 unsafe 收敛 |
 
 ### 三档 · Cargo 替不了,框架自建(RSS 真差异化)
 

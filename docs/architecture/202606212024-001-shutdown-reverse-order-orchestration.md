@@ -1,13 +1,36 @@
 # ADR-001：关闭逆序编排（无 async Drop）
 
-- 状态：Accepted（spike RW-G0.6 接缝冻结）
-- 日期：2026-06-21
-- 关联：Issue #996（RW-G0.6 spike）· Epic #991（最大并行迁移）
+- 状态：Accepted（spike RW-G0.6 接缝冻结）· **Amended**（PR-diport #1049，ManagedResource 派发收敛，见下「落地修订」）
+- 日期：2026-06-21（修订：2026-06-22）
+- 关联：Issue #996（RW-G0.6 spike）· Epic #991（最大并行迁移）· 修订单元 #1049
 - 阶段：G0「接缝冻结」——重写顺序见 `docs/migration-from-gocell/gocell-rewrite-sequence.md` P2/§三
-- 落地：`crates/bootstrap/src/shutdown.rs`
+- 落地：`crates/bootstrap/src/shutdown.rs`（编排）+ `crates/diport/src/managed_resource.rs`（port trait）
 
 > 本 ADR 是 RSS workspace 的首个架构决策记录，确立**进程关闭时资源按依赖逆序 await 关干净**的范式。
 > 这是 G0 阶段要冻结的边界之一（rewrite-sequence §「历史里代价最大的晚做」：边界越晚改越贵）。
+
+---
+
+## 落地修订（PR-diport #1049：ManagedResource 派发收敛 + 威胁矩阵重评）
+
+inter-ADR 冲突收敛——ADR-003 把可替换 provider DI port 统一 dynosaur 派发，`ManagedResource` 随之
+从 `#[async_trait]` + `Arc<dyn>` 改 dynosaur。**下文 §2/§3/§4/§5 涉 `async_trait` / `Arc<dyn ManagedResource>`
+的描述以本节为准**（编排语义/不变式不变，仅派发载体 + 持有形态变）：
+
+- **trait 归属 + 形态**：`ManagedResource`（+ `ShutdownError` + `DEFAULT_SHUTDOWN_TIMEOUT`）迁入 `diport`
+  （DI-infra 层）；去 `#[async_trait]`，改 `#[trait_variant::make(ManagedResource: Send)]` +
+  `#[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]`（Send 变体 + dyn wrapper）。
+  `ShutdownStack` / `ShutdownFailureKind` / `ResourceShutdownError` 仍留 `bootstrap`（编排归属不变）。
+- **持有形态**：`Vec<Arc<dyn ManagedResource>>` → `Vec<Box<DynManagedResource<'static>>>`；`register_*` /
+  `shutdown_one` 同步改 `Box`。`shutdown_one` 把 `Box` **直接 move 进 `tokio::spawn`**（去掉原 `Arc::clone`：
+  name/budget 在 spawn 前已读）。
+- **威胁矩阵重评**：§5「`tokio::spawn` 要求 `ManagedResource: Send + Sync + 'static`」**放宽为 `Send`**——
+  `Box<DynManagedResource>: Send`（仅需 `DynManagedResource: Send`，trait_variant Send 变体保证 boxed future
+  与 erased 对象 Send），不再需 `Sync`（`Arc<T>: Send` 才需 `T: Send+Sync`，改 Box 后此要求消失）。
+  `SHUTDOWN-*` 七条不变式（LIFO / continue-on-error / aggregate / timeout / panic-isolate / single-shot /
+  token-funnel）+ budget-cancel-safe **全部保持**，13 例回归测试同绿（mock 改 native AFIT impl + `DynManagedResource::new_box`）。
+- **安全模型**：`ShutdownError` PII 边界（Display 安全摘要、source 内部保留）随类型迁移**不变**。dynosaur 0.3
+  生成的 unsafe 经 def-site hygiene 不触发 forbid（ADR-003 落地结论 1），`diport` 无 unsafe 例外——不引入新威胁面。
 
 ---
 

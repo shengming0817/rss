@@ -13,7 +13,9 @@ members = [
   # 引擎 / 原语（依赖基础）
   "crates/consistency",
   "crates/primitives",
-  # 服务（依赖基础 + 引擎）
+  # DI-infra（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费——DI port trait 单源 + dynosaur unsafe 收敛）
+  "crates/diport",
+  # 服务（依赖基础 + 引擎 + DI-infra）
   "crates/httpserve",
   "crates/authn",
   "crates/bootstrap",
@@ -76,8 +78,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
 uuid = { version = "1" }
-async-trait = "0.1"
 futures = "0.3"
+# DI port trait 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
+# exact-pin（pre-1.0，new_box/new_arc/bridge API 仍破坏式演进；升级须审 changelog）。仅 diport
+# 可依赖（deny.toml wrapper 守 DI port 集中 + 单一 dyn-dispatch 依赖点；别处 import 不到宏）。
+# 注：实测 dynosaur 0.3 生成的 unsafe 不触发 consumer forbid（def-site hygiene），无 unsafe 例外（见 diport）。
+dynosaur = "=0.3.0"
+# Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur `bridge(dyn)` 据此生成
+# Send 的 Dyn wrapper（ShutdownStack 经 tokio::spawn 做 panic 隔离需要 Send future）。
+# exact-pin：与 dynosaur 耦合的 dyn-infra，codegen 互操作随版本演进，升级须同审。
+trait-variant = "=0.1.2"
 # HTTP / gRPC（服务层前瞻）
 axum = "0.8"
 tower = "0.5"
@@ -94,6 +104,7 @@ syn = { version = "2", features = ["full", "parsing"] }
 toml = "0.8"
 # 测试
 rstest = "0.24"
+trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
 mockall = "0.13"
 insta = "1"
 
