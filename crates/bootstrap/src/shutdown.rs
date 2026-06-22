@@ -173,6 +173,10 @@ impl ShutdownStack {
     }
 
     /// 两阶段逆序驱动核心。`budget` = 整体预算上界（`None` = 仅 per-resource 超时）。
+    // reason: 两阶段关闭驱动（broadcast + LIFO await）+ select + 预算 deadline 多路组合，
+    // 认知复杂度略超 15；逻辑单元紧密耦合（顺序/错误聚合/预算/日志），强行拆分会引入
+    // 额外参数传递并损失可读性——item-level carve-out（error-handling.md §Carve-out）。
+    #[allow(clippy::cognitive_complexity)]
     async fn run(self, budget: Option<Duration>) -> Vec<ResourceShutdownError> {
         let total = self.resources.len();
         tracing::info!(resource_count = total, "shutdown sequence starting");

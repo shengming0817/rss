@@ -10,4 +10,6 @@ pub use authz::{Action, ActionError, Decision};
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use query::{Cursor, CursorError, Limit, LimitError};
-pub use tenant::{TenantId, TenantIdError};
+pub use tenant::{
+    CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant, TenantId, TenantIdError,
+};

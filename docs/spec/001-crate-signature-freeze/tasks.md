@@ -91,14 +91,14 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 ### PR-3 服务层（门: TD05（PR-diport）；同层 7 crate 并行）
 
-- [ ] T014 [P] [US2] 冻结 `httpserve` 于 `crates/httpserve/src/lib.rs`：`RouteGroup`/`Route`/`ListenerKind`(穷尽 enum)；复用 `tower::Layer`/`Service`；register=同步 `Fn(Router)->Result<Router>`（非 DI 接缝）。ref: tower tower-layer/src/lib.rs@master + axum axum/src/routing/mod.rs@main。测试: build smoke
-- [ ] T015 [P] [US2] 冻结 `authn` 于 `crates/authn/src/lib.rs`：jwt/session/refresh 值类型、`Principal`(RowScope 派生) 类型；ctx 遵 ADR-002 显式传 `&RequestCtx`。authplan 类型引 primitives::authplan。**PDP/session store dyn port → diport**。测试: build smoke
-- [ ] T016 [P] [US2] 冻结 `bootstrap` 于 `crates/bootstrap/src/lib.rs`：`Domain::init(&self,&mut Registry)->Result`、`Registry`、`module()->DomainModule`、shutdown 编排（持 `ManagedResource` LIFO，遵 ADR-001；trait 归属待 diport 拍板）。init=sync 不 I/O 不 spawn。ref: kube-rs controller + uber-go/fx module.go@master。测试: build smoke + PORT-SHAPE-01/02
-- [ ] T017 [P] [US2] 冻结 `eventexec` 于 `crates/eventexec/src/lib.rs`：非 DI 接缝 `Disposition`(穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型、`SubscribeInitializer`、saga executor·tailer/command。**Publisher/Subscriber dyn port → diport**（subscribe 返回 `impl Stream+Send`）。ref: watermill message/pubsub.go@master + router.go@master。测试: build smoke
-- [ ] T018 [P] [US2] 冻结 `observ` 于 `crates/observ/src/lib.rs`：metrics/logging 值类型（metrics label 闭值集）。**audit sink/interceptor dyn port → diport**。测试: build smoke
-- [ ] T019 [P] [US2] 冻结 `distributed` 于 `crates/distributed/src/lib.rs`：distlock/cas/transport 值类型。**dyn port → diport**。测试: build smoke
-- [ ] T020 [P] [US2] 冻结 `deviceloop` 于 `crates/deviceloop/src/lib.rs`：cert lifecycle·signing(L4) 态机类型。**signer dyn port → diport**。测试: build smoke
-- [ ] T021 [US2] PR-3 验收（门: T014–T020）：7 服务 crate `cargo build` + clippy 绿；不依赖域/adapters（deny 绿）；listener auth chain 显式（无 None）；DI port 已在 diport。**开 PR-3，body 标覆盖率豁免 + ref**
+- [x] T014 [P] [US2] 冻结 `httpserve` 于 `crates/httpserve/src/lib.rs`：`RouteGroup`/`Route`/`ListenerKind`(穷尽 enum)；复用 `tower::Layer`/`Service`；register=同步 `Fn(Router)->Result<Router>`（非 DI 接缝）。ref: tower tower-layer/src/lib.rs@master + axum axum/src/routing/mod.rs@main。测试: build smoke
+- [x] T015 [P] [US2] 冻结 `authn` 于 `crates/authn/src/lib.rs`：jwt/session/refresh 值类型、`Principal`(RowScope 派生) 类型；ctx 遵 ADR-002 显式传 `&RequestCtx`。authplan 类型引 primitives::authplan。**PDP/session store dyn port → diport**。测试: build smoke
+- [x] T016 [P] [US2] 冻结 `bootstrap` 于 `crates/bootstrap/src/lib.rs`：`Domain::init(&self,&mut Registry)->Result`、`Registry`、`module()->DomainModule`、shutdown 编排（持 `ManagedResource` LIFO，遵 ADR-001；trait 归属待 diport 拍板）。init=sync 不 I/O 不 spawn。ref: kube-rs controller + uber-go/fx module.go@master。测试: build smoke + PORT-SHAPE-01/02
+- [x] T017 [P] [US2] 冻结 `eventexec` 于 `crates/eventexec/src/lib.rs`：非 DI 接缝 `Disposition`(穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型、`SubscribeInitializer`、saga executor·tailer/command。**Publisher/Subscriber dyn port → diport**（subscribe 返回 `impl Stream+Send`）。ref: watermill message/pubsub.go@master + router.go@master。测试: build smoke
+- [x] T018 [P] [US2] 冻结 `observ` 于 `crates/observ/src/lib.rs`：metrics/logging 值类型（metrics label 闭值集）。**audit sink/interceptor dyn port → diport**。测试: build smoke
+- [x] T019 [P] [US2] 冻结 `distributed` 于 `crates/distributed/src/lib.rs`：distlock/cas/transport 值类型。**dyn port → diport**。测试: build smoke
+- [x] T020 [P] [US2] 冻结 `deviceloop` 于 `crates/deviceloop/src/lib.rs`：cert lifecycle·signing(L4) 态机类型。**signer dyn port → diport**。测试: build smoke
+- [x] T021 [US2] PR-3 验收（门: T014–T020）：7 服务 crate `cargo build` + clippy 绿；不依赖域/adapters（deny 绿）；listener auth chain 显式（无 None）；DI port 已在 diport。**开 PR-3，body 标覆盖率豁免 + ref**
 
 **Checkpoint**: US2 完成 → 服务接缝冻结，域与 adapters 可实现/注册。
 

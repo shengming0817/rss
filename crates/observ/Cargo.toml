@@ -16,3 +16,5 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
+futures = { workspace = true }
+thiserror = { workspace = true }
