@@ -7,6 +7,9 @@ version = "v1"
 owner = "_framework"
 consistencyLevel = "LocalOnly"
 lifecycle = "draft"
+# per-kind http 字段（#1035）：path/method（draft 故非强制，此处演练格式 + 锁 golden）。
+path = "/api/v1/_seed/echo"
+method = "POST"
 
 [schemas]
 request = "request.schema.json"

@@ -2,7 +2,7 @@
 //!
 //! 子命令：
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
-//!   `cargo xtask contract validate`     契约元数据校验（R1–R6，CI 门）
+//!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract

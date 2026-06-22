@@ -7,6 +7,9 @@ version = "v1"
 owner = "_framework"
 consistencyLevel = "OutboxFact"
 lifecycle = "draft"
+# per-kind event 字段（#1035）：topic/delivery（draft 故非强制，此处演练格式 + 锁 golden）。
+topic = "seed.thing-happened"
+delivery = "at-least-once"
 
 [schemas]
 payload = "payload.schema.json"
