@@ -112,12 +112,13 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 ### PR-4 域层（门: T021；软门 #998 generated；同层 5 crate 并行，与 PR-5 并行）
 
-- [ ] T022 [P] [US3] 冻结 `identity` 于 `crates/identity/src/`：身份/会话/RBAC/ABAC 域内 DTO + 值对象 + 非 DI 域逻辑。domain 类型不 derive Serialize（ADR-004 C6）。**repo/领域服务 DI port → diport**（dynosaur，PR-diport）。软门: #998(wire 类型)。测试: build smoke + 域内类型编译
-- [ ] T023 [P] [US3] 冻结 `settings` 于 `crates/settings/src/`：版本化配置/flag repo+服务 trait。软门: #998。测试: build smoke + PORT-SHAPE-01/02
-- [ ] T024 [P] [US3] 冻结 `audit` 于 `crates/audit/src/`：审计链 repo + append 服务 trait。软门: #998。测试: build smoke + PORT-SHAPE-01/02
-- [ ] T025 [P] [US3] 冻结 `contractreg` 于 `crates/contractreg/src/`：运行时契约 submit/list repo+服务 trait。软门: #998。测试: build smoke + PORT-SHAPE-01/02
-- [ ] T026 [P] [US3] 冻结 `syshealth` 于 `crates/syshealth/src/`：健康聚合服务 trait。测试: build smoke + PORT-SHAPE-01
-- [ ] T027 [US3] PR-4 验收（门: T022–T026）：5 域 crate `cargo build` + clippy 绿；域间无 import + 不依赖 adapters（deny 绿）；domain 类型未 derive Serialize（核）。**开 PR-4，body 标覆盖率豁免 + ref + #998 软依赖说明**
+- [x] T022 [P] [US3] 冻结 `identity` 于 `crates/identity/src/`：身份/会话/RBAC/ABAC 域内 DTO + 值对象 + 非 DI 域逻辑。domain 类型不 derive Serialize（ADR-004 C6）。**repo/领域服务 DI port → diport**（dynosaur，PR-diport）。软门: #998(wire 类型)。测试: build smoke + 域内类型编译
+- [x] T023 [P] [US3] 冻结 `settings` 于 `crates/settings/src/`：版本化配置/flag **域内值对象 + 非 DI 纯逻辑**（ConfigEntry/ConfigVersion/FlagState/RolloutRule + evaluate_flag/diff）。**repo/服务 DI port → diport（归属待决 #1083，本轮 Scope A 不含）**。测试: build smoke（显式 `fn(..)->..` 签名断言）
+- [x] T024 [P] [US3] 冻结 `audit` 于 `crates/audit/src/`：审计链 **域内值对象 + 非 DI 纯逻辑**（AuditEntry/EntryHash/AuditChainLink + link_hash/verify_chain）。**repo/append 服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）
+- [x] T025 [P] [US3] 冻结 `contractreg` 于 `crates/contractreg/src/`：运行时契约 **域内值对象 + 非 DI 纯逻辑**（ContractRecord/Kind/Status/ConsistencyLevel + can_transition/validate_metadata）。**submit/list repo+服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）
+- [x] T026 [P] [US3] 冻结 `syshealth` 于 `crates/syshealth/src/`：健康聚合 **域内值对象 + 非 DI 纯逻辑**（复用 primitives::healthz + ProbeRegistry/ProbeDescriptor + aggregate_with_criticality）。**聚合服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）
+- [x] T027 [US3] PR-4 验收（门: T022–T026）：5 域 crate `cargo build` + clippy 绿；域间无 import + 不依赖 adapters（deny 绿）；domain 类型未 derive Serialize（核）。**开 PR-4，body 标覆盖率豁免 + ref + #998 软依赖说明**
+  - 落地说明（PR #1051，**Scope A**）：本 PR 冻**域内值对象 + 非 DI 纯域逻辑**（对标 authn），全 `todo!()`、域类型落 `mod domain` 经 dylint `rss_domain_no_serialize` 守 C6，smoke 用显式 `fn(..)->..` 断言 Hard 锁签名。**勾选 [x] 仅代表 Scope A（域内非 DI 接缝）已交付**——上列 T023–T026 中 **repo port / repo 型领域服务 / PORT-SHAPE 部分未在本 PR 落地**（归属阻塞于 `data-model.md` 待决项#1：diport 不得引域实体，与 layer-diport.md SessionRepo→diport 矛盾 → **跟踪 #1083**）；待 #1083 拍板后另起单元补 repo/服务接缝 + PORT-SHAPE。#998 虽 closed 但 `generated/` 仅 seed stub、无真实域 wire 类型，故只冻非 wire 接缝。依赖精简 → #1084。`cargo xtask verify`（含 build/clippy/nextest/deny/dylint）全绿。
 
 ### PR-5 adapters 层（门: TD05（PR-diport）；与 PR-4 并行；同层 12 crate 并行）
 

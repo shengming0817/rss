@@ -67,6 +67,8 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
+ "uuid",
  "vocab",
 ]
 
@@ -203,6 +205,7 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
  "vocab",
 ]
 
@@ -590,6 +593,7 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
  "vocab",
 ]
 
@@ -1198,6 +1202,7 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
  "vocab",
 ]
 
@@ -1279,6 +1284,7 @@ dependencies = [
  "runctx",
  "secure",
  "support",
+ "thiserror",
  "vocab",
 ]
 

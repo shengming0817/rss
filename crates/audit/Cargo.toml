@@ -24,3 +24,5 @@ observ = { path = "../observ" }
 distributed = { path = "../distributed" }
 deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
+thiserror = { workspace = true }
+uuid = { workspace = true }

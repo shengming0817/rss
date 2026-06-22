@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+thiserror = { workspace = true }
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 secure = { path = "../secure" }
