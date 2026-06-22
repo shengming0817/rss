@@ -74,7 +74,8 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+# 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
+uuid = { version = "1" }
 async-trait = "0.1"
 futures = "0.3"
 # HTTP / gRPC（服务层前瞻）

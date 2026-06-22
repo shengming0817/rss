@@ -1,0 +1,479 @@
+pub mod secure
+pub mod secure::aead
+#[non_exhaustive] pub enum secure::aead::AeadError
+pub secure::aead::AeadError::Open
+pub secure::aead::AeadError::Seal
+impl core::error::Error for secure::aead::AeadError
+impl core::fmt::Debug for secure::aead::AeadError
+pub fn secure::aead::AeadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::aead::AeadError
+pub fn secure::aead::AeadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::aead::AeadError
+impl core::marker::Send for secure::aead::AeadError
+impl core::marker::Sync for secure::aead::AeadError
+impl core::marker::Unpin for secure::aead::AeadError
+impl core::marker::UnsafeUnpin for secure::aead::AeadError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::AeadError
+impl core::panic::unwind_safe::UnwindSafe for secure::aead::AeadError
+impl<T, U> core::convert::Into<U> for secure::aead::AeadError where U: core::convert::From<T>
+pub fn secure::aead::AeadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::aead::AeadError where U: core::convert::Into<T>
+pub type secure::aead::AeadError::Error = core::convert::Infallible
+pub fn secure::aead::AeadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::aead::AeadError where U: core::convert::TryFrom<T>
+pub type secure::aead::AeadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::aead::AeadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::aead::AeadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::aead::AeadError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::aead::AeadError where T: 'static + ?core::marker::Sized
+pub fn secure::aead::AeadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::aead::AeadError where T: ?core::marker::Sized
+pub fn secure::aead::AeadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::aead::AeadError where T: ?core::marker::Sized
+pub fn secure::aead::AeadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::aead::AeadError
+pub fn secure::aead::AeadError::from(T) -> T
+pub struct secure::aead::Ciphertext(_)
+impl secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::as_bytes(&self) -> &[u8]
+pub fn secure::aead::Ciphertext::from_bytes(alloc::vec::Vec<u8>) -> Self
+impl core::clone::Clone for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::clone(&self) -> secure::aead::Ciphertext
+impl core::cmp::Eq for secure::aead::Ciphertext
+impl core::cmp::PartialEq for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::eq(&self, &secure::aead::Ciphertext) -> bool
+impl core::fmt::Debug for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
+impl core::marker::Freeze for secure::aead::Ciphertext
+impl core::marker::Send for secure::aead::Ciphertext
+impl core::marker::Sync for secure::aead::Ciphertext
+impl core::marker::Unpin for secure::aead::Ciphertext
+impl core::marker::UnsafeUnpin for secure::aead::Ciphertext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Ciphertext
+impl core::panic::unwind_safe::UnwindSafe for secure::aead::Ciphertext
+impl<T, U> core::convert::Into<U> for secure::aead::Ciphertext where U: core::convert::From<T>
+pub fn secure::aead::Ciphertext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::aead::Ciphertext where U: core::convert::Into<T>
+pub type secure::aead::Ciphertext::Error = core::convert::Infallible
+pub fn secure::aead::Ciphertext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::aead::Ciphertext where U: core::convert::TryFrom<T>
+pub type secure::aead::Ciphertext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::aead::Ciphertext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::aead::Ciphertext where T: core::clone::Clone
+pub type secure::aead::Ciphertext::Owned = T
+pub fn secure::aead::Ciphertext::clone_into(&self, &mut T)
+pub fn secure::aead::Ciphertext::to_owned(&self) -> T
+impl<T> core::any::Any for secure::aead::Ciphertext where T: 'static + ?core::marker::Sized
+pub fn secure::aead::Ciphertext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
+pub fn secure::aead::Ciphertext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
+pub fn secure::aead::Ciphertext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::aead::Ciphertext where T: core::clone::Clone
+pub unsafe fn secure::aead::Ciphertext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::from(T) -> T
+pub trait secure::aead::Aead
+pub fn secure::aead::Aead::open(&self, &secure::aead::Ciphertext) -> core::result::Result<alloc::vec::Vec<u8>, secure::aead::AeadError>
+pub fn secure::aead::Aead::seal(&self, &[u8]) -> core::result::Result<secure::aead::Ciphertext, secure::aead::AeadError>
+pub mod secure::cookie
+#[non_exhaustive] pub enum secure::cookie::CookieError
+pub secure::cookie::CookieError::Malformed
+pub secure::cookie::CookieError::Signature
+impl core::error::Error for secure::cookie::CookieError
+impl core::fmt::Debug for secure::cookie::CookieError
+pub fn secure::cookie::CookieError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::cookie::CookieError
+pub fn secure::cookie::CookieError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::cookie::CookieError
+impl core::marker::Send for secure::cookie::CookieError
+impl core::marker::Sync for secure::cookie::CookieError
+impl core::marker::Unpin for secure::cookie::CookieError
+impl core::marker::UnsafeUnpin for secure::cookie::CookieError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieError
+impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieError
+impl<T, U> core::convert::Into<U> for secure::cookie::CookieError where U: core::convert::From<T>
+pub fn secure::cookie::CookieError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieError where U: core::convert::Into<T>
+pub type secure::cookie::CookieError::Error = core::convert::Infallible
+pub fn secure::cookie::CookieError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieError where U: core::convert::TryFrom<T>
+pub type secure::cookie::CookieError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::cookie::CookieError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::cookie::CookieError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::cookie::CookieError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::cookie::CookieError where T: 'static + ?core::marker::Sized
+pub fn secure::cookie::CookieError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::cookie::CookieError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::cookie::CookieError
+pub fn secure::cookie::CookieError::from(T) -> T
+#[non_exhaustive] pub enum secure::cookie::CookieValueError
+pub secure::cookie::CookieValueError::Empty
+pub secure::cookie::CookieValueError::Format
+impl core::error::Error for secure::cookie::CookieValueError
+impl core::fmt::Debug for secure::cookie::CookieValueError
+pub fn secure::cookie::CookieValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::cookie::CookieValueError
+pub fn secure::cookie::CookieValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::cookie::CookieValueError
+impl core::marker::Send for secure::cookie::CookieValueError
+impl core::marker::Sync for secure::cookie::CookieValueError
+impl core::marker::Unpin for secure::cookie::CookieValueError
+impl core::marker::UnsafeUnpin for secure::cookie::CookieValueError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValueError
+impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValueError
+impl<T, U> core::convert::Into<U> for secure::cookie::CookieValueError where U: core::convert::From<T>
+pub fn secure::cookie::CookieValueError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValueError where U: core::convert::Into<T>
+pub type secure::cookie::CookieValueError::Error = core::convert::Infallible
+pub fn secure::cookie::CookieValueError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValueError where U: core::convert::TryFrom<T>
+pub type secure::cookie::CookieValueError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::cookie::CookieValueError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::cookie::CookieValueError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::cookie::CookieValueError where T: 'static + ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::cookie::CookieValueError
+pub fn secure::cookie::CookieValueError::from(T) -> T
+pub struct secure::cookie::CookieValue(_)
+impl secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::as_str(&self) -> &str
+pub fn secure::cookie::CookieValue::parse(&str) -> core::result::Result<Self, secure::cookie::CookieValueError>
+impl core::clone::Clone for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::clone(&self) -> secure::cookie::CookieValue
+impl core::cmp::Eq for secure::cookie::CookieValue
+impl core::cmp::PartialEq for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::eq(&self, &secure::cookie::CookieValue) -> bool
+impl core::fmt::Debug for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::cookie::CookieValue
+impl core::marker::Freeze for secure::cookie::CookieValue
+impl core::marker::Send for secure::cookie::CookieValue
+impl core::marker::Sync for secure::cookie::CookieValue
+impl core::marker::Unpin for secure::cookie::CookieValue
+impl core::marker::UnsafeUnpin for secure::cookie::CookieValue
+impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValue
+impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValue
+impl<T, U> core::convert::Into<U> for secure::cookie::CookieValue where U: core::convert::From<T>
+pub fn secure::cookie::CookieValue::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValue where U: core::convert::Into<T>
+pub type secure::cookie::CookieValue::Error = core::convert::Infallible
+pub fn secure::cookie::CookieValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValue where U: core::convert::TryFrom<T>
+pub type secure::cookie::CookieValue::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::cookie::CookieValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::cookie::CookieValue where T: core::clone::Clone
+pub type secure::cookie::CookieValue::Owned = T
+pub fn secure::cookie::CookieValue::clone_into(&self, &mut T)
+pub fn secure::cookie::CookieValue::to_owned(&self) -> T
+impl<T> core::any::Any for secure::cookie::CookieValue where T: 'static + ?core::marker::Sized
+pub fn secure::cookie::CookieValue::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValue::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValue::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::cookie::CookieValue where T: core::clone::Clone
+pub unsafe fn secure::cookie::CookieValue::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::from(T) -> T
+pub trait secure::cookie::CookieCodec
+pub fn secure::cookie::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
+pub fn secure::cookie::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
+pub mod secure::pathsafe
+pub fn secure::pathsafe::is_safe_segment(&str) -> bool
+pub mod secure::redaction
+pub struct secure::redaction::Redacted(_)
+impl secure::redaction::Redacted
+pub fn secure::redaction::Redacted::as_str(&self) -> &str
+pub fn secure::redaction::Redacted::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::clone(&self) -> secure::redaction::Redacted
+impl core::cmp::Eq for secure::redaction::Redacted
+impl core::cmp::PartialEq for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::eq(&self, &secure::redaction::Redacted) -> bool
+impl core::fmt::Debug for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::redaction::Redacted
+impl core::marker::Freeze for secure::redaction::Redacted
+impl core::marker::Send for secure::redaction::Redacted
+impl core::marker::Sync for secure::redaction::Redacted
+impl core::marker::Unpin for secure::redaction::Redacted
+impl core::marker::UnsafeUnpin for secure::redaction::Redacted
+impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Redacted
+impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Redacted
+impl<T, U> core::convert::Into<U> for secure::redaction::Redacted where U: core::convert::From<T>
+pub fn secure::redaction::Redacted::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::redaction::Redacted where U: core::convert::Into<T>
+pub type secure::redaction::Redacted::Error = core::convert::Infallible
+pub fn secure::redaction::Redacted::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::redaction::Redacted where U: core::convert::TryFrom<T>
+pub type secure::redaction::Redacted::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::redaction::Redacted::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::redaction::Redacted where T: core::clone::Clone
+pub type secure::redaction::Redacted::Owned = T
+pub fn secure::redaction::Redacted::clone_into(&self, &mut T)
+pub fn secure::redaction::Redacted::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::redaction::Redacted where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::redaction::Redacted::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::redaction::Redacted where T: 'static + ?core::marker::Sized
+pub fn secure::redaction::Redacted::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::redaction::Redacted where T: ?core::marker::Sized
+pub fn secure::redaction::Redacted::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::redaction::Redacted where T: ?core::marker::Sized
+pub fn secure::redaction::Redacted::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::redaction::Redacted where T: core::clone::Clone
+pub unsafe fn secure::redaction::Redacted::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::from(T) -> T
+pub trait secure::redaction::Redactor
+pub fn secure::redaction::Redactor::redact(&self, &str) -> secure::redaction::Redacted
+pub fn secure::redaction::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
+pub fn secure::redaction::redact_field(&str, &str) -> secure::redaction::Redacted
+#[non_exhaustive] pub enum secure::AeadError
+pub secure::AeadError::Open
+pub secure::AeadError::Seal
+impl core::error::Error for secure::aead::AeadError
+impl core::fmt::Debug for secure::aead::AeadError
+pub fn secure::aead::AeadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::aead::AeadError
+pub fn secure::aead::AeadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::aead::AeadError
+impl core::marker::Send for secure::aead::AeadError
+impl core::marker::Sync for secure::aead::AeadError
+impl core::marker::Unpin for secure::aead::AeadError
+impl core::marker::UnsafeUnpin for secure::aead::AeadError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::AeadError
+impl core::panic::unwind_safe::UnwindSafe for secure::aead::AeadError
+impl<T, U> core::convert::Into<U> for secure::aead::AeadError where U: core::convert::From<T>
+pub fn secure::aead::AeadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::aead::AeadError where U: core::convert::Into<T>
+pub type secure::aead::AeadError::Error = core::convert::Infallible
+pub fn secure::aead::AeadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::aead::AeadError where U: core::convert::TryFrom<T>
+pub type secure::aead::AeadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::aead::AeadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::aead::AeadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::aead::AeadError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::aead::AeadError where T: 'static + ?core::marker::Sized
+pub fn secure::aead::AeadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::aead::AeadError where T: ?core::marker::Sized
+pub fn secure::aead::AeadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::aead::AeadError where T: ?core::marker::Sized
+pub fn secure::aead::AeadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::aead::AeadError
+pub fn secure::aead::AeadError::from(T) -> T
+#[non_exhaustive] pub enum secure::CookieError
+pub secure::CookieError::Malformed
+pub secure::CookieError::Signature
+impl core::error::Error for secure::cookie::CookieError
+impl core::fmt::Debug for secure::cookie::CookieError
+pub fn secure::cookie::CookieError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::cookie::CookieError
+pub fn secure::cookie::CookieError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::cookie::CookieError
+impl core::marker::Send for secure::cookie::CookieError
+impl core::marker::Sync for secure::cookie::CookieError
+impl core::marker::Unpin for secure::cookie::CookieError
+impl core::marker::UnsafeUnpin for secure::cookie::CookieError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieError
+impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieError
+impl<T, U> core::convert::Into<U> for secure::cookie::CookieError where U: core::convert::From<T>
+pub fn secure::cookie::CookieError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieError where U: core::convert::Into<T>
+pub type secure::cookie::CookieError::Error = core::convert::Infallible
+pub fn secure::cookie::CookieError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieError where U: core::convert::TryFrom<T>
+pub type secure::cookie::CookieError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::cookie::CookieError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::cookie::CookieError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::cookie::CookieError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::cookie::CookieError where T: 'static + ?core::marker::Sized
+pub fn secure::cookie::CookieError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::cookie::CookieError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::cookie::CookieError
+pub fn secure::cookie::CookieError::from(T) -> T
+#[non_exhaustive] pub enum secure::CookieValueError
+pub secure::CookieValueError::Empty
+pub secure::CookieValueError::Format
+impl core::error::Error for secure::cookie::CookieValueError
+impl core::fmt::Debug for secure::cookie::CookieValueError
+pub fn secure::cookie::CookieValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::cookie::CookieValueError
+pub fn secure::cookie::CookieValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::cookie::CookieValueError
+impl core::marker::Send for secure::cookie::CookieValueError
+impl core::marker::Sync for secure::cookie::CookieValueError
+impl core::marker::Unpin for secure::cookie::CookieValueError
+impl core::marker::UnsafeUnpin for secure::cookie::CookieValueError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValueError
+impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValueError
+impl<T, U> core::convert::Into<U> for secure::cookie::CookieValueError where U: core::convert::From<T>
+pub fn secure::cookie::CookieValueError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValueError where U: core::convert::Into<T>
+pub type secure::cookie::CookieValueError::Error = core::convert::Infallible
+pub fn secure::cookie::CookieValueError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValueError where U: core::convert::TryFrom<T>
+pub type secure::cookie::CookieValueError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::cookie::CookieValueError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::cookie::CookieValueError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::cookie::CookieValueError where T: 'static + ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValueError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::cookie::CookieValueError
+pub fn secure::cookie::CookieValueError::from(T) -> T
+pub struct secure::Ciphertext(_)
+impl secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::as_bytes(&self) -> &[u8]
+pub fn secure::aead::Ciphertext::from_bytes(alloc::vec::Vec<u8>) -> Self
+impl core::clone::Clone for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::clone(&self) -> secure::aead::Ciphertext
+impl core::cmp::Eq for secure::aead::Ciphertext
+impl core::cmp::PartialEq for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::eq(&self, &secure::aead::Ciphertext) -> bool
+impl core::fmt::Debug for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
+impl core::marker::Freeze for secure::aead::Ciphertext
+impl core::marker::Send for secure::aead::Ciphertext
+impl core::marker::Sync for secure::aead::Ciphertext
+impl core::marker::Unpin for secure::aead::Ciphertext
+impl core::marker::UnsafeUnpin for secure::aead::Ciphertext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Ciphertext
+impl core::panic::unwind_safe::UnwindSafe for secure::aead::Ciphertext
+impl<T, U> core::convert::Into<U> for secure::aead::Ciphertext where U: core::convert::From<T>
+pub fn secure::aead::Ciphertext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::aead::Ciphertext where U: core::convert::Into<T>
+pub type secure::aead::Ciphertext::Error = core::convert::Infallible
+pub fn secure::aead::Ciphertext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::aead::Ciphertext where U: core::convert::TryFrom<T>
+pub type secure::aead::Ciphertext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::aead::Ciphertext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::aead::Ciphertext where T: core::clone::Clone
+pub type secure::aead::Ciphertext::Owned = T
+pub fn secure::aead::Ciphertext::clone_into(&self, &mut T)
+pub fn secure::aead::Ciphertext::to_owned(&self) -> T
+impl<T> core::any::Any for secure::aead::Ciphertext where T: 'static + ?core::marker::Sized
+pub fn secure::aead::Ciphertext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
+pub fn secure::aead::Ciphertext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
+pub fn secure::aead::Ciphertext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::aead::Ciphertext where T: core::clone::Clone
+pub unsafe fn secure::aead::Ciphertext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::from(T) -> T
+pub struct secure::CookieValue(_)
+impl secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::as_str(&self) -> &str
+pub fn secure::cookie::CookieValue::parse(&str) -> core::result::Result<Self, secure::cookie::CookieValueError>
+impl core::clone::Clone for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::clone(&self) -> secure::cookie::CookieValue
+impl core::cmp::Eq for secure::cookie::CookieValue
+impl core::cmp::PartialEq for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::eq(&self, &secure::cookie::CookieValue) -> bool
+impl core::fmt::Debug for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::cookie::CookieValue
+impl core::marker::Freeze for secure::cookie::CookieValue
+impl core::marker::Send for secure::cookie::CookieValue
+impl core::marker::Sync for secure::cookie::CookieValue
+impl core::marker::Unpin for secure::cookie::CookieValue
+impl core::marker::UnsafeUnpin for secure::cookie::CookieValue
+impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValue
+impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValue
+impl<T, U> core::convert::Into<U> for secure::cookie::CookieValue where U: core::convert::From<T>
+pub fn secure::cookie::CookieValue::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValue where U: core::convert::Into<T>
+pub type secure::cookie::CookieValue::Error = core::convert::Infallible
+pub fn secure::cookie::CookieValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValue where U: core::convert::TryFrom<T>
+pub type secure::cookie::CookieValue::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::cookie::CookieValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::cookie::CookieValue where T: core::clone::Clone
+pub type secure::cookie::CookieValue::Owned = T
+pub fn secure::cookie::CookieValue::clone_into(&self, &mut T)
+pub fn secure::cookie::CookieValue::to_owned(&self) -> T
+impl<T> core::any::Any for secure::cookie::CookieValue where T: 'static + ?core::marker::Sized
+pub fn secure::cookie::CookieValue::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValue::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
+pub fn secure::cookie::CookieValue::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::cookie::CookieValue where T: core::clone::Clone
+pub unsafe fn secure::cookie::CookieValue::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::from(T) -> T
+pub struct secure::Redacted(_)
+impl secure::redaction::Redacted
+pub fn secure::redaction::Redacted::as_str(&self) -> &str
+pub fn secure::redaction::Redacted::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::clone(&self) -> secure::redaction::Redacted
+impl core::cmp::Eq for secure::redaction::Redacted
+impl core::cmp::PartialEq for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::eq(&self, &secure::redaction::Redacted) -> bool
+impl core::fmt::Debug for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::redaction::Redacted
+impl core::marker::Freeze for secure::redaction::Redacted
+impl core::marker::Send for secure::redaction::Redacted
+impl core::marker::Sync for secure::redaction::Redacted
+impl core::marker::Unpin for secure::redaction::Redacted
+impl core::marker::UnsafeUnpin for secure::redaction::Redacted
+impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Redacted
+impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Redacted
+impl<T, U> core::convert::Into<U> for secure::redaction::Redacted where U: core::convert::From<T>
+pub fn secure::redaction::Redacted::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::redaction::Redacted where U: core::convert::Into<T>
+pub type secure::redaction::Redacted::Error = core::convert::Infallible
+pub fn secure::redaction::Redacted::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::redaction::Redacted where U: core::convert::TryFrom<T>
+pub type secure::redaction::Redacted::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::redaction::Redacted::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::redaction::Redacted where T: core::clone::Clone
+pub type secure::redaction::Redacted::Owned = T
+pub fn secure::redaction::Redacted::clone_into(&self, &mut T)
+pub fn secure::redaction::Redacted::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::redaction::Redacted where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::redaction::Redacted::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::redaction::Redacted where T: 'static + ?core::marker::Sized
+pub fn secure::redaction::Redacted::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::redaction::Redacted where T: ?core::marker::Sized
+pub fn secure::redaction::Redacted::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::redaction::Redacted where T: ?core::marker::Sized
+pub fn secure::redaction::Redacted::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::redaction::Redacted where T: core::clone::Clone
+pub unsafe fn secure::redaction::Redacted::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::redaction::Redacted
+pub fn secure::redaction::Redacted::from(T) -> T
+pub trait secure::Aead
+pub fn secure::Aead::open(&self, &secure::aead::Ciphertext) -> core::result::Result<alloc::vec::Vec<u8>, secure::aead::AeadError>
+pub fn secure::Aead::seal(&self, &[u8]) -> core::result::Result<secure::aead::Ciphertext, secure::aead::AeadError>
+pub trait secure::CookieCodec
+pub fn secure::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
+pub fn secure::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
+pub trait secure::Redactor
+pub fn secure::Redactor::redact(&self, &str) -> secure::redaction::Redacted
+pub fn secure::is_safe_segment(&str) -> bool
+pub fn secure::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
+pub fn secure::redact_field(&str, &str) -> secure::redaction::Redacted

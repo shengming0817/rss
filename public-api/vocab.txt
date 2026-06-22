@@ -1,0 +1,1245 @@
+pub mod vocab
+pub mod vocab::authz
+#[non_exhaustive] pub enum vocab::authz::ActionError
+pub vocab::authz::ActionError::Empty
+pub vocab::authz::ActionError::Format
+impl core::error::Error for vocab::authz::ActionError
+impl core::fmt::Debug for vocab::authz::ActionError
+pub fn vocab::authz::ActionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::ActionError
+pub fn vocab::authz::ActionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::authz::ActionError
+impl core::marker::Send for vocab::authz::ActionError
+impl core::marker::Sync for vocab::authz::ActionError
+impl core::marker::Unpin for vocab::authz::ActionError
+impl core::marker::UnsafeUnpin for vocab::authz::ActionError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::ActionError
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::ActionError
+impl<T, U> core::convert::Into<U> for vocab::authz::ActionError where U: core::convert::From<T>
+pub fn vocab::authz::ActionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::ActionError where U: core::convert::Into<T>
+pub type vocab::authz::ActionError::Error = core::convert::Infallible
+pub fn vocab::authz::ActionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::ActionError where U: core::convert::TryFrom<T>
+pub type vocab::authz::ActionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::ActionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::authz::ActionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::ActionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::ActionError where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::ActionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::ActionError where T: ?core::marker::Sized
+pub fn vocab::authz::ActionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::ActionError where T: ?core::marker::Sized
+pub fn vocab::authz::ActionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::authz::ActionError
+pub fn vocab::authz::ActionError::from(T) -> T
+#[non_exhaustive] pub enum vocab::authz::Decision
+pub vocab::authz::Decision::Allow
+pub vocab::authz::Decision::Deny
+impl core::clone::Clone for vocab::authz::Decision
+pub fn vocab::authz::Decision::clone(&self) -> vocab::authz::Decision
+impl core::cmp::Eq for vocab::authz::Decision
+impl core::cmp::PartialEq for vocab::authz::Decision
+pub fn vocab::authz::Decision::eq(&self, &vocab::authz::Decision) -> bool
+impl core::fmt::Debug for vocab::authz::Decision
+pub fn vocab::authz::Decision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::authz::Decision
+impl core::marker::StructuralPartialEq for vocab::authz::Decision
+impl core::marker::Freeze for vocab::authz::Decision
+impl core::marker::Send for vocab::authz::Decision
+impl core::marker::Sync for vocab::authz::Decision
+impl core::marker::Unpin for vocab::authz::Decision
+impl core::marker::UnsafeUnpin for vocab::authz::Decision
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Decision
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Decision
+impl<T, U> core::convert::Into<U> for vocab::authz::Decision where U: core::convert::From<T>
+pub fn vocab::authz::Decision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::Decision where U: core::convert::Into<T>
+pub type vocab::authz::Decision::Error = core::convert::Infallible
+pub fn vocab::authz::Decision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::Decision where U: core::convert::TryFrom<T>
+pub type vocab::authz::Decision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::Decision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::Decision where T: core::clone::Clone
+pub type vocab::authz::Decision::Owned = T
+pub fn vocab::authz::Decision::clone_into(&self, &mut T)
+pub fn vocab::authz::Decision::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::authz::Decision where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::Decision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::Decision where T: ?core::marker::Sized
+pub fn vocab::authz::Decision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::Decision where T: ?core::marker::Sized
+pub fn vocab::authz::Decision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::Decision where T: core::clone::Clone
+pub unsafe fn vocab::authz::Decision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::Decision
+pub fn vocab::authz::Decision::from(T) -> T
+pub struct vocab::authz::Action(_)
+impl vocab::authz::Action
+pub fn vocab::authz::Action::as_str(&self) -> &str
+pub fn vocab::authz::Action::parse(&str) -> core::result::Result<Self, vocab::authz::ActionError>
+impl core::clone::Clone for vocab::authz::Action
+pub fn vocab::authz::Action::clone(&self) -> vocab::authz::Action
+impl core::cmp::Eq for vocab::authz::Action
+impl core::cmp::PartialEq for vocab::authz::Action
+pub fn vocab::authz::Action::eq(&self, &vocab::authz::Action) -> bool
+impl core::fmt::Debug for vocab::authz::Action
+pub fn vocab::authz::Action::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::authz::Action
+impl core::marker::Freeze for vocab::authz::Action
+impl core::marker::Send for vocab::authz::Action
+impl core::marker::Sync for vocab::authz::Action
+impl core::marker::Unpin for vocab::authz::Action
+impl core::marker::UnsafeUnpin for vocab::authz::Action
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Action
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Action
+impl<T, U> core::convert::Into<U> for vocab::authz::Action where U: core::convert::From<T>
+pub fn vocab::authz::Action::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::Action where U: core::convert::Into<T>
+pub type vocab::authz::Action::Error = core::convert::Infallible
+pub fn vocab::authz::Action::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::Action where U: core::convert::TryFrom<T>
+pub type vocab::authz::Action::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::Action::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::Action where T: core::clone::Clone
+pub type vocab::authz::Action::Owned = T
+pub fn vocab::authz::Action::clone_into(&self, &mut T)
+pub fn vocab::authz::Action::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::authz::Action where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::Action::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::Action where T: ?core::marker::Sized
+pub fn vocab::authz::Action::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::Action where T: ?core::marker::Sized
+pub fn vocab::authz::Action::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone::Clone
+pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::Action
+pub fn vocab::authz::Action::from(T) -> T
+pub mod vocab::contract
+pub mod vocab::contract::owner
+#[non_exhaustive] pub enum vocab::contract::owner::ContractOwner
+pub vocab::contract::owner::ContractOwner::Domain(vocab::contract::owner::DomainName)
+pub vocab::contract::owner::ContractOwner::Framework
+impl vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
+impl core::clone::Clone for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
+impl core::cmp::Eq for vocab::contract::owner::ContractOwner
+impl core::cmp::PartialEq for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::eq(&self, &vocab::contract::owner::ContractOwner) -> bool
+impl core::fmt::Debug for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::contract::owner::ContractOwner
+impl core::marker::Freeze for vocab::contract::owner::ContractOwner
+impl core::marker::Send for vocab::contract::owner::ContractOwner
+impl core::marker::Sync for vocab::contract::owner::ContractOwner
+impl core::marker::Unpin for vocab::contract::owner::ContractOwner
+impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::ContractOwner where U: core::convert::From<T>
+pub fn vocab::contract::owner::ContractOwner::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::ContractOwner where U: core::convert::Into<T>
+pub type vocab::contract::owner::ContractOwner::Error = core::convert::Infallible
+pub fn vocab::contract::owner::ContractOwner::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::ContractOwner where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::ContractOwner::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::ContractOwner::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::owner::ContractOwner where T: core::clone::Clone
+pub type vocab::contract::owner::ContractOwner::Owned = T
+pub fn vocab::contract::owner::ContractOwner::clone_into(&self, &mut T)
+pub fn vocab::contract::owner::ContractOwner::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::owner::ContractOwner where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner where T: core::clone::Clone
+pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::from(T) -> T
+#[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
+pub vocab::contract::owner::DomainNameError::Empty
+pub vocab::contract::owner::DomainNameError::Format
+impl core::error::Error for vocab::contract::owner::DomainNameError
+impl core::fmt::Debug for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::contract::owner::DomainNameError
+impl core::marker::Send for vocab::contract::owner::DomainNameError
+impl core::marker::Sync for vocab::contract::owner::DomainNameError
+impl core::marker::Unpin for vocab::contract::owner::DomainNameError
+impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainNameError where U: core::convert::From<T>
+pub fn vocab::contract::owner::DomainNameError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainNameError where U: core::convert::Into<T>
+pub type vocab::contract::owner::DomainNameError::Error = core::convert::Infallible
+pub fn vocab::contract::owner::DomainNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainNameError where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::DomainNameError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::DomainNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::contract::owner::DomainNameError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::contract::owner::DomainNameError where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::from(T) -> T
+pub struct vocab::contract::owner::DomainName(_)
+impl vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
+pub fn vocab::contract::owner::DomainName::parse(&str) -> core::result::Result<Self, vocab::contract::owner::DomainNameError>
+impl core::clone::Clone for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::clone(&self) -> vocab::contract::owner::DomainName
+impl core::cmp::Eq for vocab::contract::owner::DomainName
+impl core::cmp::PartialEq for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::eq(&self, &vocab::contract::owner::DomainName) -> bool
+impl core::fmt::Debug for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::contract::owner::DomainName
+impl core::marker::Freeze for vocab::contract::owner::DomainName
+impl core::marker::Send for vocab::contract::owner::DomainName
+impl core::marker::Sync for vocab::contract::owner::DomainName
+impl core::marker::Unpin for vocab::contract::owner::DomainName
+impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainName
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainName
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainName
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainName where U: core::convert::From<T>
+pub fn vocab::contract::owner::DomainName::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainName where U: core::convert::Into<T>
+pub type vocab::contract::owner::DomainName::Error = core::convert::Infallible
+pub fn vocab::contract::owner::DomainName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainName where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::DomainName::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::DomainName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::owner::DomainName where T: core::clone::Clone
+pub type vocab::contract::owner::DomainName::Owned = T
+pub fn vocab::contract::owner::DomainName::clone_into(&self, &mut T)
+pub fn vocab::contract::owner::DomainName::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::owner::DomainName where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainName::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainName::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainName::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::owner::DomainName where T: core::clone::Clone
+pub unsafe fn vocab::contract::owner::DomainName::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::from(T) -> T
+pub mod vocab::error
+#[non_exhaustive] pub enum vocab::error::CoreErrorKind
+pub vocab::error::CoreErrorKind::Conflict
+pub vocab::error::CoreErrorKind::Forbidden
+pub vocab::error::CoreErrorKind::Internal
+pub vocab::error::CoreErrorKind::NotFound
+pub vocab::error::CoreErrorKind::Unauthenticated
+pub vocab::error::CoreErrorKind::Validation
+impl vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::message(self) -> &'static str
+impl core::clone::Clone for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::clone(&self) -> vocab::error::CoreErrorKind
+impl core::cmp::Eq for vocab::error::CoreErrorKind
+impl core::cmp::PartialEq for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::eq(&self, &vocab::error::CoreErrorKind) -> bool
+impl core::fmt::Debug for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::error::CoreErrorKind
+impl core::marker::StructuralPartialEq for vocab::error::CoreErrorKind
+impl core::marker::Freeze for vocab::error::CoreErrorKind
+impl core::marker::Send for vocab::error::CoreErrorKind
+impl core::marker::Sync for vocab::error::CoreErrorKind
+impl core::marker::Unpin for vocab::error::CoreErrorKind
+impl core::marker::UnsafeUnpin for vocab::error::CoreErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreErrorKind
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreErrorKind
+impl<T, U> core::convert::Into<U> for vocab::error::CoreErrorKind where U: core::convert::From<T>
+pub fn vocab::error::CoreErrorKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreErrorKind where U: core::convert::Into<T>
+pub type vocab::error::CoreErrorKind::Error = core::convert::Infallible
+pub fn vocab::error::CoreErrorKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::CoreErrorKind where U: core::convert::TryFrom<T>
+pub type vocab::error::CoreErrorKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::CoreErrorKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::error::CoreErrorKind where T: core::clone::Clone
+pub type vocab::error::CoreErrorKind::Owned = T
+pub fn vocab::error::CoreErrorKind::clone_into(&self, &mut T)
+pub fn vocab::error::CoreErrorKind::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::error::CoreErrorKind where T: 'static + ?core::marker::Sized
+pub fn vocab::error::CoreErrorKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
+pub fn vocab::error::CoreErrorKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
+pub fn vocab::error::CoreErrorKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::error::CoreErrorKind where T: core::clone::Clone
+pub unsafe fn vocab::error::CoreErrorKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::from(T) -> T
+#[non_exhaustive] pub enum vocab::error::InternalAttr
+pub vocab::error::InternalAttr::Int(&'static str, i64)
+pub vocab::error::InternalAttr::Str(&'static str, alloc::string::String)
+impl core::clone::Clone for vocab::error::InternalAttr
+pub fn vocab::error::InternalAttr::clone(&self) -> vocab::error::InternalAttr
+impl core::fmt::Debug for vocab::error::InternalAttr
+pub fn vocab::error::InternalAttr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::error::InternalAttr
+impl core::marker::Send for vocab::error::InternalAttr
+impl core::marker::Sync for vocab::error::InternalAttr
+impl core::marker::Unpin for vocab::error::InternalAttr
+impl core::marker::UnsafeUnpin for vocab::error::InternalAttr
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::InternalAttr
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::InternalAttr
+impl<T, U> core::convert::Into<U> for vocab::error::InternalAttr where U: core::convert::From<T>
+pub fn vocab::error::InternalAttr::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::InternalAttr where U: core::convert::Into<T>
+pub type vocab::error::InternalAttr::Error = core::convert::Infallible
+pub fn vocab::error::InternalAttr::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::InternalAttr where U: core::convert::TryFrom<T>
+pub type vocab::error::InternalAttr::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::InternalAttr::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::error::InternalAttr where T: core::clone::Clone
+pub type vocab::error::InternalAttr::Owned = T
+pub fn vocab::error::InternalAttr::clone_into(&self, &mut T)
+pub fn vocab::error::InternalAttr::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::error::InternalAttr where T: 'static + ?core::marker::Sized
+pub fn vocab::error::InternalAttr::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
+pub fn vocab::error::InternalAttr::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
+pub fn vocab::error::InternalAttr::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::error::InternalAttr where T: core::clone::Clone
+pub unsafe fn vocab::error::InternalAttr::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::error::InternalAttr
+pub fn vocab::error::InternalAttr::from(T) -> T
+#[non_exhaustive] pub enum vocab::error::PublicDetail
+pub vocab::error::PublicDetail::Bool(&'static str, bool)
+pub vocab::error::PublicDetail::Duration(&'static str, core::time::Duration)
+pub vocab::error::PublicDetail::Int(&'static str, i64)
+pub vocab::error::PublicDetail::Str(&'static str, alloc::string::String)
+pub vocab::error::PublicDetail::Time(&'static str, std::time::SystemTime)
+impl core::clone::Clone for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::clone(&self) -> vocab::error::PublicDetail
+impl core::cmp::PartialEq for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::eq(&self, &vocab::error::PublicDetail) -> bool
+impl core::fmt::Debug for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::error::PublicDetail
+impl core::marker::Freeze for vocab::error::PublicDetail
+impl core::marker::Send for vocab::error::PublicDetail
+impl core::marker::Sync for vocab::error::PublicDetail
+impl core::marker::Unpin for vocab::error::PublicDetail
+impl core::marker::UnsafeUnpin for vocab::error::PublicDetail
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::PublicDetail
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::PublicDetail
+impl<T, U> core::convert::Into<U> for vocab::error::PublicDetail where U: core::convert::From<T>
+pub fn vocab::error::PublicDetail::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::PublicDetail where U: core::convert::Into<T>
+pub type vocab::error::PublicDetail::Error = core::convert::Infallible
+pub fn vocab::error::PublicDetail::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::PublicDetail where U: core::convert::TryFrom<T>
+pub type vocab::error::PublicDetail::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::PublicDetail::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::error::PublicDetail where T: core::clone::Clone
+pub type vocab::error::PublicDetail::Owned = T
+pub fn vocab::error::PublicDetail::clone_into(&self, &mut T)
+pub fn vocab::error::PublicDetail::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::error::PublicDetail where T: 'static + ?core::marker::Sized
+pub fn vocab::error::PublicDetail::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
+pub fn vocab::error::PublicDetail::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
+pub fn vocab::error::PublicDetail::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::error::PublicDetail where T: core::clone::Clone
+pub unsafe fn vocab::error::PublicDetail::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::from(T) -> T
+pub struct vocab::error::CoreError
+impl vocab::error::CoreError
+pub fn vocab::error::CoreError::internal_attrs(&self) -> &[vocab::error::InternalAttr]
+pub fn vocab::error::CoreError::kind(&self) -> vocab::error::CoreErrorKind
+pub fn vocab::error::CoreError::new(vocab::error::CoreErrorKind) -> Self
+pub fn vocab::error::CoreError::public_details(&self) -> &[vocab::error::PublicDetail]
+pub fn vocab::error::CoreError::with_details(self, vocab::error::PublicDetail) -> Self
+pub fn vocab::error::CoreError::with_internal(self, vocab::error::InternalAttr) -> Self
+impl core::error::Error for vocab::error::CoreError
+impl core::fmt::Debug for vocab::error::CoreError
+pub fn vocab::error::CoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::error::CoreError
+pub fn vocab::error::CoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::error::CoreError
+impl core::marker::Send for vocab::error::CoreError
+impl core::marker::Sync for vocab::error::CoreError
+impl core::marker::Unpin for vocab::error::CoreError
+impl core::marker::UnsafeUnpin for vocab::error::CoreError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreError
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreError
+impl<T, U> core::convert::Into<U> for vocab::error::CoreError where U: core::convert::From<T>
+pub fn vocab::error::CoreError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreError where U: core::convert::Into<T>
+pub type vocab::error::CoreError::Error = core::convert::Infallible
+pub fn vocab::error::CoreError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::CoreError where U: core::convert::TryFrom<T>
+pub type vocab::error::CoreError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::CoreError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::error::CoreError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::error::CoreError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::error::CoreError where T: 'static + ?core::marker::Sized
+pub fn vocab::error::CoreError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::CoreError where T: ?core::marker::Sized
+pub fn vocab::error::CoreError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreError where T: ?core::marker::Sized
+pub fn vocab::error::CoreError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::error::CoreError
+pub fn vocab::error::CoreError::from(T) -> T
+pub mod vocab::query
+#[non_exhaustive] pub enum vocab::query::CursorError
+pub vocab::query::CursorError::Malformed
+impl core::error::Error for vocab::query::CursorError
+impl core::fmt::Debug for vocab::query::CursorError
+pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::query::CursorError
+pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::query::CursorError
+impl core::marker::Send for vocab::query::CursorError
+impl core::marker::Sync for vocab::query::CursorError
+impl core::marker::Unpin for vocab::query::CursorError
+impl core::marker::UnsafeUnpin for vocab::query::CursorError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::CursorError
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::CursorError
+impl<T, U> core::convert::Into<U> for vocab::query::CursorError where U: core::convert::From<T>
+pub fn vocab::query::CursorError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::CursorError where U: core::convert::Into<T>
+pub type vocab::query::CursorError::Error = core::convert::Infallible
+pub fn vocab::query::CursorError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::CursorError where U: core::convert::TryFrom<T>
+pub type vocab::query::CursorError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::CursorError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::query::CursorError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::query::CursorError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::query::CursorError where T: 'static + ?core::marker::Sized
+pub fn vocab::query::CursorError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::CursorError where T: ?core::marker::Sized
+pub fn vocab::query::CursorError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::CursorError where T: ?core::marker::Sized
+pub fn vocab::query::CursorError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::query::CursorError
+pub fn vocab::query::CursorError::from(T) -> T
+#[non_exhaustive] pub enum vocab::query::LimitError
+pub vocab::query::LimitError::TooLarge
+impl core::error::Error for vocab::query::LimitError
+impl core::fmt::Debug for vocab::query::LimitError
+pub fn vocab::query::LimitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::query::LimitError
+pub fn vocab::query::LimitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::query::LimitError
+impl core::marker::Send for vocab::query::LimitError
+impl core::marker::Sync for vocab::query::LimitError
+impl core::marker::Unpin for vocab::query::LimitError
+impl core::marker::UnsafeUnpin for vocab::query::LimitError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::LimitError
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::LimitError
+impl<T, U> core::convert::Into<U> for vocab::query::LimitError where U: core::convert::From<T>
+pub fn vocab::query::LimitError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::LimitError where U: core::convert::Into<T>
+pub type vocab::query::LimitError::Error = core::convert::Infallible
+pub fn vocab::query::LimitError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::LimitError where U: core::convert::TryFrom<T>
+pub type vocab::query::LimitError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::LimitError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::query::LimitError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::query::LimitError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::query::LimitError where T: 'static + ?core::marker::Sized
+pub fn vocab::query::LimitError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::LimitError where T: ?core::marker::Sized
+pub fn vocab::query::LimitError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::LimitError where T: ?core::marker::Sized
+pub fn vocab::query::LimitError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::query::LimitError
+pub fn vocab::query::LimitError::from(T) -> T
+pub struct vocab::query::Cursor(_)
+impl vocab::query::Cursor
+pub fn vocab::query::Cursor::as_str(&self) -> &str
+pub fn vocab::query::Cursor::parse(&str) -> core::result::Result<Self, vocab::query::CursorError>
+impl core::clone::Clone for vocab::query::Cursor
+pub fn vocab::query::Cursor::clone(&self) -> vocab::query::Cursor
+impl core::cmp::Eq for vocab::query::Cursor
+impl core::cmp::PartialEq for vocab::query::Cursor
+pub fn vocab::query::Cursor::eq(&self, &vocab::query::Cursor) -> bool
+impl core::fmt::Debug for vocab::query::Cursor
+pub fn vocab::query::Cursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::query::Cursor
+impl core::marker::Freeze for vocab::query::Cursor
+impl core::marker::Send for vocab::query::Cursor
+impl core::marker::Sync for vocab::query::Cursor
+impl core::marker::Unpin for vocab::query::Cursor
+impl core::marker::UnsafeUnpin for vocab::query::Cursor
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Cursor
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::Cursor
+impl<T, U> core::convert::Into<U> for vocab::query::Cursor where U: core::convert::From<T>
+pub fn vocab::query::Cursor::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::Cursor where U: core::convert::Into<T>
+pub type vocab::query::Cursor::Error = core::convert::Infallible
+pub fn vocab::query::Cursor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::Cursor where U: core::convert::TryFrom<T>
+pub type vocab::query::Cursor::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::Cursor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::query::Cursor where T: core::clone::Clone
+pub type vocab::query::Cursor::Owned = T
+pub fn vocab::query::Cursor::clone_into(&self, &mut T)
+pub fn vocab::query::Cursor::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::query::Cursor where T: 'static + ?core::marker::Sized
+pub fn vocab::query::Cursor::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::Cursor where T: ?core::marker::Sized
+pub fn vocab::query::Cursor::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::Cursor where T: ?core::marker::Sized
+pub fn vocab::query::Cursor::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::query::Cursor where T: core::clone::Clone
+pub unsafe fn vocab::query::Cursor::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::query::Cursor
+pub fn vocab::query::Cursor::from(T) -> T
+pub struct vocab::query::Limit(_)
+impl vocab::query::Limit
+pub fn vocab::query::Limit::get(&self) -> u16
+pub fn vocab::query::Limit::new(u16) -> core::result::Result<Self, vocab::query::LimitError>
+impl core::clone::Clone for vocab::query::Limit
+pub fn vocab::query::Limit::clone(&self) -> vocab::query::Limit
+impl core::cmp::Eq for vocab::query::Limit
+impl core::cmp::PartialEq for vocab::query::Limit
+pub fn vocab::query::Limit::eq(&self, &vocab::query::Limit) -> bool
+impl core::fmt::Debug for vocab::query::Limit
+pub fn vocab::query::Limit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::query::Limit
+impl core::marker::StructuralPartialEq for vocab::query::Limit
+impl core::marker::Freeze for vocab::query::Limit
+impl core::marker::Send for vocab::query::Limit
+impl core::marker::Sync for vocab::query::Limit
+impl core::marker::Unpin for vocab::query::Limit
+impl core::marker::UnsafeUnpin for vocab::query::Limit
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Limit
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::Limit
+impl<T, U> core::convert::Into<U> for vocab::query::Limit where U: core::convert::From<T>
+pub fn vocab::query::Limit::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::Limit where U: core::convert::Into<T>
+pub type vocab::query::Limit::Error = core::convert::Infallible
+pub fn vocab::query::Limit::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::Limit where U: core::convert::TryFrom<T>
+pub type vocab::query::Limit::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::Limit::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::query::Limit where T: core::clone::Clone
+pub type vocab::query::Limit::Owned = T
+pub fn vocab::query::Limit::clone_into(&self, &mut T)
+pub fn vocab::query::Limit::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::query::Limit where T: 'static + ?core::marker::Sized
+pub fn vocab::query::Limit::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::Limit where T: ?core::marker::Sized
+pub fn vocab::query::Limit::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::Limit where T: ?core::marker::Sized
+pub fn vocab::query::Limit::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::query::Limit where T: core::clone::Clone
+pub unsafe fn vocab::query::Limit::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::query::Limit
+pub fn vocab::query::Limit::from(T) -> T
+pub mod vocab::tenant
+#[non_exhaustive] pub enum vocab::tenant::TenantIdError
+pub vocab::tenant::TenantIdError::Empty
+pub vocab::tenant::TenantIdError::Format
+pub vocab::tenant::TenantIdError::Nil
+impl core::error::Error for vocab::tenant::TenantIdError
+impl core::fmt::Debug for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::tenant::TenantIdError
+impl core::marker::Send for vocab::tenant::TenantIdError
+impl core::marker::Sync for vocab::tenant::TenantIdError
+impl core::marker::Unpin for vocab::tenant::TenantIdError
+impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
+impl<T, U> core::convert::Into<U> for vocab::tenant::TenantIdError where U: core::convert::From<T>
+pub fn vocab::tenant::TenantIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantIdError where U: core::convert::Into<T>
+pub type vocab::tenant::TenantIdError::Error = core::convert::Infallible
+pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
+pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::from(T) -> T
+pub struct vocab::tenant::TenantId(_)
+impl vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
+pub fn vocab::tenant::TenantId::parse(&str) -> core::result::Result<Self, vocab::tenant::TenantIdError>
+impl core::clone::Clone for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::clone(&self) -> vocab::tenant::TenantId
+impl core::cmp::Eq for vocab::tenant::TenantId
+impl core::cmp::PartialEq for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
+impl core::fmt::Debug for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::tenant::TenantId
+impl core::marker::StructuralPartialEq for vocab::tenant::TenantId
+impl core::marker::Freeze for vocab::tenant::TenantId
+impl core::marker::Send for vocab::tenant::TenantId
+impl core::marker::Sync for vocab::tenant::TenantId
+impl core::marker::Unpin for vocab::tenant::TenantId
+impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
+impl<T, U> core::convert::Into<U> for vocab::tenant::TenantId where U: core::convert::From<T>
+pub fn vocab::tenant::TenantId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantId where U: core::convert::Into<T>
+pub type vocab::tenant::TenantId::Error = core::convert::Infallible
+pub fn vocab::tenant::TenantId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantId where U: core::convert::TryFrom<T>
+pub type vocab::tenant::TenantId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::tenant::TenantId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone::Clone
+pub type vocab::tenant::TenantId::Owned = T
+pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
+pub fn vocab::tenant::TenantId::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
+pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::clone::Clone
+pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::from(T) -> T
+#[non_exhaustive] pub enum vocab::ActionError
+pub vocab::ActionError::Empty
+pub vocab::ActionError::Format
+impl core::error::Error for vocab::authz::ActionError
+impl core::fmt::Debug for vocab::authz::ActionError
+pub fn vocab::authz::ActionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::ActionError
+pub fn vocab::authz::ActionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::authz::ActionError
+impl core::marker::Send for vocab::authz::ActionError
+impl core::marker::Sync for vocab::authz::ActionError
+impl core::marker::Unpin for vocab::authz::ActionError
+impl core::marker::UnsafeUnpin for vocab::authz::ActionError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::ActionError
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::ActionError
+impl<T, U> core::convert::Into<U> for vocab::authz::ActionError where U: core::convert::From<T>
+pub fn vocab::authz::ActionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::ActionError where U: core::convert::Into<T>
+pub type vocab::authz::ActionError::Error = core::convert::Infallible
+pub fn vocab::authz::ActionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::ActionError where U: core::convert::TryFrom<T>
+pub type vocab::authz::ActionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::ActionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::authz::ActionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::ActionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::ActionError where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::ActionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::ActionError where T: ?core::marker::Sized
+pub fn vocab::authz::ActionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::ActionError where T: ?core::marker::Sized
+pub fn vocab::authz::ActionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::authz::ActionError
+pub fn vocab::authz::ActionError::from(T) -> T
+#[non_exhaustive] pub enum vocab::ContractOwner
+pub vocab::ContractOwner::Domain(vocab::contract::owner::DomainName)
+pub vocab::ContractOwner::Framework
+impl vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
+impl core::clone::Clone for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
+impl core::cmp::Eq for vocab::contract::owner::ContractOwner
+impl core::cmp::PartialEq for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::eq(&self, &vocab::contract::owner::ContractOwner) -> bool
+impl core::fmt::Debug for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::contract::owner::ContractOwner
+impl core::marker::Freeze for vocab::contract::owner::ContractOwner
+impl core::marker::Send for vocab::contract::owner::ContractOwner
+impl core::marker::Sync for vocab::contract::owner::ContractOwner
+impl core::marker::Unpin for vocab::contract::owner::ContractOwner
+impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::ContractOwner where U: core::convert::From<T>
+pub fn vocab::contract::owner::ContractOwner::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::ContractOwner where U: core::convert::Into<T>
+pub type vocab::contract::owner::ContractOwner::Error = core::convert::Infallible
+pub fn vocab::contract::owner::ContractOwner::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::ContractOwner where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::ContractOwner::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::ContractOwner::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::owner::ContractOwner where T: core::clone::Clone
+pub type vocab::contract::owner::ContractOwner::Owned = T
+pub fn vocab::contract::owner::ContractOwner::clone_into(&self, &mut T)
+pub fn vocab::contract::owner::ContractOwner::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::owner::ContractOwner where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner where T: core::clone::Clone
+pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::from(T) -> T
+#[non_exhaustive] pub enum vocab::CoreErrorKind
+pub vocab::CoreErrorKind::Conflict
+pub vocab::CoreErrorKind::Forbidden
+pub vocab::CoreErrorKind::Internal
+pub vocab::CoreErrorKind::NotFound
+pub vocab::CoreErrorKind::Unauthenticated
+pub vocab::CoreErrorKind::Validation
+impl vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::message(self) -> &'static str
+impl core::clone::Clone for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::clone(&self) -> vocab::error::CoreErrorKind
+impl core::cmp::Eq for vocab::error::CoreErrorKind
+impl core::cmp::PartialEq for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::eq(&self, &vocab::error::CoreErrorKind) -> bool
+impl core::fmt::Debug for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::error::CoreErrorKind
+impl core::marker::StructuralPartialEq for vocab::error::CoreErrorKind
+impl core::marker::Freeze for vocab::error::CoreErrorKind
+impl core::marker::Send for vocab::error::CoreErrorKind
+impl core::marker::Sync for vocab::error::CoreErrorKind
+impl core::marker::Unpin for vocab::error::CoreErrorKind
+impl core::marker::UnsafeUnpin for vocab::error::CoreErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreErrorKind
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreErrorKind
+impl<T, U> core::convert::Into<U> for vocab::error::CoreErrorKind where U: core::convert::From<T>
+pub fn vocab::error::CoreErrorKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreErrorKind where U: core::convert::Into<T>
+pub type vocab::error::CoreErrorKind::Error = core::convert::Infallible
+pub fn vocab::error::CoreErrorKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::CoreErrorKind where U: core::convert::TryFrom<T>
+pub type vocab::error::CoreErrorKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::CoreErrorKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::error::CoreErrorKind where T: core::clone::Clone
+pub type vocab::error::CoreErrorKind::Owned = T
+pub fn vocab::error::CoreErrorKind::clone_into(&self, &mut T)
+pub fn vocab::error::CoreErrorKind::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::error::CoreErrorKind where T: 'static + ?core::marker::Sized
+pub fn vocab::error::CoreErrorKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
+pub fn vocab::error::CoreErrorKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
+pub fn vocab::error::CoreErrorKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::error::CoreErrorKind where T: core::clone::Clone
+pub unsafe fn vocab::error::CoreErrorKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::from(T) -> T
+#[non_exhaustive] pub enum vocab::CursorError
+pub vocab::CursorError::Malformed
+impl core::error::Error for vocab::query::CursorError
+impl core::fmt::Debug for vocab::query::CursorError
+pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::query::CursorError
+pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::query::CursorError
+impl core::marker::Send for vocab::query::CursorError
+impl core::marker::Sync for vocab::query::CursorError
+impl core::marker::Unpin for vocab::query::CursorError
+impl core::marker::UnsafeUnpin for vocab::query::CursorError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::CursorError
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::CursorError
+impl<T, U> core::convert::Into<U> for vocab::query::CursorError where U: core::convert::From<T>
+pub fn vocab::query::CursorError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::CursorError where U: core::convert::Into<T>
+pub type vocab::query::CursorError::Error = core::convert::Infallible
+pub fn vocab::query::CursorError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::CursorError where U: core::convert::TryFrom<T>
+pub type vocab::query::CursorError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::CursorError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::query::CursorError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::query::CursorError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::query::CursorError where T: 'static + ?core::marker::Sized
+pub fn vocab::query::CursorError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::CursorError where T: ?core::marker::Sized
+pub fn vocab::query::CursorError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::CursorError where T: ?core::marker::Sized
+pub fn vocab::query::CursorError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::query::CursorError
+pub fn vocab::query::CursorError::from(T) -> T
+#[non_exhaustive] pub enum vocab::Decision
+pub vocab::Decision::Allow
+pub vocab::Decision::Deny
+impl core::clone::Clone for vocab::authz::Decision
+pub fn vocab::authz::Decision::clone(&self) -> vocab::authz::Decision
+impl core::cmp::Eq for vocab::authz::Decision
+impl core::cmp::PartialEq for vocab::authz::Decision
+pub fn vocab::authz::Decision::eq(&self, &vocab::authz::Decision) -> bool
+impl core::fmt::Debug for vocab::authz::Decision
+pub fn vocab::authz::Decision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::authz::Decision
+impl core::marker::StructuralPartialEq for vocab::authz::Decision
+impl core::marker::Freeze for vocab::authz::Decision
+impl core::marker::Send for vocab::authz::Decision
+impl core::marker::Sync for vocab::authz::Decision
+impl core::marker::Unpin for vocab::authz::Decision
+impl core::marker::UnsafeUnpin for vocab::authz::Decision
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Decision
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Decision
+impl<T, U> core::convert::Into<U> for vocab::authz::Decision where U: core::convert::From<T>
+pub fn vocab::authz::Decision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::Decision where U: core::convert::Into<T>
+pub type vocab::authz::Decision::Error = core::convert::Infallible
+pub fn vocab::authz::Decision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::Decision where U: core::convert::TryFrom<T>
+pub type vocab::authz::Decision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::Decision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::Decision where T: core::clone::Clone
+pub type vocab::authz::Decision::Owned = T
+pub fn vocab::authz::Decision::clone_into(&self, &mut T)
+pub fn vocab::authz::Decision::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::authz::Decision where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::Decision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::Decision where T: ?core::marker::Sized
+pub fn vocab::authz::Decision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::Decision where T: ?core::marker::Sized
+pub fn vocab::authz::Decision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::Decision where T: core::clone::Clone
+pub unsafe fn vocab::authz::Decision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::Decision
+pub fn vocab::authz::Decision::from(T) -> T
+#[non_exhaustive] pub enum vocab::DomainNameError
+pub vocab::DomainNameError::Empty
+pub vocab::DomainNameError::Format
+impl core::error::Error for vocab::contract::owner::DomainNameError
+impl core::fmt::Debug for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::contract::owner::DomainNameError
+impl core::marker::Send for vocab::contract::owner::DomainNameError
+impl core::marker::Sync for vocab::contract::owner::DomainNameError
+impl core::marker::Unpin for vocab::contract::owner::DomainNameError
+impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainNameError where U: core::convert::From<T>
+pub fn vocab::contract::owner::DomainNameError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainNameError where U: core::convert::Into<T>
+pub type vocab::contract::owner::DomainNameError::Error = core::convert::Infallible
+pub fn vocab::contract::owner::DomainNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainNameError where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::DomainNameError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::DomainNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::contract::owner::DomainNameError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::contract::owner::DomainNameError where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::from(T) -> T
+#[non_exhaustive] pub enum vocab::InternalAttr
+pub vocab::InternalAttr::Int(&'static str, i64)
+pub vocab::InternalAttr::Str(&'static str, alloc::string::String)
+impl core::clone::Clone for vocab::error::InternalAttr
+pub fn vocab::error::InternalAttr::clone(&self) -> vocab::error::InternalAttr
+impl core::fmt::Debug for vocab::error::InternalAttr
+pub fn vocab::error::InternalAttr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::error::InternalAttr
+impl core::marker::Send for vocab::error::InternalAttr
+impl core::marker::Sync for vocab::error::InternalAttr
+impl core::marker::Unpin for vocab::error::InternalAttr
+impl core::marker::UnsafeUnpin for vocab::error::InternalAttr
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::InternalAttr
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::InternalAttr
+impl<T, U> core::convert::Into<U> for vocab::error::InternalAttr where U: core::convert::From<T>
+pub fn vocab::error::InternalAttr::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::InternalAttr where U: core::convert::Into<T>
+pub type vocab::error::InternalAttr::Error = core::convert::Infallible
+pub fn vocab::error::InternalAttr::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::InternalAttr where U: core::convert::TryFrom<T>
+pub type vocab::error::InternalAttr::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::InternalAttr::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::error::InternalAttr where T: core::clone::Clone
+pub type vocab::error::InternalAttr::Owned = T
+pub fn vocab::error::InternalAttr::clone_into(&self, &mut T)
+pub fn vocab::error::InternalAttr::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::error::InternalAttr where T: 'static + ?core::marker::Sized
+pub fn vocab::error::InternalAttr::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
+pub fn vocab::error::InternalAttr::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
+pub fn vocab::error::InternalAttr::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::error::InternalAttr where T: core::clone::Clone
+pub unsafe fn vocab::error::InternalAttr::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::error::InternalAttr
+pub fn vocab::error::InternalAttr::from(T) -> T
+#[non_exhaustive] pub enum vocab::LimitError
+pub vocab::LimitError::TooLarge
+impl core::error::Error for vocab::query::LimitError
+impl core::fmt::Debug for vocab::query::LimitError
+pub fn vocab::query::LimitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::query::LimitError
+pub fn vocab::query::LimitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::query::LimitError
+impl core::marker::Send for vocab::query::LimitError
+impl core::marker::Sync for vocab::query::LimitError
+impl core::marker::Unpin for vocab::query::LimitError
+impl core::marker::UnsafeUnpin for vocab::query::LimitError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::LimitError
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::LimitError
+impl<T, U> core::convert::Into<U> for vocab::query::LimitError where U: core::convert::From<T>
+pub fn vocab::query::LimitError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::LimitError where U: core::convert::Into<T>
+pub type vocab::query::LimitError::Error = core::convert::Infallible
+pub fn vocab::query::LimitError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::LimitError where U: core::convert::TryFrom<T>
+pub type vocab::query::LimitError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::LimitError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::query::LimitError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::query::LimitError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::query::LimitError where T: 'static + ?core::marker::Sized
+pub fn vocab::query::LimitError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::LimitError where T: ?core::marker::Sized
+pub fn vocab::query::LimitError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::LimitError where T: ?core::marker::Sized
+pub fn vocab::query::LimitError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::query::LimitError
+pub fn vocab::query::LimitError::from(T) -> T
+#[non_exhaustive] pub enum vocab::PublicDetail
+pub vocab::PublicDetail::Bool(&'static str, bool)
+pub vocab::PublicDetail::Duration(&'static str, core::time::Duration)
+pub vocab::PublicDetail::Int(&'static str, i64)
+pub vocab::PublicDetail::Str(&'static str, alloc::string::String)
+pub vocab::PublicDetail::Time(&'static str, std::time::SystemTime)
+impl core::clone::Clone for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::clone(&self) -> vocab::error::PublicDetail
+impl core::cmp::PartialEq for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::eq(&self, &vocab::error::PublicDetail) -> bool
+impl core::fmt::Debug for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::error::PublicDetail
+impl core::marker::Freeze for vocab::error::PublicDetail
+impl core::marker::Send for vocab::error::PublicDetail
+impl core::marker::Sync for vocab::error::PublicDetail
+impl core::marker::Unpin for vocab::error::PublicDetail
+impl core::marker::UnsafeUnpin for vocab::error::PublicDetail
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::PublicDetail
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::PublicDetail
+impl<T, U> core::convert::Into<U> for vocab::error::PublicDetail where U: core::convert::From<T>
+pub fn vocab::error::PublicDetail::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::PublicDetail where U: core::convert::Into<T>
+pub type vocab::error::PublicDetail::Error = core::convert::Infallible
+pub fn vocab::error::PublicDetail::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::PublicDetail where U: core::convert::TryFrom<T>
+pub type vocab::error::PublicDetail::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::PublicDetail::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::error::PublicDetail where T: core::clone::Clone
+pub type vocab::error::PublicDetail::Owned = T
+pub fn vocab::error::PublicDetail::clone_into(&self, &mut T)
+pub fn vocab::error::PublicDetail::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::error::PublicDetail where T: 'static + ?core::marker::Sized
+pub fn vocab::error::PublicDetail::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
+pub fn vocab::error::PublicDetail::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
+pub fn vocab::error::PublicDetail::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::error::PublicDetail where T: core::clone::Clone
+pub unsafe fn vocab::error::PublicDetail::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::error::PublicDetail
+pub fn vocab::error::PublicDetail::from(T) -> T
+#[non_exhaustive] pub enum vocab::TenantIdError
+pub vocab::TenantIdError::Empty
+pub vocab::TenantIdError::Format
+pub vocab::TenantIdError::Nil
+impl core::error::Error for vocab::tenant::TenantIdError
+impl core::fmt::Debug for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::tenant::TenantIdError
+impl core::marker::Send for vocab::tenant::TenantIdError
+impl core::marker::Sync for vocab::tenant::TenantIdError
+impl core::marker::Unpin for vocab::tenant::TenantIdError
+impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
+impl<T, U> core::convert::Into<U> for vocab::tenant::TenantIdError where U: core::convert::From<T>
+pub fn vocab::tenant::TenantIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantIdError where U: core::convert::Into<T>
+pub type vocab::tenant::TenantIdError::Error = core::convert::Infallible
+pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
+pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::from(T) -> T
+pub struct vocab::Action(_)
+impl vocab::authz::Action
+pub fn vocab::authz::Action::as_str(&self) -> &str
+pub fn vocab::authz::Action::parse(&str) -> core::result::Result<Self, vocab::authz::ActionError>
+impl core::clone::Clone for vocab::authz::Action
+pub fn vocab::authz::Action::clone(&self) -> vocab::authz::Action
+impl core::cmp::Eq for vocab::authz::Action
+impl core::cmp::PartialEq for vocab::authz::Action
+pub fn vocab::authz::Action::eq(&self, &vocab::authz::Action) -> bool
+impl core::fmt::Debug for vocab::authz::Action
+pub fn vocab::authz::Action::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::authz::Action
+impl core::marker::Freeze for vocab::authz::Action
+impl core::marker::Send for vocab::authz::Action
+impl core::marker::Sync for vocab::authz::Action
+impl core::marker::Unpin for vocab::authz::Action
+impl core::marker::UnsafeUnpin for vocab::authz::Action
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Action
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Action
+impl<T, U> core::convert::Into<U> for vocab::authz::Action where U: core::convert::From<T>
+pub fn vocab::authz::Action::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::Action where U: core::convert::Into<T>
+pub type vocab::authz::Action::Error = core::convert::Infallible
+pub fn vocab::authz::Action::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::Action where U: core::convert::TryFrom<T>
+pub type vocab::authz::Action::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::Action::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::Action where T: core::clone::Clone
+pub type vocab::authz::Action::Owned = T
+pub fn vocab::authz::Action::clone_into(&self, &mut T)
+pub fn vocab::authz::Action::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::authz::Action where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::Action::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::Action where T: ?core::marker::Sized
+pub fn vocab::authz::Action::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::Action where T: ?core::marker::Sized
+pub fn vocab::authz::Action::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone::Clone
+pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::Action
+pub fn vocab::authz::Action::from(T) -> T
+pub struct vocab::CoreError
+impl vocab::error::CoreError
+pub fn vocab::error::CoreError::internal_attrs(&self) -> &[vocab::error::InternalAttr]
+pub fn vocab::error::CoreError::kind(&self) -> vocab::error::CoreErrorKind
+pub fn vocab::error::CoreError::new(vocab::error::CoreErrorKind) -> Self
+pub fn vocab::error::CoreError::public_details(&self) -> &[vocab::error::PublicDetail]
+pub fn vocab::error::CoreError::with_details(self, vocab::error::PublicDetail) -> Self
+pub fn vocab::error::CoreError::with_internal(self, vocab::error::InternalAttr) -> Self
+impl core::error::Error for vocab::error::CoreError
+impl core::fmt::Debug for vocab::error::CoreError
+pub fn vocab::error::CoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::error::CoreError
+pub fn vocab::error::CoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::error::CoreError
+impl core::marker::Send for vocab::error::CoreError
+impl core::marker::Sync for vocab::error::CoreError
+impl core::marker::Unpin for vocab::error::CoreError
+impl core::marker::UnsafeUnpin for vocab::error::CoreError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreError
+impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreError
+impl<T, U> core::convert::Into<U> for vocab::error::CoreError where U: core::convert::From<T>
+pub fn vocab::error::CoreError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreError where U: core::convert::Into<T>
+pub type vocab::error::CoreError::Error = core::convert::Infallible
+pub fn vocab::error::CoreError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::error::CoreError where U: core::convert::TryFrom<T>
+pub type vocab::error::CoreError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::error::CoreError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::error::CoreError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::error::CoreError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::error::CoreError where T: 'static + ?core::marker::Sized
+pub fn vocab::error::CoreError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::error::CoreError where T: ?core::marker::Sized
+pub fn vocab::error::CoreError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreError where T: ?core::marker::Sized
+pub fn vocab::error::CoreError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::error::CoreError
+pub fn vocab::error::CoreError::from(T) -> T
+pub struct vocab::Cursor(_)
+impl vocab::query::Cursor
+pub fn vocab::query::Cursor::as_str(&self) -> &str
+pub fn vocab::query::Cursor::parse(&str) -> core::result::Result<Self, vocab::query::CursorError>
+impl core::clone::Clone for vocab::query::Cursor
+pub fn vocab::query::Cursor::clone(&self) -> vocab::query::Cursor
+impl core::cmp::Eq for vocab::query::Cursor
+impl core::cmp::PartialEq for vocab::query::Cursor
+pub fn vocab::query::Cursor::eq(&self, &vocab::query::Cursor) -> bool
+impl core::fmt::Debug for vocab::query::Cursor
+pub fn vocab::query::Cursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::query::Cursor
+impl core::marker::Freeze for vocab::query::Cursor
+impl core::marker::Send for vocab::query::Cursor
+impl core::marker::Sync for vocab::query::Cursor
+impl core::marker::Unpin for vocab::query::Cursor
+impl core::marker::UnsafeUnpin for vocab::query::Cursor
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Cursor
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::Cursor
+impl<T, U> core::convert::Into<U> for vocab::query::Cursor where U: core::convert::From<T>
+pub fn vocab::query::Cursor::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::Cursor where U: core::convert::Into<T>
+pub type vocab::query::Cursor::Error = core::convert::Infallible
+pub fn vocab::query::Cursor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::Cursor where U: core::convert::TryFrom<T>
+pub type vocab::query::Cursor::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::Cursor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::query::Cursor where T: core::clone::Clone
+pub type vocab::query::Cursor::Owned = T
+pub fn vocab::query::Cursor::clone_into(&self, &mut T)
+pub fn vocab::query::Cursor::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::query::Cursor where T: 'static + ?core::marker::Sized
+pub fn vocab::query::Cursor::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::Cursor where T: ?core::marker::Sized
+pub fn vocab::query::Cursor::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::Cursor where T: ?core::marker::Sized
+pub fn vocab::query::Cursor::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::query::Cursor where T: core::clone::Clone
+pub unsafe fn vocab::query::Cursor::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::query::Cursor
+pub fn vocab::query::Cursor::from(T) -> T
+pub struct vocab::DomainName(_)
+impl vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
+pub fn vocab::contract::owner::DomainName::parse(&str) -> core::result::Result<Self, vocab::contract::owner::DomainNameError>
+impl core::clone::Clone for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::clone(&self) -> vocab::contract::owner::DomainName
+impl core::cmp::Eq for vocab::contract::owner::DomainName
+impl core::cmp::PartialEq for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::eq(&self, &vocab::contract::owner::DomainName) -> bool
+impl core::fmt::Debug for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::contract::owner::DomainName
+impl core::marker::Freeze for vocab::contract::owner::DomainName
+impl core::marker::Send for vocab::contract::owner::DomainName
+impl core::marker::Sync for vocab::contract::owner::DomainName
+impl core::marker::Unpin for vocab::contract::owner::DomainName
+impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainName
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainName
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainName
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainName where U: core::convert::From<T>
+pub fn vocab::contract::owner::DomainName::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainName where U: core::convert::Into<T>
+pub type vocab::contract::owner::DomainName::Error = core::convert::Infallible
+pub fn vocab::contract::owner::DomainName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainName where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::DomainName::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::DomainName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::owner::DomainName where T: core::clone::Clone
+pub type vocab::contract::owner::DomainName::Owned = T
+pub fn vocab::contract::owner::DomainName::clone_into(&self, &mut T)
+pub fn vocab::contract::owner::DomainName::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::owner::DomainName where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainName::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainName::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainName::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::owner::DomainName where T: core::clone::Clone
+pub unsafe fn vocab::contract::owner::DomainName::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::owner::DomainName
+pub fn vocab::contract::owner::DomainName::from(T) -> T
+pub struct vocab::Limit(_)
+impl vocab::query::Limit
+pub fn vocab::query::Limit::get(&self) -> u16
+pub fn vocab::query::Limit::new(u16) -> core::result::Result<Self, vocab::query::LimitError>
+impl core::clone::Clone for vocab::query::Limit
+pub fn vocab::query::Limit::clone(&self) -> vocab::query::Limit
+impl core::cmp::Eq for vocab::query::Limit
+impl core::cmp::PartialEq for vocab::query::Limit
+pub fn vocab::query::Limit::eq(&self, &vocab::query::Limit) -> bool
+impl core::fmt::Debug for vocab::query::Limit
+pub fn vocab::query::Limit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::query::Limit
+impl core::marker::StructuralPartialEq for vocab::query::Limit
+impl core::marker::Freeze for vocab::query::Limit
+impl core::marker::Send for vocab::query::Limit
+impl core::marker::Sync for vocab::query::Limit
+impl core::marker::Unpin for vocab::query::Limit
+impl core::marker::UnsafeUnpin for vocab::query::Limit
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Limit
+impl core::panic::unwind_safe::UnwindSafe for vocab::query::Limit
+impl<T, U> core::convert::Into<U> for vocab::query::Limit where U: core::convert::From<T>
+pub fn vocab::query::Limit::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::query::Limit where U: core::convert::Into<T>
+pub type vocab::query::Limit::Error = core::convert::Infallible
+pub fn vocab::query::Limit::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::query::Limit where U: core::convert::TryFrom<T>
+pub type vocab::query::Limit::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::query::Limit::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::query::Limit where T: core::clone::Clone
+pub type vocab::query::Limit::Owned = T
+pub fn vocab::query::Limit::clone_into(&self, &mut T)
+pub fn vocab::query::Limit::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::query::Limit where T: 'static + ?core::marker::Sized
+pub fn vocab::query::Limit::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::query::Limit where T: ?core::marker::Sized
+pub fn vocab::query::Limit::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::query::Limit where T: ?core::marker::Sized
+pub fn vocab::query::Limit::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::query::Limit where T: core::clone::Clone
+pub unsafe fn vocab::query::Limit::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::query::Limit
+pub fn vocab::query::Limit::from(T) -> T
+pub struct vocab::TenantId(_)
+impl vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
+pub fn vocab::tenant::TenantId::parse(&str) -> core::result::Result<Self, vocab::tenant::TenantIdError>
+impl core::clone::Clone for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::clone(&self) -> vocab::tenant::TenantId
+impl core::cmp::Eq for vocab::tenant::TenantId
+impl core::cmp::PartialEq for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
+impl core::fmt::Debug for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::tenant::TenantId
+impl core::marker::StructuralPartialEq for vocab::tenant::TenantId
+impl core::marker::Freeze for vocab::tenant::TenantId
+impl core::marker::Send for vocab::tenant::TenantId
+impl core::marker::Sync for vocab::tenant::TenantId
+impl core::marker::Unpin for vocab::tenant::TenantId
+impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
+impl<T, U> core::convert::Into<U> for vocab::tenant::TenantId where U: core::convert::From<T>
+pub fn vocab::tenant::TenantId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantId where U: core::convert::Into<T>
+pub type vocab::tenant::TenantId::Error = core::convert::Infallible
+pub fn vocab::tenant::TenantId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantId where U: core::convert::TryFrom<T>
+pub type vocab::tenant::TenantId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::tenant::TenantId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone::Clone
+pub type vocab::tenant::TenantId::Owned = T
+pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
+pub fn vocab::tenant::TenantId::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
+pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::clone::Clone
+pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::from(T) -> T

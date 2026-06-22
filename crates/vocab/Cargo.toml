@@ -5,5 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+thiserror = { workspace = true }
+# TenantId 内部表示为 canonical UUID（tenancy.md fail-closed）。仅需持有/解析，默认 std feature 即可；不引 v4/serde。
+uuid = { workspace = true }
+
 [lints]
 workspace = true

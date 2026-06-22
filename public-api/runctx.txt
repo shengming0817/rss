@@ -1,0 +1,181 @@
+pub mod runctx
+pub mod runctx::ctx
+pub struct runctx::ctx::RequestCtx<T, P>
+impl<T, P> runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::new(T, P) -> Self
+pub fn runctx::ctx::RequestCtx<T, P>::principal(&self) -> &P
+pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
+impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
+impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
+impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
+impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::eq(&self, &runctx::ctx::RequestCtx<T, P>) -> bool
+impl<T, P> core::marker::Freeze for runctx::ctx::RequestCtx<T, P> where T: core::marker::Freeze, P: core::marker::Freeze
+impl<T, P> core::marker::Send for runctx::ctx::RequestCtx<T, P> where T: core::marker::Send, P: core::marker::Send
+impl<T, P> core::marker::Sync for runctx::ctx::RequestCtx<T, P> where T: core::marker::Sync, P: core::marker::Sync
+impl<T, P> core::marker::Unpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::Unpin, P: core::marker::Unpin
+impl<T, P> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::UnsafeUnpin, P: core::marker::UnsafeUnpin
+impl<T, P> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::RefUnwindSafe, P: core::panic::unwind_safe::RefUnwindSafe
+impl<T, P> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::UnwindSafe, P: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for runctx::ctx::RequestCtx<T, P> where U: core::convert::From<T>
+pub fn runctx::ctx::RequestCtx<T, P>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for runctx::ctx::RequestCtx<T, P> where U: core::convert::Into<T>
+pub type runctx::ctx::RequestCtx<T, P>::Error = core::convert::Infallible
+pub fn runctx::ctx::RequestCtx<T, P>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for runctx::ctx::RequestCtx<T, P> where U: core::convert::TryFrom<T>
+pub type runctx::ctx::RequestCtx<T, P>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn runctx::ctx::RequestCtx<T, P>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for runctx::ctx::RequestCtx<T, P> where T: core::clone::Clone
+pub type runctx::ctx::RequestCtx<T, P>::Owned = T
+pub fn runctx::ctx::RequestCtx<T, P>::clone_into(&self, &mut T)
+pub fn runctx::ctx::RequestCtx<T, P>::to_owned(&self) -> T
+impl<T> core::any::Any for runctx::ctx::RequestCtx<T, P> where T: 'static + ?core::marker::Sized
+pub fn runctx::ctx::RequestCtx<T, P>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for runctx::ctx::RequestCtx<T, P> where T: ?core::marker::Sized
+pub fn runctx::ctx::RequestCtx<T, P>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for runctx::ctx::RequestCtx<T, P> where T: ?core::marker::Sized
+pub fn runctx::ctx::RequestCtx<T, P>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for runctx::ctx::RequestCtx<T, P> where T: core::clone::Clone
+pub unsafe fn runctx::ctx::RequestCtx<T, P>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::from(T) -> T
+pub type runctx::ctx::AppCtx = runctx::ctx::RequestCtx<TenantSlot, PrincipalSlot>
+pub mod runctx::local
+pub struct runctx::local::MissingCtx
+impl core::clone::Clone for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::clone(&self) -> runctx::local::MissingCtx
+impl core::cmp::Eq for runctx::local::MissingCtx
+impl core::cmp::PartialEq for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::eq(&self, &runctx::local::MissingCtx) -> bool
+impl core::error::Error for runctx::local::MissingCtx
+impl core::fmt::Debug for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runctx::local::MissingCtx
+impl core::marker::Freeze for runctx::local::MissingCtx
+impl core::marker::Send for runctx::local::MissingCtx
+impl core::marker::Sync for runctx::local::MissingCtx
+impl core::marker::Unpin for runctx::local::MissingCtx
+impl core::marker::UnsafeUnpin for runctx::local::MissingCtx
+impl core::panic::unwind_safe::RefUnwindSafe for runctx::local::MissingCtx
+impl core::panic::unwind_safe::UnwindSafe for runctx::local::MissingCtx
+impl<T, U> core::convert::Into<U> for runctx::local::MissingCtx where U: core::convert::From<T>
+pub fn runctx::local::MissingCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for runctx::local::MissingCtx where U: core::convert::Into<T>
+pub type runctx::local::MissingCtx::Error = core::convert::Infallible
+pub fn runctx::local::MissingCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for runctx::local::MissingCtx where U: core::convert::TryFrom<T>
+pub type runctx::local::MissingCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn runctx::local::MissingCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for runctx::local::MissingCtx where T: core::clone::Clone
+pub type runctx::local::MissingCtx::Owned = T
+pub fn runctx::local::MissingCtx::clone_into(&self, &mut T)
+pub fn runctx::local::MissingCtx::to_owned(&self) -> T
+impl<T> alloc::string::ToString for runctx::local::MissingCtx where T: core::fmt::Display + ?core::marker::Sized
+pub fn runctx::local::MissingCtx::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for runctx::local::MissingCtx where T: 'static + ?core::marker::Sized
+pub fn runctx::local::MissingCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for runctx::local::MissingCtx where T: ?core::marker::Sized
+pub fn runctx::local::MissingCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for runctx::local::MissingCtx where T: ?core::marker::Sized
+pub fn runctx::local::MissingCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for runctx::local::MissingCtx where T: core::clone::Clone
+pub unsafe fn runctx::local::MissingCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::from(T) -> T
+pub fn runctx::local::scope<F>(runctx::ctx::AppCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
+pub fn runctx::local::try_current() -> core::result::Result<runctx::ctx::AppCtx, runctx::local::MissingCtx>
+pub fn runctx::local::try_with<R>(impl core::ops::function::FnOnce(&runctx::ctx::AppCtx) -> R) -> core::result::Result<R, runctx::local::MissingCtx>
+pub struct runctx::MissingCtx
+impl core::clone::Clone for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::clone(&self) -> runctx::local::MissingCtx
+impl core::cmp::Eq for runctx::local::MissingCtx
+impl core::cmp::PartialEq for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::eq(&self, &runctx::local::MissingCtx) -> bool
+impl core::error::Error for runctx::local::MissingCtx
+impl core::fmt::Debug for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runctx::local::MissingCtx
+impl core::marker::Freeze for runctx::local::MissingCtx
+impl core::marker::Send for runctx::local::MissingCtx
+impl core::marker::Sync for runctx::local::MissingCtx
+impl core::marker::Unpin for runctx::local::MissingCtx
+impl core::marker::UnsafeUnpin for runctx::local::MissingCtx
+impl core::panic::unwind_safe::RefUnwindSafe for runctx::local::MissingCtx
+impl core::panic::unwind_safe::UnwindSafe for runctx::local::MissingCtx
+impl<T, U> core::convert::Into<U> for runctx::local::MissingCtx where U: core::convert::From<T>
+pub fn runctx::local::MissingCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for runctx::local::MissingCtx where U: core::convert::Into<T>
+pub type runctx::local::MissingCtx::Error = core::convert::Infallible
+pub fn runctx::local::MissingCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for runctx::local::MissingCtx where U: core::convert::TryFrom<T>
+pub type runctx::local::MissingCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn runctx::local::MissingCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for runctx::local::MissingCtx where T: core::clone::Clone
+pub type runctx::local::MissingCtx::Owned = T
+pub fn runctx::local::MissingCtx::clone_into(&self, &mut T)
+pub fn runctx::local::MissingCtx::to_owned(&self) -> T
+impl<T> alloc::string::ToString for runctx::local::MissingCtx where T: core::fmt::Display + ?core::marker::Sized
+pub fn runctx::local::MissingCtx::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for runctx::local::MissingCtx where T: 'static + ?core::marker::Sized
+pub fn runctx::local::MissingCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for runctx::local::MissingCtx where T: ?core::marker::Sized
+pub fn runctx::local::MissingCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for runctx::local::MissingCtx where T: ?core::marker::Sized
+pub fn runctx::local::MissingCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for runctx::local::MissingCtx where T: core::clone::Clone
+pub unsafe fn runctx::local::MissingCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for runctx::local::MissingCtx
+pub fn runctx::local::MissingCtx::from(T) -> T
+pub struct runctx::RequestCtx<T, P>
+impl<T, P> runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::new(T, P) -> Self
+pub fn runctx::ctx::RequestCtx<T, P>::principal(&self) -> &P
+pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
+impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
+impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
+impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
+impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::eq(&self, &runctx::ctx::RequestCtx<T, P>) -> bool
+impl<T, P> core::marker::Freeze for runctx::ctx::RequestCtx<T, P> where T: core::marker::Freeze, P: core::marker::Freeze
+impl<T, P> core::marker::Send for runctx::ctx::RequestCtx<T, P> where T: core::marker::Send, P: core::marker::Send
+impl<T, P> core::marker::Sync for runctx::ctx::RequestCtx<T, P> where T: core::marker::Sync, P: core::marker::Sync
+impl<T, P> core::marker::Unpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::Unpin, P: core::marker::Unpin
+impl<T, P> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::UnsafeUnpin, P: core::marker::UnsafeUnpin
+impl<T, P> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::RefUnwindSafe, P: core::panic::unwind_safe::RefUnwindSafe
+impl<T, P> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::UnwindSafe, P: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for runctx::ctx::RequestCtx<T, P> where U: core::convert::From<T>
+pub fn runctx::ctx::RequestCtx<T, P>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for runctx::ctx::RequestCtx<T, P> where U: core::convert::Into<T>
+pub type runctx::ctx::RequestCtx<T, P>::Error = core::convert::Infallible
+pub fn runctx::ctx::RequestCtx<T, P>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for runctx::ctx::RequestCtx<T, P> where U: core::convert::TryFrom<T>
+pub type runctx::ctx::RequestCtx<T, P>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn runctx::ctx::RequestCtx<T, P>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for runctx::ctx::RequestCtx<T, P> where T: core::clone::Clone
+pub type runctx::ctx::RequestCtx<T, P>::Owned = T
+pub fn runctx::ctx::RequestCtx<T, P>::clone_into(&self, &mut T)
+pub fn runctx::ctx::RequestCtx<T, P>::to_owned(&self) -> T
+impl<T> core::any::Any for runctx::ctx::RequestCtx<T, P> where T: 'static + ?core::marker::Sized
+pub fn runctx::ctx::RequestCtx<T, P>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for runctx::ctx::RequestCtx<T, P> where T: ?core::marker::Sized
+pub fn runctx::ctx::RequestCtx<T, P>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for runctx::ctx::RequestCtx<T, P> where T: ?core::marker::Sized
+pub fn runctx::ctx::RequestCtx<T, P>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for runctx::ctx::RequestCtx<T, P> where T: core::clone::Clone
+pub unsafe fn runctx::ctx::RequestCtx<T, P>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::from(T) -> T
+pub fn runctx::scope<F>(runctx::ctx::AppCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
+pub fn runctx::try_current() -> core::result::Result<runctx::ctx::AppCtx, runctx::local::MissingCtx>
+pub fn runctx::try_with<R>(impl core::ops::function::FnOnce(&runctx::ctx::AppCtx) -> R) -> core::result::Result<R, runctx::local::MissingCtx>
+pub type runctx::AppCtx = runctx::ctx::RequestCtx<TenantSlot, PrincipalSlot>
