@@ -30,6 +30,11 @@ impl PublisherError {
 /// 公开 [`Publisher`] 是 **Send 变体**（adapters `impl Publisher for ...`），[`DynPublisher`] 是其
 /// dyn-compatible wrapper。payload 为 provider-agnostic 字节 + topic 字符串——DI infra port **不**引
 /// `generated` wire 类型（diport 只依赖基础 + 引擎；跨域 wire 单源仍是 contract，ADR-003 §6 偏离 2）。
+///
+/// ⚠ **代表性最小 port（feasibility 范式，非 production-final）**：当前 `publish(&str, &[u8])` 是裸
+/// topic/payload，类型层不阻止绕过 outbox/contract funnel。production 事件发布 port 须 typed
+/// `PublishRequest` / `Topic` newtype / envelope metadata（tenant/correlation/content-type），随
+/// **eventexec/outbox 域**落地设计，跟踪 **issue #1061**。**禁止** adapter 按当前裸形态落 production impl。
 #[trait_variant::make(Publisher: Send)]
 #[dynosaur(pub DynPublisher = dyn(box) Publisher, bridge(dyn))]
 #[allow(async_fn_in_trait)]

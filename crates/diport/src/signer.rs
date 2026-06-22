@@ -34,6 +34,12 @@ impl SignerError {
 ///
 /// dyn-safe 约束（ADR-003 §4.6）：方法 `&self`、参数 / 返回为具体类型、supertrait 仅 Send、
 /// 带 `async fn shutdown`（无 async Drop）。
+///
+/// ⚠ **代表性最小 port（feasibility 范式，非 production-final）**：本 PR（PR-diport）冻结 Signer 仅为
+/// 验证 async crypto port 的 dynosaur Send 派发范式。当前 `sign(&[u8])` 是**裸签**——production 签名 port
+/// 须改 typed request（key/tenant/purpose/algorithm/caller，供 provider fail-closed 策略校验 + 审计归因，
+/// 零信任边界），随**证书签发域（deviceloop）**落地设计，跟踪 **issue #1061**。**禁止** adapter 按当前裸
+/// 形态落 production impl。（pre-GA wire 窗口允许届时原地收紧，见 api-versioning §兼容窗口。）
 #[trait_variant::make(Signer: Send)]
 #[dynosaur(pub DynSigner = dyn(box) Signer, bridge(dyn))]
 #[allow(async_fn_in_trait)]
@@ -76,5 +82,24 @@ mod smoke {
         })
         .await;
         assert!(matches!(joined, Ok(true)));
+    }
+
+    // #1049 待决项 PORT-SHAPE：验证 mockall mock（native-AFIT，非 #[async_trait]）可装入 dynosaur
+    // Send 变体的 `DynSigner` + 跨 spawn（Send future）。落实「mock 是 native trait impl，经 new_box 进 DynX」。
+    mockall::mock! {
+        TestSigner {}
+        impl Signer for TestSigner {
+            async fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignerError>;
+            async fn shutdown(&self) -> Result<(), SignerError>;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mockall_mock_loads_into_dyn_signer() {
+        let mut mock = MockTestSigner::new();
+        mock.expect_sign().returning(|_| Ok(vec![1, 2, 3]));
+        let signer: Box<DynSigner> = DynSigner::new_box(mock);
+        let joined = tokio::spawn(async move { signer.sign(b"x").await }).await;
+        assert!(matches!(joined, Ok(Ok(ref sig)) if sig == &[1, 2, 3]));
     }
 }

@@ -25,3 +25,5 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 trybuild = { workspace = true }
+# 验证 mockall mock 可装入 dynosaur DynX wrapper（#1049 待决项 PORT-SHAPE：mock × native-AFIT/Send 变体）。
+mockall = { workspace = true }

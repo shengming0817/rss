@@ -50,7 +50,7 @@ fn run<S: IdemCheck>(s: &S) { /* 单态、零 box */ }
 ### C2. mock
 
 - mock 在**同 crate `#[cfg(test)]`** 生成消费，**禁跨 crate 共享**（合 rust-standards「域 crate 单测不依赖 adapter crate」）；外部 trait 用 `mockall::mock!`。
-- **⚠️ 待验证（PR-diport，data-model 待决项#6）**：dynosaur/native-AFIT 下 mockall `automock` 的具体形态（是否直接支持 native `async fn` in trait；mock 装入 native trait 还是 `DynX` wrapper）ADR-003 未覆盖，由 PR-diport `cargo expand` 实测后回填本节。在此之前 mock 形态以 PR-diport 结论为准。
+- **✅ 已验证（PR-diport #164，data-model 待决项#6）**：dynosaur Send 变体 + native AFIT 下 mockall **可用**——用 `mockall::mock!` 对 Send 变体 trait（如 `Signer`）写 mock（**非** `#[async_trait]`，方法 `async fn` 直接声明），生成的 `MockX` 经 `DynX::new_box(mock)` 装入 dyn wrapper 且 future `Send`（跨 `tokio::spawn` 通过）。即 **mock 是 native trait impl，经 `new_box` 进 `DynX`**（不是 mock `DynX` 本身）。机器锁：`crates/diport/src/signer.rs` `#[cfg(test)] mockall_mock_loads_into_dyn_signer`（`cargo test -p diport` 跑）。
 
 ### C3. ctx 传播（← ADR-002 D2）
 
@@ -80,7 +80,7 @@ domain 类型**不** derive `Serialize`/`Deserialize`；仅 contract/DTO（`gene
 
 ### C7. sealed / newtype（← ADR-003 §4.2）
 
-- **DI port trait 不跨 crate sealed**：集中到 `diport` 后，sealed-trait 无法「只放行某外部 adapter crate impl」→ 采**方案②**：放弃跨 crate sealing，改 `deny.toml` wrappers 限定「可依赖 `diport` 并 impl port trait」的 crate 集（Hard→Medium）。
+- **DI port trait 不跨 crate sealed**：集中到 `diport` 后，sealed-trait 无法「只放行某外部 adapter crate impl」→ 采**方案②**：放弃跨 crate sealing。`deny.toml` wrapper 收敛 **dynosaur/trait-variant 宏依赖**到 `diport`（保证 port 只在此定义）——但 cargo-deny **限依赖非 impl**，且域 crate 也依赖 `diport` 消费端口，故「谁可 impl」**当前未机器强制**（落地实测，见 ADR-003 落地结论 2）；implementer-allowlist 待 PR-5（#1060）。
 - adapter：`pub struct PgStore(pub(crate) sqlx::PgPool);` raw client `pub(crate)`，**native AFIT** impl diport trait；adapter crate 保持 `#![forbid(unsafe_code)]`（不 invoke dynosaur 宏）。
 
 ### C8. 覆盖率豁免
@@ -138,7 +138,7 @@ PR body 标 `ref: {framework} {path}@{ref}`（见 research.md），或「无需�
 | C8 覆盖率豁免 | **Medium（governance 测试）** | 签名 PR 声明 + CI 门豁免 todo!() 不可达 |
 | C10 错误 message const | **Hard/Medium** | `&'static str` 类型约束（Hard）+ clippy（Medium） |
 | C3 ctx fail-closed | **Hard + Medium** | 私有字段 + 无 Deserialize（Hard）；ctx 缺失 deny 的行为测试（Medium，ADR-002） |
-| C2 mock 形态 | **Soft（当前）→ 待 PR-diport 升 Medium/Hard** | dynosaur/native-AFIT 下 mockall 形态未定，暂依人工对照（Soft）；PR-diport 实测后回填本表并升档（data-model 待决项#6） |
+| C2 mock 形态 | **Medium（PR-diport #164 落地）** | dynosaur Send 变体 + native-AFIT 下 mockall `mock!` 形态已实测可用，由 `crates/diport/src/signer.rs` `mockall_mock_loads_into_dyn_signer` 机器锁（`cargo test -p diport`，接入 verify nextest）守（data-model 待决项#6 闭合） |
 
 > 无 Soft **新增 enforcement 机制**；C2 的 Soft 是「评级待定」的临时状态（PR-diport 收口），非以 Soft 立项的约束。
 

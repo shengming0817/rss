@@ -35,8 +35,13 @@
 //! ## sealing（ADR-003 §4.2 方案 ②）
 //!
 //! DI port trait 集中到独立 crate 后，sealed-trait（仅定义 crate 内封闭）无法对独立 adapter crate
-//! sealing。本 crate trait **不带** sealed supertrait；「谁可 impl」由 `deny.toml` wrapper 限定
-//! 可依赖 `diport` 并 impl 的 crate 集（cargo-deny，Medium）——Hard→Medium 取舍（ADR-003 §6 偏离 3）。
+//! sealing。本 crate trait **不带** sealed supertrait。
+//!
+//! `deny.toml` wrapper 收敛的是 **dynosaur/trait-variant 宏依赖**（只准 `diport` 依赖 ⇒ DI port
+//! 只在 `diport` 定义，DIPORT-MACRO-CONFINE-01）——它**不**约束「谁可 **impl** port trait」：
+//! cargo-deny 只能限依赖、不能限 impl 站点，且域 crate 也合法依赖 `diport`（为**消费**端口而非 impl）。
+//! 故 port trait 的 **impl-sealing 当前未机器强制**（「外部无法 impl」由类型系统 Hard 降为「尚无守卫」）——
+//! implementer-allowlist（限 production impl 到 adapter/组合根）待 PR-5 落地，跟踪 **issue #1060**。
 //!
 //! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01
 //!

@@ -46,8 +46,10 @@ sealed marker type，再注入 service。port trait 用 sealed-trait 模式封�
 
 > **例外（`diport` 跨 crate DI port，ADR-003 §4.2 方案 ②）**：DI port trait 集中到 `diport` 独立 crate 后，
 > sealed-trait（仅定义 crate 内封闭）**无法**对独立 adapter crate sealing。故 `diport` 的 DI port trait
-> **不带** sealed supertrait；「谁可 impl」由 `deny.toml` wrapper 限定可依赖 `diport`/`dynosaur` 的 crate 集
-> （cargo-deny，**Medium**）——即「外部无法 impl」由类型系统 **Hard 降为 cargo-deny Medium**。
+> **不带** sealed supertrait。`deny.toml` wrapper 收敛的是 **dynosaur/trait-variant 宏依赖**（只准 `diport`
+> 依赖，保证 DI port 只在 `diport` 定义）——它**不**等于「限定谁可 **impl** port trait」：cargo-deny 限依赖
+> 非 impl，且域 crate 也合法依赖 `diport`（消费端口而非 impl）。故 port trait 的 **impl-sealing 当前未机器
+> 强制**（「外部无法 impl」由类型系统 Hard 降为「尚无守卫」），implementer-allowlist 待 PR-5（跟踪 #1060）。
 > 同 crate 内的 port sealing 仍用 sealed-trait（Hard）。
 
 ## Contract test
