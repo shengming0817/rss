@@ -50,7 +50,7 @@ cargo xtask public-api --check --allow-missing # 仅 PR-0 自检：宽限「base
 ## 失败排查
 
 - `cargo build` 报 DI port trait 不 dyn-compatible（`Box<DynX>` 编不过）→ 检查 dynosaur 宏 `#[dynosaur::dynosaur(DynX = dyn(box) X)]` 是否就位、trait 是否违反 dyn-compatible（泛型方法/返回 Self/impl Trait，ADR-003 §4.6）。
-- `forbid(unsafe_code)` 阻断 dynosaur 生成点 → 该 trait 误放在 diport 以外；DI port 必须定义在 diport（仅 diport 有 forbid→deny 例外，ADR-003 §3）。
+- DI port 必须定义在 diport：`dynosaur`/`trait-variant` 宏**依赖**经 deny.toml wrapper 限定到 diport（误放在 diport 以外 → cargo-deny 拒绝该依赖）。注：`forbid(unsafe_code)` **不**阻断 dynosaur 生成点（def-site hygiene，#1049 实测推翻 ADR-003 §3 原设）——diport 无 forbid→deny 例外。
 - mock 编译失败 → dynosaur/native-AFIT 下 mockall 形态以 PR-diport 验证结论为准（data-model 待决项#6）。
 - 覆盖率门 CI 红 → PR body 缺覆盖率豁免声明（ADR-004 C8）。
 - deny.toml 红 → 跨域 import / 域依赖 adapter（违 FR-009），或 dynosaur 依赖出现在 diport 以外（违 C11），按分层 + wrappers 修依赖。

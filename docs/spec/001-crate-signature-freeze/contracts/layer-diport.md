@@ -2,7 +2,9 @@
 
 > 范式见 conventions.md（单源 ADR-004）；决策单源 = **ADR-003**（`docs/architecture/202606212047-003-di-trait-async-dyn-dispatch-strategy.md`）。
 >
-> 计划重排引入的新单元：ADR-003 把可替换 provider 的 **DI 注入 port trait** 收敛进一个专用服务层 crate `diport`——因 dynosaur 宏展开注入 `unsafe transmute`，必须集中到单一 crate（forbid→deny 例外，§3）。本单元 = ADR-003 §8 推迟的「diport 落地 + dynosaur 可行性验证」单元。
+> ADR-003 把可替换 provider 的 **DI 注入 port trait** 收敛进 **DI-infra 层** crate `diport`（基础/引擎之上、服务/域/adapter 之下，见 `docs/rules/architecture.md` §分层）。`dynosaur`/`trait-variant` 宏依赖经 `deny.toml` wrapper + `layer-deps` 收敛到本 crate（DIPORT-MACRO-CONFINE-01，Medium），保证 DI port 只在 diport 定义。
+>
+> **落地结论（PR-diport #1049 spike 实测，推翻 ADR-003 §3 原设的 forbid→deny 例外）**：dynosaur 0.3 生成的 `unsafe transmute` 经 def-site hygiene **不触发** consumer crate 的 `unsafe_code` lint——diport **无 forbid→deny 例外、无 unsafe carve-out**，与其它 crate 一致 `[lints] workspace = true`（仍继承 workspace `forbid`）。dynosaur→diport 收敛改由 deny.toml wrapper 守（DI port 集中，与 unsafe 无关）。本单元 = ADR-003 §8 推迟的「diport 落地 + dynosaur 可行性验证」单元，已落地。
 
 ## 冻结接缝（DI port trait 全集，dynosaur）
 
@@ -11,38 +13,38 @@
 | 来源层 | DI port trait（举例） | 形态 |
 |---|---|---|
 | 引擎 | `Clock`（待决项#2 是否迁入）、`IdempotencyStore`（如需 dyn） | dynosaur `dyn(box)` wrapper |
-| 服务 | `Publisher`/`Subscriber`、`Pdp`、session/refresh store、`DistLock`、`Transport`、`Signer` | dynosaur |
+| 服务 | `Publisher`/`Subscriber`（+ sync `SubscribeInitializer`）、`AuditSink`、`Pdp`、session/refresh store、`DistLock`、`Transport`、`Signer` | dynosaur（sync port 如 `SubscribeInitializer` 同 `Clock` 不需 dynosaur） |
 | 生命周期 | `ManagedResource`（待决项#4 inter-ADR 冲突） | 暂遵 ADR-001（async_trait + `Arc<dyn>`）；PR-diport 统一→dynosaur 并同步重评 ADR-001 威胁矩阵 |
 | 域 | 各域仓储/领域服务 repo port（`SessionRepo`/`ConfigRepo`/…，`pub`） | dynosaur |
 
 ```rust
-// crates/diport/src/lib.rs
-#![deny(unsafe_code)] // crate 根：deny（非 forbid），仅本 crate；其余 crate 继承 workspace forbid
+// crates/diport/Cargo.toml — 继承 workspace forbid，无 deny 覆盖、无 unsafe carve-out（落地结论）
+// [lints] workspace = true
 
-// crates/diport/src/store.rs — dynosaur 生成 dyn-compatible DynUserStore，static 零开销、dyn 才 box
-#[dynosaur::dynosaur(DynUserStore = dyn(box) UserStore)]
-pub trait UserStore: Send + Sync {                 // native AFIT，无 #[async_trait]
-    async fn find_by_id(&self, id: UserId) -> Result<User, StoreError>;  // body: todo!()
-    async fn shutdown(&self) -> Result<(), StoreError>;                  // 无 async Drop
+// crates/diport/src/<port>.rs — Send 变体 + dynosaur dyn(box) wrapper（static 零开销、dyn 才 box）
+#[trait_variant::make(MyPort: Send)]                       // 生成 Send 变体 MyPort
+#[dynosaur(pub DynMyPort = dyn(box) MyPort, bridge(dyn))]  // 据 Send 变体生成 dyn-compatible wrapper
+#[allow(async_fn_in_trait)]                                // Send 由 trait_variant 变体 + dynosaur wrapper 承载
+pub trait MyPortLocal {                            // 非 Send 基 trait，crate 根只 re-export Send 变体 + DynX
+    async fn do_it(&self) -> Result<(), MyPortError>;   // native AFIT，无 #[async_trait]，body: todo!()
+    async fn shutdown(&self) -> Result<(), MyPortError>; // 无 async Drop
 }
 ```
 
-## 落地门（ADR-003 §8 — 本 PR 验收前必须验证 / 完成）
+## 落地门（ADR-003 §8 — PR-diport #1049 已验证 / 完成）
 
-**三开放风险（dynosaur pre-1.0）**：
+**三开放风险（dynosaur pre-1.0）落地结论**：
 
-1. 目标 `#[allow(unsafe_code)]` 可达性 + carve-out 登记（`cargo expand` 实测；按 error-handling.md §Carve-out 更新 ADR registry + lint 映射 + 展开点 `// SAFETY:`）。
-2. 跨 crate sealing 不可行（§4.2）→ 二选一 ①（impl 收回 diport）/ ②（deny.toml wrappers 限定实现方，倾向 ②）。
-3. dynosaur v0.3 API（`new_box`/`from_box`）破坏式演进 → pin `=0.3.x` + 升级审 changelog。
+1. unsafe carve-out **不需要**：dynosaur 0.3 生成的 `unsafe transmute` 经 def-site hygiene 不触发 consumer forbid（`cargo build` 实测 + trybuild anti-vacuity 验证 forbid 对本 crate 手写 unsafe 仍生效）。无目标 `#[allow(unsafe_code)]`、无 ADR registry / lint 映射 carve-out。
+2. 跨 crate sealing 不可行（§4.2）→ 采**方案 ②**：`deny.toml` wrapper 收敛 `dynosaur`/`trait-variant` **依赖**（只准 diport 依赖 ⇒ DI port 只在 diport 定义）。注意 cargo-deny 限「依赖」非「impl」——port-trait **impl-allowlist（限谁可 impl）当前未机器强制**，待 #1060 / PR-5。本 crate trait **不带** sealed supertrait。
+3. dynosaur v0.3 API（`new_box`/`new_arc`）→ 已 pin `=0.3.0`；升级须复测 unsafe-hygiene 不变式 + 审 changelog。
 
-**结构单源回写（同 PR，三处一并改防漂移）**：`docs/rules/architecture.md` §扁平 workspace 结构树 + §分层、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers；并回写 `rust-standards.md §工程护栏`（diport forbid 例外）+ `domain-patterns.md`（DI port 集中 + sealing 改 cargo-deny）。
+**结构单源回写（PR-diport 已完成）**：`docs/rules/architecture.md` §扁平 workspace 结构树 + §分层、`Cargo.toml [workspace] members`（`crates/diport`）、`deny.toml` wrappers、`domain-patterns.md`（DI port 集中 + sealing 改 cargo-deny）。
 
 **前置 follow-up**：`bootstrap` shutdown 框架（按注册逆序执行 `shutdown()`，把 ADR-003 §7 末条 Soft→Medium）须先于 port trait 大规模落地。
 
-**回退触发**：三风险任一不可接受 → 按 ADR-003 §5 以 async-trait 重评，spec 须再 reconcile。
-
 ## 验证
 
-- `cargo build -p diport` 绿；首个 port trait 的 dyn-compatible compile-pass + compile-fail（`trybuild`，Medium 回归锁）。
-- `deny.toml` wrappers 绿：`dynosaur` 依赖仅 diport；impl diport port trait 的 crate 集受限。
-- adapter crate 保持 `#![forbid(unsafe_code)]` 编译通过（不 invoke dynosaur 宏）。
+- `cargo build -p diport` 绿；port trait 的 dyn-compatible compile-pass + compile-fail（`trybuild`，DIPORT-DYN-COMPAT-01 / DIPORT-UNSAFE-HYGIENE-01，Medium 回归锁）。
+- `deny.toml` wrappers 绿：`dynosaur`/`trait-variant` **依赖**仅 diport（DI port 集中，限依赖非 impl；impl-allowlist 待 #1060）。
+- diport 继承 workspace `forbid(unsafe_code)` 编译通过（无 deny 覆盖、无 carve-out）；adapter crate 保持 `forbid` 且不 invoke dynosaur 宏。

@@ -9,12 +9,12 @@ publish = false
 workspace = true
 
 [dependencies]
-vocab = { path = "../vocab" }
+# 注：审计 sink 迁 diport（#1075）后，本 crate 的 metrics label / MetricLabel / SpanField 仅用 std；
+# vocab/futures/thiserror 随 AuditSink 一并移除。其余基础/引擎 path 依赖系服务冻结期预声明（#1050），
+# 非本 PR 引入，保持不动。
 ids = { path = "../ids" }
 secure = { path = "../secure" }
 support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
-futures = { workspace = true }
-thiserror = { workspace = true }

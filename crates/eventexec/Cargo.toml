@@ -9,7 +9,9 @@ publish = false
 workspace = true
 
 [dependencies]
+# Subscriber DI port + Message 原语迁 diport（#1075）；本 crate 消费 diport::Message（HandlerFn/ConsumerFn 入参）。
+diport = { path = "../diport" }
 futures = { workspace = true }
 thiserror = { workspace = true }
-tokio-util = { workspace = true }
+# 注：tokio-util（CancellationToken）随 EventSubscriber 迁 diport 后本 crate 不再使用，已移除。
 uuid = { workspace = true, features = ["v4"] }

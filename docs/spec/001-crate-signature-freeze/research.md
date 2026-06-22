@@ -14,7 +14,7 @@
   - **native AFIT + dyn**：1.96 非 stable，不可用。
   - **trait-variant**：只解 Send-bound、不解 dyn，拒。
   - **纯静态泛型铺满**：组合根 `Arc<dyn>` 场景单态膨胀 + 编译爆炸，仅用于 L0。
-- **代价**：接受 dynosaur 的 `unsafe`（生成点 transmute）+ pre-1.0 API 风险——收敛到 `diport` 单 crate（forbid→deny 例外）+ §8 三开放风险待 diport 落地验证。
+- **代价**：接受 dynosaur 的 `unsafe`（生成点 transmute）+ pre-1.0 API 风险——收敛到 `diport` 单 crate。**落地（#1049）**：def-site hygiene 不触发 consumer forbid，diport 无 forbid→deny 例外、无 carve-out；§8 三开放风险已验证。
 - **ref**: `spastorino/dynosaur releases/v0.3.0`（`dyn(box)` 生成、`new_box`/`from_box`）；`dtolnay/async-trait README@master`（被拒：每调用 Box::pin 成本模型）；`tower tower-service/src/lib.rs@master`（pre-AFIT `poll_ready + type Future` 范式）；`kube-rs kube-runtime/src/watcher.rs@main`（内部 native AFIT + 泛型，L0 对标）。
 
 ## D2. mock 范式 + 签名冻结期测试策略

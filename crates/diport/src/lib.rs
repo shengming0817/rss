@@ -6,15 +6,15 @@
 //!
 //! ## 派发策略（ADR-003）
 //!
-//! - **async DI port**（`Signer` / `Publisher` / `ManagedResource`）：native AFIT + dynosaur
+//! - **async DI port**（`Signer` / `Publisher` / `Subscriber` / `AuditSink` / `ManagedResource`）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
 //!   - **Send**：dyn wrapper 的 boxed future 须 `Send`（ShutdownStack 经 `tokio::spawn` 隔离 panic）。
 //!     由 `#[trait_variant::make(X: Send)]` 生成 Send 变体 + dynosaur `bridge(dyn)` 据此生成 Send 的
 //!     `DynX`。本 crate 公开（`pub use`）的是 **Send 变体** `X` + `DynX`；非 Send 基 trait `XLocal`
 //!     仅供静态分发的窄场景，不在 crate 根 re-export（避免方法解析歧义）。
-//! - **sync DI port**（`Clock`）：sync trait 天然 dyn-compatible，经 `Box<dyn Clock>` 注入，
-//!   **不需** dynosaur（仅 async port 需要）。
+//! - **sync DI port**（`Clock` / `SubscribeInitializer`）：sync trait 天然 dyn-compatible，经
+//!   `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
 //!
 //! ## 新增一个 async DI port（三步，照 `signer.rs` 抄）
 //!
@@ -52,14 +52,21 @@
 //! `[lints] workspace = true`。dynosaur→diport 收敛改由 deny.toml wrapper 守（DI port 集中 + 单一
 //! dyn-dispatch 依赖点），与 unsafe 无关。dynosaur exact-pin `=0.3.0`：升级须复测本不变式 + 审 changelog。
 
+pub mod audit_sink;
 pub mod clock;
 pub mod managed_resource;
 pub mod publisher;
 pub mod signer;
+pub mod subscriber;
 
+pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
 pub use clock::Clock;
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
 };
 pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
+pub use subscriber::{
+    DynSubscriber, Message, MessageId, MessageMetadata, MessageStream, SubscribeInitError,
+    SubscribeInitializer, Subscriber, SubscriberError,
+};

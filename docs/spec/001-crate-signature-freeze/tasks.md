@@ -73,9 +73,9 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 **Independent Test**: `cargo build -p diport` 绿；首 port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（dynosaur 仅 diport）；adapter crate 保持 forbid 编译过。
 
-- [ ] TD01 [PR-diport] 建 `crates/diport`（`#![deny(unsafe_code)]` 覆盖 workspace forbid + 生成点目标 `#[allow]`）；定义 DI port trait 全集 + `#[dynosaur::dynosaur(DynX = dyn(box) X)]` wrapper（native AFIT，body=todo!()）。ref: spastorino/dynosaur releases/v0.3.0。测试: build smoke + PORT-SHAPE-01/02/03（`Box/Arc<DynX>`）
-- [ ] TD02 [PR-diport] **结构单源回写（同 PR 三处）**：`docs/rules/architecture.md`（§扁平结构树 + §分层，登记 diport）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers（dynosaur 仅 diport；impl diport port 的 crate 集受限）+ dynosaur pin `=0.3.x`
-- [ ] TD03 [PR-diport] 验证 ADR-003 §8 三开放风险：① `cargo expand` 确认 `#[allow(unsafe_code)]` 可达性 + carve-out 登记（error-handling §Carve-out + 展开点 `// SAFETY:`）；② 跨 crate sealing 二选一（倾向方案②，deny.toml wrappers）；③ dynosaur v0.3 API 审 changelog
+- [ ] TD01 [PR-diport] 建 `crates/diport`（继承 workspace forbid，**无 deny 覆盖、无生成点 `#[allow]` carve-out**——#1049 实测 def-site hygiene 不触发 consumer forbid）；定义 DI port trait 全集 + `#[trait_variant::make(X: Send)]` + `#[dynosaur(pub DynX = dyn(box) X, bridge(dyn))]` wrapper（native AFIT，body=todo!()）。ref: spastorino/dynosaur releases/v0.3.0。测试: build smoke + PORT-SHAPE-01/02/03（`Box/Arc<DynX>`）
+- [ ] TD02 [PR-diport] **结构单源回写（同 PR 三处）**：`docs/rules/architecture.md`（§扁平结构树 + §分层，登记 diport）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers（`dynosaur`/`trait-variant` **依赖**仅 diport；限依赖非 impl，impl-allowlist 待 #1060）+ dynosaur pin `=0.3.x`
+- [ ] TD03 [PR-diport] 验证 ADR-003 §8 三开放风险（#1049 落地结论）：① unsafe carve-out **不需要**——def-site hygiene 不触发 consumer forbid（无 `#[allow(unsafe_code)]`、无 carve-out 登记）；② 跨 crate sealing 采方案②（deny.toml wrapper 限宏**依赖**非 impl；impl-allowlist 待 #1060/PR-5）；③ dynosaur v0.3 API pin `=0.3.0` + 审 changelog
 - [ ] TD04 [PR-diport] 回写 `rust-standards.md §工程护栏`（diport forbid 例外）+ `domain-patterns.md`（DI port 集中 + sealing 改 cargo-deny）；加首 port trait `trybuild` dyn-compatible compile-pass/fail（Medium 回归锁）；解决 mockall × dynosaur/native-AFIT 形态（待决项#6）
 - [ ] TD05 [PR-diport] PR-diport 验收（门: TD01–TD04 + bootstrap shutdown 框架前置）：`cargo build -p diport` + clippy + `cargo deny check` 绿；dyn-compatible trybuild 绿；§8 三风险已结论；架构/规则单源已回写。**开 PR-diport，body 标 ref: dynosaur + ADR-003 §8 验证结论 + 覆盖率豁免**
 

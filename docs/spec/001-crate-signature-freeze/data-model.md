@@ -62,11 +62,11 @@
 
 计划层重排引入 diport 后浮现的真实开放点（ADR-003 §8 亦留为开放风险）—— 此处显式登记 + 给推荐方向：
 
-1. **实体引用与分层序（架构约束，非选项）**：diport 是**服务层 crate**，按分层规则 **MUST NOT 依赖域 crate**（deny.toml 编译期强制）。故 diport port trait 的参数/返回实体类型 **MUST** 定义在基础层（`ids`/`vocab`）或 `generated`（wire 类型），**不得**引用域内实体（`User`/`Session` 等域专属类型）——否则 diport→域 反向依赖、层序倒置、deny.toml 红。ADR-003 §4.1 示例中的 `User` 须按此约束落在基础层/generated，或由 PR-diport 决定其归属（但不得让 diport 依赖域 crate）。这是设计约束，PR-diport 实施者不得将域实体引入 diport。
+1. **实体引用与分层序（架构约束，非选项）**：diport 是 **DI-infra 层 crate**，按分层规则 **MUST NOT 依赖域 crate**（deny.toml 编译期强制）。故 diport port trait 的参数/返回实体类型 **MUST** 定义在基础层（`ids`/`vocab`）或 `generated`（wire 类型），**不得**引用域内实体（`User`/`Session` 等域专属类型）——否则 diport→域 反向依赖、层序倒置、deny.toml 红。ADR-003 §4.1 示例中的 `User` 须按此约束落在基础层/generated，或由 PR-diport 决定其归属（但不得让 diport 依赖域 crate）。这是设计约束，PR-diport 实施者不得将域实体引入 diport。
 2. **Clock / ManagedResource 归属**：ADR-003 §2/§4.3 把 Clock 列为 DI port→diport；原 spec 把 Clock 放 primitives（引擎）。**推荐**：`Clock`+`DynClock`、`ManagedResource`+`DynManagedResource` 迁入 diport；primitives 只留纯计算/静态引擎 trait。PR-diport 确认。
-3. **域 repo `pub(crate)`→`pub`**：DI port 迁 diport 即跨 crate → 失去 `pub(crate)` 封装；改由 deny.toml wrappers 限定实现方 crate 集（ADR-003 §4.2 方案②，Hard→Medium）。登记该偏离。
+3. **域 repo `pub(crate)`→`pub`**：DI port 迁 diport 即跨 crate → 失去 `pub(crate)` 封装；改由 deny.toml wrapper 收敛 `dynosaur`/`trait-variant` **宏依赖**（DI port 定义点单源，§4.2 方案②，Medium，限**依赖**非 impl）。port-trait impl-allowlist（限谁可 impl）当前未机器强制（Hard→尚无守卫），待 #1060/PR-5。登记该偏离。
 4. **inter-ADR 冲突（ManagedResource）**：**ADR-001** 把 `ManagedResource` 定为 `#[async_trait]` + `Arc<dyn>`；**ADR-003** 通则是 DI 注入→dynosaur。二者对 `ManagedResource` 冲突。**推荐**：随 bootstrap shutdown 框架落地时统一为 dynosaur 并**同步重评 ADR-001 威胁矩阵**（ai-robust「ADR amendment 同步」）；在此之前 `ManagedResource` 暂遵 ADR-001（async_trait）。
-5. **diport 落地 = ADR-003 §8 可行性验证单元**：建 crate + 验三开放风险（`#[allow(unsafe_code)]` 可达性 + carve-out 登记 / 跨 crate sealing 取舍 / dynosaur v0.3 API）+ 完成 §8 全部 follow-up（architecture.md/deny.toml/rust-standards/domain-patterns 回写、trybuild、bootstrap shutdown 框架前置）。**若 dynosaur 实测不可接受 → 按 ADR-003 §5 回退 async-trait，本 spec 需再 reconcile**。
+5. **diport 落地 = ADR-003 §8 可行性验证单元（#1049 已验证，dynosaur 实测可接受、未回退）**：建 crate + 三开放风险落地结论（① unsafe carve-out **不需要**——def-site hygiene 不触发 consumer forbid，无 `#[allow(unsafe_code)]`、无 carve-out 登记 / ② 跨 crate sealing 采方案②，deny.toml wrapper 限宏**依赖**非 impl，impl-allowlist 待 #1060 / ③ dynosaur v0.3 pin `=0.3.0`）+ §8 follow-up（architecture.md/deny.toml/domain-patterns 回写、trybuild、bootstrap shutdown 框架前置）。
 6. **mockall × dynosaur/native-AFIT**：PORT-SHAPE-01/02/03 假设 mockall mock 可构造；native-AFIT/dynosaur 下兼容性 ADR-003 未覆盖 → PR-diport 验证（mock 是 native trait 还是 `DynX` wrapper）。
 
 ## 验证不变式（测试件）

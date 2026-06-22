@@ -2,7 +2,7 @@
 
 > 范式见 conventions.md（单源 ADR-004）。域层软依赖 #998（generated wire 类型）。
 >
-> **重排（ADR-003）**：域的仓储/领域服务 **DI port trait** 已收敛到 `diport`（PR-diport，dynosaur；`pub(crate)`→`pub` + deny.toml wrappers 限定实现方，§4.2 方案②）。PR-4 冻**域内 DTO + 非 DI 域逻辑**；PR-5 adapter 以 **native AFIT** impl diport 的 port trait。
+> **重排（ADR-003）**：域的仓储/领域服务 **DI port trait** 已收敛到 `diport`（PR-diport，dynosaur；`pub(crate)`→`pub` + deny.toml wrapper 收敛**宏依赖**（限**依赖**非 impl，§4.2 方案②）；port-trait impl-allowlist 待 #1060/PR-5）。PR-4 冻**域内 DTO + 非 DI 域逻辑**；PR-5 adapter 以 **native AFIT** impl diport 的 port trait。
 
 ## PR-4 域层（identity / settings / audit / contractreg / syshealth）
 

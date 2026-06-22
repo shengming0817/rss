@@ -46,7 +46,7 @@
 |---|---|---|
 | 分层依赖隔离（crate 图 + deny.toml，Hard） | ✅ | PR 顺序 = 分层序；域间互不依赖、adapters 不被域依赖由 deny.toml 守，签名阶段即遵守 |
 | AI-robust：约束上移编译期（Hard 优先） | ✅ | 签名冻结本身即"接缝以类型/可见性表达"；dynosaur dyn-compatible（Hard，编译器）、构造器必填参数、newtype 全为 Hard 载体 |
-| unsafe 默认 forbid（rust-standards，Hard 默认） | ⚠️ 例外 | ADR-003 dynosaur 生成点注入 transmute → **仅 `diport`** forbid→deny + 目标 allow；其余全仓保持 forbid。收敛守卫 = deny.toml wrappers（Medium）。例外落地在 PR-diport（见 Complexity Tracking + ADR-003 §3/§6） |
+| unsafe 默认 forbid（rust-standards，Hard 默认） | ✓ 无例外（落地） | ADR-003 §3 原设「仅 `diport` forbid→deny + 目标 allow」被 PR-diport #1049 spike 推翻：def-site hygiene 不触发 consumer forbid → diport **无 forbid→deny 例外、无 carve-out**，全仓保持 forbid。dynosaur/trait-variant 依赖收敛守卫 = deny.toml wrappers（Medium） |
 | 必填依赖非 Option + 构造器必填参数（Hard） | ✅ | FR-011；PORT-SHAPE-02 测试验证 mock 可作必填参数注入 |
 | domain 不 derive Serialize（Hard，serde 边界冻结） | ✅ | FR-010 显式约束 |
 | `Clock` 构造器位置参、禁默认系统时钟（Medium，clippy） | ✅ | conventions PR-0 固化 |
@@ -83,7 +83,7 @@ docs/spec/001-crate-signature-freeze/
 crates/
 ├── vocab/ ids/ secure/ support/ runctx/        # 基础层（P1 组）—— runctx ctx 范式依 ADR-002
 ├── consistency/ primitives/                      # 引擎层（P1 组）—— Clock/lifecycle 推荐迁 diport（待决项#2）
-├── diport/                                        # DI port crate（PR-diport 新建）—— dynosaur + forbid→deny（ADR-003）
+├── diport/                                        # DI-infra crate（PR-diport #1049）—— dynosaur；无 forbid→deny 例外（#1049 实测）
 ├── httpserve/ authn/ bootstrap/ eventexec/       # 服务层（P2 组，非 DI 接缝）—— bootstrap::shutdown 依 ADR-001
 │   observ/ distributed/ deviceloop/
 ├── identity/ settings/ audit/ contractreg/ syshealth/   # 域层（P3 组，域内 DTO）—— 软依赖 #998 generated
@@ -120,4 +120,4 @@ PR-0  conventions 地基(ADR-004)  [门: ADR-002 + ADR-003 + ADR-001 三 ADR 已
 |---|---|---|
 | 覆盖率门豁免（签名 PR <80%/90%） | body=`todo!()` 物理不可达，无行为可测；强测会逼出假测试 | 替代"在签名 PR 写真实现凑覆盖率"被拒：违反"只冻接缝不实现行为"，破坏并行冻结的全部价值。改为：签名 PR 声明豁免、覆盖率门移交对应行为 PR（W 阶段）兑现 |
 | PR-0 引入 conventions"约定层" | 32 crate 签名若各写各的 dynosaur/mock 风格→W 阶段返工 + review 不可机判 | 替代"无 conventions、各 crate 自由发挥"被拒：AI co-author 易漂移，签名 review 无统一基准。conventions 是最小必要抽象（一份 ADR-004 文档，非代码框架） |
-| PR-diport 引入专用 DI port crate + forbid→deny 例外 | ADR-003：dynosaur 宏注入 unsafe transmute，须收敛到单 crate 才能保其余全仓 forbid 干净；DI port 分散各 crate 则每个都要 forbid 例外 | 替代"DI port 留各域/服务 crate（async-trait）"= ADR-003 §5 已拒（成本模型）；替代"全仓放开 forbid"被拒（unsafe 失控）。收敛守卫 = deny.toml wrappers（Medium）。落地 + §8 三风险验证在 PR-diport |
+| PR-diport 引入 DI-infra crate（dynosaur 依赖收敛） | ADR-003：dynosaur/trait-variant 宏依赖须收敛到单 crate（DI port 集中）。§3 原设的 forbid→deny 例外被 #1049 spike 推翻——def-site hygiene 不触发 consumer forbid，diport 无 carve-out、全仓保持 forbid | 替代"DI port 留各域/服务 crate（async-trait）"= ADR-003 §5 已拒（成本模型）。收敛守卫 = deny.toml wrappers（Medium）。§8 三风险已在 PR-diport #1049 验证 |

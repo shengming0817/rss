@@ -9,8 +9,8 @@
 | **httpserve** | `RouteGroup{listener,prefix,register}`、`Route{method,path,contract_id,public}`、`ListenerKind`(穷尽 enum Primary/Internal/Health/Admin)、复用 `tower::Layer`/`Service` | register=同步 `Fn(Router)->Result<Router>`（非 trait object） | ref: tower/axum |
 | **authn** | jwt/session/refresh 值类型、`Principal`（RowScope 派生）类型；ctx 遵 ADR-002 显式传 `&RequestCtx` | type + 函数；**PDP/session store dyn port → diport** | authplan 类型在 primitives::authplan |
 | **bootstrap** | `Domain::init(&self,&mut Registry)->Result<(),KernelError>`、`Registry`、`module()->DomainModule`、shutdown 编排（持 `ManagedResource` LIFO） | init=sync 不 I/O/spawn；`ManagedResource` 遵 **ADR-001**（待 diport 拍板是否迁 + 是否 dynosaur 化，见 data-model 待决项#4） | shutdown ADR-001；ref: kube-rs/fx |
-| **eventexec** | `Disposition`(Ack/Nack/Requeue 穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型别名、`SubscribeInitializer`、saga executor·tailer/command 接缝；subscribe 返回 `impl Stream+Send` | type/enum/函数；**Publisher/Subscriber dyn port → diport** | ref: watermill |
-| **observ** | metrics(label 闭值集)/logging 值类型、audit sink 接缝 | type/enum；**dyn sink port → diport** | metrics label 闭值集 |
+| **eventexec** | `Disposition`(Ack/Nack/Requeue 穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型别名、saga executor·tailer/command 接缝 | type/enum/函数；**Publisher dyn port + `Subscriber`/`SubscribeInitializer` dyn port + `Message` 原语已迁 diport（#1075）** | ref: watermill |
+| **observ** | metrics(label 闭值集)/logging(`SpanField`) 值类型 | type/enum；**audit sink port（`AuditSink`/`AuditEvent`/`AuditOutcome`）已迁 diport（#1075）** | metrics label 闭值集 |
 | **distributed** | distlock/cas/transport 值类型 | **dyn port → diport** | — |
 | **deviceloop** | cert lifecycle·signing（L4）状态机类型 | 态机 type；**signer dyn port → diport** | L4 reconcile |
 
@@ -22,7 +22,7 @@ pub trait Domain: Send + Sync + 'static {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError>;  // body: todo!()
 }
 
-// eventexec — 非 DI 接缝：穷尽 enum + 函数类型别名（Publisher/Subscriber trait 见 diport）
+// eventexec — 非 DI 接缝：穷尽 enum + 函数类型别名（Publisher/Subscriber/SubscribeInitializer trait + Message 原语见 diport，#1075）
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Disposition { Ack, Nack, Requeue { /* delay */ } }

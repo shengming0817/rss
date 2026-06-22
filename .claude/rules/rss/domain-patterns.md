@@ -24,7 +24,7 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 子模块按真实功能增长，不预生成空目录。
 
 > **例外（DI port 集中）**：可替换 provider 的 **DI 注入 port trait**（`Clock` / `Signer` /
-> `Publisher` / `Subscriber` / `Pdp` / `ManagedResource` 及各域 repo port）**不放域 crate
+> `Publisher` / `Subscriber` / `AuditSink` / `Pdp` / `ManagedResource` 及各域 repo port）**不放域 crate
 > `internal/ports`**，统一收敛进 DI-infra 层 crate `diport`（ADR-003）——dynosaur 的 async dyn
 > 派发宏 + Send 变体生成只此一处。域 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费，不自定义这些
 > port trait。纯域内（非可替换 provider）的仓储 / 服务 trait 仍留 `internal/ports`。

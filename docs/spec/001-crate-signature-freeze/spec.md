@@ -69,7 +69,7 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 ### Edge Cases
 
 - **spike 未落地就冻签名**：ADR-002(#994 context) / ADR-003(#995 dynosaur 派发) 决定每个 trait 的方法签名与声明语法。三 ADR 均已落地（门已过）。注意 ADR-003 dynosaur **可行性待 diport 落地 spike 验证**；若实测不可接受回退 async-trait（ADR-003 §5），已冻 DI port 声明语法须返工——故 DI port 实质冻结门于 PR-diport（见 Dependencies / data-model 待决项）。
-- **dynosaur 跨 crate sealing 不可行 × mockall**：ADR-003 §4.2——DI port trait 集中到 `diport` 后无法对独立 adapter crate sealing，改 deny.toml wrappers 限定实现方（Hard→Medium）；mockall 在 native-AFIT/dynosaur 下的形态 ADR-003 未覆盖，列 PR-diport 待验证（data-model 待决项#6）。
+- **dynosaur 跨 crate sealing 不可行 × mockall**：ADR-003 §4.2——DI port trait 集中到 `diport` 后无法对独立 adapter crate sealing（不带 sealed supertrait）；deny.toml wrapper 收敛 `dynosaur`/`trait-variant` **宏依赖**（DI port 定义点单源，Medium，限**依赖**非 impl），**不**限定谁可 impl——port-trait impl-allowlist 当前未机器强制（Hard→尚无守卫），待 #1060/PR-5；mockall 在 native-AFIT/dynosaur 下的形态经 #1049 验证（signer.rs mockall smoke）。
 - **覆盖率门误伤**：body=todo!() 不可达，覆盖率必然偏低。处理：签名冻结 PR 在说明中声明"覆盖率延迟到行为 PR"，避免 80% 门触发红。
 - **域层引用未生成的 generated 类型**：若 #998 未产出 `generated`，域层签名无法引用具体 wire 类型。处理：域层 PR 软依赖 #998；可先用占位/最小类型冻结非 wire 部分，wire 引用部分待 #998。
 - **adapters 无独立 trait 可冻**：adapters 实现上层 trait，自身通常不定义新 trait。处理：adapter 单元只冻 unit sealed-marker + native AFIT impl 已冻 diport trait 签名，不强造 trait。
@@ -97,8 +97,8 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 - **签名冻结单元（freeze unit）**：一个或一组 crate 的公开接缝集合，是 PR 的粒度。属性：所属层、依赖的上游层、是否软依赖 #998、所需 spike 前置。
 - **conventions 地基**：trait 写法 + mock + ctx + 覆盖率约定的单源（**ADR-004**），被所有签名单元引用。
 - **DI port trait**：provider-可换、经 dynosaur `DynX` wrapper 注入的接缝（`Box/Arc<DynX>`）；收敛进 `diport` crate；需 dyn-compatible + mockall mock。
-- **diport crate**：DI port trait + dynosaur wrapper + unsafe 收敛（forbid→deny 例外）的专用服务层 crate（ADR-003，新建于 PR-diport）。
-- **sealed-marker newtype**：adapter 以 native AFIT 实现 diport DI port trait 的范式（PR-5 冻 unit struct；raw client 字段在 W 阶段接后端时填入、保持 `pub(crate)`；crate 保持 forbid）。
+- **diport crate**：DI port trait + dynosaur wrapper 的 **DI-infra 层** crate（ADR-003，PR-diport #1049）。**无** forbid→deny 例外、**无** unsafe carve-out（#1049 实测 def-site hygiene 不触发 consumer forbid，推翻 §3 原设）；`dynosaur`/`trait-variant` 依赖经 deny.toml wrapper 收敛到本 crate。
+- **sealed-marker newtype**：adapter 以 unit sealed-marker/native AFIT 实现 diport DI port trait 的范式（PR-5 冻 unit struct；raw client 字段在 W 阶段接后端时填入、保持 `pub(crate)`；crate 保持 forbid）。
 - **spike 依赖门**：ADR-001/002/003 决议 + diport 落地门作为签名实施的前置条件（非规划前置）。
 
 ## Success Criteria *(mandatory)*

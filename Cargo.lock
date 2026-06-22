@@ -226,11 +226,14 @@ name = "diport"
 version = "0.0.0"
 dependencies = [
  "dynosaur",
+ "futures",
  "mockall",
  "thiserror",
  "tokio",
+ "tokio-util",
  "trait-variant",
  "trybuild",
+ "vocab",
 ]
 
 [[package]]
@@ -289,9 +292,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 name = "eventexec"
 version = "0.0.0"
 dependencies = [
+ "diport",
  "futures",
  "thiserror",
- "tokio-util",
  "uuid",
 ]
 
@@ -711,14 +714,11 @@ name = "observ"
 version = "0.0.0"
 dependencies = [
  "consistency",
- "futures",
  "ids",
  "primitives",
  "runctx",
  "secure",
  "support",
- "thiserror",
- "vocab",
 ]
 
 [[package]]

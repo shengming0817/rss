@@ -3,59 +3,14 @@
 //! ref: watermill message/message.go+pubsub.go+router.go@master
 //!      oxidecomputer/steno src/saga_action_generic.rs@main
 
-use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::Stream;
 use futures::future::BoxFuture;
 
-// ── 消息原语 ────────────────────────────────────────────────────────────────
-
-/// 消息唯一标识（对齐 watermill Message.UUID）。
-#[allow(dead_code)] // reason: 签名冻结骨架，todo!() 体暂不使用字段；ADR-004 C8 豁免
-pub struct MessageId(String);
-
-impl MessageId {
-    pub fn new(_id: impl Into<String>) -> Self {
-        todo!()
-    }
-
-    pub fn as_str(&self) -> &str {
-        todo!()
-    }
-}
-
-/// 消息元数据（key-value 字符串映射，对齐 watermill Metadata）。
-#[allow(dead_code)] // reason: 签名冻结骨架，todo!() 体暂不使用字段；ADR-004 C8 豁免
-#[derive(Default)]
-pub struct MessageMetadata(HashMap<String, String>);
-
-impl MessageMetadata {
-    pub fn get(&self, _key: &str) -> Option<&str> {
-        todo!()
-    }
-
-    pub fn set(&mut self, _key: impl Into<String>, _value: impl Into<String>) {
-        todo!()
-    }
-}
-
-/// 消息值类型（对齐 watermill Message UUID/Metadata/Payload）。
-///
-/// 不暴露 Ack/Nack——由框架据 `Disposition` 驱动。
-pub struct Message {
-    pub id: MessageId,
-    pub metadata: MessageMetadata,
-    pub payload: Vec<u8>,
-}
-
-impl Message {
-    pub fn new(_id: impl Into<String>, _payload: Vec<u8>) -> Self {
-        todo!()
-    }
-}
+// 消息原语（Message / MessageId / MessageMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
+// （issue #1075，ADR-003 DI port 收敛）；本 crate 经 `diport::Message` 消费（HandlerFn/ConsumerFn 入参）。
+use diport::Message;
 
 // ── 处理结论 ─────────────────────────────────────────────────────────────────
 
@@ -92,41 +47,9 @@ impl ConsumerError {
     }
 }
 
-// ── 主题初始化接缝 ────────────────────────────────────────────────────────────
-
-/// 主题初始化接缝（对齐 watermill SubscribeInitializer）。
-pub trait SubscribeInitializer: Send + Sync {
-    fn subscribe_initialize(&self, topic: &str) -> Result<(), SubscribeInitError>;
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("subscribe initialize failed")]
-pub struct SubscribeInitError {
-    // 私有字段封装基础设施错误细节；外部不可字面构造（F6 funnel）
-    #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-impl SubscribeInitError {
-    pub fn new<E: std::error::Error + Send + Sync + 'static>(_source: E) -> Self {
-        todo!()
-    }
-}
-
-// ── Subscriber 内部接缝 ───────────────────────────────────────────────────────
-
-/// 已装箱的消息流（subscribe 返回值；取消即流终止）。
-pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
-
-/// Subscriber 内部接缝（subscribe 返回 `MessageStream`，对齐 watermill `<-chan *Message`；
-/// token 取消即流终止）。
-pub trait EventSubscriber: Send + Sync {
-    fn subscribe(
-        &self,
-        topic: &str,
-        token: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<MessageStream, SubscribeInitError>>;
-}
+// 主题初始化接缝（`SubscribeInitializer`）与 Subscriber 内部接缝（`EventSubscriber` → `Subscriber`）
+// 及 `MessageStream` / `SubscribeInitError` 随 Subscriber DI port 迁 `diport`（issue #1075，
+// ADR-003 DI port 收敛）；消费方经 `diport::{Subscriber, SubscribeInitializer, MessageStream}` 注入。
 
 // ── saga 接缝（对齐 steno Action）─────────────────────────────────────────────
 
@@ -328,15 +251,8 @@ mod tests {
         _assert_send_sync::<ConsumerFn>();
     }
 
-    #[test]
-    fn subscribe_initializer_is_send_sync() {
-        _assert_send_sync::<dyn SubscribeInitializer>();
-    }
-
-    #[test]
-    fn event_subscriber_is_send_sync() {
-        _assert_send_sync::<dyn EventSubscriber>();
-    }
+    // SubscribeInitializer / EventSubscriber 的 Send+Sync/object-safe smoke 随其迁 `diport`
+    // （diport::subscriber::smoke）；此处不再断言（类型已不在本 crate）。
 
     #[test]
     fn saga_executor_is_send_sync_object_safe() {
@@ -349,13 +265,6 @@ mod tests {
     }
 
     // ── F6：私有字段 funnel 验证——只绑定构造器 fn 指针，不触发 todo!() ─────────
-
-    #[test]
-    fn subscribe_init_error_new_fn_ptr_bindable() {
-        // SubscribeInitError 含私有字段，外部不可字面构造；只能经 new() 受控构造
-        // 绑定 fn 指针验证签名可达，不调用（body 为 todo!()）
-        let _fn_ptr: fn(std::io::Error) -> SubscribeInitError = SubscribeInitError::new;
-    }
 
     #[test]
     fn saga_action_ctx_new_fn_ptr_bindable() {

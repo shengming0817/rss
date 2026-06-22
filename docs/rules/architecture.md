@@ -56,13 +56,13 @@ rss/
 │   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
 │   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
-│   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源（Clock / Signer / Publisher / ManagedResource…）+ dynosaur Dyn wrapper
+│   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源（Clock / Signer / Publisher / Subscriber / AuditSink / ManagedResource…）+ dynosaur Dyn wrapper
 │   ├── httpserve/        # axum router / middleware / health
 │   ├── authn/            # jwt / session / refresh / PDP / Principal
 │   ├── bootstrap/        # composition / config / shutdown / worker
 │   ├── eventexec/        # outbox relay / eventbus / saga executor·tailer / command
 │   ├── deviceloop/       # cert lifecycle·signing（L4）
-│   ├── observ/           # metrics / logging / grpc interceptor / audit / websocket
+│   ├── observ/           # metrics / logging / grpc interceptor / websocket（audit sink 迁 diport，#1075）
 │   ├── distributed/      # distlock / cas / transport
 │   ├── identity/         # 域：身份 / 会话 / RBAC / ABAC
 │   ├── settings/         # 域：版本化配置 / flag（避开 config 重名）
@@ -91,7 +91,7 @@ rss/
 - **基础** `vocab`/`ids`/`secure`/`support`/`runctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`vocab ◁ ids ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)。当前实际存在的唯一前向边是 `runctx → vocab`——`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`(ADR-002 §D3,决策 #2)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
 - **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖 DI-infra/服务/域/adapters。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
-  可替换 provider 的 DI port trait 单源(Clock/Signer/Publisher/ManagedResource…)+ dynosaur Dyn wrapper;
+  可替换 provider 的 DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource…)+ dynosaur Dyn wrapper;
   集中收敛使 DI port 与 dynosaur 依赖只此一处(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
 - **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。
