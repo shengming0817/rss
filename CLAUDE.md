@@ -93,7 +93,7 @@ Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静�
 ## 参考框架
 
 新建或重构层内模块时，先用 `WebFetch` 读对标源码，commit message 注明 `ref: {framework} {file}`。
-读源码优先 Rust 工业对标；中列 Go 框架是架构范式 / 概念来源。
+读源码优先 Rust 工业对标；Go / Java / .NET 等框架仅作架构范式 / 概念出处，列于该文件文末「概念谱系」附录（优先级远低于 Rust 对标主表）。
 
 当前模块对标哪个开源项目——完整模块对标表（概念映射 + owner/repo 坐标 + 源码起点路径 + primary/secondary 优先级，
 含 reconcile / saga / 分布式 / 证书 PKI / 可观测 / 授权 等扩展模块）见**单一事实源**

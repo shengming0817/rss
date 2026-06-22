@@ -9,18 +9,18 @@
 
 ## 模块对标表
 
-> 中列 = 架构范式 / 概念来源（含 Go 框架，看设计意图）；右列 = **读源码优先**的 Rust 工业对标 + 生态 crate。
-> 优先级：每格 `·` / `/` 分隔的引用按 **primary（加粗，读源码首选）→ secondary（参考，可偏离）** 排序；中列概念框架首项为概念 primary。
+> 本表只列**读源码优先的 Rust 工业对标 + 生态 crate**：每格 `·` / `/` 分隔的引用按 **primary（加粗，读源码首选）→ secondary（参考，可偏离）** 排序。
+> Go / Java / .NET 等架构范式 / 概念出处见文末「概念谱系」附录（优先级远低于本表，仅作设计意图参考）。
 > 下文「按模块扩展对标」表用 `primary | secondary` 列表达同一套语义；「Rust 标准库参考」表等权强制遵循、不分 primary/secondary。
 
-| RSS 模块 / 层 | 对标框架 / 范式（概念来源 · owner/repo · 起点） | Rust 工业对标 + 生态（owner/repo · 起点） |
-|---------------|------------------------------------------------|------------------------------------------|
-| 域 crate 生命周期 / init + 契约校验（`bootstrap`） | **`kubernetes/kubernetes`**（`pkg/controller/`） | **`kube-rs/kube`**（`kube-runtime/src/controller/mod.rs`）· `oxidecomputer/omicron`（`Cargo.toml` 组合根） |
-| 域 crate 运行时 / 依赖注入（组合根 `assemblies` / `bins`） | **`uber-go/fx`**（`app.go` · `module.go`） | 构造器注入 · **`oxidecomputer/omicron`** / `risingwavelabs/risingwave`（手工接线范本）· `AzureMarker/shaku` |
-| 代码生成（`generated` / build.rs / proc-macro） | **`zeromicro/go-zero`** goctl（`tools/goctl/api/gogen/`） | **`oxidecomputer/typify`**（`typify/src/lib.rs`）· `prettyplease` · `oxidecomputer/dropshot`(代码→OpenAPI) / `oxidecomputer/progenitor`(OpenAPI→client) |
-| 中间件（`httpserve` tower 层） | **`go-kratos/kratos`**（`middleware/middleware.go`） | **`tower-rs/tower`**（`tower/src/builder/`）/ `tower-http` · `linkerd/linkerd2-proxy`（Layer / mTLS 工业标杆） |
-| HTTP server（`httpserve`） | — | **`tokio-rs/axum`**（`axum/src/routing/`）· `oxidecomputer/dropshot`（`dropshot/src/lib.rs`） |
-| 事件驱动（`eventexec` / EventBus） | **`ThreeDotsLabs/watermill`**（`message/router.go` · `pubsub/gochannel/`） | **`serverlesstechnology/cqrs`**（crate `cqrs-es`，`src/lib.rs`，CQRS/ES）· `oxidecomputer/steno`（`src/lib.rs`，saga 编排） |
+| RSS 模块 / 层 | Rust 工业对标 + 生态（owner/repo · 起点） |
+|---------------|------------------------------------------|
+| 域 crate 生命周期 / init + 契约校验（`bootstrap`） | **`kube-rs/kube`**（`kube-runtime/src/controller/mod.rs`）· `oxidecomputer/omicron`（`Cargo.toml` 组合根） |
+| 域 crate 运行时 / 依赖注入（组合根 `assemblies` / `bins`） | 构造器注入 · **`oxidecomputer/omicron`** / `risingwavelabs/risingwave`（手工接线范本）· `AzureMarker/shaku` |
+| 代码生成（`generated` / build.rs / proc-macro） | **`oxidecomputer/typify`**（`typify/src/lib.rs`）· `prettyplease` · `oxidecomputer/dropshot`(代码→OpenAPI) / `oxidecomputer/progenitor`(OpenAPI→client) |
+| 中间件（`httpserve` tower 层） | **`tower-rs/tower`**（`tower/src/builder/`）/ `tower-http` · `linkerd/linkerd2-proxy`（Layer / mTLS 工业标杆） |
+| HTTP server（`httpserve`） | **`tokio-rs/axum`**（`axum/src/routing/`）· `oxidecomputer/dropshot`（`dropshot/src/lib.rs`） |
+| 事件驱动（`eventexec` / EventBus） | **`serverlesstechnology/cqrs`**（crate `cqrs-es`，`src/lib.rs`，CQRS/ES）· `oxidecomputer/steno`（`src/lib.rs`，saga 编排） |
 
 raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}`
 （branch 多为 `master` 或 `main`，404 时换分支重试；大文件先 `Grep`/`WebSearch` 定位行号再局部拉取）。
@@ -58,9 +58,23 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 | 并发 | tokio task + `CancellationToken`，资源 RAII 清理 |
 | HTTP 测试 | `tower::ServiceExt::oneshot` + `axum::http` 驱动 handler |
 
+## 概念谱系（设计范式出处 · 多生态）
+
+> 各模块的**架构范式发源地**（跨 Go / Java / .NET 生态）。RSS 借其设计意图、用上「模块对标表」的 Rust 工业对标实现。
+> 各行按范式**真实发源地**标注生态，不强求每行覆盖三生态（如 reconcile / codegen 范式主源自 Go，无同级 Java/.NET 锚点）。
+> **本附录优先级远低于上「模块对标表」**——只作概念出处参考，故只列框架名、不带源码起点路径。
+
+| RSS 模块 | 概念范式出处（Go / Java / .NET） | 借鉴的概念 |
+|----------|----------------------------------|-----------|
+| 域生命周期 / reconcile | `kubernetes/kubernetes`（Go） | 控制器 / desired-state 收敛环 |
+| 依赖注入 / 组合根 | `uber-go/fx`（Go）· Spring / Spring Boot（Java）· ASP.NET Core DI（.NET） | DI 容器 + 生命周期（**Rust 无同级框架**，唯一概念锚点）|
+| 代码生成 | `zeromicro/go-zero` goctl（Go） | API spec → code 工具链 |
+| 中间件 | `go-kratos/kratos`（Go）· ASP.NET Core middleware pipeline（.NET） | 中间件链 / pipeline |
+| 事件驱动 / saga | `ThreeDotsLabs/watermill`（Go）· Axon Framework（Java）· MassTransit（.NET） | 消息路由 / pubsub / CQRS-saga 编排 |
+
 ## 维护
 
-模块新增 / 对标变更时**只改本文件**——本文件是对标的**单一事实源**（概念映射 + 完整 owner/repo + 起点路径 +
-扩展模块 + primary/secondary 优先级）。`CLAUDE.md` §参考框架 不持表、只留 `ref:` 工作流并指回本文件，故无第二份表
+模块新增 / 对标变更时**只改本文件**——本文件是对标的**单一事实源**（Rust 工业对标主表 + 完整 owner/repo + 起点路径 +
+扩展模块 + primary/secondary 优先级 + 多生态概念谱系附录）。`CLAUDE.md` §参考框架 不持表、只留 `ref:` 工作流并指回本文件，故无第二份表
 需同步（单源化消除了原「两表逐行同序」漂移面）。表中无匹配模块时，explorer 须
 fail-loud（见 `.claude/agents/explorer.md` step 1），不静默吐空结论。
