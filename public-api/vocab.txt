@@ -117,11 +117,44 @@ impl<T> core::convert::From<T> for vocab::authz::Action
 pub fn vocab::authz::Action::from(T) -> T
 pub mod vocab::contract
 pub mod vocab::contract::owner
-#[non_exhaustive] pub enum vocab::contract::owner::ContractOwner
-pub vocab::contract::owner::ContractOwner::Domain(vocab::contract::owner::DomainName)
-pub vocab::contract::owner::ContractOwner::Framework
+#[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
+pub vocab::contract::owner::DomainNameError::Empty
+pub vocab::contract::owner::DomainNameError::Format
+impl core::error::Error for vocab::contract::owner::DomainNameError
+impl core::fmt::Debug for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::contract::owner::DomainNameError
+impl core::marker::Send for vocab::contract::owner::DomainNameError
+impl core::marker::Sync for vocab::contract::owner::DomainNameError
+impl core::marker::Unpin for vocab::contract::owner::DomainNameError
+impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainNameError where U: core::convert::From<T>
+pub fn vocab::contract::owner::DomainNameError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainNameError where U: core::convert::Into<T>
+pub type vocab::contract::owner::DomainNameError::Error = core::convert::Infallible
+pub fn vocab::contract::owner::DomainNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainNameError where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::DomainNameError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::DomainNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for vocab::contract::owner::DomainNameError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::contract::owner::DomainNameError where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
+pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
+pub fn vocab::contract::owner::DomainNameError::from(T) -> T
+pub struct vocab::contract::owner::ContractOwner(_)
 impl vocab::contract::owner::ContractOwner
 pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
+pub fn vocab::contract::owner::ContractOwner::framework() -> Self
+pub fn vocab::contract::owner::ContractOwner::of_domain(vocab::contract::owner::DomainName) -> Self
 impl core::clone::Clone for vocab::contract::owner::ContractOwner
 pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
 impl core::cmp::Eq for vocab::contract::owner::ContractOwner
@@ -159,39 +192,6 @@ impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner whe
 pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
 pub fn vocab::contract::owner::ContractOwner::from(T) -> T
-#[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
-pub vocab::contract::owner::DomainNameError::Empty
-pub vocab::contract::owner::DomainNameError::Format
-impl core::error::Error for vocab::contract::owner::DomainNameError
-impl core::fmt::Debug for vocab::contract::owner::DomainNameError
-pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::contract::owner::DomainNameError
-pub fn vocab::contract::owner::DomainNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for vocab::contract::owner::DomainNameError
-impl core::marker::Send for vocab::contract::owner::DomainNameError
-impl core::marker::Sync for vocab::contract::owner::DomainNameError
-impl core::marker::Unpin for vocab::contract::owner::DomainNameError
-impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
-impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainNameError where U: core::convert::From<T>
-pub fn vocab::contract::owner::DomainNameError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainNameError where U: core::convert::Into<T>
-pub type vocab::contract::owner::DomainNameError::Error = core::convert::Infallible
-pub fn vocab::contract::owner::DomainNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainNameError where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::DomainNameError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::DomainNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::contract::owner::DomainNameError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::contract::owner::DomainNameError where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
-pub fn vocab::contract::owner::DomainNameError::from(T) -> T
 pub struct vocab::contract::owner::DomainName(_)
 impl vocab::contract::owner::DomainName
 pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
@@ -841,48 +841,6 @@ impl<T> core::borrow::BorrowMut<T> for vocab::authz::ActionError where T: ?core:
 pub fn vocab::authz::ActionError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for vocab::authz::ActionError
 pub fn vocab::authz::ActionError::from(T) -> T
-#[non_exhaustive] pub enum vocab::ContractOwner
-pub vocab::ContractOwner::Domain(vocab::contract::owner::DomainName)
-pub vocab::ContractOwner::Framework
-impl vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
-impl core::clone::Clone for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
-impl core::cmp::Eq for vocab::contract::owner::ContractOwner
-impl core::cmp::PartialEq for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::eq(&self, &vocab::contract::owner::ContractOwner) -> bool
-impl core::fmt::Debug for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::contract::owner::ContractOwner
-impl core::marker::Freeze for vocab::contract::owner::ContractOwner
-impl core::marker::Send for vocab::contract::owner::ContractOwner
-impl core::marker::Sync for vocab::contract::owner::ContractOwner
-impl core::marker::Unpin for vocab::contract::owner::ContractOwner
-impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
-impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::ContractOwner where U: core::convert::From<T>
-pub fn vocab::contract::owner::ContractOwner::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::ContractOwner where U: core::convert::Into<T>
-pub type vocab::contract::owner::ContractOwner::Error = core::convert::Infallible
-pub fn vocab::contract::owner::ContractOwner::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::ContractOwner where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::ContractOwner::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::ContractOwner::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::owner::ContractOwner where T: core::clone::Clone
-pub type vocab::contract::owner::ContractOwner::Owned = T
-pub fn vocab::contract::owner::ContractOwner::clone_into(&self, &mut T)
-pub fn vocab::contract::owner::ContractOwner::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::owner::ContractOwner where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner where T: core::clone::Clone
-pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::from(T) -> T
 #[non_exhaustive] pub enum vocab::CoreErrorKind
 pub vocab::CoreErrorKind::Conflict
 pub vocab::CoreErrorKind::Forbidden
@@ -1320,6 +1278,48 @@ impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone
 pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::authz::Action
 pub fn vocab::authz::Action::from(T) -> T
+pub struct vocab::ContractOwner(_)
+impl vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
+pub fn vocab::contract::owner::ContractOwner::framework() -> Self
+pub fn vocab::contract::owner::ContractOwner::of_domain(vocab::contract::owner::DomainName) -> Self
+impl core::clone::Clone for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
+impl core::cmp::Eq for vocab::contract::owner::ContractOwner
+impl core::cmp::PartialEq for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::eq(&self, &vocab::contract::owner::ContractOwner) -> bool
+impl core::fmt::Debug for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::contract::owner::ContractOwner
+impl core::marker::Freeze for vocab::contract::owner::ContractOwner
+impl core::marker::Send for vocab::contract::owner::ContractOwner
+impl core::marker::Sync for vocab::contract::owner::ContractOwner
+impl core::marker::Unpin for vocab::contract::owner::ContractOwner
+impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
+impl<T, U> core::convert::Into<U> for vocab::contract::owner::ContractOwner where U: core::convert::From<T>
+pub fn vocab::contract::owner::ContractOwner::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::ContractOwner where U: core::convert::Into<T>
+pub type vocab::contract::owner::ContractOwner::Error = core::convert::Infallible
+pub fn vocab::contract::owner::ContractOwner::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::ContractOwner where U: core::convert::TryFrom<T>
+pub type vocab::contract::owner::ContractOwner::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::owner::ContractOwner::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::owner::ContractOwner where T: core::clone::Clone
+pub type vocab::contract::owner::ContractOwner::Owned = T
+pub fn vocab::contract::owner::ContractOwner::clone_into(&self, &mut T)
+pub fn vocab::contract::owner::ContractOwner::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::owner::ContractOwner where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
+pub fn vocab::contract::owner::ContractOwner::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner where T: core::clone::Clone
+pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
+pub fn vocab::contract::owner::ContractOwner::from(T) -> T
 pub struct vocab::CoreError
 impl vocab::error::CoreError
 pub fn vocab::error::CoreError::internal_attrs(&self) -> &[vocab::error::InternalAttr]

@@ -79,8 +79,9 @@ pub(crate) enum Lifecycle {
 /// 契约归属。`_framework` sentinel = provider-agnostic 中立契约归框架；其余为域名。
 ///
 /// reason: G0.3 仅需「是否框架归属」（R2 用）；owner→域名解析（`owner().domain()`）+ sealed 封闭
-/// （`Framework` 类型层无法解析成域）收口到 `vocab::ContractOwner`，属后续单元
-/// （见 .claude/rules/rss/contract-fanout.md §契约归属），本单元不预置未用 API。
+/// （`Framework` 类型层无法解析成域）已收口到 `vocab::ContractOwner`（PR #188，构造封闭）。本 `String`-based
+/// 解析 enum 与 `vocab::ContractOwner` 的双类型消重收口到 contract-registry 行为 PR，已登记 issue #1091
+/// 跟踪（见 .claude/rules/rss/contract-fanout.md §契约归属）；本单元不预置未用 API。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContractOwner {
     Domain(String),

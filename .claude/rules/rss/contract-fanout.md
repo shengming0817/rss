@@ -25,7 +25,7 @@ HTTP path、auth 语义、consistency level、subscription role 时，必须做�
 
 ## 契约归属（域 crate vs framework）
 
-契约的 owner 是 sealed `vocab::ContractOwner`（`Domain(name) | Framework`，sealed enum）：
+契约的 owner 是 sealed `vocab::ContractOwner`（公开 struct 包私有内层 enum `Domain(name) | Framework`；构造只经 `ContractOwner::framework()` / `ContractOwner::of_domain(DomainName)` 受控入口，外部 crate 无法命名内层 ⇒ 无法 raw-mint 任意 owner）：
 
 - 默认 owner 是某个**域 crate**（`owner: <domain>` 或经 `endpoints.server/publisher` 派生）。
 - **中立、provider-agnostic** 契约（正确性要求 provider 可互换，如设备身份/证书签发）由**框架**归属：
@@ -33,8 +33,8 @@ HTTP path、auth 语义、consistency level、subscription role 时，必须做�
 - owner→域 crate 解析**只经 `c.owner().domain()`**（框架 owner 返回 `None`）；禁止直接索引 `project.domains[c.owner]`。
 - 框架归属今仅 http/event；`lifecycle: active` 须在某 `assembly.toml` 的 `frameworkContracts` 声明且经 `bootstrap::validate_framework_serving` 验证 route group 已挂载；否则须为 draft|deprecated。
 
-owner→域 crate 收口由 sealed enum + `owner().domain()` API（类型系统强制 `Framework` 无法解析成域）守，无需运行期 guard。
-符号/盲区见 `crates/vocab/src/contract/owner.rs`。
+owner→域 crate 收口由 sealed struct（私有内层 enum + 受控构造关联函数）+ `owner().domain()` API（类型系统强制 `Framework` 无法解析成域、外部无法 mint 任意 owner）守，无需运行期 guard。
+构造封闭符号/盲区见 `crates/vocab/src/contract/owner.rs`（INVARIANT: CONTRACT-OWNER-SEAL-01）。
 
 ## Implementation matrix
 
