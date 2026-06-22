@@ -14,6 +14,7 @@
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
 mod codegen;
 mod contract;
+mod diagnostic;
 mod layerdeps;
 mod layers;
 mod pathsafe;
@@ -124,8 +125,8 @@ fn parse_public_api(args: &[&str]) -> Result<Command> {
 fn dispatch(args: &[String]) -> Result<()> {
     match parse_command(args)? {
         Command::Codegen { check } => codegen::run(check),
-        Command::ContractValidate => contract::validate::run(),
-        Command::LayerDeps => layerdeps::run(),
+        Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
+        Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
         Command::Verify {
             fast,
             allow_missing_tools,

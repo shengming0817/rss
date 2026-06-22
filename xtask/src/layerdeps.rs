@@ -33,7 +33,10 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::layers::{self, Layer};
+
+pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 /// 被违反的分层规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,15 +55,6 @@ pub(crate) enum Rule {
     WrapperCoverage,
     /// LAYER-DEPS-07：含 path 的本地依赖未解析到现存 workspace 成员（逃逸 / 非成员 / typo）。
     UnresolvedPath,
-}
-
-/// 单条 lint 失败。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Finding {
-    pub(crate) rule: Rule,
-    /// 出错主体（成员名或路径）。
-    pub(crate) subject: String,
-    pub(crate) detail: String,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -99,48 +93,42 @@ pub(crate) struct BanEntry {
     pub(crate) wrappers: Vec<String>,
 }
 
-fn finding(rule: Rule, subject: impl Into<String>, detail: impl Into<String>) -> Finding {
-    Finding {
-        rule,
-        subject: subject.into(),
-        detail: detail.into(),
+/// `cargo xtask layer-deps` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
+pub(crate) struct LayerDeps;
+
+impl GovernanceCheck for LayerDeps {
+    type Rule = Rule;
+    fn name(&self) -> &'static str {
+        "layer-deps"
     }
-}
+    fn check(&self) -> Result<(String, Vec<Finding>)> {
+        let root = crate::workspace_root()?;
+        let workspace = parse_root_manifest(&root)?.workspace;
+        let members = load_members(&root, &workspace.members)?;
+        // canary：根 Cargo.toml 解析异常 / [workspace] members 被意外缩减时，静默通过会让分层门形同
+        // 虚设。下界显著低于实际成员数（35），仅捕「解析返回空/极少」的配置灾难，不误伤正常增减。
+        if members.len() < 10 {
+            bail!(
+                "layer-deps: 仅解析到 {} 个 workspace 成员，疑似根 Cargo.toml [workspace] members 异常",
+                members.len()
+            );
+        }
+        let scan = load_edges(&root, &members, &workspace.dependencies)?;
+        let bans = load_bans(&root)?;
 
-/// 入口：校验真实工作区，有失败则 `bail`（非零退出）。
-pub(crate) fn run() -> Result<()> {
-    let root = crate::workspace_root()?;
-    let workspace = parse_root_manifest(&root)?.workspace;
-    let members = load_members(&root, &workspace.members)?;
-    // canary：根 Cargo.toml 解析异常 / [workspace] members 被意外缩减时，静默通过会让分层门形同
-    // 虚设。下界显著低于实际成员数（35），仅捕「解析返回空/极少」的配置灾难，不误伤正常增减。
-    if members.len() < 10 {
-        bail!(
-            "layer-deps: 仅解析到 {} 个 workspace 成员，疑似根 Cargo.toml [workspace] members 异常",
-            members.len()
-        );
-    }
-    let scan = load_edges(&root, &members, &workspace.dependencies)?;
-    let bans = load_bans(&root)?;
+        let mut findings = check_layers(&members, &scan.edges);
+        findings.extend(scan.findings);
+        findings.extend(check_wrappers(&members, &bans));
+        findings.extend(check_external_confinement(&members, &bans));
 
-    let mut findings = check_layers(&members, &scan.edges);
-    findings.extend(scan.findings);
-    findings.extend(check_wrappers(&members, &bans));
-    findings.extend(check_external_confinement(&members, &bans));
-
-    if findings.is_empty() {
-        eprintln!(
-            "layer-deps: {} 成员 / {} 内部边 / {} wrappers 全部通过",
+        let summary = format!(
+            "{} 成员 / {} 内部边 / {} wrappers 全部通过",
             members.len(),
             scan.edges.len(),
             bans.len()
         );
-        return Ok(());
+        Ok((summary, findings))
     }
-    for f in &findings {
-        eprintln!("  [{:?}] {}: {}", f.rule, f.subject, f.detail);
-    }
-    bail!("layer-deps: {} 项分层依赖校验失败", findings.len());
 }
 
 /// 规则 (a)(b)(c)(d) + LAYER-DEPS-05：分类覆盖 + 每条内部边对照 `layers::allows`。

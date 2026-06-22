@@ -10,7 +10,7 @@
 //! 规则执行顺序（注释编号 = 执行先后）：
 //!   R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::path::Path;
 
 use super::manifest::{
@@ -18,7 +18,10 @@ use super::manifest::{
     SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
 use super::{DiscoveredContract, discover};
+use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
+
+pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,26 +42,19 @@ pub(crate) enum Rule {
     IdentSyntax,
 }
 
-/// 单条校验失败。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Finding {
-    pub(crate) rule: Rule,
-    pub(crate) contract: String,
-    pub(crate) detail: String,
-}
+/// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
+pub(crate) struct ContractValidate;
 
-/// 入口：校验真实仓 `contracts/`，有失败则 `bail`。
-pub(crate) fn run() -> Result<()> {
-    let contracts_root = crate::workspace_root()?.join("contracts");
-    let (count, findings) = validate_root(&contracts_root)?;
-    if findings.is_empty() {
-        eprintln!("contract validate: {count} 契约全部通过");
-        return Ok(());
+impl GovernanceCheck for ContractValidate {
+    type Rule = Rule;
+    fn name(&self) -> &'static str {
+        "contract validate"
     }
-    for f in &findings {
-        eprintln!("  [{:?}] {}: {}", f.rule, f.contract, f.detail);
+    fn check(&self) -> Result<(String, Vec<Finding>)> {
+        let contracts_root = crate::workspace_root()?.join("contracts");
+        let (count, findings) = validate_root(&contracts_root)?;
+        Ok((format!("{count} 契约全部通过"), findings))
     }
-    bail!("contract validate: {} 项校验失败", findings.len());
 }
 
 /// 校验给定根下全部契约，返回（契约数, findings）。根可注入便于测试。
@@ -83,14 +79,6 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_unsafe_schema_path(&c.manifest, &label));
     findings.extend(rule_ident_syntax(&c.manifest, &label));
     findings
-}
-
-fn finding(rule: Rule, label: &str, detail: impl Into<String>) -> Finding {
-    Finding {
-        rule,
-        contract: label.to_string(),
-        detail: detail.into(),
-    }
 }
 
 /// R1：saga ⇒ WorkflowEventual。
@@ -361,7 +349,12 @@ mod tests {
             },
         );
         let f = rule_saga_consistency(&m, "x");
-        assert_eq!(f.map(|f| f.rule), Some(Rule::SagaConsistency));
+        assert_eq!(f.as_ref().map(|f| f.rule), Some(Rule::SagaConsistency));
+        assert_eq!(
+            f.map(|f| f.subject),
+            Some("x".to_string()),
+            "subject 须为传入 label"
+        );
     }
 
     #[test]
@@ -487,6 +480,7 @@ mod tests {
         let findings = rule_schema_shape(&m, "x");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::SchemaShape);
+        assert_eq!(findings[0].subject, "x", "subject 须为传入 label");
     }
 
     #[test]
@@ -551,6 +545,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::MissingSchema);
+        assert_eq!(findings[0].subject, "x", "subject 须为传入 label");
         Ok(())
     }
 

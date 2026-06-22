@@ -22,6 +22,7 @@
 //! INVARIANT: VERIFY-AGGREGATE-01 —— 任一门步失败 ⇒ verify 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 —— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 
+use crate::diagnostic::run_check;
 use crate::workspace_root;
 use crate::{codegen, contract, layerdeps};
 use anyhow::{Result, bail};
@@ -285,8 +286,8 @@ fn run_one(step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
 
 fn run_internal(check: InternalCheck) -> Result<()> {
     match check {
-        InternalCheck::ContractValidate => contract::validate::run(),
-        InternalCheck::LayerDeps => layerdeps::run(),
+        InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
+        InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::CodegenCheck => codegen::run(true),
     }
 }
