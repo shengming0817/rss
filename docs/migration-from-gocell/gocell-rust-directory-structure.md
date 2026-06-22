@@ -159,7 +159,7 @@ rss/
 
 ## 五、参考项目对标
 
-接 CLAUDE.md 的「参考框架」表（`ref: {project} {file}` 工作流），Rust 侧按关注点对标如下。
+接 CLAUDE.md §参考框架 工作流（`ref: {project} {file}`；完整对标表见单一事实源 `docs/references/framework-comparison.md`），Rust 侧按关注点对标如下。
 
 ### 最该先读的 4 个整体参考
 

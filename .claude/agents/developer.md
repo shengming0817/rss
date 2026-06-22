@@ -56,8 +56,8 @@ memory: project
 
 ### 2. 检查对标约束（基础/基建/域/adapters crate 下修改时）
 
-按 CLAUDE.md 的"参考框架"规则：
-- 查 `docs/references/framework-comparison.md` 找当前模块对标
+按对标规则（`ref:` commit 工作流见 CLAUDE.md §参考框架）：
+- 查 `docs/references/framework-comparison.md`（对标单一事实源）找当前模块对标
 - 不确定设计时停手，请调用方派发 `explorer` agent 先研究，再回来执行
 
 ### 3. Edit-Test Loop（逐步改、逐步测）

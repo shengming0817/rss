@@ -18,7 +18,7 @@ permissionMode: auto
 
 ## 使用场景
 
-- 新建或重构 `crates/`、`adapters/`、`bins/` 下的模块时，按 CLAUDE.md 的"参考框架"规则拉取对标源码
+- 新建或重构 `crates/`、`adapters/`、`bins/` 下的模块时，按 `docs/references/framework-comparison.md`（对标单一事实源）拉取对标源码（`ref:` commit 工作流见 CLAUDE.md §参考框架）
 - 研究某个开源项目的接口（trait）设计、生命周期、错误处理模式
 - 对比多个框架解决同一问题的方案
 - 为架构决策提供证据（源码引用 + 采纳/偏离理由）

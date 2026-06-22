@@ -93,18 +93,11 @@ Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静�
 ## 参考框架
 
 新建或重构层内模块时，先用 `WebFetch` 读对标源码，commit message 注明 `ref: {framework} {file}`。
-读源码优先 Rust 工业对标（右列）；中列 Go 框架是架构范式 / 概念来源。完整 owner/repo 坐标 +
-按模块细分的扩展对标（reconcile / saga / 分布式 / 证书 PKI / 可观测 / 授权 …）见
-`docs/references/framework-comparison.md`。
+读源码优先 Rust 工业对标；中列 Go 框架是架构范式 / 概念来源。
 
-| 模块 | 对标框架 / 范式（概念来源） | Rust 工业对标 + 生态 |
-|------|---------|--------------|
-| 域 crate 生命周期 / init + 契约校验 | Kubernetes | kube-rs · omicron |
-| 域 crate 运行时 / 依赖注入 | Uber fx | 构造器注入 · omicron / RisingWave · shaku |
-| 代码生成 | go-zero goctl | typify · prettyplease · omicron(dropshot / progenitor) |
-| 中间件 | Kratos | tower / tower-http · linkerd2-proxy |
-| HTTP | — | axum · omicron(dropshot) |
-| 事件驱动 | Watermill | cqrs-es · Oxide steno(saga) |
+当前模块对标哪个开源项目——完整模块对标表（概念映射 + owner/repo 坐标 + 源码起点路径 + primary/secondary 优先级，
+含 reconcile / saga / 分布式 / 证书 PKI / 可观测 / 授权 等扩展模块）见**单一事实源**
+`docs/references/framework-comparison.md`，explorer / developer / ship / fix 均以该文件为入口。
 
 ## Sandbox 提权
 
