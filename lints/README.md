@@ -54,7 +54,7 @@ cd lints/rss_domain_no_serialize && cargo test
 |---------|-----------|---------|
 | `rss_domain_no_serialize` | SERDE-DOMAIN-FREEZE-01 | domain 实体禁 derive serde `Serialize`/`Deserialize`（只有 contract/DTO/`generated` 可序列化到 wire）。默认 `Warn`。 |
 | `rss_spawn_missing_scope` | SPAWN-CTX-REBIND-01 | `tokio::spawn`/`spawn_blocking` 子任务体内读 `runctx::try_with`/`try_current`，却未在外层 `runctx::scope(...)` 重绑 ctx（spawn footgun 静态防误用，ADR-002）。默认 `Warn`。仅 intraprocedural；`#[cfg(test)]` 子树因 `cargo dylint --all` 默认不带 `--all-targets` 不被扫（故 `runctx` 自测的 footgun 演示不报，也无 stable 构建 `unknown_lints` 之虞）。 |
-| `rss_crosstenant_callsite` | TENANCY-CROSSTENANT-CAP-01 | `vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin()` 仅 `authn` crate 可调用（跨租户 capability 签发 callsite-allowlist；funnel 下游约束——上游私有 `_seal` 字段在 vocab 是 Hard，本 lint 守下游「谁可调」为 Medium）。默认 `Warn`。仅认 `Call`/`MethodCall`（裸 fn-path 引用不报）、intraprocedural（allowlist crate 内 re-export 洗白不追）；UI 用两个 example target（`crosstenant_callsite_ui` 红 / `authn` 绿）证 allowlist 分支。 |
+| `rss_crosstenant_callsite` | TENANCY-CROSSTENANT-CAP-01 | `vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin()` 仅 `authn` crate 可调用（跨租户 capability 签发 callsite-allowlist；funnel 下游约束——上游私有 `_seal` 字段在 vocab 是 Hard，本 lint 守下游「谁可调」为 Medium）。默认 `Warn`。捕获对该 assoc fn 的**任意 path 引用**（直接 call callee / 函数项别名 / fn-pointer 强转，凡解析到该 `DefId` 即报，杜绝「先别名再调用」绕过）；仍 intraprocedural（allowlist crate 内跨函数 wrapper 洗白不追，#1085）。UI 用两个 example target（`crosstenant_callsite_ui` 红 / `authn` 绿）证 allowlist 分支。 |
 
 逃生门：确需豁免的 callsite（如确需序列化的非 DTO 类型、确需读裸 ctx 的 spawn），在该 item 上加
 `#[allow(<lint_id>)] // reason: ...`（与仓库 item-level carve-out 纪律一致）。
