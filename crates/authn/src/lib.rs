@@ -94,8 +94,8 @@ impl Principal {
 
     /// 从 principal + 请求 ctx 派生行级可见性义务（ADR-002）。
     ///
-    /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<TenantSlot, PrincipalSlot>` 别名，
-    /// 遵循 ADR-002 显式传 `&RequestCtx` 而非隐式线程局部的原则。
+    /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<vocab::tenant::TenantId, PrincipalSlot>`
+    /// 别名，遵循 ADR-002 显式传 `&RequestCtx` 而非隐式线程局部的原则。
     /// ctx 缺失 fail-closed（返回 [`runctx::MissingCtx`]，绝不伪造 RowScope）。
     pub fn row_visibility(
         &self,

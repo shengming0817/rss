@@ -158,7 +158,8 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
             // 未分类成员已单独 flag（LAYER-DEPS-05）；edges 只含内部成员，无外部边。
             continue;
         };
-        if !layers::allows(from, to) {
+        // 基础同层横向默认禁；唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）。
+        if !layers::allows(from, to) && !layers::basis_intra_dag_allows(&edge.from, &edge.to) {
             findings.push(finding(
                 violation_rule(from, to),
                 edge.from.clone(),
@@ -725,14 +726,16 @@ mod tests {
         assert_eq!(findings[0].rule, Rule::BackPath);
     }
 
-    /// F1：基础→兄弟基础违规——基础"仅 std+外部"，不依赖任何内部成员（→ BackPath）。
+    /// F1：基础 intra-base DAG **反向**边违规——DAG 为 `vocab ◁ … ◁ support`，`vocab → support` 是倒挂边
+    /// （非 BASE-INTRADAG-01 放行的前向边 → BackPath）。前向边（如 `support → vocab` / `runctx → vocab`）由
+    /// `basis_intra_dag_allows` 放行，见 layers.rs `basis_intra_dag_allows_forward_only`。
     #[test]
     fn check_layers_red_same_layer_basis() {
         let members = vec![
             m("vocab", "crates/vocab", Some(Layer::Basis)),
             m("support", "crates/support", Some(Layer::Basis)),
         ];
-        let findings = check_layers(&members, &[e("support", "vocab")]);
+        let findings = check_layers(&members, &[e("vocab", "support")]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::BackPath);
     }

@@ -1,6 +1,6 @@
 //! runctx — 请求级 context 控制流值（tenant / principal）的传播接缝。
 //!
-//! # 可观测性边界（ADR-001 §D1，Hard）
+//! # 可观测性边界（ADR-002 §D1，Hard）
 //!
 //! 本 crate **只**承载控制流值（授权用的 tenant / principal）。trace / correlation /
 //! request / cell 等**可观测 ID 是诊断信号**，必须由 consumer（httpserve middleware /
@@ -9,17 +9,17 @@
 //! 改写，不配做 row-scope 授权闸门（见 `docs/rules/tenancy.md`「tracing span 仅作关联信号、
 //! 不替代持久审计」）。
 //!
-//! # 范式（ADR-001 §D2）
+//! # 范式（ADR-002 §D2）
 //!
 //! [`RequestCtx`] 是显式 sealed struct，经 `tokio::task_local!` 传播：框架信任边界
 //! （httpserve / authn）用 [`scope`] 绑定一次，深层代码用 [`try_current`] / [`try_with`] 取用。
-//! ctx 缺失 = fail-closed（返回 [`MissingCtx`]，绝不伪造 anonymous / default-tenant；ADR-001 §D6）。
+//! ctx 缺失 = fail-closed（返回 [`MissingCtx`]，绝不伪造 anonymous / default-tenant；ADR-002 §D6）。
 //!
 //! 构造只允许发生在已认证通道（JWT claim / service-token-MAC 的 `X-Tenant-ID`）；
-//! [`RequestCtx`] 私有字段 + 无 `Deserialize` ⇒ 从 request body 构造不可表达（ADR-001 §D5）。
+//! [`RequestCtx`] 私有字段 + 无 `Deserialize` ⇒ 从 request body 构造不可表达（ADR-002 §D5）。
 //!
 //! `tokio::spawn` / `spawn_blocking` / `std::thread` **不继承** task_local：跨任务须显式
-//! 「spawn 前 [`try_current`] 捕获 → 子任务 [`scope`] 重绑」，否则子任务 fail-closed（ADR-001 §后果 R2）。
+//! 「spawn 前 [`try_current`] 捕获 → 子任务 [`scope`] 重绑」，否则子任务 fail-closed（ADR-002 §后果 R2）。
 //!
 //! # consumer 接线示例（仅示意，runctx 不依赖 axum / tracing）
 //!
@@ -39,7 +39,8 @@
 pub mod ctx;
 pub mod local;
 
-// slot 占位类型不进 crate 根公开 API（`#[doc(hidden)]` + `pub(crate)` 构造，外部不可伪造）；
-// consumer 经 AppCtx 不透明持有，经访问器借用（ADR-001 §D5）。W 阶段换真类型时一并清理。
+// `AppCtx` 的 tenant 已是具体 `vocab::tenant::TenantId`（ADR-002 §D3）；principal 仍 `PrincipalSlot`
+// 占位（`#[doc(hidden)]` + `pub(crate)` 构造，外部不可 mint ⇒ `AppCtx` 不可伪造），W 阶段由 authn
+// principal facet 取代。consumer 经 `AppCtx` 不透明持有、经访问器借用（ADR-002 §D5）。
 pub use ctx::{AppCtx, RequestCtx};
 pub use local::{MissingCtx, scope, try_current, try_with};

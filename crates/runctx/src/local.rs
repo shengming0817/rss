@@ -1,7 +1,7 @@
 //! [`AppCtx`] 的 `task_local!` 传播 + fail-closed 访问器。
 //!
 //! `scope` 在信任边界绑定一次，`try_with` / `try_current` 在深层取用；ctx 缺失返回
-//! [`MissingCtx`]（绝不 panic、绝不伪造 ctx —— ADR-001 §D6）。
+//! [`MissingCtx`]（绝不 panic、绝不伪造 ctx —— ADR-002 §D6）。
 //!
 //! 注意 `tokio::task_local!` 的 `with` / `get` 在未绑定时**会 panic**，故本模块只封装
 //! `try_with`（workspace `panic`/`unwrap_used`/`expect_used` 均 deny）。
@@ -10,7 +10,7 @@ use crate::ctx::AppCtx;
 use std::future::Future;
 
 tokio::task_local! {
-    // 单一 monomorphized 实例（一个进程一套 auth 模型 —— ADR-001 §后果 R1）。
+    // 单一 monomorphized 实例（一个进程一套 auth 模型 —— ADR-002 §后果 R1）。
     static REQUEST_CTX: AppCtx;
 }
 
@@ -39,18 +39,36 @@ pub fn try_current() -> Result<AppCtx, MissingCtx> {
 }
 
 /// 当前任务不在任何 [`scope`] 内 —— 控制流值缺失。调用方必须 fail-closed（deny），
-/// 不得回退到 anonymous / default-tenant（ADR-001 §D6）。
+/// 不得回退到 anonymous / default-tenant（ADR-002 §D6）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("request context missing: caller is outside an authenticated scope")]
 pub struct MissingCtx;
 
 #[cfg(test)]
 mod tests {
-    use crate::ctx::{AppCtx, PrincipalSlot, RequestCtx, TenantSlot};
+    use crate::ctx::{AppCtx, PrincipalSlot, RequestCtx};
     use crate::local::{MissingCtx, scope, try_current, try_with};
+    use vocab::tenant::TenantId;
+
+    // 测试 fixture：把任意 label 确定性映射到合法 canonical UUID（distinct label ⇒ distinct id，
+    // 同 label ⇒ 同 id），使租户隔离 / 相等断言可辨。`DefaultHasher` 在**同次运行内**确定即够本测试
+    // （每次运行内构造并比对，不跨运行复现；不依赖 std 未保证的跨版本 hash 稳定性）。
+    // reason: `| 1` 保证非 nil、`from_u64_pair → hyphenated` 必为 canonical lowercase，故 parse 在此恒 Ok；
+    // item-level carve-out 仅作用本 helper（error-handling.md §Carve-out / workspace 测试模块 #[allow] 约定）。
+    #[allow(clippy::unwrap_used)]
+    fn tid(label: &str) -> TenantId {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        label.hash(&mut hasher);
+        let hi = hasher.finish() | 1; // 置最低位 ⇒ 整体 u128 非 nil
+        label.len().hash(&mut hasher);
+        let lo = hasher.finish();
+        let canonical = uuid::Uuid::from_u64_pair(hi, lo).hyphenated().to_string();
+        TenantId::parse(&canonical).unwrap()
+    }
 
     fn sample(tenant: &str, principal: &str) -> AppCtx {
-        RequestCtx::new(TenantSlot::new(tenant), PrincipalSlot::new(principal))
+        RequestCtx::new(tid(tenant), PrincipalSlot::new(principal))
     }
 
     // happy path：scope 绑定后深层 try_current 取回同一快照。
@@ -60,7 +78,7 @@ mod tests {
         assert_eq!(seen, Ok(sample("t1", "u1")));
     }
 
-    // fail-closed 核心不变式（ADR-001 §D6）：无 scope 时返回 Err，绝不伪造 ctx。
+    // fail-closed 核心不变式（ADR-002 §D6）：无 scope 时返回 Err，绝不伪造 ctx。
     #[tokio::test]
     async fn try_current_outside_scope_is_err() {
         assert_eq!(try_current(), Err(MissingCtx));
@@ -75,11 +93,8 @@ mod tests {
     // try_with 是免 clone 主入口：scope 内借用 ctx 求值。
     #[tokio::test]
     async fn try_with_inside_scope_borrows_payload() {
-        let tenant = scope(sample("t1", "u1"), async {
-            try_with(|ctx| ctx.tenant().clone())
-        })
-        .await;
-        assert_eq!(tenant, Ok(TenantSlot::new("t1")));
+        let tenant = scope(sample("t1", "u1"), async { try_with(|ctx| *ctx.tenant()) }).await;
+        assert_eq!(tenant, Ok(tid("t1")));
     }
 
     // try_with fail-closed：无 scope 时 Err，且闭包根本不被调用（绝不在缺 ctx 时跑业务）。
@@ -108,7 +123,7 @@ mod tests {
     #[test]
     fn ctx_accessors_return_bound_payload() {
         let ctx = sample("t", "p");
-        assert_eq!(ctx.tenant(), &TenantSlot::new("t"));
+        assert_eq!(ctx.tenant(), &tid("t"));
         assert_eq!(ctx.principal(), &PrincipalSlot::new("p"));
     }
 
@@ -177,10 +192,11 @@ mod tests {
         );
     }
 
-    // slot 的 Debug 同样脱敏（assert_eq! 失败消息走 Debug，不该裸打印 payload）。
+    // principal slot 的 Debug 脱敏（assert_eq! 失败消息走 Debug，principal subject 是凭据级 PII，不裸打印）。
+    // 注：`TenantId` Debug 为 derived（打印 UUID）——tenant id 是合法可观测标识（observ span 字段），非凭据，
+    // 有意不脱敏；RequestCtx 的手写 Debug 仍对 tenant/principal 统一出 `<redacted>`（见上 test）。
     #[test]
-    fn slot_debug_is_redacted() {
-        assert!(!format!("{:?}", TenantSlot::new("SECRET")).contains("SECRET"));
+    fn principal_slot_debug_is_redacted() {
         assert!(!format!("{:?}", PrincipalSlot::new("SECRET")).contains("SECRET"));
     }
 }

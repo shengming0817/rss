@@ -546,84 +546,6 @@ pub unsafe fn vocab::query::Limit::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::query::Limit
 pub fn vocab::query::Limit::from(T) -> T
 pub mod vocab::tenant
-#[non_exhaustive] pub enum vocab::tenant::TenantIdError
-pub vocab::tenant::TenantIdError::Empty
-pub vocab::tenant::TenantIdError::Format
-pub vocab::tenant::TenantIdError::Nil
-impl core::error::Error for vocab::tenant::TenantIdError
-impl core::fmt::Debug for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for vocab::tenant::TenantIdError
-impl core::marker::Send for vocab::tenant::TenantIdError
-impl core::marker::Sync for vocab::tenant::TenantIdError
-impl core::marker::Unpin for vocab::tenant::TenantIdError
-impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
-impl<T, U> core::convert::Into<U> for vocab::tenant::TenantIdError where U: core::convert::From<T>
-pub fn vocab::tenant::TenantIdError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantIdError where U: core::convert::Into<T>
-pub type vocab::tenant::TenantIdError::Error = core::convert::Infallible
-pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
-pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::from(T) -> T
-pub struct vocab::tenant::TenantId(_)
-impl vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
-pub fn vocab::tenant::TenantId::parse(&str) -> core::result::Result<Self, vocab::tenant::TenantIdError>
-impl core::clone::Clone for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::clone(&self) -> vocab::tenant::TenantId
-impl core::cmp::Eq for vocab::tenant::TenantId
-impl core::cmp::PartialEq for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
-impl core::fmt::Debug for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for vocab::tenant::TenantId
-impl core::marker::StructuralPartialEq for vocab::tenant::TenantId
-impl core::marker::Freeze for vocab::tenant::TenantId
-impl core::marker::Send for vocab::tenant::TenantId
-impl core::marker::Sync for vocab::tenant::TenantId
-impl core::marker::Unpin for vocab::tenant::TenantId
-impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
-impl<T, U> core::convert::Into<U> for vocab::tenant::TenantId where U: core::convert::From<T>
-pub fn vocab::tenant::TenantId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantId where U: core::convert::Into<T>
-pub type vocab::tenant::TenantId::Error = core::convert::Infallible
-pub fn vocab::tenant::TenantId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantId where U: core::convert::TryFrom<T>
-pub type vocab::tenant::TenantId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::TenantId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone::Clone
-pub type vocab::tenant::TenantId::Owned = T
-pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
-pub fn vocab::tenant::TenantId::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::clone::Clone
-pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::from(T) -> T
 #[non_exhaustive] pub enum vocab::tenant::RowScope
 pub vocab::tenant::RowScope::All
 pub vocab::tenant::RowScope::Device
@@ -711,6 +633,52 @@ impl<T> core::clone::CloneToUninit for vocab::tenant::ScopedTenant where T: core
 pub unsafe fn vocab::tenant::ScopedTenant::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::tenant::ScopedTenant
 pub fn vocab::tenant::ScopedTenant::from(T) -> T
+#[non_exhaustive] pub enum vocab::tenant::TenantIdError
+pub vocab::tenant::TenantIdError::Empty
+pub vocab::tenant::TenantIdError::Format
+pub vocab::tenant::TenantIdError::Nil
+impl core::clone::Clone for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::clone(&self) -> vocab::tenant::TenantIdError
+impl core::cmp::Eq for vocab::tenant::TenantIdError
+impl core::cmp::PartialEq for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::eq(&self, &vocab::tenant::TenantIdError) -> bool
+impl core::error::Error for vocab::tenant::TenantIdError
+impl core::fmt::Debug for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::tenant::TenantIdError
+impl core::marker::Freeze for vocab::tenant::TenantIdError
+impl core::marker::Send for vocab::tenant::TenantIdError
+impl core::marker::Sync for vocab::tenant::TenantIdError
+impl core::marker::Unpin for vocab::tenant::TenantIdError
+impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
+impl<T, U> core::convert::Into<U> for vocab::tenant::TenantIdError where U: core::convert::From<T>
+pub fn vocab::tenant::TenantIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantIdError where U: core::convert::Into<T>
+pub type vocab::tenant::TenantIdError::Error = core::convert::Infallible
+pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
+pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantIdError where T: core::clone::Clone
+pub type vocab::tenant::TenantIdError::Owned = T
+pub fn vocab::tenant::TenantIdError::clone_into(&self, &mut T)
+pub fn vocab::tenant::TenantIdError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::tenant::TenantIdError where T: core::clone::Clone
+pub unsafe fn vocab::tenant::TenantIdError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::from(T) -> T
 pub struct vocab::tenant::CrossTenantCapability
 impl vocab::tenant::CrossTenantCapability
 pub fn vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin() -> Self
@@ -792,6 +760,54 @@ impl<T> core::borrow::BorrowMut<T> for vocab::tenant::RowVisibility where T: ?co
 pub fn vocab::tenant::RowVisibility::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for vocab::tenant::RowVisibility
 pub fn vocab::tenant::RowVisibility::from(T) -> T
+pub struct vocab::tenant::TenantId(_)
+impl vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
+pub fn vocab::tenant::TenantId::parse(&str) -> core::result::Result<Self, vocab::tenant::TenantIdError>
+impl core::clone::Clone for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::clone(&self) -> vocab::tenant::TenantId
+impl core::cmp::Eq for vocab::tenant::TenantId
+impl core::cmp::PartialEq for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
+impl core::fmt::Debug for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::tenant::TenantId
+impl core::marker::StructuralPartialEq for vocab::tenant::TenantId
+impl core::marker::Freeze for vocab::tenant::TenantId
+impl core::marker::Send for vocab::tenant::TenantId
+impl core::marker::Sync for vocab::tenant::TenantId
+impl core::marker::Unpin for vocab::tenant::TenantId
+impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
+impl<T, U> core::convert::Into<U> for vocab::tenant::TenantId where U: core::convert::From<T>
+pub fn vocab::tenant::TenantId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantId where U: core::convert::Into<T>
+pub type vocab::tenant::TenantId::Error = core::convert::Infallible
+pub fn vocab::tenant::TenantId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantId where U: core::convert::TryFrom<T>
+pub type vocab::tenant::TenantId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::tenant::TenantId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone::Clone
+pub type vocab::tenant::TenantId::Owned = T
+pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
+pub fn vocab::tenant::TenantId::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::tenant::TenantId where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::tenant::TenantId::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
+pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
+pub fn vocab::tenant::TenantId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::clone::Clone
+pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::from(T) -> T
 #[non_exhaustive] pub enum vocab::ActionError
 pub vocab::ActionError::Empty
 pub vocab::ActionError::Format
@@ -1221,11 +1237,17 @@ pub fn vocab::tenant::ScopedTenant::from(T) -> T
 pub vocab::TenantIdError::Empty
 pub vocab::TenantIdError::Format
 pub vocab::TenantIdError::Nil
+impl core::clone::Clone for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::clone(&self) -> vocab::tenant::TenantIdError
+impl core::cmp::Eq for vocab::tenant::TenantIdError
+impl core::cmp::PartialEq for vocab::tenant::TenantIdError
+pub fn vocab::tenant::TenantIdError::eq(&self, &vocab::tenant::TenantIdError) -> bool
 impl core::error::Error for vocab::tenant::TenantIdError
 impl core::fmt::Debug for vocab::tenant::TenantIdError
 pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for vocab::tenant::TenantIdError
 pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for vocab::tenant::TenantIdError
 impl core::marker::Freeze for vocab::tenant::TenantIdError
 impl core::marker::Send for vocab::tenant::TenantIdError
 impl core::marker::Sync for vocab::tenant::TenantIdError
@@ -1241,6 +1263,10 @@ pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T a
 impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
 pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
 pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantIdError where T: core::clone::Clone
+pub type vocab::tenant::TenantIdError::Owned = T
+pub fn vocab::tenant::TenantIdError::clone_into(&self, &mut T)
+pub fn vocab::tenant::TenantIdError::to_owned(&self) -> T
 impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
 pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
 impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
@@ -1249,6 +1275,8 @@ impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core:
 pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
 pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::tenant::TenantIdError where T: core::clone::Clone
+pub unsafe fn vocab::tenant::TenantIdError::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
 pub fn vocab::tenant::TenantIdError::from(T) -> T
 pub struct vocab::Action(_)
@@ -1330,32 +1358,6 @@ impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreError where T: ?core::m
 pub fn vocab::error::CoreError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for vocab::error::CoreError
 pub fn vocab::error::CoreError::from(T) -> T
-pub struct vocab::CrossTenantCapability
-impl vocab::tenant::CrossTenantCapability
-pub fn vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin() -> Self
-impl core::marker::Freeze for vocab::tenant::CrossTenantCapability
-impl core::marker::Send for vocab::tenant::CrossTenantCapability
-impl core::marker::Sync for vocab::tenant::CrossTenantCapability
-impl core::marker::Unpin for vocab::tenant::CrossTenantCapability
-impl core::marker::UnsafeUnpin for vocab::tenant::CrossTenantCapability
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::CrossTenantCapability
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::CrossTenantCapability
-impl<T, U> core::convert::Into<U> for vocab::tenant::CrossTenantCapability where U: core::convert::From<T>
-pub fn vocab::tenant::CrossTenantCapability::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::CrossTenantCapability where U: core::convert::Into<T>
-pub type vocab::tenant::CrossTenantCapability::Error = core::convert::Infallible
-pub fn vocab::tenant::CrossTenantCapability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::CrossTenantCapability where U: core::convert::TryFrom<T>
-pub type vocab::tenant::CrossTenantCapability::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::CrossTenantCapability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for vocab::tenant::CrossTenantCapability where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantCapability::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::CrossTenantCapability where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantCapability::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::CrossTenantCapability where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantCapability::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::CrossTenantCapability
-pub fn vocab::tenant::CrossTenantCapability::from(T) -> T
 pub struct vocab::CrossTenantVisibility
 impl vocab::tenant::CrossTenantVisibility
 pub fn vocab::tenant::CrossTenantVisibility::authorize(vocab::tenant::CrossTenantCapability) -> Self
@@ -1546,6 +1548,8 @@ impl core::cmp::PartialEq for vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
 impl core::fmt::Debug for vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::tenant::TenantId
+pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::hash::Hash for vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::Copy for vocab::tenant::TenantId
@@ -1569,6 +1573,8 @@ impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone:
 pub type vocab::tenant::TenantId::Owned = T
 pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
 pub fn vocab::tenant::TenantId::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::tenant::TenantId where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::tenant::TenantId::to_string(&self) -> alloc::string::String
 impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
 pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized

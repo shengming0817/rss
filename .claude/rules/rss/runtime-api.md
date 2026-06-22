@@ -13,9 +13,12 @@ route group 类型位于 `httpserve`。
 域 crate 在 `init(&self, reg: &mut Registry)` 中通过 `reg.route_group(...)` 声明 listener、prefix、register
 闭包。闭包返回 `Result<(), _>`，错误必须冒泡到 bootstrap；禁止 `expect` / `unwrap` 风格 panic。
 
-业务路由使用 `httpserve::mount(router, httpserve::Route { .. })`（router 为 axum `Router`）。
-`Route.contract` 承载 method、path、contract ID。Public 和 password-reset-exempt 只能通过
-route 字段显式声明。
+业务路由按 listener 二选一挂载（router 为 axum `Router`），均承载 method、path、contract ID：
+
+- 非-`Primary` listener（`Internal` / `Admin` / `Health`）：`httpserve::mount(router, httpserve::Route { .. })`——`Route` 类型层**无** opt-out 字段。
+- `Primary` listener：`httpserve::mount_primary(router, httpserve::PrimaryRoute { .., opt_out })`——`PrimaryRoute` 是**唯一**可携 opt-out 的 route 类型。
+
+Public 和 password-reset-exempt 只能经 `PrimaryRoute.opt_out`（`Some(RouteAuthOptOut::Public | PasswordResetExempt)`）在 `Primary` listener 上声明；plain `Route` 类型层无此字段（input-struct-field-exclusion，Hard，INVARIANT AUTH-OPTOUT-PRIMARYONLY-01）。
 
 ## Listener
 

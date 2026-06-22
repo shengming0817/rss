@@ -11,7 +11,8 @@
 //! INVARIANT: LAYER-DEPS-00 —— 五层 const 表与 architecture.md §分层 同源；矩阵 `allows`
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
-/// 基础层（仅 std + 外部 crate，不依赖内部其它分组）。
+/// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
+/// （`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，ADR-002 §D3）——见 [`basis_intra_dag_allows`]。
 pub(crate) const BASIS_CRATES: &[&str] = &["vocab", "ids", "secure", "support", "runctx"];
 /// 引擎 / 原语层（依赖基础）。
 pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives"];
@@ -106,9 +107,20 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
         DiPort => matches!(to, Basis | Engine),
         // 引擎：仅基础；禁兄弟引擎（§分层 未授予）/ DI-infra 及以上。
         Engine => to == Basis,
-        // 基础：仅 std + 外部 crate，不依赖任何内部成员（含兄弟基础）。
+        // 基础：不依赖上层 / 跨界；同层（兄弟基础）默认禁——唯一例外是 intra-base DAG 前向边，
+        // 由 [`basis_intra_dag_allows`] 单独放行（layerdeps 在 Basis→Basis 时叠加判定）。
         Basis => false,
     }
+}
+
+/// 基础层**内部** DAG 前向边放行（INVARIANT: BASE-INTRADAG-01）。[`BASIS_CRATES`] 的声明顺序即 DAG
+/// 低→高（`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，ADR-002 §D3）；高 rank crate 可依赖低 rank crate
+/// （前向边，如 sanctioned `runctx → vocab`），反向 / 同 crate / 任一端非基础边一律 `false`。这是
+/// [`allows`]「基础同层横向一律禁」的**唯一**例外；`layerdeps::check_layers` 在 `!allows(Basis,Basis)`
+/// 时叠加本判定。fail-closed：只放行 DAG 严格前向边。
+pub(crate) fn basis_intra_dag_allows(from_crate: &str, to_crate: &str) -> bool {
+    let rank = |c: &str| BASIS_CRATES.iter().position(|&x| x == c);
+    matches!((rank(from_crate), rank(to_crate)), (Some(f), Some(t)) if f > t)
 }
 
 #[cfg(test)]
@@ -166,6 +178,28 @@ mod tests {
     #[test]
     fn classify_adapter_immune_to_name() {
         assert_eq!(classify("redis", "adapters/redis"), Some(Layer::Adapter));
+    }
+
+    /// intra-base DAG 前向边放行 / 反向·同 crate·非基础禁（INVARIANT: BASE-INTRADAG-01 anti-vacuity）。
+    #[rstest]
+    // 前向边（高 rank → 低 rank）：放行。sanctioned `runctx → vocab`。
+    #[case("runctx", "vocab", true)]
+    #[case("support", "secure", true)]
+    #[case("ids", "vocab", true)]
+    // 反向边：禁（防成环 / 倒挂）。
+    #[case("vocab", "runctx", false)]
+    #[case("vocab", "support", false)]
+    // 同 crate：禁。
+    #[case("vocab", "vocab", false)]
+    // 任一端非基础 crate：本例外不适用（false ⇒ 交回 allows 决策）。
+    #[case("runctx", "consistency", false)]
+    #[case("httpserve", "vocab", false)]
+    fn basis_intra_dag_allows_forward_only(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] want: bool,
+    ) {
+        assert_eq!(basis_intra_dag_allows(from, to), want);
     }
 
     #[rstest]

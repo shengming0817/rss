@@ -11,6 +11,13 @@ workspace = true
 [dependencies]
 # task_local! / LocalKey / TaskLocalFuture 均在 tokio core（rt feature；workspace 已含 rt-multi-thread）。
 # runctx 刻意不依赖 tracing —— 可观测 ID 走 consumer 的 span，控制流值入 RequestCtx，二者在
-# 依赖图上不可互通（ADR-001 §D1，Hard 边界）。同样不依赖 serde：RequestCtx 不可从 body 反序列化构造。
+# 依赖图上不可互通（ADR-002 §D1，Hard 边界）。同样不依赖 serde：RequestCtx 不可从 body 反序列化构造。
 tokio = { workspace = true }
 thiserror = { workspace = true }
+# intra-base sanctioned 边（ADR-002 §D3）：AppCtx 的 tenant payload 收敛为具体 vocab::tenant::TenantId。
+# base 层 DAG：vocab ◁ ids ◁ secure ◁ support ◁ runctx（docs/rules/architecture.md §分层）。
+vocab = { path = "../vocab" }
+
+[dev-dependencies]
+# 仅测试 fixture（tid helper）用：把 label 确定性映射成 canonical UUID 串再经 TenantId::parse 构造。
+uuid = { workspace = true }

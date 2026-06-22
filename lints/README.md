@@ -54,6 +54,7 @@ cd lints/rss_domain_no_serialize && cargo test
 |---------|-----------|---------|
 | `rss_domain_no_serialize` | SERDE-DOMAIN-FREEZE-01 | domain 实体禁 derive serde `Serialize`/`Deserialize`（只有 contract/DTO/`generated` 可序列化到 wire）。默认 `Warn`。 |
 | `rss_spawn_missing_scope` | SPAWN-CTX-REBIND-01 | `tokio::spawn`/`spawn_blocking` 子任务体内读 `runctx::try_with`/`try_current`，却未在外层 `runctx::scope(...)` 重绑 ctx（spawn footgun 静态防误用，ADR-002）。默认 `Warn`。仅 intraprocedural；`#[cfg(test)]` 子树因 `cargo dylint --all` 默认不带 `--all-targets` 不被扫（故 `runctx` 自测的 footgun 演示不报，也无 stable 构建 `unknown_lints` 之虞）。 |
+| `rss_crosstenant_callsite` | TENANCY-CROSSTENANT-CAP-01 | `vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin()` 仅 `authn` crate 可调用（跨租户 capability 签发 callsite-allowlist；funnel 下游约束——上游私有 `_seal` 字段在 vocab 是 Hard，本 lint 守下游「谁可调」为 Medium）。默认 `Warn`。仅认 `Call`/`MethodCall`（裸 fn-path 引用不报）、intraprocedural（allowlist crate 内 re-export 洗白不追）；UI 用两个 example target（`crosstenant_callsite_ui` 红 / `authn` 绿）证 allowlist 分支。 |
 
 逃生门：确需豁免的 callsite（如确需序列化的非 DTO 类型、确需读裸 ctx 的 spawn），在该 item 上加
 `#[allow(<lint_id>)] // reason: ...`（与仓库 item-level carve-out 纪律一致）。
@@ -63,3 +64,10 @@ cd lints/rss_domain_no_serialize && cargo test
 **ui example target 名取唯一 `<lint>_ui`**（非裸 `ui`）：多个 lint crate 同名 example 在 `cargo test --workspace`
 会产生 artifact 路径碰撞（Cargo 警告、未来或升 hard error，见 rust-lang/cargo#6313）；`src/lib.rs` 的
 `ui_test_example(env!("CARGO_PKG_NAME"), "<lint>_ui")` 第二参须同步，golden 仍随源文件名 `ui/main.stderr`。
+
+> **例外（caller-crate-name lint 的绿例）**：若 lint 按 **caller crate 名** 判 allowlist（如
+> `rss_crosstenant_callsite` 只准 `authn` 调），绿例须把 example target 名取作 allowlist 项本身（如 `authn`）
+> ——UI fixture 编译为单一 example crate、其 crate 名 = target 名，故只有这样 `crate_name(LOCAL_CRATE)` 才命中
+> allowlist 分支。此时 target 名**故意偏离** `<lint>_ui`；红例仍用 `<lint>_ui`。碰撞风险：不同 lint 的同名绿例
+> target（如两个 lint 都用 `authn`）——届时按需在 target 名加 lint 前缀消歧。golden 随各源文件名（如 `ui/authn.stderr`，
+> 无诊断时为**空文件**，须提交以锁定「期望零诊断」）。

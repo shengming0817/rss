@@ -27,7 +27,7 @@ impl ScopedTenant {
 }
 
 /// `TenantId` 解析错误。空值 / nil UUID / 非 canonical UUID 均非法（`docs/rules/tenancy.md` fail-closed）。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum TenantIdError {
     #[error("tenant id is empty")]
@@ -42,18 +42,45 @@ pub enum TenantIdError {
 ///
 /// 隔离域边界类型——空值与 nil UUID 非法、非空必须 canonical UUID（`docs/rules/tenancy.md`）。
 /// 用 UUID 内部表示让「非 canonical 租户」从类型层不可表达；不提供 infallible 构造入口。
+///
+/// **可观测标识、非凭据**：`Debug` / `Display` 有意输出 canonical UUID 原值——tenant id 是 audit /
+/// tracing span 的合法字段（对比 principal subject 等凭据级 PII 须脱敏，ADR-002 §威胁矩阵）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TenantId(uuid::Uuid);
 
 impl TenantId {
     /// 解析 canonical UUID 字符串；拒绝 empty / nil / 非 canonical（fail-closed）。
-    pub fn parse(_raw: &str) -> Result<Self, TenantIdError> {
-        todo!()
+    ///
+    /// canonical = lowercase-hyphenated（RFC 9562 §4）。`Uuid::try_parse` 宽松（接受
+    /// simple / braced / urn / 大写），故 round-trip 比对拒绝非 canonical 表示——隔离域边界
+    /// 只认单一字符串形态，杜绝同一 UUID 多形态在 RLS predicate / cache key 上歧义。
+    /// 错误优先级：空→`Empty`；非 canonical 形态（含**非 canonical 的 nil**，如 simple `00…0`）→`Format`
+    /// （round-trip 先于 nil 检查拒绝）；仅 canonical nil 串→`Nil`。
+    pub fn parse(raw: &str) -> Result<Self, TenantIdError> {
+        if raw.is_empty() {
+            return Err(TenantIdError::Empty);
+        }
+        let uuid = uuid::Uuid::try_parse(raw).map_err(|_| TenantIdError::Format)?;
+        if uuid.hyphenated().to_string() != raw {
+            return Err(TenantIdError::Format);
+        }
+        if uuid.is_nil() {
+            return Err(TenantIdError::Nil);
+        }
+        Ok(Self(uuid))
     }
 
     /// 取底层 uuid。
     pub fn as_uuid(&self) -> uuid::Uuid {
-        todo!()
+        self.0
+    }
+}
+
+// 可观测标识：Display 输出 canonical lowercase-hyphenated（同 parse 接受形态），便于 span / audit 结构化字段，
+// 免消费方退回 `as_uuid().to_string()` 或 `{:?}`（后者带 `TenantId(..)` 前缀）。
+impl std::fmt::Display for TenantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.hyphenated())
     }
 }
 
@@ -117,9 +144,9 @@ impl RowVisibility {
 /// 跨租户授权 capability（构造受控：仅 authn 已校验 super-admin 派生路径应签发）。
 ///
 /// INVARIANT: TENANCY-CROSSTENANT-CAP-01 —— 跨 crate 真 seal 不可达（domain-patterns.md：sealed-trait
-/// 仅定义-crate 内封闭，vocab 无法对 authn sealing）。本类型为 **Medium 漏斗**：私有字段强制经 funnel，
-/// 显式且 greppable；「只 authn verified super-admin 路径可调用」由 callsite-allowlist governance lint 强制
-/// （lint 跟踪见 #1074）。
+/// 仅定义-crate 内封闭，vocab 无法对 authn sealing）。本类型为 **Medium 漏斗**：私有字段强制经 funnel（上游
+/// Hard），显式且 greppable；「只 authn verified super-admin 路径可调用」（下游）由 callsite-allowlist dylint
+/// `rss_crosstenant_callsite`（`lints/`，allowlist=`authn`，`-D warnings` 经 `cargo xtask verify` fail-closed）强制。
 pub struct CrossTenantCapability {
     _seal: (),
 }
@@ -202,5 +229,87 @@ mod smoke {
             CrossTenantCapability::issue_for_verified_super_admin;
         let _authorize: fn(CrossTenantCapability) -> CrossTenantVisibility =
             CrossTenantVisibility::authorize;
+    }
+}
+
+#[cfg(test)]
+mod tenant_id {
+    //! `TenantId::parse` 表驱动：canonical lowercase-hyphenated 唯一合法形态；
+    //! 空 / nil / 非 canonical（大写·simple·braced·urn·含空白）一律 fail-closed（tenancy.md）。
+    use super::{TenantId, TenantIdError};
+
+    // 合法 canonical lowercase-hyphenated 基准（RFC 9562 §4）。
+    const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[test]
+    fn parse_rejects_invalid_and_accepts_canonical() {
+        // (输入, 期望)；用 `.map(|_| ())` 抹掉 Ok 载荷以表比对（不 unwrap/expect/panic）。
+        let cases: &[(&str, Result<(), TenantIdError>)] = &[
+            (CANON, Ok(())),
+            ("", Err(TenantIdError::Empty)),
+            (
+                "00000000-0000-0000-0000-000000000000",
+                Err(TenantIdError::Nil),
+            ),
+            ("not-a-uuid", Err(TenantIdError::Format)),
+            ("123", Err(TenantIdError::Format)),
+            // 非 canonical 表示（大写 / simple / braced / urn / 前导空白）一律 Format——
+            // 单一字符串形态杜绝同一 UUID 在 RLS predicate / cache key 上歧义。
+            (
+                "F47AC10B-58CC-4372-A567-0E02B2C3D479",
+                Err(TenantIdError::Format),
+            ),
+            (
+                "f47ac10b58cc4372a5670e02b2c3d479",
+                Err(TenantIdError::Format),
+            ),
+            (
+                "{f47ac10b-58cc-4372-a567-0e02b2c3d479}",
+                Err(TenantIdError::Format),
+            ),
+            (
+                "urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                Err(TenantIdError::Format),
+            ),
+            (
+                " f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                Err(TenantIdError::Format),
+            ),
+            // 结尾空白 + 混合大小写：同样非 canonical → Format。
+            (
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479 ",
+                Err(TenantIdError::Format),
+            ),
+            (
+                "F47ac10b-58cc-4372-a567-0e02b2c3d479",
+                Err(TenantIdError::Format),
+            ),
+            // 非 canonical 的 nil（simple 全 0）：round-trip 先拒为 Format，非 Nil（见 parse rustdoc 错误优先级）。
+            (
+                "00000000000000000000000000000000",
+                Err(TenantIdError::Format),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                TenantId::parse(input).map(|_| ()),
+                *expected,
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn as_uuid_round_trips_canonical() {
+        // as_uuid 还原的 uuid 重新 canonical 化必须等于输入（无信息丢失）。
+        let got = TenantId::parse(CANON).map(|id| id.as_uuid().hyphenated().to_string());
+        assert_eq!(got, Ok(CANON.to_string()));
+    }
+
+    #[test]
+    fn display_outputs_canonical() {
+        // Display 输出 canonical lowercase-hyphenated，回灌 parse 仍成功（往返一致）。
+        let shown = TenantId::parse(CANON).map(|id| id.to_string());
+        assert_eq!(shown, Ok(CANON.to_string()));
     }
 }

@@ -60,6 +60,7 @@ exclude = ["lints"]
 libraries = [
   { path = "lints/rss_domain_no_serialize" },
   { path = "lints/rss_spawn_missing_scope" },
+  { path = "lints/rss_crosstenant_callsite" },
 ]
 
 [workspace.package]
