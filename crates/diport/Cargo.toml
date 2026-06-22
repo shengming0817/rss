@@ -1,0 +1,29 @@
+[package]
+name = "diport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# diport 与其它 crate 一致继承 workspace lints（含 `unsafe_code = "forbid"`）。
+# 实测（PR-diport spike）：dynosaur 0.3 宏生成的 `unsafe transmute` 经 def-site hygiene
+# **不触发** consumer crate 的 `unsafe_code` lint——即便 `forbid` 也编译通过（anti-vacuity
+# 已验证 forbid 对本 crate 手写 unsafe 仍生效）。故 ADR-003 §3 的 forbid→deny 例外**不需要**，
+# diport 无 unsafe carve-out。dynosaur→diport 收敛仍由 deny.toml wrapper 守（DI port 集中 +
+# 单一 dyn-dispatch 依赖点），与 unsafe 无关。
+[lints]
+workspace = true
+
+[dependencies]
+# DI port 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
+dynosaur = { workspace = true }
+# Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur bridge(dyn) 据此生成
+# Send 的 Dyn wrapper（ShutdownStack 经 tokio::spawn 做 panic 隔离需要 Send future）。
+trait-variant = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+trybuild = { workspace = true }
+# 验证 mockall mock 可装入 dynosaur DynX wrapper（#1049 待决项 PORT-SHAPE：mock × native-AFIT/Send 变体）。
+mockall = { workspace = true }

@@ -1,13 +1,40 @@
 # ADR-001：关闭逆序编排（无 async Drop）
 
-- 状态：Accepted（spike RW-G0.6 接缝冻结）
-- 日期：2026-06-21
-- 关联：Issue #996（RW-G0.6 spike）· Epic #991（最大并行迁移）
+- 状态：Accepted（spike RW-G0.6 接缝冻结）· **Amended**（PR-diport #1049，ManagedResource 派发收敛，见下「落地修订」）
+- 日期：2026-06-21（修订：2026-06-22）
+- 关联：Issue #996（RW-G0.6 spike）· Epic #991（最大并行迁移）· 修订单元 #1049
 - 阶段：G0「接缝冻结」——重写顺序见 `docs/migration-from-gocell/gocell-rewrite-sequence.md` P2/§三
-- 落地：`crates/bootstrap/src/shutdown.rs`
+- 落地：`crates/bootstrap/src/shutdown.rs`（编排）+ `crates/diport/src/managed_resource.rs`（port trait）
 
 > 本 ADR 是 RSS workspace 的首个架构决策记录，确立**进程关闭时资源按依赖逆序 await 关干净**的范式。
 > 这是 G0 阶段要冻结的边界之一（rewrite-sequence §「历史里代价最大的晚做」：边界越晚改越贵）。
+
+---
+
+## 落地修订（PR-diport #1049：ManagedResource 派发收敛 + 威胁矩阵重评）
+
+inter-ADR 冲突收敛——ADR-003 把可替换 provider DI port 统一 dynosaur 派发，`ManagedResource` 随之
+从 `#[async_trait]` + `Arc<dyn>` 改 dynosaur。**下文 §2/§3/§4/§5 涉 `async_trait` / `Arc<dyn ManagedResource>`
+的描述以本节为准**（编排语义/不变式不变，仅派发载体 + 持有形态变）：
+
+- **trait 归属 + 形态**：`ManagedResource`（+ `ShutdownError` + `DEFAULT_SHUTDOWN_TIMEOUT`）迁入 `diport`
+  （DI-infra 层）；去 `#[async_trait]`，改 `#[trait_variant::make(ManagedResource: Send)]` +
+  `#[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]`（Send 变体 + dyn wrapper）。
+  `ShutdownStack` / `ShutdownFailureKind` / `ResourceShutdownError` 仍留 `bootstrap`（编排归属不变）。
+- **持有形态**：`Vec<Arc<dyn ManagedResource>>` → `Vec<Box<DynManagedResource<'static>>>`；`register_*` /
+  `shutdown_one` 同步改 `Box`。`shutdown_one` 把 `Box` **直接 move 进 `tokio::spawn`**（去掉原 `Arc::clone`：
+  name/budget 在 spawn 前已读）。
+- **威胁矩阵重评**：§5「`tokio::spawn` 要求 `ManagedResource: Send + Sync + 'static`」**放宽为 `Send`**——
+  `Box<DynManagedResource>: Send`（仅需 `DynManagedResource: Send`，trait_variant Send 变体保证 boxed future
+  与 erased 对象 Send），不再需 `Sync`（`Arc<T>: Send` 才需 `T: Send+Sync`，改 Box 后此要求消失）。
+  `SHUTDOWN-*` 七条不变式（LIFO / continue-on-error / aggregate / timeout / panic-isolate / single-shot /
+  token-funnel）**全部保持**，回归测试同绿（mock 改 native AFIT impl + `DynManagedResource::new_box`）。
+- **`SHUTDOWN-BUDGET-CANCEL-SAFE-01` 收紧（round-2 / F2，#164）**：原「预算耗尽 detach 在飞 task、进程退出回收」
+  改为 **`abort` 在飞 task**——`shutdown_one` 把整体 deadline 与 per-resource `timeout` 收进单一 `select`，
+  预算耗尽分支在返回前 `handle.abort()`（非阻塞、不 `await` join，cancel-safe 不变）。回归 +
+  `shutdown_within_budget_exhausted_aborts_in_flight_task`（Drop-guard 断言 future 被 drop）锁定。见 §后果 与 §3 表。
+- **安全模型**：`ShutdownError` PII 边界（Display 安全摘要、source 内部保留）随类型迁移**不变**。dynosaur 0.3
+  生成的 unsafe 经 def-site hygiene 不触发 forbid（ADR-003 落地结论 1），`diport` 无 unsafe 例外——不引入新威胁面。
 
 ---
 
@@ -188,10 +215,11 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
   预算耗尽时剩余资源记 `BudgetExhausted` 由驱动器自身聚合，**不**交外层 `timeout`（外层取消会在 LIFO
   中途 drop future、中断后续关闭——见 §3 `SHUTDOWN-BUDGET-CANCEL-SAFE-01`）。重 I/O 之外资源仍应
   `shutdown_timeout()` 调小，30s 默认对齐 k8s grace 默认。
-- `shutdown_within` 预算耗尽时，**正在关闭**的当前资源其 spawn task 随 future drop 而 detach（非
-  `abort`，因驱动器已不持其句柄），由进程退出回收——与上条「超时 hung task 不 await join」同一权衡
-  （关闭路径，进程即将退出）。整体预算用单一共享 deadline 而非 per-resource 余额分配，因后者需测
-  per-resource elapsed（`Instant` 被 clippy 禁、待注入 `Clock`），属下方延后项。
+- `shutdown_within` 预算耗尽时，**正在关闭**的当前资源其 spawn task 被 `abort()`（PR-diport #164 落地，
+  F2）：驱动器把整体 deadline 与 per-resource `timeout` 收进 `shutdown_one` 内**单一 select**，预算耗尽分支
+  在返回前对在飞 `JoinHandle` 调 `abort()`（非阻塞、不 `await` join，仍 cancel-safe）——不再 detach 等进程
+  退出回收。剩余未启动资源无 task，仅记 `BudgetExhausted`。整体预算用单一共享 deadline 而非 per-resource
+  余额分配，因后者需测 per-resource elapsed（`Instant` 被 clippy 禁、待注入 `Clock`），属下方延后项。
 
 **已延后（非本 spike 范围，登记去向，非藏 TODO）**
 

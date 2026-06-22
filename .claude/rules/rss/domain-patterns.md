@@ -23,6 +23,12 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 `internal/ports` 放仓储和服务 trait；`internal/mem` 放 in-memory 实现。其它 internal
 子模块按真实功能增长，不预生成空目录。
 
+> **例外（DI port 集中）**：可替换 provider 的 **DI 注入 port trait**（`Clock` / `Signer` /
+> `Publisher` / `Subscriber` / `Pdp` / `ManagedResource` 及各域 repo port）**不放域 crate
+> `internal/ports`**，统一收敛进 DI-infra 层 crate `diport`（ADR-003）——dynosaur 的 async dyn
+> 派发宏 + Send 变体生成只此一处。域 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费，不自定义这些
+> port trait。纯域内（非可替换 provider）的仓储 / 服务 trait 仍留 `internal/ports`。
+
 ## Init fail-fast
 
 `Domain::init(&self, reg: &mut Registry) -> Result<(), KernelError>` 中必须：
@@ -37,6 +43,14 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 域 crate / 服务 public Option 不接收 raw infra trait。raw adapter 先在域 crate 边界用 newtype 包成
 sealed marker type，再注入 service。port trait 用 sealed-trait 模式封闭（编译器强制，外部 crate
 无法实现），raw 类型保持 `pub(crate)`。
+
+> **例外（`diport` 跨 crate DI port，ADR-003 §4.2 方案 ②）**：DI port trait 集中到 `diport` 独立 crate 后，
+> sealed-trait（仅定义 crate 内封闭）**无法**对独立 adapter crate sealing。故 `diport` 的 DI port trait
+> **不带** sealed supertrait。`deny.toml` wrapper 收敛的是 **dynosaur/trait-variant 宏依赖**（只准 `diport`
+> 依赖，保证 DI port 只在 `diport` 定义）——它**不**等于「限定谁可 **impl** port trait」：cargo-deny 限依赖
+> 非 impl，且域 crate 也合法依赖 `diport`（消费端口而非 impl）。故 port trait 的 **impl-sealing 当前未机器
+> 强制**（「外部无法 impl」由类型系统 Hard 降为「尚无守卫」），implementer-allowlist 待 PR-5（跟踪 #1060）。
+> 同 crate 内的 port sealing 仍用 sealed-trait（Hard）。
 
 ## Contract test
 

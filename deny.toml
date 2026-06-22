@@ -38,6 +38,16 @@ deny = [
   # 外部禁用（provider 收敛）
   { crate = "openssl", use-instead = "rustls" },
   { crate = "openssl-sys", use-instead = "rustls" },
+  # DI port 收敛（ADR-003）：dynosaur（dyn-dispatch 宏）+ trait-variant（Send 变体生成）只能被
+  # `diport` 依赖——可替换 provider 的 DI port trait + Dyn wrapper 集中到 DI-infra 单一 crate
+  # （单一 dyn-dispatch 依赖点）。INVARIANT: DIPORT-MACRO-CONFINE-01。
+  # 注：实测 dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（diport 无 unsafe
+  #   例外），故本 wrapper 是「DI port 集中」架构守卫（Medium），非 unsafe 收敛。
+  # port-trait impl-sealing（谁可 impl port trait）：cargo-deny 限「依赖」非「impl」，且域 crate 也依赖
+  #   diport（消费端口而非 impl），无法用单一 wrapper 表达「仅 adapter 可 impl」；本轮无 adapter 实 impl
+  #   （骨架），implementer-allowlist 待 PR-5 adapter 落地补（见 PR OOS）。
+  { crate = "dynosaur", wrappers = ["diport"] },
+  { crate = "trait-variant", wrappers = ["diport"] },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖。
   # 覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
   # ⚠ INVARIANT(LAYER-WRAP-01)：新增任何组合根 crate（assembly/bin）须同步加入下列每条 wrappers，

@@ -8,8 +8,8 @@ publish = false
 [lints]
 workspace = true
 
-# bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎」只连基础+引擎，不依赖兄弟服务
-# （resolver 等需要的服务由组合根 bins/server / assembly 注入，不在此预连）。见 PR #137 review F1。
+# bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎+DI-infra」连基础+引擎+diport，
+# 不依赖兄弟服务（resolver 等由组合根 bins/server / assembly 注入，不在此预连）。见 PR #137 review F1。
 [dependencies]
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
@@ -18,12 +18,14 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
+# DI-infra：ManagedResource port trait + DynManagedResource（Send dyn wrapper）+ ShutdownError 单源。
+# 服务→DI-infra 下行依赖（layers.rs allows）。dynosaur 派发统一替代原 async-trait（ADR-003）。
+diport = { path = "../diport" }
 # 关闭逆序编排范式（无 async Drop）。tokio::time 做有界超时、spawn 做 panic 隔离，
-# tokio-util::CancellationToken 做关闭取消广播；async-trait 让 ManagedResource 可 dyn 分发。
-# 关闭失败用本 crate typed ShutdownError（thiserror）表达，不在公共 port 暴露 anyhow。
+# tokio-util::CancellationToken 做关闭取消广播；ManagedResource 的 dyn 分发由 diport（dynosaur）承载。
+# 关闭聚合错误（ShutdownFailureKind / ResourceShutdownError）用 thiserror，不在公共 port 暴露 anyhow。
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

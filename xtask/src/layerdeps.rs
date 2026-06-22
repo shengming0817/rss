@@ -126,6 +126,7 @@ pub(crate) fn run() -> Result<()> {
     let mut findings = check_layers(&members, &scan.edges);
     findings.extend(scan.findings);
     findings.extend(check_wrappers(&members, &bans));
+    findings.extend(check_external_confinement(&members, &bans));
 
     if findings.is_empty() {
         eprintln!(
@@ -183,11 +184,26 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
     findings
 }
 
+/// 外部 crate 收敛 wrapper（`(外部 crate, 唯一允许依赖它的内部 crate)`）——**非分层 wrapper**。
+/// 把某外部 crate 的直接依赖方限定到单一内部 crate（cargo-deny wrappers），与「域/adapter/generated
+/// 分层 wrapper」是不同类别：目标是**外部** crate（不在 workspace 成员集），故不走 stale / 反向② 校验，
+/// 改校验 wrappers 恰为指定内部 crate（防开洞 / typo）。
+///
+/// INVARIANT: DIPORT-MACRO-CONFINE-01 —— DI port 的 dyn-dispatch 宏（dynosaur）+ Send 变体生成
+///   （trait-variant）只能被 `diport` 依赖（DI port trait + Dyn wrapper 集中到 DI-infra 单一 crate）。
+///
+/// **不变量（防漂移）**：左元素必须是**外部** crate（不在 workspace 成员集），右元素是唯一允许依赖它的
+/// **内部** crate。若误把内部 crate 放左元素，下方 stale/反向② 旁路会静默放过其分层依赖违规——故新增条目
+/// 须确保左元素是外部依赖名（与 `Cargo.toml [workspace.dependencies]` 对应），而非 workspace 成员。
+const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &str)] =
+    &[("dynosaur", "diport"), ("trait-variant", "diport")];
+
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
 /// 正向：每个 Domain/Adapter/Generated 成员须有 ban entry 且 wrappers ⊇ 所需消费者
 /// （Domain/Adapter ⊇ 全部组合根；Generated ⊇ 全部域 + 组合根）。
-/// 反向：① 每条带 wrappers 的 ban 须对应现存 Domain/Adapter/Generated 成员（无 stale）；
-/// ② wrappers 中每个消费者须是 `layers::allows` 允许依赖被 ban crate 的层（防过宽 wrapper 开洞，
+/// 反向：① 每条带 wrappers 的 ban 须对应现存 Domain/Adapter/Generated 成员（无 stale），
+/// **例外** [`EXTERNAL_CONFINEMENT_WRAPPERS`]（外部 crate 收敛，单独校验）；
+/// ② wrappers 中每个消费者须是 `layers::allows` 允许依赖被 ban crate 的层（防过宽 wrapper 开洞,
 /// 如把某服务塞进域的 wrappers）。与 `check_layers` 的 AdapterScope/SiblingDomain（source-centric
 /// 实际边）互为两条 Medium 防线，须同绿。
 pub(crate) fn check_wrappers(members: &[Member], bans: &[BanEntry]) -> Vec<Finding> {
@@ -243,6 +259,14 @@ pub(crate) fn check_wrappers(members: &[Member], bans: &[BanEntry]) -> Vec<Findi
     }
 
     for b in bans {
+        // 外部 crate 收敛 wrapper（dynosaur/trait-variant → diport）是独立类别——由 `check_external_confinement`
+        // 单独校验（正向覆盖 + 形态），此处跳过，避免被误判为 stale 分层 wrapper。
+        if EXTERNAL_CONFINEMENT_WRAPPERS
+            .iter()
+            .any(|(ext, _)| *ext == b.crate_name.as_str())
+        {
+            continue;
+        }
         // 反向①：ban 目标须是现存 Domain/Adapter/Generated 成员（否则 stale：已删/未分类/外部误配）。
         let stale = match layer_of.get(b.crate_name.as_str()) {
             Some(l) => !matches!(l, Layer::Domain | Layer::Adapter | Layer::Generated),
@@ -275,6 +299,44 @@ pub(crate) fn check_wrappers(members: &[Member], bans: &[BanEntry]) -> Vec<Findi
                     format!("deny.toml wrapper `{w}` 不是工作区成员（typo / 已删除）"),
                 )),
             }
+        }
+    }
+    findings
+}
+
+/// 外部 crate 收敛 wrapper 校验（DIPORT-MACRO-CONFINE-01）——与分层 wrapper（[`check_wrappers`]）正交：
+/// 目标是**外部** crate（不在 workspace 成员集）。双向 fail-closed：
+/// - **正向覆盖**：每个 [`EXTERNAL_CONFINEMENT_WRAPPERS`] entry 必须有对应 ban——否则删除
+///   `dynosaur`/`trait-variant` ban 会使 dyn-dispatch 宏收敛静默失效而 lint 不报错。
+/// - **形态**：收敛目标内部 crate 须现存，且 wrappers 恰为该 crate（防开洞 / typo）。
+pub(crate) fn check_external_confinement(members: &[Member], bans: &[BanEntry]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (ext, expect) in EXTERNAL_CONFINEMENT_WRAPPERS {
+        match bans.iter().find(|b| b.crate_name.as_str() == *ext) {
+            // 正向覆盖：ban 缺失（删除即收敛失效）。
+            None => findings.push(finding(
+                Rule::WrapperCoverage,
+                (*ext).to_string(),
+                format!("deny.toml 缺外部收敛 ban：`{ext}` 须恰限定到 `{expect}`（删除会使 dyn-dispatch 宏收敛静默失效）"),
+            )),
+            Some(b) if !members.iter().any(|mem| mem.name.as_str() == *expect) => {
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    b.crate_name.clone(),
+                    format!("外部收敛 wrapper 目标 `{expect}` 不是工作区成员（typo / 已删除）"),
+                ));
+            }
+            Some(b) if b.wrappers.len() != 1 || b.wrappers[0].as_str() != *expect => {
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    b.crate_name.clone(),
+                    format!(
+                        "外部收敛 wrapper 须恰为 [`{expect}`]（DI port 单一依赖点），实为: {}",
+                        b.wrappers.join(", ")
+                    ),
+                ));
+            }
+            Some(_) => {}
         }
     }
     findings
@@ -757,6 +819,7 @@ mod tests {
             m("server", "bins/server", Some(Layer::Root)),
             m("rss", "bins/rss", Some(Layer::Root)),
             m("xtask", "xtask", Some(Layer::Root)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
             m("identity", "crates/identity", Some(Layer::Domain)),
             m("redis", "adapters/redis", Some(Layer::Adapter)),
             m("generated", "generated", Some(Layer::Generated)),
@@ -845,6 +908,48 @@ mod tests {
         assert_eq!(findings[0].subject, "ghost");
     }
 
+    // DiPort 层成员本身不需要分层 ban entry（只有 Domain/Adapter/Generated 需要）——
+    // 守 `check_wrappers` 的 `_ => continue` 正向旁路非恒错：仅含一个 diport 成员、无 ban 时 findings 为空。
+    // 外部收敛 ban（dynosaur/trait-variant）在 check_wrappers reverse loop 被 `continue` 跳过、不误判 stale。
+    #[test]
+    fn check_wrappers_diport_layer_needs_no_ban_entry() {
+        let members = vec![m("diport", "crates/diport", Some(Layer::DiPort))];
+        assert!(check_wrappers(&members, &[]).is_empty());
+    }
+
+    // DIPORT-MACRO-CONFINE-01（check_external_confinement）：外部收敛 wrapper 双向 fail-closed。
+    #[test]
+    fn external_confinement_green() {
+        let bans = vec![
+            ban("dynosaur", &["diport"]),
+            ban("trait-variant", &["diport"]),
+        ];
+        assert!(check_external_confinement(&wrapper_fixture_members(), &bans).is_empty());
+    }
+
+    #[test]
+    fn external_confinement_red_ban_deleted() {
+        // 删掉 dynosaur ban（保留 trait-variant）→ 正向覆盖报 dynosaur 缺失（防收敛静默失效，F4）。
+        let bans = vec![ban("trait-variant", &["diport"])];
+        let findings = check_external_confinement(&wrapper_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
+        assert_eq!(findings[0].subject, "dynosaur");
+    }
+
+    #[test]
+    fn external_confinement_red_widened() {
+        // dynosaur 收敛被开洞：wrappers 含 diport 之外的 crate（DI port 单一依赖点被破坏）。
+        let bans = vec![
+            ban("dynosaur", &["diport", "server"]),
+            ban("trait-variant", &["diport"]),
+        ];
+        let findings = check_external_confinement(&wrapper_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
+        assert_eq!(findings[0].subject, "dynosaur");
+    }
+
     // ---- 真实工作区 anti-vacuity（守卫非恒错 / 分类非恒空）----
     // 本测试只守「骨架真实工作区绿路径」；各规则的 red case 由上面 synthetic fixture 测试覆盖。
 
@@ -878,6 +983,7 @@ mod tests {
         let mut findings = check_layers(&members, &scan.edges);
         findings.extend(scan.findings);
         findings.extend(check_wrappers(&members, &bans));
+        findings.extend(check_external_confinement(&members, &bans));
         assert!(findings.is_empty(), "真实工作区应无违规: {findings:?}");
         Ok(())
     }
