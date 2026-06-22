@@ -20,12 +20,36 @@ impl std::fmt::Debug for Ciphertext {
 
 impl Ciphertext {
     /// 由密文字节构造（受控 funnel）。供 [`Aead`] 实现方（adapter）在 `seal` 中返回密文容器。
-    pub fn from_bytes(_bytes: Vec<u8>) -> Self {
-        todo!()
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        todo!()
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ciphertext;
+
+    #[test]
+    fn from_bytes_as_bytes_roundtrip() {
+        let data = vec![1u8, 2, 3, 255, 0];
+        let ct = Ciphertext::from_bytes(data.clone());
+        assert_eq!(ct.as_bytes(), data.as_slice());
+    }
+
+    #[test]
+    fn from_bytes_empty() {
+        let ct = Ciphertext::from_bytes(vec![]);
+        assert_eq!(ct.as_bytes(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn debug_redacts_content() {
+        let ct = Ciphertext::from_bytes(vec![42, 43]);
+        assert_eq!(format!("{ct:?}"), "Ciphertext(<redacted>)");
     }
 }
 

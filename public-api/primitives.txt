@@ -713,6 +713,7 @@ impl<T> core::convert::From<T> for primitives::crypto::Mac
 pub fn primitives::crypto::Mac::from(T) -> T
 pub struct primitives::crypto::MacKey(_)
 impl primitives::crypto::MacKey
+pub fn primitives::crypto::MacKey::as_bytes(&self) -> &[u8]
 pub fn primitives::crypto::MacKey::from_bytes(alloc::vec::Vec<u8>) -> Self
 impl core::clone::Clone for primitives::crypto::MacKey
 pub fn primitives::crypto::MacKey::clone(&self) -> primitives::crypto::MacKey
@@ -1837,6 +1838,7 @@ impl<T> core::convert::From<T> for primitives::crypto::Mac
 pub fn primitives::crypto::Mac::from(T) -> T
 pub struct primitives::MacKey(_)
 impl primitives::crypto::MacKey
+pub fn primitives::crypto::MacKey::as_bytes(&self) -> &[u8]
 pub fn primitives::crypto::MacKey::from_bytes(alloc::vec::Vec<u8>) -> Self
 impl core::clone::Clone for primitives::crypto::MacKey
 pub fn primitives::crypto::MacKey::clone(&self) -> primitives::crypto::MacKey

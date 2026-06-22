@@ -9,9 +9,6 @@ publish = false
 workspace = true
 
 [dependencies]
-vocab = { path = "../vocab" }
-ids = { path = "../ids" }
-secure = { path = "../secure" }
-support = { path = "../support" }
-runctx = { path = "../runctx" }
 thiserror = { workspace = true }
+# constant_time_eq 常数时间比较（MAC/token 比较收口，无短路）。ref: dalek-cryptography/subtle src/lib.rs@main
+subtle = { workspace = true }

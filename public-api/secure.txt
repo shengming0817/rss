@@ -194,7 +194,6 @@ pub mod secure::redaction
 pub struct secure::redaction::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
-pub fn secure::redaction::Redacted::new(impl core::convert::Into<alloc::string::String>) -> Self
 impl core::clone::Clone for secure::redaction::Redacted
 pub fn secure::redaction::Redacted::clone(&self) -> secure::redaction::Redacted
 impl core::cmp::Eq for secure::redaction::Redacted
@@ -424,7 +423,6 @@ pub fn secure::cookie::CookieValue::from(T) -> T
 pub struct secure::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
-pub fn secure::redaction::Redacted::new(impl core::convert::Into<alloc::string::String>) -> Self
 impl core::clone::Clone for secure::redaction::Redacted
 pub fn secure::redaction::Redacted::clone(&self) -> secure::redaction::Redacted
 impl core::cmp::Eq for secure::redaction::Redacted

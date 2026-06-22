@@ -139,6 +139,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bootstrap"
 version = "0.0.0"
 dependencies = [
@@ -825,12 +831,8 @@ dependencies = [
 name = "primitives"
 version = "0.0.0"
 dependencies = [
- "ids",
- "runctx",
- "secure",
- "support",
+ "subtle",
  "thiserror",
- "vocab",
 ]
 
 [[package]]
@@ -1243,6 +1245,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
 name = "support"
 version = "0.0.0"
 dependencies = [
@@ -1628,6 +1636,7 @@ dependencies = [
 name = "vocab"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "thiserror",
  "uuid",
 ]

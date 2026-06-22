@@ -58,25 +58,44 @@ pub struct AuthPlan {
     scheme: AuthScheme,
 }
 
+/// 判断 listener 是否为控制面（Internal / Admin）。
+fn is_control_plane(listener: ListenerKind) -> bool {
+    matches!(listener, ListenerKind::Internal | ListenerKind::Admin)
+}
+
+/// 将 `AuthScheme` 映射到 `RequiredScheme`；`NoAuth` 返回 `None`（无认证要求）。
+fn require_scheme(scheme: AuthScheme) -> Option<RequiredScheme> {
+    match scheme {
+        AuthScheme::Jwt => Some(RequiredScheme::Jwt),
+        AuthScheme::Mtls => Some(RequiredScheme::Mtls),
+        AuthScheme::ServiceToken => Some(RequiredScheme::ServiceToken),
+        AuthScheme::JwtFromAssembly => Some(RequiredScheme::JwtFromAssembly),
+        AuthScheme::NoAuth => None,
+    }
+}
+
 impl AuthPlan {
     /// 由 listener 种类 + 显式 scheme 构造；拒 Internal/Admin 上的 NoAuth（fail-closed，runtime-api.md）。
-    pub fn new(_listener: ListenerKind, _scheme: AuthScheme) -> Result<Self, AuthPlanError> {
-        todo!()
+    pub fn new(listener: ListenerKind, scheme: AuthScheme) -> Result<Self, AuthPlanError> {
+        if is_control_plane(listener) && scheme == AuthScheme::NoAuth {
+            return Err(AuthPlanError::NoAuthOnControlPlane);
+        }
+        Ok(Self { listener, scheme })
     }
 
     /// 显式无认证 plan（`AuthNone`）；仅对外面 listener 合法，Internal/Admin 拒（fail-closed）。
-    pub fn none(_listener: ListenerKind) -> Result<Self, AuthPlanError> {
-        todo!()
+    pub fn none(listener: ListenerKind) -> Result<Self, AuthPlanError> {
+        Self::new(listener, AuthScheme::NoAuth)
     }
 
     /// 所属 listener 种类。
     pub fn listener(self) -> ListenerKind {
-        todo!()
+        self.listener
     }
 
     /// 认证方案。
     pub fn scheme(self) -> AuthScheme {
-        todo!()
+        self.scheme
     }
 }
 
@@ -105,10 +124,182 @@ pub enum AuthRequirement {
 /// 纯决策：按优先级（route opt-out → listener plan → fail-fast deny）算最终认证要求。
 ///
 /// fail-closed（runtime-api.md）：`Internal` / `Admin` listener 上的 route opt-out 必须被拒
-/// （返回 [`AuthRequirement::Require`] 或 `Deny`，绝不 `Allow`）；opt-out 仅对 `Primary` 等对外
-/// listener 生效。纯函数、无 I/O。
+/// ——返回 [`AuthRequirement::Deny`]（非法配置，直接拒整条路由，绝不 Allow 或 Require 降级）；
+/// opt-out 仅对 `Primary` 等对外 listener 生效，产生 [`AuthRequirement::Allow`]。
+/// 无 opt-out 时：`NoAuth` scheme → `Allow`；其余 scheme → `Require`。纯函数、无 I/O。
 ///
-/// INVARIANT: AUTH-FAILCLOSED-01 —— Internal/Admin listener 上 route opt-out 必须被拒（绝不 Allow）；Medium governance test 随 authn W 行为 PR 落地。
-pub fn resolve_requirement(_plan: AuthPlan, _opt_out: Option<RouteAuthOptOut>) -> AuthRequirement {
-    todo!()
+/// INVARIANT: AUTH-FAILCLOSED-01 —— Internal/Admin listener 上 route opt-out 必须返回 `Deny`（绝不 Allow）；Medium governance test 随 authn W 行为 PR 落地。
+pub fn resolve_requirement(plan: AuthPlan, opt_out: Option<RouteAuthOptOut>) -> AuthRequirement {
+    match opt_out {
+        Some(_) => {
+            if is_control_plane(plan.listener) {
+                // 红线：控制面 listener 上的 opt-out 是非法配置，fail-fast 拒整条路由（绝不降级）。
+                AuthRequirement::Deny
+            } else {
+                // 对外面 listener（Primary / Health）允许 opt-out 降级。
+                AuthRequirement::Allow
+            }
+        }
+        None => match require_scheme(plan.scheme) {
+            Some(s) => AuthRequirement::Require(s),
+            None => AuthRequirement::Allow, // NoAuth scheme：无需认证
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── AuthPlan::new ─────────────────────────────────────────────────────────
+    #[test]
+    fn auth_plan_new_primary_no_auth_ok() {
+        #[allow(clippy::unwrap_used)]
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::NoAuth).unwrap();
+        assert_eq!(plan.listener(), ListenerKind::Primary);
+        assert_eq!(plan.scheme(), AuthScheme::NoAuth);
+    }
+
+    #[test]
+    fn auth_plan_new_health_no_auth_ok() {
+        assert!(AuthPlan::new(ListenerKind::Health, AuthScheme::NoAuth).is_ok());
+    }
+
+    #[test]
+    fn auth_plan_new_internal_no_auth_err() {
+        assert!(matches!(
+            AuthPlan::new(ListenerKind::Internal, AuthScheme::NoAuth),
+            Err(AuthPlanError::NoAuthOnControlPlane)
+        ));
+    }
+
+    #[test]
+    fn auth_plan_new_admin_no_auth_err() {
+        assert!(matches!(
+            AuthPlan::new(ListenerKind::Admin, AuthScheme::NoAuth),
+            Err(AuthPlanError::NoAuthOnControlPlane)
+        ));
+    }
+
+    #[test]
+    fn auth_plan_new_internal_jwt_ok() {
+        assert!(AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).is_ok());
+    }
+
+    #[test]
+    fn auth_plan_none_primary_ok() {
+        assert!(AuthPlan::none(ListenerKind::Primary).is_ok());
+    }
+
+    #[test]
+    fn auth_plan_none_internal_err() {
+        assert!(matches!(
+            AuthPlan::none(ListenerKind::Internal),
+            Err(AuthPlanError::NoAuthOnControlPlane)
+        ));
+    }
+
+    // ── resolve_requirement ───────────────────────────────────────────────────
+
+    fn primary_jwt_plan() -> AuthPlan {
+        #[allow(clippy::unwrap_used)]
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap()
+    }
+
+    fn primary_no_auth_plan() -> AuthPlan {
+        #[allow(clippy::unwrap_used)]
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::NoAuth).unwrap()
+    }
+
+    fn internal_service_token_plan() -> AuthPlan {
+        #[allow(clippy::unwrap_used)]
+        AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).unwrap()
+    }
+
+    fn admin_jwt_plan() -> AuthPlan {
+        #[allow(clippy::unwrap_used)]
+        AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).unwrap()
+    }
+
+    // Primary + Public opt-out → Allow
+    #[test]
+    fn resolve_primary_public_opt_out_allows() {
+        let req = resolve_requirement(primary_jwt_plan(), Some(RouteAuthOptOut::Public));
+        assert_eq!(req, AuthRequirement::Allow);
+    }
+
+    // Primary + PasswordResetExempt opt-out → Allow
+    #[test]
+    fn resolve_primary_password_reset_exempt_allows() {
+        let req = resolve_requirement(
+            primary_jwt_plan(),
+            Some(RouteAuthOptOut::PasswordResetExempt),
+        );
+        assert_eq!(req, AuthRequirement::Allow);
+    }
+
+    // Internal + opt-out → Deny（控制面 opt-out 是非法配置，fail-fast 拒整条路由）
+    #[test]
+    fn resolve_internal_opt_out_is_deny() {
+        let req = resolve_requirement(internal_service_token_plan(), Some(RouteAuthOptOut::Public));
+        assert_eq!(req, AuthRequirement::Deny);
+    }
+
+    // Admin + opt-out → Deny（控制面 opt-out 是非法配置，fail-fast 拒整条路由）
+    #[test]
+    fn resolve_admin_opt_out_is_deny() {
+        let req = resolve_requirement(admin_jwt_plan(), Some(RouteAuthOptOut::Public));
+        assert_eq!(req, AuthRequirement::Deny);
+    }
+
+    // No opt-out + NoAuth scheme → Allow
+    #[test]
+    fn resolve_no_opt_out_no_auth_scheme_allows() {
+        let req = resolve_requirement(primary_no_auth_plan(), None);
+        assert_eq!(req, AuthRequirement::Allow);
+    }
+
+    // No opt-out + JWT scheme → Require(Jwt)
+    #[test]
+    fn resolve_no_opt_out_jwt_scheme_requires() {
+        let req = resolve_requirement(primary_jwt_plan(), None);
+        assert_eq!(req, AuthRequirement::Require(RequiredScheme::Jwt));
+    }
+
+    // No opt-out + ServiceToken → Require(ServiceToken)
+    #[test]
+    fn resolve_no_opt_out_service_token_requires() {
+        let req = resolve_requirement(internal_service_token_plan(), None);
+        assert_eq!(req, AuthRequirement::Require(RequiredScheme::ServiceToken));
+    }
+
+    // No opt-out + Mtls → Require(Mtls)
+    #[test]
+    fn resolve_no_opt_out_mtls_requires() {
+        #[allow(clippy::unwrap_used)]
+        let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::Mtls).unwrap();
+        let req = resolve_requirement(plan, None);
+        assert_eq!(req, AuthRequirement::Require(RequiredScheme::Mtls));
+    }
+
+    // No opt-out + JwtFromAssembly → Require(JwtFromAssembly)
+    #[test]
+    fn resolve_no_opt_out_jwt_from_assembly_requires() {
+        #[allow(clippy::unwrap_used)]
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::JwtFromAssembly).unwrap();
+        let req = resolve_requirement(plan, None);
+        assert_eq!(
+            req,
+            AuthRequirement::Require(RequiredScheme::JwtFromAssembly)
+        );
+    }
+
+    // Health listener + opt-out → Allow (not control plane)
+    #[test]
+    fn resolve_health_opt_out_allows() {
+        #[allow(clippy::unwrap_used)]
+        let plan = AuthPlan::new(ListenerKind::Health, AuthScheme::NoAuth).unwrap();
+        let req = resolve_requirement(plan, Some(RouteAuthOptOut::Public));
+        assert_eq!(req, AuthRequirement::Allow);
+    }
 }

@@ -28,7 +28,6 @@ pub use healthz::{HealthCheck, HealthReport, HealthStatus, ProbeName, ProbeNameE
 #[cfg(test)]
 mod smoke {
     //! build smoke：证明 sync 纯计算 trait 可被泛型静态分发消费 + 闭值集 / 值类型 / 纯函数签名可引用。
-    //! **不执行 todo!() body**——只构造 Copy enum、绑定函数项（不调用），故无 panic 触发。
     use crate::authplan::{
         AuthPlan, AuthRequirement, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut,
         resolve_requirement,
@@ -56,31 +55,34 @@ mod smoke {
         m.verify(key, algorithm, msg, tag)
     }
 
-    // 证明：trait 可被 impl（签名形状闭合；body 永不在 smoke 中触发）。
+    // 证明：trait 可被 impl（签名形状闭合；body 为最简合法实现）。
     struct NoopDigester;
     impl Digester for NoopDigester {
         fn digest(&self, _algorithm: DigestAlgorithm, _input: &[u8]) -> Digest {
-            todo!()
+            // reason: noop 仅用于 smoke 证签名可静态分发，永不生产使用。
+            Digest::from_bytes(Vec::new())
         }
     }
 
     struct NoopMacVerifier;
     impl MacVerifier for NoopMacVerifier {
         fn sign(&self, _key: &MacKey, _algorithm: MacAlgorithm, _message: &[u8]) -> Mac {
-            todo!()
+            // reason: noop 仅用于 smoke 证签名可静态分发，永不生产使用。
+            Mac::from_bytes(Vec::new())
         }
         fn verify(
             &self,
             _key: &MacKey,
             _algorithm: MacAlgorithm,
             _message: &[u8],
-            _tag: &Mac,
+            tag: &Mac,
         ) -> bool {
-            todo!()
+            // reason: noop verifier 仅用于 smoke 编译测试，常数时间比较空标签（永不在生产使用）。
+            crate::crypto::constant_time_eq(tag.as_bytes(), &[])
         }
     }
 
-    // 闭值集 enum / 值类型 / 纯函数签名可被引用消费（编译期，不执行 todo!() body）。
+    // 闭值集 enum / 值类型 / 纯函数签名可被引用消费（编译期）。
     #[test]
     fn type_and_fn_signatures_are_consumable() {
         let _state: CircuitState = CircuitState::HalfOpen;
@@ -92,7 +94,7 @@ mod smoke {
         let _req = AuthRequirement::Require(RequiredScheme::Jwt);
         let _mac_alg = MacAlgorithm::HmacSha256;
 
-        // 函数指针绑定证明签名形状（不调用 → 不触 todo!()）。
+        // 函数指针绑定证明签名形状。
         let _f: fn(CircuitState, CircuitCounts, BreakerConfig, BreakerEvent) -> CircuitState =
             next_state;
         let _g: fn(CircuitState, CircuitCounts, BreakerConfig) -> bool = allows_request;

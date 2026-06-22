@@ -61,6 +61,7 @@ libraries = [
   { path = "lints/rss_domain_no_serialize" },
   { path = "lints/rss_spawn_missing_scope" },
   { path = "lints/rss_crosstenant_callsite" },
+  { path = "lints/rss_authplan_callsite" },
 ]
 
 [workspace.package]
@@ -83,6 +84,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
 uuid = { version = "1" }
 futures = "0.3"
+# 编码 / 加密原语（基础层 + 引擎原语 opt-in）
+base64 = "0.22"   # vocab Cursor base64url（URL_SAFE_NO_PAD）不透明 token 解码校验
+subtle = "2"      # primitives constant_time_eq 常数时间比较（RustCrypto 工业标准，免自维护 black_box 屏障）。ref: dalek-cryptography/subtle src/lib.rs@main
 # DI port trait 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 # exact-pin（pre-1.0，new_box/new_arc/bridge API 仍破坏式演进；升级须审 changelog）。仅 diport
 # 可依赖（deny.toml wrapper 守 DI port 集中 + 单一 dyn-dispatch 依赖点；别处 import 不到宏）。

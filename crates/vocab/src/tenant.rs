@@ -22,7 +22,11 @@ pub enum ScopedTenant {
 impl ScopedTenant {
     /// 提升为完整 RowScope（不含 All 方向）。
     pub fn as_row_scope(self) -> RowScope {
-        todo!()
+        match self {
+            ScopedTenant::SelfOnly => RowScope::SelfOnly,
+            ScopedTenant::Device => RowScope::Device,
+            ScopedTenant::Tenant => RowScope::Tenant,
+        }
     }
 }
 
@@ -107,9 +111,6 @@ pub enum RowScope {
 /// 行级可见性义务（sealed obligation：私有字段，只能经构造 funnel 构造）。
 ///
 /// 持有者保证 scope + 可选租户约束已经过认证通道派生；外部无法绕过 funnel 自造。
-// ADR-004 C8 签名冻结：字段私有、体为 todo!()；函数体落地前 dead_code 预期（carve-out item-level）。
-// reason: ADR-004 C8 签名冻结——私有字段待行为 PR 读取
-#[allow(dead_code)]
 pub struct RowVisibility {
     scope: RowScope,
     /// `Some` 时约束于特定租户（`ScopedTenant` scope 下由 Principal 派生）。
@@ -121,23 +122,29 @@ impl RowVisibility {
     ///
     /// 接受 [`ScopedTenant`] 而非 [`RowScope`]，类型层排除 `RowScope::All`
     /// 进入此路径（Finding#13，tenancy.md，Hard）。
-    pub fn new(_scope: ScopedTenant, _tenant: TenantId) -> Self {
-        todo!()
+    pub fn new(scope: ScopedTenant, tenant: TenantId) -> Self {
+        Self {
+            scope: scope.as_row_scope(),
+            tenant: Some(tenant),
+        }
     }
 
     /// 构造跨租户可见性。调用方须持有 [`CrossTenantVisibility`] marker（显式位置参）。
     pub fn new_cross_tenant(_marker: CrossTenantVisibility) -> Self {
-        todo!()
+        Self {
+            scope: RowScope::All,
+            tenant: None,
+        }
     }
 
     /// 返回当前可见域。
     pub fn scope(&self) -> RowScope {
-        todo!()
+        self.scope
     }
 
     /// 返回租户约束（跨租户 `All` scope 时为 `None`）。
     pub fn tenant(&self) -> Option<TenantId> {
-        todo!()
+        self.tenant
     }
 }
 
@@ -154,7 +161,7 @@ pub struct CrossTenantCapability {
 impl CrossTenantCapability {
     /// 由 authn 已校验 super-admin 派生路径签发（governance lint 限定 callsite）。
     pub fn issue_for_verified_super_admin() -> Self {
-        todo!()
+        Self { _seal: () }
     }
 }
 
@@ -162,9 +169,6 @@ impl CrossTenantCapability {
 ///
 /// 持有此值代表调用方已经过平台授权验证（`SuperAdmin` / framework-internal）；
 /// 非特权代码路径无构造入口，从类型层杜绝意外跨租户访问（ADR-002）。
-// ADR-004 C8 签名冻结：字段私有、体为 todo!()；函数体落地前 dead_code 预期（carve-out item-level）。
-// reason: ADR-004 C8 签名冻结——私有字段待行为 PR 读取
-#[allow(dead_code)]
 pub struct CrossTenantVisibility {
     // 私有 unit 字段，阻止 struct literal 构造
     _priv: (),
@@ -175,13 +179,14 @@ impl CrossTenantVisibility {
     ///
     /// 调用方须持有已签发的 `CrossTenantCapability`（由 authn 校验 super-admin 路径签发）。
     pub fn authorize(_cap: CrossTenantCapability) -> Self {
-        todo!()
+        // reason: cap 消费即授权——持有 CrossTenantCapability 代表 authn 已校验 super-admin
+        Self { _priv: () }
     }
 }
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：证明 RowScope / ScopedTenant Copy enum 可构造、funnel 签名可引用（不调用 todo!() body）。
+    //! build smoke：证明 RowScope / ScopedTenant Copy enum 可构造、funnel 签名可引用。
     use super::{
         CrossTenantCapability, CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant,
         TenantId,
@@ -189,7 +194,7 @@ mod smoke {
 
     #[test]
     fn row_scope_and_visibility_signatures_are_consumable() {
-        // RowScope Copy enum 构造（不触发 todo!()）
+        // RowScope Copy enum 构造
         let _scope: RowScope = RowScope::Tenant;
         let _self_only = RowScope::SelfOnly;
         let _device = RowScope::Device;
@@ -215,20 +220,81 @@ mod smoke {
             ScopedTenant::Tenant => {}
         }
 
-        // 绑定函数指针证明签名形状（不调用 → 不触 todo!()）
         // Finding#13：new 接受 ScopedTenant 而非 RowScope，All 路径从类型层排除
         let _new: fn(ScopedTenant, TenantId) -> RowVisibility = RowVisibility::new;
         let _cross: fn(CrossTenantVisibility) -> RowVisibility = RowVisibility::new_cross_tenant;
 
-        // as_row_scope 签名可绑定（不调用）
+        // as_row_scope 签名可绑定
         let _as_scope: fn(ScopedTenant) -> RowScope = ScopedTenant::as_row_scope;
 
-        // F3：CrossTenantCapability funnel 签名可绑定（不调用 → 不触 todo!()）
+        // F3：CrossTenantCapability funnel 签名可绑定
         // issue_for_verified_super_admin 是受控入口；authorize 消费 capability 构造 marker
         let _issue: fn() -> CrossTenantCapability =
             CrossTenantCapability::issue_for_verified_super_admin;
         let _authorize: fn(CrossTenantCapability) -> CrossTenantVisibility =
             CrossTenantVisibility::authorize;
+    }
+}
+
+#[cfg(test)]
+mod row_visibility_tests {
+    use super::{
+        CrossTenantCapability, CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant,
+        TenantId,
+    };
+
+    const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::unwrap_used)]
+    fn tenant() -> TenantId {
+        TenantId::parse(CANON).unwrap()
+    }
+
+    #[test]
+    fn scoped_tenant_as_row_scope_all_variants() {
+        let cases: &[(ScopedTenant, RowScope)] = &[
+            (ScopedTenant::SelfOnly, RowScope::SelfOnly),
+            (ScopedTenant::Device, RowScope::Device),
+            (ScopedTenant::Tenant, RowScope::Tenant),
+        ];
+        for (scoped, expected) in cases {
+            assert_eq!(scoped.as_row_scope(), *expected, "scoped={scoped:?}");
+        }
+    }
+
+    #[test]
+    fn row_visibility_new_sets_scope_and_tenant() {
+        let tid = tenant();
+        let cases: &[ScopedTenant] = &[
+            ScopedTenant::SelfOnly,
+            ScopedTenant::Device,
+            ScopedTenant::Tenant,
+        ];
+        for scoped in cases {
+            let vis = RowVisibility::new(*scoped, tid);
+            assert_eq!(vis.scope(), scoped.as_row_scope(), "scoped={scoped:?}");
+            assert_eq!(vis.tenant(), Some(tid), "scoped={scoped:?}");
+        }
+    }
+
+    #[test]
+    fn row_visibility_new_cross_tenant_is_all_with_no_tenant() {
+        let cap = CrossTenantCapability::issue_for_verified_super_admin();
+        let marker = CrossTenantVisibility::authorize(cap);
+        let vis = RowVisibility::new_cross_tenant(marker);
+        assert_eq!(vis.scope(), RowScope::All);
+        assert_eq!(vis.tenant(), None);
+    }
+
+    #[test]
+    fn cross_tenant_capability_and_visibility_are_constructible() {
+        let cap = CrossTenantCapability::issue_for_verified_super_admin();
+        let _vis = CrossTenantVisibility::authorize(cap);
+        // 消费后能构造 RowVisibility（通过 new_cross_tenant 路径）
+        let cap2 = CrossTenantCapability::issue_for_verified_super_admin();
+        let marker2 = CrossTenantVisibility::authorize(cap2);
+        let vis2 = RowVisibility::new_cross_tenant(marker2);
+        assert_eq!(vis2.scope(), RowScope::All);
     }
 }
 

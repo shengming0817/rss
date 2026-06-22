@@ -242,6 +242,7 @@ pub vocab::error::CoreErrorKind::NotFound
 pub vocab::error::CoreErrorKind::Unauthenticated
 pub vocab::error::CoreErrorKind::Validation
 impl vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::code(self) -> &'static str
 pub fn vocab::error::CoreErrorKind::message(self) -> &'static str
 impl core::clone::Clone for vocab::error::CoreErrorKind
 pub fn vocab::error::CoreErrorKind::clone(&self) -> vocab::error::CoreErrorKind
@@ -849,6 +850,7 @@ pub vocab::CoreErrorKind::NotFound
 pub vocab::CoreErrorKind::Unauthenticated
 pub vocab::CoreErrorKind::Validation
 impl vocab::error::CoreErrorKind
+pub fn vocab::error::CoreErrorKind::code(self) -> &'static str
 pub fn vocab::error::CoreErrorKind::message(self) -> &'static str
 impl core::clone::Clone for vocab::error::CoreErrorKind
 pub fn vocab::error::CoreErrorKind::clone(&self) -> vocab::error::CoreErrorKind
