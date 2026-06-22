@@ -27,7 +27,6 @@ use crate::workspace_root;
 use crate::{codegen, contract, layerdeps};
 use anyhow::{Result, bail};
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 /// verify 选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,56 +189,10 @@ fn resolve_tool(available: bool, allow_missing: bool) -> ToolAction {
     }
 }
 
-/// 探测第三方 cargo 子命令是否可用：`cargo <sub> --version`（静默）。
-/// cargo 对「无此子命令」和「检查失败」都返回 101，故用 `--version` 探测做判别。
-fn tool_available(probe_sub: &str) -> bool {
-    clean_cargo_cmd(&[probe_sub, "--version"], &[], None)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// verify 子进程须清洗的 ambient 环境变量。两类：
-/// - **toolchain 选择**（`RUSTUP_TOOLCHAIN`/`RUSTC`/`RUSTDOC`/`RUSTC_WRAPPER`）：`cargo xtask verify`
-///   = `cargo run -p xtask`，子进程继承父 cargo 的 toolchain 环境会**覆盖** per-dir `rust-toolchain.toml`，
-///   打破根 stable 1.96 与 `lints/` nightly 的隔离（`cargo dylint --all` 须用 lints/ nightly）。
-/// - **编译 flag**（`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`/`CARGO_BUILD_RUSTFLAGS`/`DYLINT_RUSTFLAGS`）：
-///   ambient flag 会静默改变 `clippy -D warnings`/`dylint -D warnings` 的判定（注入或抑制 lint），
-///   破坏门的 fail-closed 语义。清掉使门**对环境无关**——dylint 步要的 `-D warnings` 经显式 `env` 重设。
-const STRIPPED_ENV: &[&str] = &[
-    "RUSTUP_TOOLCHAIN",
-    "RUSTC",
-    "RUSTDOC",
-    "RUSTC_WRAPPER",
-    "RUSTFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-    "CARGO_BUILD_RUSTFLAGS",
-    "DYLINT_RUSTFLAGS",
-];
-
-/// 构造清洗了 ambient 环境（再叠加显式 `env`）的 cargo 命令。先 `env_remove`（[`STRIPPED_ENV`]）
-/// 再 set `env`——故 dylint 步显式传的 `DYLINT_RUSTFLAGS=-D warnings` 是该步该变量的唯一来源。
-fn clean_cargo_cmd(args: &[&str], env: &[(&str, &str)], cwd: Option<&Path>) -> Command {
-    let mut cmd = Command::new("cargo");
-    cmd.args(args);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    for var in STRIPPED_ENV {
-        cmd.env_remove(var);
-    }
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd
-}
-
 /// spawn 一个 cargo 门步，继承 stdio（用户实时看输出），校验退出码。
 /// INVARIANT VERIFY-AGGREGATE-01：非零退出 ⇒ `Err`（不吞错）。
 fn run_step(label: &str, args: &[&str], env: &[(&str, &str)], cwd: &Path) -> Result<()> {
-    let status = clean_cargo_cmd(args, env, Some(cwd))
+    let status = crate::cmd::clean_cmd("cargo", args, env, Some(cwd))
         .status()
         .map_err(|e| {
             anyhow::anyhow!(
@@ -267,7 +220,7 @@ fn run_one(step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
         StepKind::Tool {
             probe,
             install_hint,
-        } => match resolve_tool(tool_available(probe), opts.allow_missing_tools) {
+        } => match resolve_tool(crate::cmd::tool_available(probe), opts.allow_missing_tools) {
             ToolAction::Run => run_step(step.label, step.args, step.env, root),
             ToolAction::SkipWarn => {
                 eprintln!(
@@ -459,38 +412,5 @@ mod tests {
             env: &[],
             needs_compile: false,
         }
-    }
-
-    /// `clean_cargo_cmd` 须 `env_remove` 全部 ambient toolchain/flag 变量（防外部环境污染门结果），
-    /// 且显式 `env`（如 dylint 的 `DYLINT_RUSTFLAGS`）在清洗后重设、为该步唯一来源。
-    #[test]
-    fn clean_cargo_cmd_strips_ambient_and_applies_explicit_env() {
-        use std::ffi::OsStr;
-        // 显式步：传 DYLINT_RUSTFLAGS ⇒ 它在 env_remove 后被重设为该值。
-        let cmd = clean_cargo_cmd(&["dylint"], &[("DYLINT_RUSTFLAGS", "-D warnings")], None);
-        let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
-        // toolchain + flag 变量（DYLINT_RUSTFLAGS 除外——本步显式重设）均须为「移除」(value=None)。
-        for stripped in STRIPPED_ENV.iter().filter(|v| **v != "DYLINT_RUSTFLAGS") {
-            assert!(
-                envs.iter()
-                    .any(|(k, v)| *k == OsStr::new(stripped) && v.is_none()),
-                "{stripped} 应被 env_remove"
-            );
-        }
-        assert!(
-            envs.iter()
-                .any(|(k, v)| *k == OsStr::new("DYLINT_RUSTFLAGS")
-                    && *v == Some(OsStr::new("-D warnings"))),
-            "显式 DYLINT_RUSTFLAGS 应在清洗后重设"
-        );
-        // 非显式步（env=&[]）：ambient DYLINT_RUSTFLAGS 也被移除，不被继承。
-        let bare = clean_cargo_cmd(&["build"], &[], None);
-        let bare_envs: Vec<(&OsStr, Option<&OsStr>)> = bare.get_envs().collect();
-        assert!(
-            bare_envs
-                .iter()
-                .any(|(k, v)| *k == OsStr::new("DYLINT_RUSTFLAGS") && v.is_none()),
-            "非 dylint 步须移除 ambient DYLINT_RUSTFLAGS"
-        );
     }
 }

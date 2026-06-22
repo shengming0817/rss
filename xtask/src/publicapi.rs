@@ -24,7 +24,6 @@ use crate::layers::{BASIS_CRATES, ENGINE_CRATES};
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
 
@@ -88,14 +87,7 @@ fn baseline_dir() -> Result<PathBuf> {
 
 /// 检测外部 cargo-public-api；缺失即 fail-fast 给安装指引（INVARIANT PUBLICAPI-TOOL-GATE-01）。
 fn ensure_tool_available() -> Result<()> {
-    let ok = Command::new("cargo")
-        .args(["public-api", "--version"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok {
+    if crate::cmd::tool_available("public-api") {
         return Ok(());
     }
     bail!(
@@ -108,13 +100,16 @@ fn ensure_tool_available() -> Result<()> {
 
 /// 运行 `cargo public-api -p <crate>` 捕获其封装面快照文本。
 fn capture_public_api(krate: &str) -> Result<String> {
-    let out = Command::new("cargo")
-        .args(["public-api", "-p", krate])
+    let out = crate::cmd::clean_cmd("cargo", &["public-api", "-p", krate], &[], None)
         .output()
         .with_context(|| format!("运行 cargo public-api -p {krate} 失败"))?;
     if !out.status.success() {
+        let code = out
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
         bail!(
-            "cargo public-api -p {krate} 非零退出:\n{}",
+            "cargo public-api -p {krate} 非零退出（退出码 {code}）:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
     }

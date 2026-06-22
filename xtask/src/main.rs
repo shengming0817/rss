@@ -12,6 +12,7 @@
 //!   `cargo xtask public-api [--layer basis|engine] [--check] [--allow-missing]`
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
+mod cmd;
 mod codegen;
 mod contract;
 mod diagnostic;

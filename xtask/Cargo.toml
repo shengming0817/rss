@@ -13,7 +13,7 @@ toml = { workspace = true }
 typify = { workspace = true }
 schemars = { workspace = true }
 prettyplease = { workspace = true }
-syn = { workspace = true }
+syn = { workspace = true, features = ["visit"] }   # visit: CMD-FUNNEL-01 守卫 AST 扫描子进程构造点
 
 [dev-dependencies]
 rstest = { workspace = true }

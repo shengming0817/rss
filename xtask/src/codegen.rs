@@ -189,11 +189,12 @@ fn normalize(s: &str) -> String {
 /// 经 rustfmt 规范化（与 `cargo fmt` 同一 formatter）——派生 committed 文件须 rustfmt-canonical，
 /// 否则 `cargo fmt --all` 会重排 prettyplease 输出（如 `fn fmt(..)` 换行）造成 codegen 漂移。
 /// 用 rust-toolchain.toml 钉的 rustfmt（component）；edition 显式 2024 与 generated crate 一致。
+/// 经 [`crate::cmd::clean_cmd`] 清洗 ambient 环境（剥 `RUSTUP_TOOLCHAIN` 等），确保用 rust-toolchain.toml
+/// 钉的 1.96 rustfmt、不被外部 toolchain override 改变 golden 派生（INVARIANT CODEGEN-DRIFT-01）。
 pub(crate) fn format_rust(code: &str) -> Result<String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("rustfmt")
-        .args(["--edition", "2024"])
+    use std::process::Stdio;
+    let mut child = crate::cmd::clean_cmd("rustfmt", &["--edition", "2024"], &[], None)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
