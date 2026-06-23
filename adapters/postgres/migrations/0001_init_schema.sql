@@ -1,0 +1,8 @@
+-- 0001_init_schema.sql — eventexec 持久化拓扑基线占位（P3 基座，#1116）。
+--
+-- 本占位不建任何 durable 表。实际持久化表——
+--   outbox / inbox_dedup / dead_letter / saga_journal / checkpoint / projection_events
+-- ——由 P4–P10 各自的 {序号}_{动词}_{对象}.sql 迁移按需新增（只增不改）。
+--
+-- 作用：建立 migrations/ 基线 + _sqlx_migrations 记账锚点，验证 Migrator 装配可应用。
+-- 空（comment-only）迁移由 sqlx 正常应用并记账（checksum/version 入 _sqlx_migrations）。

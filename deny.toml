@@ -26,6 +26,9 @@ allow = [
   "ISC",
   "Unicode-3.0",
   "Zlib",
+  # webpki-roots（sqlx tls-rustls 传递引入）打包 Mozilla 根 CA 集，以 CDLA-Permissive-2.0（Community
+  # Data License Agreement，宽松数据许可）授权该 CA 数据。仅此依赖使用，#1116 postgres adapter 激活。
+  "CDLA-Permissive-2.0",
 ]
 # 本仓成员均 publish = false，跳过其 license 校验（license 校验只针对外部依赖）。
 private = { ignore = true }

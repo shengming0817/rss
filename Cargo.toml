@@ -107,8 +107,8 @@ tower = "0.5"
 tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
 tonic = "0.13"
 prost = "0.13"
-# 持久化（adapters 前瞻）
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）
+# 持久化（postgres adapter，#1116）
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
 typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x

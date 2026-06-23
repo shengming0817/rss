@@ -20,6 +20,21 @@ consistency = { path = "../../crates/consistency" }
 primitives = { path = "../../crates/primitives" }
 # 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
-# 实现 identity 的**域形** repo port（identity::ports::RoleRepo，native AFIT）——adapter→域 = DIP 内向边
-# （Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。adapter 仍不被域依赖。
+# adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。
+# 边由 #[cfg(test)] RoleRepoEdgeProof impl identity::ports::RoleRepo 承载——不挂可构造的生产 PgStore（review F3）。
 identity = { path = "../../crates/identity" }
+# eventexec 持久化基座（#1116）：连接池 / 事务 / Migrator。features migrate+macros 在 workspace.dependencies 声明。
+sqlx = { workspace = true }
+# run_in_transaction 闭包返回 BoxFuture（HRTB 绕过异步闭包借用规则）。
+futures = { workspace = true }
+# 连接 / 迁移成功的结构化日志。
+tracing = { workspace = true }
+# PgError 库错误枚举（error-handling.md：库错误用 thiserror）。
+thiserror = { workspace = true }
+
+[features]
+# 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
+integration = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
