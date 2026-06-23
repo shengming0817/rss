@@ -105,6 +105,11 @@ trait-variant = "=0.1.2"
 axum = "0.8"
 tower = "0.5"
 tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
+# 限流 provider（adapters/ratelimit，#1011）：keyed GCRA 限流器，x/time/rate（token bucket）的 Rust 工业等价。
+# 自带 monotonic clock（DefaultClock/QuantaClock；FakeRelativeClock 供确定性测试）——不经 diport::Clock
+# （wall-clock SystemTime，错的时间基），故不触 clippy disallowed-methods（ban 仅约束我们直调 now()）。
+# ref: antifuchs/governor src/state/keyed.rs
+governor = "0.8"
 tonic = "0.13"
 prost = "0.13"
 # 持久化（postgres adapter，#1116）

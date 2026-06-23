@@ -58,6 +58,7 @@ pub mod audit_sink;
 pub mod clock;
 pub mod managed_resource;
 pub mod publisher;
+pub mod rate_limiter;
 pub mod signer;
 pub mod subscriber;
 
@@ -67,6 +68,9 @@ pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
 };
 pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
+pub use rate_limiter::{
+    DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
+};
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
 pub use subscriber::{
     DynSubscriber, Message, MessageId, MessageMetadata, MessageStream, SubscribeInitError,

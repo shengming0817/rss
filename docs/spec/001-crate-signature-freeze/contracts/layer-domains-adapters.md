@@ -43,8 +43,9 @@ adapters 实现 `diport` 定义的 DI port trait；**不被域依赖**（组合�
 | 全部 12 | postgres, redis, amqp, mqtt, s3, oidc, grpc, otel, prometheus, vault, softca, ratelimit | `ManagedResource`（生命周期 shutdown，普适） |
 | 发布 | amqp, mqtt | 另 impl `Publisher` |
 | 签名 | vault, softca | 另 impl `Signer` |
+| 限流 | ratelimit | 另 impl `RateLimiter`（W 阶段 #1011 新定义于 diport；marker `RateLimiter`→`GovernorLimiter`） |
 
-> 注：provider-agnostic 更专的 infra trait（设备 transport/证书签发/metrics/Subscriber…）diport 现**未冻**，待 W 阶段定义后再 impl。**域形 repo port（ADR-005）归域 crate `ports`**：本轮 `postgres` 已 impl 代表性 `identity::ports::RoleRepo`（adapter→域 DIP 边编译证明）；其余域 repo port 随 W 阶段逐域补 + 对应 adapter impl（按需把该 adapter 加入该域 deny.toml wrapper）。
+> 注：provider-agnostic 更专的 infra trait（设备 transport/证书签发/metrics/Subscriber…）diport 现**未冻**，待 W 阶段定义后再 impl。**W 阶段已落地**：`RateLimiter`（限流，#1011）按 ADR-005 category line 作为 provider-agnostic infra port 新增进 diport（async dynosaur，照 `signer.rs`），`ratelimit` 冻结 marker 随 body 落地由 `RateLimiter` 重命名为 provider 专名 `GovernorLimiter`（governor GCRA；冻结名仅示意、无外部消费方）。**域形 repo port（ADR-005）归域 crate `ports`**：本轮 `postgres` 已 impl 代表性 `identity::ports::RoleRepo`（adapter→域 DIP 边编译证明）；其余域 repo port 随 W 阶段逐域补 + 对应 adapter impl（按需把该 adapter 加入该域 deny.toml wrapper）。
 
 要点：PR-5 冻 **unit sealed-marker**（`pub struct PgStore;`，无 raw client 字段——字段延迟 W 阶段接后端时填入、届时 `pub(crate)` 不泄漏），**native AFIT** impl 已冻 diport DI port trait body=todo!()。adapter crate **保持 `#![forbid(unsafe_code)]`**（只 import diport trait + `Dyn*`，自己不 invoke dynosaur 宏，ADR-003 §4.2）。adapters 本身不 mock（域 crate mock 的是 diport trait）。PR-5 与 PR-4 触不同 crate→可并行。
 

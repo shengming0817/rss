@@ -20,6 +20,7 @@
 > generated/ 不在任何 unit：契约派生（#998 产物），不手写签名。
 > **重排说明**：ADR-003 把 DI 注入 port trait（Store/Signer/Publisher/Subscriber/PDP/Clock/ManagedResource…）收敛进新 `diport` crate（dynosaur 宏 + unsafe 收敛，§3）。故新增 **PR-diport** 单元（PR-2 后、PR-3/4/5 前）；PR-3 只冻服务层**非 DI 接缝**、PR-4 只冻域内 DTO/非 DI 域逻辑。具体归属边界见下「diport 落地待决项」（由 PR-diport 拍板）。
 > 同层 unit 在 tasks 中可进一步拆"子 PR"以增并行度（见 quickstart §并行拆分建议）。
+> **W 阶段冻结台账补记（#1011）**：`ratelimit` adapter body 落地时，按 ADR-005 category line 在 `diport` **新增** provider-agnostic infra port `RateLimiter`（async dynosaur，照 `signer.rs`，冻结时未定义——见 §diport 落地待决项「更专 infra trait 待 W 阶段」）；冻结期的 unit marker `RateLimiter` 随 body 重命名为 provider 专名 `GovernorLimiter`（governor GCRA provider）。冻结名仅示意、无外部消费方，重命名不破坏接缝。
 
 ## 实体 2：Trait 分类（决定 async/dyn 范式 + mock 方式）
 

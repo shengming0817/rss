@@ -8,15 +8,14 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
+# adapter 实现 diport DI port（RateLimiter + ManagedResource，native AFIT；不 invoke dynosaur 宏，保持 forbid）。
 [dependencies]
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
+# 实现 diport DI port trait（RateLimiter + ManagedResource）。
 diport = { path = "../../crates/diport" }
+# keyed GCRA 限流器（x/time/rate token-bucket 的 Rust 工业等价），自带 monotonic 时钟。
+# ref: antifuchs/governor src/state/keyed.rs
+governor = { workspace = true }
+
+[dev-dependencies]
+# 异步单测 runtime（dyn-injection multi_thread spawn）。
+tokio = { workspace = true }
