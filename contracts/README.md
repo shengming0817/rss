@@ -71,3 +71,13 @@ contracts/{kind}/{domain}/{version}/
 `cargo xtask verify` 是本地全量治理门（门集**单一事实源** = `README.md` §构建与本地验证 / `xtask/src/verify.rs`）：除全 workspace 的 fmt / build / clippy / nextest / deny / dylint 外，**契约相关**的 `contract validate`（元数据校验）、`layer-deps`（分层依赖）、`codegen --check`（派生漂移门）也是其中的 in-process meta 步（亦含在 `--fast` 内），任一失败即停止。改契约后跑 `cargo xtask verify`（或 `--fast` 快检）即覆盖契约元数据 + 派生漂移校验；激活 forge=azure 无 CI ⇒ 此门是治理门的唯一实际 gate。
 
 per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block）已随 #1035 落地（见上 §contract.toml 字段 + 校验规则 R8–R10）；属预期附加演进（新增 optional 字段不破坏既有契约解析），非破坏冻结。codegen 不消费这些字段（只读 `*.schema.json`），故 `generated/` 不受影响。
+
+### 敏感字段脱敏（codegen 单源，`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`）
+
+含**凭据级字段名**（字段名小写后 `contains` 命中约定集 `password` / `passwd` / `secret` / `token` / `credential`）的
+generated wire struct，codegen（`xtask/src/codegen.rs` 的 `strip_sensitive_debug`）**抑制其 `Debug` derive**——该类型
+从类型层即**不可** `{:?}` 格式化，杜绝 `{:?}` 或未 `skip` 的 `#[tracing::instrument]` 把明文凭据打进日志（如
+`IdentityLoginRequest { password, .. }`）。脱敏单源在 codegen，**勿手改 committed `generated/src/**`**；输出由
+`cargo xtask codegen --check` 漂移门 + synthetic 单测 `sensitive_field_struct_drops_debug_derive` 锁定（该单测以非敏感
+struct 保留 `Debug` 作 anti-vacuity 对照）。新增 / 调整敏感字段名约定须改 `strip_sensitive_debug` 的 `SENSITIVE` 常量集；
+域侧实体（非 generated）的脱敏另由手写 redacted `Debug` + `#[instrument(skip ...)]` 承载，不在本约定内。

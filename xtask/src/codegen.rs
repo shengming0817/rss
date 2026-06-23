@@ -332,6 +332,78 @@ mod tests {
         Ok(())
     }
 
+    /// 落一个 http 契约：request 含敏感字段 `password`、response 仅非敏感字段——
+    /// 用于验 codegen 对含凭据字段的 struct 剥 `Debug`、非敏感 struct 保留 `Debug`（#1096，PR #186 F2）。
+    fn seed_http_sensitive(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            "id = \"seed.login\"\nkind = \"http\"\ndomain = \"_seed\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"LocalOnly\"\nlifecycle = \"draft\"\n[schemas]\nrequest = \"request.schema.json\"\nresponse = \"response.schema.json\"\n",
+        )?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SensitiveSeedRequest\",\"type\":\"object\",\"required\":[\"password\",\"username\"],\"properties\":{\"password\":{\"type\":\"string\"},\"username\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        )?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SensitiveSeedResponse\",\"type\":\"object\",\"required\":[\"ok\"],\"properties\":{\"ok\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        )?;
+        Ok(())
+    }
+
+    /// 派生 .rs 中名为 `name` 的 struct 是否 derive `Debug`。
+    fn struct_derives_debug(file: &syn::File, name: &str) -> bool {
+        file.items.iter().any(|item| {
+            let syn::Item::Struct(s) = item else {
+                return false;
+            };
+            if s.ident != name {
+                return false;
+            }
+            s.attrs.iter().any(|attr| {
+                attr.path().is_ident("derive")
+                    && attr
+                        .parse_args_with(
+                            syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                        )
+                        .is_ok_and(|paths| {
+                            paths
+                                .iter()
+                                .any(|p| p.segments.last().is_some_and(|seg| seg.ident == "Debug"))
+                        })
+            })
+        })
+    }
+
+    /// 含敏感字段（`password` 等）的 generated wire struct 须被 codegen 剥 `Debug` derive
+    /// （`strip_sensitive_debug`，`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`）；非敏感 struct 保留 `Debug`
+    /// 作 anti-vacuity 对照——杜绝 `{:?}` 把凭据打进日志（#1096，PR #186 F2）。
+    ///
+    /// anti-vacuity（结构保证）：typify 默认给所有派生 struct 加 `Debug`；若 `strip_sensitive_debug`
+    /// 退化为 no-op，`SensitiveSeedRequest` 仍带 `Debug`，下方第一个 `assert!` 必失——守卫非恒真。
+    #[test]
+    fn sensitive_field_struct_drops_debug_derive() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http_sensitive(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let parsed = syn::parse_str::<syn::File>(&rendered).context("解析派生 .rs")?;
+        assert!(
+            !struct_derives_debug(&parsed, "SensitiveSeedRequest"),
+            "含 password 的 struct 不应 derive Debug（防 {{:?}} 泄露凭据）:\n{rendered}"
+        );
+        assert!(
+            struct_derives_debug(&parsed, "SensitiveSeedResponse"),
+            "非敏感 struct 应保留 Debug（anti-vacuity 对照）:\n{rendered}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn module_name_joins_domain_version() {
         assert_eq!(module_name("_seed", "v1"), "_seed_v1");
