@@ -7,11 +7,22 @@ use dynosaur::dynosaur;
 /// PII 边界（替代 `anyhow` 暴露在公共 port，与 [`crate::ShutdownError`] 同范式）：`Display` 仅输出
 /// provider 无关的安全摘要常量（不含 runtime 数据）；adapter 内部原始错误经 [`SignerError::new`] 包成
 /// [`std::error::Error::source`] 内部保留，**不进默认日志**（待 `secure` redaction funnel 落地后清洗记录）。
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("signing failed")]
 pub struct SignerError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误的 Debug
+// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
+// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
+impl std::fmt::Debug for SignerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignerError")
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SignerError {
@@ -58,8 +69,19 @@ impl SigningPurpose {
 }
 
 /// 签名结果字节。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// PII 边界（类型层 Hard，对标 `primitives::crypto::{Mac,Digest}` opaque Debug）：手写 `Debug` 只输出固定
+/// `Signature(<redacted>)`，不展开原始字节——密码学物料不进 Debug / tracing。
+///
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
+#[derive(Clone, PartialEq, Eq)]
 pub struct Signature(Vec<u8>);
+
+impl std::fmt::Debug for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Signature(<redacted>)")
+    }
+}
 
 impl Signature {
     /// 由字节构造签名。
@@ -78,7 +100,7 @@ impl Signature {
 /// **租户 / 调用者**经 ambient [`runctx::RequestCtx`] 解析（tenant / principal 是请求级 context 值，
 /// 非 sign-request 字段；provider 从 ctx 取做 RLS / ABAC），不重复进本请求。字段集随消费域（deviceloop
 /// 证书签发）细化——pre-GA 窗口可原地加字段（algorithm / correlation），是可演进接缝，非 production-final 冻结面。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignRequest {
     /// 目标签名 key。
     pub key: KeyId,
@@ -86,6 +108,20 @@ pub struct SignRequest {
     pub purpose: SigningPurpose,
     /// 待签字节。
     pub message: Vec<u8>,
+}
+
+/// PII 边界（类型层 Hard，同 [`Signature`]）：手写 `Debug` 对 `message`（待签字节，可能是 CSR / nonce /
+/// token 等敏感体）输出 `<redacted>`；`key` / `purpose` 是归因元数据，可观测。
+///
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
+impl std::fmt::Debug for SignRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignRequest")
+            .field("key", &self.key)
+            .field("purpose", &self.purpose)
+            .field("message", &"<redacted>")
+            .finish()
+    }
 }
 
 /// 签名 provider DI port（async）。
@@ -166,5 +202,60 @@ mod smoke {
         let signer: Box<DynSigner> = DynSigner::new_box(mock);
         let joined = tokio::spawn(async move { signer.sign(sample_request()).await }).await;
         assert!(matches!(joined, Ok(Ok(ref sig)) if sig.as_bytes() == [1, 2, 3]));
+    }
+}
+
+#[cfg(test)]
+mod pii_debug {
+    //! `SignRequest.message`（待签名体）/ `Signature`（密码学物料）字节 Debug 脱敏回归。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（对标 `primitives::crypto::{Mac,Digest,MacKey}` opaque Debug）。
+    use super::{KeyId, SignRequest, Signature, SigningPurpose};
+
+    #[test]
+    fn sign_request_debug_redacts_message() {
+        // anti-vacuity：原始 Vec<u8> Debug 把 0xDE 渲染成 "222"，证明 "!contains(222)" 检测非空转。
+        assert!(
+            format!("{:?}", vec![0xDE_u8]).contains("222"),
+            "前提失效：检测字节不在原始 Debug"
+        );
+        let req = SignRequest {
+            key: KeyId::new("key-1"),
+            purpose: SigningPurpose::new("device-cert"),
+            message: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        };
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("222"), "message 字节泄漏(0xDE=222): {dbg}");
+        assert!(!dbg.contains("173"), "message 字节泄漏(0xAD=173): {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+        assert!(dbg.contains("key-1"), "key 应可见: {dbg}");
+        assert!(dbg.contains("device-cert"), "purpose 应可见: {dbg}");
+    }
+
+    #[test]
+    fn signature_debug_is_opaque() {
+        let sig = Signature::new(vec![0xDE, 0xAD]);
+        assert_eq!(format!("{sig:?}"), "Signature(<redacted>)");
+    }
+}
+
+#[cfg(test)]
+mod error_redaction {
+    //! `SignerError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
+    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（对标 `RateLimitError::error_redaction`）。
+    use super::SignerError;
+
+    #[test]
+    fn error_debug_redacts_source() {
+        let secret = std::io::Error::other("redis://user:hunter2@cache.internal:6379");
+        // anti-vacuity：原始 source 自身 Debug 确实携密，否则回归断言空转。
+        assert!(
+            format!("{secret:?}").contains("hunter2"),
+            "前提失效：source 未携密"
+        );
+        let rendered = format!("{:?}", SignerError::new(secret));
+        assert!(
+            !rendered.contains("hunter2") && !rendered.contains("redis://"),
+            "Debug 泄漏 source: {rendered}"
+        );
     }
 }

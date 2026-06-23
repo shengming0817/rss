@@ -6,11 +6,22 @@ use dynosaur::dynosaur;
 ///
 /// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；adapter 原始错误经
 /// [`PublisherError::new`] 包成 [`std::error::Error::source`] 内部保留，**不进默认日志**。
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("publish failed")]
 pub struct PublisherError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
+// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
+// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
+impl std::fmt::Debug for PublisherError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublisherError")
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 impl PublisherError {
@@ -47,12 +58,25 @@ impl Topic {
 /// **租户 / correlation** 经 ambient [`runctx::RequestCtx`] 解析（请求级 context 值，非发布请求字段）。
 /// 跨域 wire 类型单源仍是 contract——`payload` 由 `eventexec`/outbox 层按 contract envelope 预编码后传入，
 /// DI-infra port **不**引 `generated`（ADR-003 §6 偏离 2）。字段集随消费域细化（pre-GA 可原地加 content-type 等）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PublishRequest {
     /// 目标 topic。
     pub topic: Topic,
     /// provider-agnostic 事件字节（已按 contract envelope 编码）。
     pub payload: Vec<u8>,
+}
+
+/// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（事件序列化体，可能含
+/// PII——如审计事件本身被编码进 payload）输出 `<redacted>`；`topic` 是路由元数据，可观测。
+///
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
+impl std::fmt::Debug for PublishRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishRequest")
+            .field("topic", &self.topic)
+            .field("payload", &"<redacted>")
+            .finish()
+    }
 }
 
 /// 事件发布 provider DI port（async）。
@@ -104,5 +128,51 @@ mod smoke {
         })
         .await;
         assert!(matches!(joined, Ok(true)));
+    }
+}
+
+#[cfg(test)]
+mod pii_debug {
+    //! `PublishRequest.payload`（事件序列化体，可能含 PII）字节 Debug 脱敏回归。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    use super::{PublishRequest, Topic};
+
+    #[test]
+    fn publish_request_debug_redacts_payload() {
+        // anti-vacuity：原始 Vec<u8> Debug 把 0xDE 渲染成 "222"，证明 "!contains(222)" 检测非空转。
+        assert!(
+            format!("{:?}", vec![0xDE_u8]).contains("222"),
+            "前提失效：检测字节不在原始 Debug"
+        );
+        let req = PublishRequest {
+            topic: Topic::new("session.created"),
+            payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        };
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("222"), "payload 字节泄漏(0xDE=222): {dbg}");
+        assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+        assert!(dbg.contains("session.created"), "topic 应可见: {dbg}");
+    }
+}
+
+#[cfg(test)]
+mod error_redaction {
+    //! `PublisherError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
+    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01.
+    use super::PublisherError;
+
+    #[test]
+    fn error_debug_redacts_source() {
+        let secret = std::io::Error::other("amqp://user:hunter2@broker.internal:5672");
+        assert!(
+            format!("{secret:?}").contains("hunter2"),
+            "前提失效：source 未携密"
+        );
+        let rendered = format!("{:?}", PublisherError::new(secret));
+        assert!(
+            !rendered.contains("hunter2") && !rendered.contains("amqp://"),
+            "Debug 泄漏 source: {rendered}"
+        );
     }
 }

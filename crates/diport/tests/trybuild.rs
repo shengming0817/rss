@@ -4,8 +4,10 @@
 //! - fail（dyn-compat）：`async fn` in trait 裸 `Box<dyn _>` → E0038，锁 dynosaur 为 DI port 解决的根问题。
 //! - fail（unsafe-forbid）：anti-vacuity——`#![forbid(unsafe_code)]` + 手写 unsafe 编不过，锁
 //!   DIPORT-UNSAFE-HYGIENE-01 的基线（forbid 非恒真；dynosaur 生成 unsafe 不触发 forbid 是 hygiene 效果）。
+//! - fail（arc-not-send）：**全部** async port 的 `Arc<DynX>: !Send`（dynosaur Send 变体非 Sync），锁 #1095
+//!   注入形态收口决策——多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`（anti-vacuity：改 Send+Sync 即破）。
 //!
-//! INVARIANT: DIPORT-DYN-COMPAT-01 · DIPORT-UNSAFE-HYGIENE-01
+//! INVARIANT: DIPORT-DYN-COMPAT-01 · DIPORT-UNSAFE-HYGIENE-01 · DIPORT-ASYNC-ARC-SEND-01
 
 #[test]
 fn ui() {
@@ -13,4 +15,5 @@ fn ui() {
     t.pass("tests/ui/dyn_compatible_pass.rs");
     t.compile_fail("tests/ui/dyn_incompatible_fail.rs");
     t.compile_fail("tests/ui/unsafe_forbid_fail.rs");
+    t.compile_fail("tests/ui/arc_dyn_ports_not_send.rs");
 }

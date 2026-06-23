@@ -73,11 +73,11 @@ fn run<S: IdemCheck>(s: &S) { /* 单态、零 box */ }
 - `ManagedResource`：`async fn shutdown(&self)` + `name()` + `shutdown_timeout()`，typed `ShutdownError`（非 `anyhow`，公共 port 不泄漏 adapter 信息）。
 - **⚠️ inter-ADR 冲突（data-model 待决项#4）**：ADR-001 把 `ManagedResource` 定为 `#[async_trait]` + `Arc<dyn>`；C1 通则（ADR-003）是 DI 注入→dynosaur。**`ManagedResource` 暂遵 ADR-001（async_trait）**，随 bootstrap shutdown 框架落地时由 PR-diport 统一为 dynosaur 并**同步重评 ADR-001 威胁矩阵**（ai-robust「ADR amendment 同步」）。
 
-### C5. 必填依赖 / Clock（← ADR-003 §4.3）
+### C5. 必填依赖 / Clock（← ADR-003 §4.3 + Amendment #1095）
 
 - 必填 DI 依赖 = 构造器**必填位置参**（非 `Option`），缺失即编译错误：`fn new(store: Box<DynUserStore>, clock: Box<DynClock>) -> Self`。
 - `Clock` 走同一 `Box<DynClock>` 范式；**禁** builder option / Config 字段传 clock，**禁**默认系统时钟（prod clock 仅在组合根构造）。
-- `Box<Dyn*>`（单一所有者）vs `Arc<Dyn*>`（跨 `tokio::spawn` / 多 service 共享）按所有权选。
+- **async DI port 注入形态三分**（单源 = [ADR-003 Amendment #1095](202606212047-003-di-trait-async-dyn-dispatch-strategy.md) §注入形态收口；本节不复制三分表）：`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 **`!Send`**，**不能**跨 `tokio::spawn` / Send `'static` future 共享。故 `Box<DynX>` 单 owner；多次调用 + 跨 Send future 用**泛型静态分发** `<S: X + Send + Sync + 'static>` + `Arc<S>`；`Arc<DynX>` 仅限不跨 Send future 的窄场景。（sync port `Clock` 天然 `Send + Sync`，`Box` / `Arc<DynClock>` 均可。）
 
 ### C6. serde 边界
 

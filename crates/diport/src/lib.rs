@@ -16,6 +16,25 @@
 //! - **sync DI port**（`Clock` / `SubscribeInitializer`）：sync trait 天然 dyn-compatible，经
 //!   `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
 //!
+//! ## 注入形态（INVARIANT: DIPORT-ASYNC-ARC-SEND-01）
+//!
+//! async DI port 的 dynosaur Send 变体 `DynX` 是 **`Send` 但非 `Sync`**（`#[trait_variant::make(X: Send)]`
+//! 只加 `Send`，内部 `dyn ErasedX` 无 `Sync`）。推论：`Box<DynX>: Send`（`Box<T>: Send ⟸ T: Send`）成立，
+//! 但 `Arc<DynX>: Send` 需 `DynX: Send + Sync`，故 **`Arc<DynX>` 是 `!Send`**——无法被多次调用且在
+//! `tokio::spawn` / Send `'static` future 中消费的 async 消费者（典型订阅 handler）持有。注入形态据此三分
+//! （ADR-003 amendment §注入形态收口，#1095）：
+//!
+//! | 消费场景 | 注入形态 |
+//! |----------|----------|
+//! | 单 owner、非跨 Send-future（如 `ShutdownStack` 顺序关闭） | `Box<DynX>`（仅需 Send） |
+//! | 多次调用 + 在 `tokio::spawn` / Send `'static` future 中消费 | **泛型静态分发** `<S: X + Send + Sync + 'static>` + `Arc<S>`（provider 经 trait bound 仍可互换，零运行期成本） |
+//! | 单线程 / 不跨 Send-future 持有 | `Arc<DynX>`（窄场景） |
+//!
+//! 错误形态（`Arc<DynX>` 跨 Send future）**编译期不可表达**（Hard）；负例
+//! `tests/ui/arc_dyn_ports_not_send.rs` 锁该事实（anti-vacuity：改 `Send + Sync` 即破）。泛型静态分发
+//! 范例见 `audit::application::SessionCreatedAuditHandler`。Option A（改 `DynX: Send + Sync` 让 `Arc<DynX>`
+//! 可 dyn 注入运行期多态）已评估 defer，见 ADR-003 amendment。
+//!
 //! ## 新增一个 async DI port（三步，照 `signer.rs` 抄）
 //!
 //! 1. 新建 `crates/diport/src/<port>.rs`，写基 trait（**非** Send，命名 `<Port>Local`），叠加两个属性宏：

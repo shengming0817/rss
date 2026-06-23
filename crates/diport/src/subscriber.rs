@@ -51,7 +51,7 @@ impl MessageMetadata {
 /// 消息值类型（对齐 watermill Message UUID/Metadata/Payload）。
 ///
 /// 不暴露 Ack/Nack——由框架据 `eventexec::Disposition` 驱动。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Message {
     /// 消息唯一标识。
     pub id: MessageId,
@@ -59,6 +59,20 @@ pub struct Message {
     pub metadata: MessageMetadata,
     /// provider-agnostic 消息字节。
     pub payload: Vec<u8>,
+}
+
+/// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（消息体，可能含 PII）输出
+/// `<redacted>`；`id` / `metadata`（路由 header）可观测。
+///
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Message")
+            .field("id", &self.id)
+            .field("metadata", &self.metadata)
+            .field("payload", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Message {
@@ -81,11 +95,22 @@ pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 ///
 /// PII 边界（与 [`crate::PublisherError`] 同范式）：`Display` 仅安全摘要常量；adapter 原始错误经
 /// [`SubscriberError::new`] 包成 [`std::error::Error::source`] 内部保留，**不进默认日志**。
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("subscription failed")]
 pub struct SubscriberError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
+// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
+// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
+impl std::fmt::Debug for SubscriberError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscriberError")
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SubscriberError {
@@ -101,11 +126,22 @@ impl SubscriberError {
 }
 
 /// 主题初始化失败（[`SubscribeInitializer`]）。
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("subscribe initialize failed")]
 pub struct SubscribeInitError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
+// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
+// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
+impl std::fmt::Debug for SubscribeInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscribeInitError")
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SubscribeInitError {
@@ -241,5 +277,51 @@ mod smoke {
         let err = SubscribeInitError::new(std::fmt::Error);
         assert_eq!(err.to_string(), "subscribe initialize failed");
         assert!(std::error::Error::source(&err).is_some());
+    }
+}
+
+#[cfg(test)]
+mod pii_debug {
+    //! `Message.payload`（消息体，可能含 PII）字节 Debug 脱敏回归。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    use super::Message;
+
+    #[test]
+    fn message_debug_redacts_payload() {
+        // anti-vacuity：原始 Vec<u8> Debug 把 0xDE 渲染成 "222"，证明 "!contains(222)" 检测非空转。
+        assert!(
+            format!("{:?}", vec![0xDE_u8]).contains("222"),
+            "前提失效：检测字节不在原始 Debug"
+        );
+        let msg = Message::new("msg-1", vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let dbg = format!("{msg:?}");
+        assert!(!dbg.contains("222"), "payload 字节泄漏(0xDE=222): {dbg}");
+        assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+        assert!(dbg.contains("msg-1"), "id 应可见: {dbg}");
+    }
+}
+
+#[cfg(test)]
+mod error_redaction {
+    //! `SubscriberError` / `SubscribeInitError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
+    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01.
+    use super::{SubscribeInitError, SubscriberError};
+
+    #[test]
+    fn error_debug_redacts_source() {
+        let mk = || std::io::Error::other("redis://user:hunter2@cache.internal:6379");
+        // anti-vacuity：原始 source 自身 Debug 确实携密。
+        assert!(format!("{:?}", mk()).contains("hunter2"), "前提失效");
+        let sub = format!("{:?}", SubscriberError::new(mk()));
+        assert!(
+            !sub.contains("hunter2"),
+            "SubscriberError Debug 泄漏 source: {sub}"
+        );
+        let init = format!("{:?}", SubscribeInitError::new(mk()));
+        assert!(
+            !init.contains("hunter2"),
+            "SubscribeInitError Debug 泄漏 source: {init}"
+        );
     }
 }

@@ -4,6 +4,7 @@
 - **日期**：2026-06-21（落地回写：2026-06-22）
 - **关联**：issue #995 [RW-G0.5] · epic #991 · 落地单元 #1049 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
 - **后续修订**：**ADR-005**（#1083，2026-06-23）把「所有 DI port 收敛 diport」部分化——域形 repo/service port 归域 crate（§6 偏离 2 + §7 行 1 已就地重写并重评威胁矩阵）。
+- **后续修订**：**Amendment（#1095，2026-06-23）**——async DI port 注入形态收口（`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 `!Send`；多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`）。§4.3 / §4.5 冲突段就地重写、§7 威胁矩阵补行、Option A defer。见下「Amendment」节。
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
 
@@ -35,6 +36,56 @@ dynosaur 0.3 落地 spike 实测，三项开放风险结论 + 对原 ADR 的修�
 5. **ManagedResource（§7 末条 + 跨 ADR-001 冲突）→ 已收敛**：迁入 `diport` 改 dynosaur Send 变体；`bootstrap`
    `ShutdownStack` 以 `Box<DynManagedResource<'static>>` 持有并 `tokio::spawn` 隔离 panic——`Box` 仅需 `Send`
    （免 `Arc` 的 `Send+Sync`），并去掉原 `Arc::clone`。ADR-001 威胁矩阵同步重评（见 ADR-001 落地回写）。
+
+---
+
+## Amendment（2026-06-23，#1095）：async DI port 注入形态收口（`Arc<DynX>` 是 `!Send`）
+
+**触发**：RW-G1（PR #186）内置 review（架构维度 Cx3）发现 §4.3 的 `Arc<Dyn*>` 注入示例与**落地结论 3** 矛盾。
+落地用 `#[trait_variant::make(X: Send)]` 只生成 **Send（非 Sync）** 变体——冒号后的 bound 既作变体 trait 的
+supertrait、又作 async 返回 future 的 bound，且**只取所列 bound、不隐式补 `Sync`**
+（`ref: rust-lang/impl-trait-utils trait-variant/src/lib.rs@main`：`make(IntFactory: Send)` ⇒ `trait IntFactory: Send`
++ `impl Future + Send`）。dynosaur 据此生成的 `DynX` 内部 `dyn ErasedX` **无 `Sync`**。后果链：
+
+- `Box<DynX>: Send` 成立（`Box<T>: Send ⟸ T: Send`）；
+- 但 `Arc<DynX>: Send` 需 `DynX: Send + Sync`，`DynX` 非 Sync ⇒ **`Arc<DynX>` 是 `!Send`**；
+- 故任何**多次调用、且把依赖 clone 进每次调用的 Send `'static` future** 的 async 消费者（典型订阅 handler
+  `handle() -> BoxFuture<'static>`）**无法持有 `Arc<DynX>`**——§4.3 的 `Arc<DynEventPublisher>` + `tokio::spawn`
+  示例在落地形态下编不过。
+
+in-repo 编译期证据：负例 `crates/diport/tests/ui/arc_dyn_ports_not_send.rs`（`dyn ErasedAuditSink` 非
+Sync ⇒ `Arc<DynAuditSink>` 非 Send，trybuild compile-fail）。
+
+### 决策（sanctioned 注入形态，三分）
+
+| 消费场景 | 注入形态 |
+|----------|----------|
+| 单 owner、非跨 Send-future（如 `ShutdownStack` 顺序关闭，落地结论 5） | `Box<DynX>`（仅需 Send） |
+| **多次调用 + 把依赖 clone 进每次 Send `'static` future**（订阅 handler 等） | **泛型静态分发**：消费者 `<S: X + Send + Sync + 'static>` 持 `Arc<S>`（静态分发 DI——provider 经 trait bound 仍可互换、产出 Send future、零运行期成本、不碰冻结端口） |
+| 单线程 / 不跨 Send-future 持有 | `Arc<DynX>`（窄场景） |
+
+范例（已落地）：`audit::application::SessionCreatedAuditHandler<S: AuditSink + Send + Sync + 'static>` 持
+`Arc<S>`，`handle()` 内 `Arc::clone` 进 `Box::pin(async move {…})`（Send `'static` future）。§4.3 / §4.5 冲突
+段落已就地加 ⚠ 修订 banner。
+
+### Option A（已评估 → defer，跟踪 issue #1152）
+
+把 6 个 async DI port（AuditSink / Publisher / Subscriber / Signer / RateLimiter / ManagedResource）的 Dyn wrapper 改 `Send + Sync`（`#[trait_variant::make(X: Send + Sync)]` 或手写
+`DynX: Send + Sync`），使 `Arc<DynX>` 可 dyn 注入运行期多态消费者。**defer 理由**：① 改 ADR-005 冻结的端口
+签名（触 `cargo public-api` 复核）；② 须重验 12 个 adapter impl 全 `Sync` + boxed-future Sync 语义；③
+trait-variant / dynosaur 是否接受 / 传递 `Send + Sync` 在 pinned pre-1.0（`=0.3.0` / `=0.1.2`）上未验证；④
+当前无 `Arc<DynX>` 运行期多态 / 异构 sink 集合消费方。触发条件（出现上述需求）记于 issue #1152。
+
+### 威胁矩阵 / 安全模型重评（ai-robust：amendment 须同步重评）
+
+- **新增攻击面**：无。本 amendment 不改运行期行为，仅收口注入形态选择。
+- **错误形态可表达性**：`Arc<DynX>` 跨 Send future = **编译期不可表达（Hard）**——`Arc<DynX>: !Send` 使
+  `tokio::spawn` 处直接 `E0277`，不依赖人记规范。负例 `arc_dyn_ports_not_send.rs`（trybuild compile-fail，
+  **Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁该事实：若改 Send+Sync（Option A）此例转可
+  编译，强制有意识更新本 ADR + 负例。
+- **provider 可互换性**：泛型静态分发经 `S: X` trait bound 保持（与 dyn 注入同等可换 provider、同样经构造器
+  必填参注入），未削弱 §2「可替换 provider」与 §7 其余行——安全模型不退化。
+- INVARIANT: DIPORT-ASYNC-ARC-SEND-01（`diport` crate rustdoc「注入形态」节 + 负例 + 本节，三处同源）。
 
 ---
 
@@ -200,6 +251,11 @@ impl SessionService {
 }
 ```
 
+> ⚠ **本段已被 Amendment（2026-06-23，#1095）修订——原设错误**：落地 `make(X: Send)` 变体的 `DynX` 是
+> **Send 非 Sync**，故 `Arc<DynX>` 是 `!Send`，**不能** move / clone 进 `tokio::spawn` 的 Send `'static` task；
+> 下方 `Arc<DynEventPublisher>` + spawn 示例在落地形态下编不过（多次调用 async 消费者改用泛型静态分发
+> `<S: X + Send + Sync>` + `Arc<S>`，见 Amendment §决策）。`Box<DynX>` 仍是单 owner 缺省。下文仅存原始（已废）推理。
+>
 > `Box<Dyn*>` 还是 `Arc<Dyn*>`？单一所有者 → `Box`；需要跨 `tokio::spawn` / 多 service 共享同一 provider
 > → `Arc`（`Box` 不能 clone 共享）。两者都满足 `Send + Sync + 'static`（trait 定义处已声明 `Send + Sync`）。
 > 共享场景示例：
@@ -242,6 +298,12 @@ let svc = SessionService::new(store, clock, publisher);
 > 表中「用 `mockall` mock 注入测试」**只适用于已经走 `Box<Dyn*>`/`Arc<Dyn*>` 的动态依赖**——可 mock
 > 不是选动态的理由。L0 静态依赖的单测用 `#[cfg(test)]` 模块内的直接 impl 替身，不引入 dynosaur wrapper、
 > 不破坏「L0 保持 forbid 干净」。
+>
+> **Amendment（#1095）补充**：左列「动态」并非都用 `Arc<DynX>`。async DI port 的 `DynX` 是 Send 非 Sync ⇒
+> `Arc<DynX>` 是 `!Send`，故**把依赖 clone 进每次调用的 Send `'static` future** 的多次调用消费者（订阅 handler
+> `handle() -> BoxFuture<'static>`）**不能**用 `Arc<DynX>`，改用**泛型静态分发** `<S: X + Send + Sync + 'static>`
+> + `Arc<S>`（Amendment §决策）。三分：`Box<DynX>`（单 owner move 进 spawn）/ `Arc<S>`（多次调用克隆）/
+> `Arc<DynX>`（单线程窄场景）。
 
 ### 4.6 dyn 对象安全 dos / don'ts（port trait 写法约束）
 
@@ -304,6 +366,7 @@ dylint Medium（#1060 闭环）。
 | **必填 DI 依赖非 Option** | **Hard（类型系统）** | 构造器必填位置参 `Box<Dyn*>`，缺失即编译错误（ai-robust 范本）。 |
 | **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |
 | **shutdown 逆序关闭** | **Soft（当前）→ Medium（`bootstrap` 框架落地后）** | 逆序类型系统管不到（无 async Drop）。`bootstrap` shutdown 框架（§8 follow-up，**尚未落地**）按注册逆序统一执行 `shutdown()` 后升 Medium；在此之前为 Soft，故该框架是 `diport` 实落的**前置项**而非可选 follow-up——**禁止**长期停留在「组合根手记顺序」的 Soft 纪律。 |
+| **多次调用 async 消费者注入形态收口**（Amendment #1095：`Arc<DynX>` 跨 Send future 不可表达，改泛型静态分发） | **Hard（类型系统）+ Medium 回归锁** | `Arc<DynX>: !Send`（`DynX` Send 非 Sync）使误用 `tokio::spawn` 处 `E0277`（Hard，不依赖人记）；负例 `tests/ui/arc_dyn_ports_not_send.rs`（trybuild compile-fail，**Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁事实，改 Send+Sync（Option A）即破。详见 Amendment（#1095）。 |
 
 ---
 
@@ -342,6 +405,7 @@ dylint Medium（#1060 闭环）。
 ## 对标证据（ref）
 
 - `ref: spastorino/dynosaur releases/v0.3.0` — 选定方案：`dyn(box)` 生成、`new_box`/`from_box` API、pre-1.0。
+- `ref: rust-lang/impl-trait-utils trait-variant/src/lib.rs@main` — Amendment（#1095）依据：`make(X: Send)` 把冒号后 bound 作变体 trait supertrait + async 返回 future bound，只取所列 bound（不隐式补 Sync）⇒ `DynX` Send 非 Sync ⇒ `Arc<DynX>` `!Send`。
 - `ref: tower tower-service/src/lib.rs@master` — `poll_ready + type Future` 规避 async-fn-in-trait 的 pre-AFIT 范式。
 - `ref: kube-rs kube-runtime/src/watcher.rs@main` — 内部 trait 用 native AFIT + 泛型静态分发（L0 档对标）。
 - `ref: linkerd2-proxy linkerd/stack/src/arc_new_service.rs@main` — `Arc<dyn NewService>` 同步工厂 + 异步 call 的 DI 接缝。

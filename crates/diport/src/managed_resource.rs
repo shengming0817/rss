@@ -65,11 +65,22 @@ pub trait ManagedResourceLocal {
 /// （不含 runtime 数据）；包装的原始错误仅作 [`std::error::Error::source`] 内部保留，
 /// **不进入默认日志**。驱动器在 redaction funnel（`secure::redact_error`，ADR-001 §5 延后项）
 /// 落地前不打印 source——见 `bootstrap::ShutdownStack` 业务错误分支。
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("resource shutdown failed")]
 pub struct ShutdownError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
+// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
+// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
+impl std::fmt::Debug for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShutdownError")
+            .field("source", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ShutdownError {
@@ -109,5 +120,26 @@ mod smoke {
         assert_eq!(resource.shutdown_timeout(), DEFAULT_SHUTDOWN_TIMEOUT);
         let handle = tokio::spawn(async move { resource.shutdown().await });
         assert!(handle.await.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod error_redaction {
+    //! `ShutdownError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
+    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01.
+    use super::ShutdownError;
+
+    #[test]
+    fn error_debug_redacts_source() {
+        let secret = std::io::Error::other("redis://user:hunter2@cache.internal:6379");
+        assert!(
+            format!("{secret:?}").contains("hunter2"),
+            "前提失效：source 未携密"
+        );
+        let rendered = format!("{:?}", ShutdownError::new(secret));
+        assert!(
+            !rendered.contains("hunter2") && !rendered.contains("redis://"),
+            "Debug 泄漏 source: {rendered}"
+        );
     }
 }

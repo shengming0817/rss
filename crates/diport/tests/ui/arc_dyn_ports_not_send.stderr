@@ -1,0 +1,113 @@
+error[E0277]: `(dyn audit_sink::__dynosaur_macro_dynauditsink::ErasedAuditSink + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:21:19
+   |
+21 |     assert_send::<Arc<DynAuditSink<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn audit_sink::__dynosaur_macro_dynauditsink::ErasedAuditSink + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynAuditSink<'static>`, the trait `Sync` is not implemented for `(dyn audit_sink::__dynosaur_macro_dynauditsink::ErasedAuditSink + 'static)`
+note: required because it appears within the type `DynAuditSink<'static>`
+  --> src/audit_sink.rs
+   |
+   | #[dynosaur(pub DynAuditSink = dyn(box) AuditSink, bridge(dyn))]
+   |                ^^^^^^^^^^^^
+   = note: required for `Arc<DynAuditSink<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:17:19
+   |
+17 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
+
+error[E0277]: `(dyn publisher::__dynosaur_macro_dynpublisher::ErasedPublisher + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:22:19
+   |
+22 |     assert_send::<Arc<DynPublisher<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn publisher::__dynosaur_macro_dynpublisher::ErasedPublisher + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynPublisher<'static>`, the trait `Sync` is not implemented for `(dyn publisher::__dynosaur_macro_dynpublisher::ErasedPublisher + 'static)`
+note: required because it appears within the type `DynPublisher<'static>`
+  --> src/publisher.rs
+   |
+   | #[dynosaur(pub DynPublisher = dyn(box) Publisher, bridge(dyn))]
+   |                ^^^^^^^^^^^^
+   = note: required for `Arc<DynPublisher<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:17:19
+   |
+17 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
+
+error[E0277]: `(dyn subscriber::__dynosaur_macro_dynsubscriber::ErasedSubscriber + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:23:19
+   |
+23 |     assert_send::<Arc<DynSubscriber<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn subscriber::__dynosaur_macro_dynsubscriber::ErasedSubscriber + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynSubscriber<'static>`, the trait `Sync` is not implemented for `(dyn subscriber::__dynosaur_macro_dynsubscriber::ErasedSubscriber + 'static)`
+note: required because it appears within the type `DynSubscriber<'static>`
+  --> src/subscriber.rs
+   |
+   | #[dynosaur(pub DynSubscriber = dyn(box) Subscriber, bridge(dyn))]
+   |                ^^^^^^^^^^^^^
+   = note: required for `Arc<DynSubscriber<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:17:19
+   |
+17 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
+
+error[E0277]: `(dyn signer::__dynosaur_macro_dynsigner::ErasedSigner + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:24:19
+   |
+24 |     assert_send::<Arc<DynSigner<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^ `(dyn signer::__dynosaur_macro_dynsigner::ErasedSigner + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynSigner<'static>`, the trait `Sync` is not implemented for `(dyn signer::__dynosaur_macro_dynsigner::ErasedSigner + 'static)`
+note: required because it appears within the type `DynSigner<'static>`
+  --> src/signer.rs
+   |
+   | #[dynosaur(pub DynSigner = dyn(box) Signer, bridge(dyn))]
+   |                ^^^^^^^^^
+   = note: required for `Arc<DynSigner<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:17:19
+   |
+17 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
+
+error[E0277]: `(dyn rate_limiter::__dynosaur_macro_dynratelimiter::ErasedRateLimiter + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:25:19
+   |
+25 |     assert_send::<Arc<DynRateLimiter<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn rate_limiter::__dynosaur_macro_dynratelimiter::ErasedRateLimiter + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynRateLimiter<'static>`, the trait `Sync` is not implemented for `(dyn rate_limiter::__dynosaur_macro_dynratelimiter::ErasedRateLimiter + 'static)`
+note: required because it appears within the type `DynRateLimiter<'static>`
+  --> src/rate_limiter.rs
+   |
+   | #[dynosaur(pub DynRateLimiter = dyn(box) RateLimiter, bridge(dyn))]
+   |                ^^^^^^^^^^^^^^
+   = note: required for `Arc<DynRateLimiter<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:17:19
+   |
+17 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
+
+error[E0277]: `(dyn managed_resource::__dynosaur_macro_dynmanagedresource::ErasedManagedResource + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:26:19
+   |
+26 |     assert_send::<Arc<DynManagedResource<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn managed_resource::__dynosaur_macro_dynmanagedresource::ErasedManagedResource + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynManagedResource<'static>`, the trait `Sync` is not implemented for `(dyn managed_resource::__dynosaur_macro_dynmanagedresource::ErasedManagedResource + 'static)`
+note: required because it appears within the type `DynManagedResource<'static>`
+  --> src/managed_resource.rs
+   |
+   | #[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]
+   |                ^^^^^^^^^^^^^^^^^^
+   = note: required for `Arc<DynManagedResource<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:17:19
+   |
+17 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
