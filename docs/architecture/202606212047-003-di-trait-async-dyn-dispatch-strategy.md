@@ -22,7 +22,8 @@ dynosaur 0.3 落地 spike 实测，三项开放风险结论 + 对原 ADR 的修�
 2. **§8 风险 2（跨 crate sealing）→ 方案 ②**：DI port trait 不带 sealed supertrait；「谁可 impl」由 `deny.toml`
    wrapper 限定可依赖 `dynosaur`/`trait-variant`/`diport` 的 crate 集（cargo-deny Medium，INVARIANT
    DIPORT-MACRO-CONFINE-01，`layer-deps` 守 wrapper⟷源一致）。cargo-deny 限「依赖」非「impl」的残余缺口
-   （域 crate 也依赖 diport 来消费端口）：PR-5 已落 adapter 真实 impl，但 impl 站点仍无机器载体，implementer-allowlist 待 #1060。
+   （域 crate 也依赖 diport 来消费端口）由 dylint 自写 lint `rss_diport_impl_allowlist`（AST 级，Medium，
+   INVARIANT DIPORT-IMPL-ALLOWLIST-01）补齐：非 adapter / 组合根路径下 impl 任一 diport port trait 即报，#1060 闭环。
 3. **§8 风险 3（v0.3 API）→ 修订**：真实构造 API = `DynX::new_box` / `new_arc` / `from_box` / `from_mut`
    （§4 示例 `new_box`/`new_arc` 正确；README 的 `boxed` 形态为旧版）。**新增**：`dyn(box)` 默认 boxed future
    **非 Send**；DI port 须在多线程 runtime 跨 spawn → 用 `#[trait_variant::make(X: Send)]` 生成 Send 变体 +
@@ -132,7 +133,8 @@ use std::sync::Arc;
 
 /// dynosaur 生成 dyn-compatible 的 `DynUserStore` wrapper；static 路径零开销，dyn 路径才 box。
 /// 实现方限制：本模板按方案 ②（adapter 独立 crate 实现）——port trait **不带** sealed supertrait，
-/// 「谁可 impl」由 `deny.toml` wrappers 限定（cargo-deny Medium，见 §4.2 / §8 风险 2）。
+/// 「谁可 impl」由 dylint lint `rss_diport_impl_allowlist`（AST 级，Medium，DIPORT-IMPL-ALLOWLIST-01）限定到
+/// adapter / 组合根（见 §4.2 / §8 风险 2）；`deny.toml` wrappers 守「谁可定义 port」（DIPORT-MACRO-CONFINE-01）。
 /// 仅当改选方案 ①（adapter impl 收回 `diport`）才加 `mod private { pub trait Sealed {} }` + `private::Sealed` supertrait。
 #[dynosaur::dynosaur(DynUserStore = dyn(box) UserStore)]
 pub trait UserStore: Send + Sync {
@@ -167,8 +169,9 @@ impl UserStore for PgUserStore {            // native AFIT impl，无 #[async_tr
 > **sealing 的根本张力（§8 风险 2）**：sealed-trait（`private::Sealed` supertrait）只能在**定义 crate（`diport`）
 > 内**封闭；而 adapter 是**独立 crate**——sealed-trait 无法「只放行某个外部 crate impl」。故集中到 `diport`
 > 后，DI port trait **无法**对其 adapter 实现方 sealing。落地二选一（本 ADR 倾向 ②，保持 adapter crate 独立）：
-> **①** port impl 收回 `diport` 内（sealing 成立，但 adapter 逻辑入 diport）；**②** 放弃跨 crate sealing，改由
-> `deny.toml` wrappers 限定「可依赖 `diport` 并 impl port trait」的 crate 集（cargo-deny，**Medium**）。
+> **①** port impl 收回 `diport` 内（sealing 成立，但 adapter 逻辑入 diport）；**②** 放弃跨 crate sealing——
+> 定义面由 `deny.toml` wrappers 限定（只准 `diport` 定义 port，cargo-deny **Medium**），impl 面由 dylint lint
+> `rss_diport_impl_allowlist` 限定到 adapter / 组合根 crate 集（AST 级 **Medium**，DIPORT-IMPL-ALLOWLIST-01，#1060 落地）。
 > §4.1 trait 模板 + 上方 adapter 骨架**统一按 ② 写**（trait 无 sealed supertrait、adapter 不 `impl Sealed`），
 > 可直接复制编译，**单一可执行路径**；若改选 ①，§4.1 加回 `private::Sealed` supertrait + `mod private` 且 adapter impl 收回 `diport`。
 
@@ -274,9 +277,10 @@ let svc = SessionService::new(store, clock, publisher);
 跨域 wire 类型；跨域通信单源仍是 contract，本偏离不削弱该不变式。
 
 **偏离 3（部分）**：domain-patterns「port trait 用 sealed-trait 封闭」在**同 crate**内仍成立，但 DI port
-trait 集中到 `diport` 后**无法对独立 adapter crate sealing**（§4.2）——本 ADR 倾向放弃跨 crate sealing、
-改 cargo-deny wrappers（Medium）限定实现方 crate 集。即「外部无法 impl」从类型系统 Hard 降为 cargo-deny
-Medium。
+trait 集中到 `diport` 后**无法对独立 adapter crate sealing**（§4.2）——本 ADR 放弃跨 crate sealing：定义面由
+cargo-deny wrappers 守（只准 `diport` 定义 port），impl 面由 dylint lint `rss_diport_impl_allowlist`（AST 级
+Medium，DIPORT-IMPL-ALLOWLIST-01）限定实现方到 adapter / 组合根。即「外部无法 impl」从类型系统 Hard 降为
+dylint Medium（#1060 闭环）。
 
 > 三条偏离须在 `diport` crate 实落时**同步回写** `docs/rules/architecture.md`（§扁平 workspace 结构树 + §分层，
 > **架构单一事实源**，登记 `diport` 服务层 crate）、`rust-standards.md §工程护栏` 与 `domain-patterns.md`
@@ -307,8 +311,8 @@ Medium。
    lint 配置映射，并在展开点提供 `// SAFETY:`（或 `diport` rustdoc INVARIANT 集中登记）阐明 transmute 的
    lifetime-擦除安全假设（rust-standards §工程护栏「unsafe 必须带 `// SAFETY:`」）。
 2. **跨 crate sealing 不可行（见 §4.2）**：sealed-trait 只能在定义 crate `diport` 内封闭，adapter 是独立
-   crate → DI port trait 无法对其 adapter 实现方 sealing。落地须在 §4.2 ①（impl 收回 diport）/ ②（放弃跨
-   crate sealing，cargo-deny wrappers 限定实现方 crate 集）间定夺；本 ADR 倾向 ②。须 `diport` 落地确认。
+   crate → DI port trait 无法对其 adapter 实现方 sealing。落地选 §4.2 ②（放弃跨 crate sealing）：定义面由
+   cargo-deny wrappers 守、impl 面由 dylint lint `rss_diport_impl_allowlist`（Medium，DIPORT-IMPL-ALLOWLIST-01，#1060）守。
 3. **dynosaur v0.3 API 稳定性**：`new_box` / `from_box` / bridge impl 仍在破坏式演进；pin `=0.3.x` 并在
    升级时审 changelog。供应链 advisory 由 `deny.toml [advisories]`（全量 advisory 扫描 + `yanked = "deny"`）
    自动覆盖，无需显式 ignore。
@@ -317,8 +321,8 @@ Medium。
 
 - **结构单源回写（`diport` 落地同 PR，三处一并改防漂移）**：`docs/rules/architecture.md` §扁平 workspace 结构树
   + §分层（登记 `diport` 服务层 crate）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers。
-- `deny.toml` wrappers（Medium）：「可依赖 `dynosaur`」限定到 `diport`、「可依赖 `diport` 并 impl port trait」
-  限定到允许的 adapter crate 集；clippy / cargo-deny 守 unsafe 仅准 `diport`。
+- `deny.toml` wrappers（Medium）：「可依赖 `dynosaur`」限定到 `diport`（定义面）；impl 面（「谁可 impl port
+  trait」限定到 adapter / 组合根）由 dylint lint `rss_diport_impl_allowlist`（DIPORT-IMPL-ALLOWLIST-01，#1060）守。
 - 首个 port trait 落地：加 `trybuild` dyn-compatible compile-pass / compile-fail 用例（Medium 回归锁）。
 - `bootstrap` shutdown 框架：按注册逆序执行 `shutdown()`（把 §7 末条从 Soft 升 Medium）——**前置项**，先于
   port trait 大规模落地。

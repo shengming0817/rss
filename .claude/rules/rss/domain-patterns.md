@@ -48,8 +48,10 @@ sealed marker type，再注入 service。port trait 用 sealed-trait 模式封�
 > sealed-trait（仅定义 crate 内封闭）**无法**对独立 adapter crate sealing。故 `diport` 的 DI port trait
 > **不带** sealed supertrait。`deny.toml` wrapper 收敛的是 **dynosaur/trait-variant 宏依赖**（只准 `diport`
 > 依赖，保证 DI port 只在 `diport` 定义）——它**不**等于「限定谁可 **impl** port trait」：cargo-deny 限依赖
-> 非 impl，且域 crate 也合法依赖 `diport`（消费端口而非 impl）。故 port trait 的 **impl-sealing 当前未机器
-> 强制**（「外部无法 impl」由类型系统 Hard 降为「尚无守卫」）；PR-5 已落 adapter 真实 impl，implementer-allowlist 仍待 #1060。
+> 非 impl，且域 crate 也合法依赖 `diport`（消费端口而非 impl）。故 impl-site allowlist（限 production impl 到
+> adapter / 组合根）由 dylint 自写 lint `rss_diport_impl_allowlist`（AST 级，Medium，INVARIANT
+> DIPORT-IMPL-ALLOWLIST-01）承载：cargo-deny 守**定义面**（port 只在 `diport` 定义），dylint 守**impl 面**
+> （非 adapter / 组合根路径下 impl 任一 diport port trait 即报）；#1060 闭环。
 > 同 crate 内的 port sealing 仍用 sealed-trait（Hard）。
 
 ## Contract test

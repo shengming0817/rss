@@ -40,8 +40,10 @@
 //! `deny.toml` wrapper 收敛的是 **dynosaur/trait-variant 宏依赖**（只准 `diport` 依赖 ⇒ DI port
 //! 只在 `diport` 定义，DIPORT-MACRO-CONFINE-01）——它**不**约束「谁可 **impl** port trait」：
 //! cargo-deny 只能限依赖、不能限 impl 站点，且域 crate 也合法依赖 `diport`（为**消费**端口而非 impl）。
-//! 故 port trait 的 **impl-sealing 当前未机器强制**（「外部无法 impl」由类型系统 Hard 降为「尚无守卫」）——
-//! implementer-allowlist（限 production impl 到 adapter/组合根）仍无机器载体——PR-5 已落 adapter 真实 impl，跟踪 **issue #1060**。
+//! 故 impl-site allowlist（限 production impl 到 adapter / 组合根）改由 dylint 自写 lint
+//! `rss_diport_impl_allowlist` 承载（AST 级，Medium，INVARIANT DIPORT-IMPL-ALLOWLIST-01）：非
+//! adapter / 组合根路径下 impl 任一 diport port trait 即报。二者互补——cargo-deny 守**定义面**（port
+//! 只在 `diport` 定义），dylint 守**impl 面**（port 只在 adapter / 组合根 impl）。#1060 闭环。
 //!
 //! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01
 //!
