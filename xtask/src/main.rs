@@ -12,9 +12,15 @@
 //!   `cargo xtask public-api [--layer basis|engine] [--check] [--allow-missing]`
 //!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
+//!   `cargo xtask ci [--allow-missing-tools]`
+//!                                      CI lane **超集**聚合（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
+//!                                      verify 全门（build/clippy 升 `--all-features --all-targets`）+ 覆盖率门
+//!                                      （`cargo llvm-cov nextest` 替 nextest，强制 basis/engine ≥90%）+ public-api
+//!                                      --check（轴 A）。verify 仍是本地 stable-only 快门，ci 是 CI 全工具超集。详见 `verify.rs`。
 mod cmd;
 mod codegen;
 mod contract;
+mod coverage;
 mod diagnostic;
 mod layerdeps;
 mod layers;
@@ -49,6 +55,9 @@ enum Command {
         allow_missing: bool,
         layer: Option<publicapi::Layer>,
     },
+    Ci {
+        allow_missing_tools: bool,
+    },
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -64,9 +73,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
+        ["ci", rest @ ..] => parse_ci(rest),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools]>"
             )
         }
     }
@@ -87,6 +97,22 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
     }
     Ok(Command::Verify {
         fast,
+        allow_missing_tools,
+    })
+}
+
+/// 解析 `ci` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`ci` 无 `--fast`——CI 超集恒全量跑。
+fn parse_ci(args: &[&str]) -> Result<Command> {
+    let mut allow_missing_tools = false;
+    for &tok in args {
+        match tok {
+            "--allow-missing-tools" => allow_missing_tools = true,
+            other => {
+                bail!("ci 未知参数: {other}；用法: cargo xtask ci [--allow-missing-tools]")
+            }
+        }
+    }
+    Ok(Command::Ci {
         allow_missing_tools,
     })
 }
@@ -137,6 +163,9 @@ fn dispatch(args: &[String]) -> Result<()> {
             allow_missing,
             layer,
         } => publicapi::run(check, allow_missing, layer),
+        Command::Ci {
+            allow_missing_tools,
+        } => verify::run_ci(allow_missing_tools),
     }
 }
 
@@ -293,6 +322,36 @@ mod tests {
         assert!(parse_command(&s(&["public-api", "--layer", "bogus"])).is_err());
         assert!(parse_command(&s(&["public-api", "--layer"])).is_err()); // 缺值
         assert!(parse_command(&s(&["public-api", "--bogus"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_ci_bare() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["ci"]))?,
+            Command::Ci {
+                allow_missing_tools: false
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_ci_allow_missing_tools() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["ci", "--allow-missing-tools"]))?,
+            Command::Ci {
+                allow_missing_tools: true
+            }
+        );
+        Ok(())
+    }
+
+    /// ci flag fail-closed：未知 flag / 尾参 / 误用 `--fast`（ci 无此 flag）均 `Err`。
+    #[test]
+    fn parse_command_ci_rejects_unknown_flag() {
+        assert!(parse_command(&s(&["ci", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["ci", "--fast"])).is_err()); // ci 无 --fast
+        assert!(parse_command(&s(&["ci", "extra"])).is_err());
     }
 
     #[test]

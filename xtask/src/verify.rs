@@ -15,12 +15,20 @@
 //! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
 //! 外部工具时显式宽限（默认 fail-closed）。
 //!
-//! **故意不入 verify（语义/工具链不同，非遗漏）**：`cargo-udeps`（多余/未声明依赖，需 nightly `-Z`，
-//! 与根 stable 1.96 冲突）、`public-api`（库封装面 baseline 冻结门，需 nightly rustdoc-json，见
-//! `publicapi.rs`）、`llvm-cov` 覆盖率阈值（per-PR-diff 语义、非全 workspace pass/fail）——均为独立可选门。
+//! **`cargo xtask ci`（[`run_ci`]）= CI lane 超集**（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
+//! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
+//! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
+//! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 是 **CI 全工具超集**——二者经
+//! [`full_plan`] / [`ci_plan`] 共享 fmt/meta/deny/dylint 同一构造，杜绝两份计划漂移。
 //!
-//! INVARIANT: VERIFY-AGGREGATE-01 —— 任一门步失败 ⇒ verify 非零退出（聚合 fail-fast，不吞错）。
+//! **`cargo-udeps` 仍不入两者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
+//! `cargo-semver-checks`（轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒ `--workspace` 选 0 包、门
+//! 空转，故本轮不入 ci（public-api --check 已非空转兜轴 A）；待 crate 可发布后 follow-up 接入（见 PR body）。
+//!
+//! INVARIANT: VERIFY-AGGREGATE-01 —— 任一门步失败 ⇒ verify/ci 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 —— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
+//! INVARIANT: CI-PIPELINE-DELEGATE-01 —— azure-pipelines.yml 只调 `cargo xtask ci`、不逐条重列门 run
+//!   命令（门逻辑单源在 xtask）；由 `azure_pipeline_delegates_to_xtask_ci` 治理测试守。
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
@@ -37,12 +45,16 @@ struct VerifyOpts {
     allow_missing_tools: bool,
 }
 
-/// in-process Rust 门（无外部进程）。
+/// in-process Rust 门（无外部进程 / 自管子进程）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalCheck {
     ContractValidate,
     LayerDeps,
     CodegenCheck,
+    /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
+    Coverage,
+    /// ci 专用：`public-api --check`（basis+engine 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
+    PublicApiCheck,
 }
 
 /// 门步载体。`Internal` 在进程内跑；`CargoBuiltin` 是 toolchain 自带子命令（免探测）；
@@ -56,6 +68,13 @@ enum StepKind {
         probe: &'static str,
         /// 缺工具时给的安装指引。
         install_hint: &'static str,
+    },
+    /// 工具门控的进程内门：先探测 `probe`（缺则按 `allow_missing_tools` 经 [`resolve_tool`] 决策），
+    /// 在则跑 `check` 内部逻辑（其自管子进程，如 coverage 跑 llvm-cov、public-api 跑 cargo-public-api）。
+    ToolGatedInternal {
+        probe: &'static str,
+        install_hint: &'static str,
+        check: InternalCheck,
     },
 }
 
@@ -82,91 +101,207 @@ enum ToolAction {
     Fail,
 }
 
-/// 全量门步计划（单一事实源；顺序 = 执行顺序）。
+// ---- 门步构造（单一事实源）。verify 与 ci 共用 fmt/meta/deny/dylint 的同一构造，杜绝两份计划漂移。----
+
+fn step_fmt() -> Step {
+    Step {
+        label: "fmt",
+        args: &["fmt", "--all", "--", "--check"],
+        kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_contract_validate() -> Step {
+    Step {
+        label: "contract-validate",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ContractValidate),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_layer_deps() -> Step {
+    Step {
+        label: "layer-deps",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::LayerDeps),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_codegen_check() -> Step {
+    Step {
+        label: "codegen-check",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::CodegenCheck),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_deny() -> Step {
+    Step {
+        label: "deny",
+        args: &["deny", "check"],
+        kind: StepKind::Tool {
+            probe: "deny",
+            install_hint: "cargo install cargo-deny --locked",
+        },
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_dylint() -> Step {
+    Step {
+        label: "dylint",
+        args: &["dylint", "--all"],
+        kind: StepKind::Tool {
+            probe: "dylint",
+            install_hint: "cargo install cargo-dylint dylint-link",
+        },
+        // `rss_domain_no_serialize` 默认 `Warn`（warning 不退非零）；`-D warnings` 把它（及其它
+        // 注册 lint）升为 deny ⇒ 违例即非零退出，使 dylint 成 fail-closed 门（#1023 的核心诉求）。
+        // 已验证干净树下 exit 0、无 nightly 误报。
+        env: &[("DYLINT_RUSTFLAGS", "-D warnings")],
+        needs_compile: true,
+    }
+}
+
+// verify 专用：workspace 默认 feature 的 build/clippy/nextest（stable-only 本地快门）。
+fn step_build_workspace() -> Step {
+    Step {
+        label: "build",
+        args: &["build", "--workspace"],
+        kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: true,
+    }
+}
+fn step_clippy_workspace() -> Step {
+    Step {
+        label: "clippy",
+        args: &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: true,
+    }
+}
+fn step_nextest() -> Step {
+    Step {
+        label: "nextest",
+        args: &["nextest", "run", "--workspace", "--no-tests=pass"],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
+
+// ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
+// 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
+// public-api --check（轴 A）。
+// ci 的 cargo 门带 `--locked`：CI 确定性构建——Cargo.lock 缺失/漂移即 fail（不静默改锁），与
+// `cargo run --locked -p xtask -- ci` 入口共同锁全链（入口锁 xtask 子树，build --workspace --locked 锁
+// 全 workspace 依赖解析）。verify（本地快门）**不**带 --locked，留本地迭代余地（review #206 codex F2）。
+fn step_build_all_features() -> Step {
+    Step {
+        label: "build",
+        args: &[
+            "build",
+            "--workspace",
+            "--all-features",
+            "--all-targets",
+            "--locked",
+        ],
+        kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: true,
+    }
+}
+fn step_clippy_all_features() -> Step {
+    Step {
+        label: "clippy",
+        args: &[
+            "clippy",
+            "--workspace",
+            "--all-features",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: true,
+    }
+}
+fn step_coverage() -> Step {
+    Step {
+        label: "coverage",
+        args: &[],
+        kind: StepKind::ToolGatedInternal {
+            probe: "llvm-cov",
+            install_hint: "cargo install cargo-llvm-cov --locked",
+            check: InternalCheck::Coverage,
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
+fn step_public_api() -> Step {
+    Step {
+        label: "public-api",
+        args: &[],
+        kind: StepKind::ToolGatedInternal {
+            probe: "public-api",
+            install_hint: "rustup toolchain install nightly && cargo install cargo-public-api --locked",
+            check: InternalCheck::PublicApiCheck,
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
+
+/// verify 全量门步计划（单一事实源；顺序 = 执行顺序）。
 fn full_plan() -> Vec<Step> {
     vec![
-        Step {
-            label: "fmt",
-            args: &["fmt", "--all", "--", "--check"],
-            kind: StepKind::CargoBuiltin,
-            env: &[],
-            needs_compile: false,
-        },
-        Step {
-            label: "contract-validate",
-            args: &[],
-            kind: StepKind::Internal(InternalCheck::ContractValidate),
-            env: &[],
-            needs_compile: false,
-        },
-        Step {
-            label: "layer-deps",
-            args: &[],
-            kind: StepKind::Internal(InternalCheck::LayerDeps),
-            env: &[],
-            needs_compile: false,
-        },
-        Step {
-            label: "codegen-check",
-            args: &[],
-            kind: StepKind::Internal(InternalCheck::CodegenCheck),
-            env: &[],
-            needs_compile: false,
-        },
-        Step {
-            label: "build",
-            args: &["build", "--workspace"],
-            kind: StepKind::CargoBuiltin,
-            env: &[],
-            needs_compile: true,
-        },
-        Step {
-            label: "clippy",
-            args: &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ],
-            kind: StepKind::CargoBuiltin,
-            env: &[],
-            needs_compile: true,
-        },
-        Step {
-            label: "nextest",
-            args: &["nextest", "run", "--workspace", "--no-tests=pass"],
-            kind: StepKind::Tool {
-                probe: "nextest",
-                install_hint: "cargo install cargo-nextest --locked",
-            },
-            env: &[],
-            needs_compile: true,
-        },
-        Step {
-            label: "deny",
-            args: &["deny", "check"],
-            kind: StepKind::Tool {
-                probe: "deny",
-                install_hint: "cargo install cargo-deny --locked",
-            },
-            env: &[],
-            needs_compile: false,
-        },
-        Step {
-            label: "dylint",
-            args: &["dylint", "--all"],
-            kind: StepKind::Tool {
-                probe: "dylint",
-                install_hint: "cargo install cargo-dylint dylint-link",
-            },
-            // `rss_domain_no_serialize` 默认 `Warn`（warning 不退非零）；`-D warnings` 把它（及其它
-            // 注册 lint）升为 deny ⇒ 违例即非零退出，使 dylint 成 fail-closed 门（#1023 的核心诉求）。
-            // 已验证干净树下 exit 0、无 nightly 误报。
-            env: &[("DYLINT_RUSTFLAGS", "-D warnings")],
-            needs_compile: true,
-        },
+        step_fmt(),
+        step_contract_validate(),
+        step_layer_deps(),
+        step_codegen_check(),
+        step_build_workspace(),
+        step_clippy_workspace(),
+        step_nextest(),
+        step_deny(),
+        step_dylint(),
+    ]
+}
+
+/// ci 超集门步计划（issue #1132 CI lane）。与 verify 共享 fmt/meta/deny/dylint 同一构造；build/clippy 升
+/// `--all-features --all-targets`；覆盖率门替 nextest（兼跑 workspace 测试）；尾追 public-api --check（轴 A）。
+/// ci 恒全量（无 `--fast`）。
+fn ci_plan() -> Vec<Step> {
+    vec![
+        step_fmt(),
+        step_contract_validate(),
+        step_layer_deps(),
+        step_codegen_check(),
+        step_build_all_features(),
+        step_clippy_all_features(),
+        step_coverage(),
+        step_deny(),
+        step_dylint(),
+        step_public_api(),
     ]
 }
 
@@ -220,20 +355,51 @@ fn run_one(step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
         StepKind::Tool {
             probe,
             install_hint,
-        } => match resolve_tool(crate::cmd::tool_available(probe), opts.allow_missing_tools) {
-            ToolAction::Run => run_step(step.label, step.args, step.env, root),
-            ToolAction::SkipWarn => {
-                eprintln!(
-                    "verify: [跳过] `{}`（缺 `cargo {probe}`，--allow-missing-tools 宽限）。装：{install_hint}",
-                    step.label
-                );
-                Ok(())
-            }
-            ToolAction::Fail => bail!(
-                "verify: 缺 `cargo {probe}`（门步 `{}`）。装：{install_hint}\n（唯一门不建议绕过；确需可显式 --allow-missing-tools）",
-                step.label
-            ),
-        },
+        } => run_tool_gated(
+            crate::cmd::tool_available(probe),
+            opts.allow_missing_tools,
+            probe,
+            install_hint,
+            step.label,
+            || run_step(step.label, step.args, step.env, root),
+        ),
+        StepKind::ToolGatedInternal {
+            probe,
+            install_hint,
+            check,
+        } => run_tool_gated(
+            crate::cmd::tool_available(probe),
+            opts.allow_missing_tools,
+            probe,
+            install_hint,
+            step.label,
+            || run_internal(*check),
+        ),
+    }
+}
+
+/// 工具门控分派（[`StepKind::Tool`] 与 [`StepKind::ToolGatedInternal`] 共用）：探测结果 + 宽限标志经
+/// [`resolve_tool`] 决策——在则跑 `on_run`，缺+宽限则警告跳过，缺+不宽限则 fail-closed
+/// （INVARIANT VERIFY-TOOL-GATE-01）。
+fn run_tool_gated(
+    available: bool,
+    allow_missing: bool,
+    probe: &str,
+    install_hint: &str,
+    label: &str,
+    on_run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    match resolve_tool(available, allow_missing) {
+        ToolAction::Run => on_run(),
+        ToolAction::SkipWarn => {
+            eprintln!(
+                "verify: [跳过] `{label}`（缺 `cargo {probe}`，--allow-missing-tools 宽限）。装：{install_hint}"
+            );
+            Ok(())
+        }
+        ToolAction::Fail => bail!(
+            "verify: 缺 `cargo {probe}`（门步 `{label}`）。装：{install_hint}\n（门不建议绕过；确需可显式 --allow-missing-tools）"
+        ),
     }
 }
 
@@ -242,6 +408,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::CodegenCheck => codegen::run(true),
+        InternalCheck::Coverage => crate::coverage::run(),
+        // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
+        InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
     }
 }
 
@@ -261,6 +430,25 @@ pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
         run_one(step, &opts, &root)?;
     }
     eprintln!("verify（{mode}）：全部通过");
+    Ok(())
+}
+
+/// ci 入口（issue #1132 CI lane 超集）：按 [`ci_plan`] 顺序跑每步，fail-fast。CI 由 azure-pipelines.yml
+/// 调 `cargo xtask ci`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01）；本地全工具机器亦可 `make ci`。
+/// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
+pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools,
+    };
+    let root = workspace_root()?;
+    let plan = ci_plan();
+    eprintln!("ci：{} 步（CI lane 超集）", plan.len());
+    for (i, step) in plan.iter().enumerate() {
+        eprintln!("ci: [{}/{}] {}", i + 1, plan.len(), step.label);
+        run_one(step, &opts, &root)?;
+    }
+    eprintln!("ci：全部通过");
     Ok(())
 }
 
@@ -412,5 +600,226 @@ mod tests {
             env: &[],
             needs_compile: false,
         }
+    }
+
+    // ---- ci 超集计划（issue #1132）----
+
+    /// ci_plan 顺序与门集（单一事实源；CI lane 实跑顺序）。
+    #[test]
+    fn ci_plan_order_and_count() {
+        assert_eq!(
+            labels(&ci_plan()),
+            vec![
+                "fmt",
+                "contract-validate",
+                "layer-deps",
+                "codegen-check",
+                "build",
+                "clippy",
+                "coverage",
+                "deny",
+                "dylint",
+                "public-api",
+            ]
+        );
+    }
+
+    /// ci 的 build/clippy 升 `--all-features --all-targets`（issue 验收：编译态全覆盖）。
+    #[test]
+    fn ci_build_clippy_use_all_features_all_targets() -> anyhow::Result<()> {
+        let plan = ci_plan();
+        for label in ["build", "clippy"] {
+            let step = plan
+                .iter()
+                .find(|s| s.label == label)
+                .ok_or_else(|| anyhow::anyhow!("ci_plan 缺 `{label}` 步"))?;
+            assert!(
+                step.args.contains(&"--all-features") && step.args.contains(&"--all-targets"),
+                "ci `{label}` 须 --all-features --all-targets，实际 {:?}",
+                step.args
+            );
+        }
+        Ok(())
+    }
+
+    /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 public-api（轴 A）；二者皆 ToolGatedInternal。
+    #[test]
+    fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
+        let plan = ci_plan();
+        assert!(
+            !labels(&plan).contains(&"nextest"),
+            "ci 不应有独立 nextest 步（已并入 coverage）"
+        );
+        let cov = plan
+            .iter()
+            .find(|s| s.label == "coverage")
+            .ok_or_else(|| anyhow::anyhow!("ci_plan 缺 coverage 步"))?;
+        assert!(matches!(
+            cov.kind,
+            StepKind::ToolGatedInternal {
+                check: InternalCheck::Coverage,
+                ..
+            }
+        ));
+        let pa = plan
+            .iter()
+            .find(|s| s.label == "public-api")
+            .ok_or_else(|| anyhow::anyhow!("ci_plan 缺 public-api 步"))?;
+        assert!(matches!(
+            pa.kind,
+            StepKind::ToolGatedInternal {
+                check: InternalCheck::PublicApiCheck,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    /// 共享门步在 verify 与 ci 里**逐字相同**（同一构造，不漂移）。Step 派生 PartialEq ⇒ 直接比对。
+    #[test]
+    fn ci_shares_meta_deny_dylint_with_verify_verbatim() {
+        let v = full_plan();
+        let c = ci_plan();
+        let find = |plan: &[Step], label: &str| plan.iter().find(|s| s.label == label).cloned();
+        for label in [
+            "fmt",
+            "contract-validate",
+            "layer-deps",
+            "codegen-check",
+            "deny",
+            "dylint",
+        ] {
+            assert_eq!(
+                find(&v, label),
+                find(&c, label),
+                "共享门步 `{label}` 在 verify/ci 不一致（漂移）"
+            );
+        }
+    }
+
+    /// ToolGatedInternal 缺工具 + 不宽限 ⇒ `Err`（fail-closed；不执行内部逻辑）。INVARIANT VERIFY-TOOL-GATE-01。
+    #[test]
+    fn run_one_toolgated_missing_fail_closed_is_err() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        assert!(run_one(&missing_toolgated_step(), &opts(false, false), &root).is_err());
+        Ok(())
+    }
+
+    /// ToolGatedInternal 缺工具 + 宽限 ⇒ `Ok`（SkipWarn；不执行内部逻辑）。
+    #[test]
+    fn run_one_toolgated_missing_skipwarn_is_ok() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        assert!(run_one(&missing_toolgated_step(), &opts(false, true), &root).is_ok());
+        Ok(())
+    }
+
+    /// 探测必失败的 ToolGatedInternal 步——若误执行内部 CodegenCheck 会真跑 codegen，但 probe 缺 ⇒
+    /// 决策在执行前短路，故内部逻辑不被触达（验证 gate 先于 run）。
+    fn missing_toolgated_step() -> Step {
+        Step {
+            label: "redtoolgated",
+            args: &[],
+            kind: StepKind::ToolGatedInternal {
+                probe: "zzz-not-a-cargo-subcommand",
+                install_hint: "（测试用，不存在）",
+                check: InternalCheck::CodegenCheck,
+            },
+            env: &[],
+            needs_compile: true,
+        }
+    }
+
+    // ---- CI-PIPELINE-DELEGATE-01：azure-pipelines.yml 委托 `cargo xtask ci`、不逐条重列门 ----
+
+    /// 委托豁免的 cargo 子命令**正向白名单**：`xtask`（alias 形）+ `run`（CI 锁定入口 `cargo run --locked
+    /// -p xtask -- ci`——run 跑 xtask 而非门）+ 工具安装（install/binstall）。除此之外任何裸 `cargo <sub>`
+    /// 都视作门 run（build/clippy/nextest/deny/dylint/llvm-cov/public-api/fmt 及**任何未来新门**）——正向
+    /// 白名单无枚举盲区（review #206 A1/A3 黑名单漏 build/llvm-cov/public-api；codex F2 入口改 --locked run
+    /// 形需放行 run）。
+    const DELEGATION_CARGO_SUBCOMMANDS: &[&str] = &["xtask", "run", "install", "binstall"];
+
+    /// xtask ci 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形（本地/文档）与 CI 锁定入口
+    /// 形（`--locked` 锁 xtask 子树依赖解析，与内部 `--workspace --locked` 门共同锁全链，codex F2）。
+    const XTASK_CI_FORMS: &[&str] = &["cargo xtask ci", "cargo run --locked -p xtask -- ci"];
+
+    /// 扫 YAML **命令文本**里每个 `cargo <token>`（run 形带空格；连字符的 `cargo-nextest` 等 arg 不匹配），
+    /// 返回紧跟的子命令 token。先按行剥 YAML 注释（`#` 起）——散文注释里的 `cargo …`（如「cargo 默认
+    /// target …」）不计入门 run 判定。
+    fn cargo_subcommands(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .flat_map(|line| {
+                let code = line.split('#').next().unwrap_or("");
+                code.match_indices("cargo ")
+                    .filter_map(|(i, _)| code[i + "cargo ".len()..].split_whitespace().next())
+            })
+            .collect()
+    }
+
+    /// 委托谓词（正向白名单）：YAML 含 xtask ci 规范形之一，且每个 `cargo <sub>` 的 sub ∈
+    /// [`DELEGATION_CARGO_SUBCOMMANDS`]——即除安装/跑 xtask 外不逐条重列任何门。
+    fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
+        XTASK_CI_FORMS.iter().any(|f| yaml.contains(f))
+            && cargo_subcommands(yaml)
+                .iter()
+                .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
+    }
+
+    /// 谓词绿/红例（anti-vacuity）：委托=真；不委托或重列**任一**门（含黑名单曾漏的 build/llvm-cov/
+    /// public-api）=假。
+    #[test]
+    fn pipeline_delegate_predicate_green_and_red() {
+        assert!(pipeline_delegates_to_xtask_ci(
+            "steps:\n  - script: cargo xtask ci\n"
+        ));
+        // 绿：安装形（install/binstall）豁免，连字符 arg 不误判。
+        assert!(pipeline_delegates_to_xtask_ci(
+            "steps:\n  - script: cargo install cargo-binstall\n  - script: cargo binstall -y cargo-nextest cargo-deny\n  - script: cargo xtask ci\n"
+        ));
+        // 绿：散文注释里的 `cargo <词>`（如「cargo 默认 target …」/「cargo build 历史」）不计入门 run 判定。
+        assert!(pipeline_delegates_to_xtask_ci(
+            "  # cargo 默认 target 在 repo 根；曾用 cargo build 直跑\nsteps:\n  - script: cargo xtask ci\n"
+        ));
+        // 绿：CI 锁定入口形 `cargo run --locked -p xtask -- ci`（run 跑 xtask 非门）+ 安装形（codex F2）。
+        assert!(pipeline_delegates_to_xtask_ci(
+            "steps:\n  - script: cargo install cargo-binstall@1.20.1 --locked\n  - script: cargo run --locked -p xtask -- ci\n"
+        ));
+        // 红：run 形入口但仍重列门（build）——run 放行不削弱门捕获。
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo build --workspace\n"
+        ));
+        // 红：未委托。
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "steps:\n  - script: cargo clippy --workspace\n"
+        ));
+        // 红：调了 xtask ci 但仍重列门——逐一覆盖（含黑名单曾漏的 build / llvm-cov / public-api / fmt）。
+        for gate in [
+            "cargo clippy -- -D warnings",
+            "cargo fmt --check",
+            "cargo nextest run --workspace",
+            "cargo deny check",
+            "cargo dylint --all",
+            "cargo build --workspace",
+            "cargo llvm-cov nextest",
+            "cargo public-api --check",
+        ] {
+            let yaml = format!("steps:\n  - script: cargo xtask ci\n  - script: {gate}\n");
+            assert!(
+                !pipeline_delegates_to_xtask_ci(&yaml),
+                "重列门 `{gate}` 应被谓词捕获"
+            );
+        }
+    }
+
+    /// 真实 committed 文件：azure-pipelines.yml 委托 `cargo xtask ci`、不重列门（INVARIANT CI-PIPELINE-DELEGATE-01）。
+    #[test]
+    fn azure_pipeline_delegates_to_xtask_ci() -> anyhow::Result<()> {
+        let path = workspace_root()?.join("azure-pipelines.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            pipeline_delegates_to_xtask_ci(&yaml),
+            "azure-pipelines.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
+        );
+        Ok(())
     }
 }

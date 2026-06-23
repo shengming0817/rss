@@ -161,6 +161,13 @@ rss/
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
 `.claude/rules/rss/ai-robust.md`)。
 
+这些 Medium(CI 门)由 **CI lane**(`azure-pipelines.yml` 薄壳 → `cargo xtask ci`,issue #1132)在 PR 上自动跑、
+失败阻断合入(INVARIANT CI-PIPELINE-DELEGATE-01:YAML 只调一条聚合命令、不逐条重列门)——把治理从 Soft「人记得
+本地 `make verify`」上移到 Medium「CI 门」。`ci` = `verify` 全门(build/clippy 升 `--all-features --all-targets`)
++ 覆盖率门(`cargo llvm-cov`,引擎-基础 ≥90%、consistency 因 L3/L4 冻结桩暂 ratchet 85%) + `public-api --check`
+(轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred)。azure CI 启用前(`AZURE_HAS_CI=false`)
+本地 `make ci` 即等价门。设计 + 激活 runbook 见 `docs/ops/202606231530-001-ci-lane.md`。
+
 ## 关键模式的 Rust 形态
 
 - **组合根 / `module()`**:域 crate 暴露 `pub fn module() -> DomainModule`;adapter↔域绑定在 `bins/server` /

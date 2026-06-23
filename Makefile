@@ -1,13 +1,24 @@
-# RSS 本地治理门聚合入口（薄 alias）。
+# RSS 治理门聚合入口（薄 alias）。
 #
-# 逻辑单源在 `cargo xtask verify`（跨平台、CI-ready、对齐 rust-analyzer xtask 范式）；本 Makefile
-# 只是为文档里一直引用的 `make verify` 名字提供入口。azure 无 CI ⇒ 本门是治理门的唯一实际 gate。
-# 门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
+# 逻辑单源在 `cargo xtask`（跨平台、CI-ready、对齐 rust-analyzer xtask 范式）；本 Makefile 只为文档
+# 一直引用的 `make verify` / `make ci` 名字提供入口。
+#
+#   make verify       本地 stable-only 快门：fmt + meta + build + clippy + nextest + deny + dylint。
+#   make ci           CI lane 超集（= azure-pipelines.yml 调的同一条 `cargo xtask ci`）：verify 全门 +
+#                     build/clippy 升 --all-features --all-targets + 覆盖率门（llvm-cov，引擎/基础 ≥90%）
+#                     + public-api --check（轴 A）。需全套工具 + nightly（llvm-cov / public-api / dylint）。
+#
+# CI lane = azure-pipelines.yml（issue #1132）：PR 触发 + 失败阻断合入经 Azure 分支策略 build validation。
+# 激活前（AZURE_HAS_CI=false，见 hack/automation/forge.conf 激活 runbook）`make ci` 本地即等价门——azure
+# CI 未启用期间它是治理门的实际 gate。门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast
+.PHONY: verify verify-fast ci
 
 verify:
 	cargo xtask verify
 
 verify-fast:
 	cargo xtask verify --fast
+
+ci:
+	cargo xtask ci

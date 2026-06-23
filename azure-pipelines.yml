@@ -1,0 +1,85 @@
+# azure-pipelines.yml — RSS CI lane（issue #1132）。
+#
+# 薄壳：所有治理门逻辑单源在 `cargo xtask ci`（INVARIANT CI-PIPELINE-DELEGATE-01，xtask/src/verify.rs；
+# 由 xtask 治理测试守「除工具安装外唯一的 cargo run 是 cargo xtask」）。本文件只负责：装 toolchain +
+# 工具，再调一条聚合命令。本地等价 = `make ci`。
+#
+# 覆盖 issue #1132 验收：build --all-features --all-targets / fmt / clippy -D warnings / nextest --workspace
+# + llvm-cov 引擎-基础 ≥90% 覆盖率门 / xtask verify 聚合（contract validate·layer-deps·codegen drift·deny·
+# dylint）/ public-api --check（轴 A）。
+#
+# 激活 runbook（org 侧一次性，本仓库无法代办）：见 hack/automation/forge.conf 的 AZURE_HAS_CI 注释 +
+# docs/ops/202606231530-001-ci-lane.md。要点：① 申请 Microsoft-hosted 免费并行额度（aka.ms/azpipelines-parallelism-request）
+# 或挂自托管 agent → ② `forge.sh pipeline-create` 注册本 YAML 为 pipeline → ③ `forge.sh pipeline-policy`
+# 给 develop 设 build validation（= PR 触发 + 失败阻断合入）→ ④ 翻 forge.conf 的 AZURE_HAS_CI=true →
+# ⑤ 开测试 PR 验证。
+# **⚠ 第 ③ 步（pipeline-policy）完成前，PR 不受 CI 阻断**——分支策略未设，治理门仍靠人工 `make ci`/`make
+# verify`；commit 本 YAML ≠ 保护即生效。
+
+# develop push 触发 CI build。PR 触发 + 阻断合入 = Azure 分支策略 build validation（Azure Repos 不读
+# YAML 的 `pr:` 键——那是 GitHub-only；故显式 none，避免误解），经 forge.sh pipeline-policy 设（见上 ③）。
+trigger:
+  branches:
+    include:
+      - develop
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  CARGO_TERM_COLOR: always
+  # dylint 嵌套 lint workspace 的 nightly（= lints/rust-toolchain.toml 钉版）；rustc-dev 供 rustc_private。
+  RSS_NIGHTLY_PINNED: nightly-2026-04-16
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+    displayName: 'Checkout（fetchDepth 0：覆盖率全量 + 未来 semver/diff-cov baseline 需见 origin/develop）'
+
+  - script: |
+      set -euo pipefail
+      # stable 1.96 由 rust-toolchain.toml 自动选定；补门所需 components。
+      rustup component add rustfmt clippy llvm-tools-preview
+      # rolling nightly：cargo-public-api 在 stable 上自动切到它生成 rustdoc-json（无 --toolchain flag）。
+      # rolling 不可复现（rustdoc-json 格式漂移可致 public-api baseline 误报）⇒ 钉版 = follow-up #1145。
+      rustup toolchain install nightly --profile minimal --component rustc-dev llvm-tools-preview rust-src
+      # dylint 钉版 nightly（lints/ 嵌套 workspace）：预装免首跑慢。
+      rustup toolchain install "$RSS_NIGHTLY_PINNED" --profile minimal --component rustc-dev llvm-tools-preview rust-src
+      rustup show
+    displayName: 'Rust toolchain（stable 1.96 + nightly[public-api] + 钉版 nightly[dylint]）'
+
+  # 缓存真实落盘点：cargo 默认 target 在 repo 根 target/（未设 CARGO_TARGET_DIR），crate 下载在 ~/.cargo。
+  # key 段 Cargo.lock 是 tracked 文件 ⇒ Azure 按其内容 hash（dep 变即新 key）；restoreKeys 取近似回退。
+  - task: Cache@2
+    inputs:
+      key: 'cargo-home | "$(Agent.OS)" | Cargo.lock'
+      restoreKeys: 'cargo-home | "$(Agent.OS)"'
+      path: $(HOME)/.cargo
+    displayName: 'Cache ~/.cargo（registry + git + 已装工具）'
+  - task: Cache@2
+    inputs:
+      key: 'cargo-target | "$(Agent.OS)" | Cargo.lock'
+      restoreKeys: 'cargo-target | "$(Agent.OS)"'
+      path: target
+    displayName: 'Cache target/（增量编译产物）'
+
+  - script: |
+      set -euo pipefail
+      # binstall 取 GitHub Releases 预编译二进制（远快于源码编译）。信任模型 = TLS（crates.io / GitHub
+      # Releases）+ Microsoft-hosted agent；--locked 仅锁源码 fallback 的 Cargo.lock，**不**校验二进制哈希。
+      # 找不到预编译时 binstall 内置 fallback 到 cargo install 源码编译；binstall 自身安装失败则整步 fail
+      # （set -euo pipefail）。**安装器 + 全部工具均钉版**（PR #206 本地验证版，可复现安装链，review codex F1）。
+      cargo install cargo-binstall@1.20.1 --locked
+      cargo binstall -y --locked \
+        cargo-nextest@0.9.137 cargo-deny@0.19.9 cargo-dylint@6.0.1 dylint-link@6.0.1 \
+        cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0
+    displayName: '装 CI 工具（钉版 binstall + nextest / deny / dylint / llvm-cov / public-api）'
+
+  # 单 job 串行全门（控制面仓库，简洁优先；fmt/meta 排前，快门先短路）。wall-clock 分片/矩阵化 = follow-up #1145。
+  # 入口用 `cargo run --locked -p xtask`（非 alias）：`--locked` 锁 xtask 子树依赖解析、CI 确定性——Cargo.lock
+  # 漂移即 fail（不静默改锁）；内部 build/clippy/coverage 门亦 --locked，共同锁全链（review codex F2）。
+  - script: |
+      set -euo pipefail
+      cargo run --locked -p xtask -- ci
+    displayName: 'cargo xtask ci（聚合全门：build/clippy/fmt/coverage/deny/dylint/public-api/contract-validate/layer-deps/codegen）'
