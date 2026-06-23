@@ -1,7 +1,9 @@
 //! identity — RSS 身份/RBAC/ABAC 域（值类型与纯逻辑签名冻结）。
 //!
-//! 本 crate 承载身份域的核心值类型、RBAC/ABAC 纯计算接缝与错误枚举。
-//! DI port（repo / store）归 `diport`（ADR-003）。
+//! 本 crate 承载身份域的核心值类型、RBAC/ABAC 纯计算接缝、错误枚举与**域形 repo/service DI port**。
+//! provider-agnostic 基建 DI port（`Clock`/`Signer`/`Publisher`/`AuditSink`…）归 `diport`（ADR-003）；
+//! **域形** repo port（签名引用域内实体 `Role`/`RoleId`，无法收敛 diport）归本 crate `ports` 模块
+//! （ADR-005 Option 2，category line 见 ADR-005 / domain-patterns.md）。
 //! 所有域类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
 //!
 //! # 实现状态（部分写实）
@@ -23,6 +25,7 @@
 mod application;
 pub(crate) mod domain;
 mod internal;
+pub mod ports;
 
 pub use application::{IdentityDomain, LoginError, LoginService};
 

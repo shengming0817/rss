@@ -4,6 +4,7 @@
 - **日期**：2026-06-22
 - **关联**：issue #997 [RW-G0.2 签名冻结] · 子 PR #1046(PR-0)/#1047/#1048/#1049(diport)/#1050/#1051/#1052 · epic #991
 - **依赖 ADR**：**ADR-001**（关闭逆序）· **ADR-002**（context 传播）· **ADR-003**（DI async+dyn 派发 = dynosaur）
+- **后续修订**：**ADR-005**（#1083）补 DI port 定义位置二分（infra→diport / 域形 repo port→域 crate）+ `adapter→域` DIP 边——C1/C7/§5 已就地补注。
 - **归属**：framework（签名约定是 provider-agnostic 基础设施，贯穿全部 crate）
 - **AI-robust 评级**：见 §5（逐条 Hard/Medium，Soft 禁止立项）
 
@@ -47,6 +48,10 @@ fn run<S: IdemCheck>(s: &S) { /* 单态、零 box */ }
 判据（ADR-003 §4.5）：provider 在 prod/test 会换 + 组合根跨 crate 注入 + L1–L4 → 动态（dynosaur）；
 总是同一实现 + 同 crate 内调用 + L0 纯计算 → 静态泛型。**dyn 对象安全 do/don't 见 ADR-003 §4.6**（禁泛型方法/返回 Self/`impl Trait`/`Clone` supertrait）。
 
+> **ADR-005 补充（#1083）——DI port 定义位置二分**：provider-agnostic infra port（签名只引基础/wire/自定义
+> 类型）定义于 `diport`；**域形 repo/service port**（签名引用域内实体，如 `RoleRepo::find(..)->Option<Role>`）
+> 定义于**所属域 crate `pub mod ports`**（同款 dynosaur Send 变体范式，但归域 crate）。归属判据见 ADR-005 §2.1。
+
 ### C2. mock
 
 - mock 在**同 crate `#[cfg(test)]`** 生成消费，**禁跨 crate 共享**（合 rust-standards「域 crate 单测不依赖 adapter crate」）；外部 trait 用 `mockall::mock!`。
@@ -80,8 +85,9 @@ domain 类型**不** derive `Serialize`/`Deserialize`；仅 contract/DTO（`gene
 
 ### C7. sealed / newtype（← ADR-003 §4.2）
 
-- **DI port trait 不跨 crate sealed**：集中到 `diport` 后，sealed-trait 无法「只放行某外部 adapter crate impl」→ 采**方案②**：放弃跨 crate sealing。`deny.toml` wrapper 收敛 **dynosaur/trait-variant 宏依赖**到 `diport`（保证 port 只在此定义）——但 cargo-deny **限依赖非 impl**，且域 crate 也依赖 `diport` 消费端口，故「谁可 impl」**当前未机器强制**（落地实测，见 ADR-003 落地结论 2）；implementer-allowlist 仍待 **#1060**（PR-5 已落 12 个 adapter 真实 impl，但 cargo-deny 无法限 impl 站点）。
-- adapter（PR-5 落地口径）：签名冻结期为 **unit sealed-marker**（`pub struct PgStore;`，无 raw client 字段），以 **native AFIT** impl diport **已冻** DI port trait（`ManagedResource` 普适 + `Signer`/`Publisher` 按职责）body=`todo!()`；raw client 字段（如 `sqlx::PgPool`，保持 `pub(crate)` 不泄漏）延迟到 W 阶段接后端时填入。adapter crate 保持 `#![forbid(unsafe_code)]`（不 invoke dynosaur 宏）。
+- **DI port trait 不跨 crate sealed**：集中到 `diport` 后，sealed-trait 无法「只放行某外部 adapter crate impl」→ 采**方案②**：放弃跨 crate sealing。`deny.toml` wrapper 收敛 **dynosaur/trait-variant 宏依赖**（保证 port 只在 DI port 定义点 crate 定义）——但 cargo-deny **限依赖非 impl**，故「谁可 impl」**当前未机器强制**（落地实测，见 ADR-003 落地结论 2）；implementer-allowlist 仍待 **#1060**（PR-5 已落 12 个 adapter 真实 impl，但 cargo-deny 无法限 impl 站点）。
+- **ADR-005 补充（#1083）——`adapter → 域` DIP 内向边**：实现**域形** repo port（如 `identity::ports::RoleRepo`）的 adapter 须依赖该域 crate（命名其 `pub` 实体），经 `deny.toml` 该域 ban 的 wrappers（加该 adapter）+ `allows(Adapter,Domain)=true` 放行；反向「域 → adapter」仍禁，「adapter 不被域依赖」不变量保持（仅新增 impl 边，运行期仍组合根注入）。dynosaur 宏依赖白名单同步扩到该域 crate（DIPORT-MACRO-CONFINE-01′）。
+- adapter（PR-5 落地口径）：签名冻结期为 **unit sealed-marker**（`pub struct PgStore;`，无 raw client 字段），以 **native AFIT** impl **已冻** DI port trait——diport 基建 port（`ManagedResource` 普适 + `Signer`/`Publisher` 按职责）+ 域形 repo port（`identity::ports::RoleRepo`，ADR-005）body=`todo!()`；raw client 字段（如 `sqlx::PgPool`，保持 `pub(crate)` 不泄漏）延迟到 W 阶段接后端时填入。adapter crate 保持 `#![forbid(unsafe_code)]`（不 invoke dynosaur 宏）。
 
 ### C8. 覆盖率豁免
 
@@ -95,11 +101,10 @@ PR body 标 `ref: {framework} {path}@{ref}`（见 research.md），或「无需�
 
 `vocab` + `thiserror` 枚举；message 为 `&'static str` const literal，**禁** `format!` 拼 runtime 数据（runtime 数据走 `with_details`/`with_internal` typed 通道）。domain 层不返回 HTTP 状态码。
 
-### C11. unsafe 收敛（← ADR-003 §3）
+### C11. DI port 宏依赖收敛（← ADR-003 §3 落地结论 1 + ADR-005）
 
-- 默认全仓 `#![forbid(unsafe_code)]`。**仅 `diport`** 例外：`[lints.rust] unsafe_code = "deny"`（覆盖 workspace forbid）+ dynosaur 生成点目标 `#[allow(unsafe_code)]` + `// SAFETY:`（lifetime 擦除假设）。
-- 收敛守卫 = `deny.toml` wrappers（Medium）把「可依赖 `dynosaur`」限定到 `diport`——无依赖即 import 不到宏、展开不出 unsafe。
-- 任一 unsafe 出现即构成 carve-out 事件，须按 error-handling.md §Carve-out 同步更新 ADR registry + lint 配置映射（item-level，禁 module/crate-level）。
+- 默认全仓 `#![forbid(unsafe_code)]`，**无 crate 例外、无 unsafe carve-out**：ADR-003 落地结论 1 实测 dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer `forbid`（无 `[lints.rust] unsafe_code="deny"` 覆盖、无生成点 `#[allow(unsafe_code)]`、无 ADR registry / lint carve-out 登记）。
+- 收敛守卫 = `deny.toml` wrappers + `xtask layer-deps`（Medium）把「可依赖 `dynosaur`/`trait-variant`」限定到 **DI port 定义点白名单** = `diport`（provider-agnostic infra port）+ **定义自身域形 repo/service port 的域 crate**（ADR-005 Option 2，DIPORT-MACRO-CONFINE-01′）——无依赖即 import 不到宏。本约束是「DI port 定义点集中」架构守卫，**非** unsafe 收敛。
 
 ### C12. dynosaur 版本 pin（← ADR-003 §7/§8）
 
@@ -132,8 +137,8 @@ PR body 标 `ref: {framework} {path}@{ref}`（见 research.md），或「无需�
 | C3 RequestCtx 不可伪造 | **Hard（类型 + 可见性）** | 私有字段 + 不 derive Deserialize（body 构造不可表达，ADR-002） |
 | C4 单次关闭 | **Hard（move 语义）** | `shutdown(self)` 消费 self（ADR-001）；LIFO 顺序为 Medium（测试断言） |
 | C6 serde 边界 | **Hard（serde derive 冻结）** | domain 不 derive；golden 锁 wire 字段 |
-| C7 DI port 实现方限定 | **Medium（cargo-deny）** | deny.toml wrappers（方案②，跨 crate sealing 不可行的降级） |
-| C11 unsafe 仅 diport | **Medium（cargo-deny）** | deny.toml 把 dynosaur 依赖限定 diport；per-crate forbid 是可覆盖纵深默认 |
+| C7 DI port 实现方限定 | **Medium（cargo-deny）** | deny.toml wrappers（方案②，跨 crate sealing 不可行的降级）；dynosaur 宏依赖白名单 = diport + 定义 repo port 的域 crate（DIPORT-MACRO-CONFINE-01′，ADR-005）；`adapter→域` impl 边经域 ban wrapper 放行 |
+| C11 DI port 宏依赖收敛白名单 | **Medium（cargo-deny + xtask）** | deny.toml + layer-deps 把 dynosaur/trait-variant 依赖限定到白名单 = diport + 定义域形 port 的域 crate（DIPORT-MACRO-CONFINE-01′，ADR-005）；无 unsafe carve-out（def-site hygiene，ADR-003 结论 1） |
 | C12 dynosaur pin | **Medium（cargo-deny）** | deny.toml 注释 ID `=0.3.x` |
 | C8 覆盖率豁免 | **Medium（governance 测试）** | 签名 PR 声明 + CI 门豁免 todo!() 不可达 |
 | C10 错误 message const | **Hard/Medium** | `&'static str` 类型约束（Hard）+ clippy（Medium） |

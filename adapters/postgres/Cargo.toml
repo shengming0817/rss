@@ -20,3 +20,6 @@ consistency = { path = "../../crates/consistency" }
 primitives = { path = "../../crates/primitives" }
 # 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+# 实现 identity 的**域形** repo port（identity::ports::RoleRepo，native AFIT）——adapter→域 = DIP 内向边
+# （Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。adapter 仍不被域依赖。
+identity = { path = "../../crates/identity" }

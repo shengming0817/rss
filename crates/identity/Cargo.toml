@@ -30,6 +30,12 @@ distributed = { path = "../distributed" }
 deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
 thiserror = { workspace = true }
+# 域形 repo/service DI port（ports 模块）的 async dyn 派发：native AFIT + dynosaur dyn-compatible wrapper +
+# trait-variant Send 变体（同 diport 范式，ADR-003/ADR-004 C1）。归属域 crate 而非 diport：repo port 签名
+# 引用域内实体，不得收敛 diport（Option 2/ADR-005）。dynosaur/trait-variant 依赖经 deny.toml 白名单收敛
+# （DIPORT-MACRO-CONFINE-01′：diport + 定义 repo port 的域 crate）。
+dynosaur = { workspace = true }
+trait-variant = { workspace = true }
 # 登录服务：注入 diport::Publisher（发 session-created outbox fact）+ Clock（会话到期）。
 diport = { path = "../diport" }
 # session-created event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
@@ -40,4 +46,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 # 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate，
 # rust-standards.md §命名）。
-tokio = { workspace = true }
+# ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynRoleRepo（PORT-SHAPE-01/02）。
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+mockall = { workspace = true }

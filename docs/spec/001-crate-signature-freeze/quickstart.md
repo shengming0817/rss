@@ -35,9 +35,9 @@ cargo xtask public-api --check --allow-missing # 仅 PR-0 自检：宽限「base
 | **PR-0** | ADR-004 conventions 合并 + conventions.md 薄引用；`cargo xtask public-api` 工具入口就绪 |
 | **PR-1** 基础 | `cargo build -p vocab -p ids -p secure -p support -p runctx` 绿；`cargo xtask public-api --layer basis` baseline 已 commit；无内部分组依赖（deny 绿） |
 | **PR-2** 引擎 | `cargo build -p consistency -p primitives` 绿；L0 引擎 trait 泛型静态分发编译过；`cargo xtask public-api --layer engine` baseline 已 commit；不依赖服务/域/adapters |
-| **PR-diport** | `cargo build -p diport` 绿；DI port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（dynosaur 仅 diport）；ADR-003 §8 三风险已验证；architecture.md/deny.toml/rust-standards/domain-patterns 已回写 |
+| **PR-diport** | `cargo build -p diport` 绿；DI port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（PR-diport 当时仅 infra port；ADR-005 后白名单扩为 `diport` + 定义域形 repo port 的域 crate，见 DIPORT-MACRO-CONFINE-01′）；ADR-003 §8 三风险已验证；architecture.md/deny.toml/rust-standards/domain-patterns 已回写 |
 | **PR-3** 服务 | 7 服务 crate `cargo build` 绿；`Domain::init` 返回 Result（不 panic）；非 DI 接缝（RouteGroup/Disposition/HandlerFn）冻结；DI port 已在 diport；不依赖域/adapters |
-| **PR-4** 域 | 5 域 crate `cargo build` 绿；域间无 import（deny 绿）；domain 类型未 derive Serialize（编译/grep 核）；DI repo port 已在 diport |
+| **PR-4** 域 | 5 域 crate `cargo build` 绿；域间无 import（deny 绿）；domain 类型未 derive Serialize（编译/grep 核）；**域形 repo/service port 在域 crate `pub mod ports`**（ADR-005 Option 2；provider-agnostic infra port 在 diport） |
 | **PR-5** adapters | 12 adapter `cargo build` 绿；unit sealed-marker，native AFIT impl 已冻 diport trait（ManagedResource + Signer/Publisher）；raw client 字段延迟 W（届时 `pub(crate)` 不泄漏）；adapter 保持 forbid(unsafe_code)；不被任何域 crate 依赖（deny 绿） |
 | **GATE** 收口 | `cargo build --workspace` 全绿 + 签名 review 通过 → 放行 W 宽扇出 (#1000–#1016) |
 
@@ -50,7 +50,7 @@ cargo xtask public-api --check --allow-missing # 仅 PR-0 自检：宽限「base
 ## 失败排查
 
 - `cargo build` 报 DI port trait 不 dyn-compatible（`Box<DynX>` 编不过）→ 检查 dynosaur 宏 `#[dynosaur::dynosaur(DynX = dyn(box) X)]` 是否就位、trait 是否违反 dyn-compatible（泛型方法/返回 Self/impl Trait，ADR-003 §4.6）。
-- DI port 必须定义在 diport：`dynosaur`/`trait-variant` 宏**依赖**经 deny.toml wrapper 限定到 diport（误放在 diport 以外 → cargo-deny 拒绝该依赖）。注：`forbid(unsafe_code)` **不**阻断 dynosaur 生成点（def-site hygiene，#1049 实测推翻 ADR-003 §3 原设）——diport 无 forbid→deny 例外。
+- DI port 定义点白名单：`dynosaur`/`trait-variant` 宏**依赖**经 deny.toml + layer-deps 限定到 diport（infra port）+ 定义自身域形 repo port 的域 crate（ADR-005，DIPORT-MACRO-CONFINE-01′；误放在白名单外 → cargo-deny 拒绝该依赖）。注：`forbid(unsafe_code)` **不**阻断 dynosaur 生成点（def-site hygiene，#1049 实测推翻 ADR-003 §3 原设）——无 unsafe carve-out。
 - mock 编译失败 → dynosaur/native-AFIT 下 mockall 形态以 PR-diport 验证结论为准（data-model 待决项#6）。
 - 覆盖率门 CI 红 → PR body 缺覆盖率豁免声明（ADR-004 C8）。
-- deny.toml 红 → 跨域 import / 域依赖 adapter（违 FR-009），或 dynosaur 依赖出现在 diport 以外（违 C11），按分层 + wrappers 修依赖。
+- deny.toml 红 → 跨域 import / 域依赖 adapter（违 FR-009），或 dynosaur 依赖出现在白名单（diport + 定义 repo port 的域 crate，DIPORT-MACRO-CONFINE-01′）以外（违 C11），按分层 + wrappers 修依赖。

@@ -71,10 +71,10 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 **Goal**: 建 `crates/diport`，把全部 DI 注入 port trait（Store/Signer/Publisher/Subscriber/PDP/Clock/ManagedResource/域 repo…）以 dynosaur 收敛，unsafe 限定本 crate；完成结构单源回写。
 
-**Independent Test**: `cargo build -p diport` 绿；首 port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（dynosaur 仅 diport）；adapter crate 保持 forbid 编译过。
+**Independent Test**: `cargo build -p diport` 绿；首 port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（dynosaur 仅 diport——PR-diport 彼时仅 infra port；**ADR-005 后白名单扩 = diport + 定义域形 repo port 的域 crate**，DIPORT-MACRO-CONFINE-01′）；adapter crate 保持 forbid 编译过。
 
 - [ ] TD01 [PR-diport] 建 `crates/diport`（继承 workspace forbid，**无 deny 覆盖、无生成点 `#[allow]` carve-out**——#1049 实测 def-site hygiene 不触发 consumer forbid）；定义 DI port trait 全集 + `#[trait_variant::make(X: Send)]` + `#[dynosaur(pub DynX = dyn(box) X, bridge(dyn))]` wrapper（native AFIT，body=todo!()）。ref: spastorino/dynosaur releases/v0.3.0。测试: build smoke + PORT-SHAPE-01/02/03（`Box/Arc<DynX>`）
-- [ ] TD02 [PR-diport] **结构单源回写（同 PR 三处）**：`docs/rules/architecture.md`（§扁平结构树 + §分层，登记 diport）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers（`dynosaur`/`trait-variant` **依赖**仅 diport；限依赖非 impl，impl-allowlist 待 #1060）+ dynosaur pin `=0.3.x`
+- [ ] TD02 [PR-diport] **结构单源回写（同 PR 三处）**：`docs/rules/architecture.md`（§扁平结构树 + §分层，登记 diport）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers（`dynosaur`/`trait-variant` **依赖**仅 diport——彼时仅 infra port；**ADR-005 后扩白名单 + 定义域形 repo port 的域 crate**；限依赖非 impl，impl-allowlist 待 #1060）+ dynosaur pin `=0.3.x`
 - [ ] TD03 [PR-diport] 验证 ADR-003 §8 三开放风险（#1049 落地结论）：① unsafe carve-out **不需要**——def-site hygiene 不触发 consumer forbid（无 `#[allow(unsafe_code)]`、无 carve-out 登记）；② 跨 crate sealing 采方案②（deny.toml wrapper 限宏**依赖**非 impl；impl-allowlist 待 #1060/PR-5）；③ dynosaur v0.3 API pin `=0.3.0` + 审 changelog
 - [ ] TD04 [PR-diport] 回写 `rust-standards.md §工程护栏`（diport forbid 例外）+ `domain-patterns.md`（DI port 集中 + sealing 改 cargo-deny）；加首 port trait `trybuild` dyn-compatible compile-pass/fail（Medium 回归锁）；解决 mockall × dynosaur/native-AFIT 形态（待决项#6）
 - [ ] TD05 [PR-diport] PR-diport 验收（门: TD01–TD04 + bootstrap shutdown 框架前置）：`cargo build -p diport` + clippy + `cargo deny check` 绿；dyn-compatible trybuild 绿；§8 三风险已结论；架构/规则单源已回写。**开 PR-diport，body 标 ref: dynosaur + ADR-003 §8 验证结论 + 覆盖率豁免**
@@ -106,7 +106,7 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 ## Phase 5: User Story 3 — 域层+adapters 层接缝冻结 (Priority: P3)
 
-**Goal**: 冻结 5 域 crate 的**域内 DTO + 非 DI 域逻辑** + 12 adapters 的 sealed-marker + native AFIT impl diport trait。扇出面最宽，冻结后即逐单元放行 W。（域 repo/服务 DI port 已迁 diport，PR-diport）
+**Goal**: 冻结 5 域 crate 的**域内 DTO + 非 DI 域逻辑 + 域形 repo/service port（`pub mod ports`，ADR-005）** + 12 adapters 的 sealed-marker + native AFIT impl（diport infra port + 域形 repo port）。扇出面最宽，冻结后即逐单元放行 W。（provider-agnostic infra DI port 在 diport；域形 repo port 归域 crate，ADR-005 #1083）
 
 **Independent Test**: 每个域 crate `cargo build` 绿且域间无 import（deny 绿）；每个 adapter sealed newtype native AFIT impl diport trait 且 raw client `pub(crate)`、保持 forbid；`cargo build --workspace` 绿。
 
@@ -119,6 +119,7 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 - [x] T026 [P] [US3] 冻结 `syshealth` 于 `crates/syshealth/src/`：健康聚合 **域内值对象 + 非 DI 纯逻辑**（复用 primitives::healthz + ProbeRegistry/ProbeDescriptor + aggregate_with_criticality）。**聚合服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）
 - [x] T027 [US3] PR-4 验收（门: T022–T026）：5 域 crate `cargo build` + clippy 绿；域间无 import + 不依赖 adapters（deny 绿）；domain 类型未 derive Serialize（核）。**开 PR-4，body 标覆盖率豁免 + ref + #998 软依赖说明**
   - 落地说明（PR #1051，**Scope A**）：本 PR 冻**域内值对象 + 非 DI 纯域逻辑**（对标 authn），全 `todo!()`、域类型落 `mod domain` 经 dylint `rss_domain_no_serialize` 守 C6，smoke 用显式 `fn(..)->..` 断言 Hard 锁签名。**勾选 [x] 仅代表 Scope A（域内非 DI 接缝）已交付**——上列 T023–T026 中 **repo port / repo 型领域服务 / PORT-SHAPE 部分未在本 PR 落地**（归属阻塞于 `data-model.md` 待决项#1：diport 不得引域实体，与 layer-diport.md SessionRepo→diport 矛盾 → **跟踪 #1083**）；待 #1083 拍板后另起单元补 repo/服务接缝 + PORT-SHAPE。#998 虽 closed 但 `generated/` 仅 seed stub、无真实域 wire 类型，故只冻非 wire 接缝。依赖精简 → #1084。`cargo xtask verify`（含 build/clippy/nextest/deny/dylint）全绿。
+  - **✅ #1083 已拍板（ADR-005，Option 2）**：域形 repo/service port 归**所属域 crate `pub mod ports`**（非 diport），`adapter→域` 经 DIP 内向边 impl（`allows(Adapter,Domain)=true`）。两份 spec 矛盾（layer-diport.md ↔ data-model.md 待决项#1）已消解。本轮落 1 个代表性 `identity::ports::RoleRepo` + `postgres` impl 作编译证明；**T023–T026 各域剩余 repo/service port + PORT-SHAPE 随 W 阶段行为单元逐域补**（机械复制本范式，按需扩 deny.toml 域 wrapper + dynosaur 白名单）。
 
 ### PR-5 adapters 层（门: TD05（PR-diport）；与 PR-4 并行；同层 12 crate 并行）
 

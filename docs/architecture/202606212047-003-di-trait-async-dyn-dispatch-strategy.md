@@ -3,6 +3,7 @@
 - **状态**：Accepted + **Landed**（PR-diport #1049，2026-06-22）。派发策略（dynosaur）已落地；§8 三项开放风险已实测，结论见下「落地结论」——**dynosaur 可行，且比本 ADR 原设更简**（无 unsafe 例外）。
 - **日期**：2026-06-21（落地回写：2026-06-22）
 - **关联**：issue #995 [RW-G0.5] · epic #991 · 落地单元 #1049 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
+- **后续修订**：**ADR-005**（#1083，2026-06-23）把「所有 DI port 收敛 diport」部分化——域形 repo/service port 归域 crate（§6 偏离 2 + §7 行 1 已就地重写并重评威胁矩阵）。
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
 
@@ -276,6 +277,12 @@ let svc = SessionService::new(store, clock, publisher);
 理由：unsafe 收敛要求宏调用集中（§3）。澄清：DI infra port 是 provider-agnostic 基础设施 trait，**不是**
 跨域 wire 类型；跨域通信单源仍是 contract，本偏离不削弱该不变式。
 
+> ⚠ **ADR-005 修订（2026-06-23，#1083）——本偏离部分化**：「**所有** DI port 收敛 diport」对
+> provider-agnostic infra port 成立，但对**域形 repo/service port over-reach**（其签名必引域内实体，放
+> diport 即 diport→域 反向依赖、层序倒置、deny 红）。修订：infra port 收敛 `diport`；**域形 repo/service
+> port 归所属域 crate `pub mod ports`**（ADR-005 §2 category line：port 签名是否引用域内实体）。dynosaur
+> 派发范式**不变**，仅扩定义点集合（diport + 定义自身 repo port 的域 crate）。详见 ADR-005。
+
 **偏离 3（部分）**：domain-patterns「port trait 用 sealed-trait 封闭」在**同 crate**内仍成立，但 DI port
 trait 集中到 `diport` 后**无法对独立 adapter crate sealing**（§4.2）——本 ADR 放弃跨 crate sealing：定义面由
 cargo-deny wrappers 守（只准 `diport` 定义 port），impl 面由 dylint lint `rss_diport_impl_allowlist`（AST 级
@@ -292,7 +299,7 @@ dylint Medium（#1060 闭环）。
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
-| **dynosaur / trait-variant 只能被 `diport` 依赖**（原「unsafe 只能出现在 `diport`」） | **Medium（cargo-deny）** | `deny.toml` wrapper 把「可依赖 `dynosaur`/`trait-variant`」限定到 `diport`（INVARIANT DIPORT-MACRO-CONFINE-01，`layer-deps` 守 wrapper⟷源）。**落地修订（结论 1）**：dynosaur 0.3 的 unsafe 不触发 consumer forbid，故本约束的动机是 **DI port 集中 + 单一 dyn-dispatch 依赖点**（架构），**非** unsafe 收敛；`diport` 无 forbid 例外。 |
+| **dynosaur / trait-variant 只能被 DI port 定义点 crate 依赖**（原「unsafe 只能出现在 `diport`」） | **Medium（cargo-deny）** | `deny.toml` wrapper + `layer-deps` 把「可依赖 `dynosaur`/`trait-variant`」限定到 DI port 定义点白名单（INVARIANT DIPORT-MACRO-CONFINE-01**′**）。**落地修订（结论 1）**：dynosaur 0.3 的 unsafe 不触发 consumer forbid，故本约束动机是 **DI port 定义点集中**（架构），**非** unsafe 收敛。**ADR-005 威胁重评（#1083）**：原「单一 dyn-dispatch 依赖点」前提随域形 repo port 必然多点定义（各域 crate）而**失效**——白名单放宽为 `diport`（DiPort）+ 定义自身 repo port 的域 crate（Domain）；残余威胁（宏被非 port-定义 crate 滥用）由「白名单条目须属 DiPort/Domain 层」守，unsafe 维度更早已被结论 1 中和，故放宽**零安全代价**、安全模型不退化。 |
 | **DI port trait 必须 dyn-compatible** | **Hard（编译器）** | 写出非 dyn-safe trait，`Box<Dyn*>`/`Arc<Dyn*>` 直接编不过。`trybuild` compile-fail 用例仅作 **Medium 回归锁**（锁错误形态），列 §8 follow-up。 |
 | **必填 DI 依赖非 Option** | **Hard（类型系统）** | 构造器必填位置参 `Box<Dyn*>`，缺失即编译错误（ai-robust 范本）。 |
 | **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |

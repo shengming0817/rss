@@ -27,10 +27,11 @@
 |---|---|---|---|---|
 | **纯计算 trait**（无 async / 无 dyn） | vocab, ids, secure, support | native（sync）/ 泛型静态分发 | `#[cfg_attr(test, automock)]` | 错误枚举、ID newtype、redaction |
 | **引擎策略 trait**（L0 静态分发） | consistency, primitives | native AFIT + 泛型 `<S: Trait>` | 同 crate `#[cfg(test)]` 替身 | 幂等/outbox/saga 态机；零开销、不引 dynosaur wrapper |
-| **DI port trait**（provider-可换、dyn 注入） | **diport**（收敛 Store/Signer/Publisher/Subscriber/PDP/Clock…） | **dynosaur**（native AFIT + `dyn(box)` wrapper） | automock（形态待验证#5） | 注入 `Box/Arc<DynX>`；adapter native AFIT impl |
+| **infra DI port trait**（provider-agnostic、dyn 注入） | **diport**（Signer/Publisher/Subscriber/AuditSink/Clock/ManagedResource…） | **dynosaur**（native AFIT + `dyn(box)` wrapper） | automock | 签名只引基础/wire/自定义类型；注入 `Box/Arc<DynX>`；adapter native AFIT impl |
+| **域形 repo/service DI port**（ADR-005 #1083） | **所属域 crate `pub mod ports`**（`RoleRepo`/`SessionRepo`/`ConfigRepo`…） | **dynosaur**（同 infra port 范式，但归域 crate） | mockall（mock 经 `new_box` 进 `DynX`） | 签名引用域内实体 → 不得归 diport；`adapter→域` DIP 内向 impl；实体 `pub`+私有字段 funnel |
 | **生命周期 trait** | diport / bootstrap | `ManagedResource`（**inter-ADR 待决**：ADR-001=async_trait vs ADR-003=dynosaur，见待决项） | automock | LIFO 由 bootstrap 显式 await，无 async Drop |
 | **服务非 DI 接缝**（type/enum/sync） | httpserve, eventexec, observ… | type/enum + sync `Fn`（非 trait object） | — | RouteGroup/Route/ListenerKind/Disposition/HandlerFn |
-| **域内类型**（pub(crate)） | identity, settings… | DTO + 非 DI 域逻辑（DI port 已迁 diport） | — | domain 不 derive Serialize |
+| **域内类型**（pub(crate)） | identity, settings… | DTO + 非 DI 域逻辑 + **域形 repo port（`pub mod ports`，ADR-005）** | — | domain 不 derive Serialize；repo 签名实体升 `pub`（私有字段 funnel） |
 | **adapter sealed-marker** | adapters/* | native AFIT impl diport 已冻 DI port trait（ManagedResource 普适 + Signer/Publisher 按职责；无新 trait、不 invoke dynosaur 宏，保持 forbid） | 不 mock | `struct PgStore;`（unit；raw client 字段延迟 W） |
 
 ## 实体 3：Conventions 项（单源 = ADR-004，被全部签名引用）
@@ -45,7 +46,7 @@
 6. **serde 边界**：domain 不 derive Serialize/Deserialize；仅 contract/DTO。
 7. **sealed/newtype**：DI port trait 不跨 crate sealed（deny.toml wrappers，ADR-003 §4.2 方案②）；adapter raw client `pub(crate)` newtype。
 8. **覆盖率豁免**：签名 PR body=todo!() 声明覆盖率延迟到行为 PR。
-9. **每 PR 对标 ref** / 10. **错误（vocab+thiserror const literal）** / 11. **unsafe 收敛（仅 diport）** / 12. **dynosaur pin =0.3.x**。
+9. **每 PR 对标 ref** / 10. **错误（vocab+thiserror const literal）** / 11. **DI port 宏依赖收敛白名单**（无 unsafe carve-out；dynosaur/trait-variant 依赖限 diport + 定义域形 port 的域 crate，DIPORT-MACRO-CONFINE-01′，ADR-005）/ 12. **dynosaur pin =0.3.x**。
 
 ## 实体 4：Spike 门（实施前置，非规划前置）—— 均已落地为 ADR
 
@@ -62,9 +63,9 @@
 
 计划层重排引入 diport 后浮现的真实开放点（ADR-003 §8 亦留为开放风险）—— 此处显式登记 + 给推荐方向：
 
-1. **实体引用与分层序（架构约束，非选项）**：diport 是 **DI-infra 层 crate**，按分层规则 **MUST NOT 依赖域 crate**（deny.toml 编译期强制）。故 diport port trait 的参数/返回实体类型 **MUST** 定义在基础层（`ids`/`vocab`）或 `generated`（wire 类型），**不得**引用域内实体（`User`/`Session` 等域专属类型）——否则 diport→域 反向依赖、层序倒置、deny.toml 红。ADR-003 §4.1 示例中的 `User` 须按此约束落在基础层/generated，或由 PR-diport 决定其归属（但不得让 diport 依赖域 crate）。这是设计约束，PR-diport 实施者不得将域实体引入 diport。
+1. **实体引用与分层序（架构约束，非选项）——✅ RESOLVED（ADR-005 / #1083，Option 2）**：diport 是 **DI-infra 层 crate**，**MUST NOT 依赖域 crate**（`allows(DiPort,Domain)=false`，deny.toml + `layer-deps` 强制）。故 diport port trait 签名只能引用基础（`ids`/`vocab`）/`generated`（wire）类型，**不得**引用域内实体。**与 layer-diport.md「SessionRepo→diport」的矛盾按 ADR-005 消解**：归属二分——provider-agnostic infra port（签名只引基础/wire/自定义类型）→ `diport`；**域形 repo/service port**（签名引用域内实体 `Session`/`Role`…）→ **所属域 crate `pub mod ports`**（非 diport、非基础层）。`adapter→域` 经 DIP 内向边 impl 域形 port（`allows(Adapter,Domain)=true`）。category line 见 ADR-005 §2.1。
 2. **Clock / ManagedResource 归属**：ADR-003 §2/§4.3 把 Clock 列为 DI port→diport；原 spec 把 Clock 放 primitives（引擎）。**推荐**：`Clock`+`DynClock`、`ManagedResource`+`DynManagedResource` 迁入 diport；primitives 只留纯计算/静态引擎 trait。PR-diport 确认。
-3. **域 repo `pub(crate)`→`pub`**：DI port 迁 diport 即跨 crate → 失去 `pub(crate)` 封装；改由 deny.toml wrapper 收敛 `dynosaur`/`trait-variant` **宏依赖**（DI port 定义点单源，§4.2 方案②，Medium，限**依赖**非 impl）。port-trait impl-allowlist（限谁可 impl）当前未机器强制（Hard→尚无守卫），待 #1060/PR-5。登记该偏离。
+3. **域 repo `pub(crate)`→`pub`——✅ RESOLVED（ADR-005，Option 2）**：域形 repo port **留所属域 crate**（`pub mod ports`，非迁 diport）。port trait + 签名引用的**最小实体集**（`Role`/`RoleId` + repo error）升 `pub`（独立 adapter crate 跨 crate impl/命名），**但字段私有 + 构造器 `pub(crate)` funnel**——外部可命名/收发、不可伪造（fail-closed）。dynosaur 宏依赖收敛白名单 = diport + 定义 repo port 的域 crate（DIPORT-MACRO-CONFINE-01′，Medium）。port-trait impl-allowlist（限谁可 impl）仍未机器强制，待 #1060/PR-5。
 4. **inter-ADR 冲突（ManagedResource）**：**ADR-001** 把 `ManagedResource` 定为 `#[async_trait]` + `Arc<dyn>`；**ADR-003** 通则是 DI 注入→dynosaur。二者对 `ManagedResource` 冲突。**推荐**：随 bootstrap shutdown 框架落地时统一为 dynosaur 并**同步重评 ADR-001 威胁矩阵**（ai-robust「ADR amendment 同步」）；在此之前 `ManagedResource` 暂遵 ADR-001（async_trait）。
 5. **diport 落地 = ADR-003 §8 可行性验证单元（#1049 已验证，dynosaur 实测可接受、未回退）**：建 crate + 三开放风险落地结论（① unsafe carve-out **不需要**——def-site hygiene 不触发 consumer forbid，无 `#[allow(unsafe_code)]`、无 carve-out 登记 / ② 跨 crate sealing 采方案②，deny.toml wrapper 限宏**依赖**非 impl，impl-allowlist 待 #1060 / ③ dynosaur v0.3 pin `=0.3.0`）+ §8 follow-up（architecture.md/deny.toml/domain-patterns 回写、trybuild、bootstrap shutdown 框架前置）。
 6. **mockall × dynosaur/native-AFIT**：PORT-SHAPE-01/02/03 假设 mockall mock 可构造；native-AFIT/dynosaur 下兼容性 ADR-003 未覆盖 → PR-diport 验证（mock 是 native trait 还是 `DynX` wrapper）。
@@ -74,6 +75,7 @@
 - **PORT-SHAPE-01**：`let _: Box<DynT> = DynT::new_box(MockT::new());`（或 `Arc<DynT>`）编译通过（dynosaur dyn-compatible）。
 - **PORT-SHAPE-02**：`Svc::new(DynRepo::new_box(MockRepo::new()))` 编译通过（DI 必填位置参注入）。
 - **PORT-SHAPE-03**：`#[tokio::test]` 中 mock async 方法 `.await` 且 Future `Send`。
+  - 注（ADR-005 #1083）：**域形 repo port** 的实体构造器在签名冻结期为 `todo!()`（ADR-004 C8），无法运行期构造入参 → 其 PORT-SHAPE-03（实际 `.await`）**留至 W 阶段行为 PR**（届时实体有真实构造体）。冻结期 smoke 以「构造 `Box<DynX>` + 断言 `Send`」证 PORT-SHAPE-01/02；future `Send` + 跨 `tokio::spawn` 由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。infra port（diport，实体可构造）的 PORT-SHAPE-03 不受影响。
 - **BUILD-SMOKE**：每 unit `cargo build -p <crate...>` 通过。
 - **PUBLIC-API**：基础/引擎层 `cargo public-api` baseline 可 commit（PR-0 落工具入口，PR-1/PR-2 产快照）。
 

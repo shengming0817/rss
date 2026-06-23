@@ -23,11 +23,21 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 `internal/ports` 放仓储和服务 trait；`internal/mem` 放 in-memory 实现。其它 internal
 子模块按真实功能增长，不预生成空目录。
 
-> **例外（DI port 集中）**：可替换 provider 的 **DI 注入 port trait**（`Clock` / `Signer` /
-> `Publisher` / `Subscriber` / `AuditSink` / `Pdp` / `ManagedResource` 及各域 repo port）**不放域 crate
-> `internal/ports`**，统一收敛进 DI-infra 层 crate `diport`（ADR-003）——dynosaur 的 async dyn
-> 派发宏 + Send 变体生成只此一处。域 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费，不自定义这些
-> port trait。纯域内（非可替换 provider）的仓储 / 服务 trait 仍留 `internal/ports`。
+> **例外（DI port 归属二分，ADR-003 + ADR-005）**：可替换 provider 的 **DI 注入 port trait** 归属按
+> **category line**（ADR-005 §2.1）二分——
+> - **provider-agnostic infra port**（签名只引基础/`generated` wire/port 自定义类型，如 `Clock` /
+>   `Signer` / `Publisher` / `Subscriber` / `AuditSink` / `Pdp` / `ManagedResource`）**不放域 crate
+>   `internal/ports`**，统一收敛进 DI-infra 层 crate `diport`（ADR-003）。
+> - **域形 repo / service port**（签名引用域内实体，如 `RoleRepo::find(..)->Option<Role>`）**不得收敛
+>   diport**（否则 diport→域 反向依赖、层序倒置、deny 红），归**所属域 crate 新建 `pub mod ports`**
+>   （ADR-005 Option 2）——非 `internal/ports`（须 `pub` 供独立 adapter crate 跨 crate impl）；trait + 签名
+>   引用的最小实体集升 `pub`、字段私有 + 构造器 `pub(crate)` funnel（外部可命名/收发、不可伪造）。
+>
+> 两类 port 同款 dynosaur Send 变体范式（`#[trait_variant::make(X: Send)]` + `#[dynosaur(...)]`）；dynosaur/
+> trait-variant 宏依赖收敛白名单 = diport + 定义自身 repo port 的域 crate（`deny.toml` + `xtask layer-deps`，
+> DIPORT-MACRO-CONFINE-01′，Medium）。判据：「此 port 签名能否在 `diport` 内编译而不让 diport 依赖域 crate？」
+> 能→diport；不能→域 crate。`adapter→域` 经 DIP 内向边 impl 域形 port。域 crate 经构造器注入 `Box<DynX>` /
+> `Arc<DynX>` 消费。纯域内（非可替换 provider）的仓储 / 服务 trait 仍留 `internal/ports`。
 
 ## Init fail-fast
 
@@ -53,6 +63,10 @@ sealed marker type，再注入 service。port trait 用 sealed-trait 模式封�
 > DIPORT-IMPL-ALLOWLIST-01）承载：cargo-deny 守**定义面**（port 只在 `diport` 定义），dylint 守**impl 面**
 > （非 adapter / 组合根路径下 impl 任一 diport port trait 即报）；#1060 闭环。
 > 同 crate 内的 port sealing 仍用 sealed-trait（Hard）。
+>
+> **域形 repo port（ADR-005 Option 2）同理**：定义于域 crate `pub mod ports`、不带 sealed supertrait；实现它的
+> adapter 须依赖该域 crate（`adapter→域` = DIP 内向边，`allows(Adapter,Domain)=true` + `deny.toml` 该域 ban
+> 的 wrappers 加该 adapter 放行；反向「域→adapter」仍禁）。dynosaur 宏依赖白名单同步扩到该域 crate（-01′）。
 
 ## Contract test
 

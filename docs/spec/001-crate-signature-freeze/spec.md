@@ -96,8 +96,8 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 
 - **签名冻结单元（freeze unit）**：一个或一组 crate 的公开接缝集合，是 PR 的粒度。属性：所属层、依赖的上游层、是否软依赖 #998、所需 spike 前置。
 - **conventions 地基**：trait 写法 + mock + ctx + 覆盖率约定的单源（**ADR-004**），被所有签名单元引用。
-- **DI port trait**：provider-可换、经 dynosaur `DynX` wrapper 注入的接缝（`Box/Arc<DynX>`）；收敛进 `diport` crate；需 dyn-compatible + mockall mock。
-- **diport crate**：DI port trait + dynosaur wrapper 的 **DI-infra 层** crate（ADR-003，PR-diport #1049）。**无** forbid→deny 例外、**无** unsafe carve-out（#1049 实测 def-site hygiene 不触发 consumer forbid，推翻 §3 原设）；`dynosaur`/`trait-variant` 依赖经 deny.toml wrapper 收敛到本 crate。
+- **DI port trait**：provider-可换、经 dynosaur `DynX` wrapper 注入的接缝（`Box/Arc<DynX>`）；归属二分（ADR-005）——provider-agnostic infra port → `diport`，**域形 repo/service port**（签名引域内实体）→ 所属域 crate `pub mod ports`；需 dyn-compatible + mockall mock。
+- **diport crate**：**provider-agnostic** DI port trait + dynosaur wrapper 的 **DI-infra 层** crate（ADR-003，PR-diport #1049）。**无** forbid→deny 例外、**无** unsafe carve-out（#1049 实测 def-site hygiene 不触发 consumer forbid，推翻 §3 原设）；`dynosaur`/`trait-variant` 依赖经 deny.toml + layer-deps 收敛到白名单 = diport + 定义域形 port 的域 crate（ADR-005，DIPORT-MACRO-CONFINE-01′）。
 - **sealed-marker newtype**：adapter 以 unit sealed-marker/native AFIT 实现 diport DI port trait 的范式（PR-5 冻 unit struct；raw client 字段在 W 阶段接后端时填入、保持 `pub(crate)`；crate 保持 forbid）。
 - **spike 依赖门**：ADR-001/002/003 决议 + diport 落地门作为签名实施的前置条件（非规划前置）。
 

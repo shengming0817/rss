@@ -33,10 +33,13 @@ pub(crate) enum IdParseError {
 // ---------------------------------------------------------------------------
 
 /// 角色标识 newtype（私有字段；构造经 funnel；不 derive Serialize——域类型）。
+///
+/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 签名实体被独立 adapter crate 跨 crate 命名/收发；
+/// 字段仍私有、构造器仍 `pub(crate)`（funnel）——外部可命名/接收 `RoleId` 但**不可伪造**（fail-closed）。
 // reason: 签名冻结期字段已声明但 body 全为 todo!()，dead_code 来自冻结期，非 API 漂移（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RoleId(String);
+pub struct RoleId(String);
 
 // reason: 签名冻结期所有方法尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
@@ -173,10 +176,14 @@ impl Permission {
 // ---------------------------------------------------------------------------
 
 /// 角色实体（含权限集；私有字段；不 derive Serialize——域类型）。
+///
+/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 返回聚合被 adapter 跨 crate 命名；字段私有、构造经
+/// `Role::new`（`pub(crate)` funnel）——adapter 可接收/返回 `Role` 但**不可伪造其不变式**。`permissions`
+/// 等字段类型仍 `pub(crate)`（`pub struct` + 私有字段不外泄字段类型）。
 // reason: 同 RoleId（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(crate) struct Role {
+pub struct Role {
     id: RoleId,
     name: String,
     permissions: Vec<PermissionId>,
@@ -481,11 +488,14 @@ pub(crate) enum AccountStatus {
 // ---------------------------------------------------------------------------
 
 /// 身份域错误（库枚举；用 `thiserror`；message 为 const 静态字面量）。
+///
+/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 方法错误类型被 adapter 跨 crate 命名（adapter 把内部
+/// 持久化错误映射成本枚举）。`#[non_exhaustive]` 保留扩展窗口。
 // reason: 签名冻结期枚举已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum IdentityError {
+pub enum IdentityError {
     #[error("role not found")]
     RoleNotFound,
     #[error("permission denied")]

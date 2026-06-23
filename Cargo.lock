@@ -600,10 +600,12 @@ dependencies = [
  "deviceloop",
  "diport",
  "distributed",
+ "dynosaur",
  "eventexec",
  "generated",
  "httpserve",
  "ids",
+ "mockall",
  "observ",
  "primitives",
  "runctx",
@@ -613,6 +615,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "trait-variant",
  "vocab",
 ]
 
@@ -826,6 +829,7 @@ version = "0.0.0"
 dependencies = [
  "consistency",
  "diport",
+ "identity",
  "ids",
  "primitives",
  "runctx",

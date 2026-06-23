@@ -10,7 +10,7 @@
 
 | 项 | 约定（一句话） | 单源 |
 |---|---|---|
-| C1 async/dyn | DI port（provider-可换、I/O、L1–L4）→ **dynosaur**（native AFIT + `#[dynosaur::dynosaur(DynX = dyn(box) X)]`，定义于 `diport`，注入 `Box/Arc<DynX>`）；L0 纯计算/单实现 → native AFIT + 泛型静态分发 | ADR-004 C1 · ADR-003 §2/§4 |
+| C1 async/dyn | DI port（provider-可换、I/O、L1–L4）→ **dynosaur**（native AFIT + `#[dynosaur::dynosaur(DynX = dyn(box) X)]`，注入 `Box/Arc<DynX>`）；定义位置二分（ADR-005）：provider-agnostic infra port → `diport`，**域形 repo/service port**（签名引域内实体）→ 所属域 crate `pub mod ports`；L0 纯计算/单实现 → native AFIT + 泛型静态分发 | ADR-004 C1 · ADR-003 §2/§4 · ADR-005 |
 | C2 mock | 同 crate `#[cfg(test)]`，禁跨 crate 共享；**dynosaur/native-AFIT 下 mockall 形态待 diport spike 验证** | ADR-004 C2 · data-model 待决项#6 |
 | C3 ctx | `runctx::RequestCtx<T,P>`（sealed struct + `task_local!`），需 ctx 处显式传 `&RequestCtx`；可观测 ID 走 tracing span 不入签名 | ADR-002 D2 |
 | C4 关闭逆序 | `ManagedResource` LIFO、显式 `async fn shutdown`、无 async Drop | ADR-001 |
@@ -20,5 +20,5 @@
 | C8 覆盖率豁免 | 签名 PR body=`todo!()` 不可达 → PR body 声明覆盖率延迟到行为 PR | — |
 | C9 对标 ref | PR body 标 `ref: {framework} {path}@{ref}` 或「无需对标：<理由>」 | research.md |
 | C10 错误 | `vocab` + `thiserror` 枚举；message `&'static str` const literal | error-handling |
-| C11 unsafe 收敛 | diport **无** forbid→deny 例外（#1049 实测 def-site hygiene 不触发 consumer forbid，推翻 ADR-003 §3 原设）；`dynosaur`/`trait-variant` **依赖**经 deny.toml wrapper 限定到 diport（限依赖非 impl） | ADR-003 §3 + #1049 |
+| C11 DI port 宏依赖收敛 | **无** unsafe carve-out（#1049 实测 def-site hygiene 不触发 consumer forbid，推翻 ADR-003 §3 原设）；`dynosaur`/`trait-variant` **依赖**经 deny.toml + layer-deps 限定到白名单 = diport + 定义域形 port 的域 crate（DIPORT-MACRO-CONFINE-01′，限依赖非 impl） | ADR-003 §3 + #1049 + ADR-005 |
 | C12 dynosaur pin | `=0.3.x` | ADR-003 §7/§8 |

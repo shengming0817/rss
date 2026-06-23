@@ -101,7 +101,8 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 分层依赖矩阵：`from` 是否允许直接依赖 `to`（仅工作区内部边；外部 crate 不经此函数）。
 /// 规则单源 = architecture.md §分层（**逐字编码，不放宽**）：基础仅 std+外部、引擎依赖基础、
 /// DI-infra 依赖基础+引擎、服务依赖基础+引擎+DI-infra、域依赖基础+引擎+DI-infra+服务+generated
-/// （兄弟域互不依赖）、adapter 实现基础/引擎/DI-infra/服务 trait。**同层横向依赖一律禁**（§分层
+/// （兄弟域互不依赖）、adapter 实现基础/引擎/DI-infra/服务/**域** trait（adapter→域 = DIP 内向边，impl 域
+/// repo/service port，Option 2/ADR-005；反向 域→adapter 仍禁）。**同层横向依赖一律禁**（§分层
 /// 未授予任一分组同层依赖；基础"仅 std+外部"直接排除基础互依赖）——fail-closed：只放行 §分层
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
@@ -111,9 +112,11 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
         Root => true,
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
         Generated => to == Basis,
-        // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务；禁兄弟 adapter / 域 / generated。
-        Adapter => matches!(to, Basis | Engine | DiPort | Service),
-        // 域：基础 + 引擎 + DI-infra + 服务 + generated；禁兄弟域（跨域只经 contract）/ adapter。
+        // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务 + 域（impl 域 repo/service port，
+        // DIP 内向边，Option 2/ADR-005）；禁兄弟 adapter / generated（反向 域→adapter 由下方 Domain 行禁）。
+        Adapter => matches!(to, Basis | Engine | DiPort | Service | Domain),
+        // 域：基础 + 引擎 + DI-infra + 服务 + generated；禁兄弟域（跨域只经 contract）/ adapter
+        //（域不依赖 adapter——依赖反转方向：adapter→域 单向，见上方 Adapter 行）。
         Domain => matches!(to, Basis | Engine | DiPort | Service | Generated),
         // 服务：基础 + 引擎 + DI-infra（消费 DI port）；禁兄弟服务（§分层 未授予）/ 域 / adapter / generated。
         Service => matches!(to, Basis | Engine | DiPort),
@@ -253,7 +256,9 @@ mod tests {
     #[case(Layer::Domain, Layer::Adapter, false)]
     #[case(Layer::Service, Layer::Adapter, false)]
     #[case(Layer::Service, Layer::Generated, false)]
-    #[case(Layer::Adapter, Layer::Domain, false)]
+    // adapter → 域：放行（DIP 内向边——adapter impl 域定义的 repo/service port，Option 2/ADR-005）。
+    // 反向 域 → adapter 仍禁（上面 Domain→Adapter=false），依赖反转方向保持。
+    #[case(Layer::Adapter, Layer::Domain, true)]
     #[case(Layer::Adapter, Layer::Generated, false)]
     #[case(Layer::Generated, Layer::Service, false)]
     // DI-infra back-path / 跨界：禁——diport 不依赖服务及以上；引擎/基础/generated 不依赖 diport。
