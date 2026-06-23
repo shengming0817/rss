@@ -10,7 +10,6 @@
 //!
 //! 层级：服务层（依赖基础 + 引擎；不依赖域 / adapters）。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
-//! ADR-004 C8：签名冻结阶段覆盖率豁免，所有函数体 = todo!()。
 
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────
 
@@ -85,8 +84,13 @@ pub enum CertLabel {
 ///
 /// 只保留 `Static(&'static str)`（compile-time literal），防止 runtime 动态字符串
 /// 进入 label value 导致高基数扩散（F10，Medium）。
-/// 进一步 sealed resolver 收紧（RouteTemplate/Domain/Topic/Handler/TenantClass）
-/// 留待 W 阶段（#1076）。
+///
+/// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` / `Topic` / `Handler` /
+/// `TenantClass` 的公开裸 `&'static str` 构造面尚未收敛成 sealed resolver / 闭值集枚举，
+/// 业务仍可写任意字面量，未满足 `docs/rules/observability.md` §Metrics Label「label 值集
+/// 必须冻结或经 typed enum 入口、禁止业务手写裸 string label」。本 crate（#1006）只兑现
+/// `key()/value()` 行为，**不改这些冻结公共接缝**（W 阶段铁律）；sealed resolver 依赖
+/// Join 阶段 assembly 声明的 closed set，由 #1076 承载。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LabelValue {
     Static(&'static str),
@@ -94,7 +98,17 @@ pub enum LabelValue {
 
 /// provider-agnostic metric label 接口。
 ///
-/// adapters/otel 实现：`fn to_key_value(l: &impl MetricLabel) -> KeyValue`。
+/// `key()` 返回低基数 label 键（Prometheus 风格短 snake_case）；`value()` 返回
+/// `LabelValue::Static`——只承编译期 literal，runtime 高基数串无法进入（F10）。
+/// 携 `&'static str` 字段的变体（`RouteTemplate` / `Domain` / `Topic` / `Handler` /
+/// `TenantClass`）透传内串，调用方只许传 compile-time 类别字面量，不许传 runtime
+/// 标识（如租户 ID）。
+///
+/// value 大小写约定：HTTP method 用大写（对齐 OTel `http.request.method`），
+/// 其余枚举派生值用小写（`2xx` / `ack` / `issued` …）。
+///
+/// 消费方（`adapters/otel` / `adapters/prometheus`）在各自 W 阶段声明 `observ`
+/// 依赖并实现 `fn to_key_value(l: &impl MetricLabel) -> KeyValue` 完成映射；本 crate 不引 otel。
 pub trait MetricLabel {
     fn key(&self) -> &'static str;
     fn value(&self) -> LabelValue;
@@ -102,31 +116,76 @@ pub trait MetricLabel {
 
 impl MetricLabel for HttpLabel {
     fn key(&self) -> &'static str {
-        todo!()
+        match self {
+            HttpLabel::Method(_) => "method",
+            HttpLabel::StatusClass(_) => "status_class",
+            HttpLabel::RouteTemplate(_) => "route_template",
+            HttpLabel::Domain(_) => "domain",
+        }
     }
 
     fn value(&self) -> LabelValue {
-        todo!()
+        match self {
+            HttpLabel::Method(method) => LabelValue::Static(match method {
+                HttpMethod::Get => "GET",
+                HttpMethod::Post => "POST",
+                HttpMethod::Put => "PUT",
+                HttpMethod::Delete => "DELETE",
+                HttpMethod::Patch => "PATCH",
+                HttpMethod::Other => "OTHER",
+            }),
+            HttpLabel::StatusClass(class) => LabelValue::Static(match class {
+                StatusClass::Class2xx => "2xx",
+                StatusClass::Class4xx => "4xx",
+                StatusClass::Class5xx => "5xx",
+            }),
+            // RouteTemplate / Domain 已是 compile-time literal，透传内串。
+            HttpLabel::RouteTemplate(s) | HttpLabel::Domain(s) => LabelValue::Static(s),
+        }
     }
 }
 
 impl MetricLabel for EventLabel {
     fn key(&self) -> &'static str {
-        todo!()
+        match self {
+            EventLabel::Topic(_) => "topic",
+            EventLabel::Disposition(_) => "disposition",
+            EventLabel::Handler(_) => "handler",
+        }
     }
 
     fn value(&self) -> LabelValue {
-        todo!()
+        match self {
+            EventLabel::Disposition(disposition) => LabelValue::Static(match disposition {
+                DispositionLabel::Ack => "ack",
+                DispositionLabel::Nack => "nack",
+                DispositionLabel::Requeue => "requeue",
+            }),
+            // Topic / Handler 已是 compile-time literal，透传内串。
+            EventLabel::Topic(s) | EventLabel::Handler(s) => LabelValue::Static(s),
+        }
     }
 }
 
 impl MetricLabel for CertLabel {
     fn key(&self) -> &'static str {
-        todo!()
+        match self {
+            CertLabel::Outcome(_) => "outcome",
+            CertLabel::TenantClass(_) => "tenant_class",
+        }
     }
 
     fn value(&self) -> LabelValue {
-        todo!()
+        match self {
+            CertLabel::Outcome(outcome) => LabelValue::Static(match outcome {
+                CertOutcomeLabel::Issued => "issued",
+                CertOutcomeLabel::Renewed => "renewed",
+                CertOutcomeLabel::Failed => "failed",
+                CertOutcomeLabel::Revoked => "revoked",
+            }),
+            // TenantClass 已是 compile-time literal，透传内串。
+            CertLabel::TenantClass(s) => LabelValue::Static(s),
+        }
     }
 }
 
@@ -142,66 +201,105 @@ pub enum SpanField {
     EntityId { kind: &'static str, id: String },
 }
 
-// ─── smoke tests（ADR-004 C8 覆盖率豁免；绝不调用 todo!() 体） ──────────────
+// ─── 行为测试（W 阶段：穷举 MetricLabel::key()/value() 全分支） ──────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 构造各 label 变体，验证 enum 可达性
+    // ── HttpLabel ────────────────────────────────────────────────────────
     #[test]
-    fn http_label_variants_constructible() {
-        let _m = HttpLabel::Method(HttpMethod::Get);
-        let _m = HttpLabel::Method(HttpMethod::Post);
-        let _m = HttpLabel::Method(HttpMethod::Put);
-        let _m = HttpLabel::Method(HttpMethod::Delete);
-        let _m = HttpLabel::Method(HttpMethod::Patch);
-        let _m = HttpLabel::Method(HttpMethod::Other);
-        let _s = HttpLabel::StatusClass(StatusClass::Class2xx);
-        let _s = HttpLabel::StatusClass(StatusClass::Class4xx);
-        let _s = HttpLabel::StatusClass(StatusClass::Class5xx);
-        let _r = HttpLabel::RouteTemplate("/api/v1/example");
-        let _d = HttpLabel::Domain("identity");
-    }
-
-    #[test]
-    fn event_label_variants_constructible() {
-        let _t = EventLabel::Topic("session.created");
-        let _d = EventLabel::Disposition(DispositionLabel::Ack);
-        let _d = EventLabel::Disposition(DispositionLabel::Nack);
-        let _d = EventLabel::Disposition(DispositionLabel::Requeue);
-        let _h = EventLabel::Handler("session_handler");
-    }
-
-    #[test]
-    fn cert_label_variants_constructible() {
-        let _i = CertLabel::Outcome(CertOutcomeLabel::Issued);
-        let _r = CertLabel::Outcome(CertOutcomeLabel::Renewed);
-        let _f = CertLabel::Outcome(CertOutcomeLabel::Failed);
-        let _v = CertLabel::Outcome(CertOutcomeLabel::Revoked);
-        let _tc = CertLabel::TenantClass("enterprise");
-    }
-
-    // 穷尽 match HttpLabel（同 crate 内 non_exhaustive 不强制 wildcard；列全变体即可）
-    #[test]
-    fn http_label_exhaustive_match() {
-        let labels = vec![
-            HttpLabel::Method(HttpMethod::Get),
-            HttpLabel::StatusClass(StatusClass::Class2xx),
-            HttpLabel::RouteTemplate("/test"),
-            HttpLabel::Domain("audit"),
+    fn http_label_method_key_value() {
+        let cases = [
+            (HttpMethod::Get, "GET"),
+            (HttpMethod::Post, "POST"),
+            (HttpMethod::Put, "PUT"),
+            (HttpMethod::Delete, "DELETE"),
+            (HttpMethod::Patch, "PATCH"),
+            (HttpMethod::Other, "OTHER"),
         ];
-        for label in &labels {
-            let _ = match label {
-                HttpLabel::Method(_) => "method",
-                HttpLabel::StatusClass(_) => "status_class",
-                HttpLabel::RouteTemplate(_) => "route_template",
-                HttpLabel::Domain(_) => "domain",
-            };
+        for (method, want) in cases {
+            let label = HttpLabel::Method(method);
+            assert_eq!(label.key(), "method");
+            assert_eq!(label.value(), LabelValue::Static(want));
         }
     }
 
-    // 构造 SpanField 各变体
+    #[test]
+    fn http_label_status_class_key_value() {
+        let cases = [
+            (StatusClass::Class2xx, "2xx"),
+            (StatusClass::Class4xx, "4xx"),
+            (StatusClass::Class5xx, "5xx"),
+        ];
+        for (class, want) in cases {
+            let label = HttpLabel::StatusClass(class);
+            assert_eq!(label.key(), "status_class");
+            assert_eq!(label.value(), LabelValue::Static(want));
+        }
+    }
+
+    #[test]
+    fn http_label_static_fields_pass_through() {
+        let route = HttpLabel::RouteTemplate("/api/v1/example");
+        assert_eq!(route.key(), "route_template");
+        assert_eq!(route.value(), LabelValue::Static("/api/v1/example"));
+
+        let domain = HttpLabel::Domain("identity");
+        assert_eq!(domain.key(), "domain");
+        assert_eq!(domain.value(), LabelValue::Static("identity"));
+    }
+
+    // ── EventLabel ───────────────────────────────────────────────────────
+    #[test]
+    fn event_label_disposition_key_value() {
+        let cases = [
+            (DispositionLabel::Ack, "ack"),
+            (DispositionLabel::Nack, "nack"),
+            (DispositionLabel::Requeue, "requeue"),
+        ];
+        for (disp, want) in cases {
+            let label = EventLabel::Disposition(disp);
+            assert_eq!(label.key(), "disposition");
+            assert_eq!(label.value(), LabelValue::Static(want));
+        }
+    }
+
+    #[test]
+    fn event_label_static_fields_pass_through() {
+        let topic = EventLabel::Topic("session.created");
+        assert_eq!(topic.key(), "topic");
+        assert_eq!(topic.value(), LabelValue::Static("session.created"));
+
+        let handler = EventLabel::Handler("session_handler");
+        assert_eq!(handler.key(), "handler");
+        assert_eq!(handler.value(), LabelValue::Static("session_handler"));
+    }
+
+    // ── CertLabel ────────────────────────────────────────────────────────
+    #[test]
+    fn cert_label_outcome_key_value() {
+        let cases = [
+            (CertOutcomeLabel::Issued, "issued"),
+            (CertOutcomeLabel::Renewed, "renewed"),
+            (CertOutcomeLabel::Failed, "failed"),
+            (CertOutcomeLabel::Revoked, "revoked"),
+        ];
+        for (outcome, want) in cases {
+            let label = CertLabel::Outcome(outcome);
+            assert_eq!(label.key(), "outcome");
+            assert_eq!(label.value(), LabelValue::Static(want));
+        }
+    }
+
+    #[test]
+    fn cert_label_tenant_class_pass_through() {
+        let label = CertLabel::TenantClass("enterprise");
+        assert_eq!(label.key(), "tenant_class");
+        assert_eq!(label.value(), LabelValue::Static("enterprise"));
+    }
+
+    // ── 数据类型构造性 smoke（SpanField / LabelValue 无行为，仅证可达） ──────
     #[test]
     fn span_field_variants_constructible() {
         let _d = SpanField::Domain("identity");
@@ -213,9 +311,14 @@ mod tests {
         };
     }
 
-    // LabelValue 变体（F10：Owned 已移除，只保留 Static compile-time literal）
+    // F10：Owned 已移除，只保留 Static compile-time literal
     #[test]
-    fn label_value_variants_constructible() {
-        let _s = LabelValue::Static("http.method");
+    fn label_value_static_eq() {
+        assert_eq!(
+            LabelValue::Static("http.method"),
+            LabelValue::Static("http.method")
+        );
+        // anti-vacuity：不同 literal 必须不等（双向验证 PartialEq）
+        assert_ne!(LabelValue::Static("a"), LabelValue::Static("b"));
     }
 }
