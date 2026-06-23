@@ -196,7 +196,10 @@ mod tests {
     /// 路径判分类不靠 crate 名——adapter 即使叫 `redis`（与 crates.io 同名）仍按路径归 Adapter。
     #[test]
     fn classify_adapter_immune_to_name() {
-        assert_eq!(classify("redis", "adapters/redis"), Some(Layer::Adapter));
+        assert_eq!(
+            classify("redis-adapter", "adapters/redis"),
+            Some(Layer::Adapter)
+        );
     }
 
     /// intra-base DAG 前向边放行 / 反向·同 crate·非基础禁（INVARIANT: BASE-INTRADAG-01 anti-vacuity）。

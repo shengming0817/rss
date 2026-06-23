@@ -44,6 +44,7 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 | workspace 组织 | （根 workspace） | `oxidecomputer/omicron`（`Cargo.toml`）· `risingwavelabs/risingwave`（`Cargo.toml`） | `zed-industries/zed`（`Cargo.toml`） |
 | 错误模型 | `vocab` | `dtolnay/thiserror`（`src/lib.rs`，库错误枚举） | `shepmaster/snafu`（`src/lib.rs`，带 context，TiKV / GreptimeDB 在用） |
 | xtask / 内部 codegen + lint 范本 | `xtask` | `rust-lang/rust-analyzer`（`xtask/src/main.rs`） | `matklad/cargo-xtask`（`README.md`，约定 spec） |
+| redis adapter — 幂等 claimer / kv 去重（`IdempotencyStore` provider）+ 连接池 `ManagedResource` | `adapters/redis` | `redis-rs/redis-rs`（`redis/src/cmd.rs` — `cmd("SET").arg(..).arg("NX").arg("EX") + query_async`）· `deadpool-rs/deadpool`（`deadpool-redis/src/lib.rs` — `Pool`/`Config`/`Runtime`；`Pool::close` ⇒ `ManagedResource::shutdown`） | — |
 
 ## Rust 标准库参考
 

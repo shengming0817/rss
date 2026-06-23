@@ -114,6 +114,9 @@ tonic = "0.13"
 prost = "0.13"
 # 持久化（postgres adapter，#1116）
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
+# redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml openssl ban 一致）；
+# re-export redis cmd API + passthrough TLS feature。明文 redis:// / TLS rediss:// 由 URL scheme 决定。
+deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
 # AMQP broker I/O（adapters/amqp，仅 `integration` feature 编译）。default-features=false 关 TLS：
 # lapin 的 rustls/native-tls 后端会拉 aws-lc-sys(OpenSSL 派生 license) / ring(license-file)，二者均不在
 # deny.toml license allow-list（cargo-deny 连 optional 树也校验）⇒ 本 PR 仅明文 `amqp://`（local broker

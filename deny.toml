@@ -6,8 +6,9 @@
 #   Medium `cargo xtask layer-deps`（source-centric，接入 verify）：读各成员 Cargo.toml [dependencies]，
 #     按 §分层 矩阵全覆盖（含本 wrappers 表达不了的「无 back-path 基础/引擎→上层」反向边），
 #     并守本文件 wrappers ⟷ 源分类一致性（LAYER-DEPS-06）。免疫裸名×crates.io 命名冲突。
-#   下列 wrappers 暂留作 defense-in-depth；adapter 接外部后端（裸名与 crates.io 冲突生效）时迁出，
-#     分层全权交 layer-deps（issue #1022「重构」种子，gate 在彼时）。
+#   下列 wrappers 是分层 defense-in-depth（与 layer-deps 并存）。adapter package 名须与其依赖的同名
+#     crates.io crate **不同**（如 redis adapter 的 package = `redis-adapter`，`[lib] name = "redis"` 保留裸导入），
+#     否则 bare-name ban 会误伤传递引入的同名外部 crate。详见 architecture.md §扁平 workspace 结构 命名约定。
 [graph]
 all-features = true
 
@@ -29,6 +30,10 @@ allow = [
   # webpki-roots（sqlx tls-rustls 传递引入）打包 Mozilla 根 CA 集，以 CDLA-Permissive-2.0（Community
   # Data License Agreement，宽松数据许可）授权该 CA 数据。仅此依赖使用，#1116 postgres adapter 激活。
   "CDLA-Permissive-2.0",
+  # Boost Software License 1.0（OSI 批准 + FSF Free/Libre，宽松无 copyleft、二进制无需署名）。
+  # `xxhash-rust`（redis-rs 1.x 传递依赖，BSL-1.0 单授权，无 Apache/MIT 备选）经 deadpool-redis 引入，
+  # #1009 redis adapter 激活。`ryu`/`whoami` 等同名 BSL 条目均 dual-license 走 Apache，不依赖本条。
+  "BSL-1.0",
 ]
 # 本仓成员均 publish = false，跳过其 license 校验（license 校验只针对外部依赖）。
 private = { ignore = true }
@@ -68,11 +73,11 @@ deny = [
   { crate = "audit", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "contractreg", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "syshealth", wrappers = ["server", "rss", "xtask", "journeys"] },
-  # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。
-  # 注意：裸后端名与 crates.io 同名 crate 冲突——本骨架空壳无外部依赖故安全；
-  # adapter 接线外部后端后须迁到 xtask source-centric lint（见 PR OOS：裸名×cargo-deny 命名冲突）。
+  # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。ban 按 **package 名** 匹配——
+  # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`，
+  # 见 adapters/redis/Cargo.toml），避免误伤传递引入的 `redis@1.x`。
   { crate = "postgres", wrappers = ["server", "rss", "xtask", "journeys"] },
-  { crate = "redis", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "redis-adapter", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "amqp", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "mqtt", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "s3", wrappers = ["server", "rss", "xtask", "journeys"] },

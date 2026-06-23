@@ -20,8 +20,10 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 - 域 crate 内的 **feature 模块**(`pub(crate)` 封装)承载更细的边界,不是独立 crate。
 - crate 名一律 **concat 无 dash、不加 `rss-` 前缀**——路径已表达分层与归属,产品名 `rss` 只保留在 `bins/rss` 一处。
   仅当扁平 `crates/` 与外部依赖 crate 真重名又缺路径语境时才加限定:`httpserve`(避开 `http`)、`authn`(避开 `auth`)、
-  `settings`(避开 `config`);`adapters/` 下用裸后端名,与自身依赖同名的(`redis`/`prometheus`)在 `Cargo.toml` 用
-  `package = "..."` 重命名外部依赖,不污染 crate 名。
+  `settings`(避开 `config`);`adapters/` 用裸后端名(目录 `adapters/redis`)。与自身依赖的 crates.io crate 同名的
+  (`redis`/`prometheus`)——尤其经传递依赖引入(如 deadpool-redis 拉 `redis@1.x`,无法 `package=` 重命名传递包)——
+  其 **package 名加 `-adapter` 后缀**(`name = "redis-adapter"`)避免 `cargo -p` 与 package-id 歧义,**`[lib] name` 保留裸名**
+  (`use redis::…` 不污染导入面);deny.toml ban 按 package 名(`redis-adapter`)照常守,无需 source-centric 豁免。
 
 ## 核心载体
 
@@ -149,7 +151,7 @@ rss/
 | contracts 跨边界单源 + 扇出闭环 | `xtask` 校验器 | Medium(CI 门) |
 | L0–L4 一致性声明 + governance(拓扑/引用完整性/格式) | `xtask` | Medium(CI 门) |
 | wire contract 版本目录(轴 B) | `xtask` | Medium(CI 门) |
-| 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml [dependencies] 按 §分层 矩阵校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..06) | Medium(CI 门) |
+| 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml [dependencies] 按 §分层 矩阵校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..07) | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 
