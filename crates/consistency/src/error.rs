@@ -19,7 +19,11 @@ pub enum EngineErrorKind {
 impl EngineErrorKind {
     /// 稳定 message（`&'static str` const literal；无 runtime 数据）。
     pub fn message(self) -> &'static str {
-        todo!()
+        match self {
+            EngineErrorKind::Transient => "transient engine error",
+            EngineErrorKind::Permanent => "permanent engine error",
+            EngineErrorKind::Invariant => "engine invariant violated",
+        }
     }
 }
 
@@ -35,22 +39,97 @@ pub struct EngineError {
 
 impl EngineError {
     /// 由 kind 构造（无 runtime 数据）。
-    pub fn new(_kind: EngineErrorKind) -> Self {
-        todo!()
+    pub fn new(kind: EngineErrorKind) -> Self {
+        Self { kind }
     }
 
     /// 错误种类。
     pub fn kind(&self) -> EngineErrorKind {
-        todo!()
+        self.kind
     }
 
     /// 是否可重试（`Transient`）。Loop / relay 据此决定退避重试 vs 放行下一步。
     pub fn is_transient(&self) -> bool {
-        todo!()
+        self.kind == EngineErrorKind::Transient
     }
 
     /// 是否永久失败（`Permanent`）。仅分类，不自动把重试改放弃（reconcile.md）。
     pub fn is_permanent(&self) -> bool {
-        todo!()
+        self.kind == EngineErrorKind::Permanent
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EngineError, EngineErrorKind};
+
+    const KINDS: [EngineErrorKind; 3] = [
+        EngineErrorKind::Transient,
+        EngineErrorKind::Permanent,
+        EngineErrorKind::Invariant,
+    ];
+
+    // 三 variant 的稳定 message 为非空 `&'static str` const literal（C10）且互异。
+    #[test]
+    fn engine_error_kind_message_distinct() {
+        let cases: &[(EngineErrorKind, &str)] = &[
+            (EngineErrorKind::Transient, "transient engine error"),
+            (EngineErrorKind::Permanent, "permanent engine error"),
+            (EngineErrorKind::Invariant, "engine invariant violated"),
+        ];
+        for &(kind, expected) in cases {
+            assert_eq!(kind.message(), expected, "kind={kind:?}");
+            assert!(
+                !kind.message().is_empty(),
+                "empty message for kind={kind:?}"
+            );
+        }
+        assert_ne!(
+            EngineErrorKind::Transient.message(),
+            EngineErrorKind::Permanent.message()
+        );
+        assert_ne!(
+            EngineErrorKind::Permanent.message(),
+            EngineErrorKind::Invariant.message()
+        );
+        assert_ne!(
+            EngineErrorKind::Transient.message(),
+            EngineErrorKind::Invariant.message()
+        );
+    }
+
+    // new → kind 往返。
+    #[test]
+    fn engine_error_new_round_trips_kind() {
+        for kind in KINDS {
+            assert_eq!(EngineError::new(kind).kind(), kind, "kind={kind:?}");
+        }
+    }
+
+    // is_transient / is_permanent 真值表（含 Invariant arm，保覆盖）。
+    #[test]
+    fn engine_error_transient_permanent_truth_table() {
+        let cases: &[(EngineErrorKind, bool, bool)] = &[
+            (EngineErrorKind::Transient, true, false),
+            (EngineErrorKind::Permanent, false, true),
+            (EngineErrorKind::Invariant, false, false),
+        ];
+        for &(kind, transient, permanent) in cases {
+            let e = EngineError::new(kind);
+            assert_eq!(e.is_transient(), transient, "is_transient kind={kind:?}");
+            assert_eq!(e.is_permanent(), permanent, "is_permanent kind={kind:?}");
+        }
+    }
+
+    // Display 输出 == kind.message()（不拼 runtime 数据，避免 PII）。
+    #[test]
+    fn engine_error_display_equals_kind_message() {
+        for kind in KINDS {
+            assert_eq!(
+                EngineError::new(kind).to_string(),
+                kind.message(),
+                "kind={kind:?}"
+            );
+        }
     }
 }

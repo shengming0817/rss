@@ -22,13 +22,16 @@ pub enum IdemKeyError {
 
 impl IdemKey {
     /// 解析稳定幂等 key；拒绝空 key（fail-closed）。
-    pub fn parse(_raw: &str) -> Result<Self, IdemKeyError> {
-        todo!()
+    pub fn parse(raw: &str) -> Result<Self, IdemKeyError> {
+        if raw.is_empty() {
+            return Err(IdemKeyError::Empty);
+        }
+        Ok(Self(raw.to_string()))
     }
 
     /// 借出底层字符串视图。
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -51,4 +54,44 @@ pub enum SeenState {
 pub trait IdempotencyStore {
     /// 标记并查询 key 是否首见（claim-or-skip）。`Fresh` ⇒ 执行；`Duplicate` ⇒ 幂等短路。
     async fn check(&self, key: &IdemKey) -> Result<SeenState, crate::error::EngineError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IdemKey, IdemKeyError};
+
+    // 任意非空 key 接受（opaque，不限字符集、不 trim）；as_str 往返。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    fn idem_key_parse_accepts_non_empty_and_round_trips() {
+        let cases: &[&str] = &[
+            "a",
+            "some-key-123",
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "session.created:tenant-42:evt-1",
+        ];
+        for &raw in cases {
+            assert!(IdemKey::parse(raw).is_ok(), "expected Ok for raw={raw:?}");
+            let key = IdemKey::parse(raw).unwrap();
+            assert_eq!(key.as_str(), raw, "raw={raw:?}");
+        }
+    }
+
+    // 空 key fail-closed → Empty（重放时 key 漂移退化成新消费者，故拒空）。
+    #[test]
+    fn idem_key_parse_rejects_empty() {
+        assert!(matches!(IdemKey::parse(""), Err(IdemKeyError::Empty)));
+    }
+
+    // 纯空白是合法 opaque key（只拒空、不 trim——caller 负责构造稳定 key，漂移在边界即暴露而非被掩盖）。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    fn idem_key_parse_accepts_whitespace_only_opaque() {
+        for &raw in &[" ", "\t", "  x  "] {
+            assert!(IdemKey::parse(raw).is_ok(), "expected Ok for raw={raw:?}");
+            assert_eq!(IdemKey::parse(raw).unwrap().as_str(), raw, "raw={raw:?}");
+        }
+    }
 }
