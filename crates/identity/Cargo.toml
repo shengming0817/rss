@@ -8,6 +8,11 @@ publish = false
 [lints]
 workspace = true
 
+# 明文种子登录（with_seed_user + in-mem user repo）仅追踪弹 / demo 用——经 feature 门控做编译期边界：
+# 生产组合根不启用即不编译，防 W 误用明文凭据路径（RW-G1 PR #186 F1，machine boundary）。
+[features]
+seed-login = []
+
 [dependencies]
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
@@ -25,3 +30,14 @@ distributed = { path = "../distributed" }
 deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
 thiserror = { workspace = true }
+# 登录服务：注入 diport::Publisher（发 session-created outbox fact）+ Clock（会话到期）。
+diport = { path = "../diport" }
+# session-created event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
+serde_json = { workspace = true }
+# 登录路径结构化 span（不记 password；observability.md §日志）。
+tracing = { workspace = true }
+
+[dev-dependencies]
+# 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate，
+# rust-standards.md §命名）。
+tokio = { workspace = true }

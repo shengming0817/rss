@@ -16,6 +16,6 @@ pub mod module;
 pub mod registry;
 pub mod shutdown;
 
-pub use domain::{Domain, KernelError};
+pub use domain::{Domain, KernelError, compose};
 pub use module::{DomainModule, ModuleFactory};
-pub use registry::{HealthProbe, Registry, SubscriberHandler};
+pub use registry::{HealthProbe, Registry, SubscriberHandler, SubscriberHandlerError};

@@ -104,12 +104,51 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
             .add_root_schema(root)
             .map_err(|e| anyhow::anyhow!("typify 派生 {}: {e}", path.display()))?;
     }
-    let parsed = syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
+    let mut parsed =
+        syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
+    strip_sensitive_debug(&mut parsed);
     Ok(format!(
         "{}{}",
         generated_header(&source),
         prettyplease::unparse(&parsed)
     ))
+}
+
+/// 含凭据级字段（password/secret/token/credential）的 generated struct 去掉 `Debug` derive——
+/// 杜绝 `{:?}` 泄露凭据进日志（PR #186 F2）。sensitive-field redaction 单源在 codegen（不手改 committed
+/// generated）；去 Debug 后该类型从类型层**不可** Debug-format（Hard），输出由 golden 锁。
+/// `INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`。
+fn strip_sensitive_debug(file: &mut syn::File) {
+    const SENSITIVE: &[&str] = &["password", "passwd", "secret", "token", "credential"];
+    for item in &mut file.items {
+        let syn::Item::Struct(s) = item else {
+            continue;
+        };
+        let has_sensitive = s.fields.iter().any(|f| {
+            f.ident.as_ref().is_some_and(|id| {
+                let name = id.to_string().to_ascii_lowercase();
+                SENSITIVE.iter().any(|kw| name.contains(kw))
+            })
+        });
+        if !has_sensitive {
+            continue;
+        }
+        for attr in &mut s.attrs {
+            if !attr.path().is_ident("derive") {
+                continue;
+            }
+            let Ok(paths) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            ) else {
+                continue;
+            };
+            let kept: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> = paths
+                .into_iter()
+                .filter(|p| p.segments.last().is_none_or(|seg| seg.ident != "Debug"))
+                .collect();
+            attr.meta = syn::parse_quote!(derive(#kept));
+        }
+    }
 }
 
 /// 校验 schema 文件名为纯文件名（无路径分量）。防逃逸单源见 `crate::pathsafe`。

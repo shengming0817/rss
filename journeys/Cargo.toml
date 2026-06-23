@@ -1,0 +1,33 @@
+[package]
+name = "journeys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# journeys — 验收 journey 组合根（组合根层，可依赖所有库 crate）。
+# RW-G1 追踪弹的端到端 journey 在 tests/ 内组装 in-mem topology（identity + audit + memory 经
+# bootstrap/eventexec 接线）；lib 暂为 demo 占位，故被组装 crate 全部为 dev-dependencies。
+[dependencies]
+
+# journey 集成测试组装根：组合根可依赖所有库 crate（deny.toml wrappers 已含 journeys）。
+[dev-dependencies]
+# seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
+identity = { path = "../crates/identity", features = ["seed-login"] }
+audit = { path = "../crates/audit" }
+bootstrap = { path = "../crates/bootstrap" }
+eventexec = { path = "../crates/eventexec" }
+diport = { path = "../crates/diport" }
+primitives = { path = "../crates/primitives" }
+generated = { path = "../generated" }
+memory = { path = "../adapters/memory" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+# 组合根边界错误聚合（error-handling.md：应用边界可 anyhow）。
+anyhow = { workspace = true }
+# adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。
+tracing = { workspace = true }

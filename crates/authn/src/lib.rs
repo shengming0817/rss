@@ -179,19 +179,20 @@ impl RefreshToken {
 }
 
 /// 会话 ID newtype（私有内容；不 derive `Serialize`）。
-// reason: 同 Jwt（ADR-004 C8 签名冻结期）。
-#[allow(dead_code)]
 pub struct SessionId(String);
 
 impl SessionId {
-    /// 生成新会话 ID（实现时使用 `ids` / `secure` crate 生成随机值）。
+    /// 生成新会话 ID（UUID v4 随机值）。
+    ///
+    /// 不取系统时钟（满足 clippy clock 纪律）；RW-G1 追踪弹经此 mint 登录会话 id。
+    /// 完整会话生命周期（`Session` / `Principal` 聚合经已校验 JWT / token 派生）留 W。
     pub fn generate() -> Self {
-        todo!()
+        Self(uuid::Uuid::new_v4().to_string())
     }
 
     /// 取 ID 字符串引用。
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -322,5 +323,24 @@ mod smoke {
         let _: fn(String) -> AccessToken = AccessToken::new;
         let _: fn(String) -> RefreshToken = RefreshToken::new;
         let _: fn(SessionId, Principal, std::time::SystemTime) -> Session = Session::new;
+    }
+}
+
+#[cfg(test)]
+mod session_id {
+    //! `SessionId::generate`（RW-G1 已写实）：UUID v4，唯一 + 非空。
+    use super::SessionId;
+
+    #[test]
+    fn generate_is_unique_and_canonical_uuid() {
+        let a = SessionId::generate();
+        let b = SessionId::generate();
+        assert!(!a.as_str().is_empty());
+        assert_ne!(a.as_str(), b.as_str());
+        // 锁定格式契约：session id 是 canonical UUID（贯穿到 audit resource_id，不可退化为递增整数）。
+        assert!(
+            uuid::Uuid::parse_str(a.as_str()).is_ok(),
+            "session id must be a parseable uuid"
+        );
     }
 }

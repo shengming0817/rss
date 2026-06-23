@@ -17,3 +17,5 @@ runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 thiserror = { workspace = true }
+# SessionId::generate —— UUID v4 随机会话 id（RW-G1）。
+uuid = { workspace = true, features = ["v4"] }

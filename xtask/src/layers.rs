@@ -4,7 +4,7 @@
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain）；
-//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `journeys` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -33,6 +33,18 @@ pub(crate) const SERVICE_CRATES: &[&str] = &[
 pub(crate) const DOMAIN_CRATES: &[&str] =
     &["identity", "settings", "audit", "contractreg", "syshealth"];
 
+/// dev/test-only adapter（demo / in-mem provider）：**禁生产 bin 依赖**，只准 test/tooling 组合根
+/// （[`DEV_ADAPTER_ROOTS`]）依赖。普通 adapter 须被全部组合根 wrapper 覆盖（LAYER-DEPS-06）；dev adapter
+/// 例外——正向只要求 [`DEV_ADAPTER_ROOTS`]、且 wrapper **不得**含生产 bin（`INVARIANT: LAYER-DEPS-07`）。
+pub(crate) const DEV_ADAPTERS: &[&str] = &["memory"];
+/// 允许消费 dev/test adapter 的组合根（验收 journey + tooling，排除 `server`/`rss` 生产 bin）。
+pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["journeys", "xtask"];
+
+/// 该 adapter 是否 dev/test-only（demo provider）。
+pub(crate) fn is_dev_adapter(name: &str) -> bool {
+    DEV_ADAPTERS.contains(&name)
+}
+
 /// workspace 成员所属分层。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Layer {
@@ -44,7 +56,7 @@ pub(crate) enum Layer {
     Domain,
     Adapter,
     Generated,
-    /// 组合根（bins / xtask / assemblies）：可依赖所有库 crate。
+    /// 组合根（bins / xtask / assemblies / journeys）：可依赖所有库 crate。
     Root,
 }
 
@@ -58,6 +70,8 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if member_path == "xtask"
         || member_path.starts_with("bins/")
         || member_path.starts_with("assemblies/")
+        || member_path == "journeys"
+        || member_path.starts_with("journeys/")
     {
         return Some(Layer::Root);
     }
@@ -143,6 +157,8 @@ mod tests {
     #[case("server", "bins/server", Some(Layer::Root))]
     #[case("rss", "bins/rss", Some(Layer::Root))]
     #[case("xtask", "xtask", Some(Layer::Root))]
+    #[case("journeys", "journeys", Some(Layer::Root))]
+    #[case("memory", "adapters/memory", Some(Layer::Adapter))]
     fn classify_maps_known_members(
         #[case] name: &str,
         #[case] path: &str,

@@ -42,10 +42,14 @@ members = [
   "adapters/vault",
   "adapters/softca",
   "adapters/ratelimit",
+  # in-mem DI port provider（RW-G1 追踪弹验接缝；测试 / demo 注入用，被 journeys 组合根消费）
+  "adapters/memory",
   # 组合根（可依赖所有库 crate）
   "bins/server",
   "bins/rss",
   "xtask",
+  # 验收 journey 组合根（demo 组装根 + 端到端集成测试；RW-G1 追踪弹）
+  "journeys",
   # 契约派生（committed，被域依赖）
   "generated",
 ]

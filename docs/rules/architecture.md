@@ -72,13 +72,14 @@ rss/
 ├── adapters/             # 一 adapter 一 crate + feature 门控；裸后端名（adapters/ 路径消歧）
 │   ├── postgres/ redis/ amqp/ mqtt/ s3/
 │   ├── oidc/ grpc/ otel/ prometheus/ vault/
-│   └── softca/ ratelimit/
+│   ├── softca/ ratelimit/
+│   └── memory/           # in-mem DI port provider（测试 / demo 注入；被 journeys 组合根消费）
 ├── bins/
 │   ├── server/           # 部署二进制
 │   └── rss/              # 薄 cli：只放 xtask/cargo 干不了的运行时命令（产品/二进制名仅此处保留）
 ├── contracts/            # ★ 跨边界单源：{kind}/{domain}/{version}/contract.toml + *.schema.json（typify 消费）
 ├── assemblies/           # ★ 物理打包（assembly.toml）
-├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml
+├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml；亦承载验收 journey 组合根 crate（demo 组装根 + 集成测试，RW-G1）
 ├── fixtures/             # ★ 测试夹具（fixture-*.toml）
 ├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
 ├── xtask/                # codegen + golden + 契约/一致性治理校验
@@ -97,8 +98,8 @@ rss/
 - **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。
-- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。
-- **bins/**、**xtask/**、**assemblies/**:组合根,可依赖所有库 crate。
+- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
+- **bins/**、**xtask/**、**assemblies/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试)。
 - **generated/**:contract 派生,被域依赖。
 - 强制:cargo 拒绝循环依赖(分层无环天然成立);`cargo-deny`(deny.toml) 表达禁依赖;`cargo-udeps` 抓多余/未声明;
   `cargo public-api` 守封装面。

@@ -51,31 +51,36 @@ deny = [
   { crate = "trait-variant", wrappers = ["diport"] },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖。
   # 覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
-  # ⚠ INVARIANT(LAYER-WRAP-01)：新增任何组合根 crate（assembly/bin）须同步加入下列每条 wrappers，
+  # ⚠ INVARIANT(LAYER-WRAP-01)：新增任何组合根 crate（assembly/bin/journeys）须同步加入下列每条 wrappers，
   #   否则其对域/adapter/generated 的合法依赖会被 deny 误拦。此一致性的持久守卫 = `cargo xtask layer-deps`
   #   的 LAYER-DEPS-06（wrappers ⟷ 源分类交叉核对，接入 verify CI 门；issue #1022 落地）。
-  { crate = "identity", wrappers = ["server", "rss", "xtask"] },
-  { crate = "settings", wrappers = ["server", "rss", "xtask"] },
-  { crate = "audit", wrappers = ["server", "rss", "xtask"] },
-  { crate = "contractreg", wrappers = ["server", "rss", "xtask"] },
-  { crate = "syshealth", wrappers = ["server", "rss", "xtask"] },
+  #   `journeys` 是验收 journey 组合根（RW-G1，#999）——故出现在每条域/adapter/generated wrappers。
+  { crate = "identity", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "settings", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "audit", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "contractreg", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "syshealth", wrappers = ["server", "rss", "xtask", "journeys"] },
   # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。
   # 注意：裸后端名与 crates.io 同名 crate 冲突——本骨架空壳无外部依赖故安全；
   # adapter 接线外部后端后须迁到 xtask source-centric lint（见 PR OOS：裸名×cargo-deny 命名冲突）。
-  { crate = "postgres", wrappers = ["server", "rss", "xtask"] },
-  { crate = "redis", wrappers = ["server", "rss", "xtask"] },
-  { crate = "amqp", wrappers = ["server", "rss", "xtask"] },
-  { crate = "mqtt", wrappers = ["server", "rss", "xtask"] },
-  { crate = "s3", wrappers = ["server", "rss", "xtask"] },
-  { crate = "oidc", wrappers = ["server", "rss", "xtask"] },
-  { crate = "grpc", wrappers = ["server", "rss", "xtask"] },
-  { crate = "otel", wrappers = ["server", "rss", "xtask"] },
-  { crate = "prometheus", wrappers = ["server", "rss", "xtask"] },
-  { crate = "vault", wrappers = ["server", "rss", "xtask"] },
-  { crate = "softca", wrappers = ["server", "rss", "xtask"] },
-  { crate = "ratelimit", wrappers = ["server", "rss", "xtask"] },
+  { crate = "postgres", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "redis", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "amqp", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "mqtt", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "s3", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "oidc", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "grpc", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "otel", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "prometheus", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "vault", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "softca", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "ratelimit", wrappers = ["server", "rss", "xtask", "journeys"] },
+  # in-mem DI port provider adapter（RW-G1 追踪弹）：dev/test-only——**禁生产 bin（server/rss）依赖**，
+  # 只准验收 journey + tooling（DEV_ADAPTER_ROOTS）依赖。机器边界 = xtask layers.rs DEV_ADAPTERS +
+  # layer-deps LAYER-DEPS-07（正向收窄 required + 反向排除生产 bin）。wrapper 须恰为 dev 组合根。
+  { crate = "memory", wrappers = ["journeys", "xtask"] },
   # generated（contract 派生 wire 类型）只能被域 crate + 组合根依赖（防服务/引擎/基础层误依赖）。
-  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "server", "rss", "xtask"] },
+  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "server", "rss", "xtask", "journeys"] },
 ]
 
 # 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml

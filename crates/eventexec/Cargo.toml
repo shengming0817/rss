@@ -15,3 +15,9 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 # 注：tokio-util（CancellationToken）随 EventSubscriber 迁 diport 后本 crate 不再使用，已移除。
 uuid = { workspace = true, features = ["v4"] }
+# run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，observability.md §日志）。
+tracing = { workspace = true }
+
+[dev-dependencies]
+# run_dispatch 异步单测 runtime（RW-G1 分发驱动）。
+tokio = { workspace = true }

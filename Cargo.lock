@@ -57,8 +57,10 @@ dependencies = [
  "bootstrap",
  "consistency",
  "deviceloop",
+ "diport",
  "distributed",
  "eventexec",
+ "futures",
  "generated",
  "httpserve",
  "ids",
@@ -66,8 +68,11 @@ dependencies = [
  "primitives",
  "runctx",
  "secure",
+ "serde_json",
  "support",
  "thiserror",
+ "tokio",
+ "tracing",
  "uuid",
  "vocab",
 ]
@@ -83,6 +88,7 @@ dependencies = [
  "secure",
  "support",
  "thiserror",
+ "uuid",
  "vocab",
 ]
 
@@ -151,6 +157,7 @@ dependencies = [
  "axum",
  "consistency",
  "diport",
+ "futures",
  "ids",
  "primitives",
  "runctx",
@@ -304,6 +311,8 @@ dependencies = [
  "diport",
  "futures",
  "thiserror",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -589,6 +598,7 @@ dependencies = [
  "bootstrap",
  "consistency",
  "deviceloop",
+ "diport",
  "distributed",
  "eventexec",
  "generated",
@@ -598,8 +608,11 @@ dependencies = [
  "primitives",
  "runctx",
  "secure",
+ "serde_json",
  "support",
  "thiserror",
+ "tokio",
+ "tracing",
  "vocab",
 ]
 
@@ -626,6 +639,25 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "journeys"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "audit",
+ "bootstrap",
+ "diport",
+ "eventexec",
+ "futures",
+ "generated",
+ "identity",
+ "memory",
+ "primitives",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "js-sys"
@@ -661,6 +693,17 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "memory"
+version = "0.0.0"
+dependencies = [
+ "diport",
+ "futures",
+ "tokio",
+ "tokio-util",
+ "vocab",
+]
 
 [[package]]
 name = "mime"

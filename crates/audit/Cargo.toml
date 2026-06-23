@@ -26,3 +26,15 @@ deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+# session-created 订阅 handler：消费 diport::Message → diport::AuditEvent → diport::AuditSink。
+diport = { path = "../diport" }
+# handle 返回 BoxFuture（bootstrap::SubscriberHandler 同范式，手写 box）。
+futures = { workspace = true }
+# 解码 session-created event payload（generated 派生类型）。
+serde_json = { workspace = true }
+# 审计 handler 失败路径（decode / tenant / sink）结构化日志——审计管道失败不可静默（observability.md §日志）。
+tracing = { workspace = true }
+
+[dev-dependencies]
+# 订阅 handler 异步单测 runtime。AuditSink 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
+tokio = { workspace = true }

@@ -11,14 +11,20 @@
 //! 偏离：Merkle 树 → 线性哈希链；hex String → `EntryHash([u8;32])` newtype；
 //!        rekor 字段全 pub → RSS 私有字段 + funnel。
 //!
-//! # 签名冻结（ADR-004 C8 豁免覆盖率）
+//! # 实现状态（部分写实）
 //!
-//! 本 crate 当前只冻结签名（函数体 = `todo!()`）；smoke test 只绑函数指针 / 构造 Copy enum，
-//! 不执行任何 `todo!()` body。
+//! `domain`（审计哈希链值类型与纯逻辑）仍**签名冻结**（函数体 = `todo!()`，smoke 只绑函数指针）；
+//! `application`（session-created 订阅 handler + [`AuditDomain`]）**RW-G1 已写实**——消费跨域事件落审计。
+//! 域哈希链 + 域内持久化留 W。`application` 模块私有，只 re-export facade（handler 内部用，不外泄）。
 
 #![forbid(unsafe_code)]
 
+/// 应用层：session-created 订阅 handler + bootstrap 生命周期（RW-G1 追踪弹）。私有——只经 facade
+/// re-export 暴露，handler 类型内部用不外泄（domain-patterns.md §封装）。
+mod application;
 pub(crate) mod domain;
+
+pub use application::AuditDomain;
 
 // ---------------------------------------------------------------------------
 // smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）

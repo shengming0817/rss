@@ -195,6 +195,51 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &str)] =
 /// ② wrappers 中每个消费者须是 `layers::allows` 允许依赖被 ban crate 的层（防过宽 wrapper 开洞,
 /// 如把某服务塞进域的 wrappers）。与 `check_layers` 的 AdapterScope/SiblingDomain（source-centric
 /// 实际边）互为两条 Medium 防线，须同绿。
+/// 成员所需的 wrapper 消费者集（正向覆盖）：Domain/Adapter ⊇ 全组合根、Generated ⊇ 全域 + 组合根；
+/// 非这三层返回 `None`（跳过）。dev/test adapter（[`layers::is_dev_adapter`]）正向只要 dev 组合根
+/// （[`layers::DEV_ADAPTER_ROOTS`]，LAYER-DEPS-07）——生产 bin 不在 required。
+fn required_consumers<'a>(
+    layer: Option<Layer>,
+    name: &str,
+    roots: &[&'a str],
+    domains: &[&'a str],
+) -> Option<Vec<&'a str>> {
+    match layer {
+        Some(Layer::Adapter) if layers::is_dev_adapter(name) => Some(
+            roots
+                .iter()
+                .copied()
+                .filter(|r| layers::DEV_ADAPTER_ROOTS.contains(r))
+                .collect(),
+        ),
+        Some(Layer::Domain | Layer::Adapter) => Some(roots.to_vec()),
+        Some(Layer::Generated) => Some(domains.iter().chain(roots).copied().collect()),
+        _ => None,
+    }
+}
+
+/// LAYER-DEPS-07 反向排除：dev/test adapter 的 wrapper 须 ⊆ [`layers::DEV_ADAPTER_ROOTS`]
+/// （禁 server/rss 生产 bin）。非 dev adapter 返回空。
+fn dev_adapter_exclusions(b: &BanEntry, banned: Layer) -> Vec<Finding> {
+    if !(matches!(banned, Layer::Adapter) && layers::is_dev_adapter(&b.crate_name)) {
+        return Vec::new();
+    }
+    b.wrappers
+        .iter()
+        .filter(|w| !layers::DEV_ADAPTER_ROOTS.contains(&w.as_str()))
+        .map(|w| {
+            finding(
+                Rule::WrapperCoverage,
+                b.crate_name.clone(),
+                format!(
+                    "dev/test adapter `{}` 不得被非 dev 组合根 `{w}` 依赖（禁生产 bin，LAYER-DEPS-07）",
+                    b.crate_name
+                ),
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn check_wrappers(members: &[Member], bans: &[BanEntry]) -> Vec<Finding> {
     let layer_of: BTreeMap<&str, Layer> = members
         .iter()
@@ -216,10 +261,8 @@ pub(crate) fn check_wrappers(members: &[Member], bans: &[BanEntry]) -> Vec<Findi
 
     let mut findings = Vec::new();
     for m in members {
-        let required: Vec<&str> = match m.layer {
-            Some(Layer::Domain | Layer::Adapter) => roots.clone(),
-            Some(Layer::Generated) => domains.iter().chain(&roots).copied().collect(),
-            _ => continue,
+        let Some(required) = required_consumers(m.layer, &m.name, &roots, &domains) else {
+            continue;
         };
         match ban_of.get(m.name.as_str()) {
             None => findings.push(finding(
@@ -271,6 +314,8 @@ pub(crate) fn check_wrappers(members: &[Member], bans: &[BanEntry]) -> Vec<Findi
         }
         // 反向②：wrappers 中每个消费者须是矩阵允许依赖被 ban crate 的层。
         let banned = layer_of[b.crate_name.as_str()];
+        // LAYER-DEPS-07：dev/test adapter 禁生产组合根依赖（与正向 required 收窄互为表里）。
+        findings.extend(dev_adapter_exclusions(b, banned));
         for w in &b.wrappers {
             match layer_of.get(w.as_str()) {
                 Some(&wl) if layers::allows(wl, banned) => {}
@@ -852,6 +897,36 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "identity");
+    }
+
+    fn dev_adapter_fixture_members() -> Vec<Member> {
+        vec![
+            m("server", "bins/server", Some(Layer::Root)),
+            m("rss", "bins/rss", Some(Layer::Root)),
+            m("xtask", "xtask", Some(Layer::Root)),
+            m("journeys", "journeys", Some(Layer::Root)),
+            m("memory", "adapters/memory", Some(Layer::Adapter)),
+        ]
+    }
+
+    #[test]
+    fn check_wrappers_dev_adapter_green() {
+        // LAYER-DEPS-07 green：dev adapter `memory` 只被 dev 组合根（journeys/xtask）依赖。
+        let bans = vec![ban("memory", &["journeys", "xtask"])];
+        assert!(check_wrappers(&dev_adapter_fixture_members(), &bans).is_empty());
+    }
+
+    #[test]
+    fn check_wrappers_dev_adapter_red_production_bin() {
+        // LAYER-DEPS-07 red（anti-vacuity）：dev adapter `memory` 的 wrapper 含生产 bin `server` → 红。
+        let bans = vec![ban("memory", &["server", "journeys", "xtask"])];
+        let findings = check_wrappers(&dev_adapter_fixture_members(), &bans);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.subject == "memory" && f.rule == Rule::WrapperCoverage),
+            "生产 bin server 依赖 dev adapter 须被 LAYER-DEPS-07 拦截"
+        );
     }
 
     #[test]

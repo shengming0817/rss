@@ -1,0 +1,14 @@
+# identity session-created event 契约（draft）——RW-G1 追踪弹验接缝用。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 登录成功发布的 outbox fact ⇒ consistencyLevel = OutboxFact（L2）。audit 域订阅消费。
+# draft：追踪弹验接缝；graduate 到 active（active event 须有 subscriber，audit 即是）留 W。
+id = "identity.session-created"
+kind = "event"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"

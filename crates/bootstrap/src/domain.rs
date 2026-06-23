@@ -34,6 +34,19 @@ pub trait Domain: Send + Sync + 'static {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError>;
 }
 
+/// 驱动一组域 crate 的 `init`，聚合声明到单一 [`Registry`]（组合根 composition 入口）。
+///
+/// 对标 uber-go/fx `New`（构造期执行各 module 的 provide/invoke 聚合）。任一域 `init` 返回 `Err`
+/// 即 fail-fast 冒泡——拒绝部分组装。纯声明聚合：不做 I/O、不 spawn（[`Domain::init`] 约束）。
+/// ref: uber-go/fx app.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（New 聚合 module）
+pub fn compose(domains: &[&dyn Domain]) -> Result<Registry, KernelError> {
+    let mut reg = Registry::new();
+    for domain in domains {
+        domain.init(&mut reg)?;
+    }
+    Ok(reg)
+}
+
 /// 组合根 / init 失败语义。
 ///
 /// 本 crate 局部错误类型（对标 kube-rs 把 `Error` 放 `kube-runtime` 而非 `kube-core`）。

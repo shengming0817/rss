@@ -1,0 +1,27 @@
+[package]
+name = "memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# in-mem DI port provider（RW-G1 追踪弹）：impl diport 的 Publisher / Subscriber / AuditSink / Clock，
+# 供 journeys 组合根注入验接缝。runtime-agnostic（futures channel，不绑 tokio runtime）。
+# adapter 只能被组合根依赖（deny.toml wrappers）。
+[dependencies]
+diport = { path = "../../crates/diport" }
+# 事件总线 fan-out + 订阅流：futures channel（receiver 即 Stream）+ take_until 取消。
+# ref: watermill pubsub/gochannel/pubsub.go@master（in-mem pub/sub 缓冲 channel）
+futures = { workspace = true }
+# 订阅取消信号：tokio_util CancellationToken（与 diport::Subscriber::subscribe 签名同源）。
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+# 单测构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
+vocab = { path = "../../crates/vocab" }
+# 异步单测 runtime + StreamExt::next。
+tokio = { workspace = true }
+futures = { workspace = true }

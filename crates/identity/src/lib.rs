@@ -4,10 +4,11 @@
 //! DI port（repo / store）归 `diport`（ADR-003）。
 //! 所有域类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
 //!
-//! # 签名冻结（ADR-004 C8 豁免覆盖率）
+//! # 实现状态（部分写实）
 //!
-//! 本 crate 当前只冻结签名（函数体 = `todo!()`）；smoke test 只绑函数指针 / 构造 Copy enum，
-//! 不执行任何 `todo!()` body。
+//! `domain`（RBAC/ABAC 值类型与纯逻辑）仍**签名冻结**（函数体 = `todo!()`，smoke 只绑函数指针）；
+//! `application`（登录接缝：[`LoginService`] / [`IdentityDomain`]）**RW-G1 已写实**——打通 identity
+//! 登录 → outbox。余下（authz 纯逻辑、真实 JWT/密码哈希）留 W。`application` 模块私有，只 re-export facade。
 //!
 //! # 对标
 //!
@@ -17,7 +18,13 @@
 
 #![forbid(unsafe_code)]
 
+/// 应用层：登录编排 + bootstrap 生命周期（RW-G1 追踪弹）。私有——只经 facade re-export 暴露，
+/// 不外泄 tracer 常量 / 内部实现（domain-patterns.md §序列化边界 / 封装）。
+mod application;
 pub(crate) mod domain;
+mod internal;
+
+pub use application::{IdentityDomain, LoginError, LoginService};
 
 // ---------------------------------------------------------------------------
 // smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）

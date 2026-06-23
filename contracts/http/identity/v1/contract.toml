@@ -1,0 +1,15 @@
+# identity 登录 HTTP 契约（draft）——RW-G1 追踪弹验接缝用。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 登录写本地会话 + 发布 session-created outbox fact ⇒ consistencyLevel = OutboxFact（L2）。
+# draft：服务层闭环验接缝，不逐字节跑 axum serving；graduate 到 active 留 W。
+id = "identity.login"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
