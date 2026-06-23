@@ -8,6 +8,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# 测试支撑：暴露 `test_support::app_ctx` 供下游 crate（如 authn）单测构造 `AppCtx`。
+# 生产构建不启用（消费方仅经 `[dev-dependencies]` 开启）⇒ `PrincipalSlot` 生产不可伪造的保证不变。
+test-support = []
+
 [dependencies]
 # task_local! / LocalKey / TaskLocalFuture 均在 tokio core（rt feature；workspace 已含 rt-multi-thread）。
 # runctx 刻意不依赖 tracing —— 可观测 ID 走 consumer 的 span，控制流值入 RequestCtx，二者在

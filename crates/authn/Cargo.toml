@@ -19,3 +19,13 @@ primitives = { path = "../primitives" }
 thiserror = { workspace = true }
 # SessionId::generate —— UUID v4 随机会话 id（RW-G1）。
 uuid = { workspace = true, features = ["v4"] }
+# JWT / service-token 结构化解码（base64url payload + JSON claims）——不验签（验签延后 verifier DI port）。
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# 表驱动单测（row_visibility / Jwt::parse 等）。
+rstest = { workspace = true }
+# test-support：单测经 runctx::test_support::app_ctx 构造 AppCtx（仅 authn 自测启用，不进生产构建）。
+runctx = { path = "../runctx", features = ["test-support"] }

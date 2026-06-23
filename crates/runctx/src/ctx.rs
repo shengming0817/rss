@@ -72,10 +72,27 @@ pub type AppCtx = RequestCtx<vocab::tenant::TenantId, PrincipalSlot>;
 pub struct PrincipalSlot(String);
 
 impl PrincipalSlot {
-    /// 构造占位 principal（仅测试；非 test 构建无构造路径 ⇒ `AppCtx` 彻底不可在 crate 外伪造）。
-    #[cfg(test)]
+    /// 构造占位 principal（仅测试 / `test-support` feature；生产构建无构造路径 ⇒ `AppCtx`
+    /// 在生产下不可在 crate 外伪造）。`test-support` 仅经下游 `[dev-dependencies]` 开启，
+    /// 不进生产构建，故生产伪造门不变（principal 生产接缝替换仍属 W，见 crate 文档）。
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new(subject: impl Into<String>) -> Self {
         Self(subject.into())
+    }
+}
+
+/// 测试支撑：仅 `test-support` feature 下编译，供下游 crate（如 authn）单测构造 [`AppCtx`]。
+///
+/// 生产构建不启用此 feature（消费方仅经 `[dev-dependencies]` 开启）⇒ `PrincipalSlot` 生产不可
+/// 伪造的保证不变；`AppCtx` 的 principal 生产接缝（`PrincipalSlot` → authn principal facet）替换仍属 W。
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::{AppCtx, PrincipalSlot, RequestCtx};
+    use vocab::tenant::TenantId;
+
+    /// 构造一个绑定 `tenant` 的 [`AppCtx`]，principal 槽填占位 `subject`（仅测试用）。
+    pub fn app_ctx(tenant: TenantId, subject: impl Into<String>) -> AppCtx {
+        RequestCtx::new(tenant, PrincipalSlot::new(subject))
     }
 }
 

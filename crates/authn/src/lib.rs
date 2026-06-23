@@ -3,18 +3,35 @@
 //! 本 crate 承载认证侧的核心值类型与错误枚举；DI port（PDP / session store）归 `diport`（ADR-003）。
 //! 所有类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
 //!
-//! # 签名冻结（ADR-004 C8 豁免覆盖率）
+//! ## 信任边界
 //!
-//! 本 crate 当前只冻结签名（函数体 = `todo!()`）；smoke test 只绑函数指针 / 构造 Copy enum，
-//! 不执行任何 `todo!()` body。
+//! `Jwt::parse` 与 `from_verified_jwt` / `from_verified_service_token` 做结构化解码与 claims 映射，
+//! **不验签、不校验 exp**——签名/MAC/过期校验显式延后给上游 verifier DI port（`diport::Pdp`）。
+//! 调用方须保证入参 token 已经过 verifier 验签后再调用此 funnel。
+//!
+//! ## fail-closed
+//!
+//! `Principal::row_visibility` 的 `Service` / `Anonymous` 分支返回 `Err(runctx::MissingCtx)`，
+//! 强制调用方 deny；字段私有，外部无法绕过 funnel 伪造特权主体。
 
 #![forbid(unsafe_code)]
+
+use base64::Engine;
+use vocab::tenant::{
+    CrossTenantCapability, CrossTenantVisibility, RowVisibility, ScopedTenant, TenantId,
+};
 
 use primitives::authplan::{AuthPlan, AuthRequirement, RouteAuthOptOut, resolve_requirement};
 
 // reason: 确保 authplan 符号被引用，防止 cargo-udeps 误报未使用依赖（ADR-004 C8）。
 #[allow(dead_code)]
 const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requirement;
+
+// kind claim 字符串常量（同义字面量 ≥3 次，抽 const）。
+const KIND_USER: &str = "user";
+const KIND_DEVICE: &str = "device";
+const KIND_ADMIN: &str = "admin";
+const KIND_SUPER_ADMIN: &str = "superAdmin";
 
 // ---------------------------------------------------------------------------
 // 主体类别
@@ -41,35 +58,105 @@ pub enum PrincipalKind {
 }
 
 // ---------------------------------------------------------------------------
+// JWT claims 解码 DTO（私有，不 Serialize）
+// ---------------------------------------------------------------------------
+
+/// JWT payload 解码 DTO（仅内部使用；只 Deserialize，不 Serialize）。
+#[derive(serde::Deserialize)]
+struct Claims {
+    sub: String,
+    #[serde(default)]
+    tenant: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// 共享 JWT payload 解码器（不验签）。
+///
+/// 信任边界：只做结构解析，签名/exp 校验由上游 verifier 负责。
+fn decode_claims(raw: &str) -> Result<Claims, AuthnError> {
+    let parts: Vec<&str> = raw.split('.').collect();
+    if parts.len() != 3 {
+        return Err(AuthnError::TokenInvalid);
+    }
+    let payload_b64 = parts[1];
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| AuthnError::TokenInvalid)?;
+    let claims: Claims = serde_json::from_slice(&bytes).map_err(|_| AuthnError::TokenInvalid)?;
+    if claims.sub.is_empty() {
+        return Err(AuthnError::TokenInvalid);
+    }
+    Ok(claims)
+}
+
+// ---------------------------------------------------------------------------
 // 认证主体
 // ---------------------------------------------------------------------------
 
 /// 认证主体（私有字段；经构造 funnel；不 derive `Serialize`——非 wire 类型）。
 ///
 /// `row_visibility` 从已认证 principal + ctx 派生行级可见域（ADR-002）。
-// reason: 签名冻结期字段已声明但 body 全为 todo!()，dead_code 来自冻结期，非 API 漂移（ADR-004 C8）。
-#[allow(dead_code)]
 pub struct Principal {
     kind: PrincipalKind,
-    /// subject 标识（内部，不入 wire）。
+    /// subject 标识（内部，不入 wire）；供 session store / audit 读取，外部消费待后续 W 接缝落地。
+    // reason: subject 是 Principal 核心标识字段，生产读路径在 session store / audit（W 阶段），
+    // 当前 crate 内暂无消费方；保留 allow 避免误删（ADR-004 C8 遗留期 carve-out）。
+    #[allow(dead_code)]
     subject: String,
     /// 所属租户（`None` 仅限 `Service` / `SuperAdmin` 跨租户场景）。
-    tenant: Option<vocab::TenantId>,
+    tenant: Option<TenantId>,
 }
 
 impl Principal {
-    /// 由已校验 JWT 派生（认证边界唯一入口）。
+    /// 由已校验 JWT 派生 [`Principal`]（认证边界唯一入口）。
     ///
     /// `kind` / `tenant` 从已验证 claims 派生；外部 crate 无法构造特权主体（ADR-001）。
-    pub fn from_verified_jwt(_jwt: &Jwt) -> Result<Self, AuthnError> {
-        todo!()
+    ///
+    /// # ⚠ 信任边界（本函数不验签）
+    ///
+    /// 本函数与 [`Jwt::parse`] **只做结构化解码 + claims 映射，不校验签名 / exp / MAC**。调用方
+    /// **必须**保证入参 `Jwt` 已被上游 verifier（未来 `diport::Pdp`）验签后才调用此 funnel——直接拿
+    /// `Jwt::parse(raw)` 的产物调用 = 零验签认证绕过。当前无生产调用方（httpserve 挂载留 W）。
+    /// 类型层强制（`VerifiedJwt` newtype，仅 Pdp 验签后 mint）待 verifier port 落地，见 issue #1109。
+    pub fn from_verified_jwt(jwt: &Jwt) -> Result<Self, AuthnError> {
+        let claims = &jwt.claims;
+        // 单点决策 kind + 是否需 tenant，避免二级 match-on-PrincipalKind 的不可达 `_` 臂
+        // （新增 PrincipalKind 时须在此加 KIND_* 串臂并定其 tenant 要求，无静默兜底）。
+        let (kind, needs_tenant) = match claims.kind.as_deref() {
+            Some(KIND_USER) => (PrincipalKind::User, true),
+            Some(KIND_DEVICE) => (PrincipalKind::Device, true),
+            Some(KIND_ADMIN) => (PrincipalKind::Admin, true),
+            // 跨租户超管：无 tenant（忽略任何 tenant claim）。
+            Some(KIND_SUPER_ADMIN) => (PrincipalKind::SuperAdmin, false),
+            // service/anonymous 不经 jwt funnel；未知/缺失 kind → TokenInvalid。
+            _ => return Err(AuthnError::TokenInvalid),
+        };
+        // scoped 主体（user/device/admin）的 tenant claim 必填：缺失 / 非 canonical UUID → TokenInvalid。
+        let tenant = if needs_tenant {
+            let raw = claims.tenant.as_deref().ok_or(AuthnError::TokenInvalid)?;
+            Some(TenantId::parse(raw).map_err(|_| AuthnError::TokenInvalid)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            kind,
+            subject: claims.sub.clone(),
+            tenant,
+        })
     }
 
     /// 由已校验 service-token 派生（service caller 入口）。
     ///
+    /// funnel 固定 `kind=Service`，忽略 token 内的 kind/tenant claim。
     /// 仅限服务间内部调用路径；caller 必须持有已校验 `AccessToken`（ADR-001）。
-    pub fn from_verified_service_token(_token: &AccessToken) -> Result<Self, AuthnError> {
-        todo!()
+    pub fn from_verified_service_token(token: &AccessToken) -> Result<Self, AuthnError> {
+        let claims = decode_claims(token.as_str())?;
+        Ok(Self {
+            kind: PrincipalKind::Service,
+            subject: claims.sub,
+            tenant: None,
+        })
     }
 
     /// 测试专用构造（不进生产/wire 路径）。
@@ -77,19 +164,23 @@ impl Principal {
     pub(crate) fn for_test(
         _kind: PrincipalKind,
         _subject: impl Into<String>,
-        _tenant: Option<vocab::TenantId>,
+        _tenant: Option<TenantId>,
     ) -> Self {
-        todo!()
+        Self {
+            kind: _kind,
+            subject: _subject.into(),
+            tenant: _tenant,
+        }
     }
 
     /// 返回主体类别。
     pub fn kind(&self) -> PrincipalKind {
-        todo!()
+        self.kind
     }
 
     /// 返回所属租户（跨租户 principal 为 `None`）。
-    pub fn tenant(&self) -> Option<vocab::TenantId> {
-        todo!()
+    pub fn tenant(&self) -> Option<TenantId> {
+        self.tenant
     }
 
     /// 从 principal + 请求 ctx 派生行级可见性义务（ADR-002）。
@@ -97,11 +188,42 @@ impl Principal {
     /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<vocab::tenant::TenantId, PrincipalSlot>`
     /// 别名，遵循 ADR-002 显式传 `&RequestCtx` 而非隐式线程局部的原则。
     /// ctx 缺失 fail-closed（返回 [`runctx::MissingCtx`]，绝不伪造 RowScope）。
+    ///
+    /// scoped 主体（user/device/admin）的行级隔离以**已认证 ctx tenant** 为准，且 fail-closed 要求
+    /// principal 自带 tenant claim 与 `*ctx.tenant()` **一致**——不一致（如 tenant-A 令牌在 ctx-B 下）
+    /// 返回 `Err`，杜绝越租户派生可见域（tenancy.md §Principal claim source）。
+    ///
+    /// `Service` / `Anonymous` 及未来未知 kind 的 `_` 分支返回 `Err(runctx::MissingCtx)`：
+    /// fail-closed，无可派生行级可见域。`MissingCtx` 是冻结签名唯一 error 通道——消费方须将此 `Err`
+    /// **一律按 deny 处理**，不区分「ctx 真缺失」与「主体不可派生 scope」成因（专用错误变体待签名破冻）。
     pub fn row_visibility(
         &self,
-        _ctx: &runctx::AppCtx,
-    ) -> Result<vocab::RowVisibility, runctx::MissingCtx> {
-        todo!()
+        ctx: &runctx::AppCtx,
+    ) -> Result<RowVisibility, runctx::MissingCtx> {
+        let ctx_tenant = *ctx.tenant();
+        // scoped 主体：principal tenant claim 必须与已认证 ctx tenant 一致，否则 fail-closed
+        // （防 tenant-A 令牌在 ctx-B 下越权派生可见域，codex review F3）。
+        let scoped = |scope: ScopedTenant| match self.tenant {
+            Some(t) if t == ctx_tenant => Ok(RowVisibility::new(scope, ctx_tenant)),
+            _ => Err(runctx::MissingCtx),
+        };
+        match self.kind {
+            PrincipalKind::User => scoped(ScopedTenant::SelfOnly),
+            PrincipalKind::Device => scoped(ScopedTenant::Device),
+            PrincipalKind::Admin => scoped(ScopedTenant::Tenant),
+            PrincipalKind::SuperAdmin => {
+                // INVARIANT: TENANCY-CROSSTENANT-CAP-01 —— authn super-admin 派生是唯一 sanctioned
+                // crosstenant capability 签发点（dylint rss_crosstenant_callsite allowlist=authn 守）。
+                // REQUIREMENT: tenancy.md §RowScope —— 调用方须在 super-admin All-scope 派生「同址」写
+                // 持久 audit ledger（tenant/principal/resource/action/request/correlation）。frozen 同步
+                // 签名无 AuditSink，本 PR 无法在此闭环；强制审计待 W httpserve/audit 接线，见 issue #1110。
+                let cap = CrossTenantCapability::issue_for_verified_super_admin();
+                let marker = CrossTenantVisibility::authorize(cap);
+                Ok(RowVisibility::new_cross_tenant(marker))
+            }
+            // Service / Anonymous 及 #[non_exhaustive] 未来 kind：fail-closed，无可派生行级可见域。
+            _ => Err(runctx::MissingCtx),
+        }
     }
 }
 
@@ -110,9 +232,10 @@ impl Principal {
 // ---------------------------------------------------------------------------
 
 /// JWT 原始令牌（私有字段；不 derive `Serialize`；构造经 fallible funnel）。
-// reason: 签名冻结期 newtype 内容未读，todo!() body 不写读操作（ADR-004 C8）。
-#[allow(dead_code)]
-pub struct Jwt(String);
+pub struct Jwt {
+    raw: String,
+    claims: Claims,
+}
 
 impl std::fmt::Debug for Jwt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -121,20 +244,22 @@ impl std::fmt::Debug for Jwt {
 }
 
 impl Jwt {
-    /// 解析并做基础结构验证（签名验证由 PDP 负责）。
-    pub fn parse(_raw: &str) -> Result<Self, AuthnError> {
-        todo!()
+    /// 解析并做基础结构验证（签名验证由上游 verifier DI port 负责，不验签、不校验 exp）。
+    pub fn parse(raw: &str) -> Result<Self, AuthnError> {
+        let claims = decode_claims(raw)?;
+        Ok(Self {
+            raw: raw.to_string(),
+            claims,
+        })
     }
 
     /// 取令牌字符串引用（只读，不 clone）。
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.raw
     }
 }
 
 /// 访问令牌 newtype（私有内容；构造经 funnel；不 derive `Serialize`）。
-// reason: 同 Jwt（ADR-004 C8 签名冻结期）。
-#[allow(dead_code)]
 pub struct AccessToken(String);
 
 impl std::fmt::Debug for AccessToken {
@@ -145,19 +270,17 @@ impl std::fmt::Debug for AccessToken {
 
 impl AccessToken {
     /// 构造访问令牌（来自认证流程输出，非直接 parse）。
-    pub fn new(_raw: impl Into<String>) -> Self {
-        todo!()
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
     }
 
     /// 取令牌字符串引用。
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
 /// 刷新令牌 newtype（私有内容；不 derive `Serialize`）。
-// reason: 同 Jwt（ADR-004 C8 签名冻结期）。
-#[allow(dead_code)]
 pub struct RefreshToken(String);
 
 impl std::fmt::Debug for RefreshToken {
@@ -168,13 +291,13 @@ impl std::fmt::Debug for RefreshToken {
 
 impl RefreshToken {
     /// 构造刷新令牌。
-    pub fn new(_raw: impl Into<String>) -> Self {
-        todo!()
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
     }
 
     /// 取令牌字符串引用。
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -197,8 +320,6 @@ impl SessionId {
 }
 
 /// 会话快照（私有字段；不 derive `Serialize`；构造经位置参 funnel）。
-// reason: 签名冻结期字段已声明但 body 全为 todo!()（ADR-004 C8）。
-#[allow(dead_code)]
 pub struct Session {
     id: SessionId,
     principal: Principal,
@@ -208,23 +329,27 @@ pub struct Session {
 
 impl Session {
     /// 构造会话（`expires_at` 来自时钟注入，不在此取系统时间）。
-    pub fn new(_id: SessionId, _principal: Principal, _expires_at: std::time::SystemTime) -> Self {
-        todo!()
+    pub fn new(id: SessionId, principal: Principal, expires_at: std::time::SystemTime) -> Self {
+        Self {
+            id,
+            principal,
+            expires_at,
+        }
     }
 
     /// 取会话 ID 引用。
     pub fn id(&self) -> &SessionId {
-        todo!()
+        &self.id
     }
 
     /// 取 principal 引用。
     pub fn principal(&self) -> &Principal {
-        todo!()
+        &self.principal
     }
 
     /// 取到期时间。
     pub fn expires_at(&self) -> std::time::SystemTime {
-        todo!()
+        self.expires_at
     }
 }
 
@@ -236,31 +361,275 @@ impl Session {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AuthnError {
+    /// 结构化解码 / claims 映射失败（坏 base64url / 坏 JSON / 缺 sub / 未知 kind / 坏 tenant）。
     #[error("token is invalid")]
     TokenInvalid,
+    /// 令牌过期。**本 crate 当前不可达**——exp 校验需 `Clock`，由 W verifier DI port（`diport::Pdp`）产生。
     #[error("token is expired")]
     TokenExpired,
+    /// 会话不存在。**本 crate 当前不可达**——由 W session store（`diport` 仓储 port）产生。
     #[error("session not found")]
     SessionNotFound,
+    /// 主体无权。预留给授权失败路径（PDP 决策，W 后续）。
     #[error("principal not permitted")]
     Forbidden,
 }
 
 // ---------------------------------------------------------------------------
-// smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）
+// 行为测试（解冻：真实调用 body；表驱动 rstest，服务档覆盖 ≥80%）
 // ---------------------------------------------------------------------------
 
+/// 测试用合法 canonical 租户（`TenantId::parse` 接受形态）。
 #[cfg(test)]
-mod smoke {
-    //! build smoke：证明签名可被引用消费 + 闭值集 enum 可构造 + Send 约束。
-    //! **不调用** `todo!()` body。
+const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
+/// 测试用 JWT 构造：3 段（header.payload.sig），payload 为给定 JSON；header/sig 为占位（不验签）。
+#[cfg(test)]
+fn test_jwt(payload_json: &str) -> String {
+    use base64::Engine;
+    let eng = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    format!(
+        "{}.{}.{}",
+        eng.encode(br#"{"alg":"none"}"#),
+        eng.encode(payload_json.as_bytes()),
+        eng.encode(b"sig"),
+    )
+}
+
+#[cfg(test)]
+mod row_visibility_tests {
+    //! 核心：`Principal::row_visibility` 身份→行级可见域派生（tenancy.md §Principal claim source）。
+    //! user→self / device→device / admin→tenant / super-admin→all / service·anonymous→fail-closed。
+    use super::{CANON_TENANT, Principal, PrincipalKind};
+    use rstest::rstest;
+    use vocab::tenant::{RowScope, TenantId};
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> TenantId {
+        TenantId::parse(CANON_TENANT).expect("canonical tenant")
+    }
+
+    /// 期望形态：scoped（Ok + 单租户）/ all（Ok + 跨租户无租户）/ fail-closed（Err）。
+    enum Expect {
+        Scoped(RowScope),
+        All,
+        FailClosed,
+    }
+
+    #[rstest]
+    #[case(PrincipalKind::User, Expect::Scoped(RowScope::SelfOnly))]
+    #[case(PrincipalKind::Device, Expect::Scoped(RowScope::Device))]
+    #[case(PrincipalKind::Admin, Expect::Scoped(RowScope::Tenant))]
+    #[case(PrincipalKind::SuperAdmin, Expect::All)]
+    #[case(PrincipalKind::Service, Expect::FailClosed)]
+    #[case(PrincipalKind::Anonymous, Expect::FailClosed)]
+    fn row_visibility_maps_kind_to_scope(
+        #[case] kind: PrincipalKind,
+        #[case] expect: Expect,
+    ) -> Result<(), runctx::MissingCtx> {
+        let tid = tenant();
+        // scoped kind 自带与 ctx 一致的 tenant（row_visibility 校验 self.tenant == ctx.tenant）；特权/匿名为 None。
+        let self_tenant = match kind {
+            PrincipalKind::User | PrincipalKind::Device | PrincipalKind::Admin => Some(tid),
+            _ => None,
+        };
+        let principal = Principal::for_test(kind, "subject-x", self_tenant);
+        let ctx = runctx::test_support::app_ctx(tid, "subject-x");
+
+        match expect {
+            Expect::Scoped(scope) => {
+                let vis = principal.row_visibility(&ctx)?;
+                assert_eq!(vis.scope(), scope, "kind={kind:?}");
+                assert_eq!(vis.tenant(), Some(tid), "kind={kind:?}");
+            }
+            Expect::All => {
+                // super-admin → 跨租户 All，经 authn 唯一 sanctioned crosstenant callsite 派生。
+                let vis = principal.row_visibility(&ctx)?;
+                assert_eq!(vis.scope(), RowScope::All);
+                assert_eq!(vis.tenant(), None);
+            }
+            Expect::FailClosed => {
+                assert!(
+                    principal.row_visibility(&ctx).is_err(),
+                    "kind={kind:?} 必须 fail-closed（无可派生行级可见域）"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn row_visibility_fails_closed_on_tenant_mismatch() {
+        // codex review F3：scoped principal 的 tenant claim 与已认证 ctx tenant 不一致 → fail-closed
+        // （防 tenant-A 令牌在 ctx-B 下越权派生可见域）。
+        let tid_a = tenant();
+        let tid_b = TenantId::parse("11111111-2222-4333-8444-555555555555").expect("tenant b");
+        assert_ne!(tid_a, tid_b);
+        for kind in [
+            PrincipalKind::User,
+            PrincipalKind::Device,
+            PrincipalKind::Admin,
+        ] {
+            let principal = Principal::for_test(kind, "subject-x", Some(tid_a));
+            let ctx = runctx::test_support::app_ctx(tid_b, "subject-x");
+            assert!(
+                principal.row_visibility(&ctx).is_err(),
+                "kind={kind:?} tenant 不一致须 fail-closed"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod jwt_parse_tests {
+    //! `Jwt::parse`：结构化解码（3 段 + base64url payload + JSON + 必填 sub），不验签。
+    use super::{AuthnError, Jwt, test_jwt};
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_accepts_valid_token_and_as_str_round_trips() {
+        let raw = test_jwt(
+            r#"{"sub":"alice","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+        );
+        let parsed = Jwt::parse(&raw).expect("valid token parses");
+        assert_eq!(parsed.as_str(), raw, "as_str 必须回放原始 token");
+    }
+
+    #[test]
+    fn parse_rejects_malformed_structures() {
+        let cases: Vec<String> = vec![
+            "only.two".to_string(),                      // 非 3 段（2 段）
+            "a.b.c.d".to_string(),                       // 非 3 段（4 段）
+            "###.###.###".to_string(),                   // payload 非 base64url
+            test_jwt("not-json"),                        // payload 非 JSON
+            test_jwt(r#"{"tenant":"x","kind":"user"}"#), // 缺 sub
+            test_jwt(r#"{"sub":"","kind":"user"}"#),     // sub 空
+        ];
+        for raw in &cases {
+            assert!(
+                matches!(Jwt::parse(raw), Err(AuthnError::TokenInvalid)),
+                "必须 TokenInvalid: {raw}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod principal_derive_tests {
+    //! `from_verified_jwt`（claims→Principal 映射）+ `from_verified_service_token`（funnel 固定 Service）。
+    //! 信任边界：函数信任入参已被上游 verifier 验签（本轮不做 crypto 验签）。
+    use super::{AccessToken, AuthnError, Jwt, Principal, PrincipalKind, test_jwt};
+    use vocab::tenant::TenantId;
+
+    const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::expect_used)]
+    fn parsed(payload_json: &str) -> Jwt {
+        Jwt::parse(&test_jwt(payload_json)).expect("payload parses")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn maps_scoped_kinds_with_tenant() {
+        let tid = TenantId::parse(CANON).expect("tenant");
+        let cases = [
+            (
+                r#"{"sub":"u","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+                PrincipalKind::User,
+            ),
+            (
+                r#"{"sub":"d","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"device"}"#,
+                PrincipalKind::Device,
+            ),
+            (
+                r#"{"sub":"a","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"admin"}"#,
+                PrincipalKind::Admin,
+            ),
+        ];
+        for (payload, kind) in cases {
+            let p = Principal::from_verified_jwt(&parsed(payload)).expect("derive ok");
+            assert_eq!(p.kind(), kind, "{payload}");
+            assert_eq!(p.tenant(), Some(tid), "{payload}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn maps_super_admin_to_cross_tenant_none() {
+        let p = Principal::from_verified_jwt(&parsed(r#"{"sub":"root","kind":"superAdmin"}"#))
+            .expect("super-admin derive ok");
+        assert_eq!(p.kind(), PrincipalKind::SuperAdmin);
+        assert_eq!(p.tenant(), None, "super-admin 跨租户，tenant 必须 None");
+    }
+
+    #[test]
+    fn rejects_scoped_kind_without_tenant() {
+        for payload in [
+            r#"{"sub":"u","kind":"user"}"#,
+            r#"{"sub":"d","kind":"device"}"#,
+            r#"{"sub":"a","kind":"admin"}"#,
+        ] {
+            assert!(
+                matches!(
+                    Principal::from_verified_jwt(&parsed(payload)),
+                    Err(AuthnError::TokenInvalid)
+                ),
+                "scoped kind 缺 tenant 必须 TokenInvalid: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_kind_wrong_funnel_and_bad_tenant() {
+        for payload in [
+            r#"{"sub":"x","kind":"service"}"#, // service 走 service-token funnel，非 jwt 派生
+            r#"{"sub":"x","kind":"anonymous"}"#, // anonymous 不经 jwt 派生
+            r#"{"sub":"x","kind":"root"}"#,    // 未知 kind
+            r#"{"sub":"x"}"#,                  // 缺 kind
+            r#"{"sub":"u","tenant":"not-a-uuid","kind":"user"}"#, // 坏 tenant
+        ] {
+            assert!(
+                matches!(
+                    Principal::from_verified_jwt(&parsed(payload)),
+                    Err(AuthnError::TokenInvalid)
+                ),
+                "必须 TokenInvalid: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn service_token_funnel_fixes_service_kind_no_tenant() {
+        let token = test_jwt(
+            r#"{"sub":"svc-a","kind":"ignored","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#,
+        );
+        let p = Principal::from_verified_service_token(&AccessToken::new(token))
+            .expect("service derive ok");
+        // funnel 自身确定 kind=Service，忽略 token 的 kind/tenant claim。
+        assert_eq!(p.kind(), PrincipalKind::Service);
+        assert_eq!(p.tenant(), None);
+    }
+
+    #[test]
+    fn service_token_rejects_malformed() {
+        assert!(matches!(
+            Principal::from_verified_service_token(&AccessToken::new("garbage")),
+            Err(AuthnError::TokenInvalid)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod value_type_tests {
+    //! token newtype / `Session` 聚合 / `Principal` 访问器 / Send / Debug 脱敏。
     use super::{
-        AccessToken, AuthnError, Jwt, Principal, PrincipalKind, RefreshToken, Session, SessionId,
+        AccessToken, CANON_TENANT, Principal, PrincipalKind, RefreshToken, Session, SessionId,
     };
-    use vocab::TenantId;
+    use std::time::{Duration, SystemTime};
+    use vocab::tenant::TenantId;
 
-    // 证明 Principal / Session 是 Send（跨 await 点传播）。
     fn _assert_send<T: Send>() {}
 
     #[test]
@@ -270,59 +639,89 @@ mod smoke {
     }
 
     #[test]
-    fn principal_kind_enum_is_constructable_and_exhaustive() {
-        let _kind: PrincipalKind = PrincipalKind::Device;
+    fn tokens_round_trip_and_debug_is_redacted() {
+        let at = AccessToken::new("access-secret");
+        assert_eq!(at.as_str(), "access-secret");
+        assert!(
+            !format!("{at:?}").contains("access-secret"),
+            "AccessToken Debug 不得泄露内容"
+        );
 
-        // 穷尽 match（non_exhaustive crate 内合法穷举）
-        match _kind {
-            PrincipalKind::User => {}
-            PrincipalKind::Device => {}
-            PrincipalKind::Admin => {}
-            PrincipalKind::SuperAdmin => {}
-            PrincipalKind::Service => {}
-            PrincipalKind::Anonymous => {}
+        let rt = RefreshToken::new("refresh-secret");
+        assert_eq!(rt.as_str(), "refresh-secret");
+        assert!(
+            !format!("{rt:?}").contains("refresh-secret"),
+            "RefreshToken Debug 不得泄露内容"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_aggregates_id_principal_and_expiry() {
+        let tid = TenantId::parse(CANON_TENANT).expect("tenant");
+        let principal = Principal::for_test(PrincipalKind::User, "alice", Some(tid));
+        let id = SessionId::generate();
+        let id_str = id.as_str().to_string();
+        let expires_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+
+        let session = Session::new(id, principal, expires_at);
+        assert_eq!(session.id().as_str(), id_str);
+        assert_eq!(session.principal().kind(), PrincipalKind::User);
+        assert_eq!(session.expires_at(), expires_at);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn principal_accessors_reflect_construction() {
+        let tid = TenantId::parse(CANON_TENANT).expect("tenant");
+        let p = Principal::for_test(PrincipalKind::Admin, "bob", Some(tid));
+        assert_eq!(p.kind(), PrincipalKind::Admin);
+        assert_eq!(p.tenant(), Some(tid));
+    }
+}
+
+#[cfg(test)]
+mod enum_exhaustiveness {
+    //! 闭值集完整性 + 错误 Display 非空（crate 内穷举 non_exhaustive）。
+    use super::{AuthnError, PrincipalKind};
+
+    #[test]
+    fn principal_kind_is_exhaustive() {
+        for kind in [
+            PrincipalKind::User,
+            PrincipalKind::Device,
+            PrincipalKind::Admin,
+            PrincipalKind::SuperAdmin,
+            PrincipalKind::Service,
+            PrincipalKind::Anonymous,
+        ] {
+            match kind {
+                PrincipalKind::User
+                | PrincipalKind::Device
+                | PrincipalKind::Admin
+                | PrincipalKind::SuperAdmin
+                | PrincipalKind::Service
+                | PrincipalKind::Anonymous => {}
+            }
         }
     }
 
     #[test]
-    fn authn_error_enum_is_exhaustive() {
-        // 穷尽 match 证明 AuthnError variant 完整（crate 内）
-        let e = AuthnError::TokenInvalid;
-        match e {
-            AuthnError::TokenInvalid => {}
-            AuthnError::TokenExpired => {}
-            AuthnError::SessionNotFound => {}
-            AuthnError::Forbidden => {}
+    fn authn_error_is_exhaustive_and_displays() {
+        for e in [
+            AuthnError::TokenInvalid,
+            AuthnError::TokenExpired,
+            AuthnError::SessionNotFound,
+            AuthnError::Forbidden,
+        ] {
+            assert!(!e.to_string().is_empty(), "错误 message 非空");
+            match e {
+                AuthnError::TokenInvalid
+                | AuthnError::TokenExpired
+                | AuthnError::SessionNotFound
+                | AuthnError::Forbidden => {}
+            }
         }
-    }
-
-    #[test]
-    fn value_type_fn_signatures_are_consumable() {
-        // 绑定函数指针（不调用 → 不触 todo!()）
-        let _parse: fn(&str) -> Result<Jwt, super::AuthnError> = Jwt::parse;
-        let _gen: fn() -> SessionId = SessionId::generate;
-
-        // row_visibility 签名：绑定 fn item（方法指针需指定类型）
-        let _row_vis = Principal::row_visibility;
-        let _ = _row_vis; // 使用绑定，避免 unused 警告
-    }
-
-    #[test]
-    fn constructor_signatures_are_consumable() {
-        // 绑定构造器方法 item（不调用 → 不触 todo!()；编译期锁签名）。
-        // impl Into<String> 参数用 String 实例化，避免 fn 指针生命周期问题。
-
-        // verified funnel — 认证边界入口（ADR-001 F1 收口）
-        let _: fn(&Jwt) -> Result<Principal, super::AuthnError> = Principal::from_verified_jwt;
-        let _: fn(&AccessToken) -> Result<Principal, super::AuthnError> =
-            Principal::from_verified_service_token;
-
-        // 测试专用构造（for_test 仅 cfg(test) 可见）
-        let _: fn(PrincipalKind, String, Option<TenantId>) -> Principal = Principal::for_test;
-
-        let _: fn(String) -> AccessToken = AccessToken::new;
-        let _: fn(String) -> RefreshToken = RefreshToken::new;
-        let _: fn(SessionId, Principal, std::time::SystemTime) -> Session = Session::new;
     }
 }
 

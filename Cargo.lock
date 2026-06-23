@@ -81,11 +81,15 @@ dependencies = [
 name = "authn"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "consistency",
  "ids",
  "primitives",
+ "rstest",
  "runctx",
  "secure",
+ "serde",
+ "serde_json",
  "support",
  "thiserror",
  "uuid",
