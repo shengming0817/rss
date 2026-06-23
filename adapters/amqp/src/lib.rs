@@ -1,47 +1,70 @@
-//! amqp — RSS workspace crate (signature-frozen; RW-G0.2 PR-5). See docs/rules/architecture.md.
+//! amqp — RSS AMQP 事件传输 adapter（lapin）。
 //!
-//! 签名冻结（ADR-004 C7）：sealed-marker 以 **native AFIT** impl diport 已冻 DI port trait，body=`todo!()`。
-//! raw client 字段待 W 阶段接后端时填入（届时保持 `pub(crate)`）；crate 保持 forbid(unsafe_code)（继承 workspace lints，不 invoke dynosaur 宏）。
+//! impl `diport` 已冻 DI port：[`AmqpPublisher`]（`Publisher` + `ManagedResource`）+
+//! [`AmqpSubscriber`]（`Subscriber` + `ManagedResource`）。生产事件主干——relay 经 `Publisher`
+//! 把已持久化 outbox entry 发到跨进程 broker，consumer 经 `Subscriber` 收取。
+//!
+//! # per-domain vhost/credential 隔离
+//!
+//! adapter 从**单个 per-domain AMQP URL**（`amqp://user:pass@host/vhost`）连接——隔离经 broker
+//! 侧的 **vhost + credential**（operator 为每个域 provision 独立 vhost/user），**不**经 exchange/queue
+//! 命名前缀（命名前缀会把域身份泄进 wire 且可绕过）。URL 由组合根经 `bootstrap::eventtransport` 决策
+//! 注入。凭据 non-leak：连接失败日志只经 `secure::redact_url_credentials` / `secure::redact_error`。
+//!
+//! # P6 传输边界（auto-ack）
+//!
+//! [`AmqpSubscriber::subscribe`] 用 `no_ack = true`（auto-ack）：broker 投递即出队，stream 产出无 ack
+//! 义务的 [`diport::Message`]（`Message`/`MessageStream` 类型层不携 acker）。这是 **P6「只做传输」边界**；
+//! 手工 ack / Disposition 驱动 / DLX 由 **P7 ConsumerBase** 接管（届时加 manual-ack subscribe 变体 +
+//! `DeliveryOutcome` seam）。代价：在途消息于崩溃窗口 at-most-once——P6 可接受，P7 兑现 at-least-once。
+//!
+//! # feature 门控
+//!
+//! 真实 lapin broker I/O 在 `integration` feature 下编译；默认 build（无 feature）退化为 sealed-marker
+//! 签名冻结壳（`todo!()` body），保 ADAPTER-PORT-FREEZE-01 默认 `cargo test` / `verify` 绿、不拉
+//! broker 客户端树。本 PR 仅明文 `amqp://`（rustls/native-tls 后端的 crypto provider license 不在
+//! deny.toml allow-list）；生产 AMQPS/TLS = follow-up。
+//!
+//! ref: lapin examples/pubsub.rs@main（connect → create_channel → queue_declare → basic_publish →
+//! basic_consume → Consumer Stream），与 `adapters/memory` 的 `take_until(token)` 流取消范式一致。
 
-use diport::{ManagedResource, PublishRequest, Publisher, PublisherError, ShutdownError};
+#[cfg(feature = "integration")]
+mod conn;
+#[cfg(feature = "integration")]
+mod publisher;
+#[cfg(feature = "integration")]
+mod subscriber;
 
-/// AMQP 事件发布 adapter（sealed-marker）。raw client（broker 连接 / channel）字段待 W 阶段填入，保持 `pub(crate)`。
-/// 同时 impl `Publisher` 与 `ManagedResource`（各有 `shutdown`）；消费经 `DynPublisher`/`Box<DynManagedResource>` 无歧义，直接操作 raw struct 时用 UFCS 消歧。
-pub struct AmqpPublisher;
+#[cfg(not(feature = "integration"))]
+mod fallback;
 
-impl Publisher for AmqpPublisher {
-    async fn publish(&self, _request: PublishRequest) -> Result<(), PublisherError> {
-        todo!()
-    }
+#[cfg(feature = "integration")]
+pub use conn::AmqpConnectError;
+#[cfg(feature = "integration")]
+pub use publisher::AmqpPublisher;
+#[cfg(feature = "integration")]
+pub use subscriber::AmqpSubscriber;
 
-    async fn shutdown(&self) -> Result<(), PublisherError> {
-        todo!()
-    }
-}
-
-impl ManagedResource for AmqpPublisher {
-    fn name(&self) -> &str {
-        todo!()
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        todo!()
-    }
-}
+#[cfg(not(feature = "integration"))]
+pub use fallback::{AmqpPublisher, AmqpSubscriber};
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait
-    //! （PhantomData 绑定检查，不构造、不执行 `todo!()` body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-01 —— sealed-marker impl 冻结的 diport DI port trait；去掉任一 impl 即编译失败（anti-vacuity）。
+    //! build smoke：编译期断言 adapter 已 impl 冻结的 diport DI port（PhantomData 绑定检查，不构造、
+    //! 不执行 body）。两种 build 都过——默认 fallback（`todo!()`）/ `integration` 真实 lapin impl。
+    //! INVARIANT: ADAPTER-PORT-FREEZE-01 —— [`AmqpPublisher`] impl `Publisher`+`ManagedResource`、
+    //! [`AmqpSubscriber`] impl `Subscriber`+`ManagedResource`；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_publisher<T: diport::Publisher>(_: PhantomData<T>) {}
+    fn assert_subscriber<T: diport::Subscriber>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
-        assert_managed_resource(PhantomData::<super::AmqpPublisher>);
         assert_publisher(PhantomData::<super::AmqpPublisher>);
+        assert_managed_resource(PhantomData::<super::AmqpPublisher>);
+        assert_subscriber(PhantomData::<super::AmqpSubscriber>);
+        assert_managed_resource(PhantomData::<super::AmqpSubscriber>);
     }
 }

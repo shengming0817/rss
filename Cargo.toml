@@ -109,6 +109,12 @@ tonic = "0.13"
 prost = "0.13"
 # 持久化（postgres adapter，#1116）
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
+# AMQP broker I/O（adapters/amqp，仅 `integration` feature 编译）。default-features=false 关 TLS：
+# lapin 的 rustls/native-tls 后端会拉 aws-lc-sys(OpenSSL 派生 license) / ring(license-file)，二者均不在
+# deny.toml license allow-list（cargo-deny 连 optional 树也校验）⇒ 本 PR 仅明文 `amqp://`（local broker
+# 集成测试 / per-domain vhost 隔离够用）。default-runtime = tokio executor + reactor。生产 AMQPS/TLS
+# provider license 甄别 = follow-up（见 PR body）。ref: lapin examples/pubsub.rs@main
+lapin = { version = "4", default-features = false, features = ["default-runtime"] }
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
 typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x

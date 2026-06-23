@@ -239,6 +239,7 @@ pub trait secure::redaction::Redactor
 pub fn secure::redaction::Redactor::redact(&self, &str) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_field(&str, &str) -> secure::redaction::Redacted
+pub fn secure::redaction::redact_url_credentials(&str) -> secure::redaction::Redacted
 #[non_exhaustive] pub enum secure::AeadError
 pub secure::AeadError::Open
 pub secure::AeadError::Seal
@@ -475,3 +476,4 @@ pub fn secure::Redactor::redact(&self, &str) -> secure::redaction::Redacted
 pub fn secure::is_safe_segment(&str) -> bool
 pub fn secure::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redact_field(&str, &str) -> secure::redaction::Redacted
+pub fn secure::redact_url_credentials(&str) -> secure::redaction::Redacted

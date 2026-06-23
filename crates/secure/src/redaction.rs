@@ -91,9 +91,34 @@ pub fn redact_field(key: &str, value: &str) -> Redacted {
     }
 }
 
+/// 统一脱敏 funnel：剥离 URL 的 userinfo（`user:pass@`）凭据，保留 scheme/host/port/path 供诊断。
+///
+/// 用于带内联凭据的连接串（AMQP `amqp://user:pass@host/vhost`、DB DSN 等）——authority 段的
+/// userinfo 整段替换为 `<redacted>`，其余原样。无 `://`、或 authority 内无 `@` 时原样返回（仍包成
+/// [`Redacted`]，禁 crate 外把未脱敏 URL 当安全值打印绕过 funnel）。只清洗 authority 段的 `@`，
+/// path / query 里的 `@` 不动（[`redact_field`] 按 key 判定无法识别 URL 内联凭据，故需此姊妹 funnel）。
+pub fn redact_url_credentials(url: &str) -> Redacted {
+    let Some(scheme_end) = url.find("://") else {
+        return Redacted::new(url);
+    };
+    let authority_start = scheme_end + 3;
+    let rest = &url[authority_start..];
+    // authority 终止于 path / query / fragment 首字符（其后的 '@' 属 path，非凭据）。
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return Redacted::new(url);
+    };
+    // 重建 scheme://<redacted>@<host:port/path...>；userinfo（at 之前）整段抹去。
+    Redacted::new(format!(
+        "{}{REDACTED_PLACEHOLDER}@{}",
+        &url[..authority_start],
+        &rest[at + 1..],
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Redacted, redact_error, redact_field};
+    use super::{Redacted, redact_error, redact_field, redact_url_credentials};
 
     #[test]
     fn redacted_new_and_as_str() {
@@ -240,5 +265,67 @@ mod tests {
     fn redact_field_private_redacted() {
         let r = redact_field("private_key", "BEGIN RSA PRIVATE KEY");
         assert_eq!(r.as_str(), "<redacted>");
+    }
+
+    // --- redact_url_credentials（AMQP / DSN 内联凭据脱敏） ---
+
+    #[test]
+    fn redact_url_strips_userinfo() {
+        let r = redact_url_credentials("amqp://user:pass@host:5672/%2fvhost");
+        assert_eq!(r.as_str(), "amqp://<redacted>@host:5672/%2fvhost");
+        assert!(!r.as_str().contains("user"));
+        assert!(!r.as_str().contains("pass"));
+    }
+
+    #[test]
+    fn redact_url_strips_user_only() {
+        let r = redact_url_credentials("amqps://alice@broker/vh");
+        assert_eq!(r.as_str(), "amqps://<redacted>@broker/vh");
+    }
+
+    #[test]
+    fn redact_url_no_userinfo_preserved() {
+        let r = redact_url_credentials("amqp://host:5672/");
+        assert_eq!(r.as_str(), "amqp://host:5672/");
+    }
+
+    #[test]
+    fn redact_url_no_path_with_userinfo() {
+        let r = redact_url_credentials("amqp://u:p@host:5672");
+        assert_eq!(r.as_str(), "amqp://<redacted>@host:5672");
+    }
+
+    #[test]
+    fn redact_url_at_in_path_not_touched() {
+        // path 段的 '@' 非凭据，不动；authority 无 userinfo ⇒ 原样。
+        let r = redact_url_credentials("amqp://host/p@th");
+        assert_eq!(r.as_str(), "amqp://host/p@th");
+    }
+
+    #[test]
+    fn redact_url_malformed_passthrough_wrapped() {
+        // 无 "://" ⇒ 原样但仍包成 Redacted（funnel 不可绕过）。
+        let r = redact_url_credentials("not-a-url");
+        assert_eq!(r.as_str(), "not-a-url");
+    }
+
+    #[test]
+    fn redact_url_query_at_not_touched() {
+        let r = redact_url_credentials("amqp://host/vh?x=a@b");
+        assert_eq!(r.as_str(), "amqp://host/vh?x=a@b");
+    }
+
+    #[test]
+    fn redact_url_fragment_at_not_touched() {
+        // fragment 段的 '@' 非凭据（authority 终止于 '#'）；authority 无 userinfo ⇒ 原样。
+        let r = redact_url_credentials("amqp://host/vh#frag@ment");
+        assert_eq!(r.as_str(), "amqp://host/vh#frag@ment");
+    }
+
+    #[test]
+    fn redact_url_ipv6_host_userinfo_stripped() {
+        // IPv6 host（[..]）authority 仍正确终止于 '/'，userinfo 被抹、host 保留。
+        let r = redact_url_credentials("amqp://user:pass@[::1]:5672/vhost");
+        assert_eq!(r.as_str(), "amqp://<redacted>@[::1]:5672/vhost");
     }
 }

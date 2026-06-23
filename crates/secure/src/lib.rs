@@ -10,4 +10,4 @@ pub mod redaction;
 pub use aead::{Aead, AeadError, Ciphertext};
 pub use cookie::{CookieCodec, CookieError, CookieValue, CookieValueError};
 pub use pathsafe::is_safe_segment;
-pub use redaction::{Redacted, Redactor, redact_error, redact_field};
+pub use redaction::{Redacted, Redactor, redact_error, redact_field, redact_url_credentials};
