@@ -9,12 +9,22 @@ publish = false
 workspace = true
 
 [dependencies]
-vocab = { path = "../vocab" }
-ids = { path = "../ids" }
-secure = { path = "../secure" }
-support = { path = "../support" }
-runctx = { path = "../runctx" }
-consistency = { path = "../consistency" }
-primitives = { path = "../primitives" }
+# 基础/引擎（仅用到的两个 path dep；ids/secure/support/runctx/consistency 未用 → 不声明，避免 cargo-udeps 多余依赖）
+vocab = { path = "../vocab" }           # CoreError / CoreErrorKind / PublicDetail（wire error mapper 单源）
+primitives = { path = "../primitives" } # AuthPlan / resolve_requirement / HealthReport（健康聚合）
+# HTTP runtime（生态对标 axum + tower，不自造中间件 trait）
 axum = { workspace = true }
+tower = { workspace = true }                             # EnforceLayer/EnforceService impl tower::Layer/Service（axum from_fn 不可用于 MethodRouter::layer）
+futures = { workspace = true }         # panic_recovery 中间件 catch_unwind（AssertUnwindSafe + FutureExt）
+# wire DTO 序列化（error envelope / readyz 响应）
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 请求关联 id 生成
+uuid = { workspace = true, features = ["v4"] }
+# 结构化 span / 日志
+tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true, features = ["util"] } # ServiceExt::oneshot 驱动 mock 请求

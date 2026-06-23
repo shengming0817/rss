@@ -1,9 +1,16 @@
 //! httpserve — RSS HTTP 服务基础设施（listener / route 声明、auth 装配接缝）。
 //!
-//! 只含签名冻结（ADR-004 C8 覆盖率豁免）；所有函数体为 `todo!()`，逻辑待后续 PR 实现。
+//! 提供 `mount` / `mount_primary` / `finalize_auth` 三个冻结公共函数，以及
+//! `health` 模块（`healthz` / `readyz` builders）。
 //!
-//! ref: tower tower-layer/src/lib.rs@master（Layer::layer 同步语义）
-//! ref: axum axum/src/routing/mod.rs@main（Router::route/nest/layer）
+//! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main（Layer::from_fn 同步语义）
+
+mod auth;
+mod error;
+pub mod health;
+mod middleware;
+
+pub use auth::RouteMeta;
 
 use primitives::{ListenerKind, RouteAuthOptOut};
 
@@ -68,80 +75,58 @@ pub enum RouteGroupError {
 
 /// 非-`Primary` listener 的声明性 [`Route`] 挂载到 axum Router（无 opt-out；`resolve_requirement` 恒收 `None`）。
 ///
-/// 对标 axum `Router::route` 逐条注册，携带 `contract_id` 元数据用于治理扫描。
+/// 对标 axum `Router::route` 逐条注册，携带 `contract_id` 和 `method` 元数据进运行时 extension
+/// （供下游审计/可观测消费及 drift 检测）。
 pub fn mount(
-    _router: axum::Router,
-    _route: Route,
-    _handler: axum::routing::MethodRouter,
+    router: axum::Router,
+    route: Route,
+    handler: axum::routing::MethodRouter,
 ) -> axum::Router {
-    todo!()
+    router.route(
+        route.path,
+        handler.layer(auth::enforce_layer(None, route.method, route.contract_id)),
+    )
 }
 
 /// `Primary` listener 的声明性 [`PrimaryRoute`] 挂载到 axum Router；唯一接受 auth opt-out 的入口
 /// （`PrimaryRoute.opt_out` 透传至 `resolve_requirement`，AUTH-OPTOUT-PRIMARYONLY-01）。
-///
-/// 调用方责任：仅在 `Primary` listener 的 `RouteGroup::register` 闭包内调用——类型层只保证「opt-out 字段
-/// 仅 `PrimaryRoute` 有」，不绑定 `Router` 与 listener 种类（须 phantom type，未立项）。`PrimaryRoute` 误挂
-/// 到非 Primary listener 的残留 seam 由 `finalize_auth` / `resolve_requirement` 运行期 fail-closed 兜底
-/// （AUTH-FAILCLOSED-01）。
 pub fn mount_primary(
-    _router: axum::Router,
-    _route: PrimaryRoute,
-    _handler: axum::routing::MethodRouter,
+    router: axum::Router,
+    route: PrimaryRoute,
+    handler: axum::routing::MethodRouter,
 ) -> axum::Router {
-    todo!()
+    router.route(
+        route.path,
+        handler.layer(auth::enforce_layer(
+            route.opt_out,
+            route.method,
+            route.contract_id,
+        )),
+    )
 }
 
 /// 所有 RouteGroup 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 AuthPlan）。
 ///
 /// `finalize_auth` 在所有 route 注册完成后运行；业务不得绕过最终 matcher（runtime-api.md）。
+///
+/// 层序（`.layer` 调用顺序 = 内→外）：
+/// - `Extension(plan)`：最内（路由前设 plan ext），EnforceService 在 MethodRouter 层读取 plan。
+/// - `panic_recovery`：request-aware panic → 500 envelope（带 requestId；须在 trace 内侧让 trace 看到 500）。
+/// - `trace`：tracing span，可看到 panic_recovery 合成的 500。
+/// - `request_id`：最外，设 id + 回填 header（panic 路径也能补 header）。
+///
+/// 请求流（外→内）：request_id → trace → panic_recovery → Extension(plan) → 路由匹配 →
+/// EnforceService（读 plan，决策 requirement）→ handler。
+///
+/// 当前恒 `Ok`（无失败分支）——`RouteGroupError` 变体留给 bootstrap-driver 路径（签名冻结保留扩展点）。
 pub fn finalize_auth(
-    _router: axum::Router,
-    _plan: primitives::AuthPlan,
+    router: axum::Router,
+    plan: primitives::AuthPlan,
 ) -> Result<axum::Router, RouteGroupError> {
-    todo!()
-}
-
-#[cfg(test)]
-mod smoke {
-    use super::*;
-
-    // FnOnce 不要求 Sync，只检查 Send（RouteGroup 需跨线程传递至 bootstrap）
-    fn _assert_send<T: Send>() {}
-
-    #[test]
-    fn signatures_consumable() {
-        // 非-Primary route：**无 opt-out 字段**——opt-out 在类型层不可表达（field exclusion，Hard）。
-        let _r = Route {
-            method: axum::http::Method::GET,
-            path: "/internal/v1/x",
-            contract_id: "x",
-        };
-        // Primary route：唯一携 opt-out 的类型；Some(..) 表降级，None 表正常认证。
-        let _pr = PrimaryRoute {
-            method: axum::http::Method::GET,
-            path: "/api/v1/x",
-            contract_id: "x",
-            opt_out: Some(RouteAuthOptOut::Public),
-        };
-        let _pr_none = PrimaryRoute {
-            method: axum::http::Method::POST,
-            path: "/api/v1/y",
-            contract_id: "y",
-            opt_out: None,
-        };
-        // register 用 Ok 构造器（恒等成功）证明字段类型，FnOnce 满足，合法
-        let _g = RouteGroup {
-            listener: ListenerKind::Primary,
-            prefix: "/api/v1/x",
-            register: Box::new(Ok),
-        };
-        // 绑定函数指针，不调用（不触发 todo!()）
-        let _m: fn(axum::Router, Route, axum::routing::MethodRouter) -> axum::Router = mount;
-        let _mp: fn(axum::Router, PrimaryRoute, axum::routing::MethodRouter) -> axum::Router =
-            mount_primary;
-        let _f: fn(axum::Router, primitives::AuthPlan) -> Result<axum::Router, RouteGroupError> =
-            finalize_auth;
-        _assert_send::<RouteGroup>();
-    }
+    let router = router
+        .layer(axum::Extension(plan))
+        .layer(axum::middleware::from_fn(middleware::panic_recovery))
+        .layer(axum::middleware::from_fn(middleware::trace))
+        .layer(axum::middleware::from_fn(middleware::request_id));
+    Ok(router)
 }

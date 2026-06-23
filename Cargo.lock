@@ -545,13 +545,15 @@ name = "httpserve"
 version = "0.0.0"
 dependencies = [
  "axum",
- "consistency",
- "ids",
+ "futures",
  "primitives",
- "runctx",
- "secure",
- "support",
+ "serde",
+ "serde_json",
  "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
  "vocab",
 ]
 

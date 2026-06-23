@@ -104,7 +104,7 @@ trait-variant = "=0.1.2"
 # HTTP / gRPC（服务层前瞻）
 axum = "0.8"
 tower = "0.5"
-tower-http = "0.6"
+tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
 tonic = "0.13"
 prost = "0.13"
 # 持久化（adapters 前瞻）

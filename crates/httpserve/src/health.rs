@@ -1,0 +1,246 @@
+//! Health endpoint builders：healthz（liveness）和 readyz（readiness）。
+//!
+//! DTO 为 wire 类型（非 domain entity），derive Serialize 合规。
+//! `readyz` 的 `report` 参数用 `Fn() -> HealthReport` 闭包，每请求调用一次；
+//! 每请求 clone 闭包满足 axum Handler 的 `Fn` 语义。
+//!
+//! ref: tokio-rs/axum examples/health-check.rs@main（健康端点范式）
+
+use axum::http::StatusCode;
+use primitives::{HealthReport, HealthStatus};
+use serde::Serialize;
+
+/// Liveness DTO（wire 类型，camelCase，Serialize 合规）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LivenessDto {
+    status: &'static str,
+}
+
+/// Readiness 聚合 DTO（wire 类型，camelCase，Serialize 合规）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadyzDto {
+    overall: &'static str,
+    checks: Vec<CheckDto>,
+}
+
+/// 单条 probe DTO（wire 类型）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckDto {
+    name: String,
+    status: &'static str,
+    detail: &'static str,
+}
+
+impl ReadyzDto {
+    fn from_report(r: &HealthReport) -> Self {
+        Self {
+            overall: r.overall().as_label(),
+            checks: r
+                .checks()
+                .iter()
+                .map(|c| CheckDto {
+                    name: c.name().as_str().to_owned(),
+                    status: c.status().as_label(),
+                    detail: c.detail(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// liveness 端点：恒 200 `{"status":"ok"}`（存活即活）。
+pub fn healthz() -> axum::routing::MethodRouter {
+    axum::routing::get(|| async { (StatusCode::OK, axum::Json(LivenessDto { status: "ok" })) })
+}
+
+/// readiness 端点：聚合 `report()` 的 `HealthReport`；Unhealthy → 503，否则 200。
+///
+/// `report` 是 `Fn() -> HealthReport`——每请求调用一次，配合 `Clone` 满足 axum Handler 语义。
+///
+/// Degraded→200（运行但降级）：HTTP 状态仅区分 serving(200)/not-ready(503)，消费方解析
+/// body.overall 判精确态（k8s readiness probe 据 2xx 判健康，Degraded 实例仍接流量是有意设计）。
+pub fn readyz<F>(report: F) -> axum::routing::MethodRouter
+where
+    F: Fn() -> HealthReport + Clone + Send + Sync + 'static,
+{
+    axum::routing::get(move || {
+        let report = report.clone();
+        async move {
+            let r = report();
+            let overall = r.overall();
+            let status = if overall == HealthStatus::Unhealthy {
+                let failed: Vec<&str> = r
+                    .checks()
+                    .iter()
+                    .filter(|c| c.status() != HealthStatus::Healthy)
+                    .map(|c| c.name().as_str())
+                    .collect();
+                tracing::warn!(
+                    overall = overall.as_label(),
+                    failed_count = failed.len(),
+                    failed_probes = ?failed,
+                    "readyz not ready"
+                );
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                if overall == HealthStatus::Degraded {
+                    let degraded: Vec<&str> = r
+                        .checks()
+                        .iter()
+                        .filter(|c| c.status() != HealthStatus::Healthy)
+                        .map(|c| c.name().as_str())
+                        .collect();
+                    tracing::info!(
+                        overall = "degraded",
+                        degraded_count = degraded.len(),
+                        degraded_probes = ?degraded,
+                        "readyz degraded but serving"
+                    );
+                }
+                StatusCode::OK
+            };
+            (status, axum::Json(ReadyzDto::from_report(&r)))
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use primitives::{HealthCheck, HealthReport, HealthStatus, ProbeName};
+    use tower::ServiceExt;
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn healthz_is_200_with_ok_status() {
+        let app = Router::new().route("/healthz", healthz());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn readyz_healthy_is_200() {
+        let app = Router::new().route(
+            "/readyz",
+            readyz(|| {
+                HealthReport::aggregate(vec![HealthCheck::new(
+                    ProbeName::parse("db").unwrap(),
+                    HealthStatus::Healthy,
+                    "ok",
+                )])
+            }),
+        );
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn readyz_unhealthy_is_503() {
+        let app = Router::new().route(
+            "/readyz",
+            readyz(|| {
+                HealthReport::aggregate(vec![HealthCheck::new(
+                    ProbeName::parse("db").unwrap(),
+                    HealthStatus::Unhealthy,
+                    "down",
+                )])
+            }),
+        );
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn readyz_degraded_is_200() {
+        // Degraded 不是 Unhealthy，返回 200（运行但降级）。
+        let app = Router::new().route(
+            "/readyz",
+            readyz(|| {
+                HealthReport::aggregate(vec![HealthCheck::new(
+                    ProbeName::parse("cache").unwrap(),
+                    HealthStatus::Degraded,
+                    "slow",
+                )])
+            }),
+        );
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn readyz_empty_checks_is_503() {
+        // fail-closed：无探针 → Unhealthy → 503。
+        let app = Router::new().route("/readyz", readyz(|| HealthReport::aggregate(vec![])));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn readyz_response_body_has_overall_and_checks() {
+        let app = Router::new().route(
+            "/readyz",
+            readyz(|| {
+                HealthReport::aggregate(vec![HealthCheck::new(
+                    ProbeName::parse("db").unwrap(),
+                    HealthStatus::Healthy,
+                    "ok",
+                )])
+            }),
+        );
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["overall"], "healthy");
+        assert!(json["checks"].is_array());
+        assert_eq!(json["checks"][0]["name"], "db");
+        assert_eq!(json["checks"][0]["status"], "healthy");
+    }
+}
