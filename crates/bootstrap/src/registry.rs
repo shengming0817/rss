@@ -17,13 +17,15 @@ use primitives::ListenerKind;
 ///
 /// 接受 axum `Router`，追加本组 routes 后返回更新后的 `Router`；
 /// 失败时返回 `Err(KernelError)` 冒泡到 bootstrap。
+///
+/// `FnOnce`——一次性执行，finalize 后不可重入；多次 finalize 见幂等 drain 说明。
 type RouteRegisterFn =
     Box<dyn FnOnce(axum::Router) -> Result<axum::Router, KernelError> + Send + 'static>;
 
 /// 路由组声明（由 [`Registry::route_group`] 收集）。
-// reason: listener/prefix 经 [`Registry::route_groups`] 已读；`register` 闭包在 RW-G1 追踪弹（服务层
-//   闭环、不逐字节跑 axum）不执行，待 W httpserve mount 驱动——故 `register` 字段保留 dead_code 例外。
-#[allow(dead_code)]
+/// `listener`/`prefix` 经 [`Registry::route_groups`] 暴露；`register` 闭包（`FnOnce`，一次性执行，
+/// finalize 后不可重入；多次 finalize 见幂等 drain 说明）由
+/// [`Registry::finalize_routes`] 在 W 阶段按 listener 分组折叠驱动（auth finalize / socket bind 归组合根）。
 pub(crate) struct RouteGroupDecl {
     pub(crate) listener: ListenerKind,
     pub(crate) prefix: &'static str,
@@ -38,8 +40,7 @@ pub(crate) struct SubscriberDecl {
 }
 
 /// 健康探针声明（由 [`Registry::probe`] 收集）。
-// reason: 签名冻结阶段（ADR-004 C8）——字段在 todo!() 体实现前不被读取，待 W 阶段 finalize 驱动时使用。
-#[allow(dead_code)]
+/// `name`（声明权威名）+ `probe` 由 [`Registry::readyz_report`] 在 W 阶段求值 + worst-of 聚合驱动。
 pub(crate) struct ProbeDecl {
     pub(crate) name: primitives::ProbeName,
     pub(crate) probe: Box<dyn HealthProbe>,
@@ -107,6 +108,13 @@ pub trait HealthProbe: Send + Sync {
 /// register 闭包延迟到 `finalize` 统一执行（对标 fx `Lifecycle.Append`），
 /// 不在 `init` 中立即生效。
 ///
+/// # Finalize order
+///
+/// 组合根推荐的调用顺序：
+/// 1. [`readyz_report`](Self::readyz_report)（`&self`，可随时调、含 finalize 后）——驱动所有探针求值聚合。
+/// 2. [`finalize_routes`](Self::finalize_routes)（`&mut self`，drain routes）——按 listener 分组折叠路由组。
+/// 3. [`into_subscribers`](Self::into_subscribers)（`self`，消费）——取出订阅声明交 eventexec 分发驱动。
+///
 /// [`Domain::init`]: crate::domain::Domain::init
 pub struct Registry {
     route_groups: Vec<RouteGroupDecl>,
@@ -161,19 +169,25 @@ impl Registry {
     ///
     /// `name` 为已校验的强类型探针名（[`primitives::ProbeName`]），消除裸 `&'static str` 的格式漂移风险。
     /// `probe` 实现 [`HealthProbe::check`]，由 bootstrap readyz 驱动聚合。
+    ///
+    /// 探针名在同一 Registry 内必须唯一（声明名是 readyz 报告的权威标识）；重复注册同名探针返回
+    /// `Err(KernelError::Probe)`。
     pub fn probe(
         &mut self,
         name: primitives::ProbeName,
         probe: Box<dyn HealthProbe>,
     ) -> Result<(), KernelError> {
+        if self.probes.iter().any(|d| d.name == name) {
+            return Err(KernelError::Probe);
+        }
         self.probes.push(ProbeDecl { name, probe });
         Ok(())
     }
 
-    /// 已声明的路由组（listener + prefix）。
+    /// 已声明的路由组（listener + prefix）的只读快照；RW-G1 journey 据此断言路由已经 bootstrap 组装声明。
     ///
-    /// 组合根 finalize 驱动 httpserve mount 用；RW-G1 journey 据此断言登录路由已经 bootstrap 组装声明
-    /// （register 闭包此阶段不执行，见 [`RouteGroupDecl`]）。
+    /// 仅 peek 不执行 register 闭包（折叠驱动见 [`finalize_routes`](Self::finalize_routes)）；
+    /// `&self` 借用，可在 `finalize_routes` 排空前调用。
     pub fn route_groups(&self) -> Vec<(ListenerKind, &'static str)> {
         self.route_groups
             .iter()
@@ -181,9 +195,96 @@ impl Registry {
             .collect()
     }
 
-    /// 已声明的健康探针数（探针聚合 readyz 驱动留 W；供 journey 断言收集计数）。
+    /// 已声明的健康探针数（供 journey 断言收集计数；聚合求值见 [`readyz_report`](Self::readyz_report)）。
     pub fn probe_count(&self) -> usize {
         self.probes.len()
+    }
+
+    /// 驱动所有已注册探针并 worst-of 聚合为 [`primitives::HealthReport`]（readyz 求值入口）。
+    ///
+    /// 每个探针经 [`HealthProbe::check`] 求值，再用 registry **声明的** [`primitives::ProbeName`]
+    /// 重建 [`primitives::HealthCheck`]——声明名权威，覆盖探针自报名（防 impl 自报漂移 / 撞名）。
+    /// 空探针 → `Unhealthy`（[`primitives::HealthReport::aggregate`] fail-closed，readyz 不因「没探针」误放行）。
+    ///
+    /// 借 `&self`、可重复调用：组合根的 readyz handler 每请求调一次（handler 如何长期持有 Registry /
+    /// 探针子集属组合根生命周期，归 Join #1017，不在本 crate）。HTTP 端点 mount 由 httpserve 驱动。
+    /// ref: uber-go/fx lifecycle.go（Hook 求值=DI port、纯聚合归 primitives，见 `primitives::healthz`）。
+    ///
+    /// detail 的 PII 安全由 `primitives::HealthCheck::detail() -> &'static str` 编译期类型约束守
+    /// （不接受 runtime String），无需运行期 strip。
+    ///
+    /// **NOTE**：`readyz_report` 是对**当前已注册探针**的纯聚合——它不感知"注册是否已完成"。
+    /// 非空探针集若全部 Healthy，结果即为 Healthy，无论是否存在尚未注册的探针。
+    /// 注册完整性由 [`compose`](crate::domain::compose) 保证：`compose` 同步运行所有
+    /// `Domain::init` 后才返回 `Registry`（全部注册或 fail-fast），由此获得的 `Registry`
+    /// 必然是完整注册状态。组合根须在 `compose()` 完成后才暴露 readyz endpoint，且不得对
+    /// 手动分步构建的部分 `Registry` 求值。
+    pub fn readyz_report(&self) -> primitives::HealthReport {
+        let checks = self
+            .probes
+            .iter()
+            .map(|d| {
+                let check = d.probe.check();
+                primitives::HealthCheck::new(d.name.clone(), check.status(), check.detail())
+            })
+            .collect();
+        primitives::HealthReport::aggregate(checks)
+    }
+
+    /// 按 listener 分组折叠路由组 register 闭包，每 listener 产出一个 axum [`Router`](axum::Router)。
+    ///
+    /// 排空 `route_groups`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
+    /// [`into_subscribers`](Self::into_subscribers) 不争用消费权；消费顺序由组合根定）。同一 listener 的
+    /// 多个组折叠进同一 Router；不同 listener 各自独立 Router——`Internal`/`Admin`/`Health` 路由**不可**
+    /// 落到 `Primary`（对外）Router 上。register 闭包 Err 原样冒泡（保留变体），并记 listener/prefix/error
+    /// 结构化错误日志。
+    ///
+    /// **挂载语义**：每个路由组的 register 闭包在一个**新鲜 `axum::Router`** 上构建本组路由
+    /// （路径相对于 `prefix`），finalize 将该子 Router **nest** 进所属 listener 的累加 Router 的
+    /// `prefix` 前缀下——声明 `prefix` 即实际挂载前缀，消除「声明 prefix vs axum 实际路径」漂移。
+    ///
+    /// 幂等 drain——`route_groups` 排空后再次调用返回空 `Vec`（非错误：routes 已交出，组合根只应调一次）。
+    ///
+    /// 产出的 per-listener Router 交组合根：再跑 `httpserve::finalize_auth` + 绑各自 socket（Join #1017）——
+    /// 本 crate 不引 httpserve、不做 auth、不 bind。
+    /// ref: oxidecomputer/omicron nexus/src/lib.rs（internal vs external server 分 listener 隔离）。
+    ///
+    /// # Finalize order
+    ///
+    /// 推荐调用顺序见 [`Registry`] struct 文档 §Finalize order。
+    ///
+    /// INVARIANT: BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 —— 不同 listener 的路由进各自 Router，不串台
+    /// （Medium：由 `finalize` 测试模块的 `finalize_routes_keeps_listeners_isolated` oneshot 反例守）。
+    pub fn finalize_routes(&mut self) -> Result<Vec<(ListenerKind, axum::Router)>, KernelError> {
+        let mut by_listener: Vec<(ListenerKind, axum::Router)> = Vec::new();
+        for decl in std::mem::take(&mut self.route_groups) {
+            let listener = decl.listener;
+            let prefix = decl.prefix;
+            // 闭包在 fresh Router 上构建本组路由（相对 prefix）；失败原样冒泡 + 记 listener/prefix/error。
+            let group = (decl.register)(axum::Router::new()).inspect_err(|e| {
+                tracing::error!(
+                    listener = ?listener,
+                    prefix,
+                    error = %e,
+                    "route group register closure failed"
+                );
+            })?;
+            let idx = match by_listener.iter().position(|(l, _)| *l == listener) {
+                Some(i) => i,
+                None => {
+                    by_listener.push((listener, axum::Router::new()));
+                    by_listener.len() - 1
+                }
+            };
+            // 声明 prefix 即实际挂载前缀：本组 Router nest 进该 listener 累加 Router 的 prefix 下。
+            let base = std::mem::take(&mut by_listener[idx].1);
+            by_listener[idx].1 = base.nest(prefix, group);
+        }
+        tracing::info!(
+            listener_count = by_listener.len(),
+            "route groups finalized into per-listener routers"
+        );
+        Ok(by_listener)
     }
 
     /// 取出订阅声明（topic + handler），交组合根接 eventexec 分发驱动。
@@ -332,5 +433,435 @@ mod collect {
     fn compose_fail_fast_on_domain_err() {
         let result = compose(&[&TwoGroupDomain, &FailingDomain]);
         assert!(matches!(result, Err(KernelError::Subscriber)));
+    }
+}
+
+#[cfg(test)]
+mod finalize {
+    //! W 阶段 finalize driver：`readyz_report`（探针 worst-of 聚合）+ `finalize_routes`
+    //! （按 listener 分组折叠 register 闭包）。前者复用 `primitives::HealthReport::aggregate`；
+    //! 后者守 INVARIANT BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01（不同 listener 路由各自 Router）。
+    use super::{HealthProbe, Registry};
+    use crate::domain::KernelError;
+    use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
+    use std::sync::{Arc, Mutex};
+
+    // expect/unwrap 仅测试断言用：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
+
+    fn probe_name(s: &str) -> ProbeName {
+        #[allow(clippy::expect_used)]
+        ProbeName::parse(s).expect("valid probe name")
+    }
+
+    /// 可配置状态 + 自报名的 mock 探针。`self_name` 用于验证「声明名权威」——
+    /// readyz_report 应以 registry 声明的 ProbeName 重建 check，覆盖探针自报的 name。
+    struct StubProbe {
+        status: HealthStatus,
+        self_name: &'static str,
+    }
+
+    impl HealthProbe for StubProbe {
+        fn check(&self) -> HealthCheck {
+            HealthCheck::new(probe_name(self.self_name), self.status, "stub")
+        }
+    }
+
+    // ── readyz_report ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn readyz_empty_is_unhealthy() {
+        // fail-closed：未注册任何 probe 不得 fail-open（同 primitives::HealthReport::aggregate）。
+        let reg = Registry::new();
+        let report = reg.readyz_report();
+        assert_eq!(report.overall(), HealthStatus::Unhealthy);
+        assert!(report.checks().is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn readyz_all_healthy_is_healthy() {
+        let mut reg = Registry::new();
+        reg.probe(
+            probe_name("a"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "a",
+            }),
+        )
+        .expect("probe a declared");
+        reg.probe(
+            probe_name("b"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "b",
+            }),
+        )
+        .expect("probe b declared");
+
+        let report = reg.readyz_report();
+        assert_eq!(report.overall(), HealthStatus::Healthy);
+        assert_eq!(report.checks().len(), 2);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn readyz_worst_of_is_degraded() {
+        let mut reg = Registry::new();
+        reg.probe(
+            probe_name("a"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "a",
+            }),
+        )
+        .expect("probe a declared");
+        reg.probe(
+            probe_name("b"),
+            Box::new(StubProbe {
+                status: HealthStatus::Degraded,
+                self_name: "b",
+            }),
+        )
+        .expect("probe b declared");
+
+        assert_eq!(reg.readyz_report().overall(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn readyz_worst_of_is_unhealthy() {
+        let mut reg = Registry::new();
+        for (name, status) in [
+            ("a", HealthStatus::Healthy),
+            ("b", HealthStatus::Degraded),
+            ("c", HealthStatus::Unhealthy),
+        ] {
+            reg.probe(
+                probe_name(name),
+                Box::new(StubProbe {
+                    status,
+                    self_name: name,
+                }),
+            )
+            .expect("probe declared");
+        }
+        assert_eq!(reg.readyz_report().overall(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn readyz_declared_probe_name_is_authoritative() {
+        // 探针自报 "self-reported"，registry 声明 "declared"——report 必须用声明名（防探针自报漂移）。
+        let mut reg = Registry::new();
+        reg.probe(
+            probe_name("declared"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "self-reported",
+            }),
+        )
+        .expect("probe declared");
+
+        let report = reg.readyz_report();
+        assert_eq!(report.checks().len(), 1);
+        assert_eq!(report.checks()[0].name().as_str(), "declared");
+    }
+
+    /// `readyz_report` 对当前已注册探针做纯聚合——非空且全部 Healthy 即返回 Healthy，
+    /// 不因"注册未完成"而强制 Unhealthy。注册完整性由 `compose()` 保证（compose 同步运行
+    /// 所有 `Domain::init` 后才返回 Registry；此测试记录 readyz_report 的语义边界）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn readyz_report_aggregates_currently_registered_probes() {
+        let mut reg = Registry::new();
+        // 手动注册单个 Healthy 探针（模拟 compose 完成前的"部分"状态，或 compose 完成后只有一个探针）。
+        reg.probe(
+            probe_name("single"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "single",
+            }),
+        )
+        .expect("probe declared");
+
+        // readyz_report 反映当前已注册探针：非空且全部 Healthy → Healthy。
+        // 注册完整性由 compose() 契约保证，readyz_report 本身不感知"是否完整"。
+        let report = reg.readyz_report();
+        assert_eq!(report.overall(), HealthStatus::Healthy);
+        assert_eq!(report.checks().len(), 1);
+    }
+
+    /// 重复注册同名探针必须返回 `Err(KernelError::Probe)`（声明名唯一性守卫）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn probe_duplicate_name_is_rejected() {
+        let mut reg = Registry::new();
+        reg.probe(
+            probe_name("dup"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "dup",
+            }),
+        )
+        .expect("first probe declared");
+
+        let result = reg.probe(
+            probe_name("dup"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "dup",
+            }),
+        );
+        assert!(matches!(result, Err(KernelError::Probe)));
+    }
+
+    // ── finalize_routes ───────────────────────────────────────────────────────
+
+    type CallLog = Arc<Mutex<Vec<&'static str>>>;
+
+    fn record(log: &CallLog, tag: &'static str) {
+        log.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(tag);
+    }
+
+    fn calls(log: &CallLog) -> Vec<&'static str> {
+        log.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn finalize_routes_empty_yields_no_routers() {
+        let mut reg = Registry::new();
+        let routers = reg.finalize_routes().expect("finalize ok");
+        assert!(routers.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn finalize_routes_runs_each_register_closure_once() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        let l = Arc::clone(&log);
+        reg.route_group(ListenerKind::Primary, "/api/v1/a", move |r| {
+            record(&l, "a");
+            Ok(r)
+        })
+        .expect("route group a declared");
+
+        let routers = reg.finalize_routes().expect("finalize ok");
+        assert_eq!(routers.len(), 1);
+        assert_eq!(routers[0].0, ListenerKind::Primary);
+        assert_eq!(calls(&log), vec!["a"]);
+    }
+
+    /// 同一 listener 注册多个路由组（不同 prefix）时，折叠进同一 Router，两闭包均执行。
+    /// nest 语义下每个路由组挂在各自 prefix 下，不同 prefix 不冲突。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn finalize_routes_folds_same_listener_groups_into_one_router() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        let prefixes = [("/api/v1/x", "a"), ("/api/v1/y", "b")];
+        for (prefix, tag) in prefixes {
+            let l = Arc::clone(&log);
+            reg.route_group(ListenerKind::Primary, prefix, move |r| {
+                record(&l, tag);
+                Ok(r)
+            })
+            .expect("route group declared");
+        }
+
+        let routers = reg.finalize_routes().expect("finalize ok");
+        // 同 listener 折叠进单个 Router；两闭包均执行。
+        assert_eq!(routers.len(), 1);
+        assert_eq!(routers[0].0, ListenerKind::Primary);
+        assert_eq!(calls(&log), vec!["a", "b"]);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn finalize_routes_separates_distinct_listeners() {
+        let mut reg = Registry::new();
+        reg.route_group(ListenerKind::Primary, "/api/v1/p", Ok)
+            .expect("primary declared");
+        reg.route_group(ListenerKind::Internal, "/internal/v1/i", Ok)
+            .expect("internal declared");
+
+        let routers = reg.finalize_routes().expect("finalize ok");
+        assert_eq!(routers.len(), 2);
+        let kinds: Vec<ListenerKind> = routers.iter().map(|(l, _)| *l).collect();
+        assert!(kinds.contains(&ListenerKind::Primary));
+        assert!(kinds.contains(&ListenerKind::Internal));
+    }
+
+    #[test]
+    fn finalize_routes_bubbles_closure_error() {
+        let mut reg = Registry::new();
+        #[allow(clippy::expect_used)]
+        reg.route_group(ListenerKind::Primary, "/api/v1/bad", |_r| {
+            Err(KernelError::RouteGroup)
+        })
+        .expect("route group declared");
+
+        let result = reg.finalize_routes();
+        assert!(matches!(result, Err(KernelError::RouteGroup)));
+    }
+
+    /// 同一 listener 有两个路由组时，第一个成功（记录 tag）、第二个失败——
+    /// finalize_routes 必须返回 Err 且第一个闭包已执行（原样冒泡，不吞 variant）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn finalize_routes_bubbles_error_from_later_closure_in_group() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+
+        let l = Arc::clone(&log);
+        reg.route_group(ListenerKind::Primary, "/api/v1/ok", move |r| {
+            record(&l, "first-ran");
+            Ok(r)
+        })
+        .expect("first route group declared");
+
+        reg.route_group(ListenerKind::Primary, "/api/v1/bad", |_r| {
+            Err(KernelError::RouteGroup)
+        })
+        .expect("second route group declared");
+
+        let result = reg.finalize_routes();
+        assert!(matches!(result, Err(KernelError::RouteGroup)));
+        // 第一个闭包已执行（finalize 按注册顺序折叠，首先跑 ok 组再遇 err 组）。
+        assert_eq!(calls(&log), vec!["first-ran"]);
+    }
+
+    /// INVARIANT BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 的反例守卫（anti-regression）：
+    /// Primary listener 上注册的路由必须只出现在 Primary 的 Router 上，不串到 Internal 的 Router。
+    /// 用 sanctioned 的 tower::ServiceExt::oneshot 实发请求断言（rust-standards.md §覆盖率）。
+    /// 同时验证第三个 listener（Health）的隔离：N-way segregation。
+    ///
+    /// F2 回归守卫：路由在 nest 后必须通过**完整前缀路径**访问；裸相对路径（无 prefix）在同一 listener
+    /// 上应返回 404——验证声明 prefix 确实参与挂载（不漂移）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalize_routes_keeps_listeners_isolated() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let mut reg = Registry::new();
+        // register 闭包在 fresh Router 上构建相对 prefix 的路由；finalize 将其 nest 到声明 prefix 下。
+        reg.route_group(ListenerKind::Primary, "/api/v1/p", |r| {
+            Ok(r.route("/primary-only", get(|| async { "p" })))
+        })
+        .expect("primary declared");
+        reg.route_group(ListenerKind::Internal, "/internal/v1/i", |r| {
+            Ok(r.route("/internal-only", get(|| async { "i" })))
+        })
+        .expect("internal declared");
+        reg.route_group(ListenerKind::Health, "/health/v1/h", |r| {
+            Ok(r.route("/health-only", get(|| async { "h" })))
+        })
+        .expect("health declared");
+
+        let routers = reg.finalize_routes().expect("finalize ok");
+        let primary = routers
+            .iter()
+            .find(|(l, _)| *l == ListenerKind::Primary)
+            .map(|(_, r)| r.clone())
+            .expect("primary router present");
+        let internal = routers
+            .iter()
+            .find(|(l, _)| *l == ListenerKind::Internal)
+            .map(|(_, r)| r.clone())
+            .expect("internal router present");
+        let health = routers
+            .iter()
+            .find(|(l, _)| *l == ListenerKind::Health)
+            .map(|(_, r)| r.clone())
+            .expect("health router present");
+
+        let req = |uri: &str| {
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request built")
+        };
+
+        // primary-only 在 primary Router 的完整路径（prefix + 相对路径）命中。
+        let hit = primary
+            .clone()
+            .oneshot(req("/api/v1/p/primary-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(hit.status(), StatusCode::OK);
+
+        // F2 回归守卫：裸相对路径在同一 listener 应 404（声明 prefix 确实参与挂载）。
+        let bare = primary
+            .clone()
+            .oneshot(req("/primary-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(bare.status(), StatusCode::NOT_FOUND);
+
+        // 跨 listener 串台检查：primary 路由不出现在 internal Router。
+        let leaked = internal
+            .clone()
+            .oneshot(req("/api/v1/p/primary-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(leaked.status(), StatusCode::NOT_FOUND);
+
+        // 反向：internal-only 只在 internal Router（完整路径）。
+        let hit = internal
+            .clone()
+            .oneshot(req("/internal/v1/i/internal-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(hit.status(), StatusCode::OK);
+
+        // F2 回归守卫：裸路径在 internal listener 上 404。
+        let bare = internal
+            .clone()
+            .oneshot(req("/internal-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(bare.status(), StatusCode::NOT_FOUND);
+
+        let leaked = primary
+            .clone()
+            .oneshot(req("/internal/v1/i/internal-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(leaked.status(), StatusCode::NOT_FOUND);
+
+        // health-only 只在 health Router（完整路径）；primary 和 internal 均缺失（N-way 隔离）。
+        let hit = health
+            .clone()
+            .oneshot(req("/health/v1/h/health-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(hit.status(), StatusCode::OK);
+
+        // F2 回归守卫：裸路径在 health listener 上 404。
+        let bare = health
+            .clone()
+            .oneshot(req("/health-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(bare.status(), StatusCode::NOT_FOUND);
+
+        let leaked_primary = primary
+            .oneshot(req("/health/v1/h/health-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(leaked_primary.status(), StatusCode::NOT_FOUND);
+        let leaked_internal = internal
+            .oneshot(req("/health/v1/h/health-only"))
+            .await
+            .expect("oneshot ok");
+        assert_eq!(leaked_internal.status(), StatusCode::NOT_FOUND);
     }
 }
