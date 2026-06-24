@@ -16,7 +16,7 @@ use p256::ecdsa::signature::Verifier;
 use sha2::Sha256;
 
 use crate::claims;
-use crate::config::{StaticKeySource, VerifierConfig};
+use crate::config::{KeySet, VerifierConfig};
 use crate::jws::{self, Jws, JwsError, SupportedAlg};
 
 /// tracing `target:` / `resource =` 固定标签（同义串 ≥3 次抽 const，rust-standards §护栏）。
@@ -57,41 +57,83 @@ fn verify_path(
     expected: SupportedAlg,
 ) -> Result<VerifiedClaims, PdpError> {
     let jws = jws::parse(token).map_err(classify_parse)?;
+    // 取当前 key 快照（静态不变 / JWKS 文件源后台刷新的最新；Arc clone 同步零撕裂）。
+    let snapshot = config.keys().snapshot();
     // alg-key 路径隔离闸（OIDC-ALG-KEYPATH-01）：token alg 必须匹配 scheme 路径算法，否则 confusion → Untrusted。
     if jws.alg != expected {
-        log_fail("alg_scheme_mismatch", config.keys());
+        log_fail("alg_scheme_mismatch", &snapshot);
         return Err(PdpError::Untrusted);
     }
-    let signed = match expected {
-        SupportedAlg::Es256 => verify_es256(config.keys(), &jws),
-        SupportedAlg::Hs256 => verify_hs256(config.keys(), &jws),
-    };
-    if !signed {
-        log_fail("bad_signature", config.keys());
-        return Err(PdpError::InvalidSignature);
+    // kid 缩小候选集（JWKS 轮转按 id 选 key；无 kid → untagged 盲扫）。kid 是 hint、非信任根——下方仍须签名校验。
+    let kid = jws.kid.as_deref();
+    match match expected {
+        SupportedAlg::Es256 => verify_es256(&snapshot, kid, &jws),
+        SupportedAlg::Hs256 => verify_hs256(&snapshot, kid, &jws),
+    } {
+        VerifyOutcome::Verified => {}
+        VerifyOutcome::NoCandidate => {
+            // kid 不在当前快照（未知 / JWKS 轮转出）→ 签名 key 不在受信集 → `Untrusted`（区别于签名结构坏的
+            // `InvalidSignature`；同 iss/aud 不受信，spec R2 / SC-005：kid 无匹配 → Untrusted）。
+            log_fail("kid_no_candidate", &snapshot);
+            return Err(PdpError::Untrusted);
+        }
+        VerifyOutcome::BadSignature => {
+            log_fail("bad_signature", &snapshot);
+            return Err(PdpError::InvalidSignature);
+        }
     }
     // 签名通过 → 校 claim 语义（exp/nbf 经注入 Clock + iss/aud/sub）。
     claims::validate_and_map(config, clock, &jws.payload)
 }
 
-/// ES256（P-256 ECDSA）签名校验：定长 r‖s 签名 + 逐 ES256 公钥试验（多 key 支持轮转）。任一通过即 true。
-/// `VerifyingKey::verify` 内部对 signing input 做 SHA-256 prehash（非预 hash 输入）。
-fn verify_es256(keys: &StaticKeySource, jws: &Jws) -> bool {
-    let Ok(sig) = Signature::from_slice(&jws.signature) else {
-        // 签名非定长 64 字节 r‖s（含空签名 / DER 形态）→ 不可用 → 验签失败。
-        return false;
-    };
-    keys.es256()
-        .iter()
-        .any(|vk| vk.verify(&jws.signing_input, &sig).is_ok())
+/// 单路径验签三态（区分 fail-closed 语义）：候选为空 = kid 不在受信集（未知 / 轮转出）→ `Untrusted`；候选存在
+/// 但无一匹配 / 签名结构坏 → `InvalidSignature`。
+enum VerifyOutcome {
+    /// 某候选 key 验签通过。
+    Verified,
+    /// 该 kid 在当前快照无候选 key（fail-closed → `Untrusted`）。
+    NoCandidate,
+    /// 有候选但无一匹配，或签名结构非法（fail-closed → `InvalidSignature`）。
+    BadSignature,
 }
 
-/// HS256（HMAC-SHA256）MAC 校验：逐 HS256 密钥算 tag + 常数时间比对（复用 `primitives::crypto::constant_time_eq`，
-/// CRYPTO-CONST-TIME-01）。任一密钥匹配即 true。
-fn verify_hs256(keys: &StaticKeySource, jws: &Jws) -> bool {
-    keys.hs256()
-        .iter()
-        .any(|secret| hs256_tag_matches(secret, &jws.signing_input, &jws.signature))
+/// ES256（P-256 ECDSA）签名校验：定长 r‖s 签名 + 逐**候选** ES256 公钥试验（按 `kid` 过滤，见
+/// [`KeySet::es256_candidates`]——支持 JWKS kid 轮转 + 静态多 key）。`VerifyingKey::verify` 内部对 signing input
+/// 做 SHA-256 prehash（非预 hash 输入）。
+fn verify_es256(keys: &KeySet, kid: Option<&str>, jws: &Jws) -> VerifyOutcome {
+    let Ok(sig) = Signature::from_slice(&jws.signature) else {
+        // 签名非定长 64 字节 r‖s（含空签名 / DER 形态）→ 结构坏 → InvalidSignature。
+        return VerifyOutcome::BadSignature;
+    };
+    let mut had_candidate = false;
+    for vk in keys.es256_candidates(kid) {
+        had_candidate = true;
+        if vk.verify(&jws.signing_input, &sig).is_ok() {
+            return VerifyOutcome::Verified;
+        }
+    }
+    if had_candidate {
+        VerifyOutcome::BadSignature
+    } else {
+        VerifyOutcome::NoCandidate
+    }
+}
+
+/// HS256（HMAC-SHA256）MAC 校验：逐**候选** HS256 密钥算 tag + 常数时间比对（复用
+/// `primitives::crypto::constant_time_eq`，CRYPTO-CONST-TIME-01；候选按 `kid` 过滤）。候选为空 → `NoCandidate`。
+fn verify_hs256(keys: &KeySet, kid: Option<&str>, jws: &Jws) -> VerifyOutcome {
+    let mut had_candidate = false;
+    for secret in keys.hs256_candidates(kid) {
+        had_candidate = true;
+        if hs256_tag_matches(secret, &jws.signing_input, &jws.signature) {
+            return VerifyOutcome::Verified;
+        }
+    }
+    if had_candidate {
+        VerifyOutcome::BadSignature
+    } else {
+        VerifyOutcome::NoCandidate
+    }
 }
 
 /// 单密钥 HS256 tag 比对（常数时间）。
@@ -122,14 +164,14 @@ fn classify_parse(err: JwsError) -> PdpError {
     PdpError::InvalidSignature
 }
 
-/// 脱敏失败日志：reason 闭值标签 + keys_tried 计数（**不**记 token / 签名 / claim 值）。
-fn log_fail(reason: &'static str, keys: &StaticKeySource) {
+/// 脱敏失败日志：reason 闭值标签 + keys_tried 计数（**不**记 token / 签名 / claim / key 材料）。
+fn log_fail(reason: &'static str, keys: &KeySet) {
     tracing::warn!(
         target: LOG_TARGET,
         resource = LOG_TARGET,
         reason = reason,
-        es256_keys = keys.es256().len(),
-        hs256_keys = keys.hs256().len(),
+        es256_keys = keys.es256_len(),
+        hs256_keys = keys.hs256_len(),
         "oidc credential verification failed"
     );
 }
@@ -146,7 +188,7 @@ mod tests {
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 
-    use super::{hs256_tag_matches, verify_credential, verify_es256};
+    use super::{VerifyOutcome, hs256_tag_matches, verify_credential, verify_es256};
     use crate::config::{StaticKeySource, VerifierConfig, VerifierConfigBuilder};
     use crate::jws::{Jws, SupportedAlg};
 
@@ -618,6 +660,23 @@ mod tests {
         assert_eq!(claims.subject(), "alice");
     }
 
+    // ── 带 kid 的 token 命中 untagged 静态 key（kid 候选 back-compat：untagged 永远候选）──────────
+    #[test]
+    fn es256_token_with_kid_hits_untagged_static_key() {
+        // 静态源全 untagged；token 带任意 kid 仍命中（保 #1195 静态 key 行为不破坏）。
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"any-kid"}"#);
+        let body = URL_SAFE_NO_PAD.encode(payload(NOW + 3600, ISS, AUD, "").as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let sig: Signature = test_sk().sign(signing_input.as_bytes());
+        let token = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()));
+        let claims = ok_claims(verify_credential(
+            &es256_config(),
+            &FixedClock(NOW),
+            &RawCredential::jwt(token),
+        ));
+        assert_eq!(claims.subject(), "alice");
+    }
+
     // ── RFC 7515 known-answer 向量 ──────────────────────────────────────────────
     /// RFC 7515 §A.1：HS256 deterministic known-answer（key/signing-input/signature 全已知）。
     #[test]
@@ -670,9 +729,16 @@ mod tests {
             signing_input: A3_SIGNING_INPUT.as_bytes().to_vec(),
             payload: Vec::new(),
             signature: A3_SIG.to_vec(),
+            kid: None,
         };
-        assert!(verify_es256(&keys, &jws), "RFC 7515 A.3 已知签名应通过");
-        // anti-vacuity：篡改签名 → false。
+        assert!(
+            matches!(
+                verify_es256(&keys.snapshot(), None, &jws),
+                VerifyOutcome::Verified
+            ),
+            "RFC 7515 A.3 已知签名应通过"
+        );
+        // anti-vacuity：篡改签名 → 有候选但无一匹配 → BadSignature。
         let mut bad = A3_SIG;
         bad[0] ^= 0x01;
         let jws_bad = Jws {
@@ -680,8 +746,12 @@ mod tests {
             signing_input: A3_SIGNING_INPUT.as_bytes().to_vec(),
             payload: Vec::new(),
             signature: bad.to_vec(),
+            kid: None,
         };
-        assert!(!verify_es256(&keys, &jws_bad));
+        assert!(matches!(
+            verify_es256(&keys.snapshot(), None, &jws_bad),
+            VerifyOutcome::BadSignature
+        ));
     }
 
     /// 公钥从 RFC x,y 解析（SEC1 点）后能验我方用对应 RFC 私钥不可得——改用 round-trip 间接覆盖（test_sk）。

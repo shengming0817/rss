@@ -55,10 +55,21 @@
 
 **判据**：PR-A2 实施前 `cargo deny check` 实测候选依赖树 + 安全评估。**若无 license-clean 成熟 TLS provider 且无 sidecar/pinning 方案，则首批仅保留静态配置 key（PR-A1），不上线远程 JWKS**——绝不以裸 plain-HTTP 兜底。**首批静态 key（PR-A1）不依赖此决断**，认证链打通不被阻塞。最终选型 + 部署约束回写本节 + quickstart（tasks T003.2b）。
 
+**决断（PR-A2 落地，#1197）——本地文件 JWKS 源 + 外部 agent 刷新，in-app 零 HTTP/TLS**：
+
+实测结论（2026-06）：
+
+1. **无 license-clean 且生产成熟的 rustls TLS provider**。穷举全生态：`ring`/`aws-lc-rs`/`boring`/`rustls-openssl` 均 OpenSSL 派生（`deny.toml` license 门禁拒）；`rustls-mbedcrypto`=MPL-2.0、`rustls-wolfcrypt`=GPL-3.0 不在 allow-list；`rustls-rustcrypto`=v0.0.2-alpha 自带「DO NOT USE IN PRODUCTION」；**`graviola`**（rustls 作者 ctz，纯 Rust，license `Apache-2.0 OR ISC OR MIT-0` 完全合规）最接近，但「very new, exercise due caution」无审计、仅 x86_64/aarch64；`rustls-symcrypt` 需 SymCrypt 原生 C 库非纯 Rust。⇒ R3「首选 rustls+rustls-rustcrypto」**不满足成熟度门**。
+2. **「应用进程内 HTTPS 拉 JWKS」是被零信任生产系统系统性规避的少数派**。Envoy/Istio 在 sidecar/edge 验 JWT（应用零 JWT 库）；SPIFFE/SPIRE 规范 `TLS MUST NOT be required`、key 经本地 UDS 分发、验签离线；cert-manager/k8s 由 controller/kubelet 拉取后写本地 Secret/文件、**应用读本地挂载文件**。RSS 对标 SPIFFE/cert-manager（**非** Envoy 网关），且 `config.rs` 注释早已指向「外部 agent 做 HTTPS、注入 key bytes」。
+
+**采纳 = R3 次选「本地受信 sidecar / 文件源」**（非兜底）：`JwksKeySource`（`adapters/oidc/src/jwks.rs`）从受 OS 文件权限 / k8s Secret RBAC / 挂载 namespace 隔离保护的**本地路径**读 JWKS 文档（外部 agent / init-container / controller 经**各自的** TLS 拉取 + 轮转后写入），解析成 kid 索引的 `KeySet` 快照 + 后台 poll 周期重载 + fail-closed + `ManagedResource` 真实关闭刷新句柄。**in-app 零 HTTP/TLS provider** ⇒ 零供应链风险；传输完整性重定位到 infra 层（机器强制，非部署约定），不触及 F2 否决的 plain-HTTP-over-network 威胁面。**in-app HTTPS（标准外部 IdP 直连）= follow-up**：待成熟 license-clean provider（graviola 1.0+审计）出现，复用本 PR 的 `KeySet`/`enum KeySource`/poll seam，仅换 transport。
+
+部署约束（回写 quickstart，T003.2b）：JWKS 文档路径的写入方负责 TLS 拉取 + 完整性；路径须经文件权限 / Secret RBAC 保护（应用只读）；应用对源不可读/畸形/空 fail-closed，刷新失败保留 last-good + `oidc_jwks_ready=false`（degraded）。
+
 ## R4. key 管理范式
 
 - **静态 key set（PR-A1）**：`KeySource` 抽象 + `StaticKeySource`（构造期解析 ES256 SEC1/PEM/JWK(x,y) + HS256 secret → `MacKey`，解析失败构造期 `Result`，热路径只 verify）。按 kid 索引。
-- **JWKS（PR-A2）**：`JwksKeySource` impl 同 `KeySource` 抽象，远程 fetch + 缓存 + 轮转 + `ManagedResource` 真实关闭（刷新句柄）；**不改 `OidcProvider` 构造器签名**（保 A2∥C 解耦）。
+- **JWKS（PR-A2 / #1197）**：`JwksKeySource`（**本地文件源** + 外部 agent 刷新，见 R3 决断）经**闭合 `enum KeySource { Static, Jwks }`** 与 `StaticKeySource` 统一进 `VerifierConfig`（非新 trait——规避 adapter 内定义 trait_variant trait 的 `DIPORT-MACRO-CONFINE-01′` 白名单例外；闭集类型层 Hard）；后台 poll 重载 + 缓存（`RwLock<Arc<KeySet>>` 快照原子换出）+ kid 索引轮转 + fail-closed + `ManagedResource` 真实关闭刷新句柄（经 `OidcProvider::shutdown` 级联）。**不改 `OidcProvider::new` 构造器签名**（保 A2∥C 解耦：PR-C 仍经 `keys(StaticKeySource)` 注入）。
 - `OidcProvider` 字段：`key_set` / `service_key_set`（HS256-only）/ `clock: Box<dyn Clock>`（必填位置参）/ `trusted_issuers` / `expected_audience` / `leeway`。sealed-marker；保留 `impl ManagedResource`（首批静态 key 无资源 → `name()="oidc"` / `shutdown()=Ok`，去 todo!()）。
 
 ## R5. 对标（ref）

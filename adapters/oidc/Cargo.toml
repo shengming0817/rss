@@ -12,9 +12,11 @@ workspace = true
 # 增补 impl diport::Pdp（纯 RustCrypto 验签——ES256〔p256 ecdsa，JWT 路径〕/ HS256〔hmac+sha2，service-token
 # 路径〕→ 三段解析 → SupportedAlg 白名单 → 签名校验 → exp/nbf〔注入 diport::Clock〕→ iss/aud → VerifiedClaims）。
 # default build 轻量（无 crypto dep），仍保 freeze smoke 类型断言（与 s3/redis 同范式；仅声明真正用到的 dep，
-# cargo-udeps 守）。key 在构造期经 StaticKeySource 注入——live JWKS-over-HTTP discovery + 轮转 = follow-up
-# （#1109/T003，构造器签名为此留稳）。ADR-006 §5：本 PR 仅 crate 交付、不接入任何生产可达 httpserve 认证路径
-# （验签空窗保护；组合根接线 = #1109/T004 安全同批门）。
+# cargo-udeps 守）。key 经构造期注入：静态经 StaticKeySource；live 轮转经 JwksKeySource（#1109/T003，本地文件源 +
+# 外部 agent 刷新——in-app **零 HTTP/TLS provider**：传输完整性属 infra 层〔文件权限 / k8s Secret RBAC / 挂载隔离〕，
+# 对齐 SPIFFE/cert-manager。无 license-clean 成熟 rustls provider〔ring/aws-lc=OpenSSL 派生禁、rustls-rustcrypto=alpha、
+# graviola=未审计〕，故 in-app HTTPS 留后续）。OidcProvider 构造器签名为此留稳。ADR-006 §5：本 PR 仅 crate 交付、
+# 不接入任何生产可达 httpserve 认证路径（验签空窗保护；组合根接线 + readiness probe = #1109/T004 安全同批门）。
 [dependencies]
 diport = { path = "../../crates/diport" }
 # ES256（P-256 ECDSA）JWS 验签（仅 backend）：VerifyingKey::from_sec1_bytes + Verifier::verify（内部 SHA-256）。
@@ -26,22 +28,29 @@ sha2 = { workspace = true, optional = true }
 primitives = { path = "../../crates/primitives", optional = true }
 # 三段 JWS base64url 解码（仅 backend）：URL_SAFE_NO_PAD 解 header/payload/signature。
 base64 = { workspace = true, optional = true }
-# 验签后 claims 反序列化（仅 backend）：私有 Claims DTO 取 sub/exp/nbf/iss/aud + flatten extra（取 tenant/kind claim）。
+# 验签后 claims 反序列化 + JWKS 文档解析（仅 backend）：claims DTO 取 sub/exp/nbf/iss/aud + flatten extra；
+# JWKS 取 keys[] 的 kty/kid/crv/x/y/k（RFC 7517 / RFC 7518 §6.2 EC、§6.4 oct）。
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-# 结构化日志（仅 backend）：只记 reason 闭值标签 + keys_tried 计数，**绝不**记原始 token / 签名 / claim 值
-# （observability.md PII 边界；新验签路径错误是静态 message 枚举、无 PII source 链，无需 secure::redact_error）。
+# 结构化日志（仅 backend）：只记 reason 闭值标签 + keys_tried 计数，**绝不**记原始 token / 签名 / claim / key 材料
+# （observability.md PII 边界；验签 / JWKS 刷新错误是静态 message 枚举、无 PII source 链）。
 tracing = { workspace = true, optional = true }
-# 构造期 fail-fast 配置校验错误（空 issuer/audience/key/claim 名 + key 格式非法 + 空 HS256 密钥），非运行期静默。
+# 构造期 fail-fast 配置校验错误（空 issuer/audience/key/claim 名 + key 格式非法 + 空 HS256 密钥 + JWKS 源不可读/畸形/无可用 key），非运行期静默。
 thiserror = { workspace = true, optional = true }
+# JWKS 文件源后台 poll 刷新任务（仅 backend）：tokio::spawn + time::interval 周期重载 + sync::Mutex 持 JoinHandle。
+# 仅 rt/time/sync（**无网络 feature**——零 in-app HTTP/TLS）。workspace 基线已含 rt-multi-thread/macros。
+tokio = { workspace = true, optional = true, features = ["time", "sync"] }
+# JWKS 刷新任务取消信号 + ManagedResource 关闭编排（CancellationToken；对齐 bootstrap ShutdownStack / grpc 范式）。
+tokio-util = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror"]
+backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util"]
 
 [dev-dependencies]
-# 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）。
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）；
+# test-util = 后台 poll 任务确定性测试（start_paused + time::advance 驱动 interval tick，无 wall-clock flaky）。
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # 表驱动验签矩阵（claim 校验各分支 + RFC7515 KAV）。
 rstest = { workspace = true }
 # 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。

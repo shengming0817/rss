@@ -20,6 +20,8 @@ mod claims;
 #[cfg(feature = "backend")]
 mod config;
 #[cfg(feature = "backend")]
+mod jwks;
+#[cfg(feature = "backend")]
 mod jws;
 #[cfg(feature = "backend")]
 mod verify;
@@ -28,6 +30,8 @@ mod verify;
 pub use config::{
     ConfigError, StaticKeySource, StaticKeySourceBuilder, VerifierConfig, VerifierConfigBuilder,
 };
+#[cfg(feature = "backend")]
+pub use jwks::{JwksError, JwksKeySource, JwksReadinessHandle};
 
 use diport::{ManagedResource, ShutdownError};
 
@@ -60,9 +64,17 @@ impl ManagedResource for OidcProvider {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        // reason: key 构造期注入、纯计算验签，无 infra 句柄 / 后台 JWKS 刷新任务需释放（本切片不做 live
-        // discovery）。关闭无需显式动作（同 s3：连接器在构造侧持有）。JWKS 刷新句柄于 #1109/T003 落地时在此释放。
-        Ok(())
+        // 级联关闭 key 源：静态源 no-op（key 构造期注入、无句柄）；JWKS 文件源停后台 poll 刷新任务 + await
+        // 收敛（#1109/T003）。OidcProvider 是组合根注册的唯一 ManagedResource，关闭经此下沉到 key source。
+        #[cfg(feature = "backend")]
+        {
+            self.config.keys().shutdown().await
+        }
+        // reason: feature-off 空壳无 config / key 源 / 后台任务，关闭无显式动作（仅 freeze smoke 类型断言）。
+        #[cfg(not(feature = "backend"))]
+        {
+            Ok(())
+        }
     }
 }
 

@@ -38,13 +38,15 @@ cargo nextest run --manifest-path bins/server/Cargo.toml --features integration 
 - 无 Authorization 头 / 坏签名 / 过期 / 错 aud → 401/403（含 requestId），tracing 记 `authz.decision=deny` + 对应 `PdpError` 变体，日志无 token/subject。
 - 有效请求 → tracing 记 `authz.decision=allow` + `principal.kind`（无 PII）。
 
-## ④ JWKS 轮转（PR-A2）
+## ④ JWKS 轮转（PR-A2 / #1197 — 本地文件源 + 外部 agent 刷新）
 
 ```bash
-cargo nextest run --manifest-path adapters/oidc/Cargo.toml -p oidc --features jwks   # fake JWKS 源
+cargo nextest run -p oidc --features backend   # fake JWKS 文件源（jwks::tests）
 ```
 
-预期：kid=k1 token 通过；轮转后 kid=k2 通过、k1 移除后旧 token → `Untrusted`；JWKS 端点不可达 → `Untrusted`（fail-closed，绝不跳过验签）。
+预期：kid=k1 token 通过；轮转（重写文件 + `reload`）后 kid=k2 通过、k1 移除后旧 token → fail-closed；源不可读/空/畸形 → 构造期 fail-fast 拒；刷新失败保留 last-good + `oidc_jwks_ready=false`（degraded，绝不 swap 空集）。
+
+**部署约束**：`JwksKeySource` 从**本地路径**读 JWKS 文档——in-app **零 HTTP/TLS provider**（无 license-clean 成熟 rustls provider，见 research.md R3 决断）。传输完整性属基础设施层：外部 agent / init-container / controller 经**各自的** TLS 拉取 + 轮转后，把 JWKS 文档写入受 **OS 文件权限 / k8s Secret RBAC / 挂载 namespace 隔离**保护的路径（应用只读）。**绝不**让应用经裸 plain-HTTP-over-network 拉 JWKS（research.md F2）。in-app HTTPS 直连外部标准 IdP = follow-up（待成熟 license-clean provider）。
 
 ## ⑤ 全量治理门
 

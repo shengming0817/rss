@@ -10,6 +10,7 @@
 //! 只服务 service-token 路径——[`crate::verify`] 按 scheme 选 key 集 + 校 token alg 匹配。
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use p256::ecdsa::VerifyingKey;
 
@@ -19,8 +20,9 @@ const DEFAULT_LEEWAY_SECS: u64 = 60;
 /// leeway 把 exp 饱和到 `i64::MAX`、nbf 饱和到 `i64::MIN`），故构造期 fail-fast 拒（安全边界前移）。
 const MAX_LEEWAY_SECS: u64 = 300;
 /// HS256 共享密钥最小字节数。RFC 7518 §3.2：HMAC-SHA256 key 不得短于 hash 输出（256-bit = 32 bytes），
-/// 短密钥削弱 MAC 强度，故构造期 fail-fast 拒（空密钥是其子集）。
-const MIN_HS256_SECRET_BYTES: usize = 32;
+/// 短密钥削弱 MAC 强度，故构造期 fail-fast 拒（空密钥是其子集）。`pub(crate)`：JWKS `oct` key 解析（[`crate::jwks`]）
+/// 复用同一最小强度约束（单源）。
+pub(crate) const MIN_HS256_SECRET_BYTES: usize = 32;
 /// 默认 tenant claim 名（从 JWT extra 取 `tenant_id` 字段，可经 builder 覆盖）。
 const DEFAULT_TENANT_CLAIM: &str = "tenant_id";
 /// 默认 kind claim 名（从 JWT extra 取 `kind` 字段，可经 builder 覆盖）。
@@ -51,13 +53,122 @@ pub enum ConfigError {
     /// leeway 超过上限（> 300s）。极大 leeway 近似关闭 exp/nbf 时间校验，安全边界前移 fail-fast 拒。
     #[error("oidc leeway exceeds maximum (300s)")]
     LeewayTooLarge,
+    /// 重复设置 key 源（`keys` 与 `keys_jwks` 互斥，二次调用即冲突）。互斥配置不静默覆盖，构造期 fail-fast。
+    #[error("oidc key source set more than once (keys/keys_jwks are mutually exclusive)")]
+    ConflictingKeySources,
 }
 
-/// 静态验签 key 源：ES256 公钥集（JWT 路径）+ HS256 密钥集（service-token 路径）。两集物理隔离，
-/// 字段私有 + 唯一构造入口 = [`StaticKeySourceBuilder`]（外部不可伪造）。
+/// 单把验签 key + 其可选 `kid`（key id）。`kid = None` = untagged（静态 key / 无 id 的 JWK）。
+pub(crate) struct KeyEntry<K> {
+    pub(crate) kid: Option<String>,
+    pub(crate) key: K,
+}
+
+/// transport-agnostic 验签 key 快照：ES256 公钥集（JWT 路径）+ HS256 密钥集（service-token 路径），各带 kid。
+/// 静态源（[`StaticKeySource`]）build 期生成一份不变快照；JWKS 文件源（[`crate::jwks::JwksKeySource`]）后台
+/// 刷新时整体替换快照（`Arc` 原子换出，读侧零撕裂）。两集物理隔离（OIDC-ALG-KEYPATH-01：[`crate::verify`]
+/// 按 scheme 选集）。
+pub(crate) struct KeySet {
+    es256: Vec<KeyEntry<VerifyingKey>>,
+    hs256: Vec<KeyEntry<Vec<u8>>>,
+}
+
+/// kid 候选规则（**单源**）：untagged key（`kid=None`）永远候选；tagged key 仅当 token kid 精确匹配才候选。
+/// `kid` 只缩小候选集，最终仍须签名校验——非信任根。
+///
+/// **untagged=通配的安全边界（#254 F1）**：`kid=None` 的 entry **只可能**来自 operator 注入的静态源
+/// （[`StaticKeySource`]，无 kid 概念、operator 受信，通配 = 既有盲扫 back-compat）——动态 **JWKS 源强制每个
+/// key 带 kid**（[`crate::jwks`] `require_kid`），故 JWKS 快照永无 untagged entry，未知/缺失 kid 的 token → 无候选
+/// → fail-closed（spec FR-005；绝不让无-kid JWK 变成任意 token 的通配 key）。
+fn entry_matches(entry_kid: Option<&str>, token_kid: Option<&str>) -> bool {
+    entry_kid.is_none() || entry_kid == token_kid
+}
+
+impl KeySet {
+    /// 由已解析的 ES256 / HS256 entry 装箱（[`StaticKeySourceBuilder::build`] / [`crate::jwks`] 解析后调）。
+    pub(crate) fn new(es256: Vec<KeyEntry<VerifyingKey>>, hs256: Vec<KeyEntry<Vec<u8>>>) -> Self {
+        Self { es256, hs256 }
+    }
+
+    /// JWT 路径候选 ES256 公钥（按 `token_kid` 过滤，见 [`entry_matches`]）。
+    pub(crate) fn es256_candidates<'a>(
+        &'a self,
+        token_kid: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a VerifyingKey> + 'a {
+        self.es256
+            .iter()
+            .filter(move |e| entry_matches(e.kid.as_deref(), token_kid))
+            .map(|e| &e.key)
+    }
+
+    /// service-token 路径候选 HS256 共享密钥（按 `token_kid` 过滤）。
+    pub(crate) fn hs256_candidates<'a>(
+        &'a self,
+        token_kid: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.hs256
+            .iter()
+            .filter(move |e| entry_matches(e.kid.as_deref(), token_kid))
+            .map(|e| e.key.as_slice())
+    }
+
+    /// ES256 集大小（脱敏失败日志的 keys_tried 计数用）。
+    pub(crate) fn es256_len(&self) -> usize {
+        self.es256.len()
+    }
+    /// HS256 集大小（脱敏失败日志计数用）。
+    pub(crate) fn hs256_len(&self) -> usize {
+        self.hs256.len()
+    }
+
+    /// 两集是否都空（`VerifierConfigBuilder::build` fail-fast / JWKS 刷新「绝不 swap 空集」guard 用）。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.es256.is_empty() && self.hs256.is_empty()
+    }
+}
+
+/// 验签 key 源（**闭合** enum：静态注入 vs JWKS 文件源——闭集，外部 crate 无法新增变体/伪造，类型层 Hard）。
+/// [`VerifierConfig`] 持有；[`crate::verify`] 经 [`KeySource::snapshot`] 取当前快照验签（同步、零 await）。
+pub(crate) enum KeySource {
+    /// 构造期静态注入的 key（无后台任务；快照不变）。
+    Static(Arc<KeySet>),
+    /// 本地文件 JWKS 源（外部 agent 刷新 + 后台 poll 重载；持刷新句柄，关闭需停任务）。
+    Jwks(crate::jwks::JwksKeySource),
+}
+
+impl KeySource {
+    /// 取当前验签 key 快照（`Static` 返回不变 Arc；`Jwks` 取后台刷新的最新快照）。
+    pub(crate) fn snapshot(&self) -> Arc<KeySet> {
+        match self {
+            KeySource::Static(set) => Arc::clone(set),
+            KeySource::Jwks(src) => src.snapshot(),
+        }
+    }
+
+    /// 关闭 key 源（`Static` 无后台任务 → no-op；`Jwks` 取消 poll 任务 + await 收敛）。由
+    /// [`crate::OidcProvider`] 的 `ManagedResource::shutdown` 级联调用。
+    pub(crate) async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        match self {
+            // reason: 静态源 key 构造期注入、无 infra 句柄 / 后台任务，关闭无需显式动作。
+            KeySource::Static(_) => Ok(()),
+            KeySource::Jwks(src) => src.shutdown().await,
+        }
+    }
+
+    /// 配置是否「无 key」（`build` fail-fast 用）。`Static` 看快照是否空；`Jwks` 构造期已 fail-fast 初始非空，
+    /// 运行期失败保留 last-good（degraded 经 `is_ready` 反映），**不**视作空配置 → 始终非空。
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            KeySource::Static(set) => set.is_empty(),
+            KeySource::Jwks(_) => false,
+        }
+    }
+}
+
+/// 静态验签 key 源：构造期注入的不变 [`KeySet`] 快照（ES256 公钥集 + HS256 密钥集，untagged）。字段私有 +
+/// 唯一构造入口 = [`StaticKeySourceBuilder`]（外部不可伪造）。
 pub struct StaticKeySource {
-    es256: Vec<VerifyingKey>,
-    hs256: Vec<Vec<u8>>,
+    set: Arc<KeySet>,
 }
 
 impl StaticKeySource {
@@ -66,19 +177,10 @@ impl StaticKeySource {
         StaticKeySourceBuilder::default()
     }
 
-    /// JWT 路径候选 ES256 公钥（本切片盲扫全部；按 `kid` 选 key 留 #1109/T003 JWKS 轮转）。
-    pub(crate) fn es256(&self) -> &[VerifyingKey] {
-        &self.es256
-    }
-
-    /// service-token 路径候选 HS256 共享密钥。
-    pub(crate) fn hs256(&self) -> &[Vec<u8>] {
-        &self.hs256
-    }
-
-    /// 两集是否都空（`VerifierConfigBuilder::build` fail-fast 用）。
-    pub(crate) fn is_empty(&self) -> bool {
-        self.es256.is_empty() && self.hs256.is_empty()
+    /// 取静态 key 快照（与 [`KeySource::snapshot`] 同形；`KeySource::Static` 包装 + 测试复用）。空集判定经
+    /// 快照的 [`KeySet::is_empty`]（[`KeySource::is_empty`] 分派），不在本类型重复。
+    pub(crate) fn snapshot(&self) -> Arc<KeySet> {
+        Arc::clone(&self.set)
     }
 }
 
@@ -119,11 +221,21 @@ impl StaticKeySourceBuilder {
         Ok(self)
     }
 
-    /// 装箱（key 集可任一为空——某 scheme 无 key 时该路径验签必失败；两集都空由 `VerifierConfigBuilder::build` 拒）。
+    /// 装箱成不变 [`KeySet`] 快照（静态 key 全 untagged → `kid=None`，验签时盲扫，保既有行为）。key 集可任一为
+    /// 空——某 scheme 无 key 时该路径验签必失败；两集都空由 `VerifierConfigBuilder::build` 拒。
     pub fn build(self) -> StaticKeySource {
+        let es256 = self
+            .es256
+            .into_iter()
+            .map(|key| KeyEntry { kid: None, key })
+            .collect();
+        let hs256 = self
+            .hs256
+            .into_iter()
+            .map(|key| KeyEntry { kid: None, key })
+            .collect();
         StaticKeySource {
-            es256: self.es256,
-            hs256: self.hs256,
+            set: Arc::new(KeySet::new(es256, hs256)),
         }
     }
 }
@@ -141,7 +253,7 @@ pub struct VerifierConfig {
     /// 外部 IdP 擅自 assert RSS 特权 kind（INVARIANT: OIDC-KIND-ALLOWLIST-01，secure-by-default）。
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
-    keys: StaticKeySource,
+    keys: KeySource,
 }
 
 impl VerifierConfig {
@@ -164,7 +276,7 @@ impl VerifierConfig {
     pub(crate) fn leeway_secs(&self) -> u64 {
         self.leeway_secs
     }
-    pub(crate) fn keys(&self) -> &StaticKeySource {
+    pub(crate) fn keys(&self) -> &KeySource {
         &self.keys
     }
 }
@@ -178,7 +290,9 @@ pub struct VerifierConfigBuilder {
     kind_claim: String,
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
-    keys: Option<StaticKeySource>,
+    keys: Option<KeySource>,
+    /// 是否重复设置 key 源（`keys`/`keys_jwks` 二次调用即 true）→ `build` fail-fast 拒（互斥不静默覆盖，#254 F3）。
+    key_source_conflict: bool,
 }
 
 impl VerifierConfigBuilder {
@@ -192,14 +306,35 @@ impl VerifierConfigBuilder {
             kind_allowlist: HashSet::new(),
             leeway_secs: DEFAULT_LEEWAY_SECS,
             keys: None,
+            key_source_conflict: false,
         }
     }
 
-    /// 注入验签 key 源（必填——未注入或空集 → `build` fail-fast 拒）。
+    /// 注入**静态**验签 key 源（必填——未注入或空集 → `build` fail-fast 拒）。A2∥C 解耦：PR-C 经此传
+    /// [`StaticKeySource`]，与 JWKS 文件源（[`Self::keys_jwks`]）互斥二选一。
     #[must_use]
     pub fn keys(mut self, keys: StaticKeySource) -> Self {
-        self.keys = Some(keys);
+        self.set_key_source(KeySource::Static(keys.snapshot()));
         self
+    }
+
+    /// 注入 **JWKS 文件源**（[`crate::jwks::JwksKeySource`]，外部 agent 刷新 + 后台 poll 轮转）。JWKS 源构造期
+    /// 已 fail-fast 初始非空，故 `build` 不再拒空。
+    ///
+    /// 与 [`Self::keys`] **互斥**：二次设置任一 key 源 → `build` 返回 [`ConfigError::ConflictingKeySources`]
+    /// （fail-fast，不静默覆盖，#254 F3）。被覆盖的旧 JWKS 源经其 `Drop` 兜底取消后台任务（[`crate::jwks`]）。
+    #[must_use]
+    pub fn keys_jwks(mut self, keys: crate::jwks::JwksKeySource) -> Self {
+        self.set_key_source(KeySource::Jwks(keys));
+        self
+    }
+
+    /// 写 key 源槽；若已设置 → 标记冲突（`build` fail-fast）。互斥单源，避免链式静默覆盖。
+    fn set_key_source(&mut self, source: KeySource) {
+        if self.keys.is_some() {
+            self.key_source_conflict = true;
+        }
+        self.keys = Some(source);
     }
 
     /// 覆盖 tenant claim 名（如 `"org"` / `"tid"`）。
@@ -233,6 +368,10 @@ impl VerifierConfigBuilder {
 
     /// 最终 fail-fast 校验 + 装箱。
     pub fn build(self) -> Result<VerifierConfig, ConfigError> {
+        // 互斥 key 源二次设置 → fail-fast（#254 F3，不静默覆盖）。
+        if self.key_source_conflict {
+            return Err(ConfigError::ConflictingKeySources);
+        }
         // 纯空白等同无效（trim 后为空 → 运行时误拒所有 token），构造期拒而非静默失败。
         if self.issuer.trim().is_empty() {
             return Err(ConfigError::EmptyIssuer);
@@ -374,7 +513,7 @@ mod tests {
             .add_hs256_secret(&[0x22u8; MIN_HS256_SECRET_BYTES])
             .expect("32-byte secret accepted")
             .build();
-        assert!(!ks.is_empty());
+        assert!(!ks.snapshot().is_empty());
     }
 
     #[test]

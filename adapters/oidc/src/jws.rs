@@ -43,12 +43,17 @@ pub struct Jws {
     pub payload: Vec<u8>,
     /// 已 base64url 解码的签名 / MAC 字节。
     pub signature: Vec<u8>,
+    /// JOSE header `kid`（key id，RFC 7515 §4.1.4）：多 key 源（JWKS 轮转，#1109/T003）按 id 选验签 key；
+    /// 无 kid 时按 untagged key 盲扫（保静态 key 行为）。`kid` 是选 key hint、**非**信任根——最终仍须签名校验。
+    pub kid: Option<String>,
 }
 
-/// JWS protected header（只取 `alg`；`kid` 选 key 留 #1109/T003 JWKS 轮转，本切片盲扫候选 key）。
+/// JWS protected header：取 `alg`（必）+ `kid`（可选，JWKS 选 key 用）。
 #[derive(Deserialize)]
 struct Header {
     alg: String,
+    #[serde(default)]
+    kid: Option<String>,
 }
 
 /// 解析失败分类（结构 / 编码 / 算法白名单）。两者由 [`crate::verify`] 一律归 `InvalidSignature`——畸形或
@@ -88,6 +93,7 @@ pub fn parse(token: &str) -> Result<Jws, JwsError> {
         signing_input,
         payload,
         signature,
+        kid: header.kid,
     })
 }
 
@@ -180,5 +186,30 @@ mod tests {
             format!("{header}.{payload}").into_bytes()
         );
         assert_eq!(jws.payload, br#"{"sub":"alice"}"#);
+        // 无 kid header → None（保静态盲扫行为）。
+        assert_eq!(jws.kid, None);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_extracts_kid_when_present() {
+        // header 含 kid → Jws.kid = Some（JWKS 轮转按 id 选 key）。
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"key-2024"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"alice"}"#);
+        let token = format!("{header}.{payload}.c2lnbmF0dXJl");
+        let jws = parse(&token).expect("well-formed ES256+kid 应解析成功");
+        assert_eq!(jws.kid.as_deref(), Some("key-2024"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_ignores_unknown_header_fields() {
+        // 未知 header 字段（如 typ/cty/x5t）不影响解析；kid 缺省 → None。
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT","cty":"x"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"svc"}"#);
+        let token = format!("{header}.{payload}.c2ln");
+        let jws = parse(&token).expect("额外 header 字段应被忽略");
+        assert_eq!(jws.alg, SupportedAlg::Hs256);
+        assert_eq!(jws.kid, None);
     }
 }
