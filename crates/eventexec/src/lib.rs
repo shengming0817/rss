@@ -13,9 +13,15 @@ pub use consumer::{ConsumerMeta, run_consumer};
 
 pub mod relay;
 pub use relay::{
-    OUTBOX_RELAY_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker, SweeperWorker, WorkerHealth, relay_loop,
-    sweeper_loop,
+    OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker, SamplerWorker,
+    SweeperWorker, WorkerHealth, backlog_sampler_loop, relay_loop, sweeper_loop,
 };
+
+// #1209 outbox relay 配置护栏（构造期 fail-fast）+ 可观测性发射端口（注入式）。
+pub mod relay_config;
+pub use relay_config::{RelayConfig, RelayConfigError, SweeperConfig, SweeperConfigError};
+pub mod relay_metrics;
+pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetrics, RelayPhase};
 
 pub mod reconcile;
 pub use reconcile::{

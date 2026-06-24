@@ -8,9 +8,10 @@
 //!
 //! # INVARIANT: OUTBOX-ENGINE-PORT-01
 //!
-//! `OutboxRelay`/`OutboxSource`/`OutboxSweeper` 是**引擎策略接缝**（签名引 `Entry`/`Disposition`/`EngineError`
-//! 等 consistency 内部类型），按 ADR-005 category line **不能**在 `diport` 内编译（否则 diport 反依赖引擎），
-//! 故正确归属本引擎 crate——非 provider-agnostic 的 diport DI port。native AFIT、不引 dynosaur。
+//! `OutboxRelay`/`OutboxSource`/`OutboxSweeper`/`OutboxBacklog` 是**引擎策略接缝**（签名引 `Entry`/
+//! `Disposition`/`BacklogSample`/`EngineError` 等 consistency 内部类型），按 ADR-005 category line **不能**在
+//! `diport` 内编译（否则 diport 反依赖引擎），故正确归属本引擎 crate——非 provider-agnostic 的 diport DI
+//! port。native AFIT、不引 dynosaur。
 //!
 //! ref: ThreeDotsLabs/watermill message/router.go@master（Ack/Requeue/Reject disposition 概念对标）。
 
@@ -245,10 +246,72 @@ pub trait OutboxSweeper {
     async fn sweep(&self, retain_seconds: u64) -> Result<u64, crate::error::EngineError>;
 }
 
+/// 单 domain 的 backlog 采样快照（纯标量值类型，sync 构造；不携 [`Entry`]）。
+///
+/// 供 outbox 可观测性采样器消费，发射 `outbox_pending_depth` / `outbox_oldest_pending_age_seconds`
+/// gauge（#1209）。engine 类型——**不** derive serde（ADR-004 C6）；私有字段 + accessor，仿 [`Entry`]。
+///
+/// backlog **drain 后**（无 pending 行）规范零值是 [`BacklogSample::empty`]（depth=0, age=0）——
+/// 采样器据此把 gauge 置 0（而非缺失），否则 Prometheus 无法区分「积压清空」与「采样器死亡」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacklogSample {
+    depth: u64,
+    oldest_age_seconds: u64,
+}
+
+impl BacklogSample {
+    /// 由 pending 深度 + 最老 pending 龄（秒）构造。
+    pub fn new(depth: u64, oldest_age_seconds: u64) -> Self {
+        Self {
+            depth,
+            oldest_age_seconds,
+        }
+    }
+
+    /// 空 backlog 规范零值（无 pending 行：depth=0, age=0）。
+    pub fn empty() -> Self {
+        Self {
+            depth: 0,
+            oldest_age_seconds: 0,
+        }
+    }
+
+    /// 当前 pending 深度（status=pending 且到期的行数）。
+    pub fn depth(&self) -> u64 {
+        self.depth
+    }
+
+    /// 最老 pending 行的龄（秒，`now() − min(created_at)`）；无 pending ⇒ 0。
+    pub fn oldest_age_seconds(&self) -> u64 {
+        self.oldest_age_seconds
+    }
+}
+
+/// Outbox 积压采样端口（L1 引擎策略 trait，native AFIT）。
+///
+/// 由可观测性采样背景 worker 周期驱动：聚合某 domain 的 pending 深度 + 最老 pending 龄，发射 backlog
+/// gauge（#1209）。与 [`OutboxSource`]（扫描）/ [`OutboxRelay`]（中继）/ [`OutboxSweeper`]（清理）同源
+/// 构成 outbox 背景机器的引擎接缝；聚合 SQL 在 adapter，本 crate 只冻接缝。读侧聚合端口，与 `poll_pending`
+/// 的行取扫描分离（不同访问形态、不同消费方），故独立 trait 而非扩 [`OutboxSource`]。
+/// native AFIT ⇒ 非 object-safe，消费方泛型 `<B: OutboxBacklog>`，禁 `Box<dyn>`。
+#[allow(async_fn_in_trait)]
+// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
+pub trait OutboxBacklog {
+    /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxSource::poll_pending`]
+    /// 的可重捞集合**同源**：`(pending 且到期) OR (stale publishing，lease 过期可被 relay 重捞)`——stale
+    /// publishing 会被重投，属可恢复积压必须计入；只排除 lease 仍有效的正常 in-flight，避免把正常中继中的行
+    /// 误计入。无可投递行 ⇒ [`BacklogSample::empty`]。`Transient` 错误 ⇒ 本轮跳过采样。
+    async fn sample_backlog(
+        &self,
+        domain: &str,
+    ) -> Result<BacklogSample, crate::error::EngineError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Disposition, Entry, HandleResult, PermanentError, PermanentErrorKind, Topic, TopicError,
+        BacklogSample, Disposition, Entry, HandleResult, PermanentError, PermanentErrorKind, Topic,
+        TopicError,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -384,5 +447,24 @@ mod tests {
         assert_eq!(entry.topic(), &topic);
         assert_eq!(entry.idem_key(), &key);
         assert_eq!(entry.payload(), payload.as_slice());
+    }
+
+    // BacklogSample::new funnel + 两访问器借出（非零值往返）。
+    #[test]
+    fn backlog_sample_new_exposes_fields() {
+        let sample = BacklogSample::new(42, 305);
+        assert_eq!(sample.depth(), 42);
+        assert_eq!(sample.oldest_age_seconds(), 305);
+    }
+
+    // BacklogSample::empty 是 depth=0/age=0 规范零值（drain 后采样器置 0 gauge 的依据）。
+    #[test]
+    fn backlog_sample_empty_is_zero() {
+        let empty = BacklogSample::empty();
+        assert_eq!(empty.depth(), 0);
+        assert_eq!(empty.oldest_age_seconds(), 0);
+        assert_eq!(empty, BacklogSample::new(0, 0));
+        // anti-vacuity：非空样本不等于 empty（双向验证 PartialEq）。
+        assert_ne!(empty, BacklogSample::new(1, 0));
     }
 }

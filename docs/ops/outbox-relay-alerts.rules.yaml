@@ -1,0 +1,77 @@
+# Outbox relay 可观测性告警规则（#1209，归属 Feature #1208）。
+#
+# Prometheus rule_files 格式。metric/label 契约单源见 docs/rules/observability.md §Outbox Relay Metrics
+# 与 docs/ops/202606250430-002-outbox-relay-observability.md。改 metric 名/label 须同步 emit site
+# （crates/eventexec relay_metrics.rs）+ 本文件 + 上述文档。
+#
+# 校验：promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
+#
+# 注：gauge 均带 `domain` label（operator 配置集，低基数）。涉及 gauge 阈值的告警一律 `by (domain)` 聚合，
+# 保 annotation 的 {{ $labels.domain }} 可靠呈现来源 domain（否则跨 domain 合并致来源失明）。
+groups:
+  - name: outbox-relay
+    rules:
+      # 积压 SLO：某 domain 最老 pending 龄超 5min（投递延迟核心信号）。max_over_time[2m] 抗采样抖动
+      # （sample_interval 上限 60s ⇒ 2min 窗内 ≥2 样本）；by(domain) 保来源可定位；for:2m 抗瞬时尖峰。
+      - alert: OutboxBacklogOldestAgeHigh
+        expr: max by (domain) (max_over_time(outbox_oldest_pending_age_seconds[2m])) > 300
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox 最老 pending 龄超 5min SLO（domain={{ $labels.domain }}）"
+          description: "outbox_oldest_pending_age_seconds={{ $value }}s on domain {{ $labels.domain }}；relay 投递滞后或卡死，检查 relay worker readyz（outbox_relay probe）与 broker 连通性。"
+
+      # DLX 增长：某 domain 任意 entry 进 DLX（永久失败 / 重试预算耗尽）即告警——死信不可静默累积。
+      - alert: OutboxDlxGrowth
+        expr: sum by (domain) (increase(outbox_dlx_total[10m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox entries 进入 DLX（domain={{ $labels.domain }}）"
+          description: "近 10min outbox_dlx_total 增长 {{ $value }}（domain={{ $labels.domain }}）；永久失败事件需人工巡检 DLX 行（adapters/postgres outbox status='dlx'）。"
+
+      # 积压深度持续高（次级信号；阈值按部署容量调，此处保守 10k 兜底防无界增长）。by(domain) 保来源。
+      - alert: OutboxPendingDepthHigh
+        expr: max by (domain) (max_over_time(outbox_pending_depth[5m])) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox pending 深度持续偏高（domain={{ $labels.domain }}）"
+          description: "outbox_pending_depth={{ $value }} on domain {{ $labels.domain }}；relay 吞吐跟不上写入速率，考虑增大 relay batch 或排查 broker。"
+
+      # 重试风暴（次级早期信号）：broker 抖动引发批量 Requeue，pending 上涨但 DLX 未增（预算未耗尽）的
+      # 窗口期，oldest-age 超阈前的领先指标。阈值按部署基线调（此处 5/s 兜底）。
+      - alert: OutboxRequeueStorm
+        expr: sum by (domain) (rate(outbox_publish_total{status="requeue"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox relay 重试风暴（domain={{ $labels.domain }}）"
+          description: "requeue 速率 {{ $value }}/s on domain {{ $labels.domain }}；broker 瞬态失败持续退避重投，先于积压告警感知，排查 broker。"
+
+      # relay tick 耗时过高（P95）：DB 慢查询/broker 慢导致 tick 变长 → 积压加速。领先于 oldest-age 告警。
+      - alert: OutboxRelayTickSlow
+        expr: histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m]))) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox relay tick P95 耗时过高（phase={{ $labels.phase }}）"
+          description: "relay tick {{ $labels.phase }} 相 P95={{ $value }}s；poll 慢=DB 扫描慢，publish 慢=broker/CAS 慢，排查对应依赖。"
+
+      # 采样器停更探测：absent_over_time 在 series 存在但近 10min 无新样本（采样器卡死/未接入）时触发，
+      # 优于裸 absent()（后者仅在该 metric family 从未出现时触发，运行后卡死检测不到）。首启动未采样亦覆盖。
+      # 注：per-domain 卡死中，只要任一 domain 仍在采样，本规则不触发该 domain——故 relay worker 卡死的
+      # 权威信号是 readyz（outbox_sampler/outbox_relay probe，外部 liveness 监控），metric 仅作辅助。
+      - alert: OutboxSamplerNoData
+        expr: absent_over_time(outbox_pending_depth[10m])
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox backlog 采样近 10min 无数据（采样器未运行/卡死或未接入 /metrics）"
+          description: "10min 内无 outbox_pending_depth 新样本；检查 outbox_sampler probe 健康与 metrics-facade 装配。"

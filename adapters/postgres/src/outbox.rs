@@ -17,7 +17,8 @@
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
 use consistency::{
-    EngineError, EngineErrorKind, Entry, IdemKey, OutboxRelay, OutboxSource, OutboxSweeper, Topic,
+    BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxRelay,
+    OutboxSource, OutboxSweeper, Topic,
 };
 use diport::{DynPublisher, PublishRequest, Publisher, PublisherError};
 use sqlx::PgConnection;
@@ -402,6 +403,63 @@ impl OutboxSweeper for PgOutbox {
         })?;
 
         Ok(result.rows_affected())
+    }
+}
+
+// ── OutboxBacklog impl ────────────────────────────────────────────────────────
+
+/// Outbox 积压采样实现（单次聚合 SELECT，服务端 `now()`，读路径，不 FOR UPDATE）。
+///
+/// **索引决策（无新建）**：pre-GA 阶段 pending 行量小；现有
+/// `idx_outbox_relay_scan ON outbox (domain, status, retry_after)` 已覆盖
+/// `WHERE domain = $1 AND status = $2 AND (retry_after IS NULL OR retry_after <= now())`
+/// 谓词，代价低廉。`min(created_at)` 聚合运行在已被索引过滤的小行集上，额外排序开销可忽略。
+/// 若后续 profiling 显示瓶颈，跟进路径为偏索引
+/// `CREATE INDEX ON outbox (domain, status, created_at) WHERE status = 'pending'`。
+impl OutboxBacklog for PgOutbox {
+    /// 采样 `domain` 的**可投递积压**（深度 + 最老积压龄）。
+    ///
+    /// 谓词与 [`OutboxSource::poll_pending`] 的可重捞集合**同源**（见本文件 `poll_pending` 的 WHERE）：
+    /// `(status=pending 且到期) OR (status=publishing 且 lease 过期 `updated_at <= now()-LEASE_TTL_SECONDS`)`。
+    /// stale `publishing`（崩溃/超时 in-flight）会被 relay 重投，属可投递积压，**必须计入**——否则 oldest-age
+    /// SLO 对可恢复积压失明（relay 重捞但 gauge 报 0）。只排除 lease 仍有效的正常 in-flight。无可投递行 ⇒
+    /// [`BacklogSample::empty`]。**不变式**：本谓词须随 `poll_pending` 同步改（集成测试 T16/T18 + stale-publishing
+    /// 用例锁定漂移）。
+    async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
+        let row: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT count(*)                                                         AS depth,
+                   COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at)))::bigint, 0) AS oldest_age_seconds
+            FROM outbox
+            WHERE domain = $1
+              AND (
+                    (status = $2 AND (retry_after IS NULL OR retry_after <= now()))
+                 OR (status = $3 AND updated_at <= now() - make_interval(secs => $4))
+              )
+            "#,
+        )
+        .bind(domain)
+        .bind(STATUS_PENDING)
+        .bind(STATUS_PUBLISHING)
+        .bind(LEASE_TTL_SECONDS)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: sample_backlog db error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
+
+        let (raw_depth, raw_age) = row;
+
+        // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
+        let depth =
+            u64::try_from(raw_depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+
+        // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
+        let oldest_age_seconds = u64::try_from(raw_age.max(0))
+            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+
+        Ok(BacklogSample::new(depth, oldest_age_seconds))
     }
 }
 

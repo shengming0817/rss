@@ -63,6 +63,33 @@ tests、dashboard、alert 与 emit site。
 `idempotency_requests_total{state}` 的 state 值集必须闭合；新增或改名必须同步 schema、
 tests、dashboard、alert 与 middleware emit site。
 
+### Outbox Relay Metrics（#1209）
+
+outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` 注入式 `OutboxMetrics` 端口，
+生产实现 `MetricsOutboxMetrics` 经 `metrics` facade）：
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `outbox_publish_total` | Counter | `domain`,`status` | relay 单条结算（status=ack/requeue/reject） |
+| `outbox_dlx_total` | Counter | `domain` | 永久失败进 DLX（= status=reject） |
+| `outbox_pending_depth` | Gauge | `domain` | pending 且到期行数（采样器） |
+| `outbox_oldest_pending_age_seconds` | Gauge | `domain` | 最老 pending 龄；无 pending ⇒ 0（非缺失） |
+| `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=poll/publish；settle 并入 publish，见 §settle 相说明） |
+
+label 闭值集纪律：
+
+- `status` 值集闭合于 `consistency::Disposition::as_label()`（`ack`/`requeue`/`reject`）；**不**经
+  `observ::EventLabel`（其 `DispositionLabel` 为 `Ack`/`Nack`/`Requeue`，与 outbox 的 `Reject` 语义不符）。
+  `phase` 闭合于 `eventexec::RelayPhase::as_label()`（`poll`/`publish`）。两者均 crate 自有 `as_label()`
+  闭映射——单源、无副本可漂移。
+- `domain` label 值来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式，
+  非请求/租户派生），基数有界，是 §HTTP Metrics domain Label 同款「assembly/config 声明 closed set」的
+  合法低基数用法。`eventexec`（Service 层）依层矩阵不能依赖 `observ`，故这些 label 暂不经 `observ`
+  typed enum 入口；把 outbox label 收敛进 `observ` 词表（供 otel 映射统一）是 **#1076** 后续项。
+
+新增或改名上述 metric / label 必须同步 schema、tests、dashboard、`docs/ops/outbox-relay-alerts.rules.yaml`
+与 emit site。
+
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
 ## Cross-domain Transport

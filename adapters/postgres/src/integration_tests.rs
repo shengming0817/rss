@@ -1155,6 +1155,261 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
     Ok(())
 }
 
+// ── T15–T18: OutboxBacklog::sample_backlog（#1209）────────────────────────────
+//
+// T15: 空表 → BacklogSample::empty()（depth=0, age=0）。
+// T16: pending 行计入 depth；published/dlx/publishing 行不计。
+// T17: oldest_age_seconds 来自 min(created_at)（最老 pending 行；允许小容差）。
+// T18: retry_after > now() 的行排除在 depth 之外（与 poll_pending pending 谓词同源）。
+
+use consistency::{BacklogSample, OutboxBacklog};
+
+/// T15: 空 outbox（仅 migrations）→ sample_backlog 返 BacklogSample::empty()。
+#[tokio::test(flavor = "multi_thread")]
+async fn t15_sample_backlog_empty_table_returns_empty() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let sample = outbox.sample_backlog("test-domain").await?;
+
+    assert_eq!(
+        sample,
+        BacklogSample::empty(),
+        "空表应返 BacklogSample::empty()"
+    );
+    assert_eq!(sample.depth(), 0);
+    assert_eq!(sample.oldest_age_seconds(), 0);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T16: pending 行计入 depth；published/dlx/**非-stale** publishing 行**不**计
+/// （此处 publishing 行 updated_at≈now()、lease 仍有效，属正常 in-flight，正确排除；stale publishing 见 T19）。
+#[tokio::test(flavor = "multi_thread")]
+async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = "t16-domain";
+
+    // seed：1 pending + 1 published + 1 dlx + 1 publishing。
+    for (prefix, target_status) in [
+        ("t16-pend", "pending"),
+        ("t16-pub", "published"),
+        ("t16-dlx", "dlx"),
+        ("t16-pubing", "publishing"),
+    ] {
+        let eid = unique_event_id(prefix);
+        let entry = make_entry(&eid);
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                let env = make_test_env(domain, "c");
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+        if target_status != "pending" {
+            sqlx::query("UPDATE outbox SET status = $1 WHERE event_id = $2")
+                .bind(target_status)
+                .bind(&eid)
+                .execute(&store.pool)
+                .await?;
+        }
+    }
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let sample = outbox.sample_backlog(domain).await?;
+
+    assert_eq!(sample.depth(), 1, "仅 pending 行计入 depth，应为 1");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T17: oldest_age_seconds 来自最老 pending 行的 created_at（min(created_at)）。
+///
+/// 插两行，旧行 created_at 人工回拨 10s；断言 oldest_age_seconds >= 10（允许 ±3s 容差）。
+#[tokio::test(flavor = "multi_thread")]
+async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = "t17-domain";
+
+    // 先插"新" pending 行（created_at = now()）。
+    let new_id = unique_event_id("t17-new");
+    store
+        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = make_entry(&new_id);
+            let env = make_test_env(domain, "c");
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    // 插"旧" pending 行，并把 created_at 回拨 10s（模拟 10 秒前写入）。
+    let old_id = unique_event_id("t17-old");
+    store
+        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = make_entry(&old_id);
+            let env = make_test_env(domain, "c");
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    sqlx::query(
+        "UPDATE outbox SET created_at = now() - make_interval(secs => 10) WHERE event_id = $1",
+    )
+    .bind(&old_id)
+    .execute(&store.pool)
+    .await?;
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let sample = outbox.sample_backlog(domain).await?;
+
+    assert_eq!(sample.depth(), 2, "两条 pending 行");
+    // oldest_age_seconds 须 ≥ 10（旧行回拨 10s）；上限放宽容差至 20s 吸收 testcontainer/CI round-trip
+    // 抖动（断言意图是「取最老行龄」而非精确计时，宽上限避免慢 CI 偶发 flaky）。
+    assert!(
+        sample.oldest_age_seconds() >= 10,
+        "oldest_age_seconds 应 ≥ 10，实际={}",
+        sample.oldest_age_seconds()
+    );
+    assert!(
+        sample.oldest_age_seconds() < 20,
+        "oldest_age_seconds 不应超过 20（宽容差吸收 CI round-trip），实际={}",
+        sample.oldest_age_seconds()
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T18: retry_after > now() 的行**不**计入 depth（与 poll_pending pending 谓词同源）。
+#[tokio::test(flavor = "multi_thread")]
+async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = "t18-domain";
+
+    // seed：1 到期 pending（retry_after IS NULL）+ 1 未到期 pending（retry_after = now()+3600）。
+    let due_id = unique_event_id("t18-due");
+    store
+        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = make_entry(&due_id);
+            let env = make_test_env(domain, "c");
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let future_id = unique_event_id("t18-future");
+    store
+        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = make_entry(&future_id);
+            let env = make_test_env(domain, "c");
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    // 把 future 行的 retry_after 置未来（3600s 后），status 保持 pending。
+    sqlx::query(
+        "UPDATE outbox SET retry_after = now() + make_interval(secs => 3600) WHERE event_id = $1",
+    )
+    .bind(&future_id)
+    .execute(&store.pool)
+    .await?;
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let sample = outbox.sample_backlog(domain).await?;
+
+    // 仅 due_id（retry_after IS NULL）计入；future_id（retry_after > now()）排除。
+    assert_eq!(
+        sample.depth(),
+        1,
+        "retry_after > now() 的行不应计入 depth，应为 1"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T19: **stale** publishing（lease 过期、poll_pending 会重捞）计入 depth + oldest-age；**非-stale**
+/// publishing（lease 仍有效）排除。锁定 sample_backlog 与 poll_pending 可投递集合同源（#1209 review F1）。
+#[tokio::test(flavor = "multi_thread")]
+async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = "t19-domain";
+    let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
+
+    // seed 两行 publishing：stale（updated_at 回拨 LEASE_TTL+10s）+ fresh（updated_at≈now()）。
+    for (prefix, stale) in [("t19-stale", true), ("t19-fresh", false)] {
+        let eid = unique_event_id(prefix);
+        let entry = make_entry(&eid);
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                let env = make_test_env(domain, "c");
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+        if stale {
+            sqlx::query(
+                "UPDATE outbox SET status='publishing', updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+            )
+            .bind(lease_ttl + 10)
+            .bind(&eid)
+            .execute(&store.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE outbox SET status='publishing', updated_at = now() WHERE event_id = $1",
+            )
+            .bind(&eid)
+            .execute(&store.pool)
+            .await?;
+        }
+    }
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let sample = outbox.sample_backlog(domain).await?;
+
+    // 仅 stale publishing 计入（fresh 行 lease 有效、属正常 in-flight 排除）。
+    assert_eq!(
+        sample.depth(),
+        1,
+        "stale publishing 应计入 depth、fresh publishing 排除，应为 1"
+    );
+    // stale 行存在 ⇒ oldest-age 反映其积压龄（> 0）。
+    assert!(
+        sample.oldest_age_seconds() > 0,
+        "stale publishing 的 oldest_age_seconds 应 > 0，实际={}",
+        sample.oldest_age_seconds()
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// t14：驱动**真实** `persist_session_and_emit` 的 rollback 分支——session INSERT 因 `to_timestamp` 溢出失败
 /// → co-tx 整体回滚 → session/outbox 两行皆无（OUTBOX-COTX-SESSION-01 负向 anti-vacuity，直测真实 method；
 /// review #1192 F1：补 t12 仅复刻 SQL 序列的盲区）。
