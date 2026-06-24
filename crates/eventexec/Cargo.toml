@@ -28,3 +28,5 @@ tokio-util = { workspace = true }
 [dev-dependencies]
 # test-util feature 提供 tokio::time::advance/pause（start_paused=true 控 interval tick）。
 tokio = { workspace = true, features = ["test-util"] }
+# TC5 T007.5 tracing 字段断言：捕获 error 级事件字段名/值（CapLayer subscriber）。
+tracing-subscriber = { workspace = true }

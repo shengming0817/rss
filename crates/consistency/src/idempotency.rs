@@ -67,18 +67,10 @@ impl ConsumerGroup {
 }
 
 /// 首见判定结果（穷尽闭值集）。
-///
-/// # Claim-only draft 注意
-///
-/// 当前仅支持 `Fresh`/`Duplicate` 两态（absent→claimed）；
-/// `Done`/`Released` 等完整生命周期态属 T007 ConsumerBase 阶段（跟踪 `#1120`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SeenState {
     /// 首次见到此 key（应执行副作用）。
-    ///
-    /// **注意（claim-only draft）**：副作用执行前崩溃时，key 仍留 claimed，
-    /// 重放永久返回 `Duplicate`（crash-after-claim 丢失风险）；完整闭环见 T007。
     Fresh,
     /// 已见过（应跳过，幂等短路）。
     Duplicate,
@@ -89,32 +81,178 @@ pub enum SeenState {
 /// trait 内直接 `async fn`——**不** object-safe，故消费方用泛型 `<S: IdempotencyStore>` 静态分发，
 /// 禁 `Box<dyn IdempotencyStore>`。
 ///
-/// # Claim-only draft（当前阶段语义限制）
+/// # 状态机（absent → claimed → done）
 ///
-/// 当前实现是 **claim-only draft**——`check` 只做 absent→claimed 的 claim-or-skip；
-/// **无 commit/release/done/claimed-timeout 闭环**。这意味着：
-/// - consumer 收到 `Fresh` 后若在执行副作用前崩溃，Redis/PG 中仍留有 claimed 记录。
-/// - 重放时该 key 永久被判 `Duplicate`，副作用**永不执行**（crash-after-claim 丢失风险）。
+/// - `check`：absent→claimed（首见 `Fresh`，已 claimed/done 返 `Duplicate`）。
+/// - `commit`：claimed→done（幂等永久去重，副作用执行成功后调用）。
+/// - `release`：claimed→absent（释放 claim，使后续重放可重新 `Fresh`；用于放弃处理/重投前释放）。
 ///
-/// 完整的 absent→claimed→done + commit/release 闭环属 **T007 ConsumerBase 阶段**（跟踪 `#1120`）。
-///
-/// **ConsumerBase 落地前，不得把本 store 复用于「Fresh 后副作用崩溃会造成不可接受丢失」的场景。**
+/// commit/release 闭环在 #1120 兑现，消除 crash-after-claim 时 key 永久 `Duplicate` 的丢失风险。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait IdempotencyStore {
     /// 标记并查询 key 是否首见（claim-or-skip）。`Fresh` ⇒ 执行；`Duplicate` ⇒ 幂等短路。
-    ///
-    /// # Claim-only draft
-    ///
-    /// 当前是 **claim-only**：`Fresh` 返回后无 commit/release 闭环；
-    /// crash-after-claim 会导致该 key 永久 `Duplicate`（丢失风险）。
-    /// 完整闭环属 T007 ConsumerBase 阶段（跟踪 `#1120`）。
     async fn check(&self, key: &IdemKey) -> Result<SeenState, crate::error::EngineError>;
+
+    /// claimed→done：标记副作用已成功执行（幂等永久去重）。
+    ///
+    /// 对 absent key 为幂等 no-op（`Ok(())`）。
+    async fn commit(&self, key: &IdemKey) -> Result<(), crate::error::EngineError>;
+
+    /// claimed→absent：释放 claim（删除 claimed 记录），使后续重放可重新得到 `Fresh`。
+    ///
+    /// 用于放弃处理或重投前释放。对 absent key 为幂等 no-op（`Ok(())`）。
+    async fn release(&self, key: &IdemKey) -> Result<(), crate::error::EngineError>;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use super::{
+        ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, SeenState,
+    };
+    use crate::error::EngineError;
+
+    // ─── in-mem fake（测试专用，覆盖完整状态机）────────────────────────────────────
+
+    /// 三态内存 store：absent / claimed / done。
+    struct FakeStore {
+        /// `true` = claimed，`false` = done（absent 时 key 不存在）。
+        state: Mutex<HashMap<String, bool>>,
+    }
+
+    impl FakeStore {
+        fn new() -> Self {
+            Self {
+                state: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl IdempotencyStore for FakeStore {
+        async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
+            let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            // reason: in-mem 操作恒成功，unwrap_or_else 处理 poisoned lock 后继续。
+            match map.get(key.as_str()) {
+                None => {
+                    // absent → claimed
+                    map.insert(key.as_str().to_string(), true);
+                    Ok(SeenState::Fresh)
+                }
+                Some(_) => Ok(SeenState::Duplicate),
+            }
+        }
+
+        async fn commit(&self, key: &IdemKey) -> Result<(), EngineError> {
+            // reason: in-mem commit 恒 Ok；claimed→done（absent 时幂等 no-op）。
+            let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if map.contains_key(key.as_str()) {
+                map.insert(key.as_str().to_string(), false); // false = done
+            }
+            Ok(())
+        }
+
+        async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
+            // reason: in-mem release 恒 Ok；claimed→absent（absent 时幂等 no-op）。
+            let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            map.remove(key.as_str());
+            Ok(())
+        }
+    }
+
+    // ─── 状态机测试（TDD）────────────────────────────────────────────────────────
+
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试用 parse — 已知非空 key，item-level carve-out（error-handling.md §Carve-out）。
+    fn k(raw: &str) -> IdemKey {
+        IdemKey::parse(raw).unwrap()
+    }
+
+    /// claim → commit → 再 check = Duplicate（done 永久去重）。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 状态机断言测试——store.check/commit 在 in-mem 实现中恒 Ok，item-level carve-out。
+    async fn state_machine_claim_commit_then_duplicate() {
+        let store = FakeStore::new();
+        let key = k("evt-commit-1");
+        assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+        store.commit(&key).await.unwrap();
+        assert_eq!(store.check(&key).await.unwrap(), SeenState::Duplicate);
+    }
+
+    /// claim → release → 再 check = Fresh（释放后可重领）。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
+    async fn state_machine_claim_release_then_fresh() {
+        let store = FakeStore::new();
+        let key = k("evt-release-1");
+        assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+        store.release(&key).await.unwrap();
+        assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+    }
+
+    /// commit 对 absent key 幂等 no-op（不 panic，Ok）。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
+    async fn commit_on_absent_key_is_noop() {
+        let store = FakeStore::new();
+        let key = k("evt-absent-commit");
+        // 直接 commit，未 claim
+        assert!(store.commit(&key).await.is_ok());
+        // 之后 check 仍可 Fresh（absent 状态未被写入 done）
+        assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+    }
+
+    /// release 对 absent key 幂等 no-op（不 panic，Ok）。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
+    async fn release_on_absent_key_is_noop() {
+        let store = FakeStore::new();
+        let key = k("evt-absent-release");
+        // 直接 release，未 claim
+        assert!(store.release(&key).await.is_ok());
+        // 之后 check 仍可 Fresh
+        assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+    }
+
+    /// 表驱动：多条 key 各自独立状态机，互不干扰。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
+    async fn multiple_keys_independent_state_machines() {
+        let store = FakeStore::new();
+        let keys: &[&str] = &["evt-A", "evt-B", "evt-C"];
+        // 全部 claim
+        for &raw in keys {
+            assert_eq!(
+                store.check(&k(raw)).await.unwrap(),
+                SeenState::Fresh,
+                "raw={raw}"
+            );
+        }
+        // A commit，B release，C 留 claimed
+        store.commit(&k("evt-A")).await.unwrap();
+        store.release(&k("evt-B")).await.unwrap();
+        // A：done → Duplicate
+        assert_eq!(
+            store.check(&k("evt-A")).await.unwrap(),
+            SeenState::Duplicate
+        );
+        // B：absent → Fresh
+        assert_eq!(store.check(&k("evt-B")).await.unwrap(), SeenState::Fresh);
+        // C：still claimed → Duplicate
+        assert_eq!(
+            store.check(&k("evt-C")).await.unwrap(),
+            SeenState::Duplicate
+        );
+    }
+
+    // ─── IdemKey / ConsumerGroup 原有测试（保留）────────────────────────────────
 
     // 任意非空 key 接受（opaque，不限字符集、不 trim）；as_str 往返。
     #[test]

@@ -20,22 +20,24 @@ use std::pin::Pin;
 use dynosaur::dynosaur;
 use futures::Stream;
 
+use crate::redacted::RedactedSource;
+
 /// 对象存储操作失败。
 ///
-/// PII 边界（**类型层 Hard**，与 [`crate::RateLimitError`] / [`crate::ShutdownError`] 同范式）：`Backend` 变体的
-/// `source`（S3 provider 错误，可能携 endpoint / bucket / 凭据签名细节）经**手写** `Debug` **不展开**、只输出固定
-/// `<redacted>` 占位；`Display` 仅 provider 无关安全摘要常量。故 `?err` / `{err:?}` 与 `%err` 一样安全，不再依赖
-/// 「消费侧只用 `Display`」的 Soft 约定。`LimitExceeded` 的 `max_bytes` 是消费域设定的配置上界、**非 PII**，可观测。
+/// PII 边界（**类型层 Hard**，与 [`crate::SignerError`] / [`crate::RateLimitError`] 同范式）：`Backend` 变体的
+/// `source`（S3 provider 错误，可能携 endpoint / bucket / 凭据签名细节）经 [`RedactedSource`] 脱敏（`Debug`/`Display`
+/// 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed），`derive(Debug)`
+/// 即安全。`Display` 仅 provider 无关安全摘要常量。`LimitExceeded` 的 `max_bytes` 是消费域设定的配置上界、**非 PII**，可观测。
 /// 需要 source 诊断时走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source 链），**不**裸 `.source()`。
 ///
-/// INVARIANT: DIPORT-OBJSTOREERR-DEBUG-REDACT-01（手写 `Debug` 不展开 `Backend` source；回归见 `error_redaction` 单测）。
-#[derive(thiserror::Error)]
+/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（source 经 `RedactedSource` 不暴露原始错误；回归见 `error_redaction` 单测）。
+#[derive(Debug, thiserror::Error)]
 pub enum ObjectStoreError {
-    /// provider 后端故障（不可用 / 权限 / 网络等）。原始错误内部保留，不进 `Display` / wire。
+    /// provider 后端故障（不可用 / 权限 / 网络等）。原始错误内部保留，不进 `Display` / wire / source 链。
     #[error("object store operation failed")]
     Backend {
         #[source]
-        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+        source: RedactedSource,
     },
     /// 对象字节超过 [`ObjectPayload::collect_limited`] 的有界上限——消费域据此拒绝过大对象（避免一次性内存
     /// 分配）。`max_bytes` 是配置上界、**非 PII**，安全可观测。
@@ -46,34 +48,15 @@ pub enum ObjectStoreError {
     },
 }
 
-impl std::fmt::Debug for ObjectStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            // PII 边界（Hard）：不展开 `Backend` 的 `source`（其 Display/Debug 可能携 endpoint / bucket / 凭据），
-            // 只输出固定安全占位，使 `{err:?}` 与 `%err`（Display 安全常量）同样不泄漏——把原 Soft 消费侧约定上移
-            // 为类型层保证。
-            Self::Backend { .. } => f
-                .debug_struct("ObjectStoreError::Backend")
-                .field("source", &"<redacted>")
-                .finish(),
-            // `max_bytes` 是配置上界、非 PII，可见利于诊断（消费域排查「对象超限」时需知阈值）。
-            Self::LimitExceeded { max_bytes } => f
-                .debug_struct("ObjectStoreError::LimitExceeded")
-                .field("max_bytes", max_bytes)
-                .finish(),
-        }
-    }
-}
-
 impl ObjectStoreError {
-    /// 把 adapter 内部错误包成 provider 后端故障（[`Self::Backend`]）。原始错误仅作 internal source 保留，
-    /// 不经 `Display` 暴露（PII 边界）。
+    /// 把 adapter 内部错误包成 provider 后端故障（[`Self::Backend`]）。原始错误仅 owned 保留，不经任何
+    /// `Error` 接口暴露（PII 边界）。
     pub fn new<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
         Self::Backend {
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 }

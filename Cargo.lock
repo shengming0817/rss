@@ -951,6 +951,7 @@ dependencies = [
  "secure",
  "support",
  "thiserror",
+ "tokio",
  "vocab",
 ]
 
@@ -1394,6 +1395,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

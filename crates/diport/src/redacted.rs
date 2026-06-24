@@ -29,7 +29,9 @@
 /// 内层 `Box` 是 **owned 但 write-only**：原始错误值保留在内存（供 panic / core-dump 事后排查），却不经
 /// `Debug` / `Display` / `Error::source()` 任一接口暴露——write-only 是本脱敏边界的**设计本意**（containment），
 /// 故字段标 `#[allow(dead_code)]`（非冗余字段）。
-pub(crate) struct RedactedSource(
+// pub（非 pub(crate)）：`pub enum` 错误（如 `ObjectStoreError`）的变体字段恒 public，须持 public 类型
+// 否则「more private than item」privacy leak。re-export 于 crate root（`pub use redacted::RedactedSource`）。
+pub struct RedactedSource(
     // reason: write-only containment——原始错误 owned 供事后 debugger / core-dump 排查，但不经任何
     // `Error` 接口（`Debug`/`Display`/`source()`）暴露（fail-closed PII 边界，DIPORT-ERR-SOURCE-REDACT-01）。
     #[allow(dead_code)] Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -38,7 +40,7 @@ pub(crate) struct RedactedSource(
 impl RedactedSource {
     /// 把一个 adapter 内部错误包成脱敏 source。原始错误**不经任何 `Error` 接口**（`Debug` / `Display` /
     /// [`std::error::Error::source`]）暴露（fail-closed PII 边界）；仅 owned 保留供事后 debugger / core-dump 排查。
-    pub(crate) fn new<E>(source: E) -> Self
+    pub fn new<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {

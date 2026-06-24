@@ -23,13 +23,15 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHandlerError};
+use consistency::ConsumerGroup;
 use diport::{AuditEvent, AuditOutcome, AuditSink, Message};
 use futures::future::BoxFuture;
-use generated::event::identity_v1::IdentitySessionCreatedPayload;
+use generated::event::identity_v1::{
+    CONTRACT_ID as SESSION_CONTRACT_ID, IdentitySessionCreatedPayload, TOPIC as SESSION_TOPIC,
+};
 
-/// session-created event 契约 topic（identity 域发布；audit 域消费——跨域只经 contract，
-/// 各域独立持有同一 topic 字符串，不共享 Rust 常量）。
-pub const SESSION_CREATED_TOPIC: &str = "identity.session-created";
+/// audit 域消费 session-created 事件的 consumer group（稳定标识，幂等去重 PK 第二维度）。
+const AUDIT_SESSION_CREATED_GROUP: &str = "audit.session-created";
 
 /// 审计资源类别（const literal，AuditEvent.resource_kind 要求 &'static str）。
 const RESOURCE_KIND_SESSION: &str = "session";
@@ -130,8 +132,12 @@ where
     S: AuditSink + Send + Sync + 'static,
 {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+        let group = ConsumerGroup::parse(AUDIT_SESSION_CREATED_GROUP)
+            .map_err(|_| KernelError::Subscriber)?;
         reg.subscriber(
-            SESSION_CREATED_TOPIC,
+            SESSION_CONTRACT_ID,
+            SESSION_TOPIC,
+            group,
             Box::new(SessionCreatedAuditHandler::new(self.sink.clone())),
         )?;
         Ok(())
@@ -246,6 +252,8 @@ mod tests {
             .expect("compose ok");
         let subs = reg.into_subscribers();
         assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].0, SESSION_CREATED_TOPIC);
+        assert_eq!(subs[0].contract_id, SESSION_CONTRACT_ID);
+        assert_eq!(subs[0].topic, SESSION_TOPIC);
+        assert_eq!(subs[0].group.as_str(), AUDIT_SESSION_CREATED_GROUP);
     }
 }

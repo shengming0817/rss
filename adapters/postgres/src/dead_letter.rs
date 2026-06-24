@@ -1,0 +1,197 @@
+//! PostgreSQL 死信持久化 adapter（DLX，#1120）。
+//!
+//! [`PgDeadLetterStore`] impl [`diport::DeadLetterStore`]——native AFIT（泛型静态分发或
+//! `Box<DynDeadLetterStore>` 组合根注入）。
+//!
+//! **immutable append**：只 INSERT，不 UPDATE / DELETE。死信记录是不可变审计物料，运维经
+//! SELECT 巡检，不修改原记录。
+//!
+//! **`original_entry` jsonb** 存 `{"bytes": [u8, ...]}` —— JSON 数字数组完整保留原始
+//! payload 字节供重放 / 巡检，往返无损，仅用已有的 `serde_json`（不引入额外 base64 依赖）。
+//! PII 保留策略属后续治理（backlog 跟踪）；此处不脱敏，完整存入。
+//!
+//! **时间戳**：`first_attempt_at` / `last_attempt_at` 用 DB DEFAULT `now()`（不注入 Clock，
+//! 与 outbox/inbox 同范式：时间源保持 DB 端单一，无跨进程偏移）。
+//!
+//! **错误 PII 边界**：sqlx 错误不进 Display（经 `DeadLetterStoreError::new` 包成 source，
+//! `error-handling.md §Message 与 PII`）。
+
+use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
+use sqlx::PgPool;
+
+use crate::PgStore;
+
+/// PostgreSQL 死信写入 adapter。
+///
+/// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
+/// 经 [`PgStore::dead_letter`] 构造。
+pub struct PgDeadLetterStore {
+    pool: PgPool,
+}
+
+impl PgStore {
+    /// 构造 [`PgDeadLetterStore`]（pool clone 自 `PgStore`，轻量）。
+    pub fn dead_letter(&self) -> PgDeadLetterStore {
+        PgDeadLetterStore {
+            pool: self.pool.clone(),
+        }
+    }
+}
+
+impl DeadLetterStore for PgDeadLetterStore {
+    /// 持久化一条死信记录（immutable INSERT，不更新已有行）。
+    ///
+    /// `original_entry` 存为 jsonb：`{"bytes": [u8, ...]}`（JSON 数字数组）以无损往返原始字节。
+    /// 时间戳 `first_attempt_at` / `last_attempt_at` 均走 DB DEFAULT `now()`。
+    /// sqlx 错误不进 Display——经 [`DeadLetterStoreError::new`] 包成 source（PII 边界）。
+    async fn write_dead_letter(
+        &self,
+        record: DeadLetterRecord,
+    ) -> Result<(), DeadLetterStoreError> {
+        // 存为 {"bytes": [u8, ...]} JSON 数组——完整往返原始字节，只用已有 serde_json，不引入 base64 依赖。
+        let bytes_arr: Vec<serde_json::Value> = record
+            .original_payload()
+            .iter()
+            .map(|&b| serde_json::Value::Number(b.into()))
+            .collect();
+        let original_entry = serde_json::json!({"bytes": bytes_arr});
+
+        sqlx::query(
+            r#"
+            INSERT INTO dead_letter
+                (domain, contract_id, topic, original_entry, error_summary, num_attempts)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(record.domain())
+        .bind(record.contract_id())
+        .bind(record.topic())
+        .bind(sqlx::types::Json(&original_entry))
+        .bind(record.error_summary())
+        .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(DeadLetterStoreError::new)?;
+
+        Ok(())
+    }
+
+    /// 释放资源（pool 由 `PgStore` 统一管理；此处 no-op）。
+    ///
+    // reason: pool 的 `close()` 由 `PgStore::shutdown`（impl `ManagedResource`）经
+    // `bootstrap::ShutdownStack` 逆序编排统一关闭；`PgDeadLetterStore` 自身无额外 infra 资源。
+    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
+        Ok(())
+    }
+}
+
+// ── 单测 ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod smoke {
+    //! 编译期类型证明：`PgDeadLetterStore: DeadLetterStore`（via trait bound）。
+    //! INVARIANT: ADAPTER-PORT-FREEZE-07 —— DeadLetterStore on PgDeadLetterStore；
+    //! 去掉 impl 即编译失败（anti-vacuity）。
+    use core::marker::PhantomData;
+
+    use diport::DeadLetterStore;
+
+    fn assert_dead_letter_store<T: DeadLetterStore>(_: PhantomData<T>) {}
+
+    #[test]
+    fn pg_dead_letter_store_impl_frozen() {
+        assert_dead_letter_store(PhantomData::<super::PgDeadLetterStore>);
+    }
+}
+
+/// 集成测试：`PgDeadLetterStore` 往返验证（写入 → SELECT 断言字段）。
+/// `integration` feature 门控；需真实 postgres，见 migrations/README.md。
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use std::time::Duration;
+
+    use diport::{DeadLetterStore, ManagedResource};
+
+    use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn config_from_env() -> Result<PgConfig, String> {
+        let var = |k: &str| {
+            std::env::var(k).map_err(|_| {
+                format!("integration 测试需设置 {k}（libpq env）；见 migrations/README.md")
+            })
+        };
+        let host = var("PGHOST")?;
+        let port: u16 = var("PGPORT")?
+            .parse()
+            .map_err(|_| "PGPORT 不是合法 u16".to_string())?;
+        let database = var("PGDATABASE")?;
+        if !database.contains("test") {
+            return Err(format!(
+                "PGDATABASE='{database}' 不含 'test'——集成测试会执行破坏性 DDL，拒绝打到非测试库"
+            ));
+        }
+        let username = var("PGUSER")?;
+        let password = var("PGPASSWORD")?;
+        Ok(
+            PgConfig::new(host, port, database, username, PgPassword::new(password))
+                .with_ssl_mode(PgSslMode::Prefer)
+                .with_acquire_timeout(Duration::from_secs(5)),
+        )
+    }
+
+    /// 写入一条死信记录，再 SELECT 回来断言字段往返正确。
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out。
+    async fn write_dead_letter_roundtrips() -> TestResult {
+        let store = PgStore::connect(&config_from_env()?).await?;
+        store.run_migrations().await?;
+
+        let dl = store.dead_letter();
+        let payload = b"original message payload".to_vec();
+        let record = diport::DeadLetterRecord::new(
+            "identity",
+            "contract-session",
+            "session.created",
+            payload.clone(),
+            diport::DeadLetterSummary::new("max retries exhausted after 10 attempts"),
+            10,
+        );
+
+        dl.write_dead_letter(record).await?;
+
+        // SELECT 最新一条（唯一写入）断言各字段。
+        let row: (String, String, String, serde_json::Value, String, i32) = sqlx::query_as(
+            r#"SELECT domain, contract_id, topic, original_entry, error_summary, num_attempts
+               FROM dead_letter
+               WHERE domain = 'identity' AND topic = 'session.created'
+               ORDER BY first_attempt_at DESC
+               LIMIT 1"#,
+        )
+        .fetch_one(&store.pool)
+        .await?;
+
+        assert_eq!(row.0, "identity", "domain should match");
+        assert_eq!(row.1, "contract-session", "contract_id should match");
+        assert_eq!(row.2, "session.created", "topic should match");
+
+        // original_entry 是 {"bytes": [u8, ...]}；还原原始字节验证往返。
+        let bytes_arr = row.3["bytes"].as_array().unwrap();
+        let decoded: Vec<u8> = bytes_arr
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u8)
+            .collect();
+        assert_eq!(decoded, payload, "original_payload roundtrip should match");
+
+        assert_eq!(
+            row.4, "max retries exhausted after 10 attempts",
+            "error_summary should match"
+        );
+        assert_eq!(row.5, 10, "num_attempts should match");
+
+        store.shutdown().await?;
+        Ok(())
+    }
+}

@@ -33,10 +33,30 @@ pub(crate) struct RouteGroupDecl {
 }
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
-/// topic + handler 在 finalize 经 [`Registry::into_subscribers`] 交组合根接 eventexec 分发驱动。
+///
+/// contract_id、topic、consumer group、handler 四元组；经 [`Registry::into_subscribers`]
+/// 转为 [`SubscriberBinding`] 交组合根接 eventexec 分发驱动。
 pub(crate) struct SubscriberDecl {
+    pub(crate) contract_id: &'static str,
     pub(crate) topic: &'static str,
+    pub(crate) group: consistency::ConsumerGroup,
     pub(crate) handler: Box<dyn SubscriberHandler>,
+}
+
+/// finalize 后交组合根的订阅绑定（从 [`SubscriberDecl`] 展开）。
+///
+/// 组合根据此把 handler 接到 eventexec 分发驱动：`topic` 用于 broker 订阅；
+/// `group` 传 ConsumerBase；`contract_id` 提供契约来源（审计/追踪）；
+/// `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
+pub struct SubscriberBinding {
+    /// 契约 ID（对应 `generated` 中的 `CONTRACT_ID` 常量）。
+    pub contract_id: &'static str,
+    /// broker topic（对应 `generated` 中的 `TOPIC` 常量）。
+    pub topic: &'static str,
+    /// 消费者组（稳定标识，幂等去重 PK 的第二维度）。
+    pub group: consistency::ConsumerGroup,
+    /// bootstrap-local 擦除 handler（由组合根 adapt 为 `eventexec::HandlerFn`）。
+    pub handler: Box<dyn SubscriberHandler>,
 }
 
 /// 健康探针声明（由 [`Registry::probe`] 收集）。
@@ -152,16 +172,30 @@ impl Registry {
         Ok(())
     }
 
-    /// 声明事件订阅。
+    /// 声明事件订阅（ContractId + topic + ConsumerGroup + handler 四元组绑定）。
     ///
-    /// `handler` 为 bootstrap-local 擦除对象（[`SubscriberHandler`]）；组合根 finalize 经
-    /// [`Registry::into_subscribers`] 取出接 eventexec 分发驱动。
+    /// - `contract_id`：契约 ID，取自 `generated::event::<domain_v1>::CONTRACT_ID`。
+    /// - `topic`：broker routing key，取自 `generated::event::<domain_v1>::TOPIC`。
+    /// - `group`：消费者组（[`consistency::ConsumerGroup`]），幂等去重 PK 的第二维度；
+    ///   取自消费域 const，经 `ConsumerGroup::parse(...)` 构造——失败须冒泡为 [`KernelError::Subscriber`]，
+    ///   不得在 init 内 `unwrap`/`expect`。
+    /// - `handler`：bootstrap-local 擦除对象（[`SubscriberHandler`]）。
+    ///
+    /// 组合根 finalize 经 [`Registry::into_subscribers`] 取出 [`SubscriberBinding`] 接 eventexec 分发驱动。
+    /// DomainId = 注册域，由注册时机隐式记录（不作为参数，避免与 contract owner 语义冲突）。
     pub fn subscriber(
         &mut self,
+        contract_id: &'static str,
         topic: &'static str,
+        group: consistency::ConsumerGroup,
         handler: Box<dyn SubscriberHandler>,
     ) -> Result<(), KernelError> {
-        self.subscribers.push(SubscriberDecl { topic, handler });
+        self.subscribers.push(SubscriberDecl {
+            contract_id,
+            topic,
+            group,
+            handler,
+        });
         Ok(())
     }
 
@@ -287,13 +321,20 @@ impl Registry {
         Ok(by_listener)
     }
 
-    /// 取出订阅声明（topic + handler），交组合根接 eventexec 分发驱动。
+    /// 取出订阅绑定（contract_id + topic + group + handler），交组合根接 eventexec 分发驱动。
     ///
     /// 消费 `self`（声明在 finalize 阶段交出，Registry 不再复用）。
-    pub fn into_subscribers(self) -> Vec<(&'static str, Box<dyn SubscriberHandler>)> {
+    /// 返回 [`SubscriberBinding`] 列表；组合根据 `topic` 订阅 broker，据 `group` 接 ConsumerBase，
+    /// 据 `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
+    pub fn into_subscribers(self) -> Vec<SubscriberBinding> {
         self.subscribers
             .into_iter()
-            .map(|d| (d.topic, d.handler))
+            .map(|d| SubscriberBinding {
+                contract_id: d.contract_id,
+                topic: d.topic,
+                group: d.group,
+                handler: d.handler,
+            })
             .collect()
     }
 }
@@ -378,11 +419,18 @@ mod collect {
     #[test]
     #[allow(clippy::expect_used)]
     fn registry_collects_and_exposes_declarations() {
+        let group =
+            consistency::ConsumerGroup::parse("audit.session-created").expect("valid group");
         let mut reg = Registry::new();
         reg.route_group(ListenerKind::Primary, "/api/v1/identity", Ok)
             .expect("route group declared");
-        reg.subscriber("identity.session-created", Box::new(OkHandler))
-            .expect("subscriber declared");
+        reg.subscriber(
+            "identity.session-created",
+            "identity.session-created",
+            group,
+            Box::new(OkHandler),
+        )
+        .expect("subscriber declared");
 
         let groups = reg.route_groups();
         assert_eq!(groups.len(), 1);
@@ -392,21 +440,27 @@ mod collect {
 
         let subs = reg.into_subscribers();
         assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].0, "identity.session-created");
+        assert_eq!(subs[0].contract_id, "identity.session-created");
+        assert_eq!(subs[0].topic, "identity.session-created");
+        assert_eq!(subs[0].group.as_str(), "audit.session-created");
     }
 
     struct TwoGroupDomain;
     impl Domain for TwoGroupDomain {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+            let group = consistency::ConsumerGroup::parse("domain-a.topic-a")
+                .map_err(|_| KernelError::Subscriber)?;
             reg.route_group(ListenerKind::Primary, "/api/v1/a", Ok)?;
-            reg.subscriber("topic.a", Box::new(OkHandler))?;
+            reg.subscriber("contract.topic-a", "topic.a", group, Box::new(OkHandler))?;
             Ok(())
         }
     }
     struct OneSubDomain;
     impl Domain for OneSubDomain {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-            reg.subscriber("topic.b", Box::new(OkHandler))?;
+            let group = consistency::ConsumerGroup::parse("domain-b.topic-b")
+                .map_err(|_| KernelError::Subscriber)?;
+            reg.subscriber("contract.topic-b", "topic.b", group, Box::new(OkHandler))?;
             Ok(())
         }
     }
@@ -418,8 +472,12 @@ mod collect {
         assert_eq!(reg.route_groups().len(), 1);
         let subs = reg.into_subscribers();
         assert_eq!(subs.len(), 2);
-        assert_eq!(subs[0].0, "topic.a");
-        assert_eq!(subs[1].0, "topic.b");
+        assert_eq!(subs[0].topic, "topic.a");
+        assert_eq!(subs[0].contract_id, "contract.topic-a");
+        assert_eq!(subs[0].group.as_str(), "domain-a.topic-a");
+        assert_eq!(subs[1].topic, "topic.b");
+        assert_eq!(subs[1].contract_id, "contract.topic-b");
+        assert_eq!(subs[1].group.as_str(), "domain-b.topic-b");
     }
 
     struct FailingDomain;

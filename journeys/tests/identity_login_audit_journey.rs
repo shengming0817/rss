@@ -81,18 +81,18 @@ async fn login_publishes_event_audited_end_to_end() -> Result<()> {
     assert_eq!(route_groups[0], (ListenerKind::Primary, "/api/v1/identity"));
     assert_eq!(registry.probe_count(), 0, "追踪弹未注册探针");
 
-    // 3. 取出订阅声明，接到 eventexec 分发驱动（订阅须先于发布——in-mem 无重放）。
+    // 3. 取出订阅绑定，接到 eventexec 分发驱动（订阅须先于发布——in-mem 无重放）。
     let token = CancellationToken::new();
     let mut dispatchers = Vec::new();
-    for (topic, handler) in registry.into_subscribers() {
-        assert_eq!(topic, SESSION_CREATED_TOPIC);
+    for binding in registry.into_subscribers() {
+        assert_eq!(binding.topic, SESSION_CREATED_TOPIC);
         let stream = bus
             .subscriber()
-            .subscribe(Topic::new(topic), token.clone())
+            .subscribe(Topic::new(binding.topic), token.clone())
             .await?;
         dispatchers.push(tokio::spawn(eventexec::run_dispatch(
             stream,
-            adapt(handler),
+            adapt(binding.handler),
         )));
     }
     assert_eq!(dispatchers.len(), 1, "恰一个 session-created 订阅");
@@ -158,14 +158,14 @@ async fn rejected_login_does_not_audit() -> Result<()> {
 
     let token = CancellationToken::new();
     let mut dispatchers = Vec::new();
-    for (topic, handler) in registry.into_subscribers() {
+    for binding in registry.into_subscribers() {
         let stream = bus
             .subscriber()
-            .subscribe(Topic::new(topic), token.clone())
+            .subscribe(Topic::new(binding.topic), token.clone())
             .await?;
         dispatchers.push(tokio::spawn(eventexec::run_dispatch(
             stream,
-            adapt(handler),
+            adapt(binding.handler),
         )));
     }
 

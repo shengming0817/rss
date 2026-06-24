@@ -58,3 +58,16 @@ pub struct SeedThingHappenedPayload {
     #[serde(rename = "thingId")]
     pub thing_id: ::std::string::String,
 }
+
+/// 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "seed.thing-happened";
+
+/// 稳定事件 topic（broker routing key；active event 来自 `contract.toml` `topic` 字段，draft 回退用 id）。
+/// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const TOPIC: &str = "seed.thing-happened";
+
+/// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
+/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
+/// `SubscriptionSpec` 类型定义见父 mod（`event/mod.rs`）；此处通过 `super::` 引用，无重复定义。
+/// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];

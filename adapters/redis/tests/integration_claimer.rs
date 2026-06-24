@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use consistency::{IdemKey, IdempotencyStore, SeenState};
+use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, SeenState};
 use deadpool_redis::{Config, Runtime};
 use diport::ManagedResource;
 use redis::RedisStore;
@@ -30,7 +30,7 @@ fn unique_key(label: &str) -> IdemKey {
     IdemKey::parse(&format!("{label}:pid{pid}:n{n}")).unwrap()
 }
 
-fn make_store(ttl: Duration) -> RedisStore {
+fn make_store(ttl: Duration, group: &str) -> RedisStore {
     let cfg = Config::from_url(test_url());
     #[allow(clippy::expect_used)]
     // reason: 集成测试 fail-loud——连不上 redis 即失败；item-level carve-out。
@@ -38,13 +38,16 @@ fn make_store(ttl: Duration) -> RedisStore {
         .create_pool(Some(Runtime::Tokio1))
         .expect("failed to create deadpool-redis pool (is redis running?)");
     #[allow(clippy::expect_used)]
+    // reason: 非空组名 parse 必过；item-level carve-out。
+    let group = ConsumerGroup::parse(group).expect("non-empty group");
+    #[allow(clippy::expect_used)]
     // reason: 测试用 TTL 恒 ≥ 1ms，构造期校验必过；item-level carve-out。
-    RedisStore::new(pool, ttl).expect("ttl must be ≥ 1ms")
+    RedisStore::new(pool, ttl, group).expect("ttl must be ≥ 1ms")
 }
 
 #[tokio::test]
 async fn integration_first_check_is_fresh_then_duplicate() {
-    let store = make_store(Duration::from_secs(60));
+    let store = make_store(Duration::from_secs(60), "integration-group");
     let key = unique_key("integration_first_fresh");
 
     #[allow(clippy::expect_used)]
@@ -64,7 +67,7 @@ async fn integration_first_check_is_fresh_then_duplicate() {
 
 #[tokio::test]
 async fn integration_ttl_expiry_refresh() {
-    let store = make_store(Duration::from_secs(1));
+    let store = make_store(Duration::from_secs(1), "integration-group");
     let key = unique_key("integration_ttl_expiry");
 
     #[allow(clippy::expect_used)]
@@ -87,8 +90,31 @@ async fn integration_ttl_expiry_refresh() {
 
 #[tokio::test]
 async fn integration_shutdown_closes_pool() {
-    let store = make_store(Duration::from_secs(60));
+    let store = make_store(Duration::from_secs(60), "integration-group");
     #[allow(clippy::expect_used)]
     // reason: 集成测试 fail-loud；item-level carve-out。
     store.shutdown().await.expect("shutdown must succeed");
+}
+
+// review #216 F5（跨组去重隔离的真实后端回归）：两个不同 ConsumerGroup 的 store 对**同一** key
+// 各自首见 Fresh——证明组维度纳入 claim key 后跨组不再互相去重（修前 key 丢 group ⇒ 第二组误判 Duplicate）。
+#[tokio::test]
+async fn integration_distinct_groups_do_not_dedup_same_key() {
+    let store_a = make_store(Duration::from_secs(60), "group-a");
+    let store_b = make_store(Duration::from_secs(60), "group-b");
+    let key = unique_key("integration_cross_group");
+
+    #[allow(clippy::expect_used)]
+    // reason: 集成测试 fail-loud；item-level carve-out。
+    let a = store_a.check(&key).await.expect("group-a check failed");
+    assert_eq!(a, SeenState::Fresh, "group-a 首见须 Fresh");
+
+    #[allow(clippy::expect_used)]
+    // reason: 集成测试 fail-loud；item-level carve-out。
+    let b = store_b.check(&key).await.expect("group-b check failed");
+    assert_eq!(
+        b,
+        SeenState::Fresh,
+        "group-b 对同一 key 独立首见须 Fresh（组隔离，非跨组去重）"
+    );
 }

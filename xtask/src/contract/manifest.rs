@@ -9,8 +9,15 @@
 //! 是 per-kind 可选字段（缺省 `None`，按 kind × lifecycle 由 `validate.rs` R8 报必填）。「坏值不可表达」
 //! 尽量上移类型层（Hard）：`HttpMethod`/`Delivery`/`CompensationOrder` 枚举解析拒非法 variant、saga
 //! `retryMillis`/`timeoutMillis` 用 `u64` 使「负 duration」不可表达、嵌套结构 `deny_unknown_fields`。
+//!
+//! event 订阅声明（#1120）：`[[subscriptions]]` 声明 event 契约的 consumer 域与 consumer group，
+//! 由 codegen 派生订阅注册 glue（`SUBSCRIPTIONS` 常量数组），供 bootstrap 接线消费（EVENT-ACTIVE-SUB-01 守）。
+//! `#[serde(default)]` 保证现有无 subscriptions 的契约仍解析（空 vec），不破坏 CONTRACT-FREEZE-01。
 
 use serde::Deserialize;
+
+/// event 订阅声明字段名常量（#1120）——DRY 于 validate R14 + codegen 订阅 glue（消除裸串重复）。
+pub(crate) const FIELD_SUBSCRIPTIONS: &str = "[[subscriptions]]";
 
 /// schema 键名常量——DRY 于 validate + codegen 双处引用（消除裸串重复）。
 pub(crate) const SCHEMA_KEY_REQUEST: &str = "request";
@@ -54,6 +61,11 @@ pub(crate) struct ContractManifest {
     /// saga per-kind：`[saga]` 专属 block。active saga 必填（R8）；内部良构由 R10 守。
     #[serde(default)]
     pub(crate) saga: Option<SagaBlock>,
+    /// event 订阅声明（#1120）：`[[subscriptions]]` 数组，每项声明一个消费者域 + consumer group。
+    /// `#[serde(default)]` ⇒ 无 subscriptions 字段的既有契约仍解析（空 vec，不破坏 CONTRACT-FREEZE-01）。
+    /// active event 必须非空（EVENT-ACTIVE-SUB-01，R14）；draft/deprecated 豁免。
+    #[serde(default)]
+    pub(crate) subscriptions: Vec<Subscription>,
 }
 
 impl ContractManifest {
@@ -233,6 +245,22 @@ pub(crate) struct SagaBlock {
 pub(crate) struct SagaStep {
     pub(crate) name: String,
     pub(crate) output_schema: String,
+}
+
+/// event 订阅声明（#1120）——TOML `[[subscriptions]]` 数组元素。
+///
+/// `consumer`：消费者域 DomainId（如 `audit`）。`group`：稳定 consumer group 名（如 `audit.session-created`）。
+/// 两字段均为必填，未知子键由 `deny_unknown_fields` 拒（CONTRACT-FREEZE-01 扩展）。
+///
+/// 供 codegen 派生订阅注册 glue（`SUBSCRIPTIONS: &[SubscriptionSpec]`）；bootstrap 消费 glue 接线。
+/// EVENT-ACTIVE-SUB-01（R12）：active event 必须 `!subscriptions.is_empty()`。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Subscription {
+    /// 消费者域 DomainId（如 `audit`、`devicestate`）。
+    pub(crate) consumer: String,
+    /// 稳定 consumer group 名（如 `audit.session-created`）——broker 用此键唯一标识消费位点。
+    pub(crate) group: String,
 }
 
 #[cfg(test)]
@@ -449,5 +477,124 @@ mod tests {
 
         let s3 = Schemas::default();
         assert!(s3.declared_files().is_empty());
+    }
+
+    // ── [[subscriptions]] 解析测试（#1120，CONTRACT-FREEZE-01 扩展）────────
+
+    /// 绿用例：`[[subscriptions]]` 正确解析为 Vec<Subscription>，consumer/group 两字段均正确。
+    #[test]
+    fn parses_event_with_subscriptions() -> anyhow::Result<()> {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "active"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+            group = "audit.session-created"
+            [[subscriptions]]
+            consumer = "devicestate"
+            group = "devicestate.session-watch"
+        "#;
+        let m = ContractManifest::from_toml_str(toml)?;
+        assert_eq!(m.subscriptions.len(), 2);
+        assert_eq!(m.subscriptions[0].consumer, "audit");
+        assert_eq!(m.subscriptions[0].group, "audit.session-created");
+        assert_eq!(m.subscriptions[1].consumer, "devicestate");
+        assert_eq!(m.subscriptions[1].group, "devicestate.session-watch");
+        Ok(())
+    }
+
+    /// 绿用例（anti-vacuity）：无 subscriptions 字段的既有契约仍解析（`#[serde(default)]`，空 vec）。
+    /// 守卫现有合约兼容性：CONTRACT-FREEZE-01 扩展不破坏旧格式。
+    #[test]
+    fn event_without_subscriptions_parses_as_empty() -> anyhow::Result<()> {
+        let m = ContractManifest::from_toml_str(VALID_EVENT)?;
+        assert!(
+            m.subscriptions.is_empty(),
+            "无 [[subscriptions]] 字段应解析为空 vec（serde default）"
+        );
+        Ok(())
+    }
+
+    /// 红用例：[[subscriptions]] 含未知子键时，`deny_unknown_fields` 应拒绝解析（CONTRACT-FREEZE-01）。
+    #[test]
+    fn subscription_rejects_unknown_field() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+            group = "audit.session-created"
+            bogus = "unexpected"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "未知子键应使解析失败（deny_unknown_fields）"
+        );
+    }
+
+    /// 红用例：[[subscriptions]] 缺 `consumer` 字段时应拒绝解析。
+    #[test]
+    fn subscription_rejects_missing_consumer() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            group = "audit.session-created"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "缺 consumer 字段应使解析失败"
+        );
+    }
+
+    /// 红用例：[[subscriptions]] 缺 `group` 字段时应拒绝解析。
+    #[test]
+    fn subscription_rejects_missing_group() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "缺 group 字段应使解析失败"
+        );
     }
 }

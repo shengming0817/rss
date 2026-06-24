@@ -14,12 +14,14 @@
 //! **不**让可构造的生产 `PgStore` 挂未实现的 `RoleRepo`（否则运行时 `todo!()` panic，review F3）；真实
 //! postgres-backed `RoleRepo` 属 identity 域 W 阶段（需 roles 表 + tenant RLS）。
 
+mod dead_letter;
 mod inbox;
 mod migrator;
 mod outbox;
 mod pool;
 mod tx;
 
+pub use dead_letter::PgDeadLetterStore;
 pub use outbox::PgOutbox;
 
 #[cfg(all(test, feature = "integration"))]

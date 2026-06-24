@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
+use crate::contract::manifest::ContractKind;
 use crate::contract::{DiscoveredContract, discover};
 use crate::pathsafe;
 
@@ -47,7 +48,8 @@ pub(crate) fn generate(contracts_root: &Path, gen_src: &Path, check: bool) -> Re
 /// 渲染全部期望文件（相对 `generated/src` 的路径 → 内容），确定性排序。
 fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>> {
     let mut files: Vec<(PathBuf, String)> = Vec::new();
-    let mut kinds: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // kinds: kind_dir → (modules, is_event_kind) ——event kind 需在 mod.rs 特化加 SubscriptionSpec 定义。
+    let mut kinds: BTreeMap<String, (BTreeSet<String>, bool)> = BTreeMap::new();
     for c in contracts {
         let kind_dir = c.manifest.kind.as_dir().to_string();
         let module = module_name(&c.manifest.domain, &c.manifest.version);
@@ -63,12 +65,18 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
         }
         let rel = PathBuf::from(&kind_dir).join(format!("{module}.rs"));
         files.push((rel, render_contract(c)?));
-        kinds.entry(kind_dir).or_default().insert(module);
+        let entry = kinds
+            .entry(kind_dir)
+            .or_insert_with(|| (BTreeSet::new(), false));
+        entry.0.insert(module);
+        if c.manifest.kind == ContractKind::Event {
+            entry.1 = true;
+        }
     }
-    for (kind_dir, modules) in &kinds {
+    for (kind_dir, (modules, is_event)) in &kinds {
         files.push((
             PathBuf::from(kind_dir).join("mod.rs"),
-            render_mod_rs(modules),
+            render_mod_rs(modules, *is_event),
         ));
     }
     files.push((PathBuf::from("lib.rs"), render_lib_rs(kinds.keys())));
@@ -81,6 +89,7 @@ fn module_name(domain: &str, version: &str) -> String {
 }
 
 /// 单契约的 typify 派生：按声明顺序把 schema 文件喂进一个 TypeSpace。
+/// 对 event kind 额外追加从 manifest 派生的订阅注册 glue（CONTRACT_ID / TOPIC / SUBSCRIPTIONS）。
 fn render_contract(c: &DiscoveredContract) -> Result<String> {
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
@@ -107,11 +116,91 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
     strip_sensitive_debug(&mut parsed);
+    let payload = prettyplease::unparse(&parsed);
+
+    // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
+    // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
+    if c.manifest.kind == ContractKind::Event {
+        let glue = render_event_glue(c)?;
+        Ok(format!("{}{}{}", generated_header(&source), payload, glue))
+    } else {
+        Ok(format!("{}{}", generated_header(&source), payload))
+    }
+}
+
+/// event kind 订阅注册 glue（从 manifest 派生，不消费 schema）。
+///
+/// 派生 `CONTRACT_ID`、`TOPIC`（active 必有 topic；draft 无 topic 则回退用 id）、以及
+/// `SUBSCRIPTIONS: &[super::SubscriptionSpec]` 常量切片（每个 `[[subscriptions]]` 条目一行）。
+/// `SubscriptionSpec` 类型定义在 `event/mod.rs`（特化 event mod.rs），本文件通过 `super::` 引用——
+/// 避免每个 event 模块重复定义同名 struct（INVARIANT CODEGEN-DRIFT-01）。
+///
+/// **防注入守卫（review #216 F6）**：consumer / group 被拼进 Rust 字符串字面量；codegen 可独立于
+/// `cargo xtask contract validate`（R7）运行，故此处经 [`is_safe_codegen_ident`] 再次校验形态，含引号 /
+/// 反斜杠 / 空白等可破坏字面量 / 注入源码的字符即 `bail!`。与 R7 互为上下游闭环 funnel（authoring 拒绝 +
+/// 派生防御），非只锁单侧 callsite。
+fn render_event_glue(c: &DiscoveredContract) -> Result<String> {
+    let contract_id = &c.manifest.id;
+    // active event 必有 topic（R8）；draft 无 topic 则回退用 id，保持确定性（不出现 Option 条件代码分歧）。
+    let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+    // 每个 [[subscriptions]] 条目一行 SubscriptionSpec 字面量；拼前防注入收口（见函数 doc）。
+    let mut subs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    for s in &c.manifest.subscriptions {
+        if !is_safe_codegen_ident(&s.consumer) {
+            bail!(
+                "契约 {}/{}/{} 的 subscription consumer 含不安全字符（防注入生成字面量）: {:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+                s.consumer
+            );
+        }
+        if !is_safe_codegen_ident(&s.group) {
+            bail!(
+                "契约 {}/{}/{} 的 subscription group 含不安全字符（防注入生成字面量）: {:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+                s.group
+            );
+        }
+        subs.push(format!(
+            "    super::SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, consumer: \"{}\", group: \"{}\" }}",
+            s.consumer, s.group
+        ));
+    }
+    let subs_body = if subs.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", subs.join(",\n"))
+    };
+
     Ok(format!(
-        "{}{}",
-        generated_header(&source),
-        prettyplease::unparse(&parsed)
+        r#"
+/// 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "{contract_id}";
+
+/// 稳定事件 topic（broker routing key；active event 来自 `contract.toml` `topic` 字段，draft 回退用 id）。
+/// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const TOPIC: &str = "{topic}";
+
+/// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
+/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
+/// `SubscriptionSpec` 类型定义见父 mod（`event/mod.rs`）；此处通过 `super::` 引用，无重复定义。
+/// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[{subs_body}];
+"#
     ))
+}
+
+/// codegen 安全标识符（review #216 F6）：仅 `[a-z0-9._-]`（消费者域名 ∪ 点分 group 名的字符全集）——
+/// 拒引号 / 反斜杠 / 空白 / 控制符等可破坏生成字符串字面量 / 注入 Rust 源的字符。精确语法（域名 vs 点分 id）
+/// 由 validate R7 守（authoring 闸门）；本守卫只做字面量安全的下界（防注入），与 R7 互为闭环 funnel。
+fn is_safe_codegen_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
+        })
 }
 
 /// 含凭据级字段（password/secret/token/credential）的 generated struct 去掉 `Debug` derive——
@@ -164,8 +253,34 @@ fn generated_header(source: &str) -> String {
     format!("// @generated by `cargo xtask codegen` — DO NOT EDIT. Source: {source}\n")
 }
 
-fn render_mod_rs(modules: &BTreeSet<String>) -> String {
+/// event kind mod.rs 特化：含 `SubscriptionSpec` POD 定义（零额外依赖，纯 `&'static str` 字段）。
+/// 各 event `{domain}_{version}.rs` 经 `super::SubscriptionSpec` 引用此定义，消除重复（CODEGEN-DRIFT-01）。
+const SUBSCRIPTION_SPEC_DEF: &str = r#"
+/// 订阅注册规格——event 契约 `[[subscriptions]]` 的 codegen 派生表示。
+///
+/// 全字段均为 `&'static str`（零运行时分配）；`contract_id`/`topic` 由同模块的
+/// `CONTRACT_ID`/`TOPIC` 常量绑定（generated，勿手改）。bootstrap 消费 `SUBSCRIPTIONS` 切片接线。
+///
+/// 由 `cargo xtask codegen` 从 `contract.toml` `[[subscriptions]]` 派生；勿手改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionSpec {
+    /// 契约 ID（`contract.toml` `id`）。
+    pub contract_id: &'static str,
+    /// 事件 topic（broker routing key）。
+    pub topic: &'static str,
+    /// 消费者域 DomainId。
+    pub consumer: &'static str,
+    /// 稳定 consumer group 名（broker 消费位点唯一键）。
+    pub group: &'static str,
+}
+"#;
+
+fn render_mod_rs(modules: &BTreeSet<String>, is_event: bool) -> String {
     let mut s = generated_header("cargo xtask codegen (module funnel)");
+    // event kind：在 mod.rs 定义 SubscriptionSpec（各子模块经 `super::` 引用，消除重复定义）。
+    if is_event {
+        s.push_str(SUBSCRIPTION_SPEC_DEF);
+    }
     for m in modules {
         s.push_str(&format!("pub mod {m};\n"));
     }
@@ -319,13 +434,41 @@ mod tests {
         Ok(())
     }
 
-    /// 在 `root/contracts/event/_seed/v1` 落一个最小 event 契约。
+    /// 在 `root/contracts/event/_seed/v1` 落一个最小 event 契约（无 subscriptions，draft）。
     fn seed_event(root: &Path) -> Result<()> {
         let dir = root.join("contracts/event/_seed/v1");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(
             dir.join("contract.toml"),
             "id = \"seed.happened\"\nkind = \"event\"\ndomain = \"_seed\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"OutboxFact\"\nlifecycle = \"draft\"\n[schemas]\npayload = \"payload.schema.json\"\n",
+        )?;
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
+        std::fs::write(dir.join("payload.schema.json"), schema)?;
+        Ok(())
+    }
+
+    /// 在 `root/contracts/event/_seed/v1` 落一个含 `[[subscriptions]]` 的 event 契约（#1120，供订阅 glue 测试）。
+    fn seed_event_with_subscription(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/event/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"seed.happened\"\n",
+                "kind = \"event\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"OutboxFact\"\n",
+                "lifecycle = \"draft\"\n",
+                "topic = \"seed.happened\"\n",
+                "delivery = \"at-least-once\"\n",
+                "[schemas]\n",
+                "payload = \"payload.schema.json\"\n",
+                "[[subscriptions]]\n",
+                "consumer = \"audit\"\n",
+                "group = \"audit.seed-happened\"\n",
+            ),
         )?;
         let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
         std::fs::write(dir.join("payload.schema.json"), schema)?;
@@ -495,6 +638,79 @@ mod tests {
         assert!(result.is_err(), "非法 Rust 须使 format_rust 返 Err");
     }
 
+    /// event glue 测试（#1120）：含 `[[subscriptions]]` 的 event 契约派生 .rs 须含：
+    /// - `CONTRACT_ID` 常量（绑定 `contract.toml` id 字段）
+    /// - `TOPIC` 常量（绑定 topic 字段）
+    /// - `SUBSCRIPTIONS` 常量切片（含 consumer / group 字面量）
+    /// - `SubscriptionSpec` 定义在 `event/mod.rs`（子模块经 `super::` 引用，无重复定义）
+    ///
+    /// anti-vacuity：无 subscriptions 的 draft event 仍生成空 SUBSCRIPTIONS 切片 + CONTRACT_ID / TOPIC（正向对照）。
+    #[test]
+    fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_glue");
+        seed_event_with_subscription(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("event/_seed_v1.rs"))?;
+        let mod_rs = std::fs::read_to_string(gen_src.join("event/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        // CONTRACT_ID 和 TOPIC 常量
+        assert!(
+            rendered.contains(r#"pub const CONTRACT_ID: &str = "seed.happened";"#),
+            "缺 CONTRACT_ID 常量:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"pub const TOPIC: &str = "seed.happened";"#),
+            "缺 TOPIC 常量:\n{rendered}"
+        );
+        // SUBSCRIPTIONS 切片含 consumer / group 字面量
+        assert!(
+            rendered.contains(r#"consumer: "audit""#),
+            "SUBSCRIPTIONS 缺 consumer 字面量:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"group: "audit.seed-happened""#),
+            "SUBSCRIPTIONS 缺 group 字面量:\n{rendered}"
+        );
+        // SubscriptionSpec 定义在 mod.rs（子模块经 super:: 引用）
+        assert!(
+            mod_rs.contains("pub struct SubscriptionSpec"),
+            "mod.rs 缺 SubscriptionSpec 定义:\n{mod_rs}"
+        );
+        // 子模块通过 super:: 引用（不重复定义）
+        assert!(
+            rendered.contains("super::SubscriptionSpec"),
+            "子模块应通过 super:: 引用 SubscriptionSpec:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    /// event 无 subscriptions（draft）→ SUBSCRIPTIONS 为空切片，CONTRACT_ID / TOPIC 仍存在（anti-vacuity）。
+    #[test]
+    fn event_glue_empty_subscriptions_draft() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_glue_empty");
+        seed_event(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("event/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        // draft event 无 topic → 回退用 id
+        assert!(
+            rendered.contains(r#"pub const CONTRACT_ID: &str = "seed.happened";"#),
+            "缺 CONTRACT_ID:\n{rendered}"
+        );
+        // 空 subscriptions 切片
+        assert!(
+            rendered.contains("pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];"),
+            "空 subscriptions 应生成空切片:\n{rendered}"
+        );
+        Ok(())
+    }
+
     /// F3 anti-vacuity（负向）：contract.toml 的 domain 含 `../` 时，codegen 须 bail（防逃逸），
     /// 即使 `contract validate`（R3/R7）未先跑——codegen 自守。
     #[test]
@@ -519,6 +735,70 @@ mod tests {
         let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
         let _ = std::fs::remove_dir_all(&root);
         assert!(result.is_err(), "domain 含 ../ 时 codegen 须防逃逸 bail");
+        Ok(())
+    }
+
+    /// review #216 F6：`is_safe_codegen_ident` 守 codegen 字面量注入下界——安全字符集 `[a-z0-9._-]` 放行，
+    /// 引号 / 反斜杠 / 空白 / 大写 / 空串拒（anti-vacuity：合法 consumer/group 必过、各注入面必拒）。
+    #[test]
+    fn is_safe_codegen_ident_table() {
+        for ok in [
+            "audit",
+            "audit.session-created",
+            "devicestate.session-watch",
+            "a1",
+            "_x",
+        ] {
+            assert!(is_safe_codegen_ident(ok), "{ok:?} 应安全");
+        }
+        for bad in [
+            "",
+            "Audit",
+            "audit\"; evil",
+            "audit\\x",
+            "audit x",
+            "audit\nx",
+            "审计",
+        ] {
+            assert!(!is_safe_codegen_ident(bad), "{bad:?} 应被拒");
+        }
+    }
+
+    /// review #216 F6（codegen 防注入红用例）：subscription group 含引号时，render_event_glue 经
+    /// `is_safe_codegen_ident` 防御性 `bail!`——codegen 独立于 validate R7 运行也不把坏值拼进生成字面量。
+    /// 正向对照见 `event_glue_with_subscription_emitted`（合法 subscription 正常生成）。
+    #[test]
+    fn subscription_unsafe_group_rejected_by_codegen() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        let dir = root.join("contracts/event/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"seed.happened\"\n",
+                "kind = \"event\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"OutboxFact\"\n",
+                "lifecycle = \"draft\"\n",
+                "topic = \"seed.happened\"\n",
+                "delivery = \"at-least-once\"\n",
+                "[schemas]\n",
+                "payload = \"payload.schema.json\"\n",
+                "[[subscriptions]]\n",
+                "consumer = \"audit\"\n",
+                "group = \"audit\\\"; evil\"\n", // TOML 转义 → group 值含引号（注入面）
+            ),
+        )?;
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
+        std::fs::write(dir.join("payload.schema.json"), schema)?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result.is_err(),
+            "含引号的 subscription group 须被 codegen 防注入守卫 bail"
+        );
         Ok(())
     }
 }

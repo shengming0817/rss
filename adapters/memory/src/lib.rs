@@ -238,6 +238,25 @@ impl IdempotencyStore for InMemClaimer {
             SeenState::Duplicate
         })
     }
+
+    /// claimed→done（幂等 no-op：in-mem HashSet 语义中 claimed/done 均视为"已见"，
+    /// commit 后 check 仍返 Duplicate，符合永久去重语义）。
+    async fn commit(&self, _key: &IdemKey) -> Result<(), EngineError> {
+        // reason: InMemClaimer 以 HashSet 记首见集合，absent/claimed/done 三态在此简化为
+        // absent / seen（seen 包含 claimed 与 done）。commit 不改集合内容（已 seen 保持 seen，
+        // 故 check 仍 Duplicate），满足「commit 后永久去重」不变式。demo/test 替身无需完整三态。
+        Ok(())
+    }
+
+    /// claimed→absent（从 HashSet 删除，使后续 check 可重得 Fresh）。
+    async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(self.group.as_str().to_string(), key.as_str().to_string()));
+        // reason: in-mem 删除不会失败，恒 Ok；absent 时 remove 是幂等 no-op。
+        Ok(())
+    }
 }
 
 #[cfg(test)]

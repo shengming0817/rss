@@ -12,16 +12,19 @@
 //! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
 //! title **未必**被 codegen 兜底（前者可能被合并 / 类型歧义、后者直接丢根类型，均非 compile error、非
 //! fail-closed）；本规则在 validate 阶段提供 fail-fast + 清晰诊断（早于 codegen）+ PascalCase 形态。
+//! INVARIANT: EVENT-ACTIVE-SUB-01 — `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
+//! active event 无 subscriber 即死事件，视为错误配置（#1120）。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
-//! （CONTRACT-FREEZE-01）；R8–R11 是条件化跨字段不变式（依赖 lifecycle/kind/值 组合），类型层无法免费表达，
+//! （CONTRACT-FREEZE-01）；R8–R14 是条件化跨字段不变式（依赖 lifecycle/kind/值 组合），类型层无法免费表达，
 //! 故与 R1–R7 同属 Medium——「能 Hard 则 Hard、余下 Medium」的正确分层。
 //!
 //! 规则执行顺序（注释编号 = 执行先后）：
 //!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
 //!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
 //!   → R9 PerKindFieldScope → R10 SagaBlock → R11 ActiveDeliverySupported → R13 SchemaTitle
+//!   → R14 ActiveSubscriber
 //!   跨契约（validate_cross，需全局视图）：R12 DuplicateId
 
 use anyhow::Result;
@@ -30,8 +33,8 @@ use std::path::Path;
 
 use super::manifest::{
     ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery, FIELD_DELIVERY,
-    FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_TOPIC, Lifecycle, SCHEMA_KEY_PAYLOAD,
-    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+    FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, Lifecycle,
+    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
 use super::{DiscoveredContract, discover};
 use crate::diagnostic::{self, GovernanceCheck, finding};
@@ -54,8 +57,9 @@ pub(crate) enum Rule {
     MissingSchema,
     /// R6：schema 文件名须为纯文件名，不得含路径分量（防 `../` 逃逸）。
     UnsafeSchemaPath,
-    /// R7：authoring 标识符（domain/version/id/owner）+ per-kind 字符串字段（http `path` / event `topic`）
-    /// 语法须先收口（拼进派生路径 / module 名 / 鉴权挂载点 / wire routing key 前）。
+    /// R7：authoring 标识符（domain/version/id/owner）+ per-kind 字符串字段（http `path` / event `topic` /
+    /// event `[[subscriptions]]` 的 consumer/group）语法须先收口（拼进派生路径 / module 名 / 鉴权挂载点 /
+    /// wire routing key / generated 注册 glue 字符串字面量 前）。
     IdentSyntax,
     /// R8：`lifecycle=active` ⇒ 按 kind 必填 active 发布接线字段（http path+method / event topic+delivery）。
     PerKindActiveFields,
@@ -74,6 +78,13 @@ pub(crate) enum Rule {
     /// R13：每个 declared schema（喂 codegen TypeSpace 的 request/response/payload）的 `title`
     /// 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）且**契约内**唯一（title→typify 生成的 Rust 类型名）。
     SchemaTitle,
+    /// R14：`lifecycle=active && kind=event` 的契约必须至少有一个 `[[subscriptions]]` 声明。
+    ///
+    /// INVARIANT: EVENT-ACTIVE-SUB-01 — active event 契约无 subscriber 即"死事件"（发出无消费），
+    /// 视为错误配置（Medium，CI 门）。draft/deprecated 豁免（种子 / 前瞻 / 退役契约不受约束）。
+    /// synthetic red：active event + 空 subscriptions → Finding；
+    /// anti-vacuity：① active event + ≥1 subscription → 通过；② draft event + 空 subscriptions → 通过。
+    ActiveSubscriber,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -149,6 +160,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_saga_block(&c.manifest, &label));
     findings.extend(rule_active_delivery_supported(&c.manifest, &label));
     findings.extend(rule_schema_title(c, &label));
+    findings.extend(rule_active_subscriber(&c.manifest, &label));
     findings
 }
 
@@ -266,8 +278,9 @@ fn rule_unsafe_schema_path(m: &ContractManifest, label: &str) -> Vec<Finding> {
 }
 
 /// R7：authoring 标识符 / per-kind 字符串字段语法。domain/version/id 拼进派生 module 名 / 文件路径
-/// （见 codegen），owner 决定契约归属，http `path` 是鉴权挂载点、event `topic` 是 wire routing key
-/// ——均须先收口形态，杜绝坏值流入生成路径 / 归属解析 / 路由注册。与 codegen 写盘前防逃逸守卫互为表里。
+/// （见 codegen），owner 决定契约归属，http `path` 是鉴权挂载点、event `topic` 是 wire routing key、
+/// event `[[subscriptions]]` 的 consumer/group 拼进 generated 注册 glue 字符串字面量——均须先收口形态，
+/// 杜绝坏值流入生成路径 / 归属解析 / 路由注册 / 生成代码。与 codegen 写盘前防逃逸 / 防注入守卫互为表里。
 fn rule_ident_syntax(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let mut out = Vec::new();
     if !is_safe_segment(&m.domain) {
@@ -329,6 +342,32 @@ fn rule_ident_syntax(m: &ContractManifest, label: &str) -> Vec<Finding> {
             label,
             format!("topic 非法：须点分小写名（如 seed.thing-happened），实为 {topic:?}"),
         ));
+    }
+    // event `[[subscriptions]]` 的 consumer / group：codegen 把二者拼进 generated 注册 glue 的
+    // `SubscriptionSpec { consumer: "…", group: "…" }` Rust **字符串字面量**（review #216 F6）。consumer 是
+    // 消费者域名、group 是稳定 consumer group 名（broker 消费位点）——须先收口形态，杜绝坏值注入生成代码 /
+    // 路由（与 codegen 写盘前 `is_safe_codegen_ident` 防御守卫互为上下游闭环 funnel）。
+    for sub in &m.subscriptions {
+        if !is_domain_name(&sub.consumer) {
+            out.push(finding(
+                Rule::IdentSyntax,
+                label,
+                format!(
+                    "subscription consumer 非法：须合法消费者域名（[a-z][a-z0-9_]*），实为 {:?}",
+                    sub.consumer
+                ),
+            ));
+        }
+        if !is_dotted_id(&sub.group) {
+            out.push(finding(
+                Rule::IdentSyntax,
+                label,
+                format!(
+                    "subscription group 非法：须点分小写名（如 audit.session-created），实为 {:?}",
+                    sub.group
+                ),
+            ));
+        }
     }
     out
 }
@@ -488,6 +527,28 @@ fn rule_active_delivery_supported(m: &ContractManifest, label: &str) -> Option<F
         )),
         _ => None,
     }
+}
+
+/// R14：`lifecycle=active && kind=event` ⇒ `subscriptions` 非空（EVENT-ACTIVE-SUB-01，Medium）。
+///
+/// active event 契约无 subscriber 即「死事件」——发出后无消费者处理，视为错误配置。
+/// draft/deprecated 豁免：种子契约 / 前瞻设计 / 退役契约不受约束。
+/// 与 R11 同为 active-event-only 规则，置于逐契约规则末尾（R13 后）执行。
+fn rule_active_subscriber(m: &ContractManifest, label: &str) -> Option<Finding> {
+    if m.lifecycle != Lifecycle::Active || m.kind != ContractKind::Event {
+        return None;
+    }
+    if m.subscriptions.is_empty() {
+        return Some(finding(
+            Rule::ActiveSubscriber,
+            label,
+            format!(
+                "active event 契约缺 {FIELD_SUBSCRIPTIONS} 声明（EVENT-ACTIVE-SUB-01）：\
+                active event 无 subscriber 即死事件，须在 contract.toml 中声明至少一个 [[subscriptions]] 条目"
+            ),
+        ));
+    }
+    None
 }
 
 /// R13：每个喂 codegen TypeSpace 的 declared schema（`[schemas]` request/response/payload）的 `title`
@@ -687,6 +748,7 @@ mod tests {
     use super::*;
     use crate::contract::manifest::{
         CompensationOrder, Delivery, HttpMethod, Lifecycle, SagaBlock, SagaStep, Schemas,
+        Subscription,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -712,6 +774,14 @@ mod tests {
             topic: None,
             delivery: None,
             saga: None,
+            subscriptions: Vec::new(),
+        }
+    }
+
+    fn one_subscription() -> Subscription {
+        Subscription {
+            consumer: "audit".to_string(),
+            group: "audit.session-created".to_string(),
         }
     }
 
@@ -1167,6 +1237,51 @@ mod tests {
         assert!(rule_ident_syntax(&event, "x").is_empty());
     }
 
+    /// R7 subscription 红用例（review #216 F6）：consumer / group 非法形态须触发 IdentSyntax——
+    /// 二者拼进 generated 注册 glue 的 Rust 字符串字面量，含引号 / 大写 / 空 / 尾段空均须拒（防注入 + 形态）。
+    /// case：(consumer, group)
+    #[rstest]
+    #[case("Audit", "audit.session-created")] // consumer 大写
+    #[case("audit\"; evil", "audit.session-created")] // consumer 含引号（codegen 注入面）
+    #[case("", "audit.session-created")] // consumer 空
+    #[case("audit", "Audit.Session")] // group 大写
+    #[case("audit", "audit\"; evil")] // group 含引号（codegen 注入面）
+    #[case("audit", "")] // group 空
+    #[case("audit", "trailing.")] // group 尾段空
+    fn r7_subscription_syntax_rejects_malformed(#[case] consumer: &str, #[case] group: &str) {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.subscriptions = vec![Subscription {
+            consumer: consumer.to_string(),
+            group: group.to_string(),
+        }];
+        let findings = rule_ident_syntax(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::IdentSyntax),
+            "consumer={consumer:?} group={group:?} 应触发 IdentSyntax"
+        );
+    }
+
+    /// R7 subscription anti-vacuity（正向）：合法 consumer / group 不触发 IdentSyntax。
+    #[test]
+    fn r7_valid_subscription_ok() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.subscriptions = vec![one_subscription()];
+        assert!(
+            rule_ident_syntax(&m, "x").is_empty(),
+            "合法 subscription 不应触发 IdentSyntax"
+        );
+    }
+
     // ── R8 PerKindActiveFields（active 必填）──────────────────────────────
 
     #[test]
@@ -1513,6 +1628,99 @@ mod tests {
         http.path = Some("/api/v1/_seed/echo".to_string());
         http.method = Some(HttpMethod::Post);
         assert!(rule_active_delivery_supported(&http, "x").is_none());
+    }
+
+    // ── R14 ActiveSubscriber（EVENT-ACTIVE-SUB-01）────────────────────────
+
+    /// synthetic red：active event + 空 subscriptions → 产生 ActiveSubscriber finding。
+    /// INVARIANT: EVENT-ACTIVE-SUB-01
+    #[test]
+    fn r14_active_event_empty_subscriptions_rejected() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.topic = Some("identity.session-created".to_string());
+        m.delivery = Some(Delivery::AtLeastOnce);
+        // subscriptions 为空（manifest() 默认）
+        let f = rule_active_subscriber(&m, "x");
+        assert_eq!(
+            f.as_ref().map(|f| f.rule),
+            Some(Rule::ActiveSubscriber),
+            "active event + 空 subscriptions 应产生 ActiveSubscriber finding"
+        );
+        assert_eq!(f.map(|f| f.subject), Some("x".to_string()));
+    }
+
+    /// anti-vacuity 绿用例 1：active event + ≥1 subscription → 通过。
+    #[test]
+    fn r14_active_event_with_subscription_ok() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.topic = Some("identity.session-created".to_string());
+        m.delivery = Some(Delivery::AtLeastOnce);
+        m.subscriptions = vec![one_subscription()];
+        assert!(
+            rule_active_subscriber(&m, "x").is_none(),
+            "active event + 1 subscription 应通过"
+        );
+    }
+
+    /// anti-vacuity 绿用例 2：draft event + 空 subscriptions → 通过（draft 豁免）。
+    #[test]
+    fn r14_draft_event_empty_subscriptions_ok() {
+        let m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        // lifecycle 默认 draft，subscriptions 默认空
+        assert_eq!(m.lifecycle, Lifecycle::Draft);
+        assert!(
+            rule_active_subscriber(&m, "x").is_none(),
+            "draft event 空 subscriptions 应豁免"
+        );
+    }
+
+    /// anti-vacuity：deprecated event + 空 subscriptions → 通过（deprecated 豁免）。
+    #[test]
+    fn r14_deprecated_event_empty_subscriptions_ok() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        m.lifecycle = Lifecycle::Deprecated;
+        assert!(
+            rule_active_subscriber(&m, "x").is_none(),
+            "deprecated event 应豁免 R14"
+        );
+    }
+
+    /// 非 event kind（http / command / saga）active 时不受 R14 约束。
+    #[test]
+    fn r14_non_event_active_ok() {
+        let mut http = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        http.lifecycle = Lifecycle::Active;
+        assert!(
+            rule_active_subscriber(&http, "x").is_none(),
+            "非 event kind 不受 R14 约束"
+        );
     }
 
     // ── R5/R6 扩展：saga step outputSchema 纳入 schema 文件完整性 ──────────

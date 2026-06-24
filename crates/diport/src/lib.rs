@@ -75,18 +75,24 @@
 
 pub mod audit_sink;
 pub mod clock;
+pub mod dead_letter_store;
 pub mod managed_resource;
 pub mod object_store;
 pub mod pdp;
 pub mod publisher;
 pub mod rate_limiter;
-// provider-error wrapper 共享脱敏 source 字段（`pub(crate)`，不进公开 API 面）。
+// provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进公开 API 面）：`pub enum` 错误
+// （`ObjectStoreError`）变体字段恒 public，须持 public 类型避免 privacy leak（#1120 merge：PR215 RedactedSource
+// pub(crate) 与 PR214 pub-enum 错误不兼容）。
 mod redacted;
 pub mod signer;
 pub mod subscriber;
 
 pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
 pub use clock::Clock;
+pub use dead_letter_store::{
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+};
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
 };
@@ -98,6 +104,7 @@ pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Top
 pub use rate_limiter::{
     DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
 };
+pub use redacted::RedactedSource;
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
 pub use subscriber::{
     DynSubscriber, Message, MessageId, MessageMetadata, MessageStream, SubscribeInitError,

@@ -41,7 +41,7 @@ impl IdempotencyStore for PgInboxStore {
     /// claim-or-skip：`INSERT INTO inbox_dedup ON CONFLICT DO NOTHING`。
     ///
     /// - `Fresh`：rows_affected == 1（首次 claim，应执行副作用）。
-    /// - `Duplicate`：rows_affected == 0（冲突，已 claim，幂等短路）。
+    /// - `Duplicate`：rows_affected == 0（冲突，已 claim/done，幂等短路）。
     ///
     /// 后端暂不可用 → `EngineErrorKind::Transient`（可重试）；原始 sqlx 错误不进 Display（PII 边界）。
     async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
@@ -63,5 +63,101 @@ impl IdempotencyStore for PgInboxStore {
         } else {
             SeenState::Duplicate
         })
+    }
+
+    /// claimed→done：`UPDATE inbox_dedup SET status='done' WHERE ... AND status='claimed'`。
+    ///
+    /// 对 absent key（无行匹配）为幂等 no-op（`Ok(())`）；对 done 行（status≠'claimed'）同样幂等跳过。
+    /// 后端暂不可用 → `EngineErrorKind::Transient`；原始 sqlx 错误不进 Display（PII 边界）。
+    async fn commit(&self, key: &IdemKey) -> Result<(), EngineError> {
+        sqlx::query(
+            "UPDATE inbox_dedup SET status = 'done' \
+             WHERE event_id = $1 AND consumer_group = $2 AND status = 'claimed'",
+        )
+        .bind(key.as_str())
+        .bind(self.group.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|_e| EngineError::new(EngineErrorKind::Transient))?;
+        Ok(())
+    }
+
+    /// claimed→absent：`DELETE FROM inbox_dedup WHERE ... AND status='claimed'`。
+    ///
+    /// 释放 claim，使后续重放可重新得到 `Fresh`。对 absent key 为幂等 no-op（`Ok(())`）。
+    /// 后端暂不可用 → `EngineErrorKind::Transient`；原始 sqlx 错误不进 Display（PII 边界）。
+    async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
+        sqlx::query(
+            "DELETE FROM inbox_dedup \
+             WHERE event_id = $1 AND consumer_group = $2 AND status = 'claimed'",
+        )
+        .bind(key.as_str())
+        .bind(self.group.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|_e| EngineError::new(EngineErrorKind::Transient))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! postgres inbox_dedup 的 commit/release 往返测试。
+    //!
+    //! integration 测试需要活 PG 实例，由 `integration` feature 门控。
+    //! 单元骨架确保编译通过；往返验收见 integration 门控测试。
+
+    #[cfg(feature = "integration")]
+    mod integration {
+        use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, SeenState};
+        use sqlx::PgPool;
+
+        #[allow(clippy::unwrap_used)]
+        // reason: 测试 setup — 已知非空 raw，item-level carve-out（error-handling.md §Carve-out）。
+        fn k(raw: &str) -> IdemKey {
+            IdemKey::parse(raw).unwrap()
+        }
+
+        #[allow(clippy::unwrap_used)]
+        // reason: 测试 setup — 已知非空组名，item-level carve-out。
+        fn g(raw: &str) -> ConsumerGroup {
+            ConsumerGroup::parse(raw).unwrap()
+        }
+
+        /// claim → commit → check = Duplicate（done 永久去重，PG 往返）。
+        #[sqlx::test]
+        async fn commit_makes_key_permanently_duplicate(pool: PgPool) {
+            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+            let key = k("pg-commit-evt-1");
+            assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+            store.commit(&key).await.unwrap();
+            assert_eq!(store.check(&key).await.unwrap(), SeenState::Duplicate);
+        }
+
+        /// claim → release → check = Fresh（释放后可重领，PG 往返）。
+        #[sqlx::test]
+        async fn release_allows_reclaim(pool: PgPool) {
+            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+            let key = k("pg-release-evt-1");
+            assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+            store.release(&key).await.unwrap();
+            assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+        }
+
+        /// commit 对 absent key 幂等（不报错）。
+        #[sqlx::test]
+        async fn commit_on_absent_is_ok(pool: PgPool) {
+            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+            let key = k("pg-absent-commit");
+            assert!(store.commit(&key).await.is_ok());
+        }
+
+        /// release 对 absent key 幂等（不报错）。
+        #[sqlx::test]
+        async fn release_on_absent_is_ok(pool: PgPool) {
+            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+            let key = k("pg-absent-release");
+            assert!(store.release(&key).await.is_ok());
+        }
     }
 }
