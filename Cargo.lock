@@ -5574,6 +5574,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "consistency",
  "prettyplease",
  "rstest",
  "schemars",

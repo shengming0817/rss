@@ -148,12 +148,12 @@ impl Topic {
     }
 }
 
-/// canonical dotted topic 文法：非空、每 `.` 段首字节 `[a-z]`、整段 `[a-z0-9-]`。
+/// canonical dotted 文法：非空、每 `.` 段首字节 `[a-z]`、整段 `[a-z0-9-]`。
 ///
-/// **镜像 contract 单源校验器** `is_dotted_id`（`xtask/src/contract/validate.rs`，R7 IdentSyntax）——
-/// topic 是 wire routing key，contract 声明面与运行期 `Topic` 构造面文法必须同形，否则会出现
-/// 「contract 能声明但运行期构造拒」的分歧。两侧分属不同层（xtask 在 consistency 之上），暂以镜像 +
-/// 注释引用维持单源；统一单源（xtask 反向 delegate 本函数）见 #1126。
+/// 本谓词（经 `Topic::parse`）是 dotted-id / topic 文法的**单一事实源**——topic 是 wire routing key，
+/// contract 声明面与运行期 `Topic` 构造面文法必须同形，否则会出现「contract 能声明但运行期构造拒」的分歧。
+/// xtask 组合根的 contract 校验器 `is_dotted_id`（R7 IdentSyntax，`xtask/src/contract/validate.rs`）已反向
+/// delegate `Topic::parse`（#1126 兑现），两侧不再镜像；漂移结构性不可表达。
 fn is_canonical_dotted(s: &str) -> bool {
     !s.is_empty()
         && s.split('.').all(|seg| {
@@ -313,7 +313,7 @@ mod tests {
         );
     }
 
-    // canonical dotted 接受（镜像 is_dotted_id，含单段 foo）+ as_str 往返。
+    // canonical dotted 接受（文法单源，xtask is_dotted_id 反向 delegate 此处；含单段 foo）+ as_str 往返。
     #[test]
     #[allow(clippy::unwrap_used)]
     // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
@@ -339,7 +339,7 @@ mod tests {
         assert!(matches!(Topic::parse(""), Err(TopicError::Empty)));
     }
 
-    // 非 canonical dotted → Format（镜像 is_dotted_id 拒绝集：空段/大写/段首数字-连字符/下划线/空格）。
+    // 非 canonical dotted → Format（文法单源拒绝集，xtask is_dotted_id 同源：空段/大写/段首数字-连字符/下划线/空格）。
     #[test]
     fn topic_parse_rejects_format() {
         let cases: &[&str] = &[
@@ -363,7 +363,7 @@ mod tests {
     }
 
     // 私有文法谓词独立语义（`parse` 已前置拒空，此处守 helper 独立调用时空串短路 false 分支，
-    // 保持与单源 `is_dotted_id` 同形且文法分支全覆盖）。
+    // 文法分支全覆盖；本谓词是 xtask `is_dotted_id` 反向 delegate 的单源被委托方）。
     #[test]
     fn is_canonical_dotted_standalone() {
         assert!(!super::is_canonical_dotted(""));

@@ -705,7 +705,8 @@ fn recurse_subschemas(v: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 /// PascalCase 形态（`^[A-Z][A-Za-z0-9]*$`）：非空、首字符 `A-Z`、其余 `[A-Za-z0-9]`（拒下划线 / 连字符 /
-/// snake / 数字开头 / 空）。手写 char 谓词，同 R7 `is_dotted_id` 等的非-regex 范式。
+/// snake / 数字开头 / 空）。手写 char 谓词，同 `is_safe_segment` / `is_version` 等的非-regex 范式
+/// （dotted-id 文法已单源到 `consistency::Topic`，见 `is_dotted_id`）。
 fn is_pascal_case(s: &str) -> bool {
     matches!(s.bytes().next(), Some(b) if b.is_ascii_uppercase())
         && s.bytes().all(|b| b.is_ascii_alphanumeric())
@@ -724,16 +725,17 @@ fn is_version(s: &str) -> bool {
     matches!(s.strip_prefix('v'), Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// 点分 id：每段首字符 `a-z`、余 `[a-z0-9-]`（如 `seed.echo`、`config.entry-upserted`）。
-/// 小写连字符同 RSS 事件命名约定（见 CLAUDE.md：`session.created` / `config.entry-upserted`），拒 camelCase。
+/// 点分 id 文法谓词：每段首字符 `a-z`、余 `[a-z0-9-]`（如 `seed.echo`、`config.entry-upserted`）。
+/// R7 用它统一校验三类**同形**字段——contract `id`、event `topic`、`[[subscriptions]].group`（见各调用点）；
+/// 三者文法一致，故共用单源。小写连字符同 RSS 事件命名约定（见 CLAUDE.md：`session.created` /
+/// `config.entry-upserted`），拒 camelCase。
+///
+/// 文法**单一事实源** = `consistency::Topic`（运行期 topic 构造面）；本函数反向 delegate `Topic::parse`
+/// （#1126 兑现，原镜像实现已删）。topic 是 wire routing key——contract 声明面（R7 校验 `contract.toml` 的
+/// `id`/`topic`/`group`）与运行期构造面文法必须同形，单源后漂移结构性不可表达。`Topic::parse(s).is_ok()`
+/// ≡ 原谓词：`parse` 先拒空再过 canonical 文法，二者合取与原 `!empty && canonical` 逐分支等价。
 fn is_dotted_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.split('.').all(|seg| {
-            matches!(seg.bytes().next(), Some(b) if b.is_ascii_lowercase())
-                && seg
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
+    consistency::Topic::parse(s).is_ok()
 }
 
 /// 域名（owner 用）：`[a-z][a-z0-9_]*`，非空、首字符字母（拒 `_` 前缀保留段与空串）。
@@ -1280,6 +1282,34 @@ mod tests {
             rule_ident_syntax(&m, "x").is_empty(),
             "合法 subscription 不应触发 IdentSyntax"
         );
+    }
+
+    /// `is_dotted_id` 谓词隔离 accept/reject 表——锁 R7 dotted-id 文法在 xtask 边界的行为
+    /// （此前仅经 `rule_ident_syntax` 间接覆盖 id/topic/group）。用例集对齐 consistency 侧文法单源
+    /// `Topic::parse` 的接受/拒绝集（#1126：`is_dotted_id` 反向 delegate `consistency::Topic::parse`）。
+    /// anti-vacuity：含正反两类用例；**禁**写 `is_dotted_id(s) == Topic::parse(s).is_ok()` 自指等价断言
+    /// （delegate 后恒真、无效），一律硬编码期望布尔。
+    #[rstest]
+    #[case("seed.thing-happened", true)]
+    #[case("session.created", true)]
+    #[case("a.b", true)]
+    #[case("foo", true)] // 单段
+    #[case("rss.session.created", true)]
+    #[case("domain1.event-2.v3", true)]
+    #[case("config.entry-upserted", true)] // 连字符（RSS 事件命名约定）
+    #[case("", false)] // 空
+    #[case(".x", false)] // 前导点 → 空段
+    #[case("x.", false)] // 尾随点 → 空段
+    #[case("a..b", false)] // 连续点 → 空段
+    #[case("Foo", false)] // 段首大写
+    #[case("foo.Bar", false)] // 次段大写
+    #[case("1a", false)] // 段首数字
+    #[case("-a", false)] // 段首连字符
+    #[case("a_b", false)] // 下划线不在 [a-z0-9-]
+    #[case("a b", false)] // 空格
+    #[case("a.b ", false)] // 段含空格
+    fn r7_is_dotted_id_accepts_rejects(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(is_dotted_id(input), expected, "input={input:?}");
     }
 
     // ── R8 PerKindActiveFields（active 必填）──────────────────────────────
