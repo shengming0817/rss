@@ -6,7 +6,7 @@
 //! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main（Layer::from_fn 同步语义）
 
 mod auth;
-mod error;
+pub mod error;
 pub mod health;
 mod middleware;
 

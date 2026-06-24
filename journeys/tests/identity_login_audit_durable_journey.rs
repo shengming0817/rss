@@ -31,8 +31,10 @@ use futures::future::BoxFuture;
 use generated::event::identity_v1::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::{IdentityDomain, LoginService};
-use memory::{FixedClock, MemAuditSink, MemBus};
+use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgEmitter, PgOutbox, PgPassword, PgSslMode, PgStore};
+use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -40,9 +42,73 @@ const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 const IDENTITY_DOMAIN: &str = "identity";
 const USERNAME: &str = "alice";
 const PASSWORD: &str = "correct-horse";
-const SUBJECT: &str = "alice-subject";
+/// 种子用户 subject——W 阶段审计 actor 是 typed `ids::UserId`（canonical uuid），故 subject 须为 uuid。
+const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
+/// durable journey 审计链 HMAC key（固定 32B）。
+const AUDIT_KEY: [u8; 32] = [0x5a; 32];
+
+/// 审计链 HMAC 测试 verifier：捕获每次 `sign` 的 message（= 每次链 append）。W 阶段审计落域内哈希链
+/// （无外部 sink），journey 经注入此 verifier 端到端断言 audit append 次数。非加密——只需确定性 + 可计数。
+#[derive(Clone, Default)]
+struct CapturingVerifier {
+    messages: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl CapturingVerifier {
+    fn audited(&self) -> Vec<Vec<u8>> {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    fn is_empty(&self) -> bool {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+impl MacVerifier for CapturingVerifier {
+    fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(message.to_vec());
+        let mut acc = FNV_OFFSET;
+        for &b in key.as_bytes().iter().chain(message) {
+            acc ^= u64::from(b);
+            acc = acc.wrapping_mul(FNV_PRIME);
+        }
+        let mut out = [0u8; 32];
+        for chunk in out.chunks_mut(8) {
+            chunk.copy_from_slice(&acc.to_be_bytes());
+            acc = acc.wrapping_mul(FNV_PRIME);
+        }
+        Mac::from_bytes(out.to_vec())
+    }
+
+    fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+        primitives::constant_time_eq(
+            self.sign(key, algorithm, message).as_bytes(),
+            tag.as_bytes(),
+        )
+    }
+}
+
+/// 构造 durable journey 用 audit 域 + 共享捕获句柄（固定 32B key）。
+#[allow(clippy::expect_used)]
+fn audit_domain() -> (AuditDomain<CapturingVerifier>, CapturingVerifier) {
+    let verifier = CapturingVerifier::default();
+    let domain = AuditDomain::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
+        .expect("audit domain: 32B key satisfies MIN_KEY_LEN");
+    (domain, verifier)
+}
 
 /// 由 testkit fixture 参数构造配置。
 /// 库名严格校验已由 `testkit::env_or_postgres` 单源执行（外部路径须 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`
@@ -103,9 +169,9 @@ fn consumer_handler(
     }
 }
 
-async fn wait_until_audited(sink: &MemAuditSink) -> Result<()> {
+async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while sink.is_empty() {
+        while audit.is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -126,10 +192,10 @@ async fn login_audit_durable_topology() -> Result<()> {
     store.run_migrations().await?;
 
     let bus = MemBus::new();
-    let sink = Arc::new(MemAuditSink::new());
+    let (audit_domain, audit) = audit_domain();
 
     // 组装 audit 订阅（contract_id/topic/group 单源自 generated SUBSCRIPTIONS）。
-    let registry = bootstrap::compose(&[&IdentityDomain, &AuditDomain::new(sink.clone())])?;
+    let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
     let binding = single_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
 
@@ -201,7 +267,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         let event_id = our.idem_key().as_str().to_string();
         let payload = our.payload().to_vec();
         OutboxRelay::relay(&relay, &our).await?;
-        wait_until_audited(&sink).await?;
+        wait_until_audited(&audit).await?;
 
         // 重投同一 EventId（模拟 broker 重投）→ PgInbox Duplicate → audit 不重复。
         bus.publisher()
@@ -220,9 +286,9 @@ async fn login_audit_durable_topology() -> Result<()> {
     driven?;
 
     assert_eq!(
-        sink.records().len(),
+        audit.audited().len(),
         1,
-        "durable：登录 emit + 重投同一 EventId → audit 仅 append 一次（PgInbox 幂等）"
+        "durable：登录 emit + 重投同一 EventId → audit 链仅 append 一次（PgInbox 幂等）"
     );
     Ok(())
 }

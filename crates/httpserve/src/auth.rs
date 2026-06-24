@@ -21,12 +21,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use axum::extract::Request;
-use axum::http::StatusCode;
 use axum::response::Response;
 use primitives::{AuthRequirement, RouteAuthOptOut, resolve_requirement};
 use tower::Layer;
 use tower::Service;
-use vocab::CoreErrorKind;
 
 use crate::middleware::RequestId;
 
@@ -106,11 +104,7 @@ type DenyFuture<E> = Pin<Box<dyn Future<Output = Result<Response, E>> + Send>>;
 /// Deny 分支：403 Forbidden + 日志。
 fn deny_response<E>(contract_id: &'static str, rid: &str) -> DenyFuture<E> {
     tracing::warn!(contract_id, "auth deny");
-    short_circuit(crate::error::error_response(
-        CoreErrorKind::Forbidden,
-        StatusCode::FORBIDDEN,
-        rid,
-    ))
+    short_circuit(crate::error::forbidden(rid))
 }
 
 /// Require 分支：fail-closed 401 + 日志。
@@ -120,11 +114,7 @@ fn deny_response<E>(contract_id: &'static str, rid: &str) -> DenyFuture<E> {
 /// 现状下需认证的路由一律 401；对外可达路由经 PrimaryRoute.opt_out(Public/PasswordResetExempt) 显式降级。
 fn require_response<E>(contract_id: &'static str, rid: &str) -> DenyFuture<E> {
     tracing::warn!(contract_id, "auth require fail-closed 401");
-    short_circuit(crate::error::error_response(
-        CoreErrorKind::Unauthenticated,
-        StatusCode::UNAUTHORIZED,
-        rid,
-    ))
+    short_circuit(crate::error::unauthenticated(rid))
 }
 
 /// 决策结果转拒绝响应（`None` = Allow，`Some` = 短路响应）。

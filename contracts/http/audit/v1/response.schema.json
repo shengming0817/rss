@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditListEntriesResponse",
+  "type": "object",
+  "required": ["data", "hasMore"],
+  "properties": {
+    "data": {
+      "type": "array",
+      "items": {
+        "title": "AuditEntryView",
+        "type": "object",
+        "required": [
+          "seq",
+          "tenantId",
+          "actor",
+          "actorKind",
+          "action",
+          "resourceKind",
+          "resourceId",
+          "outcome",
+          "recordedAt",
+          "entryHash"
+        ],
+        "properties": {
+          "seq": { "type": "integer", "format": "int64" },
+          "tenantId": { "type": "string" },
+          "actor": { "type": "string" },
+          "actorKind": { "type": "string" },
+          "action": { "type": "string" },
+          "resourceKind": { "type": "string" },
+          "resourceId": { "type": "string" },
+          "outcome": { "type": "string" },
+          "recordedAt": { "type": "integer", "format": "int64", "description": "Unix seconds (UTC)" },
+          "entryHash": { "type": "string", "description": "Opaque per-entry HMAC integrity fingerprint (base64url); not independently verifiable without the chain key." }
+        },
+        "additionalProperties": false
+      }
+    },
+    "nextCursor": { "type": "string" },
+    "hasMore": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}

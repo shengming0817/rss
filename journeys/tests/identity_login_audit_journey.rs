@@ -4,8 +4,8 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
-//! - DI 注入：identity 经 `Box<DynOutboxEmitter>`（`MemEmitter`）发射 durable outbox fact；audit 经
-//!   `Arc<MemAuditSink>` 落审计；幂等 store 经 `run_consumer` 注入。
+//! - DI 注入：identity 经 `Box<DynOutboxEmitter>`（`MemEmitter`）发射 durable outbox fact；audit 经注入的
+//!   链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部 sink）；幂等 store 经 `run_consumer` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
 //! - 消费：bootstrap `SubscriberHandler` 经组合根 adapt 成 `run_consumer` 的 `HandleResult` handler，
 //!   `ConsumerBase` 自持 claim→handle→commit/release 幂等生命周期（键 = msg.id = EventId）。
@@ -15,8 +15,9 @@
 //! `tokio::spawn`（与 eventexec 单测「直接 await」一致）。journey 用 `tokio::join!` 同任务并发驱动
 //! 消费 future 与「登录 emit + 等 sink + cancel」驱动 future——无跨线程 Send 约束。
 //!
-//! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（httpserve mount 留 W）；envelope 的
-//! trace/correlation reserved-key 注入留 W（funnel 现无 sealed setter）；audit domain 哈希链保持冻结。
+//! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（admin 读 handler 经 axum oneshot 单测覆盖，
+//! 见 audit crate）；envelope 的 trace/correlation reserved-key 注入留 W（funnel 现无 sealed setter）；audit
+//! domain 哈希链 #1014 已写实——append 落每租户 keyed HMAC 链（journey 经捕获 verifier 端到端验链 append）。
 //! durable（postgres/amqp）拓扑闭环见 `identity_login_audit_durable_journey.rs`（`--features integration`）。
 //!
 //! ref: watermill message/router/middleware/poison.go（ConsumerBase DLX）
@@ -44,8 +45,8 @@ use eventexec::{ConsumerMeta, run_consumer};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::{IdentityDomain, LoginService};
-use memory::{FixedClock, MemAuditSink, MemBus, MemEmitter};
-use primitives::ListenerKind;
+use memory::{FixedClock, MemBus, MemEmitter};
+use primitives::{ListenerKind, Mac, MacAlgorithm, MacKey, MacVerifier};
 use tokio_util::sync::CancellationToken;
 
 /// canonical UUID 种子租户（TenantId::parse 接受形态）。
@@ -55,7 +56,13 @@ const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 /// 登录种子凭据。
 const USERNAME: &str = "alice";
 const PASSWORD: &str = "correct-horse";
-const SUBJECT: &str = "alice-subject";
+/// 种子用户 subject——W 阶段审计 actor 是 typed `ids::UserId`（canonical uuid），故 subject 须为 uuid。
+const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
+/// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid），
+/// 非 uuid 会被 handler fail-closed 拒（F3）；故 session_id 须为 uuid。
+const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
+/// journey 审计链 HMAC key（固定 32B）。
+const AUDIT_KEY: [u8; 32] = [0x5a; 32];
 /// 固定登录时刻 + 会话 ttl（确定性断言）。
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
@@ -98,6 +105,71 @@ impl IdempotencyStore for JourneyClaimer {
     }
 }
 
+/// 审计链 HMAC 测试 verifier：捕获每次 `sign` 的 message（= 每次链 append 的 canonical 输入），并以确定性
+/// 折叠产出 32B 标签（链一致）。W 阶段审计落**域内哈希链**（无外部 sink），journey 经注入此 verifier
+/// 端到端断言审计 append 次数 + 内容贯穿（session_id / tenant / actor 进 canonical 链输入）。非加密——
+/// journey 只需确定性 + 可计数/可检视。
+#[derive(Clone, Default)]
+struct CapturingVerifier {
+    messages: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl CapturingVerifier {
+    fn audited(&self) -> Vec<Vec<u8>> {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    fn is_empty(&self) -> bool {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+impl MacVerifier for CapturingVerifier {
+    fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(message.to_vec());
+        // 确定性折叠（FNV-1a 变体；journey 只需链一致）。
+        let mut acc = FNV_OFFSET;
+        for &b in key.as_bytes().iter().chain(message) {
+            acc ^= u64::from(b);
+            acc = acc.wrapping_mul(FNV_PRIME);
+        }
+        let mut out = [0u8; 32];
+        for chunk in out.chunks_mut(8) {
+            chunk.copy_from_slice(&acc.to_be_bytes());
+            acc = acc.wrapping_mul(FNV_PRIME);
+        }
+        Mac::from_bytes(out.to_vec())
+    }
+
+    fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+        // journey 不走 list（不触发链 verify）；提供一致实现满足 trait 契约。
+        primitives::constant_time_eq(
+            self.sign(key, algorithm, message).as_bytes(),
+            tag.as_bytes(),
+        )
+    }
+}
+
+/// 构造 journey 用 audit 域 + 共享捕获句柄（注入捕获 verifier + 固定 32B key）。
+#[allow(clippy::expect_used)]
+fn audit_domain() -> (AuditDomain<CapturingVerifier>, CapturingVerifier) {
+    let verifier = CapturingVerifier::default();
+    let domain = AuditDomain::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
+        .expect("audit domain: 32B key satisfies MIN_KEY_LEN");
+    (domain, verifier)
+}
+
 /// noop DLX（impl `diport::DeadLetterStore`）：journey 不验死信路径（eventexec consumer.rs 已覆盖），写入恒 Ok。
 struct NoopDlx;
 
@@ -135,10 +207,10 @@ fn consumer_handler(
     }
 }
 
-/// 等待 sink 非空（有界超时，防消费未跑挂死）。超时即 `Err`，由调用方在 cancel 后再传播（避免悬挂）。
-async fn wait_until_audited(sink: &MemAuditSink) -> Result<()> {
+/// 等待审计链非空（有界超时，防消费未跑挂死）。超时即 `Err`，由调用方在 cancel 后再传播（避免悬挂）。
+async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while sink.is_empty() {
+        while audit.is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -158,15 +230,25 @@ fn single_subscription(
 #[tokio::test(flavor = "multi_thread")]
 async fn login_emits_event_audited_end_to_end() -> Result<()> {
     let bus = MemBus::new();
-    let sink = Arc::new(MemAuditSink::new());
 
-    // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅。
-    let audit_domain = AuditDomain::new(sink.clone());
+    // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅 + admin 读路由组。
+    let (audit_domain, audit) = audit_domain();
     let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
 
     let route_groups = registry.route_groups();
-    assert_eq!(route_groups.len(), 1, "identity 登录路由组已声明");
-    assert_eq!(route_groups[0], (ListenerKind::Primary, "/api/v1/identity"));
+    assert_eq!(
+        route_groups.len(),
+        2,
+        "identity 登录路由组 + audit admin 读路由组"
+    );
+    assert!(
+        route_groups.contains(&(ListenerKind::Primary, "/api/v1/identity")),
+        "identity 登录路由组: {route_groups:?}"
+    );
+    assert!(
+        route_groups.contains(&(ListenerKind::Admin, "/api/v1/audit")),
+        "audit admin 读路由组: {route_groups:?}"
+    );
     assert_eq!(registry.probe_count(), 0, "未注册探针");
 
     // 订阅经 run_consumer（幂等消费驱动）接线（订阅须先于发布——in-mem 无重放）。
@@ -204,7 +286,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
                 password: PASSWORD.to_string(),
             })
             .await;
-        let waited = wait_until_audited(&sink).await;
+        let waited = wait_until_audited(&audit).await;
         token.cancel(); // 无条件 cancel：consume future 终止，join! 不悬挂。
         let response = response?;
         waited?;
@@ -222,17 +304,28 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         "到期 = now + ttl"
     );
 
-    let records = sink.records();
-    assert_eq!(records.len(), 1, "恰一条审计记录闭环");
-    let record = &records[0];
-    assert_eq!(record.action, "login");
-    assert_eq!(record.resource_kind, "session");
-    assert_eq!(
-        record.resource_id, response.data.session_id,
-        "会话 id 贯穿闭环"
+    // W：审计落域内哈希链（无外部 sink）——经捕获 verifier 验恰一次 append + 登录产物贯穿到链 canonical 输入。
+    let audited = audit.audited();
+    assert_eq!(audited.len(), 1, "恰一次审计链 append 闭环");
+    let message = &audited[0];
+    let contains = |needle: &[u8]| message.windows(needle.len()).any(|w| w == needle);
+    assert!(
+        contains(response.data.session_id.as_bytes()),
+        "会话 id 贯穿闭环（进审计链 canonical 输入）"
     );
-    assert_eq!(record.principal_id, SUBJECT);
-    assert_eq!(record.tenant_id.to_string(), CANON_TENANT, "租户贯穿闭环");
+    assert!(contains(b"identity:login"), "登录动作贯穿闭环");
+    // F9：tenant / actor 的 16B 原始 UUID 字节贯穿到审计链 canonical 输入（防 audit 漏写关键 actor/tenant
+    // 字段而 journey 不报）。canonical_message 内 tenant/actor 是 uuid bytes（非字符串），故用 uuid 字节断言。
+    let tenant_uuid_bytes = uuid::Uuid::parse_str(CANON_TENANT)?.into_bytes();
+    let actor_uuid_bytes = uuid::Uuid::parse_str(SUBJECT)?.into_bytes();
+    assert!(
+        contains(&tenant_uuid_bytes),
+        "tenant UUID 16B 贯穿闭环（进审计链 canonical 输入）"
+    );
+    assert!(
+        contains(&actor_uuid_bytes),
+        "actor UUID 16B 贯穿闭环（进审计链 canonical 输入）"
+    );
     Ok(())
 }
 
@@ -242,8 +335,8 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn relay_redelivery_audits_once() -> Result<()> {
     let bus = MemBus::new();
-    let sink = Arc::new(MemAuditSink::new());
-    let registry = bootstrap::compose(&[&AuditDomain::new(sink.clone())])?;
+    let (audit_domain, audit) = audit_domain();
+    let registry = bootstrap::compose(&[&audit_domain])?;
 
     let token = CancellationToken::new();
     let claimer = Arc::new(JourneyClaimer::default());
@@ -289,7 +382,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     // session-created JSON（camelCase）；EventId 与 payload.sessionId 解耦（去重锚点是 EventId）。
     const EVENT_ID: &str = "evt-redeliver-fixed";
     let payload = format!(
-        r#"{{"sessionId":"sess-redeliver","subject":"{SUBJECT}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
+        r#"{{"sessionId":"{CANON_SESSION}","subject":"{SUBJECT}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
     )
     .into_bytes();
     let emitter = MemEmitter::new(bus.clone());
@@ -313,7 +406,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
                 .await
                 .map_err(|_| anyhow::anyhow!("emit"))?;
         }
-        let waited = wait_until_audited(&sink).await;
+        let waited = wait_until_audited(&audit).await;
         // 等二次投递被消费并去重短路，再 cancel。
         tokio::time::sleep(Duration::from_millis(50)).await;
         token.cancel();
@@ -325,9 +418,9 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     driven?;
 
     assert_eq!(
-        sink.records().len(),
+        audit.audited().len(),
         1,
-        "重投同一 EventId → audit 仅 append 一次（L2 consumer 幂等）"
+        "重投同一 EventId → audit 链仅 append 一次（L2 consumer 幂等）"
     );
     // anti-vacuity（acc #2）：handler 仅被调用一次（ConsumerBase Duplicate 短路第二条投递）。
     assert_eq!(
@@ -342,8 +435,8 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
-    let sink = Arc::new(MemAuditSink::new());
-    let registry = bootstrap::compose(&[&IdentityDomain, &AuditDomain::new(sink.clone())])?;
+    let (audit_domain, audit) = audit_domain();
+    let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
 
     let token = CancellationToken::new();
     let claimer = Arc::new(JourneyClaimer::default());
@@ -385,6 +478,6 @@ async fn rejected_login_does_not_audit() -> Result<()> {
 
     let (_, result) = tokio::join!(consume, drive);
     assert!(result.is_err(), "未知用户登录被拒");
-    assert!(sink.is_empty(), "登录失败不产生审计事件");
+    assert!(audit.is_empty(), "登录失败不产生审计链 append");
     Ok(())
 }

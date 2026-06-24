@@ -1,160 +1,69 @@
-//! audit — RSS 审计哈希链域（AuditEntry / EntryHash / 链验证）。
+//! audit — RSS 审计哈希链域（keyed HMAC 链 + 事件消费 + 跨租户 admin 读）。
 //!
-//! 本 crate 承载审计域的核心值类型与纯计算逻辑；所有类型字段私有，只经显式构造 funnel
-//! 创建——外部不可伪造，fail-closed。域类型均在 `mod domain` 内，由 dylint
-//! `rss_domain_no_serialize` 守护（禁止 Serialize/Deserialize derive）。
+//! 本 crate 承载审计域的核心值类型、keyed HMAC 链逻辑（[`domain`]）、域内仓储端口 + in-mem
+//! （[`internal`]）与应用层（session→链 append 订阅 handler + 跨租户 admin 读 handler，
+//! [`application`]）。所有域类型字段私有，只经显式构造 funnel——外部不可伪造，fail-closed。域类型均在
+//! `mod domain` 内，由 dylint `rss_domain_no_serialize` 守护（禁止 Serialize/Deserialize derive）。
 //!
 //! # 对标
 //!
 //! ref: sigstore/sigstore-rs src/rekor/models/log_entry.rs@main
-//! 采纳：`log_index` 单调序（→ `seq`）、`verify_inclusion` 纯验证（→ `verify_chain`）。
-//! 偏离：Merkle 树 → 线性哈希链；hex String → `EntryHash([u8;32])` newtype；
+//! 采纳：`log_index` 单调序（→ `seq`）、`verify_inclusion` 纯验证（→ `AuditChainHasher::verify`）。
+//! 偏离：Merkle 树 → 线性 keyed HMAC 哈希链；hex String → `EntryHash([u8;32])` newtype；
 //!        rekor 字段全 pub → RSS 私有字段 + funnel。
 //!
-//! # 实现状态（部分写实）
+//! # 持久化边界（#1014）
 //!
-//! `domain`（审计哈希链值类型与纯逻辑）仍**签名冻结**（函数体 = `todo!()`，smoke 只绑函数指针）；
-//! `application`（session-created 订阅 handler + [`AuditDomain`]）**RW-G1 已写实**——消费跨域事件落审计。
-//! 域哈希链 + 域内持久化留 W。`application` 模块私有，只 re-export facade（handler 内部用，不外泄）。
+//! 链逻辑泛型于 [`primitives::MacVerifier`]；生产 `sha2`/`hmac` 实现 + postgres 每租户子链持久化
+//! （advisory-lock / FORCE RLS / `rss_audit_admin` 池）是独立 follow-up adapter。本 crate 以 in-mem
+//! 实现仓储端口、域单测用确定性 `#[cfg(test)]` verifier（不依赖 adapter crate）。
 
 #![forbid(unsafe_code)]
 
-/// 应用层：session-created 订阅 handler + bootstrap 生命周期（RW-G1 追踪弹）。私有——只经 facade
-/// re-export 暴露，handler 类型内部用不外泄（domain-patterns.md §封装）。
+/// 应用层：session→链 append 订阅 handler + 跨租户 admin 读 handler + bootstrap 生命周期。私有——只经
+/// facade re-export 暴露（domain-patterns.md §封装）。
 mod application;
 pub(crate) mod domain;
+/// 域内仓储 I/O 类型 + in-mem 实现（无 port trait，YAGNI；trait + `pub mod ports` 随 postgres adapter follow-up）。
+pub(crate) mod internal;
 
-pub use application::AuditDomain;
+pub use application::{AuditDomain, AuditDomainError};
 
 // ---------------------------------------------------------------------------
-// smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）
+// smoke：域核心类型 Send 不变式（跨 await 传播；行为正确性由 domain / internal / application 真实测试覆盖）
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：证明签名可被引用消费 + 闭值集 enum 可构造 + Send 约束。
-    //! **不调用** `todo!()` body。
+    //! build smoke：证明域值类型 + keyed HMAC 链服务是 `Send`（被 async append / 订阅 handler 跨 await 持有）。
 
-    use crate::domain::{
-        AuditChainLink, AuditEntry, AuditEntryId, AuditError, AuditOutcome, EntryHash, ResourceRef,
-        link_hash, verify_chain,
-    };
+    use crate::domain::{AuditChainHasher, AuditEntry, EntryHash, ResourceRef};
+    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
-    // 证明核心类型是 Send（跨 await 点传播）。
     fn _assert_send<T: Send>() {}
+
+    /// 最小 Send `MacVerifier`（仅供 Send 断言；不参与行为测试）。
+    struct NoopMac;
+    impl MacVerifier for NoopMac {
+        fn sign(&self, _key: &MacKey, _algorithm: MacAlgorithm, _message: &[u8]) -> Mac {
+            Mac::from_bytes(vec![0u8; 32])
+        }
+        fn verify(
+            &self,
+            _key: &MacKey,
+            _algorithm: MacAlgorithm,
+            _message: &[u8],
+            _tag: &Mac,
+        ) -> bool {
+            false
+        }
+    }
 
     #[test]
     fn audit_types_are_send() {
         _assert_send::<AuditEntry>();
-        _assert_send::<AuditChainLink>();
-        _assert_send::<AuditEntryId>();
         _assert_send::<EntryHash>();
         _assert_send::<ResourceRef>();
-    }
-
-    #[test]
-    fn audit_outcome_enum_is_constructable_and_exhaustive() {
-        let _outcome: AuditOutcome = AuditOutcome::Success;
-
-        // 穷尽 match（non_exhaustive crate 内合法穷举）
-        match _outcome {
-            AuditOutcome::Success => {}
-            AuditOutcome::Denied => {}
-            AuditOutcome::Error => {}
-        }
-    }
-
-    #[test]
-    fn audit_error_enum_is_exhaustive() {
-        // 穷尽 match 证明 AuditError variant 完整（crate 内）
-        let e = AuditError::ChainBroken;
-        match e {
-            AuditError::ChainBroken => {}
-            AuditError::HashMismatch => {}
-            AuditError::SequenceGap => {}
-            AuditError::InvalidId => {}
-        }
-    }
-
-    #[test]
-    fn value_type_fn_signatures_are_consumable() {
-        // 绑定构造器方法 item（不调用 → 不触 todo!()；编译期锁签名）
-
-        // AuditEntryId funnel
-        let _parse: fn(&str) -> Result<AuditEntryId, AuditError> = AuditEntryId::parse;
-        let _new_id: fn(uuid::Uuid) -> AuditEntryId = AuditEntryId::new;
-        let _as_uuid: fn(&AuditEntryId) -> uuid::Uuid = AuditEntryId::as_uuid;
-        let _ = (_parse, _new_id, _as_uuid);
-
-        // EntryHash funnel
-        let _new_hash: fn([u8; 32]) -> EntryHash = EntryHash::new;
-        let _as_bytes: fn(&EntryHash) -> &[u8; 32] = EntryHash::as_bytes;
-        let _ = (_new_hash, _as_bytes);
-
-        // ResourceRef funnel（impl Into<String> → 用 String 实例化 fn ptr）
-        let _new_ref: fn(String, String) -> ResourceRef = ResourceRef::new;
-        let _kind: fn(&ResourceRef) -> &str = ResourceRef::kind;
-        let _id_fn: fn(&ResourceRef) -> &str = ResourceRef::id;
-        let _ = (_new_ref, _kind, _id_fn);
-
-        // AuditChainLink funnel
-        let _new_link: fn(u64, EntryHash, EntryHash) -> AuditChainLink = AuditChainLink::new;
-        let _chain_seq: fn(&AuditChainLink) -> u64 = AuditChainLink::seq;
-        let _chain_prev_hash: fn(&AuditChainLink) -> &EntryHash = AuditChainLink::prev_hash;
-        let _chain_entry_hash: fn(&AuditChainLink) -> &EntryHash = AuditChainLink::entry_hash;
-        let _ = (_new_link, _chain_seq, _chain_prev_hash, _chain_entry_hash);
-    }
-
-    #[test]
-    fn pure_logic_fn_signatures_are_consumable() {
-        // 绑定自由函数指针（不调用 → 不触 todo!()）
-        let _link: fn(&EntryHash, &AuditEntry) -> EntryHash = link_hash;
-        let _verify: fn(&[AuditEntry]) -> Result<(), AuditError> = verify_chain;
-        let _ = (_link, _verify);
-    }
-
-    #[test]
-    fn audit_entry_accessor_signatures_are_consumable() {
-        // 绑定 AuditEntry 全量 accessor 方法 item（不调用 → 不触 todo!()；编译期锁签名）
-
-        // 构造器（含新增 tenant 位参）
-        #[allow(clippy::type_complexity)]
-        let _new: fn(
-            u64,
-            EntryHash,
-            EntryHash,
-            ids::UserId,
-            authn::PrincipalKind,
-            vocab::TenantId,
-            vocab::Action,
-            ResourceRef,
-            AuditOutcome,
-            std::time::SystemTime,
-        ) -> AuditEntry = AuditEntry::new;
-        let _ = _new;
-
-        // 全量 accessor
-        let _seq: fn(&AuditEntry) -> u64 = AuditEntry::seq;
-        let _prev_hash: fn(&AuditEntry) -> &EntryHash = AuditEntry::prev_hash;
-        let _entry_hash: fn(&AuditEntry) -> &EntryHash = AuditEntry::entry_hash;
-        let _actor: fn(&AuditEntry) -> ids::UserId = AuditEntry::actor;
-        let _actor_kind: fn(&AuditEntry) -> authn::PrincipalKind = AuditEntry::actor_kind;
-        let _action: fn(&AuditEntry) -> &vocab::Action = AuditEntry::action;
-        let _resource: fn(&AuditEntry) -> &ResourceRef = AuditEntry::resource;
-        let _outcome: fn(&AuditEntry) -> AuditOutcome = AuditEntry::outcome;
-        let _recorded_at: fn(&AuditEntry) -> std::time::SystemTime = AuditEntry::recorded_at;
-        let _tenant: fn(&AuditEntry) -> vocab::TenantId = AuditEntry::tenant;
-        let _ = (
-            _seq,
-            _prev_hash,
-            _entry_hash,
-            _actor,
-            _actor_kind,
-            _action,
-            _resource,
-            _outcome,
-            _recorded_at,
-            _tenant,
-        );
+        _assert_send::<AuditChainHasher<NoopMac>>();
     }
 }

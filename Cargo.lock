@@ -290,24 +290,22 @@ name = "audit"
 version = "0.0.0"
 dependencies = [
  "authn",
+ "axum",
+ "base64",
  "bootstrap",
  "consistency",
- "deviceloop",
  "diport",
- "distributed",
- "eventexec",
  "futures",
  "generated",
  "httpserve",
  "ids",
- "observ",
  "primitives",
+ "rstest",
  "runctx",
- "secure",
  "serde_json",
- "support",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
  "vocab",
@@ -2769,6 +2767,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

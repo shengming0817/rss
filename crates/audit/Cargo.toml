@@ -11,30 +11,34 @@ workspace = true
 [dependencies]
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
-secure = { path = "../secure" }
-support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
-eventexec = { path = "../eventexec" }
-observ = { path = "../observ" }
-distributed = { path = "../distributed" }
-deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-# session-created 订阅 handler：消费 diport::Message → diport::AuditEvent → diport::AuditSink。
+# session-created 订阅 handler 入参：diport::Message（跨域事件信封）。
 diport = { path = "../diport" }
 # handle 返回 BoxFuture（bootstrap::SubscriberHandler 同范式，手写 box）。
 futures = { workspace = true }
 # 解码 session-created event payload（generated 派生类型）。
 serde_json = { workspace = true }
-# 审计 handler 失败路径（decode / tenant / sink）结构化日志——审计管道失败不可静默（observability.md §日志）。
+# 跨租户 admin 读 HTTP handler（GET /api/v1/audit/entries）：axum Query/Json + route_group 挂载。
+axum = { workspace = true }
+# 审计 handler 失败路径（decode / tenant / append）结构化日志——审计管道失败不可静默（observability.md §日志）。
 tracing = { workspace = true }
+# 跨租户 admin 读分页游标（vocab::Cursor 是 base64url 不透明 token；in-mem 编码子链下标）。
+base64 = { workspace = true }
 
 [dev-dependencies]
-# 订阅 handler 异步单测 runtime。AuditSink 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
+# 订阅 handler / async repo 单测 runtime。verifier / repo 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
 tokio = { workspace = true }
+# 表驱动域单测（链篡改逐字段参数化）。
+rstest = { workspace = true }
+# admin 读 handler 集成测试：tower::ServiceExt::oneshot 驱动 axum Router（参数绑定 / 状态码 / 响应体）。
+tower = { workspace = true }
+# test-support：handler 单测经 runctx::test_support::app_ctx + scope 注入 AppCtx tenant（仅自测，不进生产构建）。
+runctx = { path = "../runctx", features = ["test-support"] }

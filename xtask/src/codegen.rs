@@ -116,6 +116,8 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
     strip_sensitive_debug(&mut parsed);
+    allow_derivable_default_impls(&mut parsed);
+    allow_unwrap_in_defaults_mod(&mut parsed);
     let payload = prettyplease::unparse(&parsed);
 
     // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
@@ -236,6 +238,56 @@ fn strip_sensitive_debug(file: &mut syn::File) {
                 .filter(|p| p.segments.last().is_none_or(|seg| seg.ident != "Debug"))
                 .collect();
             attr.meta = syn::parse_quote!(derive(#kept));
+        }
+    }
+}
+
+/// typify 对**全 optional 字段** struct（如 GET 列表端点的纯分页 query）生成手写 `impl Default`——clippy
+/// `derivable_impls` 判其等价于 `#[derive(Default)]`。committed generated 勿手改（`codegen --check` 守）+
+/// 章程禁 module/crate-level allow ⇒ codegen 注入 **item-level** `#[allow(clippy::derivable_impls)]` 到每个
+/// `impl Default` 块（与 [`strip_sensitive_debug`] 同款 syn 后处理，单源在 codegen，输出由 golden 锁）。
+/// `INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01`。
+fn allow_derivable_default_impls(file: &mut syn::File) {
+    for item in &mut file.items {
+        let syn::Item::Impl(imp) = item else {
+            continue;
+        };
+        // 仅 `impl Default for X`（trait impl，trait path 末段标识符 == Default）。
+        let is_default_impl = imp
+            .trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .is_some_and(|seg| seg.ident == "Default");
+        if is_default_impl {
+            imp.attrs
+                .push(syn::parse_quote!(#[allow(clippy::derivable_impls)]));
+        }
+    }
+}
+
+/// typify 的 `pub mod defaults` 包含 `default_u64<T, const V: u64>() -> T` 辅助函数，内部用
+/// `.unwrap()` 将 `u64` const 转换到目标类型——const 泛型保证转换不会失败，但 clippy `unwrap_used`
+/// 无法感知 const 语义，会误报。章程禁 module-level allow ⇒ codegen 注入 **item-level**
+/// `#[allow(clippy::unwrap_used)]` 到 `defaults` 模块内的每个 `fn`（与 `allow_derivable_default_impls`
+/// 同款 syn 后处理，单源在 codegen，输出由 golden 锁）。
+/// `INVARIANT: CODEGEN-DEFAULTS-UNWRAP-ALLOW-01`。
+fn allow_unwrap_in_defaults_mod(file: &mut syn::File) {
+    for item in &mut file.items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        // 仅 `pub mod defaults`。
+        if module.ident != "defaults" {
+            continue;
+        }
+        let Some((_, ref mut content)) = module.content else {
+            continue;
+        };
+        for inner in content.iter_mut() {
+            if let syn::Item::Fn(f) = inner {
+                f.attrs
+                    .push(syn::parse_quote!(#[allow(clippy::unwrap_used)]));
+            }
         }
     }
 }
@@ -762,6 +814,67 @@ mod tests {
         ] {
             assert!(!is_safe_codegen_ident(bad), "{bad:?} 应被拒");
         }
+    }
+
+    /// `allow_derivable_default_impls` 守卫 anti-vacuity 测试（ai-robust.md §运行期 governance 测试要求）：
+    /// - 正向：`impl Default for Foo {}` 块经 `allow_derivable_default_impls` 后携带
+    ///   `#[allow(clippy::derivable_impls)]`。
+    /// - 负向控制：`impl SomethingElse for Foo {}` 不被注入该 allow 属性。
+    ///
+    /// INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01（anti-vacuity，Medium）。
+    #[test]
+    fn allow_derivable_default_impls_injects_only_default_impls() -> anyhow::Result<()> {
+        // 构造包含 impl Default 和 impl SomethingElse 的 syn::File。
+        let mut file: syn::File = syn::parse_quote! {
+            struct Foo;
+            impl Default for Foo {
+                fn default() -> Self {
+                    Foo
+                }
+            }
+            impl SomethingElse for Foo {}
+        };
+
+        allow_derivable_default_impls(&mut file);
+
+        /// 辅助：判断 impl 块是否有 #[allow(clippy::derivable_impls)]。
+        fn has_derivable_allow(items: &[syn::Item], trait_name: &str) -> anyhow::Result<bool> {
+            let item = items
+                .iter()
+                .find(|item| {
+                    if let syn::Item::Impl(imp) = item {
+                        imp.trait_
+                            .as_ref()
+                            .and_then(|(_, path, _)| path.segments.last())
+                            .is_some_and(|seg| seg.ident == trait_name)
+                    } else {
+                        false
+                    }
+                })
+                .ok_or_else(|| anyhow::anyhow!("找不到 impl {trait_name} for Foo"))?;
+            let syn::Item::Impl(imp) = item else {
+                anyhow::bail!("应为 Impl item");
+            };
+            Ok(imp.attrs.iter().any(|attr| {
+                attr.path().is_ident("allow")
+                    && attr
+                        .parse_args::<syn::Path>()
+                        .is_ok_and(|p| p.segments.iter().any(|seg| seg.ident == "derivable_impls"))
+            }))
+        }
+
+        // 正向：impl Default 块须携带 #[allow(clippy::derivable_impls)]。
+        assert!(
+            has_derivable_allow(&file.items, "Default")?,
+            "impl Default 块须被注入 #[allow(clippy::derivable_impls)]（anti-vacuity：守卫非恒真）"
+        );
+
+        // 负向控制：impl SomethingElse 不应携带该 allow 属性。
+        assert!(
+            !has_derivable_allow(&file.items, "SomethingElse")?,
+            "非 Default impl 不应被注入 #[allow(clippy::derivable_impls)]（控制组）"
+        );
+        Ok(())
     }
 
     /// review #216 F6（codegen 防注入红用例）：subscription group 含引号时，render_event_glue 经

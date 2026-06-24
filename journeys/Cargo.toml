@@ -37,6 +37,8 @@ tracing = { workspace = true }
 postgres = { path = "../adapters/postgres" }
 # F6：durable journey 经 payload 解码关联本轮 session-created entry（F1 后 idem_key = 独立 EventId ≠ session_id）。
 serde_json = { workspace = true }
+# F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
+uuid = { workspace = true }
 # 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），
 # 经 testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement）。
 testkit = { path = "../crates/testkit" }

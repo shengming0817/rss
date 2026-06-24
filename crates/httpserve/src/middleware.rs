@@ -7,11 +7,9 @@
 //! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main
 
 use axum::extract::Request;
-use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use futures::FutureExt;
-use vocab::CoreErrorKind;
 
 const X_REQUEST_ID: &str = "x-request-id";
 
@@ -86,11 +84,7 @@ pub(crate) async fn panic_recovery(req: Request, next: Next) -> Response {
     {
         Ok(resp) => resp,
         // panic payload 不解析、不泄漏；统一 envelope，requestId 来自 request 上下文。
-        Err(_panic) => crate::error::error_response(
-            CoreErrorKind::Internal,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &rid,
-        ),
+        Err(_panic) => crate::error::internal_error(&rid),
     }
 }
 

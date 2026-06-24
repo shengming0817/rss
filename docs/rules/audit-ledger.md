@@ -1,0 +1,66 @@
+# 审计哈希链字节格式规则（audit ledger）
+
+> 单一事实源 · keyed HMAC 审计链的**冻结字节布局** + 验证语义。代码实现见
+> `crates/audit/src/domain/mod.rs`（`canonical_message` / `AuditChainHasher`），golden 字节测试
+> `canonical_message_golden_full_bytes` 守。改本文件即改链 wire 语义——须同步代码 + golden + PR 说明动机。
+
+## 协议
+
+审计条目构成**每租户线性 keyed HMAC 哈希链**（对标 sigstore/sigstore-rs rekor transparency log，
+偏离 Merkle 树 → 线性链）。链节点哈希：
+
+```
+entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
+```
+
+- `key`：≥32B 的 MAC 密钥（[`primitives::MacKey`]），经 `AuditChainHasher::new` 构造器注入——**无 key
+  不可造 hasher**，且**短于 32B 即 fail-closed 拒绝构造**（`AuditChainHasher::new -> Option`，弱 key 不可造
+  hasher；公开入口 `AuditDomain::new` 映射为 `AuditDomainError::WeakKey`，组合根 fail-fast）。key 强度
+  收口在构造器（任何构造路径均校验，非仅 callsite）。真实 `sha2`/`hmac` 的 [`primitives::MacVerifier`]
+  实现是 follow-up adapter；域逻辑泛型于 `MacVerifier`。
+- `prev_hash`：前一条目的 `entry_hash`；链首（`seq=0`，genesis）为全零 `[0u8;32]`。
+- 比较一律走 [`primitives::constant_time_eq`]（防时序侧信道；`Mac`/`EntryHash` 禁裸 `==`）。
+
+## 冻结字节布局（INVARIANT: AUDIT-LEDGER-BYTES-01）
+
+`canonical_message = prev_hash(32) ‖ DOMAIN_TAG ‖ 字段序`。变长字段 `u32` BE 长度前缀 + 原始字节
+（消歧：`kind="ab",id="c"` 与 `kind="a",id="bc"` 不撞）；定宽字段 BE 无前缀；枚举单 `u8` 固定 tag
+（非字符串名 ⇒ rename-stable，`#[non_exhaustive]` 加变体不挪旧 tag）。
+
+| # | 字段 | 编码 |
+|---|------|------|
+| — | DOMAIN_TAG | `b"rss.audit.v1\x00"`（13B 字面量，锁布局版本；v2 产生不相交哈希） |
+| 1 | `tenant` | `TenantId` uuid bytes，16B（首位 ⇒ 绑定子链、防跨租户重放） |
+| 2 | `seq` | `u64` BE，8B |
+| 3 | `actor` | `UserId` uuid bytes，16B |
+| 4 | `actor_kind` | 1 tag：`User=1 Device=2 Admin=3 SuperAdmin=4 Service=5 Anonymous=6`（未知=0 fail-closed） |
+| 5 | `action` | `len(u32 BE) ‖ action.as_str().as_bytes()` |
+| 6 | `resource.kind` | `len(u32 BE) ‖ bytes` |
+| 7 | `resource.id` | `len(u32 BE) ‖ bytes` |
+| 8 | `outcome` | 1 tag：`Success=1 Denied=2 Error=3` |
+| 9 | `recorded_at` | `u64` BE unix-secs(8B) ‖ `u32` BE subsec-nanos(4B)；epoch 前 fail-closed 落 `(0,0)` |
+
+枚举 tag 由 `enum_tag_mapping_is_total_and_nonzero` 测试守（已知变体非零唯一；跨 `#[non_exhaustive]` crate
+边界的穷尽性编译期不可得，由测试补——盲区：本 crate 视野外新增的 `PrincipalKind` 变体落 tag 0）。
+
+## 验证语义（`AuditChainHasher::verify`）
+
+输入：**单租户、按 `seq` 升序**的条目切片（调用方须先按租户分区并排序）。逐条 fail-closed：
+
+| 检查 | 违反 → 错误 |
+|------|-------------|
+| (A) 全条目同 `tenant`（防御纵深） | `ChainBroken` |
+| (B) 首条 `seq=0`；后续 `seq = prev.seq + 1`（gap/dup/溢出均判） | `SequenceGap` |
+| (B') 首条 `prev_hash = genesis([0;32])` | `ChainBroken` |
+| (C) `prev_hash = 上一条 entry_hash`（常数时间） | `ChainBroken` |
+| (D) 重算 `entry_hash` 与存储一致（常数时间；错 key / 篡改命中） | `HashMismatch` |
+
+## 持久化与跨租户读（follow-up adapter）
+
+本 crate 以 in-mem 每租户子链 store 实现仓储 I/O 类型（`InMemAuditRepo` in `internal/mem`，无 port trait，YAGNI）+ 确定性测试 verifier。
+**生产持久化是独立 adapter issue**：`adapters/postgres` 每租户 genesis、advisory-lock 串行 append、
+FORCE RLS、`(tenant_id, seq)` 唯一、专用 `rss_audit_admin` 角色限定 permissive RLS 读取池；真实
+`sha2`/`hmac` 的 `MacVerifier` adapter。
+
+**跨租户 admin 读**（`RowScope::All`）由该专用池服务（tenancy.md）；principal facet 落地后须补
+`RowScope::All → 501 guard`；本轮 admin 读为租户作用域（principal facet + 持久化 adapter 是 follow-up）。

@@ -1,0 +1,20 @@
+# audit 跨租户 admin 读 HTTP 契约（draft，#1014 RW-W-audit）。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 纯读（本租户审计条目分页）⇒ consistencyLevel = LocalOnly（L0）。跨租户（RowScope::All）由 handler
+# fail-closed 501（专用 rss_audit_admin postgres 池是 follow-up，见 docs/rules/audit-ledger.md）。
+# draft：handler + 契约测试证明 serving，未 graduate 到 assembly active serving（同 identity.login）。
+id = "audit.list-entries"
+kind = "http"
+domain = "audit"
+version = "v1"
+owner = "audit"
+# 纯读无事务无 outbox ⇒ LocalOnly(L0)；升 postgres adapter（读时链验证 + 池）时须复核是否升 L1。
+consistencyLevel = "LocalOnly"
+lifecycle = "draft"
+# per-kind http 字段（#1035）：挂 Admin listener 的 operator 审计读取。
+path = "/api/v1/audit/entries"
+method = "GET"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
