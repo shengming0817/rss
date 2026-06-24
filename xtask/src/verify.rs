@@ -366,6 +366,21 @@ fn step_prometheus_backend_tests() -> Step {
         needs_compile: true,
     }
 }
+fn step_vault_backend_tests() -> Step {
+    // vault Transit `sign_impl` HTTP 编排层确定性单测（#1179：wiremock loopback mock，4 分支 + percent-encode/
+    // header）+ 非 2xx 状态分级（#1180：classify_status 表驱动）。`backend` feature 的 `#[cfg(feature)]` 测试模块
+    // 默认 workspace nextest 不编入，按包显式补跑——否则 azure 无 CI 下这些确定性测试不被任何 gate 实跑。
+    Step {
+        label: "vault-backend-tests",
+        args: &["nextest", "run", "-p", "vault", "--features", "backend"],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
 /// 确定性 feature 行为测试门集（verify 与 ci 共用，单一事实源；新增确定性 feature 行为测试的 adapter 在此追加）。
 fn feature_test_steps() -> Vec<Step> {
     vec![
@@ -373,6 +388,7 @@ fn feature_test_steps() -> Vec<Step> {
         step_redis_backend_tests(),
         step_oidc_backend_tests(),
         step_prometheus_backend_tests(),
+        step_vault_backend_tests(),
     ]
 }
 
@@ -692,6 +708,7 @@ mod tests {
                 "redis-backend-tests",
                 "oidc-backend-tests",
                 "prometheus-backend-tests",
+                "vault-backend-tests",
                 "deny",
                 "dylint",
             ]
@@ -834,6 +851,7 @@ mod tests {
                 "redis-backend-tests",
                 "oidc-backend-tests",
                 "prometheus-backend-tests",
+                "vault-backend-tests",
                 "deny",
                 "audit",
                 "dylint",

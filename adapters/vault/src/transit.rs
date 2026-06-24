@@ -21,11 +21,13 @@ const OP_SIGN_READ: &str = "sign-read";
 #[error("vault address is not a valid base url")]
 struct InvalidAddr;
 
-/// Transit `sign` 非 2xx 响应（auth / policy / key 不存在 / Vault 不可用等）。状态码经 tracing 字段下发
-/// （低基数、非 PII），不进 `Display`（const literal，error-handling.md §Message）。
+/// Transit `sign` 非 2xx 响应（auth / policy / key 不存在 / Vault 不可用等）。携带 HTTP status code 作
+/// **内部诊断字段**（`#[derive(Debug)]` 读它供 vault 内日志 / 诊断）：经 [`SignerError`] 包装后 source 在 port
+/// 边界仍 redacted（`DIPORT-ERR-SOURCE-REDACT-01` 不破），status code 不外泄给调用方。状态码不进 `Display`
+/// （const literal，error-handling.md §Message——runtime 数据只走 tracing 字段）。
 #[derive(Debug, thiserror::Error)]
 #[error("vault transit sign returned non-success status")]
-struct NonSuccessStatus;
+struct NonSuccessStatus(u16);
 
 /// Transit `sign` 2xx 响应缺 `data.signature`（畸形 / 非签名响应 / `{"errors":[..]}`）。
 #[derive(Debug, thiserror::Error)]
@@ -130,12 +132,28 @@ pub(crate) async fn sign_impl(
 
     let status = response.status();
     if !status.is_success() {
-        tracing::warn!(
-            target: "vault",
-            status = status.as_u16(),
-            "vault transit sign returned non-success status"
-        );
-        return Err(SignerError::new(NonSuccessStatus));
+        let code = status.as_u16();
+        let (category, security_relevant) = classify_status(code);
+        // #1180 分级：401/403（token / ACL / policy 授权失败）= 安全告警级 → error!（运维须单独告警、与依赖
+        // 抖动区分）；429 限流 / 5xx 依赖不可用 / 其它 4xx → warn!。tracing level 须静态，故按 security_relevant
+        // 在两个 callsite 分流。`category`（4 值闭值集）是低基数告警分组字段;`status` 是原始 HTTP 码（HTTP 语义
+        // 闭集、非无界，仅作诊断而非告警分组键）。二者均非 PII，不打印 endpoint URL / token / 响应体。
+        if security_relevant {
+            tracing::error!(
+                target: "vault",
+                status = code,
+                category,
+                "vault transit sign returned non-success status"
+            );
+        } else {
+            tracing::warn!(
+                target: "vault",
+                status = code,
+                category,
+                "vault transit sign returned non-success status"
+            );
+        }
+        return Err(SignerError::new(NonSuccessStatus(code)));
     }
 
     let body = response
@@ -158,15 +176,43 @@ fn warn_and_wrap(operation: &str, err: reqwest::Error) -> SignerError {
     SignerError::new(err)
 }
 
+/// 非 2xx HTTP 状态 → `(低基数告警类别, 安全相关位)`（#1180）。与 [`classify_reqwest_error`] 同范式：闭值集、
+/// 不进 `Display`。`category` 供运维告警规则区分授权失败 / 限流 / 依赖不可用 / 客户端错误;安全相关位
+/// （401/403 = token/ACL/policy 授权失败）决定日志级别（`error!` vs `warn!`，level 须静态故在 callsite 分流）。
+/// 纯函数 → 表驱动单测（`mod tests::classify_status_*`）。
+fn classify_status(status: u16) -> (&'static str, bool) {
+    match status {
+        401 | 403 => ("auth_error", true),
+        429 => ("rate_limited", false),
+        s if s >= 500 => ("server_error", false),
+        // catch-all：其余 4xx（404 键/mount 不存在、400 请求畸形、422 等）均客户端错误、非安全告警。
+        // 新增安全相关状态（如未来 407）须显式加 arm + 改 security_relevant，扩展即显式代码改动（非隐藏漂移）。
+        _ => ("client_error", false),
+    }
+}
+
 /// reqwest 错误 → 低基数静态标签（不经 `Display`，杜绝 URL/请求详情泄漏；供告警规则区分失败类别）。
+/// 类别判定委托纯函数 [`classify_error_kind`]：`reqwest::Error` 无公开构造器、无法表驱动直测，故把可测的
+/// 映射逻辑抽出，本函数仅做 `reqwest::Error` → 四元谓词的薄提取（阅读保障）。
 fn classify_reqwest_error(err: &reqwest::Error) -> &'static str {
-    if err.is_timeout() {
+    classify_error_kind(
+        err.is_timeout(),
+        err.is_connect(),
+        err.is_decode(),
+        err.is_request(),
+    )
+}
+
+/// reqwest 错误四元谓词 → 低基数静态类别（优先级：timeout ▷ connect ▷ decode ▷ request ▷ other）。
+/// 纯函数 → 表驱动单测（`mod tests::classify_error_kind_*`）锁定映射 + 优先级。
+fn classify_error_kind(timeout: bool, connect: bool, decode: bool, request: bool) -> &'static str {
+    if timeout {
         "timeout"
-    } else if err.is_connect() {
+    } else if connect {
         "connect"
-    } else if err.is_decode() {
+    } else if decode {
         "decode"
-    } else if err.is_request() {
+    } else if request {
         "request"
     } else {
         "other"
@@ -258,5 +304,200 @@ mod tests {
     #[test]
     fn parse_malformed_json_is_err() {
         assert!(parse_sign_response(b"not json").is_err());
+    }
+
+    #[test]
+    fn classify_status_maps_to_low_cardinality_category_and_severity() {
+        use super::classify_status;
+        // #1180：非 2xx 状态 → (低基数告警类别, 安全相关位)。安全相关位决定 sign_impl 选 error!/warn!
+        // （level 须静态，故在 callsite 分流——本表锁定「哪些状态走 error 级」这一决策本身）。
+        // (status, expected_category, expected_security_relevant)
+        let cases = [
+            (401u16, "auth_error", true), // 认证失败（token 无效 / 缺失）→ 安全告警级
+            (403, "auth_error", true),    // ACL / policy 拒绝 → 安全告警级
+            (429, "rate_limited", false), // 限流 → 退避级（warn）
+            (500, "server_error", false), // Vault 内部错误 → 依赖告警级（warn）
+            (503, "server_error", false), // Vault 不可用 → 依赖告警级（warn）
+            (502, "server_error", false), // 网关错误（≥500 区段下界外的其它 5xx）
+            (400, "client_error", false), // 请求畸形 → 客户端错误（warn）
+            (404, "client_error", false), // 键 / mount 不存在 → 客户端错误
+            (418, "client_error", false), // 其它 4xx 兜底
+        ];
+        for (status, category, security) in cases {
+            assert_eq!(
+                classify_status(status),
+                (category, security),
+                "status {status} classification"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_error_kind_maps_predicates_with_priority() {
+        use super::classify_error_kind;
+        // (timeout, connect, decode, request, expected)。优先级 timeout ▷ connect ▷ decode ▷ request ▷ other。
+        // 测 reqwest 错误映射的全部 5 个出口 + 高位谓词盖过低位（reqwest::Error 无公开构造器，故测可达的
+        // 四元谓词纯映射;reqwest::Error → 四元 bool 的提取由 classify_reqwest_error 薄包装、阅读保障）。
+        let cases = [
+            (true, false, false, false, "timeout"),
+            (false, true, false, false, "connect"),
+            (false, false, true, false, "decode"),
+            (false, false, false, true, "request"),
+            (false, false, false, false, "other"),
+            (true, true, true, true, "timeout"), // 优先级：timeout 盖过其余
+            (false, true, true, true, "connect"), // connect 盖过 decode/request
+            (false, false, true, true, "decode"), // decode 盖过 request
+        ];
+        for (timeout, connect, decode, request, expected) in cases {
+            assert_eq!(
+                classify_error_kind(timeout, connect, decode, request),
+                expected,
+                "({timeout},{connect},{decode},{request})"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "backend"))]
+mod sign_impl_tests {
+    //! `sign_impl` HTTP 编排层 4 分支 + 路径 percent-encode / `X-Vault-Token` header 确定性单测：wiremock
+    //! loopback canned 响应，reqwest 真发请求测真实编排（无 live Vault、不抽 transport trait）。纯函数接缝
+    //! （build_sign_body / parse_sign_response / classify_status）见 `mod tests`。对标 adapters/s3 backend_tests
+    //! 「传输边界 mock、测真实编排」范式。
+    //!
+    //! 4 分支覆盖：① send 失败（连接被拒，端到端经 `warn_and_wrap` → `classify_reqwest_error` connect 路径）
+    //! ② 非 2xx（含 error!/warn! 两个安全分级 callsite） ④ 2xx 成功 → parse_sign_response。③ `bytes()` 读取
+    //! 失败：与 ① 同形（`warn_and_wrap`，仅 OP 常量 OP_SIGN_READ vs OP_SIGN_SEND 不同），wiremock 无法稳定触发
+    //! 响应体读取中断、不为单一分支引第二套机制（优雅简洁），由 ① 经 `warn_and_wrap` 端到端覆盖 + 阅读保障。
+    //! （`classify_reqwest_error` 的类别映射逻辑由 `mod tests::classify_error_kind_*` 表驱动全覆盖。）
+    use std::time::Duration;
+
+    use diport::{KeyId, SignRequest, Signature, SignerError, SigningPurpose};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::sign_impl;
+
+    // reason: header 可达性验证用占位值（断言 X-Vault-Token 被注入），非真实 token / token 格式规范。
+    const TOKEN: &str = "test-token";
+    const OK_BODY: &str = r#"{"data":{"signature":"vault:v1:cmF3c2ln"}}"#; // base64("rawsig")=="cmF3c2ln"
+
+    // base Url = mock server 地址。expect 的 item-level carve-out 集中此处（error-handling.md §Carve-out）。
+    #[allow(clippy::expect_used)]
+    fn base_url(server: &MockServer) -> reqwest::Url {
+        reqwest::Url::parse(&server.uri()).expect("mock server uri is a valid base url")
+    }
+
+    fn sign_request(key: &str) -> SignRequest {
+        SignRequest {
+            key: KeyId::new(key),
+            purpose: SigningPurpose::new("unit-test"),
+            message: b"hello-rss".to_vec(),
+        }
+    }
+
+    // 固定 mount=["transit"] + timeout=200ms 调 sign_impl（直接传 http base Url；scheme 校验在 VaultSigner::new，
+    // 非 sign_impl 职责，故无需构造 VaultSigner）。
+    async fn call(server: &MockServer, key: &str) -> Result<Signature, SignerError> {
+        sign_impl(
+            &reqwest::Client::new(),
+            &base_url(server),
+            TOKEN,
+            &["transit".to_string()],
+            Duration::from_millis(200),
+            sign_request(key),
+        )
+        .await
+    }
+
+    // 取唯一一次收到的请求（断言 percent-encode / header 用）。expect carve-out 集中此处。
+    #[allow(clippy::expect_used)]
+    async fn single_request(server: &MockServer) -> wiremock::Request {
+        let mut reqs = server
+            .received_requests()
+            .await
+            .expect("wiremock request recording enabled by default");
+        assert_eq!(reqs.len(), 1, "exactly one request expected");
+        reqs.remove(0)
+    }
+
+    #[tokio::test]
+    async fn sign_2xx_success_decodes_signature() {
+        // Branch 4：2xx → parse_sign_response 剥 vault:v1: 前缀 base64 decode → 原始字节。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(OK_BODY))
+            .mount(&server)
+            .await;
+        assert!(matches!(call(&server, "my-key").await, Ok(sig) if sig.as_bytes() == b"rawsig"));
+    }
+
+    #[tokio::test]
+    async fn sign_encodes_key_path_segment_and_sends_token_header() {
+        // 安全（F1）：key="../x" 必须 percent-encode 成单段 `..%2Fx`（而非路径穿越 `/v1/transit/x`）;
+        // 且请求带 X-Vault-Token header。catch-all 响应 200，直接 inspect 收到的请求断言真实 wire 形态。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(OK_BODY))
+            .mount(&server)
+            .await;
+        assert!(call(&server, "../x").await.is_ok());
+        let req = single_request(&server).await;
+        assert_eq!(
+            req.url.path(),
+            "/v1/transit/sign/..%2Fx",
+            "key segment must be percent-encoded (no path traversal)"
+        );
+        assert_eq!(
+            req.headers
+                .get("X-Vault-Token")
+                .and_then(|v| v.to_str().ok()),
+            Some(TOKEN)
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_non_success_statuses_are_err() {
+        // Branch 2：非 2xx → Err（NonSuccessStatus）。覆盖 error!（401/403）+ warn!（429/5xx/4xx）两个安全分级
+        // callsite;分类映射本身由 mod tests::classify_status_* 锁定（错误经 SignerError 脱敏，return 值不暴露
+        // category/level，故分级正确性测在纯函数侧、分支命中测在此）。
+        for status in [400u16, 401, 403, 429, 500, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(r#"{"errors":["x"]}"#))
+                .mount(&server)
+                .await;
+            assert!(
+                call(&server, "k").await.is_err(),
+                "status {status} must map to Err"
+            );
+        }
+    }
+
+    // 指向无监听者的本地端口（绑定 :0 取系统分配端口后立即释放）→ 连接必被拒。expect carve-out 集中此处。
+    #[allow(clippy::expect_used)]
+    fn refused_base() -> reqwest::Url {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener); // 释放 → 端口回到未监听态。
+        reqwest::Url::parse(&format!("http://127.0.0.1:{port}/")).expect("valid base url")
+    }
+
+    #[tokio::test]
+    async fn sign_send_connection_refused_is_err() {
+        // Branch 1：send 失败——指向无监听者端口 → 连接被拒 → warn_and_wrap(OP_SIGN_SEND) → Err。确定性、
+        // 无 lingering mock server（无 nextest leaky）;直接覆盖 classify_reqwest_error 的 connect 分支。
+        // F4 请求级 timeout 在 sign_impl 无条件设置（`.timeout(timeout)`），阅读保障——不另起 lingering-server
+        // 超时测试以免 leaky。
+        let result = sign_impl(
+            &reqwest::Client::new(),
+            &refused_base(),
+            TOKEN,
+            &["transit".to_string()],
+            Duration::from_secs(5),
+            sign_request("k"),
+        )
+        .await;
+        assert!(result.is_err());
     }
 }

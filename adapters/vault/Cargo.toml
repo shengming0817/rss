@@ -39,3 +39,7 @@ integration = ["backend"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# sign_impl HTTP 编排层确定性单测（loopback mock endpoint，无 live Vault）：reqwest 真发请求 → 测真实
+# URL percent-encode / X-Vault-Token header / 非 2xx 状态分支 / 请求级 timeout。仅 backend-gated test 用
+# （对标 s3 aws-smithy-mocks dev-dep），production lib 仍 crypto-free。
+wiremock = { workspace = true }

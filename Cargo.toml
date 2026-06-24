@@ -142,6 +142,12 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
 # 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
 aws-smithy-mocks = "0.2"
+# reqwest 客户端测试 mock server（dev-only，adapters/vault）：loopback canned 响应 endpoint，让 reqwest 真发
+# 请求、测真实编排（URL percent-encode / X-Vault-Token header / 非 2xx 状态分支 / timeout），不抽 transport
+# trait（vault 永远只用 reqwest 一个 provider，seam 是只为测试的多余抽象）——对标 s3 aws-smithy-mocks「传输边界
+# mock、测真实编排」范式。默认仅明文 HTTP，**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls 均不进树，deny
+# 全绿，同 aws-smithy-mocks 收口理由）。ref: LukeMathWalker/wiremock-rs src/server.rs@main
+wiremock = "0.6"
 # JWT 验签 provider（adapters/oidc，#1011）：对标 gocell coreos/go-oidc token 验签面。diport::Pdp port 只需
 # 「入站 token 验签」（签名 + exp/nbf + iss + aud），非完整 OAuth/OIDC client flow（discovery/PKCE/token 交换 +
 # live JWKS-over-HTTP 拉取留 #1109），故选 jsonwebtoken 而非 openidconnect（后者拉 reqwest/HTTP+OAuth 状态机,
