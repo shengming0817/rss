@@ -4,6 +4,7 @@
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
+//!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract
 //!                                      validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
@@ -33,6 +34,7 @@ mod publicapi;
 #[cfg(test)]
 mod testutil;
 mod verify;
+mod wsdeps;
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
@@ -50,6 +52,7 @@ enum Command {
     },
     ContractValidate,
     LayerDeps,
+    WsDepsDrift,
     Verify {
         fast: bool,
         allow_missing_tools: bool,
@@ -78,13 +81,14 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["contract", "validate"] => Ok(Command::ContractValidate),
         ["layer-deps"] => Ok(Command::LayerDeps),
+        ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
         ["audit", rest @ ..] => parse_audit(rest),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | wsdeps-drift | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools]>"
             )
         }
     }
@@ -178,6 +182,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Codegen { check } => codegen::run(check),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
+        Command::WsDepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
         Command::Verify {
             fast,
             allow_missing_tools,
@@ -244,6 +249,19 @@ mod tests {
     fn parse_command_layer_deps() -> anyhow::Result<()> {
         assert_eq!(parse_command(&s(&["layer-deps"]))?, Command::LayerDeps);
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_wsdeps_drift() -> anyhow::Result<()> {
+        assert_eq!(parse_command(&s(&["wsdeps-drift"]))?, Command::WsDepsDrift);
+        Ok(())
+    }
+
+    /// wsdeps-drift fail-closed：未知尾参即 `Err`。
+    #[test]
+    fn parse_command_wsdeps_drift_rejects_trailing_args() {
+        assert!(parse_command(&s(&["wsdeps-drift", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["wsdeps-drift", "extra"])).is_err());
     }
 
     #[test]

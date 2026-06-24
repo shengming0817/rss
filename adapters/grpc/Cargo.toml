@@ -8,15 +8,40 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
+# adapter 实现 DI-infra port（diport：ManagedResource 始终）。W 阶段真身只用 diport（必填）+
+# backend 门控的 tonic 后端；G0 stub 预连的基础/引擎 crate（vocab/ids/secure/…）本切片不用，
+# 已裁——按 architecture.md §分层「adapters 按需连，不预连全层」（cargo-udeps 守）。
 [dependencies]
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+# gRPC server scaffold（plaintext，无 TLS——TLS 三模式 deferred P2-6；
+#   见 docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md P2-6）：
+#   tonic      = server+router（Server::builder / add_service / serve_with_incoming_shutdown）
+#   tonic-health = 标准 gRPC 健康服务（health_reporter，无需直接依赖 prost）
+#   tokio      = rt（spawn serve task）+ net（TcpListener::bind）+ sync（Mutex<Option<JoinHandle>>）
+#   tokio-stream = TcpListenerStream（serve_with_incoming_shutdown 需 incoming stream）
+#   tokio-util = CancellationToken——graceful shutdown 经 bootstrap ShutdownStack token funnel
+#                （register_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
+#   tracing    = 结构化日志（observability.md 规范，禁 println!）
+#   thiserror  = 构造期 / shutdown 错误枚举（error-handling.md：&'static str message，无 PII）
+tonic        = { workspace = true, optional = true, features = ["server", "router"] }
+tonic-health = { workspace = true, optional = true }
+tokio        = { workspace = true, optional = true, features = ["rt", "net", "sync"] }
+tokio-stream = { workspace = true, optional = true, features = ["net"] }
+tokio-util   = { workspace = true, optional = true }
+tracing      = { workspace = true, optional = true }
+thiserror    = { workspace = true, optional = true }
+
+[features]
+default = []
+# 接 tonic 后端：健康服务 + graceful shutdown（TcpListenerStream + CancellationToken）。
+# feature-off 时为空壳（仅 freeze smoke 类型断言）、不引入 tonic 依赖——同 s3/prometheus 的 backend 门控范式。
+backend = ["dep:tonic", "dep:tonic-health", "dep:tokio", "dep:tokio-stream", "dep:tokio-util", "dep:tracing", "dep:thiserror"]
+
+[dev-dependencies]
+# backend_tests（`--features backend`）：
+#   tokio          = 异步测试运行时（#[tokio::test] macros + rt-multi-thread）
+#   tonic          = client 端需要 channel（transport = server+channel）——测试 HealthClient connect
+#   tonic-health   = HealthClient + HealthCheckRequest（health.v1 pb 模块）
+tokio        = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tonic        = { workspace = true, features = ["transport"] }
+tonic-health = { workspace = true }

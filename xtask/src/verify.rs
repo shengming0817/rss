@@ -42,7 +42,7 @@
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
-use crate::{codegen, contract, layerdeps};
+use crate::{codegen, contract, layerdeps, wsdeps};
 use anyhow::{Result, bail};
 use std::path::Path;
 
@@ -60,6 +60,7 @@ struct VerifyOpts {
 enum InternalCheck {
     ContractValidate,
     LayerDeps,
+    WsDepsDrift,
     CodegenCheck,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
@@ -136,6 +137,15 @@ fn step_layer_deps() -> Step {
         label: "layer-deps",
         args: &[],
         kind: StepKind::Internal(InternalCheck::LayerDeps),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_wsdeps_drift() -> Step {
+    Step {
+        label: "wsdeps-drift",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::WsDepsDrift),
         env: &[],
         needs_compile: false,
     }
@@ -366,6 +376,18 @@ fn step_prometheus_backend_tests() -> Step {
         needs_compile: true,
     }
 }
+fn step_grpc_backend_tests() -> Step {
+    Step {
+        label: "grpc-backend-tests",
+        args: &["nextest", "run", "-p", "grpc", "--features", "backend"],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
 fn step_vault_backend_tests() -> Step {
     // vault Transit `sign_impl` HTTP 编排层确定性单测（#1179：wiremock loopback mock，4 分支 + percent-encode/
     // header）+ 非 2xx 状态分级（#1180：classify_status 表驱动）。`backend` feature 的 `#[cfg(feature)]` 测试模块
@@ -388,6 +410,9 @@ fn feature_test_steps() -> Vec<Step> {
         step_redis_backend_tests(),
         step_oidc_backend_tests(),
         step_prometheus_backend_tests(),
+        // grpc backend 行为测试（tonic 0.14 health server）：自绑 127.0.0.1:0 ephemeral loopback、in-process
+        // tonic client roundtrip，确定性 + hermetic（无 live 后端），同 s3/redis 范式入机器门（#1011）。
+        step_grpc_backend_tests(),
         step_vault_backend_tests(),
     ]
 }
@@ -464,6 +489,7 @@ fn full_plan() -> Vec<Step> {
         step_fmt(),
         step_contract_validate(),
         step_layer_deps(),
+        step_wsdeps_drift(),
         step_codegen_check(),
         step_build_workspace(),
         step_integration_compile(),
@@ -485,6 +511,7 @@ fn ci_plan() -> Vec<Step> {
         step_fmt(),
         step_contract_validate(),
         step_layer_deps(),
+        step_wsdeps_drift(),
         step_codegen_check(),
         step_build_all_features(),
         step_clippy_all_features(),
@@ -611,6 +638,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
+        InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
@@ -699,6 +727,7 @@ mod tests {
                 "fmt",
                 "contract-validate",
                 "layer-deps",
+                "wsdeps-drift",
                 "codegen-check",
                 "build",
                 "integration-compile",
@@ -708,6 +737,7 @@ mod tests {
                 "redis-backend-tests",
                 "oidc-backend-tests",
                 "prometheus-backend-tests",
+                "grpc-backend-tests",
                 "vault-backend-tests",
                 "deny",
                 "dylint",
@@ -715,7 +745,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(3) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(4) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -725,6 +755,7 @@ mod tests {
                 "fmt",
                 "contract-validate",
                 "layer-deps",
+                "wsdeps-drift",
                 "codegen-check",
                 "deny"
             ]
@@ -734,7 +765,7 @@ mod tests {
         }
     }
 
-    /// meta 三项（contract validate / layer-deps / codegen）在两种模式恒在。
+    /// meta 四项（contract validate / layer-deps / wsdeps-drift / codegen）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -746,7 +777,12 @@ mod tests {
                 .collect();
             assert_eq!(
                 internals,
-                vec!["contract-validate", "layer-deps", "codegen-check"],
+                vec![
+                    "contract-validate",
+                    "layer-deps",
+                    "wsdeps-drift",
+                    "codegen-check"
+                ],
                 "fast={fast}"
             );
         }
@@ -843,6 +879,7 @@ mod tests {
                 "fmt",
                 "contract-validate",
                 "layer-deps",
+                "wsdeps-drift",
                 "codegen-check",
                 "build",
                 "clippy",
@@ -851,6 +888,7 @@ mod tests {
                 "redis-backend-tests",
                 "oidc-backend-tests",
                 "prometheus-backend-tests",
+                "grpc-backend-tests",
                 "vault-backend-tests",
                 "deny",
                 "audit",
@@ -921,6 +959,7 @@ mod tests {
             "fmt",
             "contract-validate",
             "layer-deps",
+            "wsdeps-drift",
             "codegen-check",
             "deny",
             "dylint",

@@ -77,12 +77,14 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.96"
 
-# 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in；
-# 骨架阶段尚无成员引用——随后续单元增长。pin 仅前瞻，inert 不进 Cargo.lock。
+# 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
+# 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。
+# pin 必须被 Cargo.lock 的 resolved 版本满足（或为带注释的 inert 前瞻）——由 `cargo xtask wsdeps-drift` 守（#1185）。
 [workspace.dependencies]
 # 运行时 / 序列化 / 错误 / 日志
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken（tokio_util::sync::CancellationToken，cargo feature = "rt"）；见 bootstrap shutdown 范式
+tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（adapters/grpc serve_with_incoming_shutdown：自绑 listener 读回 ephemeral 端口供测试）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -113,8 +115,15 @@ tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security
 # （wall-clock SystemTime，错的时间基），故不触 clippy disallowed-methods（ban 仅约束我们直调 now()）。
 # ref: antifuchs/governor src/state/keyed.rs
 governor = "0.8"
-tonic = "0.13"
-prost = "0.13"
+# gRPC 传输（adapters/grpc，#1011）+ otel OTLP/gRPC 导出（adapters/otel）共用一份。tonic 0.14 把 prost 集成
+# 拆出 tonic-prost/tonic-prost-build（core tonic codec-agnostic）。grpc 直接消费 tonic（server+router，不启 tls：
+# plaintext，TLS 三模式 deferred P2-6）+ tonic-health（标准 gRPC 健康服务，server scaffold 的 baseline service）；
+# prost 当前仅经 tonic-prost 传递进 lock@0.14（直接 workspace 消费随 P2-7 proto codegen 落地）。与 otel 的
+# opentelemetry-otlp 0.32（grpc-tonic → tonic 0.14.6）统一到 0.14，避免 0.13/0.14 双版本（#1185）。
+# ref: hyperium/tonic examples/src/health/server.rs@master
+tonic = "0.14"
+tonic-health = "0.14"
+prost = "0.14"
 # 持久化（postgres adapter，#1116）
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
 # redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml openssl ban 一致）；
@@ -164,8 +173,8 @@ jsonwebtoken = "=9.3.1"
 # grpc-tonic + tls-ring（rustls 走 ring，**禁** tls-aws-lc：aws-lc-sys 的 OpenSSL 派生 license 不在
 # deny.toml allow-list，与 sqlx/redis tls-rustls 同口径）+ tls-webpki-roots（打包 Mozilla 根，webpki-roots
 # CDLA-Permissive-2.0 已在 allow-list）。default-features=false 关默认 http/reqwest exporter，仅留 gRPC 面。
-# 注：opentelemetry-otlp 0.32 传递引入 tonic 0.14（与为 grpc adapter 预留、当前 inert 的 `tonic="0.13"`
-# 并存，multiple-versions=warn 容忍；grpc adapter 落地时统一）。ref: open-telemetry/opentelemetry-rust
+# 注：opentelemetry-otlp 0.32 传递引入 tonic 0.14；workspace `tonic`/`prost` pin 已统一到 0.14（#1011/#1185），
+# grpc adapter 直接消费同一份，无 0.13/0.14 双版本。ref: open-telemetry/opentelemetry-rust
 opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-webpki-roots"] }
@@ -192,11 +201,14 @@ schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::
 prettyplease = "0.2"
 syn = { version = "2", features = ["full", "parsing"] }
 toml = "0.8"
+# xtask wsdeps-drift 治理校验（#1185）：解析 `[workspace.dependencies]` pin 与 Cargo.lock resolved 版本，
+# 用 VersionReq/Version 判定 pin 是否被锁定版本满足（守 pin↔lock 不漂移）。
+semver = "1"
 # 测试
 rstest = "0.24"
 trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
 mockall = "0.13"
-insta = "1"
+insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员）
 
 # 工程护栏（成员经 `[lints] workspace = true` 继承）。
 [workspace.lints.rust]

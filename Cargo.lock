@@ -1721,14 +1721,14 @@ dependencies = [
 name = "grpc"
 version = "0.0.0"
 dependencies = [
- "consistency",
  "diport",
- "ids",
- "primitives",
- "runctx",
- "secure",
- "support",
- "vocab",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-health",
+ "tracing",
 ]
 
 [[package]]
@@ -4633,6 +4633,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4748,8 +4749,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
+ "axum",
  "base64",
  "bytes",
+ "h2 0.4.15",
  "http 1.4.2",
  "http-body 1.0.1",
  "http-body-util",
@@ -4758,6 +4761,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
+ "socket2 0.6.4",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4767,6 +4771,19 @@ dependencies = [
  "tower-service",
  "tracing",
  "webpki-roots 1.0.8",
+]
+
+[[package]]
+name = "tonic-health"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+dependencies = [
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]
@@ -5557,6 +5574,7 @@ dependencies = [
  "prettyplease",
  "rstest",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "syn",
