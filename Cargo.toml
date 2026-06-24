@@ -142,6 +142,22 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
 # 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
 aws-smithy-mocks = "0.2"
+# 可观测性导出（adapters/otel，#1011）：tracing span → OTLP/gRPC 导出。opentelemetry-otlp 选
+# grpc-tonic + tls-ring（rustls 走 ring，**禁** tls-aws-lc：aws-lc-sys 的 OpenSSL 派生 license 不在
+# deny.toml allow-list，与 sqlx/redis tls-rustls 同口径）+ tls-webpki-roots（打包 Mozilla 根，webpki-roots
+# CDLA-Permissive-2.0 已在 allow-list）。default-features=false 关默认 http/reqwest exporter，仅留 gRPC 面。
+# 注：opentelemetry-otlp 0.32 传递引入 tonic 0.14（与为 grpc adapter 预留、当前 inert 的 `tonic="0.13"`
+# 并存，multiple-versions=warn 容忍；grpc adapter 落地时统一）。ref: open-telemetry/opentelemetry-rust
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-webpki-roots"] }
+# tracing span → OTel SDK 桥接 Layer（组合根 registry().with(layer) 注册）。0.33 配对 opentelemetry 0.32。
+# ref: tokio-rs/tracing-opentelemetry
+tracing-opentelemetry = "0.33"
+# OtelEndpoint::insecure_localhost 的 loopback 校验：用 canonical URL parser 解析 scheme/host/userinfo，
+# 不手写 authority split（防 `http://localhost@evil` userinfo 伪装 host 绕过）。已在树（idna 等传递依赖）。
+# ref: servo/rust-url url/src/lib.rs（Url::host/username/password）
+url = "2"
 # 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。Rust 可观测 facade 选 `metrics` crate（冻结
 # 迁移决策 gocell-rust-crate-mapping.md：slog+otel+prometheus → tracing+tracing-opentelemetry+metrics facade）；
 # 发射点经 `metrics::counter!` 全局 facade，adapter 持 PrometheusHandle 渲染 exposition。
