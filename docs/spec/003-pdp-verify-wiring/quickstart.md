@@ -24,7 +24,7 @@ cargo nextest run -p oidc --features backend
 cargo nextest run --manifest-path crates/httpserve/Cargo.toml -p httpserve
 ```
 
-预期：注入 `Authenticated` → `Require` 路由 200；不注入 → 401；`opt_out=Public` → 200（不回归）；无 AuthPlan → 403（AUTH-FAILCLOSED-01）。
+预期：注入 `scheme` 匹配的 `Authenticated` → `Require` 路由 200；不注入 / scheme 不匹配（Jwt 证据 vs `Require(Mtls)`）/ `Anonymous` 证据 → 401；`opt_out=Public` → 200（不回归）；无 AuthPlan → 403（AUTH-FAILCLOSED-01）。
 
 ## ③ 生产认证闭环 e2e（PR-C，含拒绝路径）
 
@@ -34,7 +34,7 @@ cargo nextest run --manifest-path bins/server/Cargo.toml --features integration 
 ```
 
 预期（ADR-006 §8 ③）：
-- 带有效 JWT（真 OidcProvider 验签通过）请求 `Require` 路由 → 200，request extension 携 `httpserve::Authenticated`（principal_kind facet）放行；**本批不承诺 handler 读完整 `Principal`**（完整 Principal 传播属 W 后续，见 spec US3 / data-model F3）。
+- 带有效 JWT（真 OidcProvider 验签通过）请求 `Require(Jwt)` 路由 → 200，request extension 携 `httpserve::Authenticated`（`scheme=Jwt` + principal_kind facet）、enforce `scheme()` exact-match 放行；**本批不承诺 handler 读完整 `Principal`**（完整 Principal 传播属 W 后续，见 spec US3 / data-model F3）。
 - 无 Authorization 头 / 坏签名 / 过期 / 错 aud → 401/403（含 requestId），tracing 记 `authz.decision=deny` + 对应 `PdpError` 变体，日志无 token/subject。
 - 有效请求 → tracing 记 `authz.decision=allow` + `principal.kind`（无 PII）。
 

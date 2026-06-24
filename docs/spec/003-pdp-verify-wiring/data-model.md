@@ -44,14 +44,14 @@ leeway:           Duration           // exp/nbf 时钟偏移容忍
 ## 新增类型（httpserve own —— `crates/httpserve`，PR-B）
 
 ### `Authenticated`（放行证据 extension）
-- 基础级类型，**零 authn 依赖**；仅脱敏标量（如 `principal_kind: &'static str` 或闭值枚举、可选 tenant 标量）。
-- enforce 层对 `Require(scheme)` 路由：request extension 有 `Authenticated` → 放行；无 → fail-closed 401。
-- **不引** `authn::Principal`（避免跨层依赖）；组合根桥接把 Principal 降维成 `Authenticated`。
+- 基础级类型，**零 authn 依赖**；仅脱敏标量：已验证的 `scheme: RequiredScheme`（验签桥**实际验证的**凭据方案，用 `RequiredScheme` 非 `AuthScheme` → 类型层杜绝「NoAuth 证据」）+ `principal_kind: vocab::PrincipalKind`（主体类别）。私有字段 + `Authenticated::new(scheme, principal_kind)` 构造 funnel（`new` callsite 由 `rss_authenticated_callsite` dylint 限组合根，AUTH-EVIDENCE-MINT-01）。
+- enforce 层对 `Require(required)` 路由：request extension 携 `Authenticated`、其 `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** → 放行；无证据 / `Anonymous` / 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（AUTH-EVIDENCE-REQUIRE-01，杜绝 scheme 混淆）。
+- **不引** `authn::Principal`（避免跨层依赖）；组合根桥接把 Principal + 验证的 scheme 降维成 `Authenticated`。
 
 ## 新增（组合根 bins —— PR-C）
 
 ### `verify_bridge` 中间件
-- axum 中间件：`extract Authorization 凭据 → authn::verify_jwt/verify_service_token(raw, &DynPdp) → Ok((VerifiedJwt, Principal))` → **内联** 降维：从 `principal.kind()`（`PrincipalKind`）取稳定标量构造 `httpserve::Authenticated`（facet 字段集 + `PrincipalKind → 标量` 的具体映射由 PR-B 定 `Authenticated` 类型时确定），`req.extensions_mut().insert(authenticated)`；`Err(AuthnError)` → fail-closed 401（带 requestId）。
+- axum 中间件：`extract Authorization 凭据 → authn::verify_jwt/verify_service_token(raw, &DynPdp) → Ok((VerifiedJwt, Principal))` → **内联** 降维：`httpserve::Authenticated::new(verified_scheme, principal.kind())`——`verified_scheme: RequiredScheme` = 验签桥**实际验证的**凭据方案（须与入站 `RawCredential` 的 scheme 一致；enforce 据此 exact-match 路由 `Require(required)`，方案不匹配 fail-closed）、`principal.kind(): vocab::PrincipalKind`，`req.extensions_mut().insert(authenticated)`；`Err(AuthnError)` → fail-closed 401（带 requestId）。
 - ⚠ 降维是 `auth_bridge.rs` 内**内联** mapping（**非** `impl From<&authn::Principal> for httpserve::Authenticated`：From impl 会落 httpserve 或 authn 任一 crate，前者违分层、后者无意义；内联在组合根 bins 无此问题）；具体取值方法名以 PR-B `Authenticated` + authn `PrincipalKind` 的实际 API 为准（本文不锁不可编译的方法名锚点）。
 - **传播边界（评审 F3）**：`Authenticated`（principal_kind facet）足够让 httpserve enforce 放行；**handler / 域授权读完整 `Principal`** 需 runctx principal facet 绑定，属 **W 阶段后续**，不在本批承诺——本批 e2e 仅断言 `Authenticated` 放行 + facet，不断言 handler 取完整 Principal。
 - 持 `Box<DynPdp>`（构造器必填，= 真 OidcProvider）。
@@ -77,5 +77,5 @@ leeway:           Duration           // exp/nbf 时钟偏移容忍
 - **VerifiedClaims 仅 Pdp 验签后 mint**（ADR-006 ①，Hard）：本 feature 加回归断言守不退化。
 - **Principal 仅经 from_verified_*(&newtype) 派生**（ADR-006 ②，Hard：`VerifiedJwt` `pub(crate) seal`）。
 - **Box<DynPdp> 注入必填**（Hard：构造器位置参，缺失即编译错）。
-- **Authenticated 缺失 → fail-closed 401**（Hard/编译期 typed extension + 默认拒）。
+- **Authenticated 缺失 / scheme 不匹配 → fail-closed 401**（私有字段 typed extension = **Hard/类型层**；enforce 默认拒 + scheme exact-match = **Medium**，单测 + 集成测试守，AUTH-EVIDENCE-REQUIRE-01；`Authenticated::new` 仅组合根 = **Medium** callsite dylint，AUTH-EVIDENCE-MINT-01）。
 - **stub Pdp 不入生产 bin**（Medium：deny.toml adapter wrapper + dev-dep 隔离）。

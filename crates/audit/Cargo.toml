@@ -15,7 +15,6 @@ runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
-authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
 generated = { path = "../../generated" }
 thiserror = { workspace = true }

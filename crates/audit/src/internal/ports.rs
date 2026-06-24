@@ -20,7 +20,7 @@ pub(crate) struct AuditRecord {
     /// 操作者标识。
     pub(crate) actor: ids::UserId,
     /// 操作者类别。
-    pub(crate) actor_kind: authn::PrincipalKind,
+    pub(crate) actor_kind: vocab::PrincipalKind,
     /// 授权动作。
     pub(crate) action: vocab::Action,
     /// 被操作资源引用。

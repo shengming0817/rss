@@ -385,10 +385,10 @@ mod tests {
         AbacAttribute, GlobPattern, Operator, Policy, PolicyEffect, PolicyRule, evaluate_abac,
     };
     use crate::domain::{AttributeKey, AttributeValue, PolicyId};
-    use authn::{Principal, PrincipalKind};
+    use authn::Principal;
     use rstest::rstest;
-    use vocab::Decision;
     use vocab::tenant::TenantId;
+    use vocab::{Decision, PrincipalKind};
 
     // 两个 canonical UUID：tenant A（principal 所属）/ tenant B（跨租）。
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";

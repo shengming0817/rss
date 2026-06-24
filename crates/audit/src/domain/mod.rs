@@ -137,16 +137,16 @@ fn outcome_tag(outcome: AuditOutcome) -> u8 {
     }
 }
 
-/// `authn::PrincipalKind` → 冻结 tag 字节。跨 crate `#[non_exhaustive]` 无法编译期穷尽，故补 `_ => 0`
+/// `vocab::PrincipalKind` → 冻结 tag 字节。跨 crate `#[non_exhaustive]` 无法编译期穷尽，故补 `_ => 0`
 /// fail-closed；已知变体非零唯一由 `enum_tag_mapping_is_total_and_nonzero` 测试守。
-fn principal_kind_tag(kind: authn::PrincipalKind) -> u8 {
+fn principal_kind_tag(kind: vocab::PrincipalKind) -> u8 {
     match kind {
-        authn::PrincipalKind::User => 1,
-        authn::PrincipalKind::Device => 2,
-        authn::PrincipalKind::Admin => 3,
-        authn::PrincipalKind::SuperAdmin => 4,
-        authn::PrincipalKind::Service => 5,
-        authn::PrincipalKind::Anonymous => 6,
+        vocab::PrincipalKind::User => 1,
+        vocab::PrincipalKind::Device => 2,
+        vocab::PrincipalKind::Admin => 3,
+        vocab::PrincipalKind::SuperAdmin => 4,
+        vocab::PrincipalKind::Service => 5,
+        vocab::PrincipalKind::Anonymous => 6,
         // reason: 跨 crate non_exhaustive，未知变体 fail-closed 落 0（与任何已知 tag 不撞 ⇒ 审计可发现）。
         _ => 0,
     }
@@ -172,7 +172,7 @@ pub(crate) struct AuditEntry {
     /// 操作者标识（用 `ids::UserId`；设备 / service 场景用 actor_kind 区分）。
     actor: ids::UserId,
     /// 操作者类别（驱动 audit 报告分层；与 authn principal 对齐）。
-    actor_kind: authn::PrincipalKind,
+    actor_kind: vocab::PrincipalKind,
     /// 租户标识（行级多租隔离；对标 settings::ConfigEntry.tenant）。
     tenant: vocab::TenantId,
     /// 授权动作。
@@ -194,7 +194,7 @@ impl AuditEntry {
         prev_hash: EntryHash,
         entry_hash: EntryHash,
         actor: ids::UserId,
-        actor_kind: authn::PrincipalKind,
+        actor_kind: vocab::PrincipalKind,
         tenant: vocab::TenantId,
         action: vocab::Action,
         resource: ResourceRef,
@@ -236,7 +236,7 @@ impl AuditEntry {
     }
 
     /// 返回操作者类别。
-    pub(crate) fn actor_kind(&self) -> authn::PrincipalKind {
+    pub(crate) fn actor_kind(&self) -> vocab::PrincipalKind {
         self.actor_kind
     }
 
@@ -526,7 +526,7 @@ mod tests {
             prev,
             EntryHash::genesis(),
             actor(),
-            authn::PrincipalKind::User,
+            vocab::PrincipalKind::User,
             tenant(tenant_raw),
             action("audit:read"),
             ResourceRef::new("session", "sess-1"),
@@ -654,7 +654,7 @@ mod tests {
         let stale = *original.entry_hash();
         let prev = *original.prev_hash();
         let mut a = actor();
-        let mut kind = authn::PrincipalKind::User;
+        let mut kind = vocab::PrincipalKind::User;
         let mut ten = TENANT_A;
         let mut act = action("audit:read");
         let mut res = ResourceRef::new("session", "sess-1");
@@ -663,7 +663,7 @@ mod tests {
         match field {
             TamperField::Tenant => ten = TENANT_B,
             TamperField::Actor => a = other_actor(),
-            TamperField::ActorKind => kind = authn::PrincipalKind::Admin,
+            TamperField::ActorKind => kind = vocab::PrincipalKind::Admin,
             TamperField::Action => act = action("audit:write"),
             TamperField::ResourceKind => res = ResourceRef::new("device", "sess-1"),
             TamperField::ResourceId => res = ResourceRef::new("session", "sess-2"),
@@ -867,7 +867,7 @@ mod tests {
         assert_eq!(e.seq(), 0);
         assert_eq!(e.tenant().to_string(), TENANT_A);
         assert_eq!(e.actor().as_uuid(), actor().as_uuid());
-        assert!(matches!(e.actor_kind(), authn::PrincipalKind::User));
+        assert!(matches!(e.actor_kind(), vocab::PrincipalKind::User));
         assert_eq!(e.action().as_str(), "audit:read");
         assert_eq!(e.resource().kind(), "session");
         assert_eq!(e.resource().id(), "sess-1");
@@ -884,12 +884,12 @@ mod tests {
     #[test]
     fn enum_tag_mapping_is_total_and_nonzero() {
         let pk = [
-            principal_kind_tag(authn::PrincipalKind::User),
-            principal_kind_tag(authn::PrincipalKind::Device),
-            principal_kind_tag(authn::PrincipalKind::Admin),
-            principal_kind_tag(authn::PrincipalKind::SuperAdmin),
-            principal_kind_tag(authn::PrincipalKind::Service),
-            principal_kind_tag(authn::PrincipalKind::Anonymous),
+            principal_kind_tag(vocab::PrincipalKind::User),
+            principal_kind_tag(vocab::PrincipalKind::Device),
+            principal_kind_tag(vocab::PrincipalKind::Admin),
+            principal_kind_tag(vocab::PrincipalKind::SuperAdmin),
+            principal_kind_tag(vocab::PrincipalKind::Service),
+            principal_kind_tag(vocab::PrincipalKind::Anonymous),
         ];
         assert!(pk.iter().all(|&t| t != 0), "已知 PrincipalKind tag 须非零");
         let mut sorted = pk.to_vec();

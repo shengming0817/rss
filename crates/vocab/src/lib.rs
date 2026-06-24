@@ -5,6 +5,7 @@ pub mod authz;
 pub mod contract;
 pub mod epoch;
 pub mod error;
+pub mod principal;
 pub mod query;
 pub mod tenant;
 
@@ -24,6 +25,7 @@ pub use authz::{Action, ActionError, Decision};
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
+pub use principal::PrincipalKind;
 pub use query::{Cursor, CursorError, Limit, LimitError};
 pub use tenant::{
     CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant, TenantId, TenantIdError,

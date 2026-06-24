@@ -54,31 +54,32 @@
 
 ### User Story 2 - httpserve 认证放行接缝（Authenticated 证据 + fail-closed 默认）(Priority: P1)
 
-httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Authenticated` 证据 extension（只含脱敏标量，如 `principal_kind`）；enforce 层对 `Require(scheme)` 路由改为：request extension 有 `Authenticated` → 放行，无 → fail-closed 401（替代当前恒 401）。httpserve **不新增任何 path 依赖**，`finalize_auth` 签名不变。
+httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Authenticated` 证据 extension（脱敏标量：已验证的 `scheme: RequiredScheme` + `principal_kind`）；enforce 层对 `Require(required)` 路由改为：request extension 携 `Authenticated`、非 `Anonymous`、**且 `scheme()` exact-match `required`** → 放行，无证据 / 方案不匹配 → fail-closed 401（替代当前恒 401；杜绝 scheme 混淆，如 Jwt 证据撞 `Require(Mtls)`）。httpserve **不新增任何 path 依赖**，`finalize_auth` 签名不变。
 
 **Why this priority**: httpserve 是兄弟服务 authn 的不可依赖方（分层 `layers.rs:122`）；放行机制必须由 httpserve own 的类型承载，否则没有任何 PR 能让需认证端点放行。这是安全同批门的「放行接缝」一侧——但它单独 merge **不**放行任何端点（无人注入 `Authenticated`）。
 
-**Independent Test**: `axum::http` + `tower::ServiceExt::oneshot` 覆盖：注入 `Authenticated` → Require 路由 200；不注入 → 401；既有 opt-out（Public / PasswordResetExempt）路径不变；无 AuthPlan → 403（AUTH-FAILCLOSED-01 不回归）。
+**Independent Test**: `axum::http` + `tower::ServiceExt::oneshot` 覆盖：注入 `scheme` 匹配的 `Authenticated` → Require 路由 200；不注入 / scheme 不匹配（Jwt 证据 vs `Require(Mtls)`）/ `Anonymous` 证据 → 401；既有 opt-out（Public / PasswordResetExempt）路径不变；无 AuthPlan → 403（AUTH-FAILCLOSED-01 不回归）。
 
 **Acceptance Scenarios**:
 
-1. **Given** 一条 `Require(Jwt)` 路由且 request 已携 `Authenticated` extension，**When** enforce 层处理，**Then** 放行到 handler（200）。
+1. **Given** 一条 `Require(Jwt)` 路由且 request 携 `scheme=Jwt` 的 `Authenticated` extension，**When** enforce 层处理，**Then** 放行到 handler（200）。
 2. **Given** 同路由但 request 无 `Authenticated`，**When** enforce 层处理，**Then** fail-closed 401。
 3. **Given** `PrimaryRoute` 的 `opt_out=Public`，**When** 无 `Authenticated` 请求，**Then** 仍 200（opt-out 不被本改动破坏）。
+4. **Given** 一条 `Require(Jwt)` 路由但 request 携 `scheme=Mtls` 的 `Authenticated`（方案不匹配），**When** enforce 层处理，**Then** fail-closed 401（杜绝 scheme 混淆）。
 
 ---
 
 ### User Story 3 - 生产认证接线 + 验签桥 + e2e（启用生产认证·安全同批）(Priority: P1)
 
-组合根（`bins/server`、`bins/rss`）从配置构造 `OidcProvider` → `Box<DynPdp>`，在 `httpserve::finalize_auth` 产出的 router **外层**挂 verify-bridge 中间件：提取 Authorization 凭据 → `authn::verify_jwt(raw, &pdp)` → 成功则把 Principal 降维成 `httpserve::Authenticated` 注入 request → enforce 放行；失败 fail-closed 401。中间件埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），无 PII。
+组合根（`bins/server`、`bins/rss`）从配置构造 `OidcProvider` → `Box<DynPdp>`，在 `httpserve::finalize_auth` 产出的 router **外层**挂 verify-bridge 中间件：提取 Authorization 凭据 → `authn::verify_jwt(raw, &pdp)` → 成功则 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入 request → enforce exact-match `Require(required)` 放行；失败 / 方案不匹配 fail-closed 401。中间件埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），无 PII。
 
 **Why this priority**: 这是**唯一启用生产认证**的环节，也是 ADR-006 §8 ③「httpserve↔authn 验签接线有集成测试覆盖（含拒绝路径）」的验收点。必须 blocked-by 真 verifier（US1）+ 放行接缝（US2），三者同批生效 → 零验签空窗。
 
-**Independent Test**: e2e 集成测试起 router + 真 `OidcProvider`：有效 JWT → 200 + `Authenticated`（principal_kind facet）注入；无 token / 坏签名 / 过期 / 错 aud → 401/403（拒绝路径全覆盖）；tracing span 断言 `authz.decision` + `principal.kind`、无 subject/token 泄漏；stub Pdp 仅在 `[dev-dependencies]`，不入 `cargo build --release` 依赖图。
+**Independent Test**: e2e 集成测试起 router + 真 `OidcProvider`：有效 JWT → 200 + `Authenticated`（`scheme`=Jwt + principal_kind facet）、`scheme()` exact-match 注入放行；无 token / 坏签名 / 过期 / 错 aud → 401/403（拒绝路径全覆盖）；tracing span 断言 `authz.decision` + `principal.kind`、无 subject/token 泄漏；stub Pdp 仅在 `[dev-dependencies]`，不入 `cargo build --release` 依赖图。
 
 **Acceptance Scenarios**:
 
-1. **Given** 部署注入真 `OidcProvider` + verify-bridge 已挂，**When** 客户端带有效 JWT 请求 `Require` 路由，**Then** 200，request extension 携 `httpserve::Authenticated`（含 `principal_kind` facet）放行。**注**：本批仅承诺 `Authenticated` 放行 + `principal_kind` facet；handler / 域授权读**完整 `Principal`**（runctx principal facet 绑定）属 W 阶段后续，不在本批验收（否则验收不可兑现，见 FR-009/data-model）。
+1. **Given** 部署注入真 `OidcProvider` + verify-bridge 已挂，**When** 客户端带有效 JWT 请求 `Require(Jwt)` 路由，**Then** 200，request extension 携 `httpserve::Authenticated`（含 `scheme`=Jwt + `principal_kind` facet）、`scheme()` exact-match 放行。**注**：本批仅承诺 `Authenticated` 放行 + `principal_kind` facet；handler / 域授权读**完整 `Principal`**（runctx principal facet 绑定）属 W 阶段后续，不在本批验收（否则验收不可兑现，见 FR-009/data-model）。
 2. **Given** 同部署，**When** 客户端无 Authorization 头 / 坏签名 / 过期 token，**Then** fail-closed 401（含 requestId），tracing 记 `authz.decision=deny` + 对应 `PdpError` 变体，日志无 token / subject。
 3. **Given** 生产 bin 构建，**When** `cargo build --release`，**Then** 依赖图不含任何 dev/test stub Pdp 与禁用 crypto crate（ring/rsa/aws-lc/openssl/jsonwebtoken）。
 
@@ -120,12 +121,12 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 - **FR-003**: 时钟 MUST 经构造器位置参注入（`diport::Clock`），MUST NOT 取系统时钟；exp/nbf 校验带可配置 leeway；常数时间比较 MAC（复用 `primitives::crypto`，禁 `==`）。
 - **FR-004**: key 源 MUST 经 `KeySource` 抽象（构造期解析 + 校验，解析失败在构造期 `Result`，不入验签热路径）；首批静态配置 key set（按 kid 索引）；service_token MUST 走独立 HS256-only key set（路径隔离）。
 - **FR-005**: `OidcProvider` MUST 支持 JWKS 远程 fetch + 缓存 + 轮转。**key-source 完整性（安全）**：远程 JWKS MUST 经可机器验证的传输完整性（TLS 证书校验 / mTLS / 签名 JWKS / key pinning / 本地 sidecar）——**裸 plain-HTTP JWKS MUST NOT 作为可上线选项**（内网 MITM 可替换公钥伪造 token）；若 license-clean TLS 栈暂不可用，则首批 MUST 仅保留静态配置 key、不上线远程 JWKS。HTTP/TLS 栈 MUST 经 license 甄别（规避 ring/aws-lc/openssl）。JWKS 不可达或 kid 缺失 MUST fail-closed（`Untrusted`），MUST NOT 跳过验签。**readiness（运维）**：JWKS 刷新失败 MUST 经 readiness probe `oidc_jwks_ready`（依赖可用性 probe，带 `_ready` 后缀）反映 health，verbose readyz MUST 裁剪敏感字段（无 endpoint 凭据 / key 材料）；带刷新句柄 MUST 另 impl `ManagedResource` 真实关闭。
-- **FR-006**: httpserve MUST 定义 own `Authenticated` 证据 extension（基础级类型，仅脱敏标量如 `principal_kind`，**零 authn 依赖**）；enforce 层 `Require` 路由 MUST 读 `Authenticated` 放行、缺失 MUST fail-closed 401。既有 opt-out（Public/PasswordResetExempt）与 AUTH-FAILCLOSED-01（无 plan→403）MUST 不回归。
+- **FR-006**: httpserve MUST 定义 own `Authenticated` 证据 extension（基础级类型，脱敏标量：已验证的 `scheme: RequiredScheme` + `principal_kind`，**零 authn 依赖**，私有字段 + `Authenticated::new` 构造 funnel）；enforce 层 `Require(required)` 路由 MUST 仅在请求携 `Authenticated`、其 `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行，缺证据 / 方案不匹配 MUST fail-closed 401（杜绝 scheme 混淆，如 Jwt 证据撞 `Require(Mtls)`）。既有 opt-out（Public/PasswordResetExempt）与 AUTH-FAILCLOSED-01（无 plan→403）MUST 不回归。
 - **FR-007**: httpserve crate MUST NOT 新增任何 path 依赖（不引 authn/oidc/crypto）；`finalize_auth(router, plan)` 签名 MUST 保持冻结（验签桥由组合根外层 `.layer()` 装配，非穿入 finalize_auth）。
 - **FR-008**: 组合根（`bins/server`、`bins/rss`）MUST 从配置构造 `OidcProvider` → `Box<DynPdp>`（构造器必填位置参），MUST 在 `finalize_auth` 产出 router 的**外层**挂 verify-bridge 中间件；**仅组合根**启用生产认证（注入 + 挂载）。
-- **FR-009**: verify-bridge MUST 提取凭据 → `authn::verify_jwt`/`verify_service_token`（注入 `&DynPdp`）→ 成功注入 `Authenticated`、失败 fail-closed 401；MUST 埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），span 字段 MUST NOT 含 PII（subject/token/email）。
+- **FR-009**: verify-bridge MUST 提取凭据 → `authn::verify_jwt`/`verify_service_token`（注入 `&DynPdp`）→ 成功 MUST 经 `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 验签桥实际验证的 `RequiredScheme`）注入、失败 fail-closed 401；MUST 埋 tracing span（verify ok→`authz.decision=allow`+`principal.kind`；fail→`deny`+区分 `PdpError` 变体），span 字段 MUST NOT 含 PII（subject/token/email）。
 - **FR-010**: 安全同批门 MUST 由结构闸坐实：(a) 仅启用生产认证的 PR blocked-by 真 verifier PR（DAG）；(b) **测试 stub adapter crate** MUST NOT 进生产 bin 依赖图（`deny.toml` adapter wrapper + dev-dependency 隔离，Medium）；(c) `Box<DynPdp>` 注入为构造器必填参（缺失即编译错，Hard）；(d) fail-closed 为缺省态（Hard）；(e) **生产 bins 信任根守卫（Medium，本 feature 内 PR-C 交付，不 defer）**：`Box<DynPdp>` 是 trait object、bins 在 dylint 组合根白名单可合法 `impl Pdp`，故 PR-C MUST 配套 governance 守卫（`cargo xtask` 或 dylint）扫 bins 生产 `src/` 的 `impl diport::Pdp`，仅放行 `#[cfg(test)]` / dev-dep，生产内联 always-allow impl 即 fail（synthetic red case + anti-vacuity）——**不接受 Soft、不 defer**（AI-robust：新增治理 ≥ Medium）。
-- **FR-011**: 系统 MUST 有 e2e 集成测试覆盖 httpserve↔authn 验签接线（ADR-006 §8 ③）：有效凭据 → 200 + `Authenticated`（principal_kind facet）注入；无/坏/过期/错 aud 凭据 → 401/403（拒绝路径全覆盖）。本批不承诺 handler 读完整 `Principal`（属 W）。
+- **FR-011**: 系统 MUST 有 e2e 集成测试覆盖 httpserve↔authn 验签接线（ADR-006 §8 ③）：有效凭据 → 200 + `Authenticated`（`scheme` + principal_kind facet）、scheme exact-match 注入放行；无/坏/过期/错 aud 凭据 / 方案不匹配 → 401/403（拒绝路径全覆盖）。本批不承诺 handler 读完整 `Principal`（属 W）。
 - **FR-012**: 既有类型层不变式 MUST 不回归：`VerifiedClaims` 仅 `diport::pdp` 定义、仅 Pdp 验签后 mint（ADR-006 ①）；`Principal::from_verified_*` 仅收 newtype（②）；dynosaur 宏白名单无新增越界（④，本 feature 不新增 port，天然满足）。
 - **FR-013**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0 冻结接缝（`diport::Pdp` / `authn` bridge / `finalize_auth`）内兑现 body，不改公共签名（finalize_auth 保留、Pdp trait 保留）；feature MUST 拆为 4 PR / 2 wave，形成 blocked-by DAG + `[P]` 并行标记，全部挂 Azure Boards #1109。
 - **FR-014**: 新增治理机制 MUST ≥ Medium（严禁 Soft）：安全同批门 = 构造器必填参（Hard）+ deny.toml wrapper（Medium）+ fail-closed 缺省；放行接缝 = typed extension + 默认拒（编译期/机器守）。
@@ -137,8 +138,8 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 - **PdpError**（冻结，`#[non_exhaustive]`）：fail-closed 三变体 InvalidSignature / Expired / Untrusted，纯 taxonomy（不携 source）。
 - **SupportedAlg**（新，adapter 内部 `#[non_exhaustive]`）：ES256 / HS256；EdDSA 接缝预留（follow-up）。
 - **KeyEntry / KeySource**（新，adapter 内部）：`{ kid, alg, KeyMaterial(Es256VerifyingKey | Hs256Secret) }`；`KeySource` = 静态 set（首批）/ JWKS 远程（US4）；构造器签名稳定，JWKS 作为新 impl 不改签名。
-- **Authenticated**（新，httpserve own）：放行证据 extension——脱敏标量（principal_kind 等），零 authn 依赖。
-- **VerifyBridge 中间件**（新，组合根 bins）：extract→verify→inject Authenticated + tracing 的 axum 中间件；唯一启用生产认证处。
+- **Authenticated**（新，httpserve own）：放行证据 extension——脱敏标量 `scheme: RequiredScheme`（验签桥实际验证的方案）+ `principal_kind`，零 authn 依赖；私有字段 + `Authenticated::new` funnel；enforce 按 `Require(required)` 对 `scheme()` exact-match 放行。
+- **VerifyBridge 中间件**（新，组合根 bins）：extract→verify→`Authenticated::new(verified_scheme, principal.kind())` inject + tracing 的 axum 中间件；唯一启用生产认证处。
 
 ## Success Criteria *(mandatory)*
 
@@ -146,7 +147,7 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 
 - **SC-001**: `OidcProvider::verify` 对 ES256 + HS256 通过 RFC 7515 known-answer 测试向量（验签正确而非自洽）；坏签名/过期/坏 alg/iss-aud 不符各映射到正确 `PdpError` 变体，100% 表驱动用例通过。
 - **SC-002**: 生产依赖图（`cargo build --release` + `cargo deny check`）不含 `ring` / `rsa` / `aws-lc-*` / `openssl` / `jsonwebtoken` 任一；deny licenses/bans/advisories 全绿。
-- **SC-003**: 接通后的生产可达 `Require` 端点：有效凭据 200 + `Authenticated`（principal_kind facet）放行；无/坏/过期/错 aud 凭据 401/403；e2e 拒绝路径 100% 覆盖（ADR-006 §8 ③）。
+- **SC-003**: 接通后的生产可达 `Require` 端点：有效凭据 200 + `Authenticated`（`scheme` + principal_kind facet）、scheme exact-match 放行；无/坏/过期/错 aud 凭据 / 方案不匹配 401/403；e2e 拒绝路径 100% 覆盖（ADR-006 §8 ③）。
 - **SC-004**: 安全同批门机器可验：启用生产认证的 PR（PR-C）blocked-by 真 verifier（PR-A1）；任一中间态不出现「有 plan + always-allow stub」可达端点；stub Pdp 不在任何生产 bin 依赖图（deny + dev-dep 隔离）；**且 PR-C 的 governance 守卫拒绝 bins 生产 `src/` 内联 `impl diport::Pdp`（Medium，synthetic red case 证守卫非恒真）**。
 - **SC-005**: JWKS 轮转——新 kid token 验签通过、旧 kid 移除后旧 token 拒（Untrusted）；JWKS 不可达 100% fail-closed（经 `oidc_jwks_ready` probe 反映 health），绝不静默跳过验签；**裸 plain-HTTP JWKS 不在可上线路径**（远程 JWKS 经 TLS/pinning，或退静态 key）。
 - **SC-006**: 认证决策 tracing span 在 allow/deny 两路均产生且字段无 PII（无 subject/token/email）；deny 路区分 `PdpError` 三变体（便于告警分级）。

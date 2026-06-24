@@ -14,10 +14,13 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::routing::get;
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RouteAuthOptOut};
+use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
 use tower::ServiceExt; // oneshot
+use vocab::PrincipalKind;
 
-use httpserve::{PrimaryRoute, Route, RouteMeta, finalize_auth, mount, mount_primary};
+use httpserve::{
+    Authenticated, PrimaryRoute, Route, RouteMeta, finalize_auth, mount, mount_primary,
+};
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -116,6 +119,33 @@ async fn primary_public_opt_out_allows() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
+async fn primary_public_opt_out_with_evidence_is_200() {
+    // 保险：opt_out=Public 是 Allow 分支，存在 Authenticated 证据不改变结论（证据不破坏 Allow）→ 仍 200。
+    let router = mount_primary(
+        Router::new(),
+        PrimaryRoute {
+            method: Method::GET,
+            path: "/api/v1/x",
+            contract_id: C,
+            opt_out: Some(RouteAuthOptOut::Public),
+        },
+        get(ok_handler),
+    );
+    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/x")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
 async fn primary_require_without_credential_is_401() {
     let router = mount_primary(
         Router::new(),
@@ -142,8 +172,8 @@ async fn primary_require_without_credential_is_401() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn primary_require_is_fail_closed_401() {
-    // F1 fail-closed：httpserve 无凭据验证能力，带 Authorization 也一律 401。
-    // 真实 JWT/mTLS 校验由 authn 独立 W 层提供（authn PR 落地后接缝放行）。
+    // fail-closed：httpserve 不验签——裸 Authorization header 非证据，仅请求携 Authenticated 证据
+    // extension（验签桥外层 layer 注入）才放行，故带 header 仍 401（AUTH-EVIDENCE-REQUIRE-01）。
     let router = mount_primary(
         Router::new(),
         PrimaryRoute {
@@ -162,6 +192,64 @@ async fn primary_require_is_fail_closed_401() {
         .header(header::AUTHORIZATION, "Bearer test-token")
         .body(Body::empty())
         .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn primary_require_with_authenticated_evidence_allows() {
+    // AUTH-EVIDENCE-REQUIRE-01：Require(Jwt) 路由 + 请求携 Authenticated 证据 → 放行 200。
+    // 证据由组合根验签桥（外层 layer）注入；此处直接 insert 到请求 extension 模拟该接缝。
+    let router = mount_primary(
+        Router::new(),
+        PrimaryRoute {
+            method: Method::GET,
+            path: "/api/v1/x",
+            contract_id: C,
+            opt_out: None,
+        },
+        get(ok_handler),
+    );
+    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/x")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn primary_require_with_mismatched_scheme_is_401() {
+    // AUTH-EVIDENCE-REQUIRE-01 scheme exact-match：Require(Jwt) 路由 + Mtls 方案证据 → scheme 不匹配 → 401
+    // （#1109 验签桥接入后杜绝 Jwt 证据过 Require(Mtls) 类 scheme 混淆）。
+    let router = mount_primary(
+        Router::new(),
+        PrimaryRoute {
+            method: Method::GET,
+            path: "/api/v1/x",
+            contract_id: C,
+            opt_out: None,
+        },
+        get(ok_handler),
+    );
+    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/x")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(Authenticated::new(
+        RequiredScheme::Mtls,
+        PrincipalKind::User,
+    ));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

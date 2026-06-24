@@ -31,8 +31,8 @@
 ### T002 [P] [US2] PR-B · httpserve `Authenticated` 证据 + enforce 放行（fail-closed 默认）
 **触及**: `crates/httpserve/src/{auth,lib}.rs`（**无新 path dep**）· `crates/httpserve/tests/runtime.rs` · **等级**: L1 · **blocked-by**: 无 · **并行**: 与 T001 并行。
 
-- [ ] T002.1 [US2] 先写测试（`axum::http` + `tower::ServiceExt::oneshot`）：注入 `Authenticated`→Require 路由 200（**新正向用例，当前恒 401 → FAIL**）；不注入→401 / `opt_out=Public`→200 / 无 AuthPlan→403（既有用例复用做不回归基线，当前已 PASS，非新 FAIL）
-- [ ] T002.2 [US2] `auth.rs`：定义 `Authenticated` extension（基础级、脱敏标量 `principal_kind`，零 authn 依赖）；`require_response`/`reject_if_needed` 改为读 request extension 的 `Authenticated`→放行、缺失→fail-closed 401
+- [ ] T002.1 [US2] 先写测试（`axum::http` + `tower::ServiceExt::oneshot`）：注入 `scheme` 匹配的 `Authenticated`→Require 路由 200（**新正向用例，当前恒 401 → FAIL**）；不注入→401 / **scheme 不匹配（Jwt 证据 vs `Require(Mtls)`）→401** / **`Anonymous` 证据→401** / `opt_out=Public`→200 / 无 AuthPlan→403（既有用例复用做不回归基线）
+- [ ] T002.2 [US2] `auth.rs`：定义 `Authenticated` extension（基础级、脱敏标量 `scheme: RequiredScheme` + `principal_kind`，零 authn 依赖，私有字段 + `new` funnel）；`reject_if_needed` 改为读 request extension 的 `Authenticated`→ 非 `Anonymous` 且 `scheme()` exact-match `Require(required)` 则放行、否则 fail-closed 401
 - [ ] T002.3 [US2] `lib.rs`：导出 `Authenticated`；`finalize_auth` 文档更新（层序：验签桥由组合根外层装配；**签名不改**，httpserve Cargo.toml 不新增 path dep）
 - [ ] T002.4 [US2] 覆盖率 ≥80%；`nextest`/`clippy -D warnings`/`fmt`/`layer-deps`（httpserve 无新 path dep）绿
 
@@ -53,8 +53,8 @@
 ### T004 [US3] PR-C · 组合根注入 + verify-bridge + 埋点 + e2e（启用生产认证·安全同批）
 **触及**: `bins/{server,rss}/src/{main,auth_bridge}.rs` · `bins/{server,rss}/Cargo.toml`（首次加 httpserve/authn/oidc/diport/primitives/axum/tower/tokio/config）· `bins/{server,rss}/tests/auth_e2e.rs` · **等级**: L1 · **blocked-by**: **T001（真 verifier OidcProvider:Pdp）+ T002（httpserve::Authenticated 放行接缝）** · **并行**: 与 T003 并行（bins vs adapters/oidc 零交叉）。
 
-- [ ] T004.1 [US3] 先写 e2e 集成测试（dev-dep/feature 门控）：有效 JWT（真 OidcProvider 静态 key 验签）→200+`Authenticated`(principal_kind facet) 注入放行（**本批不断言 handler 读完整 Principal——属 W**，评审 F3）；无 token/坏签名/过期/错 aud→401/403（拒绝路径全覆盖）；**T001/T002 单独 merge 态 Require 仍 401 回归用例**；tracing span 断言 `authz.decision`+`principal.kind`、无 subject/token 泄漏；stub Pdp 仅 `[dev-dependencies]` —— FAIL
-- [ ] T004.2 [US3] `auth_bridge.rs`（**各 bin 各一份**——bins/server 与 bins/rss 是独立 crate 不共享 src；逻辑小，漂移再提取 `assemblies/authwire`）：axum 中间件 extract Authorization→`authn::verify_jwt`/`verify_service_token`(注入 `&DynPdp`)→ok **内联** 从 `principal.kind()`(`PrincipalKind`) 取稳定标量构造 `httpserve::Authenticated`（具体取值方法以 PR-B/authn 实际 API 为准，非 `From<&Principal>` trait）注入 request、err fail-closed 401；tracing span（ok→allow+principal.kind；err→deny+PdpError 变体；无 PII）—— 落地 authn lib.rs:280 `NOTE(#1109)` 承诺
+- [ ] T004.1 [US3] 先写 e2e 集成测试（dev-dep/feature 门控）：有效 JWT（真 OidcProvider 静态 key 验签）→200+`Authenticated`(`scheme`=Jwt + principal_kind facet) `scheme()` exact-match 注入放行（**本批不断言 handler 读完整 Principal——属 W**，评审 F3）；无 token/坏签名/过期/错 aud→401/403（拒绝路径全覆盖）；**T001/T002 单独 merge 态 Require 仍 401 回归用例**；tracing span 断言 `authz.decision`+`principal.kind`、无 subject/token 泄漏；stub Pdp 仅 `[dev-dependencies]` —— FAIL
+- [ ] T004.2 [US3] `auth_bridge.rs`（**各 bin 各一份**——bins/server 与 bins/rss 是独立 crate 不共享 src；逻辑小，漂移再提取 `assemblies/authwire`）：axum 中间件 extract Authorization→`authn::verify_jwt`/`verify_service_token`(注入 `&DynPdp`)→ok **内联** `httpserve::Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme: RequiredScheme` = 验签桥实际验证的方案，须与入站 `RawCredential` scheme 一致；非 `From<&Principal>` trait）注入 request、err fail-closed 401；tracing span（ok→allow+principal.kind；err→deny+PdpError 变体；无 PII）—— 落地 authn lib.rs:280 `NOTE(#1109)` 承诺
 - [ ] T004.3 [US3] `main.rs`（server+rss）：从配置构造 `OidcProvider`→`Box<DynPdp>`（必填位参）；`Registry::finalize_routes`→每 listener router→`httpserve::finalize_auth(router,plan)`→**外层** `.layer(verify_bridge(pdp))`；JWKS/issuer/audience/key 配置注入
 - [ ] T004.4 [US3] 安全同批门核对：`cargo build --release` 依赖图无 stub Pdp + 无禁用 crypto crate；仅 T004 启用生产认证（T001/T002/T003 单独 merge 后 Require 端点仍 401）；`Box<DynPdp>` 必填编译期守
 - [ ] T004.6 [US3] **信任根 Medium 守卫（评审 F1，本 PR 必交付，不 defer）**：`cargo xtask` governance（或 dylint）扫 bins 生产 `src/` 的 `impl diport::Pdp`，仅放行 `#[cfg(test)]`/dev-dep，生产内联 always-allow impl → fail；synthetic red case + anti-vacuity（守卫非恒真）；INVARIANT 记守卫 rustdoc

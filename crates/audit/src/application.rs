@@ -72,15 +72,15 @@ fn to_unix_secs(time: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-/// `authn::PrincipalKind` → wire 字符串（camelCase）。
-fn principal_kind_wire(kind: authn::PrincipalKind) -> &'static str {
+/// `vocab::PrincipalKind` → wire 字符串（camelCase）。
+fn principal_kind_wire(kind: vocab::PrincipalKind) -> &'static str {
     match kind {
-        authn::PrincipalKind::User => "user",
-        authn::PrincipalKind::Device => "device",
-        authn::PrincipalKind::Admin => "admin",
-        authn::PrincipalKind::SuperAdmin => "superAdmin",
-        authn::PrincipalKind::Service => "service",
-        authn::PrincipalKind::Anonymous => "anonymous",
+        vocab::PrincipalKind::User => "user",
+        vocab::PrincipalKind::Device => "device",
+        vocab::PrincipalKind::Admin => "admin",
+        vocab::PrincipalKind::SuperAdmin => "superAdmin",
+        vocab::PrincipalKind::Service => "service",
+        vocab::PrincipalKind::Anonymous => "anonymous",
         // reason: 跨 crate non_exhaustive，未知 kind fail-safe 落 "unknown"（不泄、不 panic）。
         _ => "unknown",
     }
@@ -241,7 +241,7 @@ where
             let record = AuditRecord {
                 tenant,
                 actor,
-                actor_kind: authn::PrincipalKind::User,
+                actor_kind: vocab::PrincipalKind::User,
                 action,
                 resource: ResourceRef::new(RESOURCE_KIND_SESSION, session.as_uuid().to_string()),
                 outcome: AuditOutcome::Success,

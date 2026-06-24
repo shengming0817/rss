@@ -192,7 +192,7 @@ mod tests {
         AuditRecord {
             tenant: tenant(tenant_raw),
             actor: ids::UserId::parse(ACTOR).expect("actor"),
-            actor_kind: authn::PrincipalKind::User,
+            actor_kind: vocab::PrincipalKind::User,
             action: vocab::Action::parse("audit:read").expect("action"),
             resource: ResourceRef::new("session", "sess-1"),
             outcome: AuditOutcome::Success,

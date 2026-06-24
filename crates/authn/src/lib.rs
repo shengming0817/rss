@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 use base64::Engine;
+use vocab::PrincipalKind;
 use vocab::tenant::{
     CrossTenantCapability, CrossTenantVisibility, RowVisibility, ScopedTenant, TenantId,
 };
@@ -42,29 +43,9 @@ const KIND_DEVICE: &str = "device";
 const KIND_ADMIN: &str = "admin";
 const KIND_SUPER_ADMIN: &str = "superAdmin";
 
-// ---------------------------------------------------------------------------
-// 主体类别
-// ---------------------------------------------------------------------------
-
-/// 认证主体类别（驱动 [`vocab::RowScope`] 派生；闭值集，fail-closed）。
-///
-/// `Service` / `Anonymous` 派生为受限 RowScope（见 `docs/rules/tenancy.md`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PrincipalKind {
-    /// 普通终端用户。
-    User,
-    /// 设备主体（MDM 管理设备，L4 场景）。
-    Device,
-    /// 管理员（域级）。
-    Admin,
-    /// 超管（跨租户，仅平台授权层可造）。
-    SuperAdmin,
-    /// 服务账号（内部服务间 token）。
-    Service,
-    /// 匿名访客（fail-closed：RowScope 受限，不得升级权限）。
-    Anonymous,
-}
+// 主体类别 `PrincipalKind` 单一源已上移基础层 `vocab`（crates/vocab/src/principal.rs）：authn `Principal.kind` /
+// httpserve `Authenticated` 证据 / audit `actor_kind` 共用同一枚举，杜绝双源漂移。本 crate 经顶部
+// `use vocab::PrincipalKind` 消费；KIND_* claim 串 → `PrincipalKind` 的映射策略仍归本 crate（`from_verified_jwt`）。
 
 // ---------------------------------------------------------------------------
 // JWT claims 解码 DTO（私有，不 Serialize）
@@ -1145,29 +1126,9 @@ mod value_type_tests {
 
 #[cfg(test)]
 mod enum_exhaustiveness {
-    //! 闭值集完整性 + 错误 Display 非空（crate 内穷举 non_exhaustive）。
-    use super::{AuthnError, PrincipalKind};
-
-    #[test]
-    fn principal_kind_is_exhaustive() {
-        for kind in [
-            PrincipalKind::User,
-            PrincipalKind::Device,
-            PrincipalKind::Admin,
-            PrincipalKind::SuperAdmin,
-            PrincipalKind::Service,
-            PrincipalKind::Anonymous,
-        ] {
-            match kind {
-                PrincipalKind::User
-                | PrincipalKind::Device
-                | PrincipalKind::Admin
-                | PrincipalKind::SuperAdmin
-                | PrincipalKind::Service
-                | PrincipalKind::Anonymous => {}
-            }
-        }
-    }
+    //! AuthnError 闭值集完整性 + Display 非空（crate 内穷举 non_exhaustive）。
+    //! PrincipalKind 穷举守卫随类型上移 vocab（crates/vocab/src/principal.rs 的 tests）。
+    use super::AuthnError;
 
     #[test]
     fn authn_error_is_exhaustive_and_displays() {

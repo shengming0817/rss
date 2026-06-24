@@ -44,7 +44,7 @@
 - **跨域只经 contract**：✅ 本 feature 不新增 wire contract；消费冻结的 diport port-own 类型 + httpserve own 标量，无手写共享 wire crate。
 - **AI-robust 三档**（每条新约束标级）：
   - 安全同批门：`Box<DynPdp>` 注入构造器必填参（**Hard**，缺失即编译错）+ 测试 stub adapter crate 不入生产依赖图（`deny.toml` adapter wrapper，**Medium**）+ fail-closed 缺省（**Hard**）+ **bins 生产 `impl Pdp` governance 守卫（Medium，PR-C/T004.6 交付，评审 F1 升级，不 defer）**——见 §决策 3.3。
-  - 放行接缝：httpserve own `Authenticated` typed extension + enforce 默认拒（类型层 + fail-closed，**Hard/编译期**）。
+  - 放行接缝（#1196 落地，评审 F1 纠级）：httpserve own `Authenticated` typed extension——私有字段 = **Hard/类型层**（外部无法 struct-literal 伪造）；enforce 默认拒（无证据 / 无 plan → fail-closed，**Medium**，单测 + 集成测试守，AUTH-EVIDENCE-REQUIRE-01）；`Authenticated::new` 仅组合根可调（`rss_authenticated_callsite` callsite dylint，**Medium**，AUTH-EVIDENCE-MINT-01，与 `AuthPlan` 同治理姿态）。原标『Hard/编译期』纠为实际三档载体（验签桥在组合根、`new` 无法 `pub(crate)` 收口，故 callsite dylint 而非类型 seal）。
   - alg 白名单 + alg-key 一致：adapter 内 `#[non_exhaustive]` enum-match（类型穷尽）+ 表驱动负用例（**Medium**）。
   - JWKS key-source 完整性：远程 JWKS 经 TLS/pinning/签名 JWKS，禁裸 plain-HTTP（评审 F2）；不可得则退静态 key（**Medium**：构造期拒明文 + deny 甄别）。
   - 类型层不变式不回归（VerifiedClaims 仅 Pdp mint、from_verified_* 收 newtype）：既有 **Hard**（`pub(crate) seal` + 入参类型），本 feature 加回归断言守。
@@ -63,12 +63,12 @@
 
 **A 否决（硬约束）**：`xtask/src/layers.rs:122` `Service => matches!(to, Basis|Engine|DiPort)` —— httpserve 依赖兄弟服务 authn 被 `cargo xtask layer-deps` + deny.toml 编译期拒。无商量余地。
 
-- **B（httpserve own 放行接缝）**：httpserve 在基础级定义 `Authenticated` marker extension（仅脱敏标量，**零 authn 依赖**）；enforce 层 `require_response` 改为读 `Authenticated` → 有则放行、无则 fail-closed 401（替代当前恒 401）。承载「放行机制」。
-- **C（验签桥落组合根 bins）**：「extract 凭据 → `authn::verify_jwt(raw, &DynPdp)` → 转 `Authenticated` → 注入 request extension + 埋点」落 `bins/`（唯一能同时 `use httpserve + authn + oidc` 的 Root 层）。承载「authn 接线」。
+- **B（httpserve own 放行接缝）**：httpserve 在基础级定义 `Authenticated` 证据 extension（脱敏标量 `scheme: RequiredScheme` + `principal_kind`，**零 authn 依赖**）；enforce 层 `reject_if_needed` 改为读 `Authenticated` → 携证据、非 `Anonymous`、`scheme()` exact-match `Require(required)` 则放行，否则 fail-closed 401（替代当前恒 401；杜绝 scheme 混淆）。承载「放行机制」。
+- **C（验签桥落组合根 bins）**：「extract 凭据 → `authn::verify_jwt(raw, &DynPdp)` → `Authenticated::new(verified_scheme, principal.kind())`（`verified_scheme` = 实际验证的方案，enforce 据此 exact-match）→ 注入 request extension + 埋点」落 `bins/`（唯一能同时 `use httpserve + authn + oidc` 的 Root 层）。承载「authn 接线」。
 
 ### 决策 2：finalize_auth 签名不破（验签桥走组合根外层 layer）
 
-`finalize_auth(router, plan)` 冻结签名**保留**——非为兼容，而是 B+C 分层下 httpserve 根本不该依赖 authn（穿 verifier 进去违反分层）。组合根在 `finalize_auth` 产出 router 的**外层** `.layer(verify_bridge_middleware(pdp))`。层序（外→内）：request_id → trace → panic_recovery → **verify-bridge（注入 Authenticated）** → Extension(plan) → 路由 → EnforceService（MethodRouter 层读 Authenticated 放行）。外层先执行，extension 注入早于 enforce 读取，顺序天然满足。httpserve Cargo.toml **不新增任何 path dep**。
+`finalize_auth(router, plan)` 冻结签名**保留**——非为兼容，而是 B+C 分层下 httpserve 根本不该依赖 authn（穿 verifier 进去违反分层）。组合根在 `finalize_auth` 产出 router 的**外层** `.layer(verify_bridge_middleware(pdp))`。层序（外→内）：request_id → trace → panic_recovery → **verify-bridge（注入 Authenticated）** → Extension(plan) → 路由 → EnforceService（MethodRouter 层读 Authenticated、`scheme()` exact-match `Require(required)` 放行）。外层先执行，extension 注入早于 enforce 读取，顺序天然满足。httpserve Cargo.toml **不新增任何 path dep**。
 
 ### 决策 3：安全同批门坐实（ADR-006 §5，三道结构闸）
 
@@ -106,13 +106,13 @@ adapters/oidc/
 ├── src/claims.rs               # PR-A1：claims DTO（exp/nbf/iss/aud/sub/tenant/kind）+ PdpError 映射
 └── src/jwks.rs                 # PR-A2：JwksKeySource（远程 fetch + 缓存 + 轮转）+ ManagedResource 真实关闭
 crates/httpserve/
-├── src/auth.rs                 # PR-B：Authenticated 证据类型 + require_response 改读 Authenticated 放行
+├── src/auth.rs                 # PR-B：Authenticated(scheme+principal_kind) 证据类型 + reject_if_needed 改读 Authenticated、scheme exact-match 放行
 ├── src/lib.rs                  # PR-B：导出 Authenticated；finalize_auth 文档（层序，签名不变）
 └── tests/runtime.rs            # PR-B：注入 Authenticated→200 / 缺失→401 / opt-out 不回归
 bins/server/ + bins/rss/          # ⚠ 两者是独立 crate，不能共享 src/ 模块
 ├── Cargo.toml                  # PR-C：首次加 httpserve/authn/oidc/diport/primitives/axum/tower/tokio/config
 ├── src/main.rs                 # PR-C：构造 OidcProvider→Box<DynPdp>；finalize_auth→外层 .layer(verify_bridge)
-├── src/auth_bridge.rs          # PR-C：extract→verify_jwt→inject Authenticated + tracing span（见下「共享决策」）
+├── src/auth_bridge.rs          # PR-C：extract→verify_jwt→Authenticated::new(verified_scheme,kind) inject + tracing span（见下「共享决策」）
 └── tests/auth_e2e.rs           # PR-C：有效→200+Principal / 无·坏·过期·错aud→401/403（拒绝路径）
 Cargo.toml（根）                # PR-A1：p256/hmac/sha2 入 [workspace.dependencies]；PR-A2：HTTP/TLS 栈
 docs/references/framework-comparison.md  # PR-A1：新增 authn/jwt 验签对标行
@@ -120,7 +120,7 @@ docs/references/framework-comparison.md  # PR-A1：新增 authn/jwt 验签对标
 
 **Structure Decision**：扁平 workspace 既定；本 feature **不新增库 crate**（verifier 入既有 `adapters/oidc`、放行接缝入既有 `httpserve`、验签桥入既有 `bins`），只新增模块文件 + 加 workspace crypto deps + e2e 测试。
 
-**auth_bridge 共享决策（F4）**：`bins/server` 与 `bins/rss` 是**独立 crate**，无法直接共享 `src/auth_bridge.rs`。PR-C 默认**各 bin 各实现一份**（验签桥逻辑小：extract→verify→inject+span，~80 行）；若后续出现漂移，再提取 `assemblies/authwire`（组合根层共享 crate，可依赖 httpserve+authn+oidc）供两 bin 依赖（行数估算届时 ×~1.4）。降维 `Principal → Authenticated` 是 `auth_bridge.rs` 内的**内联 mapping**（`Authenticated { principal_kind: principal.kind().as_str(), .. }`），**非** `From<&Principal>` trait impl（避免 httpserve↔authn 隐式层序联想，F11）。
+**auth_bridge 共享决策（F4）**：`bins/server` 与 `bins/rss` 是**独立 crate**，无法直接共享 `src/auth_bridge.rs`。PR-C 默认**各 bin 各实现一份**（验签桥逻辑小：extract→verify→inject+span，~80 行）；若后续出现漂移，再提取 `assemblies/authwire`（组合根层共享 crate，可依赖 httpserve+authn+oidc）供两 bin 依赖（行数估算届时 ×~1.4）。降维 `Principal → Authenticated` 是 `auth_bridge.rs` 内的**内联 mapping**（`Authenticated::new(verified_scheme, principal.kind())`——`verified_scheme: RequiredScheme` = 验签桥实际验证的凭据方案、`principal.kind(): vocab::PrincipalKind`；经私有字段 + constructor funnel 构造，**非** struct literal——字段在 #1196 已私有），**非** `From<&Principal>` trait impl（避免 httpserve↔authn 隐式层序联想，F11）。enforce 按路由 `Require(required)` exact-match `verified_scheme`，故验签桥须传其真实验证的方案（AUTH-EVIDENCE-REQUIRE-01，#1196 评审 F1）。
 
 ## 4-PR 分层（2 wave）
 

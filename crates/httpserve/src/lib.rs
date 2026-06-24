@@ -10,7 +10,7 @@ pub mod error;
 pub mod health;
 mod middleware;
 
-pub use auth::RouteMeta;
+pub use auth::{Authenticated, RouteMeta};
 
 use primitives::{ListenerKind, RouteAuthOptOut};
 
@@ -117,6 +117,9 @@ pub fn mount_primary(
 ///
 /// 请求流（外→内）：request_id → trace → panic_recovery → Extension(plan) → 路由匹配 →
 /// EnforceService（读 plan，决策 requirement）→ handler。
+///
+/// 验签桥接线（#1109）：验签桥 `.layer()` 须叠在 **`finalize_auth` 返回的 router 之外**（请求方向先于
+/// `EnforceService` 执行），其注入的 [`Authenticated`] 证据方在 enforce 读取前就位；叠内层则顺序倒置、证据缺失。
 ///
 /// 当前恒 `Ok`（无失败分支）——`RouteGroupError` 变体留给 bootstrap-driver 路径（签名冻结保留扩展点）。
 pub fn finalize_auth(
