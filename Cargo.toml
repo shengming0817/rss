@@ -23,6 +23,8 @@ members = [
   "crates/observ",
   "crates/distributed",
   "crates/deviceloop",
+  # 服务层 test-support：HTTP 契约测试脚手架（oneshot harness；经 [dev-dependencies] 被域/组合根消费，不进生产 shipped 图）
+  "crates/testkit",
   # 域（依赖基础 + 引擎 + 服务 + generated；互不依赖）
   "crates/identity",
   "crates/settings",

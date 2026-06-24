@@ -20,6 +20,11 @@ pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives"];
 /// DI port trait 单源 + dynosaur 单一 dyn-dispatch 依赖点（ADR-003）。
 pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
 /// 服务层（依赖基础 + 引擎 + DI-infra）。
+///
+/// `testkit` 是**服务层 test-support 库**（HTTP 契约测试 oneshot harness，#1136）：出边全是外部 crate
+/// （axum/tower/serde…，无 workspace 内部边可违 [`allows`]），经 `[dev-dependencies]` 被域/组合根消费
+/// （dev-dep 边不入 layerdeps shipped 扫描，见 `layerdeps` 文档头）。归 Service 层 ⇒ 无需 deny.toml 分层
+/// ban（仅 Domain/Adapter/Generated 需，LAYER-DEPS-06）、无需改 base intra-DAG。
 pub(crate) const SERVICE_CRATES: &[&str] = &[
     "httpserve",
     "authn",
@@ -28,6 +33,7 @@ pub(crate) const SERVICE_CRATES: &[&str] = &[
     "observ",
     "distributed",
     "deviceloop",
+    "testkit",
 ];
 /// 域层（依赖基础 + 引擎 + 服务 + generated；兄弟域互不依赖）。
 pub(crate) const DOMAIN_CRATES: &[&str] =
@@ -43,6 +49,18 @@ pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["journeys", "xtask"];
 /// 该 adapter 是否 dev/test-only（demo provider）。
 pub(crate) fn is_dev_adapter(name: &str) -> bool {
     DEV_ADAPTERS.contains(&name)
+}
+
+/// test-support 库（HTTP 契约测试 harness 等，如 `testkit`）：归 Service 层供 classify，但**只准经
+/// `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（architecture.md §分层）。机器守由 layerdeps
+/// [`check_test_support_confinement`](crate::layerdeps::check_test_support_confinement)（INVARIANT:
+/// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区——`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit
+/// 放进 `[dependencies]`；layerdeps 只扫 shipped 依赖表，故任一指向本集成员的内部边即 shipped 误用。
+pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit"];
+
+/// 该 crate 是否 test-support 库（只准 dev-dependency 消费，见 [`TEST_SUPPORT_CRATES`]）。
+pub(crate) fn is_test_support(name: &str) -> bool {
+    TEST_SUPPORT_CRATES.contains(&name)
 }
 
 /// workspace 成员所属分层。
@@ -152,6 +170,7 @@ mod tests {
     #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
     #[case("bootstrap", "crates/bootstrap", Some(Layer::Service))]
+    #[case("testkit", "crates/testkit", Some(Layer::Service))]
     #[case("identity", "crates/identity", Some(Layer::Domain))]
     #[case("syshealth", "crates/syshealth", Some(Layer::Domain))]
     #[case("redis", "adapters/redis", Some(Layer::Adapter))]

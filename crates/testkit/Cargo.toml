@@ -1,0 +1,23 @@
+[package]
+name = "testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# 服务层 test-support 脚手架：HTTP 契约测试 harness（per-contract 测试模板，#1136）。
+# 零 workspace 依赖（出边全外部 crate）⇒ 零 adapter 依赖：域 crate 经 [dev-dependencies] 消费本 crate
+# 写契约测试，不拉任何 adapter crate（rust-standards.md §命名「域 crate 单测不依赖平台 adapter crate」）。
+[dependencies]
+axum = { workspace = true }                          # Router / Body / Request / to_bytes（被测 router 类型）
+tower = { workspace = true, features = ["util"] }    # ServiceExt::oneshot 驱动（in-process，无 TCP）
+serde = { workspace = true }                         # ContractRequest.json 的 Serialize 约束 + WireError derive
+serde_json = { workspace = true }                    # body 序列化 / 反序列化（schema 对齐 + error envelope 解析）
+thiserror = { workspace = true }                     # TestkitError 库错误枚举
+
+[dev-dependencies]
+tokio = { workspace = true }                         # harness 自测的 async runtime
+uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度

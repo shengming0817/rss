@@ -66,6 +66,7 @@ rss/
 │   ├── deviceloop/       # cert lifecycle·signing（L4）
 │   ├── observ/           # metrics / logging / grpc interceptor / websocket（audit sink 迁 diport，#1075）
 │   ├── distributed/      # distlock / cas / transport
+│   ├── testkit/          # 服务层 test-support：HTTP 契约测试 oneshot harness（经 [dev-dependencies] 被域/组合根消费，零 adapter 依赖，不进生产 shipped 图）
 │   ├── identity/         # 域：身份 / 会话 / RBAC / ABAC
 │   ├── settings/         # 域：版本化配置 / flag（避开 config 重名）
 │   ├── audit/            # 域：审计链
@@ -97,7 +98,7 @@ rss/
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource…,签名只引基础/wire/自定义类型)+ dynosaur Dyn wrapper(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
   注:**域形** repo/service port(签名引用域内实体)**不归 diport**,归所属域 crate `pub mod ports`(ADR-005 Option 2,见下「域」行 + category line ADR-005 §2.1)。
-- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。
+- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。`testkit` 是同层 **test-support 库**(HTTP 契约测试 oneshot harness,#1136):出边全外部 crate(axum/tower/serde…,无内部边),经 `[dev-dependencies]` 被域/组合根消费写 per-contract 测试——**零 adapter 依赖**(满足「域单测不依赖平台 adapter crate」),分层登记在 `xtask layers.rs` `SERVICE_CRATES`。
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。**定义自身域形 repo/service DI port**(`pub mod ports`,签名引用域内实体,由 adapter 经 DIP 实现,ADR-005);为此可依赖 dynosaur/trait-variant(DIPORT-MACRO-CONFINE-01′ 白名单)。
 - **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。

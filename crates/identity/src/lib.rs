@@ -29,6 +29,11 @@ pub mod ports;
 
 pub use application::{IdentityDomain, LoginError, LoginService};
 
+/// `identity.login` 契约测试样板（#1136）——用 `testkit` harness 给 served HTTP 契约写 per-contract
+/// 测试的模板（正常 schema / 参数错误 + 错误码）。鉴权边界 / path newtype 维度按层分裂，见模块 rustdoc。
+#[cfg(test)]
+mod login_contract;
+
 // ---------------------------------------------------------------------------
 // smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）
 // ---------------------------------------------------------------------------

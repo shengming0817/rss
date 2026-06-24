@@ -51,3 +51,7 @@ tracing = { workspace = true }
 # ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynRoleRepo（PORT-SHAPE-01/02）。
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 mockall = { workspace = true }
+# identity.login 契约测试样板（#1136 login_contract）：testkit oneshot harness + axum 挂载样板 handler。
+# testkit 零 adapter 依赖（dev-dep 消费不破「域单测不依赖 adapter crate」）；axum 构建样板 router。
+testkit = { path = "../testkit" }
+axum = { workspace = true }

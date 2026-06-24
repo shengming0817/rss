@@ -27,6 +27,10 @@
 //! INVARIANT: LAYER-DEPS-06 —— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
 //! INVARIANT: LAYER-DEPS-07 —— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
+//! INVARIANT: LAYER-DEPS-08 —— test-support 库（`layers::TEST_SUPPORT_CRATES`，如 `testkit`）只准经
+//!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
+//!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
+//!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -55,6 +59,8 @@ pub(crate) enum Rule {
     WrapperCoverage,
     /// LAYER-DEPS-07：含 path 的本地依赖未解析到现存 workspace 成员（逃逸 / 非成员 / typo）。
     UnresolvedPath,
+    /// LAYER-DEPS-08：test-support 库被 shipped 依赖（应只经 `[dev-dependencies]` 消费）。
+    TestSupportShipped,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -120,6 +126,7 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(scan.findings);
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
+        findings.extend(check_test_support_confinement(&scan.edges));
 
         let summary = format!(
             "{} 成员 / {} 内部边 / {} wrappers 全部通过",
@@ -376,6 +383,30 @@ pub(crate) fn check_wrappers(
 /// [`EXTERNAL_CONFINEMENT_WRAPPERS`]）。
 pub(crate) fn check_external_confinement(members: &[Member], bans: &[BanEntry]) -> Vec<Finding> {
     check_confinement_against(EXTERNAL_CONFINEMENT_WRAPPERS, members, bans)
+}
+
+/// LAYER-DEPS-08：test-support 库（[`layers::TEST_SUPPORT_CRATES`]）禁进生产 shipped 依赖图。
+///
+/// 本 lint 只扫 shipped 依赖表（见模块头），dev-dependency 边不入 `edges`；故**任一**指向 test-support
+/// 成员的内部边都是 shipped 误用——应改放 `[dev-dependencies]`。补 `allows` 矩阵盲区：`allows(Domain,
+/// Service)=true` 不阻止域 crate 把 `testkit` 误放 `[dependencies]`（把 architecture.md「testkit 不进
+/// 生产 shipped 图」从注释 Soft 升为 Medium 机器门）。anti-vacuity：真实工作区 testkit 仅 dev-dep，0 finding；
+/// 红 case 见 `check_test_support_confinement_red_shipped_dep`。
+pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
+    edges
+        .iter()
+        .filter(|edge| layers::is_test_support(&edge.to))
+        .map(|edge| {
+            finding(
+                Rule::TestSupportShipped,
+                edge.from.clone(),
+                format!(
+                    "{} {}.{} → `{}`：test-support 库禁进生产 shipped 图，只准 [dev-dependencies] 消费（INVARIANT LAYER-DEPS-08；改放 [dev-dependencies]）",
+                    edge.from_manifest, edge.section, edge.key, edge.to
+                ),
+            )
+        })
+        .collect()
 }
 
 /// 对给定白名单逐 entry 委托 [`check_confinement_entry`]。allowlist 作参数（非直读 const）使**完整路径**
@@ -795,6 +826,22 @@ mod tests {
             e("consistency", "vocab"),
         ];
         assert!(check_layers(&members, &edges).is_empty());
+    }
+
+    /// LAYER-DEPS-08 anti-vacuity（绿）：testkit 仅经 dev-dep 消费 ⇒ shipped `edges` 无指向它的边 ⇒ 0 finding。
+    #[test]
+    fn check_test_support_confinement_green_no_shipped_edge() {
+        // shipped 边均不指向 testkit（identity→testkit 是 dev-dep，不入 edges）。
+        let edges = vec![e("identity", "httpserve"), e("identity", "generated")];
+        assert!(check_test_support_confinement(&edges).is_empty());
+    }
+
+    /// LAYER-DEPS-08（红）：误把 testkit 放进 `[dependencies]`（shipped 边）⇒ flagged。
+    #[test]
+    fn check_test_support_confinement_red_shipped_dep() {
+        let findings = check_test_support_confinement(&[e("identity", "testkit")]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::TestSupportShipped);
     }
 
     #[test]
