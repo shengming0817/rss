@@ -6,26 +6,18 @@
 
 use dynosaur::dynosaur;
 
+use crate::redacted::RedactedSource;
+
 /// 审计 sink 失败。
 ///
 /// PII 边界（与 [`crate::ShutdownError`] / [`crate::SignerError`] 同范式）：`Display` 仅安全摘要常量；
-/// adapter 原始错误经 [`AuditSinkError::new`] 包成 [`std::error::Error::source`] 内部保留，**不进默认日志**。
-#[derive(thiserror::Error)]
+/// source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——
+/// 原始错误不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+#[derive(Debug, thiserror::Error)]
 #[error("audit sink failed")]
 pub struct AuditSinkError {
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
-// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
-// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
-impl std::fmt::Debug for AuditSinkError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuditSinkError")
-            .field("source", &"<redacted>")
-            .finish()
-    }
+    source: RedactedSource,
 }
 
 impl AuditSinkError {
@@ -35,7 +27,7 @@ impl AuditSinkError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 }
@@ -219,9 +211,19 @@ mod smoke {
     // AuditSinkError::new 在 diport 写实（非冻结 todo!()）：Display 仅安全摘要常量，原始错误进 source。
     #[test]
     fn audit_sink_error_wraps_source() {
-        let err = AuditSinkError::new(std::fmt::Error);
+        let err = AuditSinkError::new(std::io::Error::other("leak-marker-audit"));
         assert_eq!(err.to_string(), "audit sink failed");
         assert!(std::error::Error::source(&err).is_some());
+        // 端到端：derive(Debug) 经 RedactedSource 脱敏、不展开内层 source（anti-vacuity 前置）。
+        assert!(
+            format!("{:?}", std::io::Error::other("leak-marker-audit"))
+                .contains("leak-marker-audit"),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !format!("{err:?}").contains("leak-marker-audit"),
+            "wrapper Debug 泄漏 source: {err:?}"
+        );
     }
 }
 
@@ -271,26 +273,5 @@ mod pii_debug {
         assert!(dbg.contains("login"), "action 应可见: {dbg}");
         assert!(dbg.contains("session"), "resource_kind 应可见: {dbg}");
         assert!(dbg.contains("f47ac10b"), "tenant_id 应可见: {dbg}");
-    }
-}
-
-#[cfg(test)]
-mod error_redaction {
-    //! `AuditSinkError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
-    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01.
-    use super::AuditSinkError;
-
-    #[test]
-    fn error_debug_redacts_source() {
-        let secret = std::io::Error::other("postgres://user:hunter2@db.internal:5432/audit");
-        assert!(
-            format!("{secret:?}").contains("hunter2"),
-            "前提失效：source 未携密"
-        );
-        let rendered = format!("{:?}", AuditSinkError::new(secret));
-        assert!(
-            !rendered.contains("hunter2") && !rendered.contains("postgres://"),
-            "Debug 泄漏 source: {rendered}"
-        );
     }
 }

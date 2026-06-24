@@ -80,6 +80,8 @@ pub mod object_store;
 pub mod pdp;
 pub mod publisher;
 pub mod rate_limiter;
+// provider-error wrapper 共享脱敏 source 字段（`pub(crate)`，不进公开 API 面）。
+mod redacted;
 pub mod signer;
 pub mod subscriber;
 

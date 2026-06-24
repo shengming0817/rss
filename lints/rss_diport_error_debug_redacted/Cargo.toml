@@ -1,0 +1,34 @@
+[package]
+name = "rss_diport_error_debug_redacted"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "RSS 治理：diport error struct 禁裸 Box<dyn Error> source 字段，改用 RedactedSource newtype（Debug/Display 脱敏，INVARIANT DIPORT-ERR-RAWSOURCE-BAN-01）"
+
+[lib]
+crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep）
+
+# 本 lint 按 **LOCAL_CRATE 名** 判守护范围（仅 `diport`）。
+# UI fixture 编译为单一 example crate、crate 名 = example target 名，故须两个 example target：
+#   - diport（crate 名 == "diport"）→ 红例：struct 持裸 Box<dyn Error> 字段触发；
+#   - not_diport（crate 名 != "diport"）→ 绿例：同形 struct 不触发（anti-vacuity，验 LOCAL_CRATE 分支非恒报）。
+# golden 随源文件名（ui/diport.stderr / ui/not_diport.stderr）。
+[[example]]
+name = "diport"
+path = "ui/diport.rs"
+
+[[example]]
+name = "not_diport"
+path = "ui/not_diport.rs"
+
+[dependencies]
+# clippy_utils rev 与 lints/rust-toolchain.toml 的 nightly 配对（dylint v6.0.1 模板），勿单独升级其一。
+# 升级步骤见 lints/README.md「前置」。ref: dylint internal/template/Cargo.toml@v6.0.1
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

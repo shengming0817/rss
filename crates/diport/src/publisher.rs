@@ -2,26 +2,18 @@
 
 use dynosaur::dynosaur;
 
+use crate::redacted::RedactedSource;
+
 /// 发布失败。
 ///
-/// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；adapter 原始错误经
-/// [`PublisherError::new`] 包成 [`std::error::Error::source`] 内部保留，**不进默认日志**。
-#[derive(thiserror::Error)]
+/// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；source 经
+/// [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误
+/// 不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+#[derive(Debug, thiserror::Error)]
 #[error("publish failed")]
 pub struct PublisherError {
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
-// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
-// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
-impl std::fmt::Debug for PublisherError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublisherError")
-            .field("source", &"<redacted>")
-            .finish()
-    }
+    source: RedactedSource,
 }
 
 impl PublisherError {
@@ -31,7 +23,7 @@ impl PublisherError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 }
@@ -102,6 +94,22 @@ mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynPublisher>` 动态注入。
     use super::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 
+    #[test]
+    fn publisher_error_wraps_source() {
+        let err = PublisherError::new(std::io::Error::other("leak-marker-pub"));
+        assert_eq!(err.to_string(), "publish failed");
+        assert!(std::error::Error::source(&err).is_some());
+        // 端到端：derive(Debug) 经 RedactedSource 脱敏、不展开内层 source（anti-vacuity 前置）。
+        assert!(
+            format!("{:?}", std::io::Error::other("leak-marker-pub")).contains("leak-marker-pub"),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !format!("{err:?}").contains("leak-marker-pub"),
+            "wrapper Debug 泄漏 source: {err:?}"
+        );
+    }
+
     fn sample_request() -> PublishRequest {
         PublishRequest {
             topic: Topic::new("session.created"),
@@ -153,26 +161,5 @@ mod pii_debug {
         assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains("session.created"), "topic 应可见: {dbg}");
-    }
-}
-
-#[cfg(test)]
-mod error_redaction {
-    //! `PublisherError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
-    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01.
-    use super::PublisherError;
-
-    #[test]
-    fn error_debug_redacts_source() {
-        let secret = std::io::Error::other("amqp://user:hunter2@broker.internal:5672");
-        assert!(
-            format!("{secret:?}").contains("hunter2"),
-            "前提失效：source 未携密"
-        );
-        let rendered = format!("{:?}", PublisherError::new(secret));
-        assert!(
-            !rendered.contains("hunter2") && !rendered.contains("amqp://"),
-            "Debug 泄漏 source: {rendered}"
-        );
     }
 }

@@ -2,7 +2,9 @@
 //!
 //! span error / tracing sink / last_error 一律经 [`redact_error`] / [`redact_field`]
 //! 收口（`docs/rules/observability.md` §redaction）——敏感 key 判定与 free-form scrub 不散落在
-//! 各 consumer。`bootstrap::shutdown` 等已把 `secure::redact_error` 当既定接缝引用。
+//! 各 consumer。redis / amqp adapter 已经 [`redact_error`] 记录 provider 错误顶层摘要；
+//! `bootstrap::shutdown` 业务错误分支亦已经本 funnel 记录 redacted 顶层摘要（顶层 `Display`-only、
+//! 不遍历 source 链）。
 
 /// 敏感 key 关键字白名单（小写包含匹配）。
 const SENSITIVE_KEY_PATTERNS: &[&str] = &[

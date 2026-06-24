@@ -317,10 +317,15 @@ where
                         tracing::debug!("resource shut down cleanly");
                         None
                     }
-                    // 业务错误：资源优雅上报 Err。source **不打印**——Display 是安全摘要常量、原始
-                    // source 待 redaction funnel（secure::redact_error，ADR-001 §5 延后）清洗后记录。
+                    // 业务错误：资源优雅上报 Err（typed `ShutdownError`，内部 source 经 `RedactedSource` 脱敏）。
+                    // 经 `secure::redact_error` 记录——funnel 只取顶层 Display（安全摘要常量、不遍历 source 链，
+                    // 杜绝 adapter 原始错误 PII 经日志泄漏）；原始 source 由 `RedactedSource` owned 但 write-only
+                    // 保留，不经 `Error::source()` 链暴露（fail-closed，DIPORT-ERR-SOURCE-REDACT-01）。
                     Ok(Ok(Err(source))) => {
-                        tracing::warn!("resource shutdown returned error");
+                        tracing::warn!(
+                            error = %secure::redact_error(&source),
+                            "resource shutdown returned error"
+                        );
                         Some(ShutdownFailureKind::Failed(source))
                     }
                     // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 —— 下游 panic 被 spawn 隔离，仅本资源失败。
@@ -483,20 +488,30 @@ mod tests {
         assert_eq!(failures[1].name, "a");
     }
 
-    // PII 边界：typed ShutdownError Display 是安全摘要常量，不泄漏 adapter 原始错误内容；
-    // 原始内容仅经 source() 链内部可达。聚合后的 ResourceShutdownError Display 同样不泄漏。
+    // PII 边界：typed ShutdownError Display 是安全摘要常量，不泄漏 adapter 原始错误内容。
+    // source 链首层是脱敏 newtype（diport `RedactedSource`，Display 亦 `<redacted>`），且其 source() 恒
+    // `None`——原始内容**不经标准 Error 链暴露**（fail-closed）。聚合后的 ResourceShutdownError Display 同样不泄漏。
     #[test]
     fn shutdown_error_display_is_safe_summary_only() {
         let err = ShutdownError::new(std::io::Error::other("secret-conn-string-42"));
         assert_eq!(err.to_string(), "resource shutdown failed");
         let leaked_in_display = err.to_string().contains("secret-conn-string-42");
         assert!(!leaked_in_display, "raw source must not appear in Display");
-        // 原始内容仅经 source() 可达（供 redaction funnel 落地后清洗记录）。
-        let source_carries_raw = std::error::Error::source(&err)
-            .is_some_and(|s| s.to_string().contains("secret-conn-string-42"));
+        // 首层 source 是 RedactedSource：其 Display 已脱敏，不泄漏原始内容（fail-closed）。
+        let first_redacted = std::error::Error::source(&err)
+            .is_some_and(|s| !s.to_string().contains("secret-conn-string-42"));
         assert!(
-            source_carries_raw,
-            "raw source preserved behind Error::source"
+            first_redacted,
+            "first-level source (RedactedSource) Display must be redacted"
+        );
+        // fail-closed：source 链在 RedactedSource 处终止（其 source() 恒 None）——通用递归遍历
+        // （anyhow `{:?}` / std::error::Report / tracing）永不到达原始 adapter 错误，无 PII 泄漏。
+        let chain_dead_ends = std::error::Error::source(&err)
+            .and_then(|redacted| redacted.source())
+            .is_none();
+        assert!(
+            chain_dead_ends,
+            "raw source must be unreachable: chain must dead-end at RedactedSource (source() == None)"
         );
 
         let agg = ResourceShutdownError {

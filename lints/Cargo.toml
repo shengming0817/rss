@@ -10,4 +10,5 @@ members = [
   "rss_crosstenant_callsite",
   "rss_diport_impl_allowlist",
   "rss_authplan_callsite",
+  "rss_diport_error_debug_redacted",
 ]

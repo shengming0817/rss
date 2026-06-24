@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use dynosaur::dynosaur;
 
+use crate::redacted::RedactedSource;
+
 /// per-resource 默认关闭超时预算。重 I/O 资源（如 outbox relay）可在
 /// [`ManagedResource::shutdown_timeout`] 覆盖为更长。
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,25 +64,16 @@ pub trait ManagedResourceLocal {
 /// 资源关闭失败：adapter 实现 [`ManagedResource::shutdown`] 时返回的 typed 错误。
 ///
 /// **PII 边界**（替代 `anyhow` 暴露在公共 port）：`Display` 仅输出资源无关的安全摘要常量
-/// （不含 runtime 数据）；包装的原始错误仅作 [`std::error::Error::source`] 内部保留，
-/// **不进入默认日志**。驱动器在 redaction funnel（`secure::redact_error`，ADR-001 §5 延后项）
-/// 落地前不打印 source——见 `bootstrap::ShutdownStack` 业务错误分支。
-#[derive(thiserror::Error)]
+/// （不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、
+/// `Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed）。`secure::redact_error`
+/// funnel 取顶层 Display、不遍历 source 链；`bootstrap::ShutdownStack` 业务错误分支已采纳 `redact_error`
+/// 记录 redacted 顶层摘要。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+#[derive(Debug, thiserror::Error)]
 #[error("resource shutdown failed")]
 pub struct ShutdownError {
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误 Debug
-// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
-// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
-impl std::fmt::Debug for ShutdownError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShutdownError")
-            .field("source", &"<redacted>")
-            .finish()
-    }
+    source: RedactedSource,
 }
 
 impl ShutdownError {
@@ -91,7 +84,7 @@ impl ShutdownError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 }
@@ -101,6 +94,22 @@ mod smoke {
     //! build smoke：证明 ManagedResource 可 native AFIT impl + 经 `Box<DynManagedResource>`
     //! 动态注入 + move 进 `tokio::spawn`（ShutdownStack panic 隔离的真实形态：Box 仅需 Send，无需 Sync）。
     use super::{DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError};
+
+    #[test]
+    fn shutdown_error_wraps_source() {
+        let err = ShutdownError::new(std::io::Error::other("leak-marker-shut"));
+        assert_eq!(err.to_string(), "resource shutdown failed");
+        assert!(std::error::Error::source(&err).is_some());
+        // 端到端：derive(Debug) 经 RedactedSource 脱敏、不展开内层 source（anti-vacuity 前置）。
+        assert!(
+            format!("{:?}", std::io::Error::other("leak-marker-shut")).contains("leak-marker-shut"),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !format!("{err:?}").contains("leak-marker-shut"),
+            "wrapper Debug 泄漏 source: {err:?}"
+        );
+    }
 
     struct NoopResource;
     impl ManagedResource for NoopResource {
@@ -120,26 +129,5 @@ mod smoke {
         assert_eq!(resource.shutdown_timeout(), DEFAULT_SHUTDOWN_TIMEOUT);
         let handle = tokio::spawn(async move { resource.shutdown().await });
         assert!(handle.await.is_ok());
-    }
-}
-
-#[cfg(test)]
-mod error_redaction {
-    //! `ShutdownError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
-    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01.
-    use super::ShutdownError;
-
-    #[test]
-    fn error_debug_redacts_source() {
-        let secret = std::io::Error::other("redis://user:hunter2@cache.internal:6379");
-        assert!(
-            format!("{secret:?}").contains("hunter2"),
-            "前提失效：source 未携密"
-        );
-        let rendered = format!("{:?}", ShutdownError::new(secret));
-        assert!(
-            !rendered.contains("hunter2") && !rendered.contains("redis://"),
-            "Debug 泄漏 source: {rendered}"
-        );
     }
 }

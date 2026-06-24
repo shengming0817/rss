@@ -16,31 +16,24 @@ use std::time::Duration;
 
 use dynosaur::dynosaur;
 
+use crate::redacted::RedactedSource;
+
 /// 限流判定失败（provider 后端不可用等；**非** over-limit——over-limit 是 `Ok(RateLimitDecision::Limited)`）。
 ///
-/// PII 边界（**类型层 Hard**，与 [`crate::ShutdownError`] 同范式但已上移）：`Display` 仅 provider 无关安全
-/// 摘要常量；`Debug` **手写**、只输出固定 `<redacted>` 占位、**不展开 `source`**——故 `?err` / `{err:?}` 与
-/// `%err` 一样安全，不再依赖「消费侧只用 `Display`」的 Soft 约定。adapter 原始错误经 [`RateLimitError::new`]
-/// 包成 [`std::error::Error::source`] 内部保留（redis-distributed provider 的 source 可能携网络细节，如
-/// Redis URL）：需要 source 诊断时走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source
-/// 链），**不**裸 `.source()`。
+/// PII 边界（**类型层 Hard**，与 [`crate::ShutdownError`] 同范式）：`Display` 仅 provider 无关安全
+/// 摘要常量；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`{err:?}` 与
+/// `%err` 同样不泄漏 source 凭据——把原 Soft 消费侧约定上移为类型层保证）。adapter 原始错误经
+/// [`RateLimitError::new`] 由 [`RedactedSource`] **owned 但 write-only** 保留（redis-distributed provider 的
+/// source 可能携网络细节，如 Redis URL）：`RedactedSource::source()` 恒 `None`，原始 source **不经标准
+/// `Error` 链暴露**（fail-closed）；安全摘要走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source 链）。
 ///
-/// INVARIANT: DIPORT-RATELIMITERR-DEBUG-REDACT-01（手写 `Debug` 不展开 source；回归见 `error_redaction` 单测）。
-#[derive(thiserror::Error)]
+/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（source 经 `RedactedSource` 脱敏；回归见 `redacted.rs`
+/// `redacted_source` 单测）。
+#[derive(Debug, thiserror::Error)]
 #[error("rate limit check failed")]
 pub struct RateLimitError {
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-impl std::fmt::Debug for RateLimitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // PII 边界（Hard）：不展开 `source`（其 Display/Debug 可能携连接串 / 凭据），只输出固定安全占位，
-        // 使 `{err:?}` 与 `%err`（Display 安全常量）同样不泄漏——把原 Soft 消费侧约定上移为类型层保证。
-        f.debug_struct("RateLimitError")
-            .field("source", &"<redacted>")
-            .finish()
-    }
+    source: RedactedSource,
 }
 
 impl RateLimitError {
@@ -50,7 +43,7 @@ impl RateLimitError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 }
@@ -172,46 +165,26 @@ mod smoke {
 }
 
 #[cfg(test)]
-mod error_redaction {
-    //! PII 边界回归（F1，#1011 review）：[`RateLimitError`] 的 `Debug` 必须**不**展开内部 `source`——
-    //! 原消费侧 Soft 日志约定（「只 `%err` 不 `?err`」）已上移为类型层 Hard。source 携密（如 redis DSN）
-    //! 时 `{err:?}` 不得泄漏。
-    //! INVARIANT: DIPORT-RATELIMITERR-DEBUG-REDACT-01
+mod smoke_error {
+    //! `RateLimitError` wrapper 集成 `RedactedSource` 冒烟：Display 为常量安全摘要，source() 首层 =
+    //! `RedactedSource`（其自身 `source()` 恒 `None`，fail-closed）。
+    //! `Debug` / `Display` 不展开 source 回归见 `redacted.rs` `redacted_source` 单测
+    //! （INVARIANT: DIPORT-ERR-SOURCE-REDACT-01）。
     use super::RateLimitError;
-
-    /// 模拟 redis / network provider 错误：`Debug` 携连接串 / 凭据（第三方 error 的 Debug 常含连接细节），
-    /// 而 `Display` 仅安全摘要——正是 `RateLimitError::new` 包装后不得经 `Debug` 泄漏的内部错误形态。
-    struct ProviderErr;
-    impl std::fmt::Debug for ProviderErr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("ProviderErr { dsn: \"redis://user:hunter2@cache.internal:6379/0\" }")
-        }
-    }
-    impl std::fmt::Display for ProviderErr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("backend unavailable")
-        }
-    }
-    impl std::error::Error for ProviderErr {}
-
-    #[test]
-    fn debug_does_not_expand_source_secret() {
-        // anti-vacuity：内部 provider 错误自身 Debug 确实携密——故 wrapper 不展开 source 才有意义。
-        assert!(
-            format!("{ProviderErr:?}").contains("hunter2"),
-            "前提失效：内部错误未携密，回归断言会空转"
-        );
-        let err = RateLimitError::new(ProviderErr);
-        let rendered = format!("{err:?}");
-        assert!(
-            !rendered.contains("hunter2") && !rendered.contains("redis://"),
-            "Debug 泄漏了 source 凭据: {rendered}"
-        );
-    }
 
     #[test]
     fn display_is_constant_safe_summary() {
-        let err = RateLimitError::new(ProviderErr);
+        let err = RateLimitError::new(std::io::Error::other("leak-marker-rl"));
         assert_eq!(err.to_string(), "rate limit check failed");
+        assert!(std::error::Error::source(&err).is_some());
+        // 端到端：derive(Debug) 经 RedactedSource 脱敏、不展开内层 source（anti-vacuity 前置）。
+        assert!(
+            format!("{:?}", std::io::Error::other("leak-marker-rl")).contains("leak-marker-rl"),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !format!("{err:?}").contains("leak-marker-rl"),
+            "wrapper Debug 泄漏 source: {err:?}"
+        );
     }
 }

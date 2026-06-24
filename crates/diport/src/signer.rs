@@ -2,27 +2,19 @@
 
 use dynosaur::dynosaur;
 
+use crate::redacted::RedactedSource;
+
 /// 签名失败。
 ///
 /// PII 边界（替代 `anyhow` 暴露在公共 port，与 [`crate::ShutdownError`] 同范式）：`Display` 仅输出
-/// provider 无关的安全摘要常量（不含 runtime 数据）；adapter 内部原始错误经 [`SignerError::new`] 包成
-/// [`std::error::Error::source`] 内部保留，**不进默认日志**（待 `secure` redaction funnel 落地后清洗记录）。
-#[derive(thiserror::Error)]
+/// provider 无关的安全摘要常量（不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display`
+/// 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed），
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
+#[derive(Debug, thiserror::Error)]
 #[error("signing failed")]
 pub struct SignerError {
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-// PII 边界（类型层 Hard，对标 `RateLimitError`）：手写 `Debug` 不展开 `source`（adapter 原始错误的 Debug
-// 可能携连接串 / 凭据），只输出 `<redacted>`——把原「消费侧不打印 source」的 Soft 约定上移为类型层保证。
-// INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（回归见 `error_redaction` 单测）。
-impl std::fmt::Debug for SignerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SignerError")
-            .field("source", &"<redacted>")
-            .finish()
-    }
+    source: RedactedSource,
 }
 
 impl SignerError {
@@ -32,7 +24,7 @@ impl SignerError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 }
@@ -154,6 +146,22 @@ mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynSigner>` 动态注入。
     use super::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
 
+    #[test]
+    fn signer_error_wraps_source() {
+        let err = SignerError::new(std::io::Error::other("leak-marker-sig"));
+        assert_eq!(err.to_string(), "signing failed");
+        assert!(std::error::Error::source(&err).is_some());
+        // 端到端：derive(Debug) 经 RedactedSource 脱敏、不展开内层 source（anti-vacuity 前置）。
+        assert!(
+            format!("{:?}", std::io::Error::other("leak-marker-sig")).contains("leak-marker-sig"),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !format!("{err:?}").contains("leak-marker-sig"),
+            "wrapper Debug 泄漏 source: {err:?}"
+        );
+    }
+
     fn sample_request() -> SignRequest {
         SignRequest {
             key: KeyId::new("key-1"),
@@ -235,27 +243,5 @@ mod pii_debug {
     fn signature_debug_is_opaque() {
         let sig = Signature::new(vec![0xDE, 0xAD]);
         assert_eq!(format!("{sig:?}"), "Signature(<redacted>)");
-    }
-}
-
-#[cfg(test)]
-mod error_redaction {
-    //! `SignerError` Debug 不展开 source（adapter 原始错误可能携连接串/凭据）。
-    //! INVARIANT: DIPORT-ERR-DEBUG-REDACT-01（对标 `RateLimitError::error_redaction`）。
-    use super::SignerError;
-
-    #[test]
-    fn error_debug_redacts_source() {
-        let secret = std::io::Error::other("redis://user:hunter2@cache.internal:6379");
-        // anti-vacuity：原始 source 自身 Debug 确实携密，否则回归断言空转。
-        assert!(
-            format!("{secret:?}").contains("hunter2"),
-            "前提失效：source 未携密"
-        );
-        let rendered = format!("{:?}", SignerError::new(secret));
-        assert!(
-            !rendered.contains("hunter2") && !rendered.contains("redis://"),
-            "Debug 泄漏 source: {rendered}"
-        );
     }
 }
