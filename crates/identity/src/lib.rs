@@ -81,9 +81,10 @@ mod smoke {
     //! 行为正确性由各子模块（`domain::{rbac,abac}`）的表驱动单测覆盖。
 
     use crate::domain::{
-        AbacAttribute, AccountStatus, AttributeKey, AttributeValue, IdentityError, Operator,
-        Permission, PermissionId, Policy, PolicyEffect, PolicyId, PolicyRule, ResourcePattern,
-        Role, RoleBinding, RoleId, Session, SessionId, authorize_rbac, evaluate_abac,
+        AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, Credential,
+        IdentityError, Operator, Permission, PermissionId, Policy, PolicyEffect, PolicyId,
+        PolicyRule, ResourcePattern, Role, RoleBinding, RoleId, Session, SessionId, authorize_rbac,
+        evaluate_abac,
     };
 
     // 证明主要类型是 Send（跨 await 点传播）。
@@ -103,6 +104,8 @@ mod smoke {
         _assert_send::<AttributeValue>();
         _assert_send::<Policy>();
         _assert_send::<PolicyRule>();
+        _assert_send::<Credential>();
+        _assert_send::<AccountLockout>();
         _assert_send::<SessionId>();
         _assert_send::<Session>();
     }
@@ -128,6 +131,8 @@ mod smoke {
             IdentityError::RoleNotFound => {}
             IdentityError::PermissionDenied => {}
             IdentityError::InvalidPolicy => {}
+            IdentityError::CredentialNotFound => {}
+            IdentityError::VersionConflict => {}
         }
     }
 

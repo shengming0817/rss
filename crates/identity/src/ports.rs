@@ -13,12 +13,16 @@
 //! ref: oxidecomputer/omicron Cargo.toml@main（域 trait + 组合根注入范本，framework-comparison §域运行时/DI）
 //! ref: Cockburn Hexagonal Ports&Adapters / Evans DDD Repository（repo 接口归域核心、adapter 经 DIP 实现）
 
+use std::time::SystemTime;
+
 use consistency::Entry;
 use diport::{OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
-pub use crate::domain::{IdentityError, Role, RoleId, Session, SessionId};
+pub use crate::domain::{
+    AccountStatus, Credential, IdentityError, Role, RoleId, Session, SessionId,
+};
 pub use vocab::TenantId;
 
 /// 角色仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
@@ -53,6 +57,90 @@ pub trait RoleRepoLocal {
 
     /// 持久化角色（upsert）。
     async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError>;
+}
+
+/// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
+///
+/// 公开 [`CredentialRepo`] 是 **Send 变体**（adapter `impl CredentialRepo for ...`），[`DynCredentialRepo`]
+/// 是其 dyn-compatible wrapper（组合根经 `Box<DynCredentialRepo>` 注入，ADR-004 C1/C5）。归属为域形 port
+/// （签名引用 `Credential`/`AccountLockout`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
+///
+/// **租户隔离由签名承载（fail-closed）**：所有方法接收 typed `TenantId` 位参做 RLS / store scope；跨租赁
+/// 经 tenant-keyed 查找天然失败——`find(t ≠ cred.tenant)` → `None`，不创建会话、不推进锁定计数
+/// （spec 003 US3 跨租红用例）。
+///
+/// **与 `RoleRepo` 差异**：本 port 在 PR3 已有写实 in-mem 替身（[`crate::internal`]），非纯签名冻结——
+/// 锁定态推进是多实例暴破防御的硬需求（内存态多实例不共享则失效），由**原子 port 方法**承载（见下）。
+/// 生产 postgres adapter impl 仍留 W（随 #1116 postgres adapter 落地）；届时 `Credential` / `AccountLockout`
+/// 的跨 crate 重建 + 只读 accessor 公开化与 `RoleRepo` 同步走 W（accessor 升 `pub` / `from_persisted` funnel，
+/// 见 #1258）——本 PR 编译证明阶段无独立 adapter，替身在同 crate 用 `pub(crate)`。
+///
+/// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `bump_version`）**不收**
+/// 独立 `tenant`/`subject` 参，store key 直接派生自 `credential.tenant()` / `.subject()`——错位组合不可表达
+/// （零信任租户隔离不靠调用方约定 / debug_assert）。只持标识的方法（`find` / `verify_password` / 锁定三方法）
+/// 收 typed `TenantId` + `subject`（无实体可派生），跨租赁经 tenant-keyed 查找天然 fail-closed。
+///
+/// **锁定推进原子化（F1）**：失败计数 = 安全关键状态，**禁**外部「读-改-写」（并发丢更新）。`record_failure` /
+/// `lockout_status` / `clear_lockout` 在 provider 内做单次原子 RMW（in-mem = 锁内、postgres = 事务/行锁/条件 upsert），
+/// 不暴露非原子 `find_lockout` + `save_lockout` 接缝。ref: kubernetes client-go RetryOnConflict（并发更新显式版本化）。
+///
+/// **owned 参数**：与既有 DI port（diport / `RoleRepo`）一致——async dyn port 用 owned 参规避借用生命周期、简化
+/// dynosaur `bridge(dyn)` 装配；消费方调用即弃，代价仅一次 `to_string`。
+#[trait_variant::make(CredentialRepo: Send)]
+#[dynosaur(pub DynCredentialRepo = dyn(box) CredentialRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: 同 RoleRepo——base trait 非 Send native AFIT，Send 由 trait_variant `CredentialRepo` 变体 +
+// dynosaur `DynCredentialRepo` 承载（ADR-003/ADR-004 C1）。
+pub trait CredentialRepoLocal {
+    /// 按主体查凭据（tenant-scoped；不存在返回 `Ok(None)`）。
+    async fn find(
+        &self,
+        tenant: TenantId,
+        subject: String,
+    ) -> Result<Option<Credential>, IdentityError>;
+
+    /// **恒定成本** constant-time 验签（F3）：无论凭据是否存在，候选明文总跑一次 argon2 KDF
+    /// （经 `secure::verify_password_constant_time`）——消除「无此主体（跳 KDF 快返回）」与「密码错（跑 KDF）」
+    /// 的登录枚举时序差。查无凭据 / 密码错均 `Ok(false)`，fail-closed 不区分（值 + 时延双重不可区分）。
+    ///
+    /// 消费方（PR4 `LoginService`）若需区分「账户不存在」与「密码错」做分流，应改走 `find` + 域内
+    /// `Credential::verify_password`，但仍须对 miss 路径补等价成本（见 `secure::verify_password_constant_time`）。
+    async fn verify_password(
+        &self,
+        tenant: TenantId,
+        subject: String,
+        candidate: String,
+    ) -> Result<bool, IdentityError>;
+
+    /// 持久化凭据（upsert）。store key 派生自 `credential`（F2：tenant/subject 错位不可表达）。
+    async fn save(&self, credential: Credential) -> Result<(), IdentityError>;
+
+    /// 密码变更 CAS：仅当存储版本 == `expected` 时以 `next` 替换；版本不匹配 → `Err(VersionConflict)`，
+    /// 查无凭据 → `Err(CredentialNotFound)`（并发密码变更安全）。store key 派生自 `next`（F2）；消费方经
+    /// `Credential::rotate`（保持 subject/tenant、version + 1）构造 `next`。
+    async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError>;
+
+    /// **原子**记录一次登录失败（F1）：provider 内单次 RMW 完成「读锁定态-or-新建 → `record_failure(now)`
+    /// → 持久化」，返回结果账号状态（`Locked` 当且仅当达阈值）。并发失败不丢更新。`now` 由调用方注入
+    /// `Clock` 读出（禁 `SystemTime::now()`，clippy 静态守）。
+    async fn record_failure(
+        &self,
+        tenant: TenantId,
+        subject: String,
+        now: SystemTime,
+    ) -> Result<AccountStatus, IdentityError>;
+
+    /// **原子**锁定态查询（F1，验签前门控）：provider 内 RMW 完成「读 → `try_lazy_unlock(now)`（TTL 过则解锁
+    /// 并持久化）→ 返回 `is_locked(now)`」。无锁定态（查无）→ `Ok(false)`。`now` 经注入 `Clock`。
+    async fn lockout_status(
+        &self,
+        tenant: TenantId,
+        subject: String,
+        now: SystemTime,
+    ) -> Result<bool, IdentityError>;
+
+    /// **原子**清除锁定态（F1，登录成功后重置失败计数）。幂等（无锁定态亦 `Ok`）。
+    async fn clear_lockout(&self, tenant: TenantId, subject: String) -> Result<(), IdentityError>;
 }
 
 /// 会话 **co-tx** Unit-of-Work DI port（async；provider 可换：prod postgres / demo in-mem）。
@@ -225,6 +313,114 @@ mod smoke {
                 entry: Entry,
                 envelope: OutboxEnvelopeParts,
             ) -> Result<(), OutboxEmitError>;
+        }
+    }
+}
+
+#[cfg(test)]
+mod smoke_credential {
+    //! build smoke：`CredentialRepo` 域形 async port 同范式（PORT-SHAPE-01/02）——native-AFIT impl +
+    //! mockall mock 均经 `Box<DynCredentialRepo>` 装入 + `Send`。`NoopCredentialRepo` body `todo!()`，
+    //! 故只构造 Dyn wrapper + 断言 `Send`，**不 `.await`**（真实行为由 `internal::mem::InMemCredentialRepo`
+    //! round-trip 测试覆盖）。
+    use super::{
+        AccountStatus, Credential, CredentialRepo, DynCredentialRepo, IdentityError, SystemTime,
+        TenantId,
+    };
+
+    struct NoopCredentialRepo;
+    impl CredentialRepo for NoopCredentialRepo {
+        async fn find(
+            &self,
+            _tenant: TenantId,
+            _subject: String,
+        ) -> Result<Option<Credential>, IdentityError> {
+            todo!()
+        }
+        async fn verify_password(
+            &self,
+            _tenant: TenantId,
+            _subject: String,
+            _candidate: String,
+        ) -> Result<bool, IdentityError> {
+            todo!()
+        }
+        async fn save(&self, _credential: Credential) -> Result<(), IdentityError> {
+            todo!()
+        }
+        async fn bump_version(
+            &self,
+            _expected: u32,
+            _next: Credential,
+        ) -> Result<(), IdentityError> {
+            todo!()
+        }
+        async fn record_failure(
+            &self,
+            _tenant: TenantId,
+            _subject: String,
+            _now: SystemTime,
+        ) -> Result<AccountStatus, IdentityError> {
+            todo!()
+        }
+        async fn lockout_status(
+            &self,
+            _tenant: TenantId,
+            _subject: String,
+            _now: SystemTime,
+        ) -> Result<bool, IdentityError> {
+            todo!()
+        }
+        async fn clear_lockout(
+            &self,
+            _tenant: TenantId,
+            _subject: String,
+        ) -> Result<(), IdentityError> {
+            todo!()
+        }
+    }
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    // PORT-SHAPE-01：impl + mock 均经 `new_box` 装入 dynosaur Send 变体 `DynCredentialRepo` 且 `Send`。
+    #[test]
+    fn credential_repo_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynCredentialRepo> = DynCredentialRepo::new_box(NoopCredentialRepo);
+        assert_send(&from_impl);
+        let from_mock: Box<DynCredentialRepo> =
+            DynCredentialRepo::new_box(MockTestCredentialRepo::new());
+        assert_send(&from_mock);
+    }
+
+    // PORT-SHAPE-02：消费侧构造器必填位置参注入（`Box<DynCredentialRepo>` 非 Option，缺失即编译错误）。
+    struct CredentialService {
+        _repo: Box<DynCredentialRepo<'static>>,
+    }
+    impl CredentialService {
+        fn new(repo: Box<DynCredentialRepo<'static>>) -> Self {
+            Self { _repo: repo }
+        }
+    }
+
+    #[test]
+    fn credential_repo_is_required_ctor_injectable() {
+        let from_impl = CredentialService::new(DynCredentialRepo::new_box(NoopCredentialRepo));
+        assert_send(&from_impl._repo);
+        let from_mock =
+            CredentialService::new(DynCredentialRepo::new_box(MockTestCredentialRepo::new()));
+        assert_send(&from_mock._repo);
+    }
+
+    mockall::mock! {
+        TestCredentialRepo {}
+        impl CredentialRepo for TestCredentialRepo {
+            async fn find(&self, tenant: TenantId, subject: String) -> Result<Option<Credential>, IdentityError>;
+            async fn verify_password(&self, tenant: TenantId, subject: String, candidate: String) -> Result<bool, IdentityError>;
+            async fn save(&self, credential: Credential) -> Result<(), IdentityError>;
+            async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError>;
+            async fn record_failure(&self, tenant: TenantId, subject: String, now: SystemTime) -> Result<AccountStatus, IdentityError>;
+            async fn lockout_status(&self, tenant: TenantId, subject: String, now: SystemTime) -> Result<bool, IdentityError>;
+            async fn clear_lockout(&self, tenant: TenantId, subject: String) -> Result<(), IdentityError>;
         }
     }
 }

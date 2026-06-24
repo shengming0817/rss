@@ -98,6 +98,11 @@ futures = "0.3"
 # 编码 / 加密原语（基础层 + 引擎原语 opt-in）
 base64 = "0.22"   # vocab Cursor base64url（URL_SAFE_NO_PAD）不透明 token 解码校验
 subtle = "2"      # primitives constant_time_eq 常数时间比较（RustCrypto 工业标准，免自维护 black_box 屏障）。ref: dalek-cryptography/subtle src/lib.rs@main
+# 密码哈希（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐。default `rand`
+# 给 `SaltString::generate`；额外 `std` 经 password-hash/std → rand_core/std 拉起 getrandom，暴露
+# `password_hash::rand_core::OsRng`（CSPRNG 盐源）。ref: RustCrypto/argon2 argon2/src/lib.rs@master
+# （Apache-2.0 OR MIT，deny allow-list 内；传递 blake2/password-hash 同许可）。
+argon2 = { version = "0.5", features = ["std"] }
 # DI port trait 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 # exact-pin（pre-1.0，new_box/new_arc/bridge API 仍破坏式演进；升级须审 changelog）。仅 diport
 # 可依赖（deny.toml wrapper 守 DI port 集中 + 单一 dyn-dispatch 依赖点；别处 import 不到宏）。

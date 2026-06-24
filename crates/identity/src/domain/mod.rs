@@ -9,7 +9,8 @@
 //! - `rbac`：`Permission` / `Role` / `RoleBinding` + `authorize_rbac`。【PR1 实现】
 //! - `abac`：`AbacAttribute` / `PolicyRule`（typed `Operator` + `PolicyEffect`）/ `Policy` +
 //!   `evaluate_abac`（deny-overrides，fail-closed）。【PR2 实现】
-//! - `account`：`AccountStatus`。【PR3 扩展，签名冻结】
+//! - `account`：`AccountStatus` + `Credential` + `AccountLockout`（凭据 / 锁定 / CAS）。【PR3 实现】
+//! - `session`：`Session` / `SessionId`（会话持久化 UoW）。【PR4 部分】
 //!
 //! # newtype funnel 校验（严格白名单，fail-closed）
 //!
@@ -42,9 +43,13 @@ pub use session::{Session, SessionId};
 pub(crate) use abac::{
     AbacAttribute, GlobPattern, Operator, Policy, PolicyEffect, PolicyRule, evaluate_abac,
 };
-// reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
+// Credential（find/save/bump 签名实体）/ AccountStatus（record_failure 返回）是 pub——经 ports facade 跨 crate
+// 收发；字段私有 + 构造器 pub(crate) funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 不在 port 签名
+// （锁定推进由原子方法 record_failure/lockout_status/clear_lockout 内部管理，返回 AccountStatus/bool）⇒ pub(crate)。
+pub use account::{AccountStatus, Credential};
+// reason: in-mem 替身（mem.rs，test/seed-login 门控）内部消费；非 gated 构建链路无调用方（ADR-004 C8）。
 #[allow(unused_imports)]
-pub(crate) use account::AccountStatus;
+pub(crate) use account::AccountLockout;
 // reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
 #[allow(unused_imports)]
 pub(crate) use rbac::{Permission, RoleBinding, authorize_rbac};
@@ -346,6 +351,8 @@ impl PolicyId {
 /// - `RoleNotFound`：`RoleRepo` 查无角色。
 /// - `InvalidPolicy`：策略构造 / 校验失败。
 /// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
+/// - `CredentialNotFound`：`CredentialRepo` 查无凭据（PR3）。
+/// - `VersionConflict`：`CredentialRepo::bump_version` CAS 期望版本不匹配（并发密码变更，PR3）。
 // reason: 库错误枚举尚无生产返回方（repo / handler 接线待 W），dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
@@ -357,6 +364,10 @@ pub enum IdentityError {
     PermissionDenied,
     #[error("policy is invalid")]
     InvalidPolicy,
+    #[error("credential not found")]
+    CredentialNotFound,
+    #[error("credential version conflict")]
+    VersionConflict,
 }
 
 // ---------------------------------------------------------------------------
