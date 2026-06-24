@@ -142,6 +142,16 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
 # 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
 aws-smithy-mocks = "0.2"
+# JWT 验签 provider（adapters/oidc，#1011）：对标 gocell coreos/go-oidc token 验签面。diport::Pdp port 只需
+# 「入站 token 验签」（签名 + exp/nbf + iss + aud），非完整 OAuth/OIDC client flow（discovery/PKCE/token 交换 +
+# live JWKS-over-HTTP 拉取留 #1109），故选 jsonwebtoken 而非 openidconnect（后者拉 reqwest/HTTP+OAuth 状态机,
+# 超本切片面，违 "仅声明真正用到的 dep"）。后端 = ring（v9 必备、非 optional）：ring 0.17.14 已因
+# rustls←redis/sqlx（#1009/#1116 adapter 的 tls-rustls）在 all-features 图内，`cargo deny check licenses` 现绿
+# （ring LICENSE 判为 ISC，在 allow-list 内）⇒ 引入零新增 crypto license 面、无新版本（multiple-versions 不升级）。
+# **钉死 =9.3.1**：v10 改显式后端——rust_crypto 拉 `rsa`（deny.toml 已 ban，RUSTSEC-2023-0071）、aws_lc_rs 拉
+# OpenSSL 派生 aws-lc-sys（不在 license allow-list），两条都阻断 deny；v9→v10 破坏式 crypto-backend 切换须审升级
+# （同 dynosaur/trait-variant exact-pin 纪律）。ref: Keats/jsonwebtoken src/validation.rs + src/decoding.rs@v9.3.1
+jsonwebtoken = "=9.3.1"
 # 可观测性导出（adapters/otel，#1011）：tracing span → OTLP/gRPC 导出。opentelemetry-otlp 选
 # grpc-tonic + tls-ring（rustls 走 ring，**禁** tls-aws-lc：aws-lc-sys 的 OpenSSL 派生 license 不在
 # deny.toml allow-list，与 sqlx/redis tls-rustls 同口径）+ tls-webpki-roots（打包 Mozilla 根，webpki-roots

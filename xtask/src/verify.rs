@@ -335,6 +335,18 @@ fn step_redis_backend_tests() -> Step {
         needs_compile: true,
     }
 }
+fn step_oidc_backend_tests() -> Step {
+    Step {
+        label: "oidc-backend-tests",
+        args: &["nextest", "run", "-p", "oidc", "--features", "backend"],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
 fn step_prometheus_backend_tests() -> Step {
     Step {
         label: "prometheus-backend-tests",
@@ -359,6 +371,7 @@ fn feature_test_steps() -> Vec<Step> {
     vec![
         step_s3_backend_tests(),
         step_redis_backend_tests(),
+        step_oidc_backend_tests(),
         step_prometheus_backend_tests(),
     ]
 }
@@ -677,6 +690,7 @@ mod tests {
                 "nextest",
                 "s3-backend-tests",
                 "redis-backend-tests",
+                "oidc-backend-tests",
                 "prometheus-backend-tests",
                 "deny",
                 "dylint",
@@ -818,6 +832,7 @@ mod tests {
                 "coverage",
                 "s3-backend-tests",
                 "redis-backend-tests",
+                "oidc-backend-tests",
                 "prometheus-backend-tests",
                 "deny",
                 "audit",

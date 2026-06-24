@@ -8,15 +8,34 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
+# adapter 真身（#1011 OIDC JWT 验签切片）：始终 impl diport::ManagedResource；`backend` feature 开时增补
+# impl diport::Pdp（jsonwebtoken 验签 JWT 签名 + exp/nbf + iss + aud，映射 claims → VerifiedClaims）。default
+# build 轻量（无 jsonwebtoken/ring），仍保 freeze smoke 类型断言（与 s3/redis 同范式；仅声明真正用到的 dep，
+# cargo-udeps 守）。key 在构造期注入——live JWKS-over-HTTP discovery + 轮转 = follow-up（#1109，同 s3 deferred
+# live MinIO 范式）。ADR-006 §5：本 PR 仅 crate 交付、不接入任何生产可达 httpserve 认证路径（验签空窗保护）。
 [dependencies]
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+# 验签引擎（仅 backend）：jsonwebtoken decode + Validation（ring 后端已在图内，见 root Cargo.toml license 论证）。
+jsonwebtoken = { workspace = true, optional = true }
+# 验签后 claims 反序列化（仅 backend）：私有 Claims DTO 取 sub + flatten extra（按可配置名取 tenant/kind claim）。
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+# redacted 结构化日志（仅 backend）：secure::redact_error funnel + tracing（observability.md：错误经 redact，禁记原始 token）。
+secure = { path = "../../crates/secure", optional = true }
+tracing = { workspace = true, optional = true }
+# 构造期 fail-fast 配置校验错误（空 issuer/audience/key/claim 名 + 拒对称算法），非运行期静默。
+thiserror = { workspace = true, optional = true }
+
+[features]
+default = []
+backend = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json", "dep:secure", "dep:tracing", "dep:thiserror"]
+
+[dev-dependencies]
+# 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）。
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# 表驱动验签矩阵（claim 校验各分支）。
+rstest = { workspace = true }
+# 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。
+tracing-subscriber = { workspace = true }
+# alg:none 负例：手工拼 base64url token（jsonwebtoken::encode 无法产出 alg:none）。
+base64 = { workspace = true }
