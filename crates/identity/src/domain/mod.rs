@@ -7,8 +7,9 @@
 //! - `mod.rs`（本文件）：共享 newtype funnel（`RoleId` / `PermissionId` / `PolicyId` / `ResourcePattern`
 //!   / `AttributeKey` / `AttributeValue`）+ `IdentityError` + 子模块 re-export 枢纽。【PR1】
 //! - `rbac`：`Permission` / `Role` / `RoleBinding` + `authorize_rbac`。【PR1 实现】
-//! - `abac`：`AbacAttribute` / `PolicyRule` / `Policy` + `evaluate_abac`。【PR2，签名冻结】
-//! - `account`：`AccountStatus`。【PR3 扩展】
+//! - `abac`：`AbacAttribute` / `PolicyRule`（typed `Operator` + `PolicyEffect`）/ `Policy` +
+//!   `evaluate_abac`（deny-overrides，fail-closed）。【PR2 实现】
+//! - `account`：`AccountStatus`。【PR3 扩展，签名冻结】
 //!
 //! # newtype funnel 校验（严格白名单，fail-closed）
 //!
@@ -34,7 +35,9 @@ pub use rbac::Role; // Role 是 pub（ports::RoleRepo 签名实体，跨 crate �
 // reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
 // 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
 #[allow(unused_imports)]
-pub(crate) use abac::{AbacAttribute, Policy, PolicyRule, evaluate_abac};
+pub(crate) use abac::{
+    AbacAttribute, GlobPattern, Operator, Policy, PolicyEffect, PolicyRule, evaluate_abac,
+};
 // reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
 #[allow(unused_imports)]
 pub(crate) use account::AccountStatus;

@@ -11,11 +11,12 @@
 //! `domain` 子域分层推进（spec 003 wave 拆分）：
 //! - **RBAC（`domain::rbac`）+ 共享 newtype funnel（`domain::mod`）已写实**（`authorize_rbac` subject+tenant
 //!   匹配 + 表驱动测试；newtype 严格白名单 parse）——PR1。
-//! - **ABAC（`domain::abac`：`evaluate_abac` / `Policy`）+ `AccountStatus`（`domain::account`）仍签名冻结**
-//!   （函数体 = `todo!()`）——PR2/PR3。
+//! - **ABAC（`domain::abac`：`evaluate_abac` / `Policy` / typed `Operator` + `PolicyEffect`）已写实**
+//!   （deny-overrides + 租户门 + 重复 key / 类型不匹配 fail-closed + 表驱动测试）——PR2。
+//! - **`AccountStatus`（`domain::account`）仍签名冻结**（函数体 = `todo!()`）——PR3。
 //!
 //! `application`（登录接缝：[`LoginService`] / [`IdentityDomain`]）**RW-G1 已写实**——打通 identity
-//! 登录 → outbox。余下（ABAC 求值、真实 JWT/密码哈希）留 W。`application` 模块私有，只 re-export facade。
+//! 登录 → outbox。余下（真实 JWT/密码哈希）留 W。`application` 模块私有，只 re-export facade。
 //!
 //! # 对标
 //!
@@ -40,18 +41,18 @@ pub use application::{IdentityDomain, LoginError, LoginService};
 mod login_contract;
 
 // ---------------------------------------------------------------------------
-// smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）
+// smoke test（绑函数指针锁签名 / 构造 Copy enum；行为正确性见子模块表驱动单测）
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：证明签名可被引用消费 + 闭值集 enum 可构造 + Send 约束。
-    //! **不调用** `todo!()` body。
+    //! build smoke：锁签名稳定（绑函数指针证明可被引用消费）+ 闭值集 enum 可构造 + Send 约束。
+    //! 行为正确性由各子模块（`domain::{rbac,abac}`）的表驱动单测覆盖。
 
     use crate::domain::{
-        AbacAttribute, AccountStatus, AttributeKey, AttributeValue, IdentityError, Permission,
-        PermissionId, Policy, PolicyId, PolicyRule, ResourcePattern, Role, RoleBinding, RoleId,
-        authorize_rbac, evaluate_abac,
+        AbacAttribute, AccountStatus, AttributeKey, AttributeValue, IdentityError, Operator,
+        Permission, PermissionId, Policy, PolicyEffect, PolicyId, PolicyRule, ResourcePattern,
+        Role, RoleBinding, RoleId, authorize_rbac, evaluate_abac,
     };
 
     // 证明主要类型是 Send（跨 await 点传播）。
@@ -138,7 +139,8 @@ mod smoke {
 
         // PolicyRule accessor
         let _: fn(&PolicyRule) -> &AttributeKey = PolicyRule::attribute_key;
-        let _: fn(&PolicyRule) -> &AttributeValue = PolicyRule::expected_value;
+        let _: fn(&PolicyRule) -> &Operator = PolicyRule::operator;
+        let _: fn(&PolicyRule) -> PolicyEffect = PolicyRule::effect;
 
         // AbacAttribute accessor
         let _: fn(&AbacAttribute) -> &AttributeKey = AbacAttribute::key;
@@ -163,7 +165,7 @@ mod smoke {
         let _: fn(String, RoleId, vocab::TenantId) -> RoleBinding = RoleBinding::new;
         let _: fn(AttributeKey, AttributeValue) -> AbacAttribute = AbacAttribute::new;
         let _: fn(PolicyId, vocab::TenantId, Vec<PolicyRule>) -> Policy = Policy::new;
-        let _: fn(AttributeKey, AttributeValue) -> PolicyRule = PolicyRule::new;
+        let _: fn(AttributeKey, Operator, PolicyEffect) -> PolicyRule = PolicyRule::new;
         // AttributeValue::new：impl Into<String> 用 String 实例化
         let _: fn(String) -> AttributeValue = AttributeValue::new;
         // RoleId::new / PermissionId::new
