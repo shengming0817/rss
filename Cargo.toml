@@ -159,16 +159,19 @@ aws-smithy-mocks = "0.2"
 # mock、测真实编排」范式。默认仅明文 HTTP，**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls 均不进树，deny
 # 全绿，同 aws-smithy-mocks 收口理由）。ref: LukeMathWalker/wiremock-rs src/server.rs@main
 wiremock = "0.6"
-# JWT 验签 provider（adapters/oidc，#1011）：对标 gocell coreos/go-oidc token 验签面。diport::Pdp port 只需
-# 「入站 token 验签」（签名 + exp/nbf + iss + aud），非完整 OAuth/OIDC client flow（discovery/PKCE/token 交换 +
-# live JWKS-over-HTTP 拉取留 #1109），故选 jsonwebtoken 而非 openidconnect（后者拉 reqwest/HTTP+OAuth 状态机,
-# 超本切片面，违 "仅声明真正用到的 dep"）。后端 = ring（v9 必备、非 optional）：ring 0.17.14 已因
-# rustls←redis/sqlx（#1009/#1116 adapter 的 tls-rustls）在 all-features 图内，`cargo deny check licenses` 现绿
-# （ring LICENSE 判为 ISC，在 allow-list 内）⇒ 引入零新增 crypto license 面、无新版本（multiple-versions 不升级）。
-# **钉死 =9.3.1**：v10 改显式后端——rust_crypto 拉 `rsa`（deny.toml 已 ban，RUSTSEC-2023-0071）、aws_lc_rs 拉
-# OpenSSL 派生 aws-lc-sys（不在 license allow-list），两条都阻断 deny；v9→v10 破坏式 crypto-backend 切换须审升级
-# （同 dynosaur/trait-variant exact-pin 纪律）。ref: Keats/jsonwebtoken src/validation.rs + src/decoding.rs@v9.3.1
-jsonwebtoken = "=9.3.1"
+# JWT/JWS 验签原语（adapters/oidc，#1195 / 1109-A1）：纯 RustCrypto，对标 RustCrypto + spiffe/rust-spiffe
+# JWT-SVID 验签面。diport::Pdp port 只需「入站 token 验签」（签名 + exp/nbf + iss + aud），非完整 OAuth/OIDC
+# client flow（discovery/PKCE/token 交换 + live JWKS-over-HTTP 拉取留 #1109/T003）。**替换 #1011 的
+# jsonwebtoken 切片**：jsonwebtoken v9 后端 = ring，被迫钉死 =9.3.1（v10 显式后端会拉 rsa〔deny ban,
+# RUSTSEC-2023-0071〕/ aws-lc-sys〔OpenSSL 派生 license 不在 allow-list〕）；且其只能整 crate 拒对称算法
+# （无 service-token HS256 路径）、exp/nbf 隐式取系统时钟（违 rust-standards「Clock 构造器注入」护栏）。
+# RustCrypto 纯 Rust（Apache-2.0/MIT，零新增 ring 面）：ES256（p256 ecdsa，JWT 路径）+ HS256（hmac+sha2,
+# service-token 路径），常数时间比较复用 primitives::crypto::constant_time_eq（CRYPTO-CONST-TIME-01）。
+# ES256 公钥经 SEC1 未压缩点注入（构造器签名跨 JWKS PR 稳定——T003 JWKS x/y 同形）。jsonwebtoken 已从
+# deny.toml ban（防重新引入）。ref: RustCrypto/elliptic-curves p256 + RustCrypto/MACs hmac + spiffe/rust-spiffe
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 # 可观测性导出（adapters/otel，#1011）：tracing span → OTLP/gRPC 导出。opentelemetry-otlp 选
 # grpc-tonic + tls-ring（rustls 走 ring，**禁** tls-aws-lc：aws-lc-sys 的 OpenSSL 派生 license 不在
 # deny.toml allow-list，与 sqlx/redis tls-rustls 同口径）+ tls-webpki-roots（打包 Mozilla 根，webpki-roots

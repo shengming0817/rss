@@ -55,6 +55,11 @@ deny = [
   # 升 Medium 的**机器守卫**：rsa 一旦进入 feature-resolved 依赖图（如有人启用 mysql feature），`deny check bans`
   # 即非零退出——强制显式决策（移除本 ban + 修复/重新评估漏洞 + 同步 cargo-audit --ignore）。图外时本 ban 为 no-op。
   { crate = "rsa" },
+  # JWT 验签供应链收敛（issue #1195 / 1109-A1）：oidc adapter 改用纯 RustCrypto（p256/hmac/sha2）做 ES256+HS256
+  # 验签后，jsonwebtoken 退出依赖图。本 ban 防重新引入——jsonwebtoken v9 后端 = ring（被迫钉死 =9.3.1），v10 显式
+  # 后端会拉 rsa（上方已 ban）/ aws-lc-sys（OpenSSL 派生 license 不在 allow-list）。重新引入须显式决策（移除本
+  # ban + 论证 crypto 后端 license/供应链）。图外时为 no-op（同 rsa）。use-instead 走 p256/hmac/sha2（RustCrypto）。
+  { crate = "jsonwebtoken" },
   # 外部禁用（provider 收敛）
   { crate = "openssl", use-instead = "rustls" },
   { crate = "openssl-sys", use-instead = "rustls" },

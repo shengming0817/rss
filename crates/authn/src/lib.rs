@@ -570,7 +570,9 @@ impl Session {
 #[non_exhaustive]
 pub enum AuthnError {
     /// 结构化解码 / claims 映射失败（坏 base64url / 坏 JSON / 缺 sub / 未知 kind / 坏 tenant），
-    /// 或 verifier 报 [`diport::PdpError::InvalidSignature`]（签名 / MAC 校验失败）。
+    /// 或 verifier 报 [`diport::PdpError::InvalidSignature`]（签名 / MAC 校验失败）/
+    /// [`diport::PdpError::Untrusted`]（签发者 / key / audience 不受信）。verify 层只做认证（非授权），
+    /// 故凭据不可信 / 无效一律 401 invalid_token（RFC 6750 §3.1），403 留给 authz 层「已认证但无权」。
     #[error("token is invalid")]
     TokenInvalid,
     /// 令牌过期（verifier 报 [`diport::PdpError::Expired`]，经 verify→mint bridge 的 `From<PdpError>` 产生）。
@@ -579,8 +581,8 @@ pub enum AuthnError {
     /// 会话不存在。**本 crate 当前不可达**——由 W session store（`diport` 仓储 port）产生。
     #[error("session not found")]
     SessionNotFound,
-    /// 主体无权（verifier 报 [`diport::PdpError::Untrusted`]：签发者 / key / audience 不受信，经
-    /// verify→mint bridge 的 `From<PdpError>` 产生）。
+    /// 主体已认证但无权（403 insufficient permission）。**本 crate 当前不可达**——由后续 authz / ABAC 层
+    /// 产生；verify→mint bridge **不**产此态（凭据不可信 / 无效归 [`AuthnError::TokenInvalid`]，RFC 6750 §3.1）。
     #[error("principal not permitted")]
     Forbidden,
 }
@@ -592,7 +594,9 @@ impl From<diport::PdpError> for AuthnError {
         match e {
             diport::PdpError::InvalidSignature => AuthnError::TokenInvalid,
             diport::PdpError::Expired => AuthnError::TokenExpired,
-            diport::PdpError::Untrusted => AuthnError::Forbidden,
+            // verify 层纯认证：Untrusted（iss / key / aud 不受信 / 未知 alg / kid 无匹配）= 凭据无效 →
+            // 401 invalid_token（RFC 6750 §3.1），非 403 Forbidden（后者留给 authz 层「已认证但无权」）。
+            diport::PdpError::Untrusted => AuthnError::TokenInvalid,
             // PdpError #[non_exhaustive]：未来变体 fail-closed 落 TokenInvalid（默认拒绝，无静默成功）。
             _ => AuthnError::TokenInvalid,
         }
@@ -985,7 +989,8 @@ mod verify_bridge_tests {
         assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
     }
 
-    /// fail-closed：三 `PdpError` 变体 → 三 `AuthnError` target，never `Ok`，never seal。
+    /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok`，never seal（verify 层纯认证，
+    /// Untrusted 与 InvalidSignature 同归 401 `TokenInvalid`，RFC 6750 §3.1）。
     #[tokio::test]
     async fn verify_jwt_pdp_failure_maps_error_and_never_mints() {
         let raw = test_jwt(
@@ -994,7 +999,7 @@ mod verify_bridge_tests {
         for (perr, want) in [
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
-            (PdpError::Untrusted, AuthnError::Forbidden),
+            (PdpError::Untrusted, AuthnError::TokenInvalid),
         ] {
             let pdp = boxed(Err(perr.clone()));
             // matches! + discriminant 守卫：既断言是 Err（绝不 mint），又锁定映射变体。
@@ -1038,13 +1043,14 @@ mod verify_bridge_tests {
         assert!(format!("{vs:?}").contains("redacted"));
     }
 
-    /// fail-closed：三 `PdpError` 变体 → 三 `AuthnError` target，never `Ok` / seal（与 verify_jwt 路径对齐）。
+    /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok` / seal（与 verify_jwt 路径对齐；
+    /// Untrusted 与 InvalidSignature 同归 401 `TokenInvalid`）。
     #[tokio::test]
     async fn verify_service_token_pdp_failure_maps_error_and_never_mints() {
         for (perr, want) in [
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
-            (PdpError::Untrusted, AuthnError::Forbidden),
+            (PdpError::Untrusted, AuthnError::TokenInvalid),
         ] {
             let pdp = boxed(Err(perr.clone()));
             let result = verify_service_token("opaque-token", &pdp).await;

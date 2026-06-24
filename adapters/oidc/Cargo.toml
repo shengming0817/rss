@@ -8,34 +8,41 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 真身（#1011 OIDC JWT 验签切片）：始终 impl diport::ManagedResource；`backend` feature 开时增补
-# impl diport::Pdp（jsonwebtoken 验签 JWT 签名 + exp/nbf + iss + aud，映射 claims → VerifiedClaims）。default
-# build 轻量（无 jsonwebtoken/ring），仍保 freeze smoke 类型断言（与 s3/redis 同范式；仅声明真正用到的 dep，
-# cargo-udeps 守）。key 在构造期注入——live JWKS-over-HTTP discovery + 轮转 = follow-up（#1109，同 s3 deferred
-# live MinIO 范式）。ADR-006 §5：本 PR 仅 crate 交付、不接入任何生产可达 httpserve 认证路径（验签空窗保护）。
+# adapter 真身（#1195 / 1109-A1 真 crypto 验签切片）：始终 impl diport::ManagedResource；`backend` feature 开时
+# 增补 impl diport::Pdp（纯 RustCrypto 验签——ES256〔p256 ecdsa，JWT 路径〕/ HS256〔hmac+sha2，service-token
+# 路径〕→ 三段解析 → SupportedAlg 白名单 → 签名校验 → exp/nbf〔注入 diport::Clock〕→ iss/aud → VerifiedClaims）。
+# default build 轻量（无 crypto dep），仍保 freeze smoke 类型断言（与 s3/redis 同范式；仅声明真正用到的 dep，
+# cargo-udeps 守）。key 在构造期经 StaticKeySource 注入——live JWKS-over-HTTP discovery + 轮转 = follow-up
+# （#1109/T003，构造器签名为此留稳）。ADR-006 §5：本 PR 仅 crate 交付、不接入任何生产可达 httpserve 认证路径
+# （验签空窗保护；组合根接线 = #1109/T004 安全同批门）。
 [dependencies]
 diport = { path = "../../crates/diport" }
-# 验签引擎（仅 backend）：jsonwebtoken decode + Validation（ring 后端已在图内，见 root Cargo.toml license 论证）。
-jsonwebtoken = { workspace = true, optional = true }
-# 验签后 claims 反序列化（仅 backend）：私有 Claims DTO 取 sub + flatten extra（按可配置名取 tenant/kind claim）。
+# ES256（P-256 ECDSA）JWS 验签（仅 backend）：VerifyingKey::from_sec1_bytes + Verifier::verify（内部 SHA-256）。
+p256 = { workspace = true, optional = true }
+# HS256（HMAC-SHA256）service-token 验签（仅 backend）：Hmac<Sha256> 计算 tag。
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+# 常数时间 tag/digest 比较复用（仅 backend）：primitives::crypto::constant_time_eq（CRYPTO-CONST-TIME-01）。
+primitives = { path = "../../crates/primitives", optional = true }
+# 三段 JWS base64url 解码（仅 backend）：URL_SAFE_NO_PAD 解 header/payload/signature。
+base64 = { workspace = true, optional = true }
+# 验签后 claims 反序列化（仅 backend）：私有 Claims DTO 取 sub/exp/nbf/iss/aud + flatten extra（取 tenant/kind claim）。
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-# redacted 结构化日志（仅 backend）：secure::redact_error funnel + tracing（observability.md：错误经 redact，禁记原始 token）。
-secure = { path = "../../crates/secure", optional = true }
+# 结构化日志（仅 backend）：只记 reason 闭值标签 + keys_tried 计数，**绝不**记原始 token / 签名 / claim 值
+# （observability.md PII 边界；新验签路径错误是静态 message 枚举、无 PII source 链，无需 secure::redact_error）。
 tracing = { workspace = true, optional = true }
-# 构造期 fail-fast 配置校验错误（空 issuer/audience/key/claim 名 + 拒对称算法），非运行期静默。
+# 构造期 fail-fast 配置校验错误（空 issuer/audience/key/claim 名 + key 格式非法 + 空 HS256 密钥），非运行期静默。
 thiserror = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json", "dep:secure", "dep:tracing", "dep:thiserror"]
+backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror"]
 
 [dev-dependencies]
 # 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）。
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-# 表驱动验签矩阵（claim 校验各分支）。
+# 表驱动验签矩阵（claim 校验各分支 + RFC7515 KAV）。
 rstest = { workspace = true }
 # 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。
 tracing-subscriber = { workspace = true }
-# alg:none 负例：手工拼 base64url token（jsonwebtoken::encode 无法产出 alg:none）。
-base64 = { workspace = true }

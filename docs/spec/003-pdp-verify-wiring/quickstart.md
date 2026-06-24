@@ -5,8 +5,8 @@
 ## ① adapter 验签 round-trip（PR-A1，无需运行时）
 
 ```bash
-# 表驱动单测 + RFC7515 known-answer 向量
-cargo nextest run --manifest-path adapters/oidc/Cargo.toml -p oidc
+# 表驱动单测 + RFC7515 known-answer 向量（真验签模块全在 backend feature 下，缺则空跑假绿）
+cargo nextest run -p oidc --features backend
 ```
 
 预期覆盖：
