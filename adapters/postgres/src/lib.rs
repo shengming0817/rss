@@ -20,11 +20,13 @@ mod inbox;
 mod migrator;
 mod outbox;
 mod pool;
+mod session_uow;
 mod tx;
 
 pub use dead_letter::PgDeadLetterStore;
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
+pub use session_uow::PgSessionUnitOfWork;
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;
@@ -69,13 +71,15 @@ mod smoke {
     //! `#[cfg(test)]` 的 `RoleRepoEdgeProof` 承载——**不**挂在可构造的生产 `PgStore` 上（避免运行时 todo!()
     //! panic，review F3）。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo edge proof +
-    //! IdempotencyStore on PgInboxStore；去掉任一即编译失败（anti-vacuity）。
+    //! IdempotencyStore on PgInboxStore + SessionUnitOfWork on PgSessionUnitOfWork（真实 impl，#1083/#1192）；
+    //! 去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
+    fn assert_session_uow<T: identity::ports::SessionUnitOfWork>(_: PhantomData<T>) {}
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
 
     /// adapter→域 DIP 内向边编译证明：postgres 依赖 identity 并 impl 其域形 `RoleRepo`（native AFIT，
@@ -101,6 +105,8 @@ mod smoke {
     fn impls_frozen_ports() {
         assert_managed_resource(PhantomData::<super::PgStore>);
         assert_role_repo(PhantomData::<RoleRepoEdgeProof>);
+        // `PgSessionUnitOfWork: SessionUnitOfWork` 真实 impl（非 edge proof）——co-tx UoW（#1083/#1192）。
+        assert_session_uow(PhantomData::<super::PgSessionUnitOfWork>);
         // `PgInboxStore: IdempotencyStore` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_idempotency_store(PhantomData::<super::PgInboxStore>);
     }

@@ -35,6 +35,37 @@ pub mod ports;
 
 pub use application::{IdentityDomain, LoginError, LoginService};
 
+/// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
+///
+/// 下游 adapter crate（postgres）集成测试需构造 [`ports::Session`](crate::ports::Session) 驱动
+/// `ports::SessionUnitOfWork`，但 `Session::new` / `SessionId::new` 是 `pub(crate)` funnel（生产不可伪造）。
+/// 本模块经 feature 门控暴露受控构造器——与 `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use std::time::SystemTime;
+
+    use vocab::TenantId;
+
+    use crate::domain::{Session, SessionId};
+
+    /// 构造测试用 [`Session`]（经域 funnel；仅 test/dev 构建）。
+    pub fn session(
+        session_id: &str,
+        subject: &str,
+        tenant: TenantId,
+        expires_at: SystemTime,
+        created_at: SystemTime,
+    ) -> Session {
+        Session::new(
+            SessionId::new(session_id),
+            subject,
+            tenant,
+            expires_at,
+            created_at,
+        )
+    }
+}
+
 /// `identity.login` 契约测试样板（#1136）——用 `testkit` harness 给 served HTTP 契约写 per-contract
 /// 测试的模板（正常 schema / 参数错误 + 错误码）。鉴权边界 / path newtype 维度按层分裂，见模块 rustdoc。
 #[cfg(test)]
@@ -52,7 +83,7 @@ mod smoke {
     use crate::domain::{
         AbacAttribute, AccountStatus, AttributeKey, AttributeValue, IdentityError, Operator,
         Permission, PermissionId, Policy, PolicyEffect, PolicyId, PolicyRule, ResourcePattern,
-        Role, RoleBinding, RoleId, authorize_rbac, evaluate_abac,
+        Role, RoleBinding, RoleId, Session, SessionId, authorize_rbac, evaluate_abac,
     };
 
     // 证明主要类型是 Send（跨 await 点传播）。
@@ -72,6 +103,8 @@ mod smoke {
         _assert_send::<AttributeValue>();
         _assert_send::<Policy>();
         _assert_send::<PolicyRule>();
+        _assert_send::<SessionId>();
+        _assert_send::<Session>();
     }
 
     #[test]

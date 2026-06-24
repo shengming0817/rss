@@ -4,8 +4,9 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
-//! - DI 注入：identity 经 `Box<DynOutboxEmitter>`（`MemEmitter`）发射 durable outbox fact；audit 经注入的
-//!   链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部 sink）；幂等 store 经 `run_consumer` 注入。
+//! - DI 注入：identity 经 `Box<DynSessionUnitOfWork>`（`MemSessionUnitOfWork`）co-tx 写 session + 发射 outbox
+//!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
+//!   sink）；幂等 store 经 `run_consumer` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
 //! - 消费：bootstrap `SubscriberHandler` 经组合根 adapt 成 `run_consumer` 的 `HandleResult` handler，
 //!   `ConsumerBase` 自持 claim→handle→commit/release 幂等生命周期（键 = msg.id = EventId）。
@@ -38,14 +39,15 @@ use consistency::{
     PermanentErrorKind, SeenState,
 };
 use diport::{
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynOutboxEmitter,
-    Message, OutboxEmitter, OutboxEnvelopeParts, Subscriber, Topic,
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, Message,
+    OutboxEmitter, OutboxEnvelopeParts, Subscriber, Topic,
 };
 use eventexec::{ConsumerMeta, run_consumer};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
+use identity::ports::DynSessionUnitOfWork;
 use identity::{IdentityDomain, LoginService};
-use memory::{FixedClock, MemBus, MemEmitter};
+use memory::{FixedClock, MemBus, MemEmitter, MemSessionUnitOfWork};
 use primitives::{ListenerKind, Mac, MacAlgorithm, MacKey, MacVerifier};
 use tokio_util::sync::CancellationToken;
 
@@ -269,9 +271,9 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         consumer_handler(binding.handler),
     );
 
-    // 登录：注入 MemEmitter（durable outbox 发射替身）+ 固定时钟。emit + 等 audit + cancel 收口。
+    // 登录：注入 MemSessionUnitOfWork（co-tx demo 替身：session + outbox fan-out）+ 固定时钟。emit + 等 audit + cancel 收口。
     let login = LoginService::with_seed_user(
-        DynOutboxEmitter::new_box(MemEmitter::new(bus.clone())),
+        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         USERNAME,
@@ -455,7 +457,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     );
 
     let login = LoginService::with_seed_user(
-        DynOutboxEmitter::new_box(MemEmitter::new(bus.clone())),
+        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         USERNAME,

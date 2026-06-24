@@ -1,8 +1,8 @@
 # ADR-005：域 repo / 领域服务 DI port 归属（Option 2：域内 port + DIP 内向实现）
 
-- **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）
-- **日期**：2026-06-23
-- **关联**：issue #1083 [RW-G0.2] · epic #991 · spike 来源 PR #1051(PR-4) / #1049(PR-diport) · 解锁 W 阶段（#1000–#1016）repo 接缝单元
+- **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）；**§9 amended by #1192**（co-tx Unit-of-Work seam 交付 #1083 session 接缝，威胁矩阵重评见 §9.3）
+- **日期**：2026-06-23（§9 amendment：2026-06-25）
+- **关联**：issue #1083 [RW-G0.2] · #1192（§9 co-tx UoW amendment）· epic #991 · spike 来源 PR #1051(PR-4) / #1049(PR-diport) · 解锁 W 阶段（#1000–#1016）repo 接缝单元
 - **依赖 ADR**：**ADR-003**（DI async+dyn 派发 = dynosaur，本 ADR 复用其派发范式不变）· **ADR-004**（签名约定单源）
 - **归属**：framework（分层 / DI 接缝归属约定，provider-agnostic 基础设施治理）
 - **AI-robust 评级**：见 §6（逐条 Hard/Medium，Soft 禁止立项）
@@ -136,6 +136,7 @@ Option 2 不 foreclose Option 3（per-域 `{domain}-model` crate）。任一条�
 | 域 repo 签名实体 `pub` 但不可伪造 | **Hard（可见性 + 类型）** | 类型 `pub`、字段私有、构造器 `pub(crate)` funnel——外部无构造路径 |
 | dynosaur/trait-variant 收敛白名单（DIPORT-MACRO-CONFINE-01′） | **Medium（cargo-deny + xtask）** | `deny.toml` wrappers + `xtask EXTERNAL_CONFINEMENT_WRAPPERS`（白名单越层 + 正向覆盖 + 集合相等，红 case anti-vacuity） |
 | 域形 port dyn-compatible + 必填注入 | **Hard（编译器/类型）** | 非 dyn-safe → `Box<DynX>` 编不过；构造器必填位置参（继承 ADR-003 C1/C5，PORT-SHAPE smoke 机器锁） |
+| co-tx UoW：业务写 + outbox append 同一事务、不可拆解（OUTBOX-COTX-SESSION-01，§9 amendment #1192） | **Hard（类型层）+ Medium（adapter same-tx anti-vacuity）** | combined 方法 `persist_session_and_emit`——域无 tx 句柄、无半提交 API（Hard：split-tx 不可表达）；adapter 单事务接线（`run_in_transaction` + `append_outbox` `&mut PgConnection`-only）由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守（Medium） |
 
 无 Soft 新增 enforcement。
 
@@ -166,7 +167,31 @@ Option 2 不 foreclose Option 3（per-域 `{domain}-model` crate）。任一条�
 ### 8.2 后续 issue
 
 - **proactive AST lint（§2.1 盲区 Hard 化）**：完整「无域实体出现在 diport port 签名」未机器强制（现由 category line + 反证侧 Hard 兜底）。`dylint` 自写 lint 可把它升为主动 Medium——登记 GitHub issue 跟踪（不阻塞本 PR）。
-- **代表性 RoleRepo 的真实 repo 接缝（#1083 review Finding 8 defer）**：可读 accessor / 查询方法随 W 阶段行为单元补（tenant scope 已由 `TenantId` 签名参数承载；见 `ports.rs` RoleRepo 注释 + §8.1）——登记 backlog issue 跟踪。
+- **代表性 RoleRepo 的真实 repo 接缝**：可读 accessor / 查询方法随 W 阶段行为单元补（tenant scope 已由 `TenantId` 签名参数承载；见 `ports.rs` RoleRepo 注释 + §8.1）——RoleRepo 自身的 roles 表 + RBAC 持久化与 #1083 session 接缝**解耦**（#1083 session 维度已由 §9 交付），登记 backlog issue 跟踪。
+
+---
+
+## 9. Amendment（#1192）：L2 OutboxFact co-tx Unit-of-Work seam（#1083 session 接缝交付）
+
+**触发**：#1192（PR #219 codex F2 defer）落地 identity session 持久化（#1083 核心）+ OutboxFact L2 完整 co-tx 接缝。`SessionUnitOfWork`（`identity::ports`）是 Option 2 范式下**第一个真实写实**（非 `todo!()` 冻结）的域形 port——postgres `PgSessionUnitOfWork` 把 session 行与 `identity.session-created` outbox 行**同一本地事务**原子写入。
+
+### 9.1 是同一 Option 2 范式的细化，非新架构轴
+
+`SessionUnitOfWork` 与 `RoleRepo`（§3）同构：域形 port 定义于 `identity::ports`、`adapter→域` DIP 内向边、dynosaur Send 变体、`Box<DynX>` 必填注入。**唯一新增维度**是 port 形态——`RoleRepo` 是 `find/save` 普通仓储，`SessionUnitOfWork` 是 **combined-method Unit-of-Work**：单方法 `persist_session_and_emit(session, entry, envelope)` 把业务实体持久化 + outbox append 收进 adapter 独占的单事务。这是 §3 范式内的细化，不引入新归属轴。
+
+> 为何 combined 方法而非「`SessionRepo::save` + `OutboxEmitter::emit` 两调用」或 closure-UoW：拆两个 provider-agnostic 端口，域无法把二者绑同一事务（端口签名不容 `&mut PgConnection`，否则 `ports`→adapter 反向耦合）；closure-UoW 把事务句柄回传给域，重开 split-tx 洞且泄漏 provider 类型。combined 方法把事务边界完全收进 adapter。
+
+### 9.2 §8.1 同步点清单的实际执行（identity 非「首次」）
+
+identity 在 RoleRepo 落地时已完成 §8.1 步骤 2/4/5（dynosaur/trait-variant 白名单 + xtask confinement 已含 `identity`），故 `SessionUnitOfWork` **新增零** deny.toml/xtask confinement 改动。实际触动：步骤 3（`Session`/`SessionId` 升 `pub` + accessor 真升 `pub` 供 adapter 跨 crate 读，**首次真实行使**——RoleRepo accessor 仍 `pub(crate)` 因其 body 仍 `todo!()`）；步骤 6（postgres 已 dep identity；**新增 demo provider** `memory` → `identity` 边，`deny.toml` identity wrapper 加 `memory`）。
+
+### 9.3 威胁矩阵重评（ai-robust「ADR amendment 同步重评」强制）
+
+| 新威胁 | 缓解 / 评级 | 安全模型是否退化 |
+|--------|------------|------------------|
+| UoW impl 把业务写与 outbox append 拆进**不同事务**（两次 `run_in_transaction` / 各自 `begin`），defeat co-tx 原子性 | **INVARIANT OUTBOX-COTX-SESSION-01**：①域侧 **Hard**——combined 方法是唯一 session-写 API（无 `persist`/`emit` 分调），返回 `Result<(),E>` 不漏 tx 句柄，域无半开事务可拆；②adapter 侧 **Medium**——单事务接线（`run_in_transaction` 独占 begin/commit/rollback、`append_outbox` `&mut PgConnection`-only 复用 OUTBOX-ATOMIC-IDEM-01）由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守 | **否（不退化）**：§2.4 `adapter→域` 边 + §2.5 dynosaur 白名单对 `identity` 已覆盖；新增第二域形 port 不加新 crate-graph 风险，`memory`→`identity` 边经既有 LAYER-DEPS-06 反向②（真实 source edge）守。仅**扩展**威胁矩阵，不冲突既有结论 |
+
+`OUTBOX-COTX-SESSION-01` 是 `OUTBOX-ATOMIC-IDEM-01`（守裸 `append_outbox` 在事务内）的 **sibling**（守 session 行 + outbox 行 both-or-neither），非其重载；emit-only `PgEmitter` 与 co-tx `PgSessionUnitOfWork` 复用同一 `append_outbox` 接缝，两路并存（前者用于无 co-located 业务写的 OutboxFact 事件）。
 
 ## 对标证据（ref）
 

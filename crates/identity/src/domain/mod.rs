@@ -29,9 +29,13 @@
 mod abac;
 mod account;
 mod rbac;
+mod session;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
 pub use rbac::Role; // Role 是 pub（ports::RoleRepo 签名实体，跨 crate 命名）。
+// Session / SessionId 是 pub（ports::SessionUnitOfWork 签名实体，跨 crate 命名）；与 RoleId 不同，二者有
+// 生产消费方（application 构造 + postgres adapter 读取），非 ADR-004 C8 冻结期 dead，故不带 allow(dead_code)。
+pub use session::{Session, SessionId};
 // reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
 // 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
 #[allow(unused_imports)]

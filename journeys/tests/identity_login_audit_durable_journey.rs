@@ -10,8 +10,9 @@
 //! 拓扑：relay 用进程内 `MemBus` 作 in-test broker（per-broker amqp 隔离由 amqp adapter 集成测试覆盖；
 //! 本 journey 聚焦 producer durable 落库 + relay CAS + 消费侧 PgInbox 幂等的端到端贯通）。
 //!
-//! 无清表：每次登录 mint 新 session_id（= 唯一 EventId），outbox/inbox_dedup 以 event_id 为键，跨轮次不冲突；
-//! relay 仅中继本轮 event_id 的 entry（不碰他轮 pending 行），故消费侧只收本轮事件。
+//! 无清表：每次登录 mint **独立 EventId**（opaque UUID，非 session_id；payload.sessionId 仅用于关联本轮 entry），
+//! outbox/inbox_dedup 以 event_id 为键，跨轮次不冲突；relay 仅中继本轮 event_id 的 entry（不碰他轮 pending 行），
+//! 故消费侧只收本轮事件。
 
 #![cfg(feature = "integration")]
 
@@ -23,16 +24,17 @@ use audit::AuditDomain;
 use bootstrap::SubscriberHandler;
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
 use diport::{
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynOutboxEmitter,
-    DynPublisher, Message, MessageId, PublishRequest, Publisher, Subscriber, Topic,
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynPublisher,
+    Message, MessageId, PublishRequest, Publisher, Subscriber, Topic,
 };
 use eventexec::{ConsumerMeta, run_consumer};
 use futures::future::BoxFuture;
 use generated::event::identity_v1::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
+use identity::ports::DynSessionUnitOfWork;
 use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus};
-use postgres::{PgConfig, PgEmitter, PgOutbox, PgPassword, PgSslMode, PgStore};
+use postgres::{PgConfig, PgOutbox, PgPassword, PgSessionUnitOfWork, PgSslMode, PgStore};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -179,8 +181,9 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
     Ok(())
 }
 
-/// durable 端到端：login → PgEmitter → outbox(pending) → relay CAS → MemBus(message_id=EventId) →
-/// run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox Duplicate → audit 仍 1（acc #2）。
+/// durable 端到端：login → PgSessionUnitOfWork co-tx（session 行 + outbox(pending) 同事务）→ relay CAS →
+/// MemBus(message_id=EventId) → run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox
+/// Duplicate → audit 仍 1（acc #2）。session 行持久化/原子性由 postgres t11/t12 守（见上方 with_seed_user 注释）。
 ///
 /// F4：无 `#[ignore]`——`#![cfg(feature = "integration")]` 门控；postgres 经 `testkit::env_or_postgres()`
 /// self-provision（testcontainers，#1137；设 `PGHOST` 等则对接长存外部 pg）。需 docker（容器路径）。
@@ -215,9 +218,11 @@ async fn login_audit_durable_topology() -> Result<()> {
         consumer_handler(binding.handler),
     );
 
-    // 生产侧：login → PgEmitter durable 落 outbox；relay（MemBus 作 in-test broker）CAS 中继。
+    // 生产侧：login → PgSessionUnitOfWork **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
+    // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
+    // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
     let login = LoginService::with_seed_user(
-        DynOutboxEmitter::new_box(PgEmitter::new(&store)),
+        DynSessionUnitOfWork::new_box(PgSessionUnitOfWork::new(&store)),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         USERNAME,

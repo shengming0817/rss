@@ -22,6 +22,9 @@ vocab = { path = "../../crates/vocab" }
 futures = { workspace = true }
 # 订阅取消信号：tokio_util CancellationToken（与 diport::Subscriber::subscribe 签名同源）。
 tokio-util = { workspace = true }
+# 域形 co-tx 端口 `identity::ports::SessionUnitOfWork` 的 demo provider（MemSessionUnitOfWork，#1192）：
+# adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper 加 memory 放行）。
+identity = { path = "../../crates/identity" }
 
 [dev-dependencies]
 # 异步单测 runtime + StreamExt::next。

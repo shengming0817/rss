@@ -912,7 +912,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
 
     let event_id = unique_event_id("t10-emit");
     let entry = Entry::new(
-        Topic::parse("identity.session-created").unwrap(),
+        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
         br#"{"sessionId":"s"}"#.to_vec(),
     );
@@ -921,7 +921,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
             entry,
             OutboxEnvelopeParts {
                 domain: "identity".to_string(),
-                contract_id: "identity.session-created".to_string(),
+                contract_id: SESSION_CREATED_TOPIC.to_string(),
                 subject_id: "subj-opaque-77".to_string(),
             },
         )
@@ -935,7 +935,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     .await?;
     assert_eq!(row.0, event_id, "event_id = EventId");
     assert_eq!(row.1, "identity", "domain");
-    assert_eq!(row.2, "identity.session-created", "topic");
+    assert_eq!(row.2, SESSION_CREATED_TOPIC, "topic");
     assert_eq!(row.3, "pending", "新 entry pending 待 relay");
     // metadata 仅含 opaque subjectId、无 PII / 无 reserved key（FR-020 funnel）。
     assert!(
@@ -950,6 +950,250 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
             row.4
         );
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T11–T14: PgSessionUnitOfWork co-tx（session 持久化 + outbox append 同一事务，#1083/#1192）─────────
+//
+// OUTBOX-COTX-SESSION-01 anti-vacuity：t11 证真实 method commit 两行皆在（含 tenant-correct）、t13 证幂等
+// 重写各恰一行；负向 rollback 双覆盖——t12 在单事务内复刻 co-tx SQL 序列后强制 Err 证两写共回滚，**t14 驱动
+// 真实 `persist_session_and_emit` 的 rollback 分支**（to_timestamp 溢出使 session INSERT 失败）证两行皆无
+// （review #1192 F1：补 t12 仅复刻序列的盲区，直测真实 method 的错误→rollback 路径）。
+
+use std::time::{Duration, SystemTime};
+
+use diport::OutboxEnvelopeParts;
+use identity::ports::{SessionUnitOfWork, TenantId};
+
+/// co-tx 测试用 canonical 租户 UUID。
+const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+/// session-created 契约 topic / contract_id 局部单源（本文件内 topic parse / contract_id / 断言统一引用，
+/// 避免同义字面量重复——review #244 F4）。
+const SESSION_CREATED_TOPIC: &str = "identity.session-created";
+
+/// 构造 session-created Entry（topic/event_id/payload）。
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path——Topic/IdemKey parse 已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+fn session_entry(event_id: &str) -> Entry {
+    Entry::new(
+        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+        IdemKey::parse(event_id).unwrap(),
+        br#"{"sessionId":"s"}"#.to_vec(),
+    )
+}
+
+/// 构造 session-created envelope（opaque subject）。
+fn session_envelope() -> OutboxEnvelopeParts {
+    OutboxEnvelopeParts {
+        domain: "identity".to_string(),
+        contract_id: SESSION_CREATED_TOPIC.to_string(),
+        subject_id: "subj-opaque-cotx".to_string(),
+    }
+}
+
+/// t11：`persist_session_and_emit` commit → session 行 + outbox 行皆在，且 session tenant-correct。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t11_cotx_commits_session_and_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t11-sess");
+    let event_id = unique_event_id("t11-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
+
+    crate::PgSessionUnitOfWork::new(&store)
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+
+    // session 行：恰 1，subject / tenant_id（tenant-correct）正确。
+    let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(sess_cnt.0, 1, "session 行应写入");
+    let srow: (String, String) =
+        sqlx::query_as("SELECT subject, tenant_id::text FROM sessions WHERE session_id = $1")
+            .bind(&session_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(srow.0, "subj-opaque-cotx", "session subject");
+    assert_eq!(srow.1, COTX_TENANT_A, "session tenant_id（tenant-correct）");
+
+    // outbox 行：恰 1，pending。
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 1, "outbox 行应写入");
+    let status: (String,) = sqlx::query_as("SELECT status FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(status.0, "pending", "新 outbox entry pending 待 relay");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t12：co-tx 写序列在单事务内执行后强制 Err → session 行 + outbox 行**共**回滚（both-or-neither）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t12_cotx_rollback_leaves_neither() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t12-sess");
+    let event_id = unique_event_id("t12-evt");
+    let entry = session_entry(&event_id);
+    let env = OutboxEnvelope::new(
+        "identity".to_string(),
+        SESSION_CREATED_TOPIC.to_string(),
+        OutboxMetadata::new().with_subject_id("subj-12"),
+    );
+    let tenant = COTX_TENANT_A.to_string();
+    let sid = session_id.clone();
+
+    // 同 PgSessionUnitOfWork 写序列（SET LOCAL + INSERT session + append_outbox）在单事务内执行后强制 Err →
+    // run_in_transaction 回滚。证明两写**共**回滚（真实 method rollback 路径结构同源，见本节注释 + T10）。
+    let rolled = store
+        .run_in_transaction::<_, (), sqlx::Error>(move |c| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+                    .bind(&tenant)
+                    .execute(&mut *c)
+                    .await?;
+                sqlx::query(
+                    r#"INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at)
+                       VALUES ($1, $2, $3::uuid, to_timestamp($4), to_timestamp($5))
+                       ON CONFLICT (session_id) DO NOTHING"#,
+                )
+                .bind(&sid)
+                .bind("subj-12")
+                .bind(&tenant)
+                .bind(1_700_003_600_i64)
+                .bind(1_700_000_000_i64)
+                .execute(&mut *c)
+                .await?;
+                append_outbox(&mut *c, &entry, &env).await?;
+                // 模拟 commit 前任一步失败 → 整体回滚（both-or-neither）。
+                Err(sqlx::Error::RowNotFound)
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await;
+    assert!(rolled.is_err(), "事务应回滚");
+
+    let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        sess_cnt.0, 0,
+        "回滚后 session 行不应存在（co-tx both-or-neither）"
+    );
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        ob_cnt.0, 0,
+        "回滚后 outbox 行不应存在（co-tx both-or-neither）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t13：同 session + 同 event_id 调两次 → session / outbox 各恰 1 行（ON CONFLICT DO NOTHING 幂等）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t13_cotx_idempotent_reemit() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t13-sess");
+    let event_id = unique_event_id("t13-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let uow = crate::PgSessionUnitOfWork::new(&store);
+
+    for _ in 0..2 {
+        let session = identity::test_support::session(
+            &session_id,
+            "subj-opaque-cotx",
+            tenant,
+            expires,
+            created,
+        );
+        uow.persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+            .await?;
+    }
+
+    let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(sess_cnt.0, 1, "幂等：session 行恰 1");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 1, "幂等：outbox 行恰 1");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t14：驱动**真实** `persist_session_and_emit` 的 rollback 分支——session INSERT 因 `to_timestamp` 溢出失败
+/// → co-tx 整体回滚 → session/outbox 两行皆无（OUTBOX-COTX-SESSION-01 负向 anti-vacuity，直测真实 method；
+/// review #1192 F1：补 t12 仅复刻 SQL 序列的盲区）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t14-sess");
+    let event_id = unique_event_id("t14-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    // expires_at 远超 Postgres timestamptz 上界（年 ~294277）：`to_timestamp(1e13 秒 ≈ 年 ~318850)` 溢出报错
+    // → session INSERT 失败，驱动真实 `PgSessionUnitOfWork` 的 `write_session_and_outbox`→Err→rollback 分支。
+    let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000_000);
+    let session =
+        identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
+
+    let result = crate::PgSessionUnitOfWork::new(&store)
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await;
+    assert!(
+        result.is_err(),
+        "session INSERT 溢出应使真实 co-tx method 返 Err"
+    );
+
+    // 真实 method rollback → 两行皆无（both-or-neither）。
+    let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(sess_cnt.0, 0, "真实 method 回滚后 session 行不应存在");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 0, "真实 method 回滚后 outbox 行不应存在");
 
     store.shutdown().await?;
     Ok(())

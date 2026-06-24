@@ -27,6 +27,7 @@ use diport::{
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
+use identity::ports::{Session, SessionUnitOfWork};
 use tokio_util::sync::CancellationToken;
 
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
@@ -157,6 +158,53 @@ impl OutboxEmitter for MemEmitter {
     ) -> Result<(), OutboxEmitError> {
         // reason: in-mem 替身无持久化载体，envelope（domain/contract_id/subject_id）无落库处——
         // 消费侧从 payload 解码 subject/tenant，故 demo 路径忽略 envelope（durable PgEmitter 才落 metadata）。
+        let request = PublishRequest {
+            topic: Topic::new(entry.topic().as_str()),
+            event_id: MessageId::new(entry.idem_key().as_str()),
+            payload: entry.payload().to_vec(),
+        };
+        self.bus
+            .publisher()
+            .publish(request)
+            .await
+            .map_err(OutboxEmitError::new)
+    }
+}
+
+// ── MemSessionUnitOfWork：in-mem 会话 co-tx 替身（demo 拓扑）────────────────────
+
+/// in-mem 会话 co-tx Unit-of-Work（impl [`identity::ports::SessionUnitOfWork`]）：把 [`Entry`] fan-out 到
+/// [`MemBus`]——demo / 单进程 / 测试用；生产走 postgres `PgSessionUnitOfWork`（单事务 session + outbox co-tx）。
+///
+/// # WARNING / DEMO-ONLY
+///
+/// **不持久化 session**（同 [`MemEmitter`] 的 demo 哲学）：in-mem 单进程无 durable 会话存储——**登录后 session
+/// 不可被后续鉴权 / 登出查回**（与 postgres 路径产品行为不同）。demo 验证的只是**接缝路由**（登录 → UoW →
+/// 事件流到 audit）。需验「session 可读」的验收**勿用本替身**——走 postgres 路径或在 journey 内自存。
+///
+/// session 持久化与 co-tx 原子性（both-or-neither）由 postgres `PgSessionUnitOfWork`（INVARIANT
+/// OUTBOX-COTX-SESSION-01）+ 集成测试守。envelope 同 `MemEmitter` 忽略（消费侧从 payload 解码）。
+pub struct MemSessionUnitOfWork {
+    bus: MemBus,
+}
+
+impl MemSessionUnitOfWork {
+    /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）。
+    pub fn new(bus: MemBus) -> Self {
+        Self { bus }
+    }
+}
+
+impl SessionUnitOfWork for MemSessionUnitOfWork {
+    async fn persist_session_and_emit(
+        &self,
+        _session: Session,
+        entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError> {
+        // reason: in-mem 替身不持久化 session（demo 无 durable 存储，同 MemEmitter；真实 co-tx 持久化语义由
+        // PgSessionUnitOfWork 的 OUTBOX-COTX-SESSION-01 守）；只复用 MemPublisher 路径把 entry fan 到总线
+        // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
         let request = PublishRequest {
             topic: Topic::new(entry.topic().as_str()),
             event_id: MessageId::new(entry.idem_key().as_str()),

@@ -10,11 +10,12 @@
 //! `OutboxEmitter` 是 producer 把业务事件**持久化进 durable outbox**（含幂等锚点 EventId）的端口——
 //! 二者语义正交，故为不同 port（不复用 `Publisher` 的 fire-and-forget 语义）。
 //!
-//! **单事实 emit 语义**：本 port 保证一条 [`Entry`] 的 durable 落库原子性（单 outbox 写自成事务）。
-//! 对于 #1100，outbox 写是唯一的 durable 写，故单写即满足 OutboxFact。与业务写同事务的 **co-tx 原子性**
-//! （FR-003 完整 L2，如 session 持久化与 outbox append 同一 `PgTransaction`）属 #1083——届时业务写经
-//! 各域 repo + unit-of-work 接缝与 append 同事务；本 port 的单事实 emit 语义不变。
-//! `consistencyLevel=OutboxFact` 的 co-tx-with-business-write 维度为已跟踪缺口（#1083）。
+//! **单事实 emit 语义**：本 port 保证一条 [`Entry`] 的 durable 落库原子性（单 outbox 写自成事务）——
+//! 用于**无 co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写同事务的 **co-tx 原子性**（FR-003
+//! 完整 L2，如 session 持久化与 outbox append 同一 `PgTransaction`）**已交付**（#1083/#1192）：经各域**域形
+//! Unit-of-Work 端口**（如 `identity::ports::SessionUnitOfWork`，combined 方法把业务写 + `append_outbox`
+//! 收进同一事务）承载，与本 emit-only port 语义正交（二者并存：emit-only 路由纯事件、UoW 路由 co-tx）。
+//! 本 port 的单事实 emit 语义不变。
 //!
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 //! ref: eventuate-tram-core io.eventuate.tram.consumer.common.DuplicateMessageDetector@master

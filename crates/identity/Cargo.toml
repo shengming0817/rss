@@ -12,6 +12,10 @@ workspace = true
 # 生产组合根不启用即不编译，防 W 误用明文凭据路径（RW-G1 PR #186 F1，machine boundary）。
 [features]
 seed-login = []
+# test-support：暴露 `test_support::session` 供**下游 adapter crate**（如 postgres）集成测试构造
+# `ports::Session`（funnel `Session::new` 为 pub(crate)，生产不可伪造）。生产构建不启用即不编译——funnel
+# seal 不变。与 authn / runctx 的 `test-support` 同信任模型。
+test-support = []
 
 [dependencies]
 vocab = { path = "../vocab" }
