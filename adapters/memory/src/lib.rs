@@ -20,9 +20,10 @@ use std::time::{Duration, SystemTime};
 use consistency::{ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, SeenState};
 
 use diport::{
-    AuditEvent, AuditSink, AuditSinkError, Clock, Message, MessageId, MessageStream,
-    OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher, PublisherError,
-    Subscriber, SubscriberError, Topic,
+    AuditEvent, AuditSink, AuditSinkError, Clock, FencedWriteKey, FencedWriteRequest, FencedWriter,
+    FencedWriterError, LeaderElector, LeaderElectorError, LeaderId, LeaseToken, Message, MessageId,
+    MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher,
+    PublisherError, Subscriber, SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -305,6 +306,133 @@ impl IdempotencyStore for InMemClaimer {
     }
 }
 
+// ── MemLeaseStore / MemLeaderElector：进程内 leader 选举替身（reconcile harness 测试 / demo）──────────
+
+/// 共享 lease 底座：多个 [`MemLeaderElector`]（模拟多副本）克隆共享同一底座竞争 leadership。
+///
+/// 确定性、无时钟（不触 clippy disallowed-methods）：lease TTL 过期 / holder crash 由测试显式
+/// [`MemLeaseStore::evict`] 模拟；生产替身走真实 redis/pg leader-elect adapter。
+#[derive(Default)]
+struct LeaseInner {
+    /// 当前持有者 + 其任期 epoch；`None` = 无人持有（可被首个 acquire 接管）。
+    holder: Option<(LeaderId, vocab::Epoch)>,
+    /// 下一个**全新**任期 epoch（每次易手 / 首次获得单调 `+1`；同一持有者续租不动）。
+    next_epoch: u64,
+}
+
+/// in-mem leader 选举底座（克隆共享同一底座）。经 [`MemLeaseStore::elector`] 取每个副本的端口。
+#[derive(Clone, Default)]
+pub struct MemLeaseStore {
+    inner: Arc<Mutex<LeaseInner>>,
+}
+
+impl MemLeaseStore {
+    /// 新建空底座（无人持有 leadership，next_epoch 从 0 起）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取一个副本的 [`MemLeaderElector`]（`id` = 该副本 holder identity，须经 `LeaderId::parse` canonical 校验）。
+    pub fn elector(&self, id: LeaderId) -> MemLeaderElector {
+        MemLeaderElector {
+            store: self.clone(),
+            id,
+        }
+    }
+
+    /// 测试钩子：模拟 lease TTL 过期 / holder crash——清当前持有者，使他副本下次 `acquire` 可接管
+    /// （接管获**新**任期 epoch，单调递增）。不重置 `next_epoch`（保跨任期单调）。
+    pub fn evict(&self) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).holder = None;
+    }
+}
+
+/// 单副本 in-mem leader 选举端口（impl [`diport::LeaderElector`]）。
+pub struct MemLeaderElector {
+    store: MemLeaseStore,
+    id: LeaderId,
+}
+
+impl LeaderElector for MemLeaderElector {
+    async fn acquire(&self, _lease: Duration) -> Result<Option<LeaseToken>, LeaderElectorError> {
+        // reason: in-mem 无 TTL，`lease` 时长被忽略（过期由测试 evict 模拟）；锁内同步无 await。
+        let mut g = self.store.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match &g.holder {
+            // 无人持有 → 接管全新任期（epoch 单调 +1）。
+            None => {
+                let epoch = vocab::Epoch::new(g.next_epoch);
+                g.next_epoch = g.next_epoch.saturating_add(1);
+                g.holder = Some((self.id.clone(), epoch));
+                Ok(Some(LeaseToken {
+                    holder: self.id.clone(),
+                    epoch,
+                }))
+            }
+            // 本副本续租 → 同任期 epoch 不变。
+            Some((holder, epoch)) if *holder == self.id => Ok(Some(LeaseToken {
+                holder: holder.clone(),
+                epoch: *epoch,
+            })),
+            // 他副本持有 → 本副本非 leader。
+            Some(_) => Ok(None),
+        }
+    }
+
+    async fn release(&self, token: LeaseToken) -> Result<(), LeaderElectorError> {
+        let mut g = self.store.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // 仅当 token 是**当前任期**持有者时让出：holder + epoch **双校验**（已易手或旧任期 stale token
+        // 则幂等 no-op）。仅校验 holder 不够——同 holder 重启后持旧 epoch token 会误让出自己续租后的新任期。
+        if matches!(&g.holder, Some((holder, epoch)) if *holder == token.holder && *epoch == token.epoch)
+        {
+            g.holder = None;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), LeaderElectorError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
+// ── MemFencedWriter：进程内防护写替身（单调 epoch CAS）─────────────────────────────────────────────
+
+/// in-mem 防护写端口（impl [`diport::FencedWriter`]）：**按 `key` 各自**记已接受 epoch 高水位，
+/// `epoch < 该 key 高水位` 的写被 [`WriteOutcome::Fenced`]（旧 leader 跨任期 stale 写被挡）；`epoch ≥` 提交并
+/// 推进该 key 高水位（**同任期多写 / 不同 key 互不 fence**，幂等由消费方负责）。
+///
+/// 仅校验 fencing CAS 语义，不持久化 `data`。INVARIANT: RECONCILE-FENCE-MONO-01（per-key 单调，回归见本 crate 单测）。
+#[derive(Clone, Default)]
+pub struct MemFencedWriter {
+    high_water: Arc<Mutex<HashMap<FencedWriteKey, vocab::Epoch>>>,
+}
+
+impl MemFencedWriter {
+    /// 新建空 writer（各 key 高水位未设，每个 key 首写恒提交）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FencedWriter for MemFencedWriter {
+    async fn write(&self, request: FencedWriteRequest) -> Result<WriteOutcome, FencedWriterError> {
+        let mut hw = self.high_water.lock().unwrap_or_else(|e| e.into_inner());
+        // per-key 单调：该 key 首写（absent）或 epoch ≥ 该 key 高水位 → 提交并推进；否则 fence（跨任期 stale）。
+        match hw.get(&request.key) {
+            Some(&seen) if request.epoch < seen => Ok(WriteOutcome::Fenced),
+            _ => {
+                hw.insert(request.key, request.epoch);
+                Ok(WriteOutcome::Committed)
+            }
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), FencedWriterError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +652,180 @@ mod tests {
             SeenState::Fresh,
             "group-b 独立首见应为 Fresh（组隔离）"
         );
+    }
+
+    // ── MemLeaderElector：leader 互斥 + 接管 epoch 单调 ───────────────────────
+
+    #[allow(clippy::expect_used)]
+    // reason: 测试用 canonical literal 构造 LeaderId，item-level carve-out（error-handling.md §Carve-out）。
+    fn lid(s: &str) -> LeaderId {
+        LeaderId::parse(s).expect("canonical leader id")
+    }
+
+    /// 2 副本共享同一底座并发争夺：仅一成功（Some），他者 None。
+    ///
+    /// 注：`MemLeaseStore` 内部同步 `Mutex`，顺序 `acquire`（无 await 间隙）等价于并发争夺；
+    /// 异步后端（redis/pg）需重写为 `tokio::join!` 并发变体以捕获真实竞态。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn two_replicas_only_one_acquires() {
+        let store = MemLeaseStore::new();
+        let a = store.elector(lid("pod-a"));
+        let b = store.elector(lid("pod-b"));
+
+        let a_lease = a.acquire(Duration::from_secs(30)).await.expect("a acquire");
+        let b_lease = b.acquire(Duration::from_secs(30)).await.expect("b acquire");
+
+        assert!(a_lease.is_some(), "pod-a 应当选");
+        assert!(b_lease.is_none(), "pod-b 应非 leader（已被 pod-a 持有）");
+        // 首任期 epoch 从 0 起（next_epoch 从 0），固定绝对起始值（非仅相对单调序）。
+        assert_eq!(
+            a_lease.as_ref().map(|t| t.epoch),
+            Some(vocab::Epoch::new(0)),
+            "首次当选 epoch 应为 0"
+        );
+
+        // 持有者续租：同任期 epoch 不变。
+        let a_renew = a.acquire(Duration::from_secs(30)).await.expect("a renew");
+        assert_eq!(
+            a_renew.map(|t| t.epoch),
+            a_lease.map(|t| t.epoch),
+            "续租 epoch 不变（同任期）"
+        );
+    }
+
+    /// holder release → 他副本接管，接管任期 epoch 单调递增（旧任期 < 新任期）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn release_then_takeover_bumps_epoch() {
+        let store = MemLeaseStore::new();
+        let a = store.elector(lid("pod-a"));
+        let b = store.elector(lid("pod-b"));
+
+        let a_lease = a
+            .acquire(Duration::from_secs(30))
+            .await
+            .expect("a acquire")
+            .expect("a is leader");
+        let e0 = a_lease.epoch;
+        assert_eq!(
+            e0,
+            vocab::Epoch::new(0),
+            "首任期 epoch 应为 0（next_epoch 从 0 起）"
+        );
+        a.release(a_lease).await.expect("a release");
+
+        let b_lease = b
+            .acquire(Duration::from_secs(30))
+            .await
+            .expect("b acquire")
+            .expect("b takes over");
+        assert!(
+            b_lease.epoch > e0,
+            "接管任期 epoch 应单调递增：{:?} !> {e0:?}",
+            b_lease.epoch
+        );
+        assert_eq!(b_lease.holder.as_str(), "pod-b");
+    }
+
+    /// evict（模拟 TTL 过期 / crash）→ 他副本接管，epoch 同样单调递增。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn evict_lets_other_replica_take_over() {
+        let store = MemLeaseStore::new();
+        let a = store.elector(lid("pod-a"));
+        let b = store.elector(lid("pod-b"));
+
+        let a_lease = a
+            .acquire(Duration::from_secs(30))
+            .await
+            .expect("a acquire")
+            .expect("a is leader");
+        // evict 前 b 抢不到。
+        assert!(
+            b.acquire(Duration::from_secs(30))
+                .await
+                .expect("b1")
+                .is_none()
+        );
+
+        store.evict(); // 模拟 a 的 lease 过期 / a crash
+
+        let b_lease = b
+            .acquire(Duration::from_secs(30))
+            .await
+            .expect("b acquire")
+            .expect("b takes over after evict");
+        assert!(b_lease.epoch > a_lease.epoch, "evict 接管 epoch 应递增");
+    }
+
+    // ── MemFencedWriter：per-key 单调 CAS（跨任期 stale 拒、同任期多写受）INVARIANT RECONCILE-FENCE-MONO-01 ──
+
+    /// per-key 单调：同 key 跨任期 stale（epoch< 高水位）被 fence；同/新 epoch 受（同任期多写合法）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn fenced_write_per_key_stale_rejected_same_or_new_accepted() {
+        let writer = MemFencedWriter::new();
+        let req = |k: &str, e: u64| FencedWriteRequest {
+            key: FencedWriteKey::new(k),
+            epoch: vocab::Epoch::new(e),
+            data: b"state".to_vec(),
+        };
+
+        // key A 首写（高水位未设）→ 提交，高水位=2。
+        assert_eq!(
+            writer.write(req("A", 2)).await.expect("a-w2"),
+            WriteOutcome::Committed
+        );
+        // 同任期多写（同 epoch=2）→ 放行（同任期合法，幂等交消费方；anti-vacuity 见下旧 epoch fence）。
+        assert_eq!(
+            writer.write(req("A", 2)).await.expect("a-w2-again"),
+            WriteOutcome::Committed,
+            "同任期同 epoch 多写应放行"
+        );
+        // 旧 epoch=1 < 高水位 2 → fence（跨任期 stale，旧 leader 写被挡）。
+        assert_eq!(
+            writer.write(req("A", 1)).await.expect("a-w1"),
+            WriteOutcome::Fenced,
+            "跨任期 stale 写应被 fence"
+        );
+        // 新 epoch=3 → 提交，推进高水位。
+        assert_eq!(
+            writer.write(req("A", 3)).await.expect("a-w3"),
+            WriteOutcome::Committed
+        );
+    }
+
+    /// per-key 隔离：不同 key 各自高水位，key A 推进不 fence key B 的同/低 epoch 写。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn fenced_write_keys_are_isolated() {
+        let writer = MemFencedWriter::new();
+        let req = |k: &str, e: u64| FencedWriteRequest {
+            key: FencedWriteKey::new(k),
+            epoch: vocab::Epoch::new(e),
+            data: b"x".to_vec(),
+        };
+        // key A 推到 epoch 5。
+        assert_eq!(
+            writer.write(req("A", 5)).await.expect("a5"),
+            WriteOutcome::Committed
+        );
+        // key B 首写 epoch 1 不受 A 高水位影响 → 提交（per-key 隔离，非全局）。
+        assert_eq!(
+            writer.write(req("B", 1)).await.expect("b1"),
+            WriteOutcome::Committed,
+            "不同 key 应各自高水位、互不 fence"
+        );
+    }
+
+    /// PhantomData freeze：MemLeaderElector / MemFencedWriter 冻结 impl diport 端口（anti-vacuity）。
+    #[test]
+    fn fakes_impl_reconcile_ports() {
+        use core::marker::PhantomData;
+        fn assert_leader_elector<T: LeaderElector>(_: PhantomData<T>) {}
+        fn assert_fenced_writer<T: FencedWriter>(_: PhantomData<T>) {}
+        assert_leader_elector(PhantomData::<MemLeaderElector>);
+        assert_fenced_writer(PhantomData::<MemFencedWriter>);
     }
 }

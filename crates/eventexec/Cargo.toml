@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 # Subscriber DI port + Message 原语迁 diport（#1075）；本 crate 消费 diport::Message（HandlerFn/ConsumerFn 入参）。
 diport = { path = "../diport" }
+# reconcile harness 经 vocab::Epoch 传递 lease epoch（Context::epoch / LeaseToken.epoch 同源，#1123）。
+vocab = { path = "../vocab" }
 futures = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
@@ -30,3 +32,5 @@ tokio-util = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 # TC5 T007.5 tracing 字段断言：捕获 error 级事件字段名/值（CapLayer subscriber）。
 tracing-subscriber = { workspace = true }
+# RECONCILE-TENANCY-REQ-01（Hard）回归：Builder::new 缺 tenancy/trigger 位置参 → 编译错（compile_fail ui）。
+trybuild = { workspace = true }

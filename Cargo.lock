@@ -1415,7 +1415,9 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
  "uuid",
+ "vocab",
 ]
 
 [[package]]

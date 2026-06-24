@@ -1,8 +1,10 @@
 # Reconcile 控制环规则
 
-本文件只保留当前行为约束。完整 invariant 清单、符号、盲区写在
-`crates/consistency/src/reconcile/mod.rs` 模块级 rustdoc §Enforced invariants、
-对应 `RECONCILE-*` 守卫（类型系统 / clippy lint / `#[test]` 纵深，见 §参考）和 reconcile ADR 中。
+本文件只保留当前行为约束。完整 invariant 清单、符号、盲区写在各守卫处：`Reconciler` 策略 trait 冻结在
+`crates/consistency/src/reconcile.rs`；harness invariant（RECONCILE-TENANCY-REQ-01）在
+`crates/eventexec/src/reconcile.rs` 模块级 rustdoc §Enforced invariants；fencing invariant
+（RECONCILE-FENCE-MONO-01）在 `crates/diport/src/fenced_writer.rs`——对应 `RECONCILE-*` 守卫（类型系统 /
+clippy/dylint lint / `#[test]` 纵深，见 §参考）和 reconcile ADR 中。
 
 ## 适用范围
 
@@ -25,22 +27,35 @@ harness）。三者正交，边界见下。
 
 ## Builder 强制
 
-`reconcile::Builder::new(r, tenancy).with_*().build()` 是**唯一**公开构造入口；Loop config 字段全部
-`pub(crate)` / 私有，`build()` 强制要求一个 Trigger。消费方禁止裸构造 Loop，禁止旁路 Builder 注入调度逻辑。
+`reconcile::Builder::new(r, tenancy, trigger).with_*().build()` 是**唯一**公开构造入口（`ReconcileLoop`
+无公开构造器、Loop config 字段全部 `pub(crate)` / 私有，`build()` infallible）。消费方禁止裸构造 Loop，
+禁止旁路 Builder 注入调度逻辑。
 
-`Builder::new` 第二参 `tenancy` 是必填 sealed `Tenancy`（`Tenancy::single_tenant()` / `Tenancy::tenant_scoped()`，
-仿 `Clock` 位置参约定，非可漏链的 `with_*`）：reconciler 在 tenantless system 身份下发射命令（Claimer key 落
-`_notenant`），故必须显式声明该命名空间是否正确。漏声明=编译错（构造器必填参数）；TenantScoped
-reconciler 须自行在 command-id 编码 tenant 维度（框架不验证 body，残留盲区）。由 builder fail-fast + 类型系统（Hard）强制：构造器必填 sealed 参数使漏传无法编译。
+`Builder::new` 第二、三参 `tenancy` / `trigger` 是必填位置参（非可漏链的 `with_*`），漏传即编译错（E0061）——
+`tenancy` 是 sealed `Tenancy`（`Tenancy::single_tenant()` / `Tenancy::tenant_scoped()`，仿 `Clock` 位置参约定）：
+reconciler 在 tenantless system 身份下发射命令（Claimer key 落 `_notenant`），故必须显式声明该命名空间是否正确；
+`trigger` 是 `Trigger`（当前仅 `Trigger::interval(period)`，事件驱动 targeted dispatch 后续兑现）：原「`build()` 强制
+一个 Trigger」（运行期 fail-fast）已上移到类型系统（ai-robust：能编译期强制不退化运行期）。TenantScoped reconciler
+须自行在 command-id 编码 tenant 维度（框架不验证 body，残留盲区）。由类型系统（Hard，构造器必填位置参）强制：
+INVARIANT RECONCILE-TENANCY-REQ-01，回归见 `crates/eventexec/tests/ui/reconcile_missing_{tenancy,trigger}_fail.rs`
+（trybuild compile_fail）。
 
 ## Leader-elect
 
-- `None` `LeaderElector`（`Option<...>`）= 单进程模式（always leader，Epoch 0，无 fencing）。
-- wire 后整环 leader-gated：仅 lease holder dispatch；丢 lease 取消 lease-scoped `CancellationToken` 中断在途 reconcile。
-- **leader ≠ fencing**：跨副本正确性靠单调 `LeaseToken.epoch` 注入 `FencedWriter`（写路径 CAS）+
-  消费方幂等，绝不靠 lease 本身。
-- `LeaderElector` trait 实现只允许在 `adapters/{redis,postgres}`（裸后端名，无前缀）+
-  `reconciletest` fake；adapter 选型 Redis vs PG 按部署形态决定。
+- 单进程 / 多副本是**运行期形态**，经 `ReconcileLoop::run` / `ReconcileLoop::run_with_leader(Arc<L>, ..)`
+  二选一表达（typed function choice，非 builder `with_leader`）。`run` = 单进程（always leader、
+  `Context::epoch()` 为 `None`、无 fencing）。
+- `run_with_leader` 整环 leader-gated：仅 lease holder dispatch；丢 lease ⇒ `select!` 丢弃在途 dispatch future
+  （取消在途 reconcile），回外环重选举（接管任期 epoch 单调递增）。dispatch 与 cancel **同层** select，
+  root / lease-scoped 取消均可中断在途 reconcile。
+- **leader ≠ fencing**：跨副本正确性靠**单调任期 epoch**（harness 经 `Context::for_harness(epoch)` 注入
+  reconciler）传给 `FencedWriter`（写路径 **per-key** CAS：按被保护资源 `FencedWriteKey` 各自高水位，拒
+  `epoch < 该 key 高水位` 的跨任期 stale 写；**同任期多写 / 不同 key 放行**，幂等由消费方负责）+ 消费方幂等，
+  绝不靠 lease 本身。leader 走泛型静态分发 `Arc<L>`（非 `Box<DynLeaderElector>`：dyn 变体 Send 非 Sync，
+  spawn 的 Send future 跨 await 持有不成立，diport DIPORT-ASYNC-ARC-SEND-01）。
+- `LeaderElector` / `FencedWriter` trait 实现只允许在 `adapters/{redis,postgres}`（裸后端名，无前缀，真后端）+
+  `adapters/memory` in-mem fake（`MemLeaderElector` / `MemFencedWriter`，确定性单测 / demo 替身）；adapter 选型
+  Redis vs PG 按部署形态决定。
 
 ## 与 saga / projection 边界
 
@@ -52,7 +67,9 @@ L3 最终一致可用 projection / saga；reconcile 用于 L4 跨不可靠边界
 
 ## 参考
 
-- 权威 rustdoc：`crates/consistency/src/reconcile/mod.rs` 模块级文档 §Enforced invariants
-- Invariants：`RECONCILE-*` 族完整清单、符号与盲区以对应守卫（类型系统 / clippy lint / `#[test]`·
-  `rstest` 纵深，可执行真源）与 `crates/consistency/src/reconcile/mod.rs` §Enforced invariants 为准；
-  规则文件不另维护清单。能编译期强制的不退化成运行期测试。
+- 权威 rustdoc：策略 trait `crates/consistency/src/reconcile.rs`；harness `crates/eventexec/src/reconcile.rs`
+  模块级文档 §Enforced invariants；fencing `crates/diport/src/fenced_writer.rs`。
+- Invariants：`RECONCILE-*` 族完整清单、符号与盲区以对应守卫（类型系统 / clippy·dylint lint / `#[test]`·
+  `rstest` 纵深，可执行真源）为准——`RECONCILE-TENANCY-REQ-01` 在 `eventexec::reconcile`（Builder + trybuild）、
+  `RECONCILE-FENCE-MONO-01` 在 `diport::fenced_writer` + `adapters/memory` 测试；规则文件不另维护清单。
+  能编译期强制的不退化成运行期测试。

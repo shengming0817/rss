@@ -46,15 +46,40 @@ impl EntityId {
     }
 }
 
-/// reconcile 运行上下文（Loop harness 提供；opaque sealed——私有字段，消费域 crate 不能伪造）。
+/// reconcile 运行上下文（Loop harness 提供，经 [`Context::for_harness`] 构造）。
 ///
-/// 承载取消信号 / lease epoch / 租户命名空间句柄等运行期接缝（行为 PR 兑现字段）。
-/// reason: reconciler 在 system 身份下跑，ctx 由 harness 注入而非业务构造（reconcile.md §Builder 强制）。
-#[derive(Debug)]
+/// 兑现 lease epoch 接缝（#1123 行为 PR）：harness 取得 leadership 后把当前单调 [`vocab::Epoch`] 注入 ctx，
+/// reconciler 经 [`Context::epoch`] 读出、传给自己的 `FencedWriter` 做写路径 CAS（跨副本 fencing）。
+/// `None` = 单进程 / 无 `LeaderElector` 模式（reconcile.md：always leader、无 fencing）。
+///
+/// **不是安全封闭面**：私有字段仅为让构造收口到 `for_harness`（字段类型可演进），**不**阻止域 crate 经
+/// `for_harness` 构造任意 epoch 的 ctx。即便域 crate 误传错误 epoch，**fencing 正确性仍由
+/// `diport::FencedWriter` 的单调 CAS 守住（RECONCILE-FENCE-MONO-01）**——ctx 只是 epoch 传递接缝，承重守卫
+/// 在写路径，不在此处。
+///
+/// **取消语义（消费者须知）**：harness 经 `tokio::select!` 驱动 dispatch；丢 lease / shutdown 时
+/// reconcile future 会在**任意 await 点被 drop**（协作取消）。reconciler 须保证写经 `FencedWriter` CAS、
+/// 不依赖跨 cancel/panic 的中间可变共享态。
+///
+/// reason: reconciler 在 tenantless system 身份下跑，ctx 由 harness 注入而非业务构造（reconcile.md §Builder 强制）。
+#[derive(Debug, Clone)]
 pub struct Context {
-    #[allow(dead_code)]
-    // reason: 冻结期 opaque sealed 字段，harness 注入，行为 PR 兑现访问器实现后移除。
-    _sealed: (),
+    epoch: Option<vocab::Epoch>,
+}
+
+impl Context {
+    /// harness 注入构造：传入当前 lease [`vocab::Epoch`]（`None` = 无 leader / 单进程）。
+    ///
+    /// 命名 `for_harness` 标注调用方应是 Loop harness（reconcile.md §Builder 强制：ctx 非业务构造）；
+    /// 非安全封闭（见类型 rustdoc），fencing 承重在 `FencedWriter` CAS。
+    pub fn for_harness(epoch: Option<vocab::Epoch>) -> Self {
+        Self { epoch }
+    }
+
+    /// 当前 lease epoch；`None` ⇒ 单进程 / 无 fencing（reconcile.md §Leader-elect）。
+    pub fn epoch(&self) -> Option<vocab::Epoch> {
+        self.epoch
+    }
 }
 
 /// reconcile 请求（私有字段；`default()`（`None` entity）= resync pulse「re-observe 全部」，level-triggered）。
@@ -120,6 +145,10 @@ impl ReconcileError {
     }
 
     /// 是否不可重试（permanent 分类；不触发自动放弃，reconcile.md）。
+    ///
+    /// **消费者须知**：`permanent` ≠「该实体永不再被处理」。harness 据此**不做退避重投**（区别于 transient），
+    /// 但**下个 resync pulse 仍会重驱动该实体**（level-triggered）。若需真正抑制重驱动，域 reconciler 须在
+    /// 自身持久层记录终态、在 `reconcile()` 内对终态实体早返回 `Outcome::settled()`。
     pub fn is_permanent(&self) -> bool {
         self.kind == crate::error::EngineErrorKind::Permanent
     }
@@ -146,8 +175,21 @@ pub trait Reconciler {
 mod tests {
     use std::time::Duration;
 
-    use super::{EntityId, EntityIdError, Outcome, ReconcileError, Request};
+    use super::{Context, EntityId, EntityIdError, Outcome, ReconcileError, Request};
     use crate::error::EngineErrorKind;
+
+    // Context::for_harness 注入 epoch、epoch() 读出往返；None = 无 leader / 单进程。
+    #[test]
+    fn context_for_harness_epoch_round_trips() {
+        // 有 leader：注入的 epoch 原样读出。
+        let ctx = Context::for_harness(Some(vocab::Epoch::new(7)));
+        assert_eq!(ctx.epoch(), Some(vocab::Epoch::new(7)));
+        // 无 leader / 单进程：None（reconcile.md：always leader、无 fencing）。
+        let none_ctx = Context::for_harness(None);
+        assert_eq!(none_ctx.epoch(), None);
+        // Clone 保留 epoch。
+        assert_eq!(ctx.clone().epoch(), ctx.epoch());
+    }
 
     // EntityId 接受非空 canonical key（uuid / 路径形 `tenant/cert` 等 opaque 形态；内部空格仍 opaque）+ as_str 往返。
     #[test]

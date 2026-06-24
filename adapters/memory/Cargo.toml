@@ -14,6 +14,9 @@ workspace = true
 [dependencies]
 consistency = { path = "../../crates/consistency" }
 diport = { path = "../../crates/diport" }
+# MemLeaderElector/MemFencedWriter 的 LeaseToken.epoch / FencedWriteRequest.epoch（单调 fencing token）。
+# 单测亦构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
+vocab = { path = "../../crates/vocab" }
 # 事件总线 fan-out + 订阅流：futures channel（receiver 即 Stream）+ take_until 取消。
 # ref: watermill pubsub/gochannel/pubsub.go@master（in-mem pub/sub 缓冲 channel）
 futures = { workspace = true }
@@ -21,8 +24,6 @@ futures = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-# 单测构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
-vocab = { path = "../../crates/vocab" }
 # 异步单测 runtime + StreamExt::next。
 tokio = { workspace = true }
 futures = { workspace = true }

@@ -1,7 +1,9 @@
-//! vocab — RSS 跨域错误词汇 / 契约归属 / 基础授权·租户·查询词汇的单源（基础层，仅 std+外部 crate）。
+//! vocab — RSS 跨域错误词汇 / 契约归属 / 基础授权·租户·查询词汇 / 分布式协调原语（[`Epoch`] fencing token）
+//! 的单源（基础层，仅 std+外部 crate）。
 
 pub mod authz;
 pub mod contract;
+pub mod epoch;
 pub mod error;
 pub mod query;
 pub mod tenant;
@@ -20,6 +22,7 @@ pub(crate) fn is_crate_name(s: &str) -> bool {
 
 pub use authz::{Action, ActionError, Decision};
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
+pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use query::{Cursor, CursorError, Limit, LimitError};
 pub use tenant::{

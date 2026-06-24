@@ -76,6 +76,8 @@
 pub mod audit_sink;
 pub mod clock;
 pub mod dead_letter_store;
+pub mod fenced_writer;
+pub mod leader_elector;
 pub mod managed_resource;
 pub mod metrics_exporter;
 pub mod object_store;
@@ -94,6 +96,13 @@ pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAud
 pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+};
+pub use fenced_writer::{
+    DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
+    WriteOutcome,
+};
+pub use leader_elector::{
+    DynLeaderElector, LeaderElector, LeaderElectorError, LeaderId, LeaderIdError, LeaseToken,
 };
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,

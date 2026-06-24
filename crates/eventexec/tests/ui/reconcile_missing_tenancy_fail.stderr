@@ -1,0 +1,15 @@
+error[E0061]: this function takes 3 arguments but 1 argument was supplied
+  --> tests/ui/reconcile_missing_tenancy_fail.rs:16:17
+   |
+16 |     let _loop = Builder::new(NoopReconciler).build();
+   |                 ^^^^^^^^^^^^---------------- two arguments of type `Tenancy` and `Trigger` are missing
+   |
+note: associated function defined here
+  --> src/reconcile.rs
+   |
+   |     pub fn new(reconciler: R, tenancy: Tenancy, trigger: Trigger) -> Self {
+   |            ^^^
+help: provide the arguments
+   |
+16 |     let _loop = Builder::new(NoopReconciler, /* Tenancy */, /* Trigger */).build();
+   |                                            ++++++++++++++++++++++++++++++

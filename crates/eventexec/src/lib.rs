@@ -13,6 +13,12 @@ pub use relay::{
     sweeper_loop,
 };
 
+pub mod reconcile;
+pub use reconcile::{
+    BackoffError, BackoffPolicy, Builder as ReconcileBuilder, RECONCILE_PROBE, ReconcileLoop,
+    Tenancy, Trigger, TriggerError,
+};
+
 use std::sync::Arc;
 use std::time::Duration;
 
