@@ -1,21 +1,31 @@
 //! settings — RSS 版本化配置与 feature flag 域。
 //!
-//! 本 crate 承载配置条目（`ConfigEntry`）与 feature flag（`FlagState`/`FlagDecision`）
-//! 的核心值类型与纯逻辑；DI port（仓储 / publisher）归 `diport`（ADR-003）。
-//! 所有域类型字段私有，只经显式构造 funnel 创建——外部不可伪造（ADR-001）。
+//! 本 crate 承载配置条目（`ConfigEntry`）与 feature flag（`FlagState`/`FlagDecision`）的核心值类型与
+//! 纯逻辑（`domain`）、版本化配置 CRUD/CAS + 发布/回滚 + flag 求值编排（`application`）、域形配置仓储
+//! DI port（`ports::ConfigRepo`，ADR-005 Option 2）与域内 in-mem 实现（`internal`）。所有域类型字段私有，
+//! 只经显式构造 funnel 创建——外部不可伪造（ADR-001）。
 //!
-//! # 签名冻结（ADR-004 C8 豁免覆盖率）
+//! # 实现状态（RW-W 行为，issue #1013）
 //!
-//! 本 crate 当前只冻结签名（函数体 = `todo!()`）；smoke test 只绑函数指针 / 构造 Copy enum，
-//! 不执行任何 `todo!()` body。
+//! 签名冻结（G0）已补真实行为：`domain` newtype 校验 / `diff` / `evaluate_flag`（全 11 operator + 百分比
+//! 分桶）；`application` 经 in-mem `Publisher`（L2 OutboxFact）打通配置发布/回滚接缝。真实持久化（postgres
+//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载留 Join。`smoke` 保留为签名冻结回归（绑函数指针锁签名）。
 //!
 //! # 对标
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main
+//! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main
 
 #![forbid(unsafe_code)]
 
+mod application;
 pub(crate) mod domain;
+mod internal;
+pub mod ports;
+
+pub use application::{
+    SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService, SettingsServiceError,
+};
 
 // ---------------------------------------------------------------------------
 // smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）

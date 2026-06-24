@@ -19,3 +19,4 @@ pub struct SubscriptionSpec {
 }
 pub mod _seed_v1;
 pub mod identity_v1;
+pub mod settings_v1;

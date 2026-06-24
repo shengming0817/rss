@@ -75,8 +75,8 @@ deny = [
   # port-trait impl-sealing（谁可 impl）：cargo-deny 限「依赖」非「impl」。diport impl-site allowlist 由
   #   dylint 自写 lint `rss_diport_impl_allowlist`（AST 级，Medium，INVARIANT DIPORT-IMPL-ALLOWLIST-01）
   #   承载；adapter→域 impl 域 repo port 经分层 wrapper（见下 identity 行加 postgres）+ source edge 校验放行。
-  { crate = "dynosaur", wrappers = ["diport", "identity"] },
-  { crate = "trait-variant", wrappers = ["diport", "identity"] },
+  { crate = "dynosaur", wrappers = ["diport", "identity", "settings"] },
+  { crate = "trait-variant", wrappers = ["diport", "identity", "settings"] },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖，
   # **外加**实现该域 repo/service port 的 adapter（adapter→域 = DIP 内向边，Option 2/ADR-005；如 identity
   # 的 RoleRepo 由 postgres impl）。覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
@@ -88,7 +88,7 @@ deny = [
   # postgres impl RoleRepo + SessionUnitOfWork（co-tx，#1083/#1192）；memory impl SessionUnitOfWork（demo
   #   provider，#1192）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
   { crate = "identity", wrappers = ["server", "rss", "xtask", "journeys", "postgres", "memory"] },
-  { crate = "settings", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "settings", wrappers = ["server", "rss", "xtask", "journeys"] }, # postgres adapter impl ConfigRepo（Join）落地时同步追加 "postgres"（adapter→域 DIP 内向边，见 #1249）
   { crate = "audit", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "contractreg", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "syshealth", wrappers = ["server", "rss", "xtask", "journeys"] },

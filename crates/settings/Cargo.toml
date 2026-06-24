@@ -8,6 +8,12 @@ publish = false
 [lints]
 workspace = true
 
+# in-mem 种子配置 / flag（ConfigRepo/FlagStore 内存实现）仅追踪弹 / demo 用，经 feature 门控做编译期边界：
+# 生产组合根不启用即不编译（对标 identity seed-login，machine boundary）。journeys 组合根经
+# `settings = { features = ["seed-data"] }` 启用。
+[features]
+seed-data = []
+
 [dependencies]
 thiserror = { workspace = true }
 vocab = { path = "../vocab" }
@@ -25,3 +31,26 @@ observ = { path = "../observ" }
 distributed = { path = "../distributed" }
 deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
+# 域形 repo DI port（ports 模块 ConfigRepo）的 async dyn 派发：native AFIT + dynosaur dyn-compatible wrapper +
+# trait-variant Send 变体（同 diport 范式，ADR-003/ADR-004 C1）。归属域 crate 而非 diport：repo port 签名
+# 引用域内实体（ConfigEntry），不得收敛 diport（Option 2/ADR-005）。dynosaur/trait-variant 依赖经 deny.toml
+# 白名单收敛（DIPORT-MACRO-CONFINE-01′：diport + 定义 repo port 的域 crate）。
+dynosaur = { workspace = true }
+trait-variant = { workspace = true }
+# 配置发布服务：注入 diport::Publisher（发 config.version-published/rollback outbox fact）+ Clock（事件时刻）。
+diport = { path = "../diport" }
+# version-published / rollback event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
+serde_json = { workspace = true }
+# 配置发布 / flag 求值结构化 span（不记 ConfigValue / PII context；observability.md §日志）。
+tracing = { workspace = true }
+# feature-flag rollout operator 求值（SemVer / 日期）。详见 workspace.dependencies 注释。
+semver = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+# 应用层 / port 异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
+# ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynConfigRepo（PORT-SHAPE-01/02）。
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+mockall = { workspace = true }
+# 域纯逻辑表驱动参数化测试（rust-standards §一致性级别 L0）。
+rstest = { workspace = true }

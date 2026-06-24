@@ -18,12 +18,16 @@ workspace = true
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
 identity = { path = "../crates/identity", features = ["seed-login"] }
 audit = { path = "../crates/audit" }
+# seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
+settings = { path = "../crates/settings", features = ["seed-data"] }
 bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
 # run_consumer 幂等消费驱动的载体类型：HandleResult / IdempotencyStore / Entry / IdemKey / ConsumerGroup。
 consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport" }
 primitives = { path = "../crates/primitives" }
+# settings 配置发布 journey 需 TenantId 构造 + 事件 payload 解码。
+vocab = { path = "../crates/vocab" }
 generated = { path = "../generated" }
 memory = { path = "../adapters/memory" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

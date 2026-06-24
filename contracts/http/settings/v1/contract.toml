@@ -1,0 +1,15 @@
+# settings 配置发布 HTTP 契约（draft）——RW-W 配置版本化写入/发布接缝。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 写入新配置版本 + 发布 config-version-changed outbox fact ⇒ consistencyLevel = OutboxFact（L2）。
+# draft：服务层闭环验接缝，不逐字节跑 axum serving；graduate 到 active（含 path+method active 必填）留 Join。
+id = "settings.config-publish"
+kind = "http"
+domain = "settings"
+version = "v1"
+owner = "settings"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"

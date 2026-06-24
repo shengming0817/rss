@@ -1,0 +1,17 @@
+# settings config-version-changed event 契约（draft）——RW-W 配置版本化发布/回滚 outbox fact。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 发布/回滚均生成新活跃版本并发同一 fact ⇒ consistencyLevel = OutboxFact（L2）。`changeKind` 区分
+# published / rolledBack（contracts 布局每 domain/version 单事件，用 kind 判别承载两类版本变更语义）。
+# draft：追踪弹验接缝；graduate 到 active（active event 须有 subscriber，订阅缓存 #1120）留后续单元。
+id = "settings.config-version-changed"
+kind = "event"
+domain = "settings"
+version = "v1"
+owner = "settings"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
+
+# TODO: graduate 到 active 时补 [[subscriptions]] 订阅缓存 consumer（#1120）+ changeKind 收紧为 enum（已 defer #1216）

@@ -2,3 +2,4 @@
 pub mod _seed_v1;
 pub mod audit_v1;
 pub mod identity_v1;
+pub mod settings_v1;
