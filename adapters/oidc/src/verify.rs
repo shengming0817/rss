@@ -9,6 +9,8 @@
 //! ref: Keats/jsonwebtoken src/validation.rs（`Validation{algorithms,iss,aud,validate_exp,validate_nbf,
 //! required_spec_claims}`）+ src/decoding.rs（`decode::<T>`, `DecodingKey::{from_rsa_pem,from_ec_pem}`）@v9.3.1。
 
+use std::collections::HashSet;
+
 use diport::{CredentialScheme, PdpError, RawCredential, VerifiedClaims};
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::Deserialize;
@@ -44,6 +46,10 @@ pub enum ConfigError {
     /// 攻击者以公钥当 HMAC 密钥伪造签名（INVARIANT: OIDC-ALG-ASYMMETRIC-ONLY-01）。
     #[error("oidc verifier must not accept symmetric (HMAC) algorithms")]
     SymmetricAlgorithm,
+    /// key 类型与算法族不匹配（RSA key 配 ES*、EC key 配 RS*/PS*）。fail-fast：误配在构造期暴露，不留到
+    /// 验签期每次失败（INVARIANT: OIDC-ALG-KEYFAMILY-MATCH-01）。
+    #[error("oidc decoding key algorithm does not match key family")]
+    AlgorithmKeyMismatch,
     /// PEM 解析失败（key 格式非法）。原始 parse 错误不入 wire / 此变体（公钥非敏感，但保持归类一致）。
     #[error("oidc decoding key is malformed")]
     InvalidKey,
@@ -69,6 +75,11 @@ pub struct VerifierConfig {
     keys: Vec<VerifyKey>,
     tenant_claim: String,
     kind_claim: String,
+    /// operator 信任本 IdP 可 assert 的 kind claim 值集（如 `{"user","device"}`）。**默认空**——空集时一律
+    /// 剥离 kind（→ None），杜绝外部 IdP 擅自 assert RSS 特权 kind（如 `superAdmin` → authn 跨租户
+    /// SuperAdmin，见 `crates/authn/src/lib.rs` derive_from_claims）。secure-by-default：未显式信任即不放行
+    /// （INVARIANT: OIDC-KIND-ALLOWLIST-01）。
+    kind_allowlist: HashSet<String>,
 }
 
 /// 验签后反序列化的 claims（私有 DTO，非域实体）。`sub` 必有；`exp`/`iss`/`aud`/`nbf` 由 jsonwebtoken
@@ -89,6 +100,7 @@ pub struct VerifierConfigBuilder {
     tenant_claim: String,
     kind_claim: String,
     keys: Vec<VerifyKey>,
+    kind_allowlist: HashSet<String>,
 }
 
 impl VerifierConfigBuilder {
@@ -101,6 +113,7 @@ impl VerifierConfigBuilder {
             tenant_claim: "tenant_id".to_string(),
             kind_claim: "kind".to_string(),
             keys: Vec::new(),
+            kind_allowlist: HashSet::new(),
         }
     }
 
@@ -118,30 +131,50 @@ impl VerifierConfigBuilder {
         self
     }
 
-    /// 注入一把 RSA 公钥（PEM，SPKI 或 PKCS#1）+ 其算法 allowlist（如 `&[Algorithm::RS256]`）。
+    /// 信任本 IdP 可 assert 的一个 kind claim 值（如 `"user"` / `"device"`）。可链式多次累加。
+    ///
+    /// **未调用即不信任任何 kind**（默认空 allowlist → 验签时一律剥离 kind → None）——杜绝外部 IdP 擅自
+    /// assert RSS 特权 kind（如 `superAdmin` → authn 跨租户 SuperAdmin）。operator 须显式信任本 IdP 真实
+    /// 签发的 kind 值；切忌为外部 IdP 信任特权 kind（INVARIANT: OIDC-KIND-ALLOWLIST-01）。
+    #[must_use]
+    pub fn trust_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind_allowlist.insert(kind.into());
+        self
+    }
+
+    /// 注入一把 RSA 公钥（PEM，SPKI 或 PKCS#1）+ 其算法 allowlist（仅 RS*/PS*，如 `&[Algorithm::RS256]`）。
     pub fn add_rsa_pem_key(
         self,
         pem: &[u8],
         algorithms: &[Algorithm],
     ) -> Result<Self, ConfigError> {
         let key = DecodingKey::from_rsa_pem(pem).map_err(|_| ConfigError::InvalidKey)?;
-        self.push_key(key, algorithms)
+        self.push_key(key, algorithms, KeyFamily::Rsa)
     }
 
-    /// 注入一把 EC 公钥（PEM）+ 其算法 allowlist（如 `&[Algorithm::ES256]`）。
+    /// 注入一把 EC 公钥（PEM）+ 其算法 allowlist（仅 ES*，如 `&[Algorithm::ES256]`）。
     pub fn add_ec_pem_key(self, pem: &[u8], algorithms: &[Algorithm]) -> Result<Self, ConfigError> {
         let key = DecodingKey::from_ec_pem(pem).map_err(|_| ConfigError::InvalidKey)?;
-        self.push_key(key, algorithms)
+        self.push_key(key, algorithms, KeyFamily::Ec)
     }
 
-    /// 校验算法 allowlist（非空 + 无 HMAC）后入队。algorithm allowlist 绑定每把 key——RS* key 只验 RS*。
-    /// INVARIANT: OIDC-ALG-ASYMMETRIC-ONLY-01（构造期拒对称算法，封堵 RS256→HS256 key-confusion）。
-    fn push_key(mut self, key: DecodingKey, algorithms: &[Algorithm]) -> Result<Self, ConfigError> {
+    /// 校验算法 allowlist（非空 + 无 HMAC + 与 key 族匹配）后入队。allowlist 绑定每把 key——RS* key 只验 RS*。
+    /// 校验序：空 → HMAC（对称，OIDC-ALG-ASYMMETRIC-ONLY-01）→ key 族匹配（RSA↔RS/PS、EC↔ES，
+    /// OIDC-ALG-KEYFAMILY-MATCH-01——防 RSA key 配 ES* 等误配留到验签期才暴露）。
+    fn push_key(
+        mut self,
+        key: DecodingKey,
+        algorithms: &[Algorithm],
+        family: KeyFamily,
+    ) -> Result<Self, ConfigError> {
         if algorithms.is_empty() {
             return Err(ConfigError::EmptyAlgorithms);
         }
         if algorithms.iter().any(is_hmac) {
             return Err(ConfigError::SymmetricAlgorithm);
+        }
+        if !algorithms.iter().all(|a| family.permits(a)) {
+            return Err(ConfigError::AlgorithmKeyMismatch);
         }
         self.keys.push(VerifyKey {
             key,
@@ -170,6 +203,7 @@ impl VerifierConfigBuilder {
             keys: self.keys,
             tenant_claim: self.tenant_claim,
             kind_claim: self.kind_claim,
+            kind_allowlist: self.kind_allowlist,
         })
     }
 }
@@ -179,6 +213,32 @@ impl VerifierConfigBuilder {
 /// INVARIANT: OIDC-ALG-ASYMMETRIC-ONLY-01（红线见 `builder_rejects_hmac_algorithm` 测试）。
 fn is_hmac(alg: &Algorithm) -> bool {
     matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
+}
+
+/// 解码 key 的算法族——builder 据此拒绝 key 类型与算法不匹配的配置（RSA key 只验 RS*/PS*，EC key 只验 ES*）。
+/// INVARIANT: OIDC-ALG-KEYFAMILY-MATCH-01。
+#[derive(Clone, Copy)]
+enum KeyFamily {
+    Rsa,
+    Ec,
+}
+
+impl KeyFamily {
+    /// 本 key 族是否允许该算法。
+    fn permits(self, alg: &Algorithm) -> bool {
+        match self {
+            KeyFamily::Rsa => matches!(
+                alg,
+                Algorithm::RS256
+                    | Algorithm::RS384
+                    | Algorithm::RS512
+                    | Algorithm::PS256
+                    | Algorithm::PS384
+                    | Algorithm::PS512
+            ),
+            KeyFamily::Ec => matches!(alg, Algorithm::ES256 | Algorithm::ES384),
+        }
+    }
 }
 
 /// scheme dispatch：`Jwt` 走签名验签；其余（`ServiceToken` + 未来 scheme，`CredentialScheme` 为
@@ -263,8 +323,10 @@ fn build_validation(config: &VerifierConfig, algorithms: &[Algorithm]) -> Valida
     v
 }
 
-/// `sub` → subject；可配置 tenant·kind claim 按名从 extra 取字符串值（缺失 / 非字符串 → None）。空 `sub`
-/// （`""`，能过 required-claim 存在性检查）→ `Untrusted`：空主体在 authn 侧是无效身份，fail-closed 拒绝。
+/// `sub` → subject；tenant claim 按配置名取字符串值（缺失 / 非字符串 → None）。kind claim 仅在值 ∈ operator
+/// `kind_allowlist` 时透传，否则剥离 → None（防外部 IdP 擅自 assert 特权 kind，OIDC-KIND-ALLOWLIST-01）。空
+/// `sub`（`""`，能过 required-claim 存在性检查）→ `InvalidSignature`（→ authn `TokenInvalid`/401：空主体是
+/// 不可用 token，非「不受信」403）。
 fn map_claims(config: &VerifierConfig, claims: Claims) -> Result<VerifiedClaims, PdpError> {
     if claims.sub.is_empty() {
         tracing::warn!(
@@ -273,11 +335,32 @@ fn map_claims(config: &VerifierConfig, claims: Claims) -> Result<VerifiedClaims,
             reason = "empty_subject",
             "oidc jwt verification failed"
         );
-        return Err(PdpError::Untrusted);
+        return Err(PdpError::InvalidSignature);
     }
     let tenant = string_claim(&claims.extra, &config.tenant_claim);
-    let kind = string_claim(&claims.extra, &config.kind_claim);
+    let kind = trusted_kind(config, &claims.extra);
     Ok(VerifiedClaims::new(claims.sub, tenant, kind))
+}
+
+/// 取 kind claim 并经 operator allowlist 过滤：值 ∈ 信任集 → 透传；存在但不信任 → 剥离 None + debug 记一笔
+/// （安全可观测：外部 IdP 试图 assert 未授权 kind 如 `superAdmin`）；缺失 → None。**不**记 kind 原值。
+fn trusted_kind(
+    config: &VerifierConfig,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    match string_claim(extra, &config.kind_claim) {
+        Some(k) if config.kind_allowlist.contains(&k) => Some(k),
+        Some(_) => {
+            tracing::debug!(
+                target: "oidc",
+                resource = "oidc",
+                reason = "kind_not_allowlisted",
+                "oidc stripped untrusted kind claim"
+            );
+            None
+        }
+        None => None,
+    }
 }
 
 /// 从 extra 取字符串型 claim（非字符串 / 缺失 → None，不强转、不 panic）。
@@ -306,8 +389,10 @@ fn classify(err: Option<jsonwebtoken::errors::Error>, keys_tried: usize) -> PdpE
         ErrorKind::InvalidAlgorithm | ErrorKind::InvalidAlgorithmName => {
             ("alg_not_allowed", PdpError::InvalidSignature)
         }
-        // 解析 / 格式错误（malformed header/payload、base64 坏、缺 required claim、缺 sub 等）→ 不受信。
-        _ => ("malformed_or_other", PdpError::Untrusted),
+        // 解析 / 格式错误（malformed header/payload、base64 坏、缺 required claim 等）→ token 不可用，归
+        // InvalidSignature（→ authn TokenInvalid/401）。区别于 iss/aud 的 Untrusted（→ Forbidden/403：结构
+        // 合法但签发者 / 受众不受信）。
+        _ => ("malformed_or_other", PdpError::InvalidSignature),
     };
     tracing::warn!(
         target: "oidc",
@@ -414,10 +499,12 @@ kQIDAQAB
 -----END PUBLIC KEY-----
 ";
 
-    /// 主验签配置：单把 PUB1 / RS256 + 默认 tenant·kind claim 名。
+    /// 主验签配置：单把 PUB1 / RS256 + 默认 tenant·kind claim 名 + 信任 user/device kind。
     #[allow(clippy::expect_used)]
     fn config() -> VerifierConfig {
         VerifierConfigBuilder::new(ISS, AUD)
+            .trust_kind("user")
+            .trust_kind("device")
             .add_rsa_pem_key(PUB1.as_bytes(), &[Algorithm::RS256])
             .expect("rsa key")
             .build()
@@ -487,16 +574,26 @@ kQIDAQAB
         assert!(matches!(r, Err(PdpError::Expired)), "got {r:?}");
     }
 
+    // 签名有效但 issuer/audience 不受信 → Untrusted（→ authn Forbidden/403：结构合法、签发者/受众不受信）。
     #[rstest::rstest]
     #[case::wrong_iss(json!({"sub": "a", "iss": "https://evil", "aud": AUD, "exp": get_current_timestamp() + 3600}))]
     #[case::wrong_aud(json!({"sub": "a", "iss": ISS, "aud": "other-rp", "exp": get_current_timestamp() + 3600}))]
-    #[case::missing_exp(json!({"sub": "a", "iss": ISS, "aud": AUD}))]
-    #[case::missing_sub(json!({"iss": ISS, "aud": AUD, "exp": get_current_timestamp() + 3600}))]
-    #[case::empty_sub(json!({"sub": "", "iss": ISS, "aud": AUD, "exp": get_current_timestamp() + 3600}))]
-    fn jwt_untrusted_or_malformed_claims_map_untrusted(#[case] claims: serde_json::Value) {
+    fn jwt_untrusted_issuer_or_audience_maps_untrusted(#[case] claims: serde_json::Value) {
         let token = mint(PRIV1, Algorithm::RS256, claims);
         let r = verify_credential(&config(), &RawCredential::jwt(token));
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
+    }
+
+    // 签名有效但 token 结构不可用（缺 exp/sub、空 sub）→ InvalidSignature（→ authn TokenInvalid/401，非
+    // Forbidden/403——malformed 不是「不受信」，见 review F4）。
+    #[rstest::rstest]
+    #[case::missing_exp(json!({"sub": "a", "iss": ISS, "aud": AUD}))]
+    #[case::missing_sub(json!({"iss": ISS, "aud": AUD, "exp": get_current_timestamp() + 3600}))]
+    #[case::empty_sub(json!({"sub": "", "iss": ISS, "aud": AUD, "exp": get_current_timestamp() + 3600}))]
+    fn jwt_unusable_claims_map_invalid(#[case] claims: serde_json::Value) {
+        let token = mint(PRIV1, Algorithm::RS256, claims);
+        let r = verify_credential(&config(), &RawCredential::jwt(token));
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
 
     #[test]
@@ -547,10 +644,11 @@ kQIDAQAB
 
     #[test]
     fn malformed_token_rejected() {
+        // malformed → InvalidSignature（→ authn TokenInvalid/401，非 Forbidden/403，见 review F4）。
         for bad in ["not-a-jwt", "a.b", "...", "garbage", ""] {
             let r = verify_credential(&config(), &RawCredential::jwt(bad));
             assert!(
-                matches!(r, Err(PdpError::Untrusted)),
+                matches!(r, Err(PdpError::InvalidSignature)),
                 "bad={bad:?} got {r:?}"
             );
         }
@@ -646,6 +744,81 @@ kQIDAQAB
         let r =
             VerifierConfigBuilder::new(ISS, AUD).add_rsa_pem_key(b"not a pem", &[Algorithm::RS256]);
         assert!(matches!(r, Err(ConfigError::InvalidKey)), "got err variant");
+    }
+
+    // EC P-256 测试公钥（一次性抛弃 fixture，offline `openssl ecparam -name prime256v1` 生成；非生产 key）。
+    const EC_PUB: &str = "-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE3+BDEpHucYP1RoqHv6TyEJhE/y8w
+yLpjt5apeWpfSsCjuSnksb0wYDpdeKJLsbW5fRk0vSiJCioJHZ5nfqCAkQ==
+-----END PUBLIC KEY-----
+";
+
+    // INVARIANT: OIDC-ALG-KEYFAMILY-MATCH-01 红线——key 类型与算法族须匹配（RSA↔RS/PS、EC↔ES）。
+    #[test]
+    fn builder_rejects_rsa_key_with_ec_alg() {
+        let r = VerifierConfigBuilder::new(ISS, AUD)
+            .add_rsa_pem_key(PUB1.as_bytes(), &[Algorithm::ES256]);
+        assert!(
+            matches!(r, Err(ConfigError::AlgorithmKeyMismatch)),
+            "got err variant"
+        );
+    }
+
+    #[test]
+    fn builder_rejects_ec_key_with_rsa_alg() {
+        let r = VerifierConfigBuilder::new(ISS, AUD)
+            .add_ec_pem_key(EC_PUB.as_bytes(), &[Algorithm::RS256]);
+        assert!(
+            matches!(r, Err(ConfigError::AlgorithmKeyMismatch)),
+            "got err variant"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn builder_accepts_ec_key_with_es_alg() {
+        let r = VerifierConfigBuilder::new(ISS, AUD)
+            .add_ec_pem_key(EC_PUB.as_bytes(), &[Algorithm::ES256])
+            .expect("ec key")
+            .build();
+        assert!(r.is_ok(), "EC key + ES256 应被接受");
+    }
+
+    // F1: 外部 IdP assert 未信任的 kind（如 superAdmin）→ 剥离为 None（杜绝外部 IdP 提权为跨租户 SuperAdmin）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn untrusted_kind_claim_stripped() {
+        // config() 只信任 user/device；token 擅自 assert superAdmin → kind 剥离 None。
+        let token = mint(
+            PRIV1,
+            Algorithm::RS256,
+            json!({"sub": "mallory", "iss": ISS, "aud": AUD, "exp": future_exp(), "kind": "superAdmin"}),
+        );
+        let vc = verify_credential(&config(), &RawCredential::jwt(token)).expect("verify ok");
+        assert_eq!(vc.subject(), "mallory");
+        assert_eq!(vc.kind(), None, "未信任 kind 必须被剥离");
+    }
+
+    // F5: 自定义 tenant/kind claim 名 → 从配置名读取（非默认名）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn custom_claim_names_map_from_config() {
+        let cfg = VerifierConfigBuilder::new(ISS, AUD)
+            .tenant_claim("org")
+            .kind_claim("typ")
+            .trust_kind("user")
+            .add_rsa_pem_key(PUB1.as_bytes(), &[Algorithm::RS256])
+            .expect("rsa key")
+            .build()
+            .expect("config");
+        let token = mint(
+            PRIV1,
+            Algorithm::RS256,
+            json!({"sub": "dave", "iss": ISS, "aud": AUD, "exp": future_exp(), "org": "tenant-9", "typ": "user"}),
+        );
+        let vc = verify_credential(&cfg, &RawCredential::jwt(token)).expect("verify ok");
+        assert_eq!(vc.tenant(), Some("tenant-9"), "tenant 应来自配置名 org");
+        assert_eq!(vc.kind(), Some("user"), "kind 应来自配置名 typ");
     }
 
     // ---- 生命周期（ManagedResource 始终 impl）+ async Pdp dyn 注入 ----
