@@ -19,7 +19,7 @@
 //! | 模块 | 等级 |
 //! |------|------|
 //! | idempotency | L0 |
-//! | outbox | L1 |
+//! | outbox | L1/L2 |
 //! | saga | L3 |
 //! | reconcile | L4 |
 //! | projection | L3 |
@@ -34,8 +34,8 @@ pub mod saga;
 pub use error::{EngineError, EngineErrorKind};
 pub use idempotency::{IdemKey, IdemKeyError, IdempotencyStore, SeenState};
 pub use outbox::{
-    Disposition, Entry, HandleResult, OutboxRelay, PermanentError, PermanentErrorKind, Topic,
-    TopicError,
+    Disposition, Entry, HandleResult, OutboxRelay, OutboxSource, OutboxSweeper, PermanentError,
+    PermanentErrorKind, Topic, TopicError,
 };
 pub use projection::{Lsn, ProjectionEvent, Projector};
 pub use reconcile::{
@@ -50,7 +50,7 @@ mod static_dispatch_smoke {
     //! 方法体 todo!() 永不调用（无 `.await`），故无 panic 实际触发。
 
     use super::idempotency::IdempotencyStore;
-    use super::outbox::OutboxRelay;
+    use super::outbox::{OutboxRelay, OutboxSource, OutboxSweeper};
     use super::projection::{ProjectionEvent, Projector};
     use super::reconcile::Reconciler;
     use super::saga::SagaStep;
@@ -62,6 +62,10 @@ mod static_dispatch_smoke {
     fn _drives_idem<S: IdempotencyStore>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上。
     fn _drives_relay<R: OutboxRelay>(_r: &R) {}
+    #[allow(dead_code)] // reason: 同上，证 OutboxSource 读侧端口可泛型静态分发消费。
+    fn _drives_source<S: OutboxSource>(_s: &S) {}
+    #[allow(dead_code)] // reason: 同上，证 OutboxSweeper 清理端口可泛型静态分发消费。
+    fn _drives_sweeper<S: OutboxSweeper>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上。
     fn _drives_saga<S: SagaStep>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上。

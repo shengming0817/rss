@@ -15,8 +15,11 @@
 //! postgres-backed `RoleRepo` 属 identity 域 W 阶段（需 roles 表 + tenant RLS）。
 
 mod migrator;
+mod outbox;
 mod pool;
 mod tx;
+
+pub use outbox::PgOutbox;
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;

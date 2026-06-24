@@ -177,6 +177,27 @@ fn step_build_workspace() -> Step {
         needs_compile: true,
     }
 }
+/// F7：postgres outbox 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的 build/clippy/nextest
+/// 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep）默认门外、回归漏网。
+/// 本步 `--no-run` 仅编译（不跑、无需真实 PG）纳入默认 verify 抓漂移；有 PG 时另跑
+/// `cargo nextest run -p postgres --features integration` 行实跑。ci lane 经 `--all-features --all-targets`
+/// 已覆盖该编译面，故仅入 [`full_plan`]，不入 [`ci_plan`]。
+fn step_integration_compile() -> Step {
+    Step {
+        label: "integration-compile",
+        args: &[
+            "test",
+            "-p",
+            "postgres",
+            "--features",
+            "integration",
+            "--no-run",
+        ],
+        kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: true,
+    }
+}
 fn step_clippy_workspace() -> Step {
     Step {
         label: "clippy",
@@ -280,6 +301,7 @@ fn full_plan() -> Vec<Step> {
         step_layer_deps(),
         step_codegen_check(),
         step_build_workspace(),
+        step_integration_compile(),
         step_clippy_workspace(),
         step_nextest(),
         step_deny(),
@@ -478,6 +500,7 @@ mod tests {
                 "layer-deps",
                 "codegen-check",
                 "build",
+                "integration-compile",
                 "clippy",
                 "nextest",
                 "deny",

@@ -1,9 +1,17 @@
-//! Outbox 投递接缝（L1）—— 纯类型 disposition + relay 策略。
+//! Outbox 接缝（L1 原子写 + L2 OutboxFact 投递）—— 纯类型 disposition + relay/source/sweep 策略。
 //!
 //! `Disposition`/`HandleResult`/`PermanentError`/`Entry`/`Topic` 是 **纯态机类型**（sync，穷尽闭值集）；
-//! `OutboxRelay` 是 L1 引擎策略 trait（native AFIT，把已持久化 entry 中继到 broker）。
-//! 真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/adapters，consistency 只冻类型 + 策略接缝。
+//! `OutboxRelay`/`OutboxSource`/`OutboxSweeper` 是 L2 OutboxFact 引擎策略 trait（native AFIT：把已持久化
+//! entry 中继到 broker / 扫描待发 / 清理已投递）。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
+//! adapters，consistency 只冻类型 + 策略接缝。
 //! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
+//!
+//! # INVARIANT: OUTBOX-ENGINE-PORT-01
+//!
+//! `OutboxRelay`/`OutboxSource`/`OutboxSweeper` 是**引擎策略接缝**（签名引 `Entry`/`Disposition`/`EngineError`
+//! 等 consistency 内部类型），按 ADR-005 category line **不能**在 `diport` 内编译（否则 diport 反依赖引擎），
+//! 故正确归属本引擎 crate——非 provider-agnostic 的 diport DI port。native AFIT、不引 dynosaur。
+//!
 //! ref: ThreeDotsLabs/watermill message/router.go@master（Ack/Requeue/Reject disposition 概念对标）。
 
 /// 消费处置（穷尽闭值集，Hard 冻结；漏 case 编不过）。eventbus.md §Disposition 表。
@@ -201,6 +209,40 @@ impl Entry {
 pub trait OutboxRelay {
     /// 中继单条已持久化 entry。返回处置驱动 receipt commit / DLX / 退避（穷尽 `Disposition`）。
     async fn relay(&self, entry: &Entry) -> Result<Disposition, crate::error::EngineError>;
+}
+
+/// Outbox 扫描源（L1 引擎策略 trait，native AFIT）。
+///
+/// 按 domain 扫描**待发** entry 批次（status=pending 且到期，含 lease 过期可回收的 in-flight），供
+/// relay 环逐条中继。读侧端口，与 [`OutboxRelay`]（写侧中继）同源构成 outbox 引擎接缝——SQL 在 adapter，
+/// 本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，消费方泛型 `<S: OutboxSource>`，禁 `Box<dyn>`。
+///
+/// 返回的 [`Entry`] 是 adapter 内部按行重建（topic/idem_key/payload），**不**携 row id / lease_token——
+/// relay 的 CAS settle 以 `entry.idem_key()`（= event_id 幂等锚）为键收口，故扫描与中继解耦无需透传 lease。
+#[allow(async_fn_in_trait)]
+// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
+pub trait OutboxSource {
+    /// 扫描某 `domain` 至多 `limit` 条待发 entry（pending 且 `retry_after` 到期，或 lease 过期的 in-flight
+    /// 可回收行）。返回已重建的引擎 [`Entry`]；空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
+    async fn poll_pending(
+        &self,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<Entry>, crate::error::EngineError>;
+}
+
+/// Outbox 保留清理端口（L1 引擎策略 trait，native AFIT）。
+///
+/// 由 sweeper 背景 worker 周期驱动：删除**已终结**（status=published，已成功投递）且超过保留期的
+/// outbox 行，防表无界增长。dlx 行保留供运维巡检——不在此删。与 [`OutboxSource`]（扫描）/
+/// [`OutboxRelay`]（中继）同源构成 outbox 背景机器的引擎接缝；删除 SQL 在 adapter，本 crate 只冻接缝。
+/// native AFIT ⇒ 非 object-safe，消费方泛型 `<S: OutboxSweeper>`，禁 `Box<dyn>`。
+#[allow(async_fn_in_trait)]
+// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
+pub trait OutboxSweeper {
+    /// 删除 `created_at` 早于「现在 − `retain_seconds`」且状态为 published 的行，返回删除条数。
+    /// `Transient` 错误 ⇒ 本轮跳过、下轮重试。
+    async fn sweep(&self, retain_seconds: u64) -> Result<u64, crate::error::EngineError>;
 }
 
 #[cfg(test)]

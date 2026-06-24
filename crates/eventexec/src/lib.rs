@@ -2,6 +2,13 @@
 //!
 //! ref: watermill message/message.go+pubsub.go+router.go@master
 //!      oxidecomputer/steno src/saga_action_generic.rs@main
+//!      serverlesstechnology/cqrs（背景 relay 解耦 + 取消安全两阶段关闭）
+
+pub mod relay;
+pub use relay::{
+    OUTBOX_RELAY_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker, SweeperWorker, WorkerHealth, relay_loop,
+    sweeper_loop,
+};
 
 use std::sync::Arc;
 use std::time::Duration;

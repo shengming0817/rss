@@ -31,6 +31,9 @@ futures = { workspace = true }
 tracing = { workspace = true }
 # PgError 库错误枚举（error-handling.md：库错误用 thiserror）。
 thiserror = { workspace = true }
+# outbox envelope metadata 序列化（OutboxEnvelope.metadata: serde_json::Value）；
+# 绑 jsonb 时 serde_json::to_string → $N::jsonb（不给 sqlx 加 uuid/json/time feature，全 server-side）。
+serde_json = { workspace = true }
 
 [features]
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。

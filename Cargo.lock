@@ -834,10 +834,13 @@ dependencies = [
 name = "eventexec"
 version = "0.0.0"
 dependencies = [
+ "consistency",
  "diport",
  "futures",
+ "primitives",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -2073,6 +2076,7 @@ dependencies = [
  "primitives",
  "runctx",
  "secure",
+ "serde_json",
  "sqlx",
  "support",
  "thiserror",

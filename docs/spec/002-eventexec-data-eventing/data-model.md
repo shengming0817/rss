@@ -28,7 +28,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | 列 | 类型 | 说明 |
 |----|------|------|
 | id | uuid PK | entry id |
-| event_id | uuid UNIQUE | 幂等 key（EventId，消费侧去重锚） |
+| event_id | text UNIQUE | 幂等 key（EventId/IdemKey，opaque 全局唯一；不强绑 UUID 格式，跨租户唯一性由 IdemKey 全局唯一保证，见 migration 注释） |
 | domain | text | 归属域（per-domain relay 读） |
 | topic | text | dotted topic |
 | contract_id | text | 契约 id |
