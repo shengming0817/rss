@@ -10,12 +10,16 @@
 #                     + public-api --check（轴 A）+ cargo-audit（供应链漏洞，#1133）。需全套工具 + nightly。
 #   make audit        供应链漏洞刷新 lane（= azure-pipelines.yml 每日 cron 调的同一条 `cargo xtask audit`，
 #                     #1133）：advisory-scoped `deny check advisories` + cargo-audit（皆 no-compile、快）。
+#   make integration  真集成 lane（#1137，opt-in，不入 verify/ci）：testcontainers self-provision
+#                     postgres/redis/rabbitmq 跑 --features integration 测试。**docker-gated**（无 docker 且未设
+#                     env URL 即 fail-closed）；设 PGHOST/REDIS_TEST_URL/RSS_AMQP_TEST_URL 指向长存服务可免 docker。
+#                     azure-pipelines 接线待 #1145（需 docker-enabled agent）——CI 激活前本 lane 仅本地/手动跑。
 #
 # CI lane = azure-pipelines.yml（issue #1132）：PR 触发 + 失败阻断合入经 Azure 分支策略 build validation。
 # 激活前（AZURE_HAS_CI=false，见 hack/automation/forge.conf 激活 runbook）`make ci` 本地即等价门——azure
 # CI 未启用期间它是治理门的实际 gate。门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci audit
+.PHONY: verify verify-fast ci audit integration
 
 verify:
 	cargo xtask verify
@@ -28,3 +32,6 @@ ci:
 
 audit:
 	cargo xtask audit
+
+integration:
+	cargo xtask integration

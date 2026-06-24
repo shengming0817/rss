@@ -45,6 +45,7 @@ use crate::workspace_root;
 use crate::{codegen, contract, layerdeps, wsdeps};
 use anyhow::{Result, bail};
 use std::path::Path;
+use std::process::Stdio;
 
 /// verify 选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,11 +255,12 @@ fn step_build_workspace() -> Step {
         needs_compile: true,
     }
 }
-/// F7：postgres outbox 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的 build/clippy/nextest
-/// 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep）默认门外、回归漏网。
-/// 本步 `--no-run` 仅编译（不跑、无需真实 PG）纳入默认 verify 抓漂移；有 PG 时另跑
-/// `cargo nextest run -p postgres --features integration` 行实跑。ci lane 经 `--all-features --all-targets`
-/// 已覆盖该编译面，故仅入 [`full_plan`]，不入 [`ci_plan`]。
+/// F7 + #1137：postgres/redis/amqp 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的
+/// build/clippy/nextest 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep /
+/// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
+/// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经 `cargo xtask integration`
+/// 行实跑（[`integration_plan`]）。ci lane 经 `--all-features --all-targets` 已覆盖该编译面，故仅入
+/// [`full_plan`]、不入 [`ci_plan`]。
 fn step_integration_compile() -> Step {
     Step {
         label: "integration-compile",
@@ -266,11 +268,49 @@ fn step_integration_compile() -> Step {
             "test",
             "-p",
             "postgres",
+            "-p",
+            "redis-adapter",
+            "-p",
+            "amqp",
+            "-p",
+            "journeys",
             "--features",
             "integration",
             "--no-run",
         ],
         kind: StepKind::CargoBuiltin,
+        env: &[],
+        needs_compile: true,
+    }
+}
+
+/// #1137：真集成 lane 实跑步——nextest 跑 postgres/redis/amqp 的 `integration` 测试（self-provision
+/// 容器 / 对接 env URL）。专用 `--profile integration`（放宽 slow-timeout，容器冷启动；见 .config/nextest.toml）。
+/// **仅** [`integration_plan`]（opt-in `cargo xtask integration`）——不入 verify/ci（默认门只 `--no-run` 编译，
+/// 须无 docker 可跑；实跑需 docker / 长存后端，由 [`run_integration`] 的 docker 门把守）。
+fn step_integration_run() -> Step {
+    Step {
+        label: "integration-tests",
+        args: &[
+            "nextest",
+            "run",
+            "--profile",
+            "integration",
+            "-p",
+            "postgres",
+            "-p",
+            "redis-adapter",
+            "-p",
+            "amqp",
+            "-p",
+            "journeys",
+            "--features",
+            "integration",
+        ],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked（实跑还需 docker 或设 PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL 等 env URL）",
+        },
         env: &[],
         needs_compile: true,
     }
@@ -534,6 +574,89 @@ fn ci_plan() -> Vec<Step> {
 /// 由 `azure_pipeline_has_scheduled_audit_lane` 守。
 fn audit_plan() -> Vec<Step> {
     vec![step_deny_advisories(), step_cargo_audit()]
+}
+
+/// #1137：真集成 lane 门步计划（opt-in `cargo xtask integration`）。当前单步 nextest 跑三 adapter 的
+/// `integration` 测试；与 verify/ci 完全隔离（默认门只编译 integration 代码、不实跑——见 [`step_integration_compile`]）。
+fn integration_plan() -> Vec<Step> {
+    vec![step_integration_run()]
+}
+
+/// 三资源 env URL 全在 ⇒ 对接长存外部 pg/redis/rabbitmq，无需 docker self-provision（testkit 的
+/// `env_or_*` resolver 同款判据）。任一缺则容器路径，需 docker。
+///
+/// **postgres 外部路径**：须同时满足：
+/// 1. `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` 存在（非空，显式 opt-in，
+///    与 `testkit::env_or_postgres` fail-closed 语义一致）；
+/// 2. 5 元组 `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD` 全在。
+///
+/// 仅满足其一不足以跳过 docker（testkit 会用容器路径或报缺失 key 错误）。
+///
+/// redis / amqp 路径：`REDIS_TEST_URL` / `RSS_AMQP_TEST_URL` 存在（不变）。
+fn all_integration_env_urls_present() -> bool {
+    let pg_opt_in = std::env::var_os("RSS_TEST_ALLOW_EXTERNAL_POSTGRES").is_some();
+    let pg_five_tuple = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]
+        .iter()
+        .all(|k| std::env::var_os(k).is_some());
+    let pg_all = pg_opt_in && pg_five_tuple;
+    let redis = std::env::var_os("REDIS_TEST_URL").is_some();
+    let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
+    pg_all && redis && amqp
+}
+
+/// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::clean_cmd`]
+/// 漏斗构造（CMD-FUNNEL-01；docker 非 cargo 子命令，故不走 [`crate::cmd::tool_available`]）。
+fn docker_available() -> bool {
+    crate::cmd::clean_cmd("docker", &["version"], &[], None)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// integration 入口（#1137 真集成 lane，opt-in）：docker 门把守后按 [`integration_plan`] 跑。
+/// **docker-gated（fail-closed，对齐 VERIFY-TOOL-GATE-01）**：三 env URL 全在 → 跳过 docker 探测（env 路径
+/// 不 self-provision）；否则探测 docker，缺 + 未宽限 → fail-closed（清晰指引），缺 + `--allow-missing-tools`
+/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；azure-pipelines 接线待 #1145（需 docker agent）。
+pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools,
+    };
+    let root = workspace_root()?;
+    // docker 门：env URL 全在则跳过（env 路径不需 docker）。
+    if !all_integration_env_urls_present() {
+        match resolve_tool(docker_available(), allow_missing_tools) {
+            ToolAction::Run => {}
+            ToolAction::SkipWarn => {
+                eprintln!(
+                    "integration: [跳过] docker daemon 不可达（--allow-missing-tools 宽限）。\
+                     外部 PG 路径需：RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（5 元组）；\
+                     + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向长存 pg/redis/rabbitmq 可免 docker。"
+                );
+                return Ok(());
+            }
+            ToolAction::Fail => bail!(
+                "integration: docker daemon 不可达（容器 self-provision 需 docker）。\
+                 启动 Docker，或同时设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + \
+                 PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（PG 5 元组）\
+                 + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向运行中的 pg/redis/rabbitmq；\
+                 确需跳过用 --allow-missing-tools。"
+            ),
+        }
+    }
+    let plan = integration_plan();
+    eprintln!(
+        "integration：{} 步（真集成 lane；docker self-provision 或 env URL）",
+        plan.len()
+    );
+    for (i, step) in plan.iter().enumerate() {
+        eprintln!("integration: [{}/{}] {}", i + 1, plan.len(), step.label);
+        run_one(step, &opts, &root)?;
+    }
+    eprintln!("integration：全部通过");
+    Ok(())
 }
 
 /// 纯函数：按 opts 产出有序门步计划。`--fast` 裁掉 `needs_compile` 步（fmt+meta+deny 保留）。
@@ -979,6 +1102,53 @@ mod tests {
     #[test]
     fn audit_plan_order_and_count() {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
+    }
+
+    /// #1137：integration lane 与 verify/ci **完全隔离**——单步 `integration-tests`，不出现在 verify/ci
+    /// （默认门只 `--no-run` 编译 integration 代码、不实跑；实跑需 docker，由 run_integration 门把守）。
+    #[test]
+    fn integration_plan_isolated_from_verify_and_ci() {
+        assert_eq!(labels(&integration_plan()), vec!["integration-tests"]);
+        assert!(!labels(&verify_plan(&opts(false, false))).contains(&"integration-tests"));
+        assert!(!labels(&ci_plan()).contains(&"integration-tests"));
+    }
+
+    /// integration 实跑步：`--profile integration`（放宽 timeout）+ `--features integration` + 三 adapter 全覆盖；
+    /// Tool gate probe `nextest`（缺工具 fail-closed）。
+    #[test]
+    fn integration_run_step_profile_feature_and_coverage() {
+        let step = step_integration_run();
+        assert_eq!(step.label, "integration-tests");
+        assert!(matches!(
+            step.kind,
+            StepKind::Tool {
+                probe: "nextest",
+                ..
+            }
+        ));
+        assert!(
+            step.args
+                .windows(2)
+                .any(|w| w == ["--profile", "integration"]),
+            "须 --profile integration，实际 {:?}",
+            step.args
+        );
+        assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
+        for p in ["postgres", "redis-adapter", "amqp", "journeys"] {
+            assert!(step.args.contains(&p), "integration 实跑须覆盖 {p}");
+        }
+    }
+
+    /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖三 adapter + journeys durable journey
+    /// （F7 + #1137：原仅 postgres）。
+    #[test]
+    fn integration_compile_covers_adapters_and_journeys_no_run() {
+        let step = step_integration_compile();
+        assert_eq!(step.label, "integration-compile");
+        assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
+        for p in ["postgres", "redis-adapter", "amqp", "journeys"] {
+            assert!(step.args.contains(&p), "integration-compile 须覆盖 {p}");
+        }
     }
 
     /// audit lane 的 deny 步是 **advisory-scoped**（`deny check advisories`），非裸 `deny check`——

@@ -110,7 +110,8 @@ mod tests {
     #[cfg(feature = "integration")]
     mod integration {
         use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, SeenState};
-        use sqlx::PgPool;
+
+        type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
         #[allow(clippy::unwrap_used)]
         // reason: 测试 setup — 已知非空 raw，item-level carve-out（error-handling.md §Carve-out）。
@@ -125,39 +126,55 @@ mod tests {
         }
 
         /// claim → commit → check = Duplicate（done 永久去重，PG 往返）。
-        #[sqlx::test]
-        async fn commit_makes_key_permanently_duplicate(pool: PgPool) {
-            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+        #[tokio::test(flavor = "multi_thread")]
+        #[allow(clippy::unwrap_used)]
+        // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+        async fn commit_makes_key_permanently_duplicate() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox(g("test-group"));
             let key = k("pg-commit-evt-1");
-            assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
-            store.commit(&key).await.unwrap();
-            assert_eq!(store.check(&key).await.unwrap(), SeenState::Duplicate);
+            assert_eq!(inbox.check(&key).await.unwrap(), SeenState::Fresh);
+            inbox.commit(&key).await.unwrap();
+            assert_eq!(inbox.check(&key).await.unwrap(), SeenState::Duplicate);
+            Ok(())
         }
 
         /// claim → release → check = Fresh（释放后可重领，PG 往返）。
-        #[sqlx::test]
-        async fn release_allows_reclaim(pool: PgPool) {
-            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+        #[tokio::test(flavor = "multi_thread")]
+        #[allow(clippy::unwrap_used)]
+        // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+        async fn release_allows_reclaim() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox(g("test-group"));
             let key = k("pg-release-evt-1");
-            assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
-            store.release(&key).await.unwrap();
-            assert_eq!(store.check(&key).await.unwrap(), SeenState::Fresh);
+            assert_eq!(inbox.check(&key).await.unwrap(), SeenState::Fresh);
+            inbox.release(&key).await.unwrap();
+            assert_eq!(inbox.check(&key).await.unwrap(), SeenState::Fresh);
+            Ok(())
         }
 
         /// commit 对 absent key 幂等（不报错）。
-        #[sqlx::test]
-        async fn commit_on_absent_is_ok(pool: PgPool) {
-            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+        #[tokio::test(flavor = "multi_thread")]
+        async fn commit_on_absent_is_ok() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox(g("test-group"));
             let key = k("pg-absent-commit");
-            assert!(store.commit(&key).await.is_ok());
+            assert!(inbox.commit(&key).await.is_ok());
+            Ok(())
         }
 
         /// release 对 absent key 幂等（不报错）。
-        #[sqlx::test]
-        async fn release_on_absent_is_ok(pool: PgPool) {
-            let store = crate::PgStore { pool: pool.clone() }.inbox(g("test-group"));
+        #[tokio::test(flavor = "multi_thread")]
+        async fn release_on_absent_is_ok() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox(g("test-group"));
             let key = k("pg-absent-release");
-            assert!(store.release(&key).await.is_ok());
+            assert!(inbox.release(&key).await.is_ok());
+            Ok(())
         }
     }
 }

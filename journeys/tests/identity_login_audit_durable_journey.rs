@@ -2,10 +2,10 @@
 //! **PgInboxStore 幂等**消费 → audit append。demo 拓扑变体见 `identity_login_audit_journey.rs`。
 //!
 //! `#![cfg(feature = "integration")]`：需真实 postgres，默认 build / `cargo xtask verify` 不编译本文件。
-//! **fail-closed**：缺 libpq env / `PGDATABASE` 不含 `test` → 测试**失败**（非静默跳过），杜绝无 DB 假绿、
-//! 防破坏性 DDL 打到非测试库（对齐 adapters/postgres 集成测试约定）。
-//! 本地运行：设 libpq env（`PGHOST`/`PGPORT`/`PGDATABASE`(含 test)/`PGUSER`/`PGPASSWORD`）后跑
-//! `cargo test -p journeys --features integration`（fail-closed：缺 DB env 即失败）。
+//! postgres 经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置；设 libpq
+//! env（`PGHOST`/`PGPORT`/`PGDATABASE`(含 `test`)/`PGUSER`/`PGPASSWORD`）则对接长存外部 pg（不起容器）。
+//! **fail-closed**：`PGDATABASE` 不含 `test` → 测试失败（破坏性 DDL 防护；容器路径 db=`rss_test` 恒满足）。
+//! 本地运行：`cargo nextest run -p journeys --features integration`（docker 在场自起容器）或经 `cargo xtask integration`。
 //!
 //! 拓扑：relay 用进程内 `MemBus` 作 in-test broker（per-broker amqp 隔离由 amqp adapter 集成测试覆盖；
 //! 本 journey 聚焦 producer durable 落库 + relay CAS + 消费侧 PgInbox 幂等的端到端贯通）。
@@ -44,27 +44,19 @@ const SUBJECT: &str = "alice-subject";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
 
-/// 由 libpq 标准 env 构造配置。fail-closed：缺 env / 非测试库名 → `Err`（测试失败，非跳过）。
-fn config_from_env() -> Result<PgConfig> {
-    let var = |k: &str| -> Result<String> {
-        std::env::var(k).map_err(|_| anyhow::anyhow!("integration 测试需设置 {k}（libpq env）"))
-    };
-    let host = var("PGHOST")?;
-    let port: u16 = var("PGPORT")?
-        .parse()
-        .map_err(|_| anyhow::anyhow!("PGPORT 非 u16"))?;
-    let database = var("PGDATABASE")?;
-    anyhow::ensure!(
-        database.contains("test"),
-        "PGDATABASE='{database}' 不含 'test'——集成测试执行破坏性 DDL，拒绝打到非测试库"
-    );
-    let username = var("PGUSER")?;
-    let password = var("PGPASSWORD")?;
-    Ok(
-        PgConfig::new(host, port, database, username, PgPassword::new(password))
-            .with_ssl_mode(PgSslMode::Prefer)
-            .with_acquire_timeout(Duration::from_secs(5)),
+/// 由 testkit fixture 参数构造配置。
+/// 库名严格校验已由 `testkit::env_or_postgres` 单源执行（外部路径须 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`
+/// + `PGDATABASE` 以 `_test` 结尾或 `== "test"`），此处不重复。
+fn pg_config(p: &testkit::PgConnParams) -> Result<PgConfig> {
+    Ok(PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        p.username.clone(),
+        PgPassword::new(p.password.clone()),
     )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(Duration::from_secs(5)))
 }
 
 /// noop DLX（journey 不验死信路径；eventexec consumer.rs 已覆盖三路径）。
@@ -124,11 +116,13 @@ async fn wait_until_audited(sink: &MemAuditSink) -> Result<()> {
 /// durable 端到端：login → PgEmitter → outbox(pending) → relay CAS → MemBus(message_id=EventId) →
 /// run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox Duplicate → audit 仍 1（acc #2）。
 ///
-/// F4：无 `#[ignore]`——`#![cfg(feature = "integration")]` + `config_from_env()` fail-closed 是唯一门控
-/// （对齐 adapters/postgres 集成测试约定，缺 DB env 即失败，非静默跳过）。
+/// F4：无 `#[ignore]`——`#![cfg(feature = "integration")]` 门控；postgres 经 `testkit::env_or_postgres()`
+/// self-provision（testcontainers，#1137；设 `PGHOST` 等则对接长存外部 pg）。需 docker（容器路径）。
+/// `pg` fixture guard **须绑定到测试结束**（其 `Drop` 停容器）。
 #[tokio::test(flavor = "multi_thread")]
 async fn login_audit_durable_topology() -> Result<()> {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let pg = testkit::env_or_postgres().await?;
+    let store = PgStore::connect(&pg_config(pg.params())?).await?;
     store.run_migrations().await?;
 
     let bus = MemBus::new();

@@ -29,9 +29,13 @@ thiserror = { workspace = true, optional = true }
 [features]
 default = []
 backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror"]
-# 集成测试需真实 redis 后端（#[cfg(feature = "integration")]，nextest 按名串行）。
-integration = ["backend"]
+# 集成测试需真实 redis 后端（#[cfg(feature = "integration")]，nextest 按名串行）；
+# testkit/containers 经此传递激活 testcontainers（self-provision 容器，无需手工预置）。
+integration = ["backend", "testkit/containers"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 rstest = { workspace = true }
+# 集成测试容器 fixture（#1137）：testcontainers self-provision redis（经 testkit/containers，
+# 仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
+testkit = { path = "../../crates/testkit" }

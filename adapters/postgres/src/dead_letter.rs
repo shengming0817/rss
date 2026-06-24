@@ -105,48 +105,20 @@ mod smoke {
 }
 
 /// 集成测试：`PgDeadLetterStore` 往返验证（写入 → SELECT 断言字段）。
-/// `integration` feature 门控；需真实 postgres，见 migrations/README.md。
+/// `integration` feature 门控；需真实 postgres，经 `testkit::env_or_postgres()` self-provision。
+/// 外部 PG 路径须 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` + 严格库名，单源校验在 testkit。
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
-    use std::time::Duration;
-
     use diport::{DeadLetterStore, ManagedResource};
 
-    use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
-
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    fn config_from_env() -> Result<PgConfig, String> {
-        let var = |k: &str| {
-            std::env::var(k).map_err(|_| {
-                format!("integration 测试需设置 {k}（libpq env）；见 migrations/README.md")
-            })
-        };
-        let host = var("PGHOST")?;
-        let port: u16 = var("PGPORT")?
-            .parse()
-            .map_err(|_| "PGPORT 不是合法 u16".to_string())?;
-        let database = var("PGDATABASE")?;
-        if !database.contains("test") {
-            return Err(format!(
-                "PGDATABASE='{database}' 不含 'test'——集成测试会执行破坏性 DDL，拒绝打到非测试库"
-            ));
-        }
-        let username = var("PGUSER")?;
-        let password = var("PGPASSWORD")?;
-        Ok(
-            PgConfig::new(host, port, database, username, PgPassword::new(password))
-                .with_ssl_mode(PgSslMode::Prefer)
-                .with_acquire_timeout(Duration::from_secs(5)),
-        )
-    }
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// 写入一条死信记录，再 SELECT 回来断言字段往返正确。
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
     // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out。
     async fn write_dead_letter_roundtrips() -> TestResult {
-        let store = PgStore::connect(&config_from_env()?).await?;
+        let (_pg, store) = crate::test_pg::connect_pg().await?;
         store.run_migrations().await?;
 
         let dl = store.dead_letter();

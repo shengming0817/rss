@@ -37,8 +37,12 @@ tracing = { workspace = true }
 postgres = { path = "../adapters/postgres" }
 # F6：durable journey 经 payload 解码关联本轮 session-created entry（F1 后 idem_key = 独立 EventId ≠ session_id）。
 serde_json = { workspace = true }
+# 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），
+# 经 testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement）。
+testkit = { path = "../crates/testkit" }
 
 [features]
 # durable 拓扑 journey（identity_login_audit_durable_journey.rs）需真实 postgres——默认不编译/不跑，
-# 经 `--features integration` 显式启用（缺 DB env fail-closed，对齐 adapters/postgres 集成测试约定）。
-integration = []
+# 经 `--features integration` 显式启用。testkit/containers 经此传递激活 testcontainers（self-provision pg，
+# 无需手工预置；设 PGHOST 等则对接长存外部 pg，对齐 adapters/postgres 集成测试约定）。
+integration = ["testkit/containers"]

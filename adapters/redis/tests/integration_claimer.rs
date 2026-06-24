@@ -1,7 +1,7 @@
 //! 集成测试：幂等 claimer（真实 redis 后端）。
 //!
-//! 需本地 redis（`docker run -p 6379:6379 redis`）。
-//! 环境变量 `REDIS_TEST_URL`（默认 `redis://127.0.0.1:6379`）。
+//! 容器经 `testkit::env_or_redis()` self-provision（testcontainers）——无需手工预置；
+//! 设 `REDIS_TEST_URL` 则对接长存外部 redis（快速本地迭代，不起容器）。需 docker（容器路径）。
 //! 连不上即失败（fail-loud，不 silent skip）。
 //!
 //! nextest test-group 串行（名称前缀 `integration_`）。
@@ -15,12 +15,9 @@ use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, SeenState};
 use deadpool_redis::{Config, Runtime};
 use diport::ManagedResource;
 use redis::RedisStore;
+use testkit::FixtureError;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn test_url() -> String {
-    std::env::var("REDIS_TEST_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
-}
 
 fn unique_key(label: &str) -> IdemKey {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -30,91 +27,77 @@ fn unique_key(label: &str) -> IdemKey {
     IdemKey::parse(&format!("{label}:pid{pid}:n{n}")).unwrap()
 }
 
-fn make_store(ttl: Duration, group: &str) -> RedisStore {
-    let cfg = Config::from_url(test_url());
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud——连不上 redis 即失败；item-level carve-out。
-    let pool = cfg
-        .create_pool(Some(Runtime::Tokio1))
-        .expect("failed to create deadpool-redis pool (is redis running?)");
-    #[allow(clippy::expect_used)]
-    // reason: 非空组名 parse 必过；item-level carve-out。
-    let group = ConsumerGroup::parse(group).expect("non-empty group");
-    #[allow(clippy::expect_used)]
-    // reason: 测试用 TTL 恒 ≥ 1ms，构造期校验必过；item-level carve-out。
-    RedisStore::new(pool, ttl, group).expect("ttl must be ≥ 1ms")
+fn make_store(url: &str, ttl: Duration, group: &str) -> Result<RedisStore, FixtureError> {
+    let pool = Config::from_url(url).create_pool(Some(Runtime::Tokio1))?;
+    let group = ConsumerGroup::parse(group)?;
+    Ok(RedisStore::new(pool, ttl, group)?)
 }
 
 #[tokio::test]
-async fn integration_first_check_is_fresh_then_duplicate() {
-    let store = make_store(Duration::from_secs(60), "integration-group");
+async fn integration_first_check_is_fresh_then_duplicate() -> Result<(), FixtureError> {
+    let redis = testkit::env_or_redis().await?;
+    let store = make_store(redis.url(), Duration::from_secs(60), "integration-group")?;
     let key = unique_key("integration_first_fresh");
 
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    let first = store.check(&key).await.expect("first check failed");
+    let first = store.check(&key).await?;
     assert_eq!(first, SeenState::Fresh, "first check must be Fresh");
 
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    let second = store.check(&key).await.expect("second check failed");
+    let second = store.check(&key).await?;
     assert_eq!(
         second,
         SeenState::Duplicate,
         "second check must be Duplicate"
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn integration_ttl_expiry_refresh() {
-    let store = make_store(Duration::from_secs(1), "integration-group");
+async fn integration_ttl_expiry_refresh() -> Result<(), FixtureError> {
+    let redis = testkit::env_or_redis().await?;
+    let store = make_store(redis.url(), Duration::from_secs(1), "integration-group")?;
     let key = unique_key("integration_ttl_expiry");
 
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    let first = store.check(&key).await.expect("first check failed");
+    let first = store.check(&key).await?;
     assert_eq!(first, SeenState::Fresh, "initial check must be Fresh");
 
     // TTL=1s → 等 1.1s 后 key 应过期。
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    let after_expiry = store.check(&key).await.expect("post-expiry check failed");
+    let after_expiry = store.check(&key).await?;
     assert_eq!(
         after_expiry,
         SeenState::Fresh,
         "after TTL expiry key must be Fresh again"
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn integration_shutdown_closes_pool() {
-    let store = make_store(Duration::from_secs(60), "integration-group");
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    store.shutdown().await.expect("shutdown must succeed");
+async fn integration_shutdown_closes_pool() -> Result<(), FixtureError> {
+    let redis = testkit::env_or_redis().await?;
+    let store = make_store(redis.url(), Duration::from_secs(60), "integration-group")?;
+    store.shutdown().await?;
+    Ok(())
 }
 
 // review #216 F5（跨组去重隔离的真实后端回归）：两个不同 ConsumerGroup 的 store 对**同一** key
 // 各自首见 Fresh——证明组维度纳入 claim key 后跨组不再互相去重（修前 key 丢 group ⇒ 第二组误判 Duplicate）。
 #[tokio::test]
-async fn integration_distinct_groups_do_not_dedup_same_key() {
-    let store_a = make_store(Duration::from_secs(60), "group-a");
-    let store_b = make_store(Duration::from_secs(60), "group-b");
+async fn integration_distinct_groups_do_not_dedup_same_key() -> Result<(), FixtureError> {
+    let redis = testkit::env_or_redis().await?;
+    let url = redis.url();
+    let store_a = make_store(url, Duration::from_secs(60), "group-a")?;
+    let store_b = make_store(url, Duration::from_secs(60), "group-b")?;
     let key = unique_key("integration_cross_group");
 
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    let a = store_a.check(&key).await.expect("group-a check failed");
+    let a = store_a.check(&key).await?;
     assert_eq!(a, SeenState::Fresh, "group-a 首见须 Fresh");
 
-    #[allow(clippy::expect_used)]
-    // reason: 集成测试 fail-loud；item-level carve-out。
-    let b = store_b.check(&key).await.expect("group-b check failed");
+    let b = store_b.check(&key).await?;
     assert_eq!(
         b,
         SeenState::Fresh,
         "group-b 对同一 key 独立首见须 Fresh（组隔离，非跨组去重）"
     );
+    Ok(())
 }

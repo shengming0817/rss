@@ -209,6 +209,11 @@ rstest = "0.24"
 trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
 mockall = "0.13"
 insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员）
+# testcontainers 真集成（#1137，crates/testkit `containers` feature）：起真 postgres/redis/rabbitmq 容器。
+# 仅经 testkit `containers` feature + 各 adapter/journeys 的 `integration` feature 传递激活（默认构建 / verify
+# 不拉此树）。docker 为运行期依赖（编译不需）；CI 集成 lane（#1145）提供 docker。ref: testcontainers/testcontainers-rs-modules-community
+testcontainers = "0.27"
+testcontainers-modules = "0.15"
 
 # 工程护栏（成员经 `[lints] workspace = true` 继承）。
 [workspace.lints.rust]

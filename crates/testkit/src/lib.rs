@@ -26,6 +26,17 @@ mod response;
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
 
+// 容器 fixture（#1137，仅 `containers` feature）：testcontainers self-provision postgres/redis/rabbitmq，
+// 供 adapter 集成测试 + journeys durable journey 经 [dev-dependencies] 消费。零内部 workspace 依赖（只回
+// 连接坐标，不构造 adapter 类型）。default 构建 / 契约 harness 消费方不拉 testcontainers 树。
+#[cfg(feature = "containers")]
+mod containers;
+#[cfg(feature = "containers")]
+pub use containers::{
+    FixtureError, PgConnParams, PgFixture, RabbitFixture, RedisFixture, env_or_postgres,
+    env_or_rabbitmq, env_or_redis,
+};
+
 /// testkit harness 错误。harness 自身不 panic（workspace `panic`/`unwrap_used` deny）——
 /// 失败一律走 `Result`，调用方在测试侧 `?` / `expect`（item-level carve-out）暴露。
 #[derive(Debug, thiserror::Error)]

@@ -35,11 +35,17 @@ thiserror = { workspace = true, optional = true }
 # 真实 AMQP broker I/O（lapin）。无此 feature 时 adapter 退化为 sealed-marker 签名冻结壳
 # （AmqpPublisher / AmqpSubscriber impl 冻结 DI port，body=todo!()），保 ADAPTER-PORT-FREEZE-01 默认绿。
 # 注：默认 build（无 integration）整 crate 无 lapin/tracing 链路——调试 AMQP 须 `--features integration`
-# （+ 真实 broker / `RSS_AMQP_TEST_URL` 跑集成测试），否则看不到任何 AMQP 日志。
-integration = ["dep:lapin", "dep:futures", "dep:tracing", "dep:thiserror"]
+# （+ docker / `RSS_AMQP_TEST_URL` 跑集成测试），否则看不到任何 AMQP 日志。
+# testkit/containers 经此传递激活 testcontainers（self-provision rabbitmq + per-domain vhost，无需手工预置）。
+integration = ["dep:lapin", "dep:futures", "dep:tracing", "dep:thiserror", "testkit/containers"]
 
 [dev-dependencies]
-# 集成测试 #[tokio::test]（仅 feature=integration 下编译执行，对接本地 broker）；time = 防挂的有界超时。
+# 集成测试 #[tokio::test]（仅 feature=integration 下编译执行）；time = 防挂的有界超时。
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+# 集成测试用 anyhow（FixtureError = anyhow::Error，ok_or_else 等需要 anyhow! 宏）。
+anyhow = { workspace = true }
+# 集成测试容器 fixture（#1137）：testcontainers self-provision rabbitmq + 建 per-domain vhost（经
+# testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
+testkit = { path = "../../crates/testkit" }

@@ -13,6 +13,14 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 leak-timeout = "200ms"
 final-status-level = "slow"
 
+# 真集成 lane profile（#1137，`cargo xtask integration` / `cargo nextest run --profile integration`）：
+# testcontainers self-provision 容器冷启动（尤其 rabbitmq-management ~250MB 首拉）可超默认 60s slow-timeout，
+# 故放宽到 300s；fail-fast=false 跑全集（一处挂不掩盖其余）。串行调度沿用下方 integration test-group。
+[profile.integration]
+slow-timeout = { period = "300s", terminate-after = 2 }
+leak-timeout = "200ms"
+fail-fast = false
+
 # 集成测试两个正交轴：编译期 feature 门 #[cfg(feature = "integration")] 决定是否编入二进制；
 # 下面 filter 仅在已编入的集成测试上做运行期串行调度（按测试名匹配，非 feature 门）。
 [test-groups]
@@ -20,4 +28,12 @@ integration = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(/integration/)'
+test-group = "integration"
+
+# integration profile 全部测试纳入串行 group（`cargo xtask integration` 仅跑 --features integration
+# 真后端测试，全部串行正确且安全——避免共享 postgres 的 setup_outbox DELETE 全表竞态）。
+# 注：此处 all() 覆盖比 default profile 的 test(/integration/) 宽，因 integration profile 仅
+# 由 integration lane 调用、其内全部测试均为真后端集成测试，不存在无辜非集成测试被卷入的问题。
+[[profile.integration.overrides]]
+filter = 'all()'
 test-group = "integration"

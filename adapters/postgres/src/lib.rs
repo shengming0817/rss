@@ -29,6 +29,9 @@ pub use outbox::PgOutbox;
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;
 
+#[cfg(all(test, feature = "integration"))]
+mod test_pg;
+
 pub use inbox::PgInboxStore;
 pub use pool::{PgConfig, PgError, PgPassword};
 // re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。

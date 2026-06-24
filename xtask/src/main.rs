@@ -22,6 +22,11 @@
 //!                                      供应链漏洞**定时刷新** lane（issue #1133，azure-pipelines.yml 每日 `schedules:`
 //!                                      cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit`
 //!                                      两门（皆 no-compile、快），捕获「未变依赖」新披露 CVE。详见 `verify.rs`。
+//!   `cargo xtask integration [--allow-missing-tools]`
+//!                                      真集成 lane（issue #1137，**opt-in**，不入 verify/ci）：testcontainers
+//!                                      self-provision postgres/redis/rabbitmq 跑 `--features integration` 测试。
+//!                                      **docker-gated**（fail-closed；env URL 全在则对接长存服务免 docker）。
+//!                                      azure-pipelines 接线待 #1145（需 docker agent）。详见 `verify.rs`。
 mod cmd;
 mod codegen;
 mod contract;
@@ -68,6 +73,9 @@ enum Command {
     Audit {
         allow_missing_tools: bool,
     },
+    Integration {
+        allow_missing_tools: bool,
+    },
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -86,9 +94,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
         ["audit", rest @ ..] => parse_audit(rest),
+        ["integration", rest @ ..] => parse_integration(rest),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | wsdeps-drift | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | wsdeps-drift | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -141,6 +150,24 @@ fn parse_audit(args: &[&str]) -> Result<Command> {
         }
     }
     Ok(Command::Audit {
+        allow_missing_tools,
+    })
+}
+
+/// 解析 `integration` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`integration` 无 `--fast`——真集成 lane 恒全量跑。
+fn parse_integration(args: &[&str]) -> Result<Command> {
+    let mut allow_missing_tools = false;
+    for &tok in args {
+        match tok {
+            "--allow-missing-tools" => allow_missing_tools = true,
+            other => {
+                bail!(
+                    "integration 未知参数: {other}；用法: cargo xtask integration [--allow-missing-tools]"
+                )
+            }
+        }
+    }
+    Ok(Command::Integration {
         allow_missing_tools,
     })
 }
@@ -198,6 +225,9 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Audit {
             allow_missing_tools,
         } => verify::run_audit(allow_missing_tools),
+        Command::Integration {
+            allow_missing_tools,
+        } => verify::run_integration(allow_missing_tools),
     }
 }
 
@@ -427,6 +457,36 @@ mod tests {
         assert!(parse_command(&s(&["audit", "--bogus"])).is_err());
         assert!(parse_command(&s(&["audit", "--fast"])).is_err());
         assert!(parse_command(&s(&["audit", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_integration_bare() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["integration"]))?,
+            Command::Integration {
+                allow_missing_tools: false
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_integration_allow_missing_tools() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["integration", "--allow-missing-tools"]))?,
+            Command::Integration {
+                allow_missing_tools: true
+            }
+        );
+        Ok(())
+    }
+
+    /// integration flag fail-closed：未知 flag / 尾参 / 误用 `--fast`（无此 flag）均 `Err`。
+    #[test]
+    fn parse_command_integration_rejects_unknown_flag() {
+        assert!(parse_command(&s(&["integration", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["integration", "--fast"])).is_err());
+        assert!(parse_command(&s(&["integration", "extra"])).is_err());
     }
 
     #[test]

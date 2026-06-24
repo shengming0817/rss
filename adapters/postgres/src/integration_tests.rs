@@ -1,53 +1,30 @@
 //! postgres adapter 集成测试（crate-internal；需真实 postgres，`integration` feature 门控；#1116 review F2/F5/F6）。
 //!
 //! crate-internal（非 `tests/`）以行使 `pub(crate)` 的 [`crate::PgStore::run_in_transaction`]（裸事务非公开
-//! API，review F2）。本地 docker postgres：设 libpq 标准 env（`PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER`
-//! / `PGPASSWORD`，`PGDATABASE` 须含 `test`），跑 `cargo nextest run -p postgres --features integration`。
+//! API，review F2）。容器经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置。
+//! **外部 PG 路径（快速本地迭代）**：须设 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`（显式 opt-in）+
+//! 5 元组 `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`；`PGDATABASE` 须以 `_test` 结尾或 `== "test"`
+//! （严格库名，单源校验在 testkit）。需 docker（容器路径）。跑 `cargo nextest run -p postgres --features integration`。
 //!
-//! **fail-closed（review F5）**：缺任一 env / `PGDATABASE` 不含 `test` → 测试**失败**（非静默跳过），杜绝
-//! 「未配置 DB 却显示 passed」的假绿，并防破坏性 DDL 打到非测试库（review F6）。
-
-use std::time::Duration;
+//! **fail-closed（review F5/F6）**：连不上 → 测试**失败**（非静默跳过）；
+//! 库名校验由 `testkit::env_or_postgres` 单源执行，此处无需重复。
+//! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, SeenState};
 use diport::ManagedResource;
 use futures::future::BoxFuture;
 
-use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
+use crate::PgStore;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+// 统一 Send+Sync 错误（= testkit::FixtureError）：sqlx::Error / PgError / FixtureError 均 Send+Sync，
+// 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
+type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-/// 由 libpq 标准 env 构造配置。fail-closed：缺 env / 非测试库名 → `Err`（测试失败，非跳过）。
-fn config_from_env() -> Result<PgConfig, String> {
-    let var = |k: &str| {
-        std::env::var(k).map_err(|_| {
-            format!("integration 测试需设置 {k}（libpq env）；见 migrations/README.md")
-        })
-    };
-    let host = var("PGHOST")?;
-    let port: u16 = var("PGPORT")?
-        .parse()
-        .map_err(|_| "PGPORT 不是合法 u16".to_string())?;
-    let database = var("PGDATABASE")?;
-    // review F6：集成测试执行破坏性 DDL（CREATE/DROP TABLE），拒绝打到非测试库。
-    if !database.contains("test") {
-        return Err(format!(
-            "PGDATABASE='{database}' 不含 'test'——集成测试会执行破坏性 DDL，拒绝打到非测试库"
-        ));
-    }
-    let username = var("PGUSER")?;
-    let password = var("PGPASSWORD")?;
-    Ok(
-        PgConfig::new(host, port, database, username, PgPassword::new(password))
-            // 本地无 TLS docker postgres：显式降级（默认 VerifyFull 对未启 TLS 的 docker pg 连不上）。
-            .with_ssl_mode(PgSslMode::Prefer)
-            .with_acquire_timeout(Duration::from_secs(5)),
-    )
-}
+use crate::test_pg::connect_pg;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pool_connects_and_shuts_down() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     assert_eq!(store.name(), "postgres");
     store.shutdown().await?;
     Ok(())
@@ -55,7 +32,7 @@ async fn pool_connects_and_shuts_down() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn migrator_applies_and_is_idempotent() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?; // 应用 0001 占位
     store.run_migrations().await?; // 再跑：checksum 命中 → 幂等 no-op
     store.shutdown().await?;
@@ -64,7 +41,7 @@ async fn migrator_applies_and_is_idempotent() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
 
     // setup：干净表 + 1 行，commit（committed 数据对所有池连接可见）。
     store
@@ -140,7 +117,7 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 // reason: 集成测试 happy-path —— uuid v4 生成不失败、测试专用固定组名非空、IdemKey 非空 parse 不失败；
 // 函数级 item-level carve-out（error-handling.md §Carve-out）。
 async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
     // 唯一 event_id：每次生成新 UUID，跨轮次不冲突，无需 DELETE 清理。
@@ -211,7 +188,7 @@ use crate::outbox::{
 };
 
 /// setup 阶段：应用 migration（含 outbox 表），清空 outbox（防测试间污染）。
-async fn setup_outbox(store: &PgStore) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_outbox(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     store.run_migrations().await?;
     sqlx::query("DELETE FROM outbox")
         .execute(&store.pool)
@@ -330,7 +307,7 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
 /// L1 原子性：append_outbox 在事务内，业务返回 Err → 回滚 → outbox 无该行。
 #[tokio::test(flavor = "multi_thread")]
 async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t1");
@@ -373,7 +350,7 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t2");
@@ -417,7 +394,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t3_relay_ok_publishes_and_acks() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t3");
@@ -466,7 +443,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t4");
@@ -537,7 +514,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t5");
@@ -594,7 +571,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t6");
@@ -689,7 +666,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t7");
@@ -758,7 +735,7 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_pub = unique_event_id("t8-pub");
@@ -846,7 +823,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t9_settle_rejects_stale_lease_token() -> TestResult {
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t9");
@@ -928,7 +905,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestResult {
     use diport::{OutboxEmitter, OutboxEnvelopeParts};
 
-    let store = PgStore::connect(&config_from_env()?).await?;
+    let (_pg, store) = connect_pg().await?;
     // F5(#1194)：仅建表、不全表 DELETE——本用例按 unique `event_id` 隔离断言（`WHERE event_id = $1`），
     // 不需净表起点，避免并发共享库下污染他用例刚写入的行（`setup_outbox` 的全表清理是 pre-existing，#1194 收口）。
     store.run_migrations().await?;
