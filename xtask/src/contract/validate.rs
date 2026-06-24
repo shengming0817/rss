@@ -5,6 +5,13 @@
 //! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）、
 //! per-kind 字段（#1035）的 active 发布接线必填（R8）/ 跨 kind 卫生（R9）/ saga block 结构语义（R10）/
 //! active event 投递语义可兑现性（R11）。
+//! INVARIANT: CONTRACT-IDUNIQ-01 — contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
+//! 依据 api-versioning.md：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
+//! INVARIANT: CONTRACT-TITLE-01 — declared schema（喂 codegen TypeSpace 的 request/response/payload）的
+//! root 须有 string `title`（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部
+//! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
+//! title **未必**被 codegen 兜底（前者可能被合并 / 类型歧义、后者直接丢根类型，均非 compile error、非
+//! fail-closed）；本规则在 validate 阶段提供 fail-fast + 清晰诊断（早于 codegen）+ PascalCase 形态。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -12,12 +19,13 @@
 //! 故与 R1–R7 同属 Medium——「能 Hard 则 Hard、余下 Medium」的正确分层。
 //!
 //! 规则执行顺序（注释编号 = 执行先后）：
-//!   R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape → R5 MissingSchema
-//!   → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields → R9 PerKindFieldScope
-//!   → R10 SagaBlock → R11 ActiveDeliverySupported
+//!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
+//!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
+//!   → R9 PerKindFieldScope → R10 SagaBlock → R11 ActiveDeliverySupported → R13 SchemaTitle
+//!   跨契约（validate_cross，需全局视图）：R12 DuplicateId
 
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::manifest::{
@@ -59,6 +67,13 @@ pub(crate) enum Rule {
     /// R11：`lifecycle=active` 的 event 只能声明当前可兑现的投递语义（仅 `at-least-once`）；
     /// `at-most-once`/`exactly-once` 当前 broker 链路无运行时保证，能力落地前限 draft/deprecated。
     ActiveDeliverySupported,
+    /// R12：contract `id` 须跨**全部**契约全局唯一（跨契约规则，在 [`validate_cross`]，非逐契约）。
+    /// id 是契约注册标识（事件 routing / 鉴权挂载 / registry）；api-versioning.md 要求破坏式 wire 变更
+    /// 新建版本目录 **且** 新 contract ID ⇒ id 全局唯一。
+    DuplicateId,
+    /// R13：每个 declared schema（喂 codegen TypeSpace 的 request/response/payload）的 `title`
+    /// 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）且**契约内**唯一（title→typify 生成的 Rust 类型名）。
+    SchemaTitle,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -83,10 +98,40 @@ pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding
     for c in &contracts {
         findings.extend(validate_contract(c));
     }
+    findings.extend(validate_cross(&contracts));
     Ok((contracts.len(), findings))
 }
 
-/// 对单契约跑全部规则（执行顺序 = 下方 `extend` 调用序 = `Rule` 声明序；编号见 `Rule` 枚举）。
+/// 跨契约规则聚合点：需要**全局视图**（看到所有契约才能判定），无法在逐契约的 [`validate_contract`]
+/// 内表达。现仅 R12 DuplicateId；后续跨契约不变式在此追加。
+fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+    rule_duplicate_id(contracts)
+}
+
+/// R12：contract `id` 须跨全部契约全局唯一（INVARIANT: CONTRACT-IDUNIQ-01）。同根因（同一重复 id）
+/// 只报 1 条（subject = 该 id），detail 列全部冲突契约 label（排序，跨机确定性）。
+fn rule_duplicate_id(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+    let mut by_id: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for c in contracts {
+        let label = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
+        by_id.entry(c.manifest.id.as_str()).or_default().push(label);
+    }
+    by_id
+        .into_iter()
+        .filter(|(_, labels)| labels.len() > 1)
+        .map(|(id, mut labels)| {
+            labels.sort();
+            finding(
+                Rule::DuplicateId,
+                id,
+                format!("contract id 跨契约重复，出现于: {}", labels.join("、")),
+            )
+        })
+        .collect()
+}
+
+/// 对单契约跑全部 per-contract 规则（执行顺序 = 下方 `extend` 调用序）。跨契约规则（R12 DuplicateId）
+/// 在 [`validate_cross`]，不在此（它需全局视图）。
 pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     // label 用相对 `{kind}/{domain}/{version}` 三段（机器稳定、跨机一致），不用绝对磁盘路径
     // ——CI / 多开发机的 finding 输出须可对应 repo 路径，便于定位。
@@ -103,6 +148,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_perkind_field_scope(&c.manifest, &label));
     findings.extend(rule_saga_block(&c.manifest, &label));
     findings.extend(rule_active_delivery_supported(&c.manifest, &label));
+    findings.extend(rule_schema_title(c, &label));
     findings
 }
 
@@ -444,6 +490,166 @@ fn rule_active_delivery_supported(m: &ContractManifest, label: &str) -> Option<F
     }
 }
 
+/// R13：每个喂 codegen TypeSpace 的 declared schema（`[schemas]` request/response/payload）的 `title`
+/// 须 PascalCase 且**契约内**唯一（INVARIANT: CONTRACT-TITLE-01）。title 是 typify 生成的 Rust 类型名
+/// （顶层 + 嵌套对象都成类型）：非 PascalCase 产生非惯用类型名；契约内重复（一契约的全部 declared schema
+/// 喂同一 TypeSpace）产生类型冲突。
+///
+/// schema 文件口径**严格对齐 codegen** `render_contract`（`xtask/src/codegen.rs` 用 `Schemas::declared_files()`）
+/// ——**不是** [`super::manifest::ContractManifest::declared_schema_files`]：后者含 saga step `outputSchema`，
+/// 那些文件**从不喂 typify**（不成类型），纳入会误报「契约内重复」且「title→类型名」依据不成立。
+/// reason: 校验口径锚定「实际生成类型的那批 schema」，勿误把两个 accessor 统一。
+///
+/// 读不到 / JSON parse 失败 → skip（不报）：文件缺失由 R5（MissingSchema）报，JSON 良构由 codegen parse
+/// 门兜底；本规则只在能解析的 schema 上校验 title。
+fn rule_schema_title(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+    let (titles, missing_root) = collect_contract_titles(c);
+    let mut out = Vec::new();
+    // ⓪ root title 必填：每个 declared schema 的 root 须有 string `title`。typify `add_root_schema`
+    // 仅在 root metadata 含 title 时生成根类型（缺则 Ok(None)、根类型静默丢失，见 codegen render_contract）。
+    for file in &missing_root {
+        out.push(finding(
+            Rule::SchemaTitle,
+            label,
+            format!("declared schema 缺 root title（须 string；否则 typify 不生成根类型）：{file}"),
+        ));
+    }
+    // ① 非 PascalCase。
+    for (title, file) in &titles {
+        if !is_pascal_case(title) {
+            out.push(finding(
+                Rule::SchemaTitle,
+                label,
+                format!(
+                    "schema title 须 PascalCase（^[A-Z][A-Za-z0-9]*$），实为 {title:?}（{file}）"
+                ),
+            ));
+        }
+    }
+    // ② 契约内重复（跨该契约全部 declared schema 文件聚合判重）。
+    let mut by_title: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (title, file) in &titles {
+        by_title
+            .entry(title.as_str())
+            .or_default()
+            .push(file.as_str());
+    }
+    for (title, mut files) in by_title {
+        if files.len() > 1 {
+            // len 判重用原始计数（同文件内重复也是重复）；显示前 dedup，避免同名文件列两次。
+            files.sort();
+            files.dedup();
+            out.push(finding(
+                Rule::SchemaTitle,
+                label,
+                format!(
+                    "schema title 契约内重复: {title:?}（出现于 {}）",
+                    files.join("、")
+                ),
+            ));
+        }
+    }
+    out
+}
+
+/// 读契约的全部 declared schema（口径 = codegen `Schemas::declared_files()`，request/response/payload），
+/// 返回（`(title, 来源文件名)` 全集, root title 缺失的文件名集）。读不到 / parse 失败的文件 skip
+/// （见 [`rule_schema_title`] doc）；能解析但 root 无 string title 的文件计入第二项（供 ⓪ root 必填门）。
+fn collect_contract_titles(c: &DiscoveredContract) -> (Vec<(String, String)>, Vec<String>) {
+    let mut titles = Vec::new();
+    let mut missing_root = Vec::new();
+    for file in c.manifest.schemas.declared_files() {
+        if pathsafe::is_unsafe_segment(file) {
+            // 防御性 fail-safe：含路径分量的文件名由 R6 报；R13 不主动 `join` 读它（不依赖
+            // 文件系统拒绝来保护自身），与 R6 意图一致。
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(c.dir.join(file)) else {
+            continue; // 缺失由 R5 报
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue; // JSON 良构由 codegen parse 门兜底
+        };
+        if !has_root_title(&value) {
+            missing_root.push(file.to_string());
+        }
+        let mut found = Vec::new();
+        collect_schema_titles(&value, &mut found);
+        for t in found {
+            titles.push((t, file.to_string()));
+        }
+    }
+    (titles, missing_root)
+}
+
+/// declared schema 的 root（顶层节点）是否声明了 string `title`。typify `add_root_schema` 仅在
+/// root metadata 含 title 时生成根类型（否则 `Ok(None)`、根类型丢失），故 root title 必填。
+/// 空 string / 非 PascalCase title 由 ①PascalCase 门另抓（空串会被 `collect_schema_titles` 收进 titles）。
+fn has_root_title(schema: &serde_json::Value) -> bool {
+    matches!(schema.get("title"), Some(serde_json::Value::String(_)))
+}
+
+/// 递归收集一个 JSON Schema (draft-07) 文档里所有**内联 schema 节点**的 `title`（仅 string 值）。
+/// 只在「已知为 schema 的 Value」上读 `title`，并仅下钻 schema 承载关键字——不进 property **名**、
+/// `required`/`enum`/`const`/`default`/`description`/`$ref` 等非 schema 文本（杜绝把字面叫 "title" 的
+/// property key 当类型名）。不走 `if`/`then`/`else`（draft-07 conditional，typify 0.7 支持有限；
+/// 漏检比误检安全）。入口对 root schema 调用一次（含 root 自身 title）。
+fn collect_schema_titles(schema: &serde_json::Value, out: &mut Vec<String>) {
+    let serde_json::Value::Object(map) = schema else {
+        return;
+    };
+    if let Some(serde_json::Value::String(title)) = map.get("title") {
+        out.push(title.clone());
+    }
+    // 子 schema = 这些关键字下 object 的各 value（properties / patternProperties / definitions / $defs 成员）。
+    for key in ["properties", "patternProperties", "definitions", "$defs"] {
+        recurse_map_values(map.get(key), out);
+    }
+    // 子 schema = 这些关键字的值（单 schema 或 schema 数组）：items（object 或 tuple array）、
+    // additionalProperties（object；bool 经入口 no-op）、not、allOf/anyOf/oneOf。
+    for key in [
+        "items",
+        "additionalProperties",
+        "not",
+        "allOf",
+        "anyOf",
+        "oneOf",
+    ] {
+        if let Some(v) = map.get(key) {
+            recurse_subschemas(v, out);
+        }
+    }
+}
+
+/// 下钻一个 object-of-subschemas（如 `properties` / `$defs`）的各 value；非 object ⇒ no-op。
+fn recurse_map_values(value: Option<&serde_json::Value>, out: &mut Vec<String>) {
+    if let Some(serde_json::Value::Object(children)) = value {
+        for child in children.values() {
+            collect_schema_titles(child, out);
+        }
+    }
+}
+
+/// 下钻一个 schema 承载值：array ⇒ 逐项递归（allOf/anyOf/oneOf/tuple items），否则单 schema 递归
+/// （非 object 在 [`collect_schema_titles`] 入口 no-op，如 `additionalProperties: false`）。
+fn recurse_subschemas(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_schema_titles(item, out);
+            }
+        }
+        other => collect_schema_titles(other, out),
+    }
+}
+
+/// PascalCase 形态（`^[A-Z][A-Za-z0-9]*$`）：非空、首字符 `A-Z`、其余 `[A-Za-z0-9]`（拒下划线 / 连字符 /
+/// snake / 数字开头 / 空）。手写 char 谓词，同 R7 `is_dotted_id` 等的非-regex 范式。
+fn is_pascal_case(s: &str) -> bool {
+    matches!(s.bytes().next(), Some(b) if b.is_ascii_uppercase())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 /// 路径段（domain 用）：非空、全 `[a-z0-9_]`、首字符 `a-z` 或 `_`（容 `_seed` 等保留段，
 /// 拒数字开头 / 大写 / `.`、`/`、`\` 等路径分量）。
 fn is_safe_segment(s: &str) -> bool {
@@ -563,11 +769,11 @@ mod tests {
 
     #[test]
     fn green_http_contract_has_no_findings() -> anyhow::Result<()> {
-        // anti-vacuity（正向）：全合法契约不产生任何 finding。
+        // anti-vacuity（正向）：全合法契约不产生任何 finding。schema 带合法 root title（R13 ⓪ 必填）。
         let dir = unique_tmp("validate");
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("request.schema.json"), "{}")?;
-        std::fs::write(dir.join("response.schema.json"), "{}")?;
+        std::fs::write(dir.join("request.schema.json"), r#"{"title":"GreenReq"}"#)?;
+        std::fs::write(dir.join("response.schema.json"), r#"{"title":"GreenResp"}"#)?;
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
@@ -1338,8 +1544,11 @@ mod tests {
     fn green_active_http_contract_has_no_findings() -> anyhow::Result<()> {
         let dir = unique_tmp("validate");
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("request.schema.json"), "{}")?;
-        std::fs::write(dir.join("response.schema.json"), "{}")?;
+        std::fs::write(dir.join("request.schema.json"), r#"{"title":"ActiveReq"}"#)?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            r#"{"title":"ActiveResp"}"#,
+        )?;
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
@@ -1352,6 +1561,364 @@ mod tests {
         let findings = validate_contract(&discovered(m, dir.clone()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    // ── R12 DuplicateId（跨契约，喂 &[DiscoveredContract]，不读盘）────────────
+
+    /// 构造一个 discovered 契约（id / 三段 label 可定制）。DuplicateId 只看 manifest.id + 路径段，不读盘。
+    fn discovered_with(id: &str, kind: &str, domain: &str, version: &str) -> DiscoveredContract {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.id = id.to_string();
+        let mut c = discovered(m, PathBuf::from("/x"));
+        c.path_kind = kind.to_string();
+        c.path_domain = domain.to_string();
+        c.path_version = version.to_string();
+        c
+    }
+
+    #[test]
+    fn r12_duplicate_id_across_two_contracts_detected() {
+        let contracts = vec![
+            discovered_with("identity.login", "http", "identity", "v1"),
+            discovered_with("identity.login", "http", "identity", "v2"),
+        ];
+        let findings = rule_duplicate_id(&contracts);
+        assert_eq!(findings.len(), 1, "同根因仅 1 条: {findings:?}");
+        assert_eq!(findings[0].rule, Rule::DuplicateId);
+        assert_eq!(findings[0].subject, "identity.login", "subject 须为重复 id");
+        assert!(findings[0].detail.contains("http/identity/v1"));
+        assert!(findings[0].detail.contains("http/identity/v2"));
+    }
+
+    #[test]
+    fn r12_three_contracts_same_id_still_one_finding() {
+        let contracts = vec![
+            discovered_with("seed.echo", "http", "_seed", "v1"),
+            discovered_with("seed.echo", "event", "_seed", "v1"),
+            discovered_with("seed.echo", "http", "other", "v1"),
+        ];
+        let findings = rule_duplicate_id(&contracts);
+        assert_eq!(findings.len(), 1, "三契约同 id 仍 1 条: {findings:?}");
+        assert_eq!(findings[0].rule, Rule::DuplicateId);
+    }
+
+    #[test]
+    fn r12_duplicate_id_detail_is_deterministic() {
+        // 乱序输入，detail 的 label 列表稳定排序（BTreeMap + sort）。
+        let a = vec![
+            discovered_with("dup.id", "http", "b", "v1"),
+            discovered_with("dup.id", "http", "a", "v1"),
+        ];
+        let b = vec![
+            discovered_with("dup.id", "http", "a", "v1"),
+            discovered_with("dup.id", "http", "b", "v1"),
+        ];
+        assert_eq!(
+            rule_duplicate_id(&a)[0].detail,
+            rule_duplicate_id(&b)[0].detail
+        );
+    }
+
+    #[test]
+    fn r12_distinct_ids_ok() {
+        // anti-vacuity：id 各异 → 无 finding。
+        let contracts = vec![
+            discovered_with("seed.echo", "http", "_seed", "v1"),
+            discovered_with("identity.login", "http", "identity", "v1"),
+            discovered_with("seed.thing-happened", "event", "_seed", "v1"),
+        ];
+        assert!(rule_duplicate_id(&contracts).is_empty());
+    }
+
+    #[test]
+    fn r12_single_contract_no_finding() {
+        // 边界：唯一一个契约 → 无重复。
+        let contracts = vec![discovered_with("seed.echo", "http", "_seed", "v1")];
+        assert!(rule_duplicate_id(&contracts).is_empty());
+    }
+
+    #[test]
+    fn r12_empty_contracts_ok() {
+        // 边界：零契约 → 无 finding（不 panic）。
+        assert!(rule_duplicate_id(&[]).is_empty());
+    }
+
+    // ── R13 SchemaTitle（per-contract，读 declared schema 文件）──────────────
+
+    /// 写一个 http 契约目录（request/response schema 内容自定），返回 (DiscoveredContract, dir)。
+    /// 调用方负责 `remove_dir_all` 清理。
+    fn http_contract_with_schemas(
+        request: &str,
+        response: &str,
+    ) -> anyhow::Result<(DiscoveredContract, PathBuf)> {
+        let dir = unique_tmp("validate-title");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("request.schema.json"), request)?;
+        std::fs::write(dir.join("response.schema.json"), response)?;
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        Ok((discovered(m, dir.clone()), dir))
+    }
+
+    #[test]
+    fn r13_non_pascal_top_level_title_detected() -> anyhow::Result<()> {
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"seed_echo"}"#,
+            r#"{"title":"SeedEchoResponse"}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.iter().any(|f| f.rule == Rule::SchemaTitle));
+        assert!(findings.iter().any(|f| f.detail.contains("seed_echo")));
+        Ok(())
+    }
+
+    #[test]
+    fn r13_non_pascal_nested_title_detected() -> anyhow::Result<()> {
+        // walker 须下钻 properties value 收集嵌套对象 title。
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"SeedEchoRequest"}"#,
+            r#"{"title":"SeedEchoResponse","properties":{"data":{"title":"echo_data"}}}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SchemaTitle && f.detail.contains("echo_data"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_intra_contract_duplicate_across_files_detected() -> anyhow::Result<()> {
+        // 同一契约 request + response 喂同一 TypeSpace → title 须契约内唯一。
+        let (c, dir) = http_contract_with_schemas(r#"{"title":"Dup"}"#, r#"{"title":"Dup"}"#)?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SchemaTitle && f.detail.contains("契约内重复"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_top_level_vs_nested_duplicate_detected() -> anyhow::Result<()> {
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"SeedEchoRequest"}"#,
+            r#"{"title":"Foo","properties":{"data":{"title":"Foo"}}}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SchemaTitle && f.detail.contains("Foo"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_valid_titles_ok() -> anyhow::Result<()> {
+        // anti-vacuity：仿真实 seed 契约，全 PascalCase 且契约内唯一 → 无 finding。
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"SeedEchoRequest","type":"object","properties":{"msg":{"type":"string"}}}"#,
+            r#"{"title":"SeedEchoResponse","properties":{"data":{"title":"SeedEchoData"}}}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r13_property_named_title_not_treated_as_type() -> anyhow::Result<()> {
+        // 防误报关键：property **名**恰为 "title" 不被当作 schema 的 title 关键字。
+        // root title 合法存在（满足 ⓪ 必填门），被测的只是 properties 下名为 "title" 的字段不被收集。
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"SeedEchoRequest","type":"object","properties":{"title":{"type":"string"}}}"#,
+            r#"{"title":"SeedEchoResponse"}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.is_empty(),
+            "property 名 title 不该被当类型名: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_unparseable_schema_skipped() -> anyhow::Result<()> {
+        // JSON 良构由 codegen parse 门兜底；本规则对坏 JSON skip（不 panic、不报）。
+        let (c, dir) =
+            http_contract_with_schemas(r#"{ this is not json"#, r#"{"title":"SeedEchoResponse"}"#)?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "坏 JSON 应 skip: {findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r13_missing_schema_file_skipped() -> anyhow::Result<()> {
+        // 文件缺失由 R5 报；SchemaTitle 不重复报、不 panic。
+        let dir = unique_tmp("validate-title");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            r#"{"title":"SeedEchoResponse"}"#,
+        )?;
+        // request.schema.json 声明但不建。
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        let findings = rule_schema_title(&discovered(m, dir.clone()), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r13_walker_covers_defs_items_oneof() -> anyhow::Result<()> {
+        // walker 须下钻 $defs / items(数组 tuple) / oneOf——内嵌 title 纳入唯一性集。
+        // 此处各位置 title 合法且唯一 → 无 finding（验 walker 不漏不误）。
+        let req = r#"{
+            "title":"ReqRoot",
+            "$defs":{"Inner":{"title":"DefInner"}},
+            "properties":{
+                "tup":{"items":[{"title":"TupA"},{"title":"TupB"}]},
+                "choice":{"oneOf":[{"title":"ChoiceA"},{"title":"ChoiceB"}]}
+            }
+        }"#;
+        let (c, dir) = http_contract_with_schemas(req, r#"{"title":"RespRoot"}"#)?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r13_intra_file_duplicate_detected() -> anyhow::Result<()> {
+        // 同一文件内两处同 title（顶层 + 嵌套）→ 契约内重复；诊断不应重复列同一文件名（dedup）。
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"Dup","properties":{"data":{"title":"Dup"}}}"#,
+            r#"{"title":"SeedEchoResponse"}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dups: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule == Rule::SchemaTitle && f.detail.contains("契约内重复"))
+            .collect();
+        assert_eq!(dups.len(), 1, "同文件内重复应报 1 条: {findings:?}");
+        assert!(
+            !dups[0]
+                .detail
+                .contains("request.schema.json、request.schema.json"),
+            "诊断不应重复列同名文件: {}",
+            dups[0].detail
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_unsafe_schema_path_skipped() -> anyhow::Result<()> {
+        // 防御性 fail-safe：declared schema 含路径分量（R6 已报）→ R13 主动 skip，不 `join` 读它。
+        let dir = unique_tmp("validate-title");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            r#"{"title":"SeedEchoResponse"}"#,
+        )?;
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            Schemas {
+                request: Some("../request.schema.json".to_string()),
+                response: Some("response.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        let findings = rule_schema_title(&discovered(m, dir.clone()), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "R13 应 skip 不安全路径: {findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r13_missing_root_title_detected() -> anyhow::Result<()> {
+        // 复现：declared schema 无 root title → typify add_root_schema 返回 Ok(None)、不生成根类型。
+        // R13 须 fail-fast 报缺 root title（此前只校验已收集到的 title，root 缺 title 静默放过）。
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"type":"object","properties":{"msg":{"type":"string"}}}"#, // 无 root title
+            r#"{"title":"SeedEchoResponse"}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SchemaTitle && f.detail.contains("root title")),
+            "缺 root title 须报 SchemaTitle: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_non_string_root_title_detected() -> anyhow::Result<()> {
+        // root title 非 string（如数字）→ 既不被 collect_schema_titles 收集（只收 string），
+        // 也等同 typify「无 title」语义 → 须报缺 root title。
+        let (c, dir) =
+            http_contract_with_schemas(r#"{"title":123}"#, r#"{"title":"SeedEchoResponse"}"#)?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SchemaTitle && f.detail.contains("root title")),
+            "非 string root title 须报 SchemaTitle: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case("SeedEchoData", true)]
+    #[case("A", true)]
+    #[case("Foo9Bar", true)]
+    #[case("seed_echo", false)] // snake
+    #[case("seedEcho", false)] // camel（首字符小写）
+    #[case("9Foo", false)] // 数字开头
+    #[case("Foo-Bar", false)] // 连字符
+    #[case("Foo_Bar", false)] // 下划线
+    #[case("", false)] // 空
+    fn r13_is_pascal_case(#[case] s: &str, #[case] want: bool) {
+        assert_eq!(is_pascal_case(s), want, "is_pascal_case({s:?})");
+    }
+
+    #[test]
+    fn real_contracts_pass_all_rules() -> anyhow::Result<()> {
+        // anti-vacuity（正向，真实数据）：仓库 contracts/ 全部契约经 validate_root 零 finding——
+        // 同时守 R12/R13 不在真实契约 / title 上误报。
+        let root = crate::workspace_root()?.join("contracts");
+        let (count, findings) = validate_root(&root)?;
+        assert!(count > 0, "应发现至少一个契约");
+        assert!(findings.is_empty(), "真实契约应零 finding: {findings:?}");
         Ok(())
     }
 }
