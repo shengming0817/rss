@@ -13,9 +13,11 @@
 //! `take_until(token)` 替代 Go channel + `<-closing`。runtime-agnostic：用 `futures::channel::mpsc`
 //! （receiver 即 `Stream`），不绑 tokio runtime。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+use consistency::{ConsumerGroup, EngineError, IdemKey, IdempotencyStore, SeenState};
 
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, Clock, Message, MessageStream, PublishRequest,
@@ -196,6 +198,48 @@ impl Clock for FixedClock {
     }
 }
 
+// ── InMemClaimer：进程内幂等去重替身（demo 拓扑）─────────────────────────────
+
+/// in-mem 幂等 claimer（impl [`consistency::IdempotencyStore`]）：以 `(group, key)` 记首见集合，
+/// 首见 `Fresh`、再见 `Duplicate`。demo / 单进程 / 测试用；生产走 redis/pg claimer。
+pub struct InMemClaimer {
+    seen: Arc<Mutex<HashSet<(String, String)>>>,
+    group: ConsumerGroup,
+}
+
+impl InMemClaimer {
+    /// 新建空 claimer，绑定消费者组。
+    ///
+    /// 构造仅 crate 内可见（`pub(crate)`）——`InMemClaimer` 是 demo/test 替身，
+    /// 当前无已知跨 crate 消费方。跨 crate dev-root demo 装配（如 replaydeps 拓扑）
+    /// 随消费方落地时再经决策 token factory 暴露；勿现在引入该 factory。
+    #[allow(dead_code)]
+    // reason: InMemClaimer::new 当前仅在 #[cfg(test)] 中调用；非测试 lib 代码无消费方，
+    // 故 rustc dead_code lint 误报。待 replaydeps demo 消费方落地时一并去掉本 allow。
+    pub(crate) fn new(group: ConsumerGroup) -> Self {
+        Self {
+            seen: Arc::new(Mutex::new(HashSet::new())),
+            group,
+        }
+    }
+}
+
+impl IdempotencyStore for InMemClaimer {
+    async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
+        let fresh = self
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((self.group.as_str().to_string(), key.as_str().to_string()));
+        // reason: in-mem 集合插入不会失败，恒 Ok；首次插入=Fresh，已存在=Duplicate。
+        Ok(if fresh {
+            SeenState::Fresh
+        } else {
+            SeenState::Duplicate
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +369,55 @@ mod tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
         );
         assert_eq!(clock.now(), clock.now());
+    }
+
+    // ── InMemClaimer L0 表驱动测试 ───────────────────────────────────────────
+
+    /// 同一 key 连续 check 3 次：第 1 次 Fresh，第 2、3 次 Duplicate。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 check，item-level carve-out（error-handling.md §Carve-out）。
+    async fn claimer_first_fresh_then_duplicate() {
+        use crate::InMemClaimer;
+        use consistency::IdemKey;
+
+        let group = consistency::ConsumerGroup::parse("audit").expect("group");
+        let claimer = InMemClaimer::new(group);
+        let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
+
+        let states: Vec<SeenState> = vec![
+            claimer.check(&key).await.expect("check 1"),
+            claimer.check(&key).await.expect("check 2"),
+            claimer.check(&key).await.expect("check 3"),
+        ];
+
+        assert_eq!(states[0], SeenState::Fresh, "第 1 次应为 Fresh");
+        assert_eq!(states[1], SeenState::Duplicate, "第 2 次应为 Duplicate");
+        assert_eq!(states[2], SeenState::Duplicate, "第 3 次应为 Duplicate");
+    }
+
+    /// 两个不同 group 的 claimer，同一 key 各自 Fresh——证明去重按组隔离，组漂移→去重失效。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 check，item-level carve-out（error-handling.md §Carve-out）。
+    async fn consumer_group_drift_breaks_dedup() {
+        use crate::InMemClaimer;
+        use consistency::IdemKey;
+
+        let group_a = consistency::ConsumerGroup::parse("audit").expect("group-a");
+        let group_b = consistency::ConsumerGroup::parse("settings").expect("group-b");
+        let claimer_a = InMemClaimer::new(group_a);
+        let claimer_b = InMemClaimer::new(group_b);
+        let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
+
+        let state_a = claimer_a.check(&key).await.expect("check a");
+        let state_b = claimer_b.check(&key).await.expect("check b");
+
+        assert_eq!(state_a, SeenState::Fresh, "group-a 首见应为 Fresh");
+        assert_eq!(
+            state_b,
+            SeenState::Fresh,
+            "group-b 独立首见应为 Fresh（组隔离）"
+        );
     }
 }

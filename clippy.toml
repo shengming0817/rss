@@ -18,6 +18,9 @@ disallowed-methods = [
   # 连接时受控调用；域/服务 crate 禁调（默认拒，组合根/sanctioned 测试 callsite item-level #[allow]）。
   # 见 bootstrap::eventtransport rustdoc。allow-invalid：非依赖 bootstrap 的 crate 解析不到此路径。
   { path = "bootstrap::eventtransport::AmqpUrl::expose", reason = "凭据原文出口仅组合根受控调用；见 eventtransport rustdoc", allow-invalid = true },
+  # 对称守卫：RedisUrl::expose() 返回含 user:pass 的原始 Redis URL，仅组合根交 redis adapter 连接时受控调用。
+  # 见 bootstrap::replaydeps rustdoc。allow-invalid：非依赖 bootstrap 的 crate 解析不到此路径。
+  { path = "bootstrap::replaydeps::RedisUrl::expose", reason = "凭据原文出口仅组合根受控调用；见 replaydeps rustdoc", allow-invalid = true },
 ]
 
 # 预留：跨域 wire 不裸传强类型标识等纪律，随类型落地补充。

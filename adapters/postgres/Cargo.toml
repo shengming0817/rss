@@ -41,3 +41,5 @@ integration = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# 集成测试用唯一 event_id 法（inbox_dedup 去重隔离验证，避免跨轮次清理）。
+uuid = { workspace = true, features = ["v4"] }

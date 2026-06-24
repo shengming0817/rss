@@ -11,7 +11,8 @@
 //! 本 journey 全程 in-process（不需 broker），故 **不** feature-gate——是默认 `cargo test` / `verify` 验收门。
 //! 真实 amqp broker I/O 的传输验收见 `adapters/amqp/tests/integration.rs`（`integration` feature 门控）。
 
-use bootstrap::{ResolvedTransport, Topology, TransportConfig, TransportResolveError, resolve};
+use bootstrap::eventtransport::resolve;
+use bootstrap::{ResolvedTransport, Topology, TransportConfig, TransportResolveError};
 use diport::{PublishRequest, Publisher, Subscriber, Topic};
 use futures::StreamExt;
 use memory::MemBus;

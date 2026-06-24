@@ -32,7 +32,9 @@ pub mod reconcile;
 pub mod saga;
 
 pub use error::{EngineError, EngineErrorKind};
-pub use idempotency::{IdemKey, IdemKeyError, IdempotencyStore, SeenState};
+pub use idempotency::{
+    ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, SeenState,
+};
 pub use outbox::{
     Disposition, Entry, HandleResult, OutboxRelay, OutboxSource, OutboxSweeper, PermanentError,
     PermanentErrorKind, Topic, TopicError,

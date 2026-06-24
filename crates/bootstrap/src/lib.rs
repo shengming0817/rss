@@ -19,6 +19,12 @@
 //!   零 adapter 依赖；adapter 构造 + in-mem sealing 落组合根（见模块 rustdoc，INVARIANT
 //!   TOPO-FAILCLOSED-01 / TOPO-INMEM-SEAL-01）。
 //!
+//! - [`replaydeps`]：topology-gated 幂等 claimer 选型——demo 拓扑用 in-mem claimer，
+//!   durable 拓扑用 Redis claimer；[`replaydeps::resolve`] 是纯策略函数，不构造 adapter。
+//!
+//! - [`topology`]：部署拓扑词汇单源（[`Topology`] 枚举），被 replaydeps / eventtransport /
+//!   sagaprojectiondeps 等 resolver 共用。
+//!
 //! [`Domain::init`]: domain::Domain::init
 //! [`Registry::readyz_report`]: registry::Registry::readyz_report
 //! [`Registry::finalize_routes`]: registry::Registry::finalize_routes
@@ -27,11 +33,13 @@ pub mod domain;
 pub mod eventtransport;
 pub mod module;
 pub mod registry;
+pub mod replaydeps;
 pub mod shutdown;
+pub mod topology;
 
 pub use domain::{Domain, KernelError, compose};
-pub use eventtransport::{
-    AmqpUrl, ResolvedTransport, Topology, TransportConfig, TransportResolveError, resolve,
-};
+pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use module::{DomainModule, ModuleFactory};
 pub use registry::{HealthProbe, Registry, SubscriberHandler, SubscriberHandlerError};
+pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
+pub use topology::Topology;

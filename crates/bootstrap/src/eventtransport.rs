@@ -35,23 +35,10 @@
 
 use std::collections::BTreeMap;
 
-/// 部署拓扑——topology-gated resolver 的单源选型输入。
-///
-/// durable 拆 **shared** / **isolated** 是不同安全策略（review F3）：共享 broker 允许 per-domain 缺配置时
-/// 回退 `RSS_AMQP_URL`；per-domain 隔离则**禁回退**（每域独立 vhost/credential，缺即 fail-closed）。
-/// `#[non_exhaustive]`：未来加 broker（mqtt）等拓扑不破坏下游 `match`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Topology {
-    /// 单进程 / 测试 / 样例：进程内 in-mem 传输（publisher == subscriber 同实例）。
-    Demo,
-    /// 生产（**共享 / 非隔离** broker）：per-domain 缺 URL 时允许回退共享 `RSS_AMQP_URL`。
-    DurableShared,
-    /// 生产（**per-domain 隔离** broker）：每域独立 vhost/credential（`RSS_<DOMAIN>_AMQP_URL`）；
-    /// **禁回退**共享 URL（配置含 shared URL 即 `IsolatedFallbackForbidden` fail-closed），缺 per-domain
-    /// URL 即 `MissingBrokerUrl` fail-closed。对齐 eventbus.md §per-domain AMQP vhost/credential 隔离。
-    DurableIsolated,
-}
+// 部署拓扑词汇单源 = [`crate::topology::Topology`]（replaydeps / eventtransport / 未来 sagaprojectiondeps
+// 共享同一枚举，防同义枚举漂移）。本模块 AMQP 特定语义（DurableShared 回退 `RSS_AMQP_URL`、DurableIsolated
+// 禁回退）文档化在 [`resolve`] / [`TransportConfig`] 层，而非枚举本体。
+use crate::topology::Topology;
 
 /// per-domain AMQP broker URL（含 `user:pass` + vhost）——凭据收口 newtype。
 ///

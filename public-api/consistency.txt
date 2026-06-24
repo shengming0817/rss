@@ -81,6 +81,38 @@ pub fn consistency::error::EngineError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::error::EngineError
 pub fn consistency::error::EngineError::from(T) -> T
 pub mod consistency::idempotency
+#[non_exhaustive] pub enum consistency::idempotency::ConsumerGroupError
+pub consistency::idempotency::ConsumerGroupError::Empty
+impl core::error::Error for consistency::idempotency::ConsumerGroupError
+impl core::fmt::Debug for consistency::idempotency::ConsumerGroupError
+pub fn consistency::idempotency::ConsumerGroupError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::idempotency::ConsumerGroupError
+pub fn consistency::idempotency::ConsumerGroupError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for consistency::idempotency::ConsumerGroupError
+impl core::marker::Send for consistency::idempotency::ConsumerGroupError
+impl core::marker::Sync for consistency::idempotency::ConsumerGroupError
+impl core::marker::Unpin for consistency::idempotency::ConsumerGroupError
+impl core::marker::UnsafeUnpin for consistency::idempotency::ConsumerGroupError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::ConsumerGroupError
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::ConsumerGroupError
+impl<T, U> core::convert::Into<U> for consistency::idempotency::ConsumerGroupError where U: core::convert::From<T>
+pub fn consistency::idempotency::ConsumerGroupError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::ConsumerGroupError where U: core::convert::Into<T>
+pub type consistency::idempotency::ConsumerGroupError::Error = core::convert::Infallible
+pub fn consistency::idempotency::ConsumerGroupError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::ConsumerGroupError where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::ConsumerGroupError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::ConsumerGroupError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for consistency::idempotency::ConsumerGroupError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::idempotency::ConsumerGroupError where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::ConsumerGroupError where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::ConsumerGroupError where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for consistency::idempotency::ConsumerGroupError
+pub fn consistency::idempotency::ConsumerGroupError::from(T) -> T
 #[non_exhaustive] pub enum consistency::idempotency::IdemKeyError
 pub consistency::idempotency::IdemKeyError::Empty
 impl core::error::Error for consistency::idempotency::IdemKeyError
@@ -154,6 +186,49 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::SeenState where
 pub unsafe fn consistency::idempotency::SeenState::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::SeenState
 pub fn consistency::idempotency::SeenState::from(T) -> T
+pub struct consistency::idempotency::ConsumerGroup(_)
+impl consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::as_str(&self) -> &str
+pub fn consistency::idempotency::ConsumerGroup::parse(&str) -> core::result::Result<Self, consistency::idempotency::ConsumerGroupError>
+impl core::clone::Clone for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::clone(&self) -> consistency::idempotency::ConsumerGroup
+impl core::cmp::Eq for consistency::idempotency::ConsumerGroup
+impl core::cmp::PartialEq for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::eq(&self, &consistency::idempotency::ConsumerGroup) -> bool
+impl core::fmt::Debug for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::idempotency::ConsumerGroup
+impl core::marker::Freeze for consistency::idempotency::ConsumerGroup
+impl core::marker::Send for consistency::idempotency::ConsumerGroup
+impl core::marker::Sync for consistency::idempotency::ConsumerGroup
+impl core::marker::Unpin for consistency::idempotency::ConsumerGroup
+impl core::marker::UnsafeUnpin for consistency::idempotency::ConsumerGroup
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::ConsumerGroup
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::ConsumerGroup
+impl<T, U> core::convert::Into<U> for consistency::idempotency::ConsumerGroup where U: core::convert::From<T>
+pub fn consistency::idempotency::ConsumerGroup::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::ConsumerGroup where U: core::convert::Into<T>
+pub type consistency::idempotency::ConsumerGroup::Error = core::convert::Infallible
+pub fn consistency::idempotency::ConsumerGroup::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::ConsumerGroup where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::ConsumerGroup::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::ConsumerGroup::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::idempotency::ConsumerGroup where T: core::clone::Clone
+pub type consistency::idempotency::ConsumerGroup::Owned = T
+pub fn consistency::idempotency::ConsumerGroup::clone_into(&self, &mut T)
+pub fn consistency::idempotency::ConsumerGroup::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::idempotency::ConsumerGroup where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroup::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::ConsumerGroup where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroup::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::ConsumerGroup where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroup::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::idempotency::ConsumerGroup where T: core::clone::Clone
+pub unsafe fn consistency::idempotency::ConsumerGroup::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::from(T) -> T
 pub struct consistency::idempotency::IdemKey(_)
 impl consistency::idempotency::IdemKey
 pub fn consistency::idempotency::IdemKey::as_str(&self) -> &str
@@ -953,6 +1028,38 @@ impl<T> core::clone::CloneToUninit for consistency::saga::CompensationOutcome wh
 pub unsafe fn consistency::saga::CompensationOutcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::CompensationOutcome
 pub fn consistency::saga::CompensationOutcome::from(T) -> T
+#[non_exhaustive] pub enum consistency::ConsumerGroupError
+pub consistency::ConsumerGroupError::Empty
+impl core::error::Error for consistency::idempotency::ConsumerGroupError
+impl core::fmt::Debug for consistency::idempotency::ConsumerGroupError
+pub fn consistency::idempotency::ConsumerGroupError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::idempotency::ConsumerGroupError
+pub fn consistency::idempotency::ConsumerGroupError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for consistency::idempotency::ConsumerGroupError
+impl core::marker::Send for consistency::idempotency::ConsumerGroupError
+impl core::marker::Sync for consistency::idempotency::ConsumerGroupError
+impl core::marker::Unpin for consistency::idempotency::ConsumerGroupError
+impl core::marker::UnsafeUnpin for consistency::idempotency::ConsumerGroupError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::ConsumerGroupError
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::ConsumerGroupError
+impl<T, U> core::convert::Into<U> for consistency::idempotency::ConsumerGroupError where U: core::convert::From<T>
+pub fn consistency::idempotency::ConsumerGroupError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::ConsumerGroupError where U: core::convert::Into<T>
+pub type consistency::idempotency::ConsumerGroupError::Error = core::convert::Infallible
+pub fn consistency::idempotency::ConsumerGroupError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::ConsumerGroupError where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::ConsumerGroupError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::ConsumerGroupError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for consistency::idempotency::ConsumerGroupError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::idempotency::ConsumerGroupError where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::ConsumerGroupError where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::ConsumerGroupError where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroupError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for consistency::idempotency::ConsumerGroupError
+pub fn consistency::idempotency::ConsumerGroupError::from(T) -> T
 #[non_exhaustive] pub enum consistency::Disposition
 pub consistency::Disposition::Ack
 pub consistency::Disposition::Reject
@@ -1296,6 +1403,49 @@ impl<T> core::borrow::BorrowMut<T> for consistency::outbox::TopicError where T: 
 pub fn consistency::outbox::TopicError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::outbox::TopicError
 pub fn consistency::outbox::TopicError::from(T) -> T
+pub struct consistency::ConsumerGroup(_)
+impl consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::as_str(&self) -> &str
+pub fn consistency::idempotency::ConsumerGroup::parse(&str) -> core::result::Result<Self, consistency::idempotency::ConsumerGroupError>
+impl core::clone::Clone for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::clone(&self) -> consistency::idempotency::ConsumerGroup
+impl core::cmp::Eq for consistency::idempotency::ConsumerGroup
+impl core::cmp::PartialEq for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::eq(&self, &consistency::idempotency::ConsumerGroup) -> bool
+impl core::fmt::Debug for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::idempotency::ConsumerGroup
+impl core::marker::Freeze for consistency::idempotency::ConsumerGroup
+impl core::marker::Send for consistency::idempotency::ConsumerGroup
+impl core::marker::Sync for consistency::idempotency::ConsumerGroup
+impl core::marker::Unpin for consistency::idempotency::ConsumerGroup
+impl core::marker::UnsafeUnpin for consistency::idempotency::ConsumerGroup
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::ConsumerGroup
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::ConsumerGroup
+impl<T, U> core::convert::Into<U> for consistency::idempotency::ConsumerGroup where U: core::convert::From<T>
+pub fn consistency::idempotency::ConsumerGroup::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::ConsumerGroup where U: core::convert::Into<T>
+pub type consistency::idempotency::ConsumerGroup::Error = core::convert::Infallible
+pub fn consistency::idempotency::ConsumerGroup::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::ConsumerGroup where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::ConsumerGroup::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::ConsumerGroup::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::idempotency::ConsumerGroup where T: core::clone::Clone
+pub type consistency::idempotency::ConsumerGroup::Owned = T
+pub fn consistency::idempotency::ConsumerGroup::clone_into(&self, &mut T)
+pub fn consistency::idempotency::ConsumerGroup::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::idempotency::ConsumerGroup where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroup::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::ConsumerGroup where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroup::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::ConsumerGroup where T: ?core::marker::Sized
+pub fn consistency::idempotency::ConsumerGroup::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::idempotency::ConsumerGroup where T: core::clone::Clone
+pub unsafe fn consistency::idempotency::ConsumerGroup::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::idempotency::ConsumerGroup
+pub fn consistency::idempotency::ConsumerGroup::from(T) -> T
 pub struct consistency::Context
 impl core::fmt::Debug for consistency::reconcile::Context
 pub fn consistency::reconcile::Context::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
