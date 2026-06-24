@@ -106,8 +106,8 @@ fn hs256_tag_matches(secret: &[u8], signing_input: &[u8], signature: &[u8]) -> b
     primitives::crypto::constant_time_eq(tag.as_slice(), signature)
 }
 
-/// 解析错误归类：畸形 / 不支持算法（含 `alg:none`、RS*）均 → `InvalidSignature`（token 不可用，401）。
-/// 区别于签发者/受众不受信的 `Untrusted`（403）。
+/// 解析错误归类：畸形 / 不支持算法（含 `alg:none`、RS*）均 → `InvalidSignature`（token 不可用，401 invalid_token）。
+/// 与 `Untrusted`（iss/aud 不受信、alg-scheme 混淆）同归 401，但语义分层：此处凭据**结构**坏，`Untrusted` 是**来源**不受信（#1229）。
 fn classify_parse(err: JwsError) -> PdpError {
     let reason = match err {
         JwsError::Malformed => "malformed_token",

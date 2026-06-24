@@ -66,11 +66,11 @@ leeway:           Duration           // exp/nbf 时钟偏移容忍
 | `alg: none` | `InvalidSignature` | alg=none 攻击 |
 | exp 过期（now > exp + leeway） | `Expired` | 时钟越界 |
 | nbf 未到（now + leeway < nbf） | `Expired` | 时钟越界 |
-| 未知/禁用 alg（RS256 等） | `Untrusted` | 不在白名单 |
+| 未知/禁用 alg（RS256 等） | `InvalidSignature` | 不在白名单，`jws::parse` 拒（UnsupportedAlg） |
 | kid 无匹配 key | `Untrusted` | key 不受信 |
 | iss 不在 trusted 集 / aud 不含 expected | `Untrusted` | 签发者/受众不受信 |
 | alg 与 key 类型不符（confusion） | `Untrusted` | key 类型不符 |
-| 空 subject | `Untrusted`（adapter 早拒；authn 亦双闸） | fail-closed |
+| 空 subject | `InvalidSignature`（adapter 早拒；authn 亦双闸） | fail-closed |
 
 ## 状态/不变式
 

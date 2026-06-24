@@ -11,18 +11,25 @@ use dynosaur::dynosaur;
 ///
 /// PII 边界：变体不携 runtime 数据，`Display` 仅 provider 无关的安全摘要常量——adapter 把内部错误
 /// **归类**到这三种 taxonomy 变体（不经 `source` 透传原始错误，杜绝凭据 / 连接串泄漏）。消费侧据变体
-/// 映射 HTTP 语义（authn `From<PdpError>`：签名坏→invalid、过期→expired、不受信→forbidden）。
+/// 映射 HTTP 语义（authn `From<PdpError>`，#1229）：`InvalidSignature` / `Untrusted` 均 →
+/// `TokenInvalid` = 401 `invalid_token`（RFC 6750 §3.1，凭据不可信 / 无效，verify 层纯认证不发 403）、
+/// `Expired` → `TokenExpired`；403 留给 authz 层「已认证但无权」。
 /// `Clone`：消费侧单测 stub 按预置结果重放。
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum PdpError {
-    /// 签名 / MAC 校验失败。
+    /// 凭据**结构 / 签名 / claim 完整性**不可用（taxonomy 压缩：oidc adapter 多个子情形归此一变体）：
+    /// 签名 / MAC 校验失败；token 段数≠3 或 base64url 坏（`jws::parse` Malformed）；alg 不在白名单
+    /// （`alg=none` / RS256 / 未知，`jws::parse` UnsupportedAlg）；payload JSON 畸形或缺必填 claim；
+    /// 空 subject；Clock 早于 UNIX_EPOCH（fail-closed）。消费侧 → 401 `invalid_token`。
     #[error("credential signature invalid")]
     InvalidSignature,
-    /// 凭据已过期（exp / nbf 越界）。
+    /// 凭据时间窗越界：`exp` 过期（now > exp + leeway）或 `nbf` 未生效（now < nbf − leeway）。
     #[error("credential expired")]
     Expired,
-    /// 签发者 / key / audience 不受信。
+    /// 凭据来源 / 路径不受信（**非**结构损坏）：`iss` 不匹配配置签发者；`aud` 不含配置受众；
+    /// alg-scheme 路径混淆（JWT 路径配 HS256 token / service-token 路径配 ES256 token，OIDC-ALG-KEYPATH-01）；
+    /// 未知 credential scheme。消费侧 → 401 `invalid_token`（verify 层纯认证，不发 403）。
     #[error("credential issuer untrusted")]
     Untrusted,
 }

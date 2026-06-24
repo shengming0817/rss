@@ -30,12 +30,12 @@
 
 ## R2. 验签流程关键安全闸
 
-- **alg 白名单**：header alg 必须 ∈ {ES256, HS256}；`alg=none` → `InvalidSignature`（经典攻击）；未知/RS256 → `Untrusted`。
+- **alg 白名单**：header alg 必须 ∈ {ES256, HS256}；不在白名单（`alg=none` / RS256 / 未知）→ `InvalidSignature`（`jws::parse` 拒，含 alg=none 经典攻击）；白名单内但与 scheme 路径锁定算法不符（ES256↔HS256 混淆）→ `Untrusted`。
 - **alg-key 一致（防 confusion）**：key set 条目自带 `(kid, alg, material)`，token header alg 必须**等于** key 条目 alg —— 防 ES256 公钥被当 HS256 secret（EC 变体 confusion）。
 - **service_token 路径隔离**：service_token 走 HS256-only key set，禁用 ES256 key set，与外部 IdP JWT 验签器隔离。
 - **时钟注入**：exp/nbf 用注入的 `diport::Clock`（禁系统时钟，clippy `disallowed_methods`），FixedClock 测边界；leeway 可配置。
 - **常数时间 MAC 比较**：复用 `primitives::crypto`（subtle），禁 `==`。
-- **fail-closed 映射**（→ `PdpError` 三变体）：段数≠3/base64坏/payload JSON坏/sig decode坏/MAC·ECDSA 不通过/alg=none → `InvalidSignature`；exp 过期/nbf 未到 → `Expired`；未知alg/kid无匹配/iss不受信/aud不符/alg-key不符/空subject → `Untrusted`。
+- **fail-closed 映射**（→ `PdpError` 三变体）：段数≠3/base64坏/payload JSON坏/sig decode坏/MAC·ECDSA 不通过/alg=none/未知alg/空subject → `InvalidSignature`；exp 过期/nbf 未到 → `Expired`；iss不受信/aud不符/alg-key不符（alg-scheme 路径混淆）/kid无匹配（US4 JWKS） → `Untrusted`。
 - **PdpError 纯 taxonomy**：`pdp.rs` 已冻 `PdpError` 不携 source —— adapter 内部 crypto 错误只归类不透传（杜绝凭据泄漏），**无需 RedactedSource**。
 
 ## R3. JWKS HTTP/TLS 栈 license 决断（US4 / PR-A2 open risk）

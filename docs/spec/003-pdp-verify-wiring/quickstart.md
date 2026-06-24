@@ -14,7 +14,7 @@ cargo nextest run -p oidc --features backend
 - 合法 HS256 service_token → `Ok`。
 - 篡改 payload → `Err(InvalidSignature)`；`alg=none` → `InvalidSignature`。
 - exp 过期（FixedClock 设在 exp+leeway 之后）→ `Expired`；exp 边界内（exp<now<exp+leeway）→ `Ok`。
-- `alg=RS256`/未知 → `Untrusted`；kid 无匹配 → `Untrusted`；iss/aud 不符 → `Untrusted`；alg=HS256 但 key 是 ES256 → `Untrusted`。
+- `alg=RS256`/未知 → `InvalidSignature`（不在白名单，`jws::parse` 拒）；kid 无匹配（US4 JWKS）→ `Untrusted`；iss/aud 不符 → `Untrusted`；alg=HS256 但走 ES256 scheme 路径（alg-scheme 混淆）→ `Untrusted`。
 - 错误不含 token/key 字节（Debug 脱敏断言）。
 - anti-vacuity：先断言「正确签名通过」，再断言坏签名拒（防恒 false 空 impl 也过坏签名用例）。
 

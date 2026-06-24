@@ -21,7 +21,7 @@
 ### T001 [P] [US1] PR-A1 · oidc adapter impl `diport::Pdp`（ES256+HS256 + 静态 KeySource）
 **触及**: `adapters/oidc/src/{lib,verify,claims}.rs` · `adapters/oidc/Cargo.toml` · 根 `Cargo.toml`（p256/hmac/sha2 入 `[workspace.dependencies]`）· `docs/references/framework-comparison.md`（新增 authn/jwt 对标行）· **等级**: 无（adapter 内部，不动 wire contract）· **blocked-by**: 无（diport::Pdp 已合并，立即可开工）· **并行**: 与 T002 并行（adapters/oidc vs crates/httpserve 零交叉）。
 
-- [ ] T001.1 [US1] 先写表驱动测试（rstest + 注入 FixedClock）：合法 ES256/HS256→Ok(VerifiedClaims) 断言 subject/tenant/kind；坏签名/坏 MAC/段数≠3/`alg=none`→InvalidSignature；exp 过期/nbf 未到→Expired；alg=RS256/未知/kid 无匹配/iss-aud 不符/alg-key 混淆/空 subject→Untrusted；RFC7515 known-answer 向量；anti-vacuity（先证正确签名通过）；Debug 脱敏（无 token/key 字节）—— 全 FAIL
+- [ ] T001.1 [US1] 先写表驱动测试（rstest + 注入 FixedClock）：合法 ES256/HS256→Ok(VerifiedClaims) 断言 subject/tenant/kind；坏签名/坏 MAC/段数≠3/`alg=none`/RS256/未知/空 subject→InvalidSignature；exp 过期/nbf 未到→Expired；kid 无匹配/iss-aud 不符/alg-key 混淆→Untrusted；RFC7515 known-answer 向量；anti-vacuity（先证正确签名通过）；Debug 脱敏（无 token/key 字节）—— 全 FAIL
 - [ ] T001.2 [US1] 根 `Cargo.toml` 加 `p256`(feature ecdsa)/`hmac`/`sha2` 到 `[workspace.dependencies]`；`adapters/oidc/Cargo.toml` opt-in（+ base64/serde/serde_json）；`cargo deny check` 绿（无 ring/rsa）
 - [ ] T001.3 [US1] `claims.rs`：claims DTO（exp/nbf/iat/iss/aud/sub/tenant/kind）+ `PdpError` fail-closed 映射表（data-model §映射）
 - [ ] T001.4 [US1] `verify.rs`：三段解析 → `SupportedAlg` 白名单选验签器（alg=none/RS256/未知拒）→ 签名校验（ES256 p256 / HS256 常数时间，复用 `primitives::crypto`）→ exp/nbf（注入 Clock + leeway）→ iss/aud → 映射 `VerifiedClaims`；alg-key 一致性闸

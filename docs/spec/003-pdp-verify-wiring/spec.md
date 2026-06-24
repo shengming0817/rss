@@ -40,15 +40,15 @@
 
 **Why this priority**: 这是「验签 = 信任原点」的承载物。没有它，`verify_jwt` 注入的是 stub（零验签），整条认证链不可信。是 ADR-006 §8 ③ e2e 的前置、安全同批门的「真 verifier」一侧。
 
-**Independent Test**: 表驱动单测（rstest）+ 注入 FixedClock，覆盖合法 ES256/HS256 token → Ok(VerifiedClaims)；坏签名/坏 MAC/段数≠3/alg=none → InvalidSignature；exp 过期/nbf 未到 → Expired；alg=RS256/未知/kid 无匹配/iss-aud 不符/alg-key 类型混淆 → Untrusted；known-answer 测试向量（RFC 7515）证明验签正确而非自洽（anti-vacuity）。adapter 不被域依赖（layer-deps）；`cargo deny` 绿（无 ring/rsa）。
+**Independent Test**: 表驱动单测（rstest）+ 注入 FixedClock，覆盖合法 ES256/HS256 token → Ok(VerifiedClaims)；坏签名/坏 MAC/段数≠3/alg=none/RS256/未知 → InvalidSignature；exp 过期/nbf 未到 → Expired；kid 无匹配/iss-aud 不符/alg-key 类型混淆 → Untrusted；known-answer 测试向量（RFC 7515）证明验签正确而非自洽（anti-vacuity）。adapter 不被域依赖（layer-deps）；`cargo deny` 绿（无 ring/rsa）。
 
 **Acceptance Scenarios**:
 
 1. **Given** 一个签名正确、未过期、iss/aud 匹配的 ES256 JWT，**When** `OidcProvider::verify(&RawCredential::jwt(raw))`，**Then** 返回 `Ok(VerifiedClaims)`，subject/tenant/kind 与 payload 一致。
 2. **Given** payload 被篡改（签名不匹配），**When** verify，**Then** `Err(PdpError::InvalidSignature)`，错误不携带 token / key 字节。
 3. **Given** `exp` 早于注入 Clock 的 now（超 leeway），**When** verify，**Then** `Err(PdpError::Expired)`。
-4. **Given** header `alg` 为 `RS256` / `none` / 未知值，**When** verify，**Then** fail-closed（`Untrusted` / `InvalidSignature`），绝不接受不在白名单的 alg。
-5. **Given** token alg=HS256 但 kid 指向 ES256 公钥（alg-key 混淆），**When** verify，**Then** `Err(PdpError::Untrusted)`（key 类型与 alg 不符）。
+4. **Given** header `alg` 为 `RS256` / `none` / 未知值，**When** verify，**Then** `Err(PdpError::InvalidSignature)`（不在白名单 {ES256, HS256}，`jws::parse` 拒），绝不接受不在白名单的 alg。
+5. **Given** token header alg=HS256 但走 JWT scheme 路径（路径锁定 ES256），**When** verify，**Then** `Err(PdpError::Untrusted)`（token alg 与 scheme 路径锁定算法不符，alg-scheme 混淆；US1 静态路径按 alg 判定，kid 选 key 留 US4）。
 
 ---
 
@@ -106,7 +106,7 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 - **验签空窗（最高风险）**：#1109 W 未落地期，httpserve 认证路径**不得**接到生产可达端点；本 feature 用「仅 PR-C 启用生产认证 + PR-C blocked-by 真 verifier + stub 无法进生产 bin + fail-closed 缺省」四闸坐实（见 plan.md §安全同批门）。
 - **alg=none / alg confusion**：alg=none 直接 InvalidSignature；alg 必须 ∈ {ES256, HS256} 白名单且与 key 类型一致（防 EC 公钥被当 HMAC secret）。
 - **service-token 路径隔离**：service_token 走 HS256-only key set（禁 ES256），与外部 IdP JWT 验签器隔离，避免 token 混淆。
-- **空 subject**：adapter 早拒 Untrusted；authn `derive_from_claims` 亦对空 subject fail-closed（双闸）。
+- **空 subject**：adapter 早拒 InvalidSignature；authn `derive_from_claims` 亦对空 subject fail-closed（双闸）。
 - **PdpError 泄漏**：`PdpError` 为纯 taxonomy（不携 source），adapter 内部 crypto 错误只归类不透传；tracing 只记变体名 + `principal.kind`，绝不 `{:?}` 整体 Principal/VerifiedClaims/token。
 - **verify-bridge 层序错位**：bridge 必须挂在 `finalize_auth` 产出 router 的**外层**（外层先注入 extension，enforce 在 MethodRouter 内层才读到）；e2e「有效 JWT→200」覆盖此回归。
 - **JWKS 不可达 / 缓存过期**：fail-closed Untrusted，不回落「跳过验签」；刷新失败经 readiness probe `oidc_jwks_ready` 反映 health（probe 名 + 注册点 + 失败测试见 FR-005 / tasks T003）。
