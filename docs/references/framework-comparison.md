@@ -39,6 +39,7 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 | 分布式锁 / fencing / 共识 | `distributed` | `tikv/tikv`（`Cargo.toml`，raft / fencing） | `databendlabs/openraft`（`openraft/src/lib.rs`）· `tikv/raft-rs`（`src/raft.rs`） |
 | 证书 / PKI L4 | `deviceloop` | `rustls/rcgen`（`rcgen/src/lib.rs`）· `djc/instant-acme`（`src/lib.rs`） | `maxlambrecht/rust-spiffe`（`spiffe/src/lib.rs`）· cert-manager（概念，provider-agnostic 范式） |
 | 可观测性 | `observ` | tokio `tracing` · `vectordotdev/vector`（`src/lib.rs`，管道范式） | `open-telemetry/opentelemetry-rust`（`opentelemetry/src/lib.rs`） |
+| 健康分级聚合 / 系统元信息（sysinfo） | `syshealth` | `aegis-monitoring`（`docs.rs/aegis-monitoring/0.1.3`，`health/`，critical/non-critical 分级聚合；**仅 crates.io/docs.rs，无 GitHub raw 拉取路径**——读源码经 docs.rs `[src]`）· `danielschemmel/build-info`（`build-info-common/src/lib.rs`，`SystemInfo` 字段对标 `CrateInfo.name`/`.version`/`GitInfo.commit_short_id`；偏离 build.rs 自采集 → 组合根注入） | spring-boot-actuator `/info`（概念，服务元信息端点） |
 | 授权 PDP / ABAC | `vocab` / `authn` | `casbin/casbin-rs`（`src/lib.rs`，RBAC/ABAC enforcer）· `eclipse-biscuit/biscuit-rust`（`biscuit-auth/src/lib.rs`，能力令牌） | `osohq/oso`（**已弃用**，Oso 转 SaaS；仅作 Polar / ABAC 概念参考，**勿读源码实现**） |
 | 状态机 FSM | `consistency` / `deviceloop` | `mdeloof/statig`（`statig/src/lib.rs`） | typestate 模式 |
 | workspace 组织 | （根 workspace） | `oxidecomputer/omicron`（`Cargo.toml`）· `risingwavelabs/risingwave`（`Cargo.toml`） | `zed-industries/zed`（`Cargo.toml`） |
