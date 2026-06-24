@@ -81,4 +81,9 @@ pub const TOPIC: &str = "identity.session-created";
 /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
 /// `SubscriptionSpec` 类型定义见父 mod（`event/mod.rs`）；此处通过 `super::` 引用，无重复定义。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];
+pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[super::SubscriptionSpec {
+    contract_id: CONTRACT_ID,
+    topic: TOPIC,
+    consumer: "audit",
+    group: "audit.session-created",
+}];

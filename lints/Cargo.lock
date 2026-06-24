@@ -194,6 +194,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "consistency"
+version = "0.0.0"
+dependencies = [
+ "ids",
+ "runctx",
+ "secure",
+ "support",
+ "thiserror 2.0.18",
+ "vocab",
+]
+
+[[package]]
 name = "defmt"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -235,6 +247,7 @@ checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 name = "diport"
 version = "0.0.0"
 dependencies = [
+ "consistency",
  "dynosaur",
  "futures",
  "thiserror 2.0.18",
@@ -713,6 +726,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ids"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1182,6 +1203,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "secure"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1272,6 +1300,13 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "support"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "syn"

@@ -13,7 +13,7 @@
 
 use bootstrap::eventtransport::resolve;
 use bootstrap::{ResolvedTransport, Topology, TransportConfig, TransportResolveError};
-use diport::{PublishRequest, Publisher, Subscriber, Topic};
+use diport::{MessageId, PublishRequest, Publisher, Subscriber, Topic};
 use futures::StreamExt;
 use memory::MemBus;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +48,7 @@ async fn demo_resolver_yields_inprocess_bus_roundtrip() {
     bus.publisher()
         .publish(PublishRequest {
             topic: Topic::new(TOPIC),
+            event_id: MessageId::new("evt-transport"),
             payload: b"session-evt".to_vec(),
         })
         .await

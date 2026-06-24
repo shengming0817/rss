@@ -130,13 +130,21 @@ lapin = { version = "4", default-features = false, features = ["default-runtime"
 # 只持有 Client（组合根 / 集成测试注入 endpoint + 连接器）；plaintext MinIO 集成测试用裸 http 连接器，生产
 # HTTPS/TLS provider license 甄别 = follow-up（见 PR body）。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio"] }
+# Vault Transit 签名 HTTP 客户端（adapters/vault，#1011）：TLS-agnostic —— default-features=false 不绑 crypto
+# provider（不进 ring/aws-lc-rs/openssl/rustls，deny 全绿；http 即可达本地 dev Vault）。production HTTPS 的
+# TLS provider（rustls+ring，对齐 sqlx）由组合根 Join 阶段经 reqwest tls feature 选定后注入预配置 Client
+# （对标 s3 注入 aws Client 不配 TLS）。ref: jmgilman/vaultrs vaultrs/src/api/transit/requests.rs
+reqwest = { version = "0.12", default-features = false }
+# Vault token 内存清零（adapters/vault，#1011 F5）：Zeroizing<String> drop 时清零密钥物料。
+# default-features=false + alloc：只取 String Zeroize impl，不拉 std/derive（Apache-2.0 OR MIT，deny allow-list 内）。
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # aws-sdk-s3 客户端测试 mock（dev-only，adapters/s3）：canned 响应规则注入确定性单测。经 test-util 传递
 # 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
 # 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
 aws-smithy-mocks = "0.2"
 # JWT 验签 provider（adapters/oidc，#1011）：对标 gocell coreos/go-oidc token 验签面。diport::Pdp port 只需
 # 「入站 token 验签」（签名 + exp/nbf + iss + aud），非完整 OAuth/OIDC client flow（discovery/PKCE/token 交换 +
-# live JWKS-over-HTTP 拉取留 #1109），故选 jsonwebtoken 而非 openidconnect（后者拉 reqwest/HTTP+OAuth 状态机，
+# live JWKS-over-HTTP 拉取留 #1109），故选 jsonwebtoken 而非 openidconnect（后者拉 reqwest/HTTP+OAuth 状态机,
 # 超本切片面，违 "仅声明真正用到的 dep"）。后端 = ring（v9 必备、非 optional）：ring 0.17.14 已因
 # rustls←redis/sqlx（#1009/#1116 adapter 的 tls-rustls）在 all-features 图内，`cargo deny check licenses` 现绿
 # （ring LICENSE 判为 ISC，在 allow-list 内）⇒ 引入零新增 crypto license 面、无新版本（multiple-versions 不升级）。
@@ -144,6 +152,16 @@ aws-smithy-mocks = "0.2"
 # OpenSSL 派生 aws-lc-sys（不在 license allow-list），两条都阻断 deny；v9→v10 破坏式 crypto-backend 切换须审升级
 # （同 dynosaur/trait-variant exact-pin 纪律）。ref: Keats/jsonwebtoken src/validation.rs + src/decoding.rs@v9.3.1
 jsonwebtoken = "=9.3.1"
+# 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。Rust 可观测 facade 选 `metrics` crate（冻结
+# 迁移决策 gocell-rust-crate-mapping.md：slog+otel+prometheus → tracing+tracing-opentelemetry+metrics facade）；
+# 发射点经 `metrics::counter!` 全局 facade，adapter 持 PrometheusHandle 渲染 exposition。
+# default-features=false 关 http-listener/push-gateway——避免拉 hyper/rustls/ring/aws-lc（TLS + HTTP-server
+# 供应链面；/metrics HTTP serving 是组合根/httpserve 关注点，不在 adapter；同 s3/lapin 的 TLS 收口范式，
+# deny license allow-list 是机器门：ring/aws-lc 不在 allow-list ⇒ 入树即红，仅余 recorder + render 子树）。
+# 注：m-e-p default-features=false 子树无 tokio；workspace 内 tokio 经 diport→tokio-util 已在树，与本依赖无关。
+# ref: metrics-rs/metrics metrics-exporter-prometheus/src/exporter/builder.rs@metrics-exporter-prometheus-v0.18.3
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
 typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x

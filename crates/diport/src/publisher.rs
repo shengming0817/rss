@@ -3,6 +3,7 @@
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
+use crate::subscriber::MessageId;
 
 /// 发布失败。
 ///
@@ -54,18 +55,23 @@ impl Topic {
 pub struct PublishRequest {
     /// 目标 topic。
     pub topic: Topic,
+    /// 事件去重锚点（= outbox `event_id` / `Entry::idem_key`）。relay 据此盖章 broker `message_id`，
+    /// 经订阅侧 `Message.id` 流回消费幂等键（`run_consumer` 的 `IdemKey`），实现「至少一次 + 幂等 =
+    /// 有效一次」端到端去重（`docs/rules/eventbus.md` §DLX 与幂等）。路由元数据，非 PII。
+    pub event_id: MessageId,
     /// provider-agnostic 事件字节（已按 contract envelope 编码）。
     pub payload: Vec<u8>,
 }
 
 /// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（事件序列化体，可能含
-/// PII——如审计事件本身被编码进 payload）输出 `<redacted>`；`topic` 是路由元数据，可观测。
+/// PII——如审计事件本身被编码进 payload）输出 `<redacted>`；`topic` / `event_id` 是路由元数据，可观测。
 ///
 /// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
 impl std::fmt::Debug for PublishRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PublishRequest")
             .field("topic", &self.topic)
+            .field("event_id", &self.event_id)
             .field("payload", &"<redacted>")
             .finish()
     }
@@ -92,7 +98,7 @@ pub trait PublisherLocal {
 #[cfg(test)]
 mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynPublisher>` 动态注入。
-    use super::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
+    use super::{DynPublisher, MessageId, PublishRequest, Publisher, PublisherError, Topic};
 
     #[test]
     fn publisher_error_wraps_source() {
@@ -113,6 +119,7 @@ mod smoke {
     fn sample_request() -> PublishRequest {
         PublishRequest {
             topic: Topic::new("session.created"),
+            event_id: MessageId::new("evt-1"),
             payload: b"evt".to_vec(),
         }
     }
@@ -143,7 +150,7 @@ mod smoke {
 mod pii_debug {
     //! `PublishRequest.payload`（事件序列化体，可能含 PII）字节 Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
-    use super::{PublishRequest, Topic};
+    use super::{MessageId, PublishRequest, Topic};
 
     #[test]
     fn publish_request_debug_redacts_payload() {
@@ -154,6 +161,7 @@ mod pii_debug {
         );
         let req = PublishRequest {
             topic: Topic::new("session.created"),
+            event_id: MessageId::new("evt-routing-id"),
             payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
         };
         let dbg = format!("{req:?}");
@@ -161,5 +169,7 @@ mod pii_debug {
         assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains("session.created"), "topic 应可见: {dbg}");
+        // event_id 是路由元数据（去重锚点），应可见——非 PII。
+        assert!(dbg.contains("evt-routing-id"), "event_id 应可见: {dbg}");
     }
 }

@@ -40,6 +40,8 @@ pub mod topology;
 pub use domain::{Domain, KernelError, compose};
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use module::{DomainModule, ModuleFactory};
-pub use registry::{HealthProbe, Registry, SubscriberHandler, SubscriberHandlerError};
+pub use registry::{
+    HealthProbe, Registry, SubscriberBinding, SubscriberHandler, SubscriberHandlerError,
+};
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
 pub use topology::Topology;

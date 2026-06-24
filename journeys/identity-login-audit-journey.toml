@@ -1,41 +1,48 @@
-# RW-G1 追踪弹验收规格（journeys 单源；可执行验收 = journeys/tests/identity_login_audit_journey.rs）。
-# 目的：证明 G0 冻结接缝能拼成闭环——identity 登录 → in-mem outbox → 分发 → audit append。
-# 通过 = 放行 W 宽扇出（见 issue #999、epic #991）。
+# identity 登录 durable outbox 闭环验收规格（journeys 单源；可执行验收 =
+# journeys/tests/identity_login_audit_journey.rs，durable 拓扑变体 =
+# journeys/tests/identity_login_audit_durable_journey.rs，`--features integration`）。
+# 目的：证明 L2 OutboxFact 闭环——identity 登录 → durable outbox 发射 → ConsumerBase 幂等消费 → audit append。
+# 源起 RW-G1 追踪弹（#999，验冻结接缝）；#1100/T008 graduate 为 durable L2 闭环 + 契约 active。
 
 id = "identity-login-audit"
-title = "identity 登录接缝 → outbox(in-mem) → audit append 验接缝"
-issue = 999
-# kind=service-seam-tracer：验证**冻结接缝服务层闭环**，非用户可见的完整 HTTP 登录旅程。
-# status=green 表示**接缝已绿**（service-seam）——HTTP/axum、JWT、durable outbox/幂等仍 OOS（见 [out_of_scope]），
-# 不代表面向用户的登录旅程已就绪；真实 HTTP login journey 待 W 落地后另立并标 green。
-kind = "service-seam-tracer"
+title = "identity 登录 → durable outbox → ConsumerBase 幂等消费 → audit append（L2 闭环）"
+issue = 1100
+# kind=service-closure：验证 L2 OutboxFact 服务层闭环（登录 emit → outbox → 消费幂等去重 → audit）。
+# status=green：demo 拓扑闭环 + 重投幂等已绿；durable（postgres/amqp）拓扑变体经 integration feature 验。
+# 仍 OOS：HTTP/axum 逐字节登录旅程、JWT/密码哈希、envelope trace/correlation 注入（见 [out_of_scope]）。
+kind = "service-closure"
 status = "green"
 
-# 组装在其上的 demo topology（substrate crates）。
+# demo 拓扑（默认，in-process 替身）；durable 拓扑（postgres outbox + relay + PgInbox 幂等）经
+# identity_login_audit_durable_journey.rs（`--features integration`）验，substrate 增 postgres。
 topology = ["bootstrap", "eventexec", "identity", "audit", "memory"]
+topology_durable = ["bootstrap", "eventexec", "identity", "audit", "postgres"]
 
 # 端到端步骤（与集成测试一一对应）。
 steps = [
-  "bootstrap::compose 跑 identity/audit 的 Domain::init，Registry 收集登录路由组 + session-created 订阅",
-  "组合根把 SubscriberHandler adapt 成 eventexec::HandlerFn，run_dispatch 驱动 MemBus 订阅流",
-  "LoginService 校验凭据 → authn::SessionId::generate → 发布 identity.session-created（MemBus publisher）",
-  "audit 订阅 handler 解码 payload → diport::AuditEvent → MemAuditSink.record",
+  "bootstrap::compose 跑 identity/audit 的 Domain::init，Registry 收集登录路由组 + session-created 订阅（订阅元数据单源自 generated SUBSCRIPTIONS）",
+  "组合根把 SubscriberHandler adapt 成 run_consumer 的 HandleResult handler，ConsumerBase 驱动 MemBus 订阅流（claim→handle→commit/release 幂等）",
+  "LoginService 校验凭据 → authn::SessionId::generate → 构造 outbox::Entry（EventId=session_id）→ 经 OutboxEmitter 落 durable outbox",
+  "（durable）relay CAS 中继 outbox entry 到 broker，message_id=EventId；（demo）MemEmitter 直发 MemBus，Message.id=EventId",
+  "audit 订阅 handler 以 EventId 幂等去重（ConsumerBase claim）后解码 payload → diport::AuditEvent → AuditSink.record",
 ]
 
 # 验收断言（通过判据）。
 [expect]
 route_group = "Primary listener, prefix=/api/v1/identity"
+contract_lifecycle = "active"   # 契约 graduate draft→active（R8/R11/R14 过）
 audit_records = 1
 audit_action = "login"
 audit_resource_kind = "session"
-tenant_threaded = true       # 租户经 payload 贯穿到审计记录
-rejected_login_audits = 0    # 负路径：登录失败不产生审计事件
+tenant_threaded = true          # 租户经 payload 贯穿到审计记录
+event_id_threaded = true        # EventId(=session_id) 经 Message.id 贯穿到消费幂等键
+consumer_idempotency = true     # relay 重投同一 EventId → audit 仅 append 一次（acc #2）
+rejected_login_audits = 0       # 负路径：登录失败不产生审计事件
 
-# 显式留 W（不在本追踪弹范围）。
+# 显式留 W（不在本闭环范围）。
 [out_of_scope]
 http_axum = "httpserve mount_primary/finalize_auth 逐字节 HTTP journey（topology 仅经 route_group 声明参与，未跑 axum）"
 jwt = "真实 JWT 签发/校验、密码哈希、authn::Session/Principal 聚合（authn 仅 SessionId::generate 入链）"
-contract_active = "契约 lifecycle=active graduate + active serving 校验"
 audit_chain = "audit domain 哈希链（link_hash/verify_chain/AuditEntry）+ 域内持久化"
-consumer_idempotency = "L2 OutboxFact consumer 幂等/去重——in-mem 单投递不触发；真实 broker 重投幂等留 W"
-correlation = "outbox envelope correlation_id / request_id 透传到 AuditEvent（当前 None）；trace 关联留 W"
+correlation = "outbox envelope trace/correlation/occurred_at reserved-key 受控注入（funnel 现 fail-closed 拒 reserved、无 sealed setter）；payload→AuditEvent correlation 透传需 payload schema 升版，留 W"
+projection_rebuild = "L3 CQRS 投影读模型 + 断点续投重建测试（投影基建 T010/P10 未落地）——本轮交付 L2 replay-via-redelivery 幂等收敛"

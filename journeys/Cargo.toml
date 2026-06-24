@@ -20,6 +20,8 @@ identity = { path = "../crates/identity", features = ["seed-login"] }
 audit = { path = "../crates/audit" }
 bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
+# run_consumer 幂等消费驱动的载体类型：HandleResult / IdempotencyStore / Entry / IdemKey / ConsumerGroup。
+consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport" }
 primitives = { path = "../crates/primitives" }
 generated = { path = "../generated" }
@@ -31,3 +33,12 @@ futures = { workspace = true }
 anyhow = { workspace = true }
 # adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。
 tracing = { workspace = true }
+# durable 拓扑 journey（`integration` feature）：PgStore/PgEmitter/PgOutbox/PgInboxStore 端到端闭环。
+postgres = { path = "../adapters/postgres" }
+# F6：durable journey 经 payload 解码关联本轮 session-created entry（F1 后 idem_key = 独立 EventId ≠ session_id）。
+serde_json = { workspace = true }
+
+[features]
+# durable 拓扑 journey（identity_login_audit_durable_journey.rs）需真实 postgres——默认不编译/不跑，
+# 经 `--features integration` 显式启用（缺 DB env fail-closed，对齐 adapters/postgres 集成测试约定）。
+integration = []

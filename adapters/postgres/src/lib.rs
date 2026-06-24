@@ -15,6 +15,7 @@
 //! postgres-backed `RoleRepo` 属 identity 域 W 阶段（需 roles 表 + tenant RLS）。
 
 mod dead_letter;
+mod emitter;
 mod inbox;
 mod migrator;
 mod outbox;
@@ -22,6 +23,7 @@ mod pool;
 mod tx;
 
 pub use dead_letter::PgDeadLetterStore;
+pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
 
 #[cfg(all(test, feature = "integration"))]

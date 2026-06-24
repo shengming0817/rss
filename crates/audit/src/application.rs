@@ -26,12 +26,10 @@ use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHand
 use consistency::ConsumerGroup;
 use diport::{AuditEvent, AuditOutcome, AuditSink, Message};
 use futures::future::BoxFuture;
-use generated::event::identity_v1::{
-    CONTRACT_ID as SESSION_CONTRACT_ID, IdentitySessionCreatedPayload, TOPIC as SESSION_TOPIC,
-};
+use generated::event::identity_v1::{IdentitySessionCreatedPayload, SUBSCRIPTIONS};
 
-/// audit 域消费 session-created 事件的 consumer group（稳定标识，幂等去重 PK 第二维度）。
-const AUDIT_SESSION_CREATED_GROUP: &str = "audit.session-created";
+/// 本域 DomainId（在 generated `SUBSCRIPTIONS` 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
+const AUDIT_DOMAIN: &str = "audit";
 
 /// 审计资源类别（const literal，AuditEvent.resource_kind 要求 &'static str）。
 const RESOURCE_KIND_SESSION: &str = "session";
@@ -132,11 +130,17 @@ where
     S: AuditSink + Send + Sync + 'static,
 {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        let group = ConsumerGroup::parse(AUDIT_SESSION_CREATED_GROUP)
-            .map_err(|_| KernelError::Subscriber)?;
+        // 订阅元数据（contract_id / topic / group）单源自 generated `SUBSCRIPTIONS`（契约 `[[subscriptions]]`
+        // codegen 派生）——不手维护平行 const，消除 contract↔consumer 的 group/topic 漂移（AI-HARD：Soft→codegen
+        // funnel + golden）。本域只声明自身 DomainId 来筛选属于自己的那条订阅；缺失即 fail-fast（死配置守卫）。
+        let spec = SUBSCRIPTIONS
+            .iter()
+            .find(|s| s.consumer == AUDIT_DOMAIN)
+            .ok_or(KernelError::Subscriber)?;
+        let group = ConsumerGroup::parse(spec.group).map_err(|_| KernelError::Subscriber)?;
         reg.subscriber(
-            SESSION_CONTRACT_ID,
-            SESSION_TOPIC,
+            spec.contract_id,
+            spec.topic,
             group,
             Box::new(SessionCreatedAuditHandler::new(self.sink.clone())),
         )?;
@@ -252,8 +256,11 @@ mod tests {
             .expect("compose ok");
         let subs = reg.into_subscribers();
         assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].contract_id, SESSION_CONTRACT_ID);
-        assert_eq!(subs[0].topic, SESSION_TOPIC);
-        assert_eq!(subs[0].group.as_str(), AUDIT_SESSION_CREATED_GROUP);
+        // 单源校验：注册的订阅元数据 == generated SUBSCRIPTIONS 那条（contract↔consumer 无漂移）。
+        let spec = SUBSCRIPTIONS[0];
+        assert_eq!(spec.consumer, AUDIT_DOMAIN);
+        assert_eq!(subs[0].contract_id, spec.contract_id);
+        assert_eq!(subs[0].topic, spec.topic);
+        assert_eq!(subs[0].group.as_str(), spec.group);
     }
 }

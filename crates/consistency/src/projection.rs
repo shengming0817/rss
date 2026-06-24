@@ -10,13 +10,16 @@ pub struct Lsn(u64);
 
 impl Lsn {
     /// 由单调序号构造（受控 funnel；来源是 journal append 序）。
-    pub fn new(_seq: u64) -> Self {
-        todo!()
+    ///
+    /// infallible：单调性由 journal append 层保证，本 funnel 不校验——caller 是 harness（append 序源），
+    /// 非外部输入，故无 [`StepName`](crate::saga::StepName) / [`EntityId`](crate::reconcile::EntityId) 那样的 fallible parse。
+    pub fn new(seq: u64) -> Self {
+        Self(seq)
     }
 
     /// 取底层序号。
     pub fn get(&self) -> u64 {
-        todo!()
+        self.0
     }
 }
 
@@ -44,4 +47,26 @@ pub trait ProjectionEvent {
 pub trait Projector {
     /// apply 单事件到读模型。幂等（同 lsn 重投 no-op）由实现保证，行为 PR 兑现。
     async fn apply<E: ProjectionEvent>(&self, event: &E) -> Result<(), crate::error::EngineError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lsn;
+
+    // Lsn new/get 多值往返（含边界 0 / u64::MAX）。
+    #[test]
+    fn lsn_new_get_round_trips() {
+        let cases: &[u64] = &[0, 1, 42, u64::MAX];
+        for &seq in cases {
+            assert_eq!(Lsn::new(seq).get(), seq, "seq={seq}");
+        }
+    }
+
+    // Lsn 单调序：Ord / Eq 烟测（断点续投 checkpoint 比较语义）。
+    #[test]
+    fn lsn_ordering() {
+        assert!(Lsn::new(1) < Lsn::new(2));
+        assert_eq!(Lsn::new(7), Lsn::new(7));
+        assert!(Lsn::new(u64::MAX) > Lsn::new(0));
+    }
 }

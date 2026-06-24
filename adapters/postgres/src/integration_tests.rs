@@ -914,3 +914,66 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
+
+// ── T10: PgEmitter durable emit（#1100/T008）──────────────────────────────────
+//
+// 原子性回滚（acc #3）由 T1（append_outbox in rolled-back tx → 无 entry）守——PgEmitter::emit 复用
+// append_outbox + 事务，故原子性结构上同源。本测覆盖 emit commit 路径的写正确性（acc #1 的 entry 形态）。
+
+/// PgEmitter::emit 落 durable outbox：恰 1 行 pending，event_id(=EventId)/domain/topic 正确，
+/// metadata 仅含 opaque subjectId（无 PII / 无 reserved key，FR-020）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path——Topic/IdemKey parse 已知合法值；函数级 item-level carve-out（error-handling.md §Carve-out）。
+async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestResult {
+    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+
+    let store = PgStore::connect(&config_from_env()?).await?;
+    // F5(#1194)：仅建表、不全表 DELETE——本用例按 unique `event_id` 隔离断言（`WHERE event_id = $1`），
+    // 不需净表起点，避免并发共享库下污染他用例刚写入的行（`setup_outbox` 的全表清理是 pre-existing，#1194 收口）。
+    store.run_migrations().await?;
+
+    let event_id = unique_event_id("t10-emit");
+    let entry = Entry::new(
+        Topic::parse("identity.session-created").unwrap(),
+        IdemKey::parse(&event_id).unwrap(),
+        br#"{"sessionId":"s"}"#.to_vec(),
+    );
+    crate::PgEmitter::new(&store)
+        .emit(
+            entry,
+            OutboxEnvelopeParts {
+                domain: "identity".to_string(),
+                contract_id: "identity.session-created".to_string(),
+                subject_id: "subj-opaque-77".to_string(),
+            },
+        )
+        .await?;
+
+    let row: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT event_id, domain, topic, status, metadata::text FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0, event_id, "event_id = EventId");
+    assert_eq!(row.1, "identity", "domain");
+    assert_eq!(row.2, "identity.session-created", "topic");
+    assert_eq!(row.3, "pending", "新 entry pending 待 relay");
+    // metadata 仅含 opaque subjectId、无 PII / 无 reserved key（FR-020 funnel）。
+    assert!(
+        row.4.contains("subjectId") && row.4.contains("subj-opaque-77"),
+        "metadata 应含 opaque subjectId: {}",
+        row.4
+    );
+    for reserved in ["trace", "correlation", "principal", "occurred_at"] {
+        assert!(
+            !row.4.contains(reserved),
+            "metadata 不应含 reserved key {reserved}: {}",
+            row.4
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
