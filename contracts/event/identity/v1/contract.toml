@@ -1,14 +1,23 @@
-# identity session-created event 契约（draft）——RW-G1 追踪弹验接缝用。
+# identity session-created event 契约（active）——登录 durable outbox 闭环（#1100/T008）。
 # 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
-# 登录成功发布的 outbox fact ⇒ consistencyLevel = OutboxFact（L2）。audit 域订阅消费。
-# draft：追踪弹验接缝；graduate 到 active（active event 须有 subscriber，audit 即是）留 W。
+# 登录成功 emit 的 outbox fact ⇒ consistencyLevel = OutboxFact（L2）。audit 域订阅消费、以 EventId 幂等去重。
+# active：登录 → durable outbox → relay → audit append 闭环已落地（#1100），audit 即其 subscriber（R14）。
 id = "identity.session-created"
 kind = "event"
 domain = "identity"
 version = "v1"
 owner = "identity"
 consistencyLevel = "OutboxFact"
-lifecycle = "draft"
+lifecycle = "active"
+# active event 必填（R8）：稳定 dotted topic（broker routing key）+ 投递语义（R11 仅放行 at-least-once）。
+topic = "identity.session-created"
+delivery = "at-least-once"
 
 [schemas]
 payload = "payload.schema.json"
+
+# active event 须有 subscriber（R14，EVENT-ACTIVE-SUB-01）：audit 域消费，consumer group 稳定。
+# codegen 据此派生 SUBSCRIPTIONS；audit 订阅注册单源读 generated SUBSCRIPTIONS（不再手维护平行 const）。
+[[subscriptions]]
+consumer = "audit"
+group = "audit.session-created"

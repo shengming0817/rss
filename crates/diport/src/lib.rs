@@ -79,6 +79,7 @@ pub mod dead_letter_store;
 pub mod managed_resource;
 pub mod metrics_exporter;
 pub mod object_store;
+pub mod outbox_emitter;
 pub mod pdp;
 pub mod publisher;
 pub mod rate_limiter;
@@ -101,6 +102,7 @@ pub use metrics_exporter::MetricsExporter;
 pub use object_store::{
     DynObjectStore, ObjectByteStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError,
 };
+pub use outbox_emitter::{DynOutboxEmitter, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 pub use pdp::{CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
 pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 pub use rate_limiter::{

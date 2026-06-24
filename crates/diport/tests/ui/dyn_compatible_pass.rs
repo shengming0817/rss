@@ -1,12 +1,14 @@
 //! pass：dynosaur Send DI port 可 native AFIT impl + 经 `Box<DynX>` / `Arc<DynX>` 注入。
-//! 覆盖全部 8 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource。
+//! 覆盖全部 9 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource / OutboxEmitter。
+use consistency::{Entry, IdemKey, Topic as ConsistencyTopic};
 use diport::{
-    AuditSink, AuditSinkError, DynAuditSink, DynManagedResource, DynObjectStore, DynPdp,
-    DynPublisher, DynRateLimiter, DynSigner, DynSubscriber, KeyId, ManagedResource, MessageStream,
-    ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError, Pdp, PdpError, PublishRequest,
-    Publisher, PublisherError, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
-    RawCredential, ShutdownError, SignRequest, Signature, Signer, SignerError, SigningPurpose,
-    Subscriber, SubscriberError, Topic, VerifiedClaims,
+    AuditSink, AuditSinkError, DynAuditSink, DynManagedResource, DynObjectStore, DynOutboxEmitter,
+    DynPdp, DynPublisher, DynRateLimiter, DynSigner, DynSubscriber, KeyId, ManagedResource,
+    MessageStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError, OutboxEmitError,
+    OutboxEmitter, OutboxEnvelopeParts, Pdp, PdpError, PublishRequest, Publisher, PublisherError,
+    RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter, RawCredential, ShutdownError,
+    SignRequest, Signature, Signer, SignerError, SigningPurpose, Subscriber, SubscriberError,
+    Topic, VerifiedClaims,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -109,6 +111,18 @@ impl Pdp for OkPdp {
     }
 }
 
+struct OkOutboxEmitter;
+
+impl OutboxEmitter for OkOutboxEmitter {
+    async fn emit(
+        &self,
+        _entry: Entry,
+        _env: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError> {
+        Ok(())
+    }
+}
+
 fn main() {
     let _boxed: Box<DynSigner> = DynSigner::new_box(OkSigner);
     let _arced: Arc<DynSigner> = DynSigner::new_arc(OkSigner);
@@ -146,4 +160,10 @@ fn main() {
     // Pdp：async DI port（#1109 验签 provider），dyn(box) wrapper 可 Box/Arc 注入。
     let _pdp_boxed: Box<DynPdp> = DynPdp::new_box(OkPdp);
     let _pdp_arced: Arc<DynPdp> = DynPdp::new_arc(OkPdp);
+
+    // OutboxEmitter：async DI port（#1100 durable outbox 发射），dyn(box) wrapper 可 Box/Arc 注入。
+    let _oe_boxed: Box<DynOutboxEmitter> = DynOutboxEmitter::new_box(OkOutboxEmitter);
+    let _oe_arced: Arc<DynOutboxEmitter> = DynOutboxEmitter::new_arc(OkOutboxEmitter);
+    let _ = ConsistencyTopic::parse("t");
+    let _ = IdemKey::parse("k");
 }

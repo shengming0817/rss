@@ -8,7 +8,7 @@
 #![cfg(feature = "integration")]
 
 use amqp::{AmqpPublisher, AmqpSubscriber};
-use diport::{PublishRequest, Publisher, Subscriber, Topic};
+use diport::{MessageId, PublishRequest, Publisher, Subscriber, Topic};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -73,6 +73,7 @@ async fn publish_subscribe_roundtrip() {
     publisher
         .publish(PublishRequest {
             topic,
+            event_id: MessageId::new("evt-amqp-1"),
             payload: b"hello-amqp".to_vec(),
         })
         .await
@@ -84,6 +85,12 @@ async fn publish_subscribe_roundtrip() {
         .expect("delivery within timeout")
         .expect("stream yielded a message");
     assert_eq!(msg.payload, b"hello-amqp".to_vec());
+    // EventId 跨 broker 传播：message_id 经 envelope 流回 Message.id（消费侧幂等键源）。
+    assert_eq!(
+        msg.id.as_str(),
+        "evt-amqp-1",
+        "event_id 应经 broker message_id 传播到 Message.id"
+    );
 
     token.cancel();
     publisher.shutdown().await.expect("publisher shutdown");
@@ -117,6 +124,7 @@ async fn topic_b_not_delivered_to_a() {
     publisher
         .publish(PublishRequest {
             topic: Topic::new("rss.it.iso-b"),
+            event_id: MessageId::new("evt-iso-b"),
             payload: b"to-b".to_vec(),
         })
         .await

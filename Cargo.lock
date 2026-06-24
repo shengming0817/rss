@@ -1262,6 +1262,7 @@ dependencies = [
 name = "diport"
 version = "0.0.0"
 dependencies = [
+ "consistency",
  "dynosaur",
  "futures",
  "mockall",
@@ -2201,6 +2202,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trait-variant",
+ "uuid",
  "vocab",
 ]
 
@@ -2329,13 +2331,16 @@ dependencies = [
  "anyhow",
  "audit",
  "bootstrap",
+ "consistency",
  "diport",
  "eventexec",
  "futures",
  "generated",
  "identity",
  "memory",
+ "postgres",
  "primitives",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

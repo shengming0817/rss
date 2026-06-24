@@ -17,11 +17,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use consistency::{ConsumerGroup, EngineError, IdemKey, IdempotencyStore, SeenState};
+use consistency::{ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, SeenState};
 
 use diport::{
-    AuditEvent, AuditSink, AuditSinkError, Clock, Message, MessageStream, PublishRequest,
-    Publisher, PublisherError, Subscriber, SubscriberError, Topic,
+    AuditEvent, AuditSink, AuditSinkError, Clock, Message, MessageId, MessageStream,
+    OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher, PublisherError,
+    Subscriber, SubscriberError, Topic,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -72,7 +73,13 @@ impl Publisher for MemPublisher {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
         let mut inner = self.bus.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.seq += 1;
-        let id = format!("mem-{}", inner.seq);
+        // event_id（去重锚点 / EventId）作 Message.id，使消费侧 `run_consumer` 的幂等键与 durable
+        // 路径一致（重投同一 EventId → Duplicate 短路）。event_id 空才回退单调 seq（保旧 demo 行为）。
+        let id = if request.event_id.as_str().is_empty() {
+            format!("mem-{}", inner.seq)
+        } else {
+            request.event_id.as_str().to_string()
+        };
         let payload = request.payload;
         let senders = inner
             .topics
@@ -120,6 +127,45 @@ impl Subscriber for MemSubscriber {
     async fn shutdown(&self) -> Result<(), SubscriberError> {
         // reason: in-mem 无 infra 资源，关闭无需释放。
         Ok(())
+    }
+}
+
+// ── MemEmitter：in-mem durable outbox 发射替身（demo 拓扑）──────────────────────
+
+/// in-mem outbox 发射端口（impl [`diport::OutboxEmitter`]）：把 [`Entry`] 直接 fan-out 到 [`MemBus`]，
+/// **不持久化**——demo / 单进程 / 测试用；生产走 postgres `PgEmitter`（durable outbox + relay CAS）。
+///
+/// 经 `MemBus::publisher()` 复用 [`MemPublisher`] 的发布路径：`Message.id = entry.idem_key()`（EventId），
+/// 闭合 demo 侧 EventId 传播（消费侧 `run_consumer` 据此幂等去重）。
+pub struct MemEmitter {
+    bus: MemBus,
+}
+
+impl MemEmitter {
+    /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）。
+    pub fn new(bus: MemBus) -> Self {
+        Self { bus }
+    }
+}
+
+impl OutboxEmitter for MemEmitter {
+    async fn emit(
+        &self,
+        entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError> {
+        // reason: in-mem 替身无持久化载体，envelope（domain/contract_id/subject_id）无落库处——
+        // 消费侧从 payload 解码 subject/tenant，故 demo 路径忽略 envelope（durable PgEmitter 才落 metadata）。
+        let request = PublishRequest {
+            topic: Topic::new(entry.topic().as_str()),
+            event_id: MessageId::new(entry.idem_key().as_str()),
+            payload: entry.payload().to_vec(),
+        };
+        self.bus
+            .publisher()
+            .publish(request)
+            .await
+            .map_err(OutboxEmitError::new)
     }
 }
 
@@ -298,12 +344,19 @@ mod tests {
         bus.publisher()
             .publish(PublishRequest {
                 topic: Topic::new(TOPIC),
+                event_id: MessageId::new("evt-roundtrip"),
                 payload: b"hello".to_vec(),
             })
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(msg.payload, b"hello".to_vec());
+        // EventId 传播：event_id 须作 Message.id（消费侧幂等键源）。
+        assert_eq!(
+            msg.id.as_str(),
+            "evt-roundtrip",
+            "event_id 应作 Message.id 传播到消费侧"
+        );
     }
 
     #[tokio::test]
@@ -324,6 +377,7 @@ mod tests {
         bus.publisher()
             .publish(PublishRequest {
                 topic: Topic::new(TOPIC),
+                event_id: MessageId::new("evt-fanout"),
                 payload: b"x".to_vec(),
             })
             .await
@@ -345,6 +399,7 @@ mod tests {
         bus.publisher()
             .publish(PublishRequest {
                 topic: Topic::new(TOPIC),
+                event_id: MessageId::new("evt-other"),
                 payload: b"x".to_vec(),
             })
             .await
@@ -352,6 +407,37 @@ mod tests {
         // 取消后流终止：不同 topic 无投递 ⇒ None。
         token.cancel();
         assert!(stream.next().await.is_none());
+    }
+
+    // MemEmitter（OutboxEmitter 替身）：emit 一条 Entry → 订阅者收到 Message，且 id = entry.idem_key()
+    // （EventId），证明 demo 侧 EventId 传播闭合（消费侧 run_consumer 幂等键源）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_emitter_uses_eventid_as_message_id() {
+        let bus = MemBus::new();
+        let token = CancellationToken::new();
+        let mut stream = bus
+            .subscriber()
+            .subscribe(Topic::new(TOPIC), token.clone())
+            .await
+            .expect("subscribe");
+        let entry = Entry::new(
+            consistency::Topic::parse(TOPIC).expect("topic"),
+            IdemKey::parse("evt-session-77").expect("idem"),
+            b"payload".to_vec(),
+        );
+        let env = OutboxEnvelopeParts {
+            domain: "identity".to_string(),
+            contract_id: TOPIC.to_string(),
+            subject_id: "subj-opaque".to_string(),
+        };
+        MemEmitter::new(bus.clone())
+            .emit(entry, env)
+            .await
+            .expect("emit");
+        let msg = stream.next().await.expect("message delivered");
+        assert_eq!(msg.id.as_str(), "evt-session-77", "EventId 应作 Message.id");
+        assert_eq!(msg.payload, b"payload".to_vec());
     }
 
     #[tokio::test]

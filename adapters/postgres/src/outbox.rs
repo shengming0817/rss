@@ -76,8 +76,7 @@ impl OutboxMetadata {
     }
 
     /// 设置 opaque 主体 id（唯一允许的 principal 形态——不容完整 Principal / PII）。
-    // reason(dead_code): 生产写路径（T008/#1100）落地前仅 #[cfg(test)] integration 行使；保留 funnel API。
-    #[allow(dead_code)]
+    /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts.subject_id` 组装（T008/#1100）。
     pub(crate) fn with_subject_id(mut self, subject_id: impl Into<String>) -> Self {
         self.0.insert(
             METADATA_SUBJECT_KEY.to_string(),
@@ -130,9 +129,7 @@ pub(crate) struct OutboxEnvelope {
 
 impl OutboxEnvelope {
     /// 构造 envelope（funnel；字段私有，仅经此入口）。
-    // reason(dead_code): 生产 caller（域 crate session 写路径）在 T008/#1100 接入；
-    // 现仅 #[cfg(test)] integration 测试行使。保持 pub(crate) 以防未来 item-level 误用。
-    #[allow(dead_code)]
+    /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts` 组装（T008/#1100）。
     pub(crate) fn new(domain: String, contract_id: String, metadata: OutboxMetadata) -> Self {
         Self {
             domain,
@@ -171,10 +168,8 @@ impl OutboxEnvelope {
 ///
 /// outbox 双写必须在业务事务内原子执行——caller 须在 `run_in_transaction` 闭包内传入
 /// `&mut PgConnection`；裸 `PgPool::acquire()` 拿到的连接类型不同，类型系统阻止误用（Hard）。
-// reason(dead_code): 当前 PR 仅建基础设施；生产 caller 在 T008/#1100 接入。caller 不是域 crate 直接
-// import 本 adapter（域→adapter 反向依赖被 deny.toml 禁）——而是组合根 / 持有 PgStore 的服务，在
-// `run_in_transaction` 闭包内调用 append_outbox（域侧只经 port 触发该写路径）。保持 pub(crate) 优先于消除 dead_code。
-#[allow(dead_code)]
+// 生产 caller：`PgEmitter::emit`（impl `diport::OutboxEmitter`）在事务内调用——域 crate 不直接 import 本
+// adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。
 pub(crate) async fn append_outbox(
     conn: &mut PgConnection,
     entry: &Entry,
@@ -292,11 +287,13 @@ impl OutboxRelay for PgOutbox {
             Some(lease) => lease,
         };
 
-        // 2. 发布到 broker。
+        // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
+        //    （至少一次 + 幂等去重端到端，eventbus.md §DLX 与幂等）。
         let publish_result = self
             .publisher
             .publish(PublishRequest {
                 topic: diport::Topic::new(entry.topic().as_str()),
+                event_id: diport::MessageId::new(event_id),
                 payload: entry.payload().to_vec(),
             })
             .await;

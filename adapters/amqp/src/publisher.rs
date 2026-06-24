@@ -56,6 +56,10 @@ impl Publisher for AmqpPublisher {
         // ⇒ 不注入 header（reserved key 由 outbox envelope 注入，业务不伪造，见 diport）。
         // mandatory=true + publisher confirms：不可路由（无绑定 queue）消息被 broker **退回**而非静默丢弃，
         // 经 confirm 检测为失败——durable publish-ok 语义闭合（不再依赖「subscriber 先启动」运行顺序约定）。
+        // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message.id`（subscriber 的
+        // `pick_message_id` 优先读 message_id 再回退 delivery_tag），实现跨进程「至少一次 + 幂等去重」。
+        let properties =
+            BasicProperties::default().with_message_id(request.event_id.as_str().into());
         let confirmation = self
             .channel
             .basic_publish(
@@ -66,7 +70,7 @@ impl Publisher for AmqpPublisher {
                     ..Default::default()
                 },
                 &request.payload,
-                BasicProperties::default(),
+                properties,
             )
             .await
             .map_err(PublisherError::new)?
