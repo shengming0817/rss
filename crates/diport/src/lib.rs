@@ -77,6 +77,7 @@ pub mod audit_sink;
 pub mod clock;
 pub mod dead_letter_store;
 pub mod managed_resource;
+pub mod metrics_exporter;
 pub mod object_store;
 pub mod pdp;
 pub mod publisher;
@@ -96,6 +97,7 @@ pub use dead_letter_store::{
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
 };
+pub use metrics_exporter::MetricsExporter;
 pub use object_store::{
     DynObjectStore, ObjectByteStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError,
 };

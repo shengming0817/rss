@@ -335,9 +335,32 @@ fn step_redis_backend_tests() -> Step {
         needs_compile: true,
     }
 }
+fn step_prometheus_backend_tests() -> Step {
+    Step {
+        label: "prometheus-backend-tests",
+        args: &[
+            "nextest",
+            "run",
+            "-p",
+            "prometheus-adapter",
+            "--features",
+            "backend",
+        ],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
 /// 确定性 feature 行为测试门集（verify 与 ci 共用，单一事实源；新增确定性 feature 行为测试的 adapter 在此追加）。
 fn feature_test_steps() -> Vec<Step> {
-    vec![step_s3_backend_tests(), step_redis_backend_tests()]
+    vec![
+        step_s3_backend_tests(),
+        step_redis_backend_tests(),
+        step_prometheus_backend_tests(),
+    ]
 }
 
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
@@ -654,6 +677,7 @@ mod tests {
                 "nextest",
                 "s3-backend-tests",
                 "redis-backend-tests",
+                "prometheus-backend-tests",
                 "deny",
                 "dylint",
             ]
@@ -794,6 +818,7 @@ mod tests {
                 "coverage",
                 "s3-backend-tests",
                 "redis-backend-tests",
+                "prometheus-backend-tests",
                 "deny",
                 "audit",
                 "dylint",

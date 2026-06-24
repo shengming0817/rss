@@ -142,6 +142,16 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
 # 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
 aws-smithy-mocks = "0.2"
+# 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。Rust 可观测 facade 选 `metrics` crate（冻结
+# 迁移决策 gocell-rust-crate-mapping.md：slog+otel+prometheus → tracing+tracing-opentelemetry+metrics facade）；
+# 发射点经 `metrics::counter!` 全局 facade，adapter 持 PrometheusHandle 渲染 exposition。
+# default-features=false 关 http-listener/push-gateway——避免拉 hyper/rustls/ring/aws-lc（TLS + HTTP-server
+# 供应链面；/metrics HTTP serving 是组合根/httpserve 关注点，不在 adapter；同 s3/lapin 的 TLS 收口范式，
+# deny license allow-list 是机器门：ring/aws-lc 不在 allow-list ⇒ 入树即红，仅余 recorder + render 子树）。
+# 注：m-e-p default-features=false 子树无 tokio；workspace 内 tokio 经 diport→tokio-util 已在树，与本依赖无关。
+# ref: metrics-rs/metrics metrics-exporter-prometheus/src/exporter/builder.rs@metrics-exporter-prometheus-v0.18.3
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
 typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x

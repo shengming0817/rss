@@ -1,22 +1,40 @@
+# package 名 `prometheus-adapter`：crates.io 存在同名 `prometheus` crate，若 package 也叫 `prometheus` 则
+# `cargo -p prometheus` 与该 package-id 歧义（architecture.md §扁平 workspace 结构 明列 `redis`/`prometheus`
+# 同名 adapter 须加 `-adapter` 后缀）。`[lib] name = "prometheus"` 保留裸导入面（`use prometheus::…` 不污染），
+# deny.toml ban 按 package 名（`prometheus-adapter`）照常守。与 `redis-adapter` 同范式。
 [package]
-name = "prometheus"
+name = "prometheus-adapter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "prometheus"
+
 [lints]
 workspace = true
 
-# adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
+# adapter 实现 DI-infra port（diport：ManagedResource 始终 + MetricsExporter 于 backend）。W 阶段真身只用
+# diport（必填）+ backend 门控的 Prometheus 后端；G0 stub 预连的基础/引擎 crate（vocab/ids/secure/…）本切片
+# 不用，已裁（否则 cargo-udeps 红）——按 architecture.md §分层「adapters 按需连，不预连全层」。
+# lib 只引 metrics-exporter-prometheus（持 PrometheusHandle 渲染）；`metrics` facade 仅测试用（发射点），入
+# dev-dependencies——lib 不直接引用 `metrics::`，避免 cargo-udeps 多余依赖。
 [dependencies]
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+metrics-exporter-prometheus = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+
+[features]
+default = []
+# 接 Prometheus 后端：装进程级 recorder + 持 render 句柄，impl diport::MetricsExporter。feature-off 时为空壳
+# （仅 freeze smoke 类型断言）、不引入后端依赖——同 s3 的 backend 门控范式。
+backend = ["dep:metrics-exporter-prometheus", "dep:thiserror"]
+
+[dev-dependencies]
+# backend_tests（`--features backend`）：metrics = 发射点 facade（with_local_recorder / counter! / gauge!，
+# 仅测试用，故纯 dev-dep）；tokio = 异步 shutdown() 生命周期测试。`metrics-exporter-prometheus` 不在此重复
+# 声明——backend_tests 经 cfg(feature="backend") 编译，届时上面的 optional dep 已激活、即可直接引用（避免
+# dev-dep 与 optional dep 双重声明）。
+metrics = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

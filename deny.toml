@@ -86,8 +86,8 @@ deny = [
   { crate = "contractreg", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "syshealth", wrappers = ["server", "rss", "xtask", "journeys"] },
   # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。ban 按 **package 名** 匹配——
-  # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`，
-  # 见 adapters/redis/Cargo.toml），避免误伤传递引入的 `redis@1.x`。
+  # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`、
+  # prometheus adapter package = `prometheus-adapter`，见各自 Cargo.toml），避免误伤同名 crates.io crate。
   { crate = "postgres", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "redis-adapter", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "amqp", wrappers = ["server", "rss", "xtask", "journeys"] },
@@ -96,7 +96,7 @@ deny = [
   { crate = "oidc", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "grpc", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "otel", wrappers = ["server", "rss", "xtask", "journeys"] },
-  { crate = "prometheus", wrappers = ["server", "rss", "xtask", "journeys"] },
+  { crate = "prometheus-adapter", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "vault", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "softca", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "ratelimit", wrappers = ["server", "rss", "xtask", "journeys"] },
