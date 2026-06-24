@@ -1,1 +1,3 @@
-{"feature_directory":"specs/003-identity-domain-crate"}
+{
+  "feature_directory": "docs/spec/003-pdp-verify-wiring"
+}
