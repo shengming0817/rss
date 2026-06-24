@@ -37,3 +37,5 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 rstest = { workspace = true }
 # 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。
 tracing-subscriber = { workspace = true }
+# alg:none 负例：手工拼 base64url token（jsonwebtoken::encode 无法产出 alg:none）。
+base64 = { workspace = true }

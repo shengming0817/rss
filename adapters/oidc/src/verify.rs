@@ -15,6 +15,10 @@ use serde::Deserialize;
 
 /// 对外暴露 jsonwebtoken 的算法枚举（组合根 / 测试经 builder 绑定每把 key 的算法 allowlist）。直接 re-export
 /// 而非镜像一层，避免无谓映射（优雅简洁）；对称算法由 builder 拒绝（见 [`VerifierConfigBuilder`]）。
+///
+/// STABILITY: 本 re-export 把 `jsonwebtoken` 类型身份带入 oidc 公开 API——升级 jsonwebtoken（已 exact-pin
+/// `=9.3.1`，见 root Cargo.toml）须同步评估调用点。#1109 接线生产路径时若调用点增多，再评估引入 oidc 自有
+/// `SigningAlgorithm` 镜像以隔断外部类型依赖。
 pub use jsonwebtoken::Algorithm;
 
 /// 验签器构造期配置错误（fail-fast：误配在组合根接线 / 测试 setup 期暴露，不在每次验签静默失败）。
@@ -52,6 +56,13 @@ struct VerifyKey {
 }
 
 /// 注入验签配置（构造侧经 [`VerifierConfigBuilder`] 提供；字段私有 + 唯一构造入口 = builder，外部不可伪造）。
+///
+/// 单实例绑定**单一** issuer + audience。多 IdP / 多 audience 场景：组合根为每个 IdP 建独立 [`crate::OidcProvider`]
+/// 实例、按 scheme/路由分发（#1109 接线时的组合根职责）。多 key（轮转 / 多签发 key）经 builder 注入多把，
+/// [`verify_jwt`] 逐把试解。
+///
+/// 注：本切片 key 构造期注入、逐把盲扫试解；按 JWT header `kid` 选 key + live JWKS-over-HTTP 拉取/轮转 =
+/// follow-up #1109（同 s3 deferred live MinIO 范式）。
 pub struct VerifierConfig {
     issuer: String,
     audience: String,
@@ -123,12 +134,13 @@ impl VerifierConfigBuilder {
         self.push_key(key, algorithms)
     }
 
-    /// 校验算法 allowlist（非空 + 无对称）后入队。algorithm allowlist 绑定每把 key——RS* key 只验 RS*。
+    /// 校验算法 allowlist（非空 + 无 HMAC）后入队。algorithm allowlist 绑定每把 key——RS* key 只验 RS*。
+    /// INVARIANT: OIDC-ALG-ASYMMETRIC-ONLY-01（构造期拒对称算法，封堵 RS256→HS256 key-confusion）。
     fn push_key(mut self, key: DecodingKey, algorithms: &[Algorithm]) -> Result<Self, ConfigError> {
         if algorithms.is_empty() {
             return Err(ConfigError::EmptyAlgorithms);
         }
-        if algorithms.iter().any(is_symmetric) {
+        if algorithms.iter().any(is_hmac) {
             return Err(ConfigError::SymmetricAlgorithm);
         }
         self.keys.push(VerifyKey {
@@ -162,8 +174,10 @@ impl VerifierConfigBuilder {
     }
 }
 
-/// 对称（HMAC）算法判定——OIDC 验签器一律拒（防 key-confusion）。
-fn is_symmetric(alg: &Algorithm) -> bool {
+/// HMAC（对称）算法判定——OIDC 验签器一律拒（防 RS256→HS256 key-confusion）。EC / RSA / EdDSA 均为非对称、
+/// 放行。命名 `is_hmac` 而非 `is_symmetric`：jsonwebtoken 的对称算法仅 HS* 系列，避免维护者误判 EdDSA 等。
+/// INVARIANT: OIDC-ALG-ASYMMETRIC-ONLY-01（红线见 `builder_rejects_hmac_algorithm` 测试）。
+fn is_hmac(alg: &Algorithm) -> bool {
     matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
 }
 
@@ -175,38 +189,65 @@ pub(crate) fn verify_credential(
 ) -> Result<VerifiedClaims, PdpError> {
     match raw.scheme() {
         CredentialScheme::Jwt => verify_jwt(config, raw.token()),
-        other => {
-            // fail-closed：不记 token；scheme tag（闭值集、非 PII）入日志足够诊断。
-            tracing::warn!(
+        _ => {
+            // 非 JWT scheme（service-token 等另有验签器）在多 Pdp 组合下是预期路由分流、非降级 → debug 不告警噪音。
+            // 不记 token、不记 scheme 值（`CredentialScheme` 为 `#[non_exhaustive]`，未来变体若携数据则 `?` fmt
+            // 会泄漏——故只记静态 reason，前向安全）。
+            tracing::debug!(
                 target: "oidc",
                 resource = "oidc",
                 reason = "non_jwt_scheme",
-                scheme = ?other,
-                "oidc rejects non-jwt credential scheme"
+                "oidc verifier handles jwt scheme only; rejecting credential"
             );
             Err(PdpError::Untrusted)
         }
     }
 }
 
-/// 逐 key 试解（多 key 支持轮转 / 多 IdP）：任一把成功即接受；全失败按最后错误归类。
+/// 逐 key 试解（多 key 支持轮转 / 多 IdP）。**短路语义**：某把 key 出现 claim-level 错误（exp/nbf/iss/aud/
+/// 缺 required claim）意味着该 key 已**验签成功**、仅 claim 不符 → 该错误是权威结论，立即归类返回，不被后续 key
+/// 的 `InvalidSignature` 掩盖（多 key 轮转下「有效但过期」不被误报为「坏签名」）。仅 signature/格式级错误才续
+/// 试下一把 key；全 key 失败按最后一个 signature 级错误归类。
 fn verify_jwt(config: &VerifierConfig, token: &str) -> Result<VerifiedClaims, PdpError> {
-    let mut last_err = None;
+    let keys_tried = config.keys.len();
+    let mut sig_err = None;
     for vk in &config.keys {
         let validation = build_validation(config, &vk.algorithms);
         match decode::<Claims>(token, &vk.key, &validation) {
-            Ok(data) => return Ok(map_claims(config, data.claims)),
-            Err(err) => last_err = Some(err),
+            Ok(data) => return map_claims(config, data.claims),
+            // claim-level：签名已通过、仅 claim 不符 → 权威结论，立即返回（不续试、不被后续 key 掩盖）。
+            Err(err) if is_claim_level(&err) => return Err(classify(Some(err), keys_tried)),
+            // signature/格式级：可能是别把 key 签的 → 续试下一把。
+            Err(err) => sig_err = Some(err),
         }
     }
-    Err(classify(last_err))
+    Err(classify(sig_err, keys_tried))
+}
+
+/// claim-level 错误：jsonwebtoken 先验签名、后校 claim——故这些 kind 蕴含「签名已对该 key 通过」。
+fn is_claim_level(err: &jsonwebtoken::errors::Error) -> bool {
+    use jsonwebtoken::errors::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::ExpiredSignature
+            | ErrorKind::ImmatureSignature
+            | ErrorKind::InvalidIssuer
+            | ErrorKind::InvalidAudience
+            | ErrorKind::InvalidSubject
+            | ErrorKind::MissingRequiredClaim(_)
+    )
 }
 
 /// 构造 `Validation`：algorithm allowlist（拒 `alg:none` 与不在集内的算法）+ iss/aud 锁定 + exp/nbf 校验 +
-/// 强制 `exp`/`iss`/`aud` 存在（拒无 exp 的永久 token）。
+/// 显式 leeway + 强制 `exp`/`iss`/`aud`/`sub` 存在（拒无 exp 的永久 token、拒无 sub 的匿名 token）。
 fn build_validation(config: &VerifierConfig, algorithms: &[Algorithm]) -> Validation {
-    // reason: algorithms 非空由 builder 保证；first 必 Some——取首算法作 seed 后即被 v.algorithms 全集覆盖，
-    // 故 unwrap_or 的 fallback 永不命中（仅为静态消除 panic 路径，不退化为 indexing/expect）。
+    // algorithms 非空由 builder push_key 保证（空 allowlist 构造期即拒）。
+    debug_assert!(
+        !algorithms.is_empty(),
+        "VerifyKey.algorithms 必非空（builder 保证）"
+    );
+    // reason: first 必 Some——取首算法作 seed 后即被 `v.algorithms` 全集覆盖，故 unwrap_or 的 fallback 永不命中
+    // （仅为静态消除 panic 路径，不退化为 indexing/expect）。
     let seed = algorithms.first().copied().unwrap_or(Algorithm::RS256);
     let mut v = Validation::new(seed);
     v.algorithms = algorithms.to_vec();
@@ -214,15 +255,29 @@ fn build_validation(config: &VerifierConfig, algorithms: &[Algorithm]) -> Valida
     v.set_audience(&[config.audience.as_str()]);
     v.validate_exp = true;
     v.validate_nbf = true;
-    v.set_required_spec_claims(&["exp", "iss", "aud"]);
+    // 时钟偏差容忍**显式化**（不靠 jsonwebtoken 隐式默认）：IdP↔RP 时钟漂移普遍，60s 是工业标准 skew 容忍
+    // （设 0 会因正常漂移误拒合法 token）。安全相关参数显式声明、有据可查。
+    v.leeway = 60;
+    // 强制 sub 存在（无 sub 的匿名 token 在 authn 侧无法 mint Principal）；exp 拒永久 token；iss/aud 见上锁定。
+    v.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
     v
 }
 
-/// `sub` → subject（必有）；可配置 tenant·kind claim 按名从 extra 取字符串值（缺失 / 非字符串 → None）。
-fn map_claims(config: &VerifierConfig, claims: Claims) -> VerifiedClaims {
+/// `sub` → subject；可配置 tenant·kind claim 按名从 extra 取字符串值（缺失 / 非字符串 → None）。空 `sub`
+/// （`""`，能过 required-claim 存在性检查）→ `Untrusted`：空主体在 authn 侧是无效身份，fail-closed 拒绝。
+fn map_claims(config: &VerifierConfig, claims: Claims) -> Result<VerifiedClaims, PdpError> {
+    if claims.sub.is_empty() {
+        tracing::warn!(
+            target: "oidc",
+            resource = "oidc",
+            reason = "empty_subject",
+            "oidc jwt verification failed"
+        );
+        return Err(PdpError::Untrusted);
+    }
     let tenant = string_claim(&claims.extra, &config.tenant_claim);
     let kind = string_claim(&claims.extra, &config.kind_claim);
-    VerifiedClaims::new(claims.sub, tenant, kind)
+    Ok(VerifiedClaims::new(claims.sub, tenant, kind))
 }
 
 /// 从 extra 取字符串型 claim（非字符串 / 缺失 → None，不强转、不 panic）。
@@ -230,9 +285,11 @@ fn string_claim(extra: &serde_json::Map<String, serde_json::Value>, name: &str) 
     extra.get(name).and_then(|v| v.as_str()).map(str::to_owned)
 }
 
-/// 把 jsonwebtoken 错误**归类**到 `PdpError` 三变体；记脱敏顶层摘要（reason 闭值标签 + redacted Display，
-/// **不**记 token）。catch-all → `Untrusted`（`ErrorKind` `#[non_exhaustive]`，新变体 fail-closed）。
-fn classify(err: Option<jsonwebtoken::errors::Error>) -> PdpError {
+/// 把 jsonwebtoken 错误**归类**到 `PdpError` 三变体；记脱敏顶层摘要（reason 闭值标签 + keys_tried 计数 +
+/// redacted Display，**不**记 token）。`alg:none` 攻击在 jsonwebtoken 表现为 `InvalidAlgorithm`，经此归
+/// `InvalidSignature`（算法拒绝 ≡ 签名无效）。catch-all → `Untrusted`（`ErrorKind` `#[non_exhaustive]`，
+/// 新变体 fail-closed）。
+fn classify(err: Option<jsonwebtoken::errors::Error>, keys_tried: usize) -> PdpError {
     use jsonwebtoken::errors::ErrorKind;
     let Some(err) = err else {
         // keys 非空保证至少试解一次——本支理论不可达；fail-closed。
@@ -245,6 +302,7 @@ fn classify(err: Option<jsonwebtoken::errors::Error>) -> PdpError {
         ErrorKind::InvalidIssuer | ErrorKind::InvalidAudience => {
             ("untrusted_iss_or_aud", PdpError::Untrusted)
         }
+        // alg 不在 allowlist（含 `alg:none`）→ 等同签名无效。
         ErrorKind::InvalidAlgorithm | ErrorKind::InvalidAlgorithmName => {
             ("alg_not_allowed", PdpError::InvalidSignature)
         }
@@ -255,6 +313,7 @@ fn classify(err: Option<jsonwebtoken::errors::Error>) -> PdpError {
         target: "oidc",
         resource = "oidc",
         reason = reason,
+        keys_tried = keys_tried,
         error = %secure::redact_error(&err),
         "oidc jwt verification failed"
     );
@@ -263,9 +322,8 @@ fn classify(err: Option<jsonwebtoken::errors::Error>) -> PdpError {
 
 #[cfg(test)]
 mod tests {
-    // reason: 测试集中 expect/unwrap/panic 于 setup 与断言（item-level carve-out，符 error-handling.md §Carve-out）。
-    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-
+    // 测试 expect carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow(clippy::expect_used)]`
+    // 逐 fn 标注（非 module-level）——与 s3 adapter 测试同范式（workspace clippy expect_used = deny）。
     use super::{Algorithm, ConfigError, VerifierConfig, VerifierConfigBuilder, verify_credential};
     use diport::{PdpError, RawCredential};
     use jsonwebtoken::{EncodingKey, Header, encode, get_current_timestamp};
@@ -357,6 +415,7 @@ kQIDAQAB
 ";
 
     /// 主验签配置：单把 PUB1 / RS256 + 默认 tenant·kind claim 名。
+    #[allow(clippy::expect_used)]
     fn config() -> VerifierConfig {
         VerifierConfigBuilder::new(ISS, AUD)
             .add_rsa_pem_key(PUB1.as_bytes(), &[Algorithm::RS256])
@@ -366,6 +425,7 @@ kQIDAQAB
     }
 
     /// 以指定私钥 + 算法签出 token。
+    #[allow(clippy::expect_used)]
     fn mint(priv_pem: &str, alg: Algorithm, claims: serde_json::Value) -> String {
         let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).expect("encoding key");
         encode(&Header::new(alg), &claims, &key).expect("encode")
@@ -377,6 +437,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn valid_rs256_token_maps_claims() {
         let token = mint(
             PRIV1,
@@ -391,6 +452,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn tenant_kind_absent_yields_none() {
         let token = mint(
             PRIV1,
@@ -404,6 +466,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn non_string_tenant_claim_yields_none() {
         let token = mint(
             PRIV1,
@@ -428,6 +491,8 @@ kQIDAQAB
     #[case::wrong_iss(json!({"sub": "a", "iss": "https://evil", "aud": AUD, "exp": get_current_timestamp() + 3600}))]
     #[case::wrong_aud(json!({"sub": "a", "iss": ISS, "aud": "other-rp", "exp": get_current_timestamp() + 3600}))]
     #[case::missing_exp(json!({"sub": "a", "iss": ISS, "aud": AUD}))]
+    #[case::missing_sub(json!({"iss": ISS, "aud": AUD, "exp": get_current_timestamp() + 3600}))]
+    #[case::empty_sub(json!({"sub": "", "iss": ISS, "aud": AUD, "exp": get_current_timestamp() + 3600}))]
     fn jwt_untrusted_or_malformed_claims_map_untrusted(#[case] claims: serde_json::Value) {
         let token = mint(PRIV1, Algorithm::RS256, claims);
         let r = verify_credential(&config(), &RawCredential::jwt(token));
@@ -447,6 +512,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn algorithm_mismatch_rejected() {
         // token 以 HS256 签名；config 只允许 RS256 → alg 不在 allowlist → 拒（防 RS256→HS256 key-confusion）。
         let key = EncodingKey::from_secret(b"shared-secret");
@@ -458,6 +524,25 @@ kQIDAQAB
         .expect("encode hs256");
         let r = verify_credential(&config(), &RawCredential::jwt(token));
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
+    #[test]
+    fn alg_none_token_rejected() {
+        // 经典 `alg:none` 攻击：header alg="none" + 空签名。jsonwebtoken 无 `none` 算法变体 ⇒ header 解析即拒、
+        // 且 allowlist 仅 RS256 ⇒ 一律 fail-closed。手工拼 base64url（jsonwebtoken::encode 无法产出 alg:none）。
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = b64.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = b64.encode(
+            format!(
+                r#"{{"sub":"a","iss":"{ISS}","aud":"{AUD}","exp":{}}}"#,
+                future_exp()
+            )
+            .as_bytes(),
+        );
+        let token = format!("{header}.{payload}.");
+        let r = verify_credential(&config(), &RawCredential::jwt(token));
+        assert!(r.is_err(), "alg:none 必须被拒: {r:?}");
     }
 
     #[test]
@@ -478,6 +563,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn multi_key_rotation_second_key_succeeds() {
         // config 注入 [PUB1, PUB2]；token 由 PRIV2 签 → 第二把 key 验签成功。
         let cfg = VerifierConfigBuilder::new(ISS, AUD)
@@ -499,6 +585,7 @@ kQIDAQAB
     // ---- 构造期 fail-fast ----
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn builder_empty_issuer_fails() {
         let r = VerifierConfigBuilder::new("", AUD)
             .add_rsa_pem_key(PUB1.as_bytes(), &[Algorithm::RS256])
@@ -508,6 +595,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn builder_empty_audience_fails() {
         let r = VerifierConfigBuilder::new(ISS, "")
             .add_rsa_pem_key(PUB1.as_bytes(), &[Algorithm::RS256])
@@ -523,6 +611,7 @@ kQIDAQAB
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn builder_empty_claim_name_fails() {
         let r = VerifierConfigBuilder::new(ISS, AUD)
             .tenant_claim("")
@@ -532,6 +621,7 @@ kQIDAQAB
         assert!(matches!(r, Err(ConfigError::EmptyClaimName)));
     }
 
+    // INVARIANT: OIDC-ALG-ASYMMETRIC-ONLY-01 红线——构造期拒对称算法（封堵 RS256→HS256 key-confusion）。
     #[test]
     fn builder_rejects_hmac_algorithm() {
         let r = VerifierConfigBuilder::new(ISS, AUD)
@@ -591,6 +681,7 @@ kQIDAQAB
     // callsite，会把其 interest 全局缓存为 never，污染本测试（tracing callsite-cache 已知行为）。nextest
     // 每测试独立进程 ⇒ 无污染、确定性通过；nextest 是本仓 canonical runner（make verify / CI）。
     #[test]
+    #[allow(clippy::expect_used)]
     fn failure_does_not_log_raw_token() {
         use std::io::Write;
         use std::sync::{Arc, Mutex};

@@ -2697,6 +2697,7 @@ dependencies = [
 name = "oidc"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "diport",
  "jsonwebtoken",
  "rstest",
