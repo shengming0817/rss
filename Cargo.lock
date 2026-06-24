@@ -251,6 +251,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "rstest",
@@ -260,6 +261,8 @@ dependencies = [
  "serde_json",
  "support",
  "thiserror",
+ "tokio",
+ "trybuild",
  "uuid",
  "vocab",
 ]

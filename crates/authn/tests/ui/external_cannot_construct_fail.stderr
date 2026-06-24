@@ -1,0 +1,19 @@
+error[E0451]: fields `raw` and `claims` of struct `VerifiedJwt` are private
+ --> tests/ui/external_cannot_construct_fail.rs:5:9
+  |
+4 |     let _ = authn::VerifiedJwt {
+  |             ------------------ in this type
+5 |         raw: "h.e.s".to_string(),
+  |         ^^^ private field
+6 |         claims: diport::VerifiedClaims::new("sub", None, None),
+  |         ^^^^^^ private field
+
+error[E0451]: fields `token` and `claims` of struct `VerifiedServiceToken` are private
+  --> tests/ui/external_cannot_construct_fail.rs:10:9
+   |
+ 9 |     let _ = authn::VerifiedServiceToken {
+   |             --------------------------- in this type
+10 |         token: authn::AccessToken::new("svc"),
+   |         ^^^^^ private field
+11 |         claims: diport::VerifiedClaims::new("sub", None, None),
+   |         ^^^^^^ private field

@@ -76,6 +76,7 @@
 pub mod audit_sink;
 pub mod clock;
 pub mod managed_resource;
+pub mod pdp;
 pub mod publisher;
 pub mod rate_limiter;
 pub mod signer;
@@ -86,6 +87,7 @@ pub use clock::Clock;
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
 };
+pub use pdp::{CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
 pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 pub use rate_limiter::{
     DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,

@@ -16,6 +16,8 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
+# verify→mint bridge：经 diport::Pdp 验签后 seal VerifiedJwt / VerifiedServiceToken（#1158, ADR-006）。
+diport = { path = "../diport" }
 thiserror = { workspace = true }
 # SessionId::generate —— UUID v4 随机会话 id（RW-G1）。
 uuid = { workspace = true, features = ["v4"] }
@@ -29,3 +31,7 @@ serde_json = { workspace = true }
 rstest = { workspace = true }
 # test-support：单测经 runctx::test_support::app_ctx 构造 AppCtx（仅 authn 自测启用，不进生产构建）。
 runctx = { path = "../runctx", features = ["test-support"] }
+# verify→mint bridge 单测经 #[tokio::test] 驱动 async verify（stub Pdp 验证 verify→seal 路径）。
+tokio = { workspace = true, features = ["macros", "rt"] }
+# 跨 crate 漏斗证明：外部 crate 不可 seal / 构造 VerifiedJwt（compile-fail UI 锁）。
+trybuild = { workspace = true }

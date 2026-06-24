@@ -5,12 +5,14 @@
 //!
 //! ## 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）
 //!
-//! `Jwt::parse` 做结构化解码 + claims 映射，**不验签、不校验 exp**（签名/MAC/过期校验延后给上游
-//! verifier DI port `diport::Pdp`，W 后续）。派生 `Principal` 的 funnel 收紧为只收**已验证 newtype**：
-//! `from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`。
-//! `VerifiedJwt` / `VerifiedServiceToken` 私有内层 + `pub(crate)` `seal`——外部 crate 无法 mint，故
-//! 「未经验签派生 Principal」**从类型层不可表达（Hard）**：拿 `Jwt::parse(raw)` 的产物已无法直接派生主体。
-//! 实际验签 body + Pdp port + 生产接线（mint 收口到验签路径）留 W，见 #1109。
+//! 验签（签名/MAC/exp）与身份 claims 由 verifier DI port `diport::Pdp` 负责；`Jwt::parse` 仅作 token
+//! **结构闸**（3 段 / base64url / JSON / 非空 sub），不验签、不提取身份。派生 `Principal` 的 funnel 收紧为
+//! 只收**已验证 newtype**：`from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`。
+//! `VerifiedJwt` / `VerifiedServiceToken` 私有字段 + `pub(crate)` `seal`——外部 crate 无法 mint，故
+//! 「未经验签派生 Principal」**从类型层不可表达（Hard）**。载体内携**单一 canonical 身份源**
+//! `diport::VerifiedClaims`（验签产物）：一个载体只导出一个 principal，无第二（raw 重解析）身份源（#1158 F1）。
+//! 生产 mint 路径 = authn-owned `verify_jwt` / `verify_service_token`（经 `Pdp` 验签后 seal）；真实 crypto
+//! verifier adapter + httpserve 接线留 W，见 #1109。
 //!
 //! ## fail-closed
 //!
@@ -25,6 +27,10 @@ use vocab::tenant::{
 };
 
 use primitives::authplan::{AuthPlan, AuthRequirement, RouteAuthOptOut, resolve_requirement};
+
+// verify→mint bridge 经 `DynPdp` 调验签：`verify` 是 `Pdp` trait 方法，须 trait 在 scope（`as _`
+// 只引入方法、不污染 `Pdp` 名——bridge 全程用 `diport::DynPdp` / `diport::RawCredential` 全限定）。
+use diport::Pdp as _;
 
 // reason: 确保 authplan 符号被引用，防止 cargo-udeps 误报未使用依赖（ADR-004 C8）。
 #[allow(dead_code)]
@@ -64,19 +70,16 @@ pub enum PrincipalKind {
 // JWT claims 解码 DTO（私有，不 Serialize）
 // ---------------------------------------------------------------------------
 
-/// JWT payload 解码 DTO（仅内部使用；只 Deserialize，不 Serialize）。
+/// JWT payload 结构校验 DTO（仅内部；只 Deserialize）。身份 claims 由 verifier 经 [`diport::VerifiedClaims`]
+/// 提供，本结构只承载结构闸所需的 `sub`（非空校验）；serde 忽略其余 payload 字段。
 #[derive(serde::Deserialize)]
 struct Claims {
     sub: String,
-    #[serde(default)]
-    tenant: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
 }
 
-/// 共享 JWT payload 解码器（不验签）。
+/// JWT 结构闸（不验签）：校验 3 段 + base64url payload + JSON + 非空 `sub`。
 ///
-/// 信任边界：只做结构解析，签名/exp 校验由上游 verifier 负责。
+/// 信任边界：只做**结构**校验，签名/exp 与身份 claims 由上游 verifier（`diport::Pdp`）负责。
 fn decode_claims(raw: &str) -> Result<Claims, AuthnError> {
     let parts: Vec<&str> = raw.split('.').collect();
     if parts.len() != 3 {
@@ -114,20 +117,40 @@ pub struct Principal {
 impl Principal {
     /// 由已验证 JWT 派生 [`Principal`]（认证边界唯一入口）。
     ///
-    /// `kind` / `tenant` 从已验证 claims 派生；外部 crate 无法构造特权主体（ADR-001）。
+    /// `kind` / `tenant` 从**验签产物 [`diport::VerifiedClaims`]**（verifier = 信任原点）派生；外部 crate
+    /// 无法构造特权主体（ADR-001）。
     ///
     /// # 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）
     ///
-    /// 入参收紧为 [`VerifiedJwt`]——其私有内层 + `pub(crate)` [`VerifiedJwt::seal`] 使外部 crate 无法
-    /// mint，故「未经验签派生 Principal」**类型层不可表达（Hard）**：裸 `Jwt::parse(raw)` 的产物已无法
-    /// 直接派生主体。本函数仍只做 claims 映射、**不验签**；签名/exp 校验由未来 verifier（`diport::Pdp`）
-    /// 在 mint `VerifiedJwt` 前完成（W 后续）。当前无生产调用方（httpserve 挂载留 W），见 #1109。
+    /// 入参收紧为 [`VerifiedJwt`]——其私有内层 + `pub(crate)` [`VerifiedJwt::seal`] 使外部 crate 无法 mint，
+    /// 故「未经验签派生 Principal」**类型层不可表达（Hard）**。`VerifiedJwt` 内携**单一 canonical 身份源**
+    /// `VerifiedClaims`（F1）：一个 verified 载体只导出一个 principal——本函数与 verify→mint bridge
+    /// [`verify_jwt`] 读**同一** `VerifiedClaims`，无第二（raw 重解析）身份源、无分歧。
     pub fn from_verified_jwt(verified: &VerifiedJwt) -> Result<Self, AuthnError> {
-        // VerifiedJwt(Jwt) tuple newtype：`.0` = 已验证内层 `Jwt`（同 crate 可读私有字段）。
-        let claims = &verified.0.claims;
+        // VerifiedJwt.claims = 验签产物 = 单一身份源（载体的 raw 仅供下游转发，不派生身份）。
+        let c = &verified.claims;
+        Self::derive_from_claims(c.subject(), c.tenant(), c.kind())
+    }
+
+    /// 由已验证 claims 三元组（subject / tenant / kind）派生 scoped / super-admin [`Principal`]。
+    ///
+    /// `kind`→[`PrincipalKind`] 策略 + subject 非空不变式**单源**：消费侧两条已验证入口共用本函数，杜绝
+    /// 双份映射 / 双份校验漂移——[`Self::from_verified_jwt`] 与 verify→mint bridge [`verify_jwt`] 均读载体
+    /// 内 [`diport::VerifiedClaims`]。service / anonymous 不经本 funnel；未知 / 缺失 kind、空 subject、
+    /// scoped 主体缺 tenant / tenant 非 canonical UUID → 一律 `TokenInvalid`（fail-closed）。
+    fn derive_from_claims(
+        subject: &str,
+        tenant: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Self, AuthnError> {
+        // 空 subject fail-closed（F2）：verifier 产物即便绕过旧 decode_claims 的非空检查，也不得 mint
+        // 空主体 Principal。此为 Principal 派生单一漏斗，覆盖 from_verified_jwt + bridge 两路。
+        if subject.is_empty() {
+            return Err(AuthnError::TokenInvalid);
+        }
         // 单点决策 kind + 是否需 tenant，避免二级 match-on-PrincipalKind 的不可达 `_` 臂
         // （新增 PrincipalKind 时须在此加 KIND_* 串臂并定其 tenant 要求，无静默兜底）。
-        let (kind, needs_tenant) = match claims.kind.as_deref() {
+        let (kind, needs_tenant) = match kind {
             Some(KIND_USER) => (PrincipalKind::User, true),
             Some(KIND_DEVICE) => (PrincipalKind::Device, true),
             Some(KIND_ADMIN) => (PrincipalKind::Admin, true),
@@ -136,32 +159,43 @@ impl Principal {
             // service/anonymous 不经 jwt funnel；未知/缺失 kind → TokenInvalid。
             _ => return Err(AuthnError::TokenInvalid),
         };
-        // scoped 主体（user/device/admin）的 tenant claim 必填：缺失 / 非 canonical UUID → TokenInvalid。
         let tenant = if needs_tenant {
-            let raw = claims.tenant.as_deref().ok_or(AuthnError::TokenInvalid)?;
+            let raw = tenant.ok_or(AuthnError::TokenInvalid)?;
             Some(TenantId::parse(raw).map_err(|_| AuthnError::TokenInvalid)?)
         } else {
             None
         };
         Ok(Self {
             kind,
-            subject: claims.sub.clone(),
+            subject: subject.to_string(),
             tenant,
         })
     }
 
-    /// 由已验证 service-token 派生（service caller 入口）。
+    /// 由已验证 service-token subject 派生（funnel 固定 `kind=Service`，跨租户 `tenant=None`）。
     ///
-    /// funnel 固定 `kind=Service`，忽略 token 内的 kind/tenant claim。入参收紧为 [`VerifiedServiceToken`]
-    /// （私有内层 + `pub(crate)` [`VerifiedServiceToken::seal`]，外部不可 mint）——与 [`Self::from_verified_jwt`]
-    /// 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）；本函数不验签，验签由未来 verifier 在 mint 前完成（W）。
-    pub fn from_verified_service_token(token: &VerifiedServiceToken) -> Result<Self, AuthnError> {
-        let claims = decode_claims(token.0.as_str())?;
+    /// fail-closed：空 subject → `TokenInvalid`（F2，与 [`Self::derive_from_claims`] 同款非空不变式）。
+    /// 信任原点 = verifier：subject 取自验签产物 [`diport::VerifiedClaims::subject`]，service token 的
+    /// kind / tenant claim 不参与（service 主体恒跨租户）。
+    fn service_from_subject(subject: &str) -> Result<Self, AuthnError> {
+        if subject.is_empty() {
+            return Err(AuthnError::TokenInvalid);
+        }
         Ok(Self {
             kind: PrincipalKind::Service,
-            subject: claims.sub,
+            subject: subject.to_string(),
             tenant: None,
         })
+    }
+
+    /// 由已验证 service-token 派生（funnel 固定 `kind=Service`）。
+    ///
+    /// 入参收紧为 [`VerifiedServiceToken`]（私有内层 + `pub(crate)` [`VerifiedServiceToken::seal`]，外部
+    /// 不可 mint）——与 [`Self::from_verified_jwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）。
+    /// subject 取自载体内**单一 canonical 身份源** [`diport::VerifiedClaims`]（verifier = 信任原点，与
+    /// verify→mint bridge [`verify_service_token`] 同源，无分歧）；忽略 kind / tenant（service 恒跨租户）。
+    pub fn from_verified_service_token(token: &VerifiedServiceToken) -> Result<Self, AuthnError> {
+        Self::service_from_subject(token.claims.subject())
     }
 
     /// 测试专用构造（不进生产/wire 路径）。
@@ -233,13 +267,70 @@ impl Principal {
 }
 
 // ---------------------------------------------------------------------------
+// verify→mint bridge（authn-owned 验签 → 受控 mint，#1158）
+// ---------------------------------------------------------------------------
+//
+// INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01（生产端闭环）。`seal` 是 `pub(crate)`——外部 crate 无法 mint
+// `VerifiedJwt` / `VerifiedServiceToken`（Hard，消费端见 `verified_token_seal` + `tests/ui/`）。本 bridge
+// 是 authn 内**唯一生产 mint 路径**：经注入的 [`diport::Pdp`] 验签（签名/exp/MAC）成功后，才在 crate 内
+// 调 `seal` 装箱、并据**验签产物** [`diport::VerifiedClaims`] 派生 `Principal`（验签 = 信任原点，非旁路
+// re-parse）。验签**先于** seal 由 `?`-链顺序保证：`pdp.verify(...).await?` 失败即返回，绝不 seal。
+// 真实 crypto verifier adapter + httpserve 生产接线留 #1109 W（ADR-006 §3/§5 验签空窗）。
+//
+// NOTE(#1109)：本 bridge 是认证决策关键路径，httpserve 接线时须补 `tracing` span（ADR-006 §4 承诺
+// 与 #1109 同批交付）：verify ok → `authz.decision=allow` + `principal.kind`（不含 PII）；verify fail →
+// `authz.decision=deny` + 区分 `PdpError` 变体（InvalidSignature / Expired / Untrusted 告警级别不同）。
+// 当前 slice 无生产接线，故不引 `tracing` 依赖、不在此埋点（避免空转 span）。
+
+/// 验签并 mint JWT：经注入的 [`diport::Pdp`] 校验签名 / exp / MAC，成功后受控 seal 出 [`VerifiedJwt`]
+/// 并据验签产物派生 [`Principal`]。验签失败 fail-closed（[`AuthnError`]），绝不 seal。
+///
+/// `pdp` 取 dynosaur wrapper `&DynPdp`（caller 可持 `Box<DynPdp>` / `Arc<DynPdp>` 或静态 impl）。返回的
+/// `VerifiedJwt` 内携**单一 canonical 身份源** `VerifiedClaims`——`Principal` 与该载体经 `from_verified_jwt`
+/// 同源派生，一个载体只导出一个 principal（F1）。`Principal` 刻意不 derive `Debug`（含 PII）——消费 / 测试
+/// 经 `.kind()` / `.tenant()` 访问器断言，不 debug 格式化整个元组。
+pub async fn verify_jwt(
+    raw: &str,
+    pdp: &diport::DynPdp<'_>,
+) -> Result<(VerifiedJwt, Principal), AuthnError> {
+    // ① 验签（信任原点）：失败即 fail-closed，下方 seal / 派生均不可达。
+    let claims = pdp.verify(&diport::RawCredential::jwt(raw)).await?;
+    // ② 结构防御闸（defense-in-depth）：raw 须 well-formed JWT（3 段 + base64url），否则 TokenInvalid——
+    //    防 lenient adapter 对畸形 token 误判 ok。解析产物丢弃，仅校验结构（身份在 ④ 取自 VerifiedClaims）。
+    Jwt::parse(raw)?;
+    // ③ 受控 mint：载体携 raw（供下游 token relay）+ **单一 canonical 身份源** claims。
+    let verified = VerifiedJwt::seal(raw.to_string(), claims);
+    // ④ 据载体单一身份源派生主体（与 from_verified_jwt 同 funnel，无第二（raw 重解析）身份源、无分歧）。
+    let principal = Principal::from_verified_jwt(&verified)?;
+    Ok((verified, principal))
+}
+
+/// 验签并 mint service-token：同 [`verify_jwt`]，funnel 固定 `kind=Service`、`subject` 取自验签产物。
+///
+/// service token 结构由 verifier（[`diport::Pdp`]）负责，authn 不 re-parse——故 `raw` 对 authn 不透明，
+/// 受控 seal 进 [`VerifiedServiceToken`]（携 raw + 单一 canonical 身份源 `VerifiedClaims`）。
+pub async fn verify_service_token(
+    raw: &str,
+    pdp: &diport::DynPdp<'_>,
+) -> Result<(VerifiedServiceToken, Principal), AuthnError> {
+    let claims = pdp
+        .verify(&diport::RawCredential::service_token(raw))
+        .await?;
+    let verified = VerifiedServiceToken::seal(AccessToken::new(raw), claims);
+    let principal = Principal::from_verified_service_token(&verified)?;
+    Ok((verified, principal))
+}
+
+// ---------------------------------------------------------------------------
 // JWT / token / session 值类型
 // ---------------------------------------------------------------------------
 
-/// JWT 原始令牌（私有字段；不 derive `Serialize`；构造经 fallible funnel）。
+/// JWT 原始令牌（私有字段；不 derive `Serialize`；构造经结构闸 funnel）。
+///
+/// `Jwt` 是 **结构载体**——`parse` 校验 token 结构（3 段 / base64url / JSON / 非空 sub）但**不**承载身份。
+/// 身份 claims 由 verifier 经 [`diport::VerifiedClaims`] 提供（verify→mint bridge 用 `Jwt::parse` 作结构闸）。
 pub struct Jwt {
     raw: String,
-    claims: Claims,
 }
 
 impl std::fmt::Debug for Jwt {
@@ -249,12 +340,11 @@ impl std::fmt::Debug for Jwt {
 }
 
 impl Jwt {
-    /// 解析并做基础结构验证（签名验证由上游 verifier DI port 负责，不验签、不校验 exp）。
+    /// 结构校验并装箱（不验签、不校验 exp、不提取身份 claims——签名/身份归 verifier）。
     pub fn parse(raw: &str) -> Result<Self, AuthnError> {
-        let claims = decode_claims(raw)?;
+        decode_claims(raw)?; // 结构闸：3 段 + base64url + JSON + 非空 sub（产物丢弃，仅校验副作用）。
         Ok(Self {
             raw: raw.to_string(),
-            claims,
         })
     }
 
@@ -264,24 +354,28 @@ impl Jwt {
     }
 }
 
-/// 已验证 JWT 标记（私有内层 [`Jwt`]；外部 crate 无法 mint；不 derive `Serialize`）。
+/// 已验证 JWT 载体（私有字段；外部 crate 无法 mint；不 derive `Serialize`）。
 ///
 /// # 类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）
 ///
 /// 把「未经验签派生 Principal」收口到类型层（Hard，newtype funnel）：[`Principal::from_verified_jwt`]
 /// 只收 `&VerifiedJwt`，而 `VerifiedJwt` 仅经 `pub(crate)` [`Self::seal`] 装箱——外部 crate 既不能命名
-/// 私有内层、也不能调 `pub(crate)` 构造，故无法用裸 `Jwt::parse(raw)` 的产物伪造已验证主体。`Debug` 脱敏。
+/// 私有字段、也不能调 `pub(crate)` 构造，故无法伪造已验证主体。`Debug` 脱敏。
 ///
-/// ⚠ `seal` 的 `pub(crate)` 可见性是本不变式锚点：改为 `pub` 会让外部可 mint，Hard 静默退化为 Soft
-/// （anti-vacuity smoke 不覆盖可见性漂移）。改 `pub` 须经 ADR amendment；机器守（`cargo public-api`
-/// golden）跟踪见 #1151。不 derive `Clone`（内层 `Jwt` 非 `Clone`）；W httpserve 接线若需共享，wrap `Arc<_>`。
+/// **单一 canonical 身份源（F1）**：载体内 `claims`（验签产物 [`diport::VerifiedClaims`]，verifier =
+/// 信任原点）是**唯一**身份源；`raw` 仅是原始 token 串（供下游 token relay / session），**不派生身份**。
+/// 故一个 `VerifiedJwt` 只能经 `from_verified_jwt` 导出**一个** principal——无第二（raw 重解析）身份源、
+/// 无分歧。bridge [`verify_jwt`] 与 `from_verified_jwt` 读同一 `claims`。
 ///
-/// **funnel 上下游强度（已知中间态，#1109 Option A）**：本 PR 只锁**消费端**（Hard）；**生产端**当前仅
-/// `pub(crate)` `seal`（test 行使），跨 crate 无受控生产入口。闭环 producer 桥接留 W——届时**不**把 `seal`
-/// 改 `pub` 让外部 verifier 直接 mint（会退化 Hard），而由 authn 暴露 **authn-owned** `verify→mint` bridge
-/// （内部经 `diport::Pdp` 验签成功后调 `seal`，`seal` 保持 `pub(crate)`）。Blocked-by diport::Pdp，见 #1158。
-/// `seal` 本身**不验签**，只做受控装箱。当前无生产调用方（httpserve 挂载留 W）。见 #1109。
-pub struct VerifiedJwt(Jwt);
+/// ⚠ `seal` 的 `pub(crate)` 可见性是本不变式锚点：改为 `pub` 会让外部可 mint，Hard 静默退化为 Soft。
+/// 改 `pub` 须经 ADR amendment；机器守（`cargo public-api` golden）跟踪见 #1151。**生产端**经 authn-owned
+/// [`verify_jwt`] 闭环；外部 crate 不可达（`tests/ui/` compile-fail 锁）。httpserve 生产挂载留 #1109 W。
+pub struct VerifiedJwt {
+    /// 原始已验证 token 串（供下游 token relay / session；**不派生身份**——身份用 [`Principal::from_verified_jwt`]）。
+    raw: String,
+    /// 验签产物 = 单一 canonical 身份源。
+    claims: diport::VerifiedClaims,
+}
 
 impl std::fmt::Debug for VerifiedJwt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -290,14 +384,17 @@ impl std::fmt::Debug for VerifiedJwt {
 }
 
 impl VerifiedJwt {
-    /// 受控装箱：把已验签 [`Jwt`] 标记为 [`VerifiedJwt`]（`pub(crate)` funnel，**不验签**）。
+    /// 受控装箱：把已验签 token（`raw`）+ 验签产物 `claims` 标记为 [`VerifiedJwt`]（`pub(crate)`，**不验签**）。
     ///
-    /// 调用方须已对 `jwt` 完成验签（签名/exp/MAC）——本函数只做类型层标记，不做 crypto。
-    // reason: 生产 mint 接线（验签后 verifier 调用）留 W，当前 crate 内仅 test 行使；
-    // 保留 allow 避免误删（ADR-004 C8 遗留期 carve-out），见 #1109。
-    #[allow(dead_code)]
-    pub(crate) fn seal(jwt: Jwt) -> Self {
-        Self(jwt)
+    /// 调用方须已经 verifier 完成验签（签名/exp/MAC）——本函数只做类型层标记。生产唯一调用方是
+    /// authn-owned [`verify_jwt`]，`seal` 保持 `pub(crate)`。
+    pub(crate) fn seal(raw: String, claims: diport::VerifiedClaims) -> Self {
+        Self { raw, claims }
+    }
+
+    /// 原始已验证 token 串（供下游 token relay；不派生身份）。
+    pub fn raw(&self) -> &str {
+        &self.raw
     }
 }
 
@@ -322,13 +419,19 @@ impl AccessToken {
     }
 }
 
-/// 已验证 service-token 标记（私有内层 [`AccessToken`]；外部 crate 无法 mint；不 derive `Serialize`）。
+/// 已验证 service-token 载体（私有字段；外部 crate 无法 mint；不 derive `Serialize`）。
 ///
-/// 与 [`VerifiedJwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）：
-/// [`Principal::from_verified_service_token`] 只收 `&VerifiedServiceToken`，仅经 `pub(crate)` [`Self::seal`]
-/// 装箱。`Debug` 脱敏。`seal` 须保持 `pub(crate)`（同 [`VerifiedJwt`] 锚点，机器守见 #1151）。
-/// 生产 mint 由验签后的 verifier 调用（W 后续），当前 crate 内仅 test 行使。见 #1109。
-pub struct VerifiedServiceToken(AccessToken);
+/// 与 [`VerifiedJwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）+ **单一 canonical 身份源**
+/// （F1）：[`Principal::from_verified_service_token`] 只收 `&VerifiedServiceToken`，从载体内 `claims`
+/// （验签产物 [`diport::VerifiedClaims`]）派生身份；`token` 仅是原始串（relay 用，不派生身份）。仅经
+/// `pub(crate)` [`Self::seal`] 装箱（同 [`VerifiedJwt`] 锚点，机器守见 #1151）。生产 mint 由
+/// [`verify_service_token`] 调用。见 #1109。
+pub struct VerifiedServiceToken {
+    /// 原始已验证 service token（relay 用，不派生身份）。
+    token: AccessToken,
+    /// 验签产物 = 单一 canonical 身份源。
+    claims: diport::VerifiedClaims,
+}
 
 impl std::fmt::Debug for VerifiedServiceToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -337,12 +440,15 @@ impl std::fmt::Debug for VerifiedServiceToken {
 }
 
 impl VerifiedServiceToken {
-    /// 受控装箱：把已验签 [`AccessToken`] 标记为 [`VerifiedServiceToken`]（`pub(crate)`，**不验签**）。
-    // reason: 生产 mint 接线（验签后 verifier 调用）留 W，当前 crate 内仅 test 行使；
-    // 保留 allow 避免误删（ADR-004 C8 遗留期 carve-out），见 #1109。
-    #[allow(dead_code)]
-    pub(crate) fn seal(token: AccessToken) -> Self {
-        Self(token)
+    /// 受控装箱：把已验签 [`AccessToken`] + 验签产物 `claims` 标记为 [`VerifiedServiceToken`]
+    /// （`pub(crate)`，**不验签**）。生产唯一调用方是 authn-owned [`verify_service_token`]。
+    pub(crate) fn seal(token: AccessToken, claims: diport::VerifiedClaims) -> Self {
+        Self { token, claims }
+    }
+
+    /// 原始已验证 service token 串（供下游 relay；不派生身份）。
+    pub fn raw(&self) -> &str {
+        self.token.as_str()
     }
 }
 
@@ -427,18 +533,34 @@ impl Session {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AuthnError {
-    /// 结构化解码 / claims 映射失败（坏 base64url / 坏 JSON / 缺 sub / 未知 kind / 坏 tenant）。
+    /// 结构化解码 / claims 映射失败（坏 base64url / 坏 JSON / 缺 sub / 未知 kind / 坏 tenant），
+    /// 或 verifier 报 [`diport::PdpError::InvalidSignature`]（签名 / MAC 校验失败）。
     #[error("token is invalid")]
     TokenInvalid,
-    /// 令牌过期。**本 crate 当前不可达**——exp 校验需 `Clock`，由 W verifier DI port（`diport::Pdp`）产生。
+    /// 令牌过期（verifier 报 [`diport::PdpError::Expired`]，经 verify→mint bridge 的 `From<PdpError>` 产生）。
     #[error("token is expired")]
     TokenExpired,
     /// 会话不存在。**本 crate 当前不可达**——由 W session store（`diport` 仓储 port）产生。
     #[error("session not found")]
     SessionNotFound,
-    /// 主体无权。预留给授权失败路径（PDP 决策，W 后续）。
+    /// 主体无权（verifier 报 [`diport::PdpError::Untrusted`]：签发者 / key / audience 不受信，经
+    /// verify→mint bridge 的 `From<PdpError>` 产生）。
     #[error("principal not permitted")]
     Forbidden,
+}
+
+/// 验签 port 错误 → 认证错误映射（verify→mint bridge 经 `?` 使用，#1158）。fail-closed：所有 `PdpError`
+/// 变体均映射到**拒绝**态，绝不静默成功；`PdpError` 是 `#[non_exhaustive]`，未来变体默认落 `TokenInvalid`。
+impl From<diport::PdpError> for AuthnError {
+    fn from(e: diport::PdpError) -> Self {
+        match e {
+            diport::PdpError::InvalidSignature => AuthnError::TokenInvalid,
+            diport::PdpError::Expired => AuthnError::TokenExpired,
+            diport::PdpError::Untrusted => AuthnError::Forbidden,
+            // PdpError #[non_exhaustive]：未来变体 fail-closed 落 TokenInvalid（默认拒绝，无静默成功）。
+            _ => AuthnError::TokenInvalid,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -586,57 +708,42 @@ mod principal_derive_tests {
     //! `from_verified_jwt`（claims→Principal 映射）+ `from_verified_service_token`（funnel 固定 Service）。
     //! 信任边界：函数信任入参已被上游 verifier 验签（本轮不做 crypto 验签）。
     use super::{
-        AccessToken, AuthnError, Jwt, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
-        test_jwt,
+        AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
     };
+    use diport::VerifiedClaims;
     use vocab::tenant::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
-    #[allow(clippy::expect_used)]
-    fn parsed(payload_json: &str) -> Jwt {
-        Jwt::parse(&test_jwt(payload_json)).expect("payload parses")
-    }
-
-    /// 已验签 JWT 测试装箱：模拟未来 verifier 验签后经 `pub(crate)` funnel mint（本轮不做 crypto）。
-    fn verified(payload_json: &str) -> VerifiedJwt {
-        VerifiedJwt::seal(parsed(payload_json))
-    }
-
-    /// 已验签 service-token 测试装箱（同上）。
-    fn verified_service(raw: impl Into<String>) -> VerifiedServiceToken {
-        VerifiedServiceToken::seal(AccessToken::new(raw))
+    /// 已验签 JWT 测试装箱：载体携 raw + verifier-canonical [`VerifiedClaims`]（单一身份源，直接构造，
+    /// 模拟 verifier 验签产物）。
+    fn vjwt(sub: &str, tenant: Option<&str>, kind: Option<&str>) -> VerifiedJwt {
+        VerifiedJwt::seal(
+            "h.e.s".to_string(),
+            VerifiedClaims::new(sub, tenant.map(str::to_string), kind.map(str::to_string)),
+        )
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn maps_scoped_kinds_with_tenant() {
         let tid = TenantId::parse(CANON).expect("tenant");
-        let cases = [
-            (
-                r#"{"sub":"u","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
-                PrincipalKind::User,
-            ),
-            (
-                r#"{"sub":"d","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"device"}"#,
-                PrincipalKind::Device,
-            ),
-            (
-                r#"{"sub":"a","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"admin"}"#,
-                PrincipalKind::Admin,
-            ),
-        ];
-        for (payload, kind) in cases {
-            let p = Principal::from_verified_jwt(&verified(payload)).expect("derive ok");
-            assert_eq!(p.kind(), kind, "{payload}");
-            assert_eq!(p.tenant(), Some(tid), "{payload}");
+        for (kind_claim, kind) in [
+            ("user", PrincipalKind::User),
+            ("device", PrincipalKind::Device),
+            ("admin", PrincipalKind::Admin),
+        ] {
+            let p = Principal::from_verified_jwt(&vjwt("sub-x", Some(CANON), Some(kind_claim)))
+                .expect("derive ok");
+            assert_eq!(p.kind(), kind, "kind={kind_claim}");
+            assert_eq!(p.tenant(), Some(tid), "kind={kind_claim}");
         }
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn maps_super_admin_to_cross_tenant_none() {
-        let p = Principal::from_verified_jwt(&verified(r#"{"sub":"root","kind":"superAdmin"}"#))
+        let p = Principal::from_verified_jwt(&vjwt("root", None, Some("superAdmin")))
             .expect("super-admin derive ok");
         assert_eq!(p.kind(), PrincipalKind::SuperAdmin);
         assert_eq!(p.tenant(), None, "super-admin 跨租户，tenant 必须 None");
@@ -644,36 +751,33 @@ mod principal_derive_tests {
 
     #[test]
     fn rejects_scoped_kind_without_tenant() {
-        for payload in [
-            r#"{"sub":"u","kind":"user"}"#,
-            r#"{"sub":"d","kind":"device"}"#,
-            r#"{"sub":"a","kind":"admin"}"#,
-        ] {
+        for kind in ["user", "device", "admin"] {
             assert!(
                 matches!(
-                    Principal::from_verified_jwt(&verified(payload)),
+                    Principal::from_verified_jwt(&vjwt("u", None, Some(kind))),
                     Err(AuthnError::TokenInvalid)
                 ),
-                "scoped kind 缺 tenant 必须 TokenInvalid: {payload}"
+                "scoped kind 缺 tenant 必须 TokenInvalid: {kind}"
             );
         }
     }
 
     #[test]
     fn rejects_unknown_kind_wrong_funnel_and_bad_tenant() {
-        for payload in [
-            r#"{"sub":"x","kind":"service"}"#, // service 走 service-token funnel，非 jwt 派生
-            r#"{"sub":"x","kind":"anonymous"}"#, // anonymous 不经 jwt 派生
-            r#"{"sub":"x","kind":"root"}"#,    // 未知 kind
-            r#"{"sub":"x"}"#,                  // 缺 kind
-            r#"{"sub":"u","tenant":"not-a-uuid","kind":"user"}"#, // 坏 tenant
-        ] {
+        let cases: [(Option<&str>, Option<&str>); 5] = [
+            (None, Some("service")),   // service 走 service-token funnel，非 jwt 派生
+            (None, Some("anonymous")), // anonymous 不经 jwt 派生
+            (None, Some("root")),      // 未知 kind
+            (None, None),              // 缺 kind
+            (Some("not-a-uuid"), Some("user")), // 坏 tenant
+        ];
+        for (tenant, kind) in cases {
             assert!(
                 matches!(
-                    Principal::from_verified_jwt(&verified(payload)),
+                    Principal::from_verified_jwt(&vjwt("x", tenant, kind)),
                     Err(AuthnError::TokenInvalid)
                 ),
-                "必须 TokenInvalid: {payload}"
+                "必须 TokenInvalid: tenant={tenant:?} kind={kind:?}"
             );
         }
     }
@@ -681,20 +785,33 @@ mod principal_derive_tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn service_token_funnel_fixes_service_kind_no_tenant() {
-        let token = test_jwt(
-            r#"{"sub":"svc-a","kind":"ignored","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#,
+        // funnel 固定 kind=Service：即便验签产物携 kind=admin / tenant，也忽略，恒 Service + 跨租户 None。
+        let vs = VerifiedServiceToken::seal(
+            AccessToken::new("opaque"),
+            VerifiedClaims::new("svc-a", Some(CANON.to_string()), Some("admin".to_string())),
         );
-        let p = Principal::from_verified_service_token(&verified_service(token))
-            .expect("service derive ok");
-        // funnel 自身确定 kind=Service，忽略 token 的 kind/tenant claim。
+        let p = Principal::from_verified_service_token(&vs).expect("service derive ok");
         assert_eq!(p.kind(), PrincipalKind::Service);
         assert_eq!(p.tenant(), None);
     }
 
     #[test]
-    fn service_token_rejects_malformed() {
+    fn rejects_empty_subject_both_funnels() {
+        // F2：验签产物即便 subject 为空（adapter 绕过旧 decode_claims 非空检查），也绝不 mint 空主体。
+        let empty_jwt = VerifiedJwt::seal(
+            "raw.tok.en".to_string(),
+            VerifiedClaims::new("", None, Some("user".to_string())),
+        );
         assert!(matches!(
-            Principal::from_verified_service_token(&verified_service("garbage")),
+            Principal::from_verified_jwt(&empty_jwt),
+            Err(AuthnError::TokenInvalid)
+        ));
+        let empty_svc = VerifiedServiceToken::seal(
+            AccessToken::new("opaque"),
+            VerifiedClaims::new("", None, None),
+        );
+        assert!(matches!(
+            Principal::from_verified_service_token(&empty_svc),
             Err(AuthnError::TokenInvalid)
         ));
     }
@@ -708,16 +825,16 @@ mod verified_token_seal {
     //! 故收紧后的 `from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`
     //! 只能消费已验证 newtype（编译期 Hard，绕过不可表达）。
     //! anti-vacuity：受控入口 + funnel 签名绑为函数指针——去掉任一即编译失败（守卫非恒真）。
-    use super::{
-        AccessToken, AuthnError, Jwt, Principal, VerifiedJwt, VerifiedServiceToken, test_jwt,
-    };
+    use super::{AccessToken, AuthnError, Principal, VerifiedJwt, VerifiedServiceToken};
+    use diport::VerifiedClaims;
 
     #[test]
     fn seal_entries_and_funnels_carry_verified_newtype_signatures() {
-        // 受控 mint 入口（`pub(crate)`，外部 crate 不可达——Hard）。
-        let _seal_jwt: fn(Jwt) -> VerifiedJwt = VerifiedJwt::seal;
-        let _seal_svc: fn(AccessToken) -> VerifiedServiceToken = VerifiedServiceToken::seal;
-        // funnel 只收已验证 newtype（裸 `&Jwt` / `&AccessToken` 不再可派生 Principal）。
+        // 受控 mint 入口（`pub(crate)`，外部 crate 不可达——Hard）；载体携 raw + canonical claims。
+        let _seal_jwt: fn(String, VerifiedClaims) -> VerifiedJwt = VerifiedJwt::seal;
+        let _seal_svc: fn(AccessToken, VerifiedClaims) -> VerifiedServiceToken =
+            VerifiedServiceToken::seal;
+        // funnel 只收已验证 newtype（裸 token / claims 不可直接派生 Principal）。
         let _from_jwt: fn(&VerifiedJwt) -> Result<Principal, AuthnError> =
             Principal::from_verified_jwt;
         let _from_svc: fn(&VerifiedServiceToken) -> Result<Principal, AuthnError> =
@@ -725,18 +842,20 @@ mod verified_token_seal {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
     fn verified_jwt_redacts_debug() {
-        let raw = test_jwt(
-            r#"{"sub":"alice-secret","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+        // 载体携 raw token + canonical claims（subject）——Debug 二者均不得泄露。
+        let vj = VerifiedJwt::seal(
+            "secret-raw-token".to_string(),
+            VerifiedClaims::new("alice-secret", Some("tenant-secret".to_string()), None),
         );
-        let vj = VerifiedJwt::seal(Jwt::parse(&raw).expect("payload parses"));
         let dbg = format!("{vj:?}");
-        assert!(!dbg.contains(&raw), "VerifiedJwt Debug 不得泄露原始 token");
-        // 显式断言 claim 明文不泄（防 Debug 委托内层格式化器打印 sub 值）。
+        assert!(
+            !dbg.contains("secret-raw-token"),
+            "VerifiedJwt Debug 不得泄露原始 token"
+        );
         assert!(
             !dbg.contains("alice-secret"),
-            "VerifiedJwt Debug 不得泄露 sub claim 明文"
+            "VerifiedJwt Debug 不得泄露 subject 明文"
         );
         assert!(
             dbg.contains("redacted"),
@@ -746,16 +865,180 @@ mod verified_token_seal {
 
     #[test]
     fn verified_service_token_redacts_debug() {
-        let vs = VerifiedServiceToken::seal(AccessToken::new("svc-secret-xyz"));
+        let vs = VerifiedServiceToken::seal(
+            AccessToken::new("svc-secret-xyz"),
+            VerifiedClaims::new("svc-subject-secret", None, None),
+        );
         let dbg = format!("{vs:?}");
         assert!(
             !dbg.contains("svc-secret-xyz"),
             "VerifiedServiceToken Debug 不得泄露原始 token"
         );
         assert!(
+            !dbg.contains("svc-subject-secret"),
+            "VerifiedServiceToken Debug 不得泄露 subject"
+        );
+        assert!(
             dbg.contains("redacted"),
             "VerifiedServiceToken Debug 应标记 redacted"
         );
+    }
+}
+
+#[cfg(test)]
+mod verify_bridge_tests {
+    //! authn-owned verify→mint bridge（#1158）：`Pdp` 验签 ok → seal `VerifiedJwt` / `VerifiedServiceToken`
+    //! 并从**验签产物 `VerifiedClaims`** 派生 `Principal`（验签 = 信任原点）；验签 fail → `AuthnError`，
+    //! 绝不 seal / 派生（fail-closed，verify 先于 seal 的顺序由 `?`-链保证）。
+    use super::{AuthnError, PrincipalKind, test_jwt, verify_jwt, verify_service_token};
+    use diport::{DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
+
+    const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    /// 桩 `Pdp`：按预置结果应答 `verify`（native-AFIT impl → 经 `DynPdp` 注入）。
+    struct StubPdp {
+        result: Result<VerifiedClaims, PdpError>,
+    }
+    impl Pdp for StubPdp {
+        async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+            self.result.clone()
+        }
+    }
+    fn boxed(result: Result<VerifiedClaims, PdpError>) -> Box<DynPdp<'static>> {
+        DynPdp::new_box(StubPdp { result })
+    }
+
+    /// happy：验签 ok → `(VerifiedJwt, Principal)`；身份反映**验签产物**而非 raw 重解析。
+    /// raw payload 故意 `kind=user`，`VerifiedClaims.kind=admin` → `Principal=Admin`，证明信任原点是 verifier。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn verify_jwt_ok_derives_principal_from_verified_claims_not_raw() {
+        let raw = test_jwt(
+            r#"{"sub":"raw-ignored","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+        );
+        let pdp = boxed(Ok(VerifiedClaims::new(
+            "admin-subj",
+            Some(CANON.to_string()),
+            Some("admin".to_string()),
+        )));
+        let (vj, principal) = verify_jwt(&raw, &pdp).await.expect("verify ok mints");
+        assert_eq!(
+            principal.kind(),
+            PrincipalKind::Admin,
+            "身份须源自 VerifiedClaims（admin），非 raw（user）"
+        );
+        assert!(
+            format!("{vj:?}").contains("redacted"),
+            "VerifiedJwt Debug 脱敏"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn verify_jwt_super_admin_is_cross_tenant_none() {
+        let raw = test_jwt(
+            r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+        );
+        let pdp = boxed(Ok(VerifiedClaims::new(
+            "root",
+            None,
+            Some("superAdmin".to_string()),
+        )));
+        let (_vj, principal) = verify_jwt(&raw, &pdp).await.expect("super-admin ok");
+        assert_eq!(principal.kind(), PrincipalKind::SuperAdmin);
+        assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
+    }
+
+    /// fail-closed：三 `PdpError` 变体 → 三 `AuthnError` target，never `Ok`，never seal。
+    #[tokio::test]
+    async fn verify_jwt_pdp_failure_maps_error_and_never_mints() {
+        let raw = test_jwt(
+            r#"{"sub":"u","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+        );
+        for (perr, want) in [
+            (PdpError::InvalidSignature, AuthnError::TokenInvalid),
+            (PdpError::Expired, AuthnError::TokenExpired),
+            (PdpError::Untrusted, AuthnError::Forbidden),
+        ] {
+            let pdp = boxed(Err(perr.clone()));
+            // matches! + discriminant 守卫：既断言是 Err（绝不 mint），又锁定映射变体。
+            // 不用 expect_err（`Principal` 无 Debug，含 PII 刻意不 derive）、不用 panic（clippy::panic 禁）。
+            let result = verify_jwt(&raw, &pdp).await;
+            assert!(
+                matches!(&result, Err(e) if std::mem::discriminant(e) == std::mem::discriminant(&want)),
+                "PdpError::{perr:?} 须映射到 {want:?}（且绝不 Ok）"
+            );
+        }
+    }
+
+    /// verify 先于 seal：`Pdp` ok 但 raw 结构坏 → `Jwt::parse` 报 `TokenInvalid`（非 seal），无产物。
+    #[tokio::test]
+    async fn verify_jwt_ok_but_malformed_raw_fails_at_parse() {
+        let pdp = boxed(Ok(VerifiedClaims::new(
+            "u",
+            Some(CANON.to_string()),
+            Some("user".to_string()),
+        )));
+        assert!(matches!(
+            verify_jwt("only.two", &pdp).await,
+            Err(AuthnError::TokenInvalid)
+        ));
+    }
+
+    /// service-token：funnel 固定 `kind=Service`，`subject` 取自 `VerifiedClaims`（raw 可不透明）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn verify_service_token_ok_fixes_service_kind() {
+        let pdp = boxed(Ok(VerifiedClaims::new(
+            "svc-a",
+            None,
+            Some("ignored".to_string()),
+        )));
+        let (vs, principal) = verify_service_token("opaque-service-token", &pdp)
+            .await
+            .expect("service verify ok");
+        assert_eq!(principal.kind(), PrincipalKind::Service);
+        assert_eq!(principal.tenant(), None);
+        assert!(format!("{vs:?}").contains("redacted"));
+    }
+
+    /// fail-closed：三 `PdpError` 变体 → 三 `AuthnError` target，never `Ok` / seal（与 verify_jwt 路径对齐）。
+    #[tokio::test]
+    async fn verify_service_token_pdp_failure_maps_error_and_never_mints() {
+        for (perr, want) in [
+            (PdpError::InvalidSignature, AuthnError::TokenInvalid),
+            (PdpError::Expired, AuthnError::TokenExpired),
+            (PdpError::Untrusted, AuthnError::Forbidden),
+        ] {
+            let pdp = boxed(Err(perr.clone()));
+            let result = verify_service_token("opaque-token", &pdp).await;
+            assert!(
+                matches!(&result, Err(e) if std::mem::discriminant(e) == std::mem::discriminant(&want)),
+                "PdpError::{perr:?} 须映射到 {want:?}（且绝不 mint）"
+            );
+        }
+    }
+
+    /// F2（bridge 端到端）：verifier 验签 ok 但返回**空 subject** → fail-closed `TokenInvalid`，绝不 mint。
+    #[tokio::test]
+    async fn verify_rejects_empty_subject_from_verifier() {
+        let raw = test_jwt(
+            r#"{"sub":"x","tenant":"f47ac10b-58cc-4372-a567-0e02b2c3d479","kind":"user"}"#,
+        );
+        let pdp = boxed(Ok(VerifiedClaims::new(
+            "",
+            Some(CANON.to_string()),
+            Some("user".to_string()),
+        )));
+        assert!(matches!(
+            verify_jwt(&raw, &pdp).await,
+            Err(AuthnError::TokenInvalid)
+        ));
+        let pdp_svc = boxed(Ok(VerifiedClaims::new("", None, None)));
+        assert!(matches!(
+            verify_service_token("opaque", &pdp_svc).await,
+            Err(AuthnError::TokenInvalid)
+        ));
     }
 }
 
