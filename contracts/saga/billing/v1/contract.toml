@@ -1,0 +1,23 @@
+# Billing checkout saga 契约（draft）——证明 kind:saga 扇出闭环：codegen（generated/src/saga/billing_v1）
+# + governance（SAGA-CONTRACT-01：R1 saga⇒L3 + R10 saga block 结构语义）+ golden。不接 assembly（draft），
+# 与执行器解耦（仅演练契约面 + 锁 golden）。形态冻结见 contracts/README.md §[saga]；治理见 docs/rules/saga.md §Governance。
+id = "billing.checkout"
+kind = "saga"
+domain = "billing"
+version = "v1"
+# owner=billing 暂无对应域 crate（draft demo，roadmap）；owner→crate 存在性治理见 issue #1246。
+owner = "billing"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
+
+[saga]
+compensationOrder = "reverse"
+retryMillis = 5000
+timeoutMillis = 30000
+steps = [
+    { name = "reserve_funds", outputSchema = "reserve.schema.json" },
+    { name = "capture", outputSchema = "capture.schema.json" },
+]

@@ -74,6 +74,7 @@
 //! dyn-dispatch 依赖点），与 unsafe 无关。dynosaur exact-pin `=0.3.0`：升级须复测本不变式 + 审 changelog。
 
 pub mod audit_sink;
+pub mod checkpoint_store;
 pub mod clock;
 pub mod dead_letter_store;
 pub mod fenced_writer;
@@ -89,10 +90,15 @@ pub mod rate_limiter;
 // （`ObjectStoreError`）变体字段恒 public，须持 public 类型避免 privacy leak（#1120 merge：PR215 RedactedSource
 // pub(crate) 与 PR214 pub-enum 错误不兼容）。
 mod redacted;
+pub mod saga_journal;
 pub mod signer;
 pub mod subscriber;
 
 pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
+pub use checkpoint_store::{
+    Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
+    DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,
+};
 pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
@@ -118,6 +124,9 @@ pub use rate_limiter::{
     DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
 };
 pub use redacted::RedactedSource;
+pub use saga_journal::{
+    DynSagaJournal, JournalEntry, JournalStatus, SagaId, SagaJournal, SagaJournalError,
+};
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
 pub use subscriber::{
     DynSubscriber, Message, MessageId, MessageMetadata, MessageStream, SubscribeInitError,

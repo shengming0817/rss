@@ -1488,6 +1488,7 @@ dependencies = [
  "tokio-util",
  "trait-variant",
  "trybuild",
+ "uuid",
  "vocab",
 ]
 
@@ -2975,6 +2976,7 @@ dependencies = [
  "identity",
  "tokio",
  "tokio-util",
+ "uuid",
  "vocab",
 ]
 

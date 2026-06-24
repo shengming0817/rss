@@ -5,6 +5,11 @@
 //! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）、
 //! per-kind 字段（#1035）的 active 发布接线必填（R8）/ 跨 kind 卫生（R9）/ saga block 结构语义（R10）/
 //! active event 投递语义可兑现性（R11）。
+//! INVARIANT: SAGA-CONTRACT-01 — kind:saga 契约治理（docs/rules/saga.md §Governance）= R1（saga ⇒
+//! consistencyLevel WorkflowEventual/L3）+ R10（非空 `[saga]` block：≥1 step、step name 合法非关键字 Rust
+//! 标识符且唯一、每步 outputSchema 非空；retry/timeout 非负 + compensationOrder=reverse 由 manifest.rs
+//! 类型层 Hard 守）。负用例见 R1/R10 synthetic reds；正用例 = `contracts/saga/billing` 经 validate 全过
+//! （Medium，CI 门，#1121）。
 //! INVARIANT: CONTRACT-IDUNIQ-01 — contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
 //! 依据 api-versioning.md：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
 //! INVARIANT: CONTRACT-TITLE-01 — declared schema（喂 codegen TypeSpace 的 request/response/payload）的

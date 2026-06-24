@@ -34,6 +34,7 @@ pub mod eventtransport;
 pub mod module;
 pub mod registry;
 pub mod replaydeps;
+pub mod sagaprojectiondeps;
 pub mod shutdown;
 pub mod topology;
 
@@ -44,4 +45,7 @@ pub use registry::{
     HealthProbe, Registry, SubscriberBinding, SubscriberHandler, SubscriberHandlerError,
 };
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
+pub use sagaprojectiondeps::{
+    PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError,
+};
 pub use topology::Topology;

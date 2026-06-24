@@ -17,13 +17,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use consistency::{ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, SeenState};
+use consistency::{ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, Lsn, SeenState};
 
 use diport::{
-    AuditEvent, AuditSink, AuditSinkError, Clock, FencedWriteKey, FencedWriteRequest, FencedWriter,
-    FencedWriterError, LeaderElector, LeaderElectorError, LeaderId, LeaseToken, Message, MessageId,
-    MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher,
-    PublisherError, Subscriber, SubscriberError, Topic, WriteOutcome,
+    AuditEvent, AuditSink, AuditSinkError, Checkpoint, CheckpointId, CheckpointOwner,
+    CheckpointStoreError, CheckpointVersion, Clock, FencedWriteKey, FencedWriteRequest,
+    FencedWriter, FencedWriterError, JournalEntry, LeaderElector, LeaderElectorError, LeaderId,
+    LeaseToken, Message, MessageId, MessageStream, OutboxEmitError, OutboxEmitter,
+    OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, SagaId,
+    SagaJournal, SagaJournalError, SaveOutcome, Subscriber, SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -481,6 +483,130 @@ impl FencedWriter for MemFencedWriter {
     }
 }
 
+// ── MemSagaJournal：saga 执行日志 in-mem 替身 ────────────────────────────────────
+
+/// in-mem saga journal（impl [`diport::SagaJournal`]）：按 `(saga_id, seq)` 主键幂等 append，
+/// `read` 返回按 `seq` 升序排列的条目（`output`/`error_summary` 恒 `None`，符合 port 契约）。
+///
+/// 对标 oxidecomputer/steno `SagaLog`（append-only journal，crash-replay 幂等）。
+/// 生产替身走 postgres adapter（`ON CONFLICT (saga_id,seq) DO NOTHING`）；本 crate 仅测试/demo 用。
+#[derive(Clone, Default)]
+pub struct MemSagaJournal {
+    // (saga_id_bytes, entry) — saga_id 以 uuid::Uuid 字节存储，entry 携带 seq/step_name/status。
+    inner: Arc<Mutex<Vec<(uuid::Uuid, JournalEntry)>>>,
+}
+
+impl MemSagaJournal {
+    /// 新建空 journal。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl SagaJournal for MemSagaJournal {
+    async fn append(&self, saga_id: &SagaId, entry: JournalEntry) -> Result<(), SagaJournalError> {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // 幂等：同 (saga_id, seq) 已存在则 no-op（对标 postgres ON CONFLICT DO NOTHING）。
+        let id = saga_id.as_uuid();
+        let seq = entry.seq;
+        let already_exists = g.iter().any(|(sid, e)| *sid == id && e.seq == seq);
+        if !already_exists {
+            g.push((id, entry));
+        }
+        Ok(())
+    }
+
+    async fn read(&self, saga_id: &SagaId) -> Result<Vec<JournalEntry>, SagaJournalError> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = saga_id.as_uuid();
+        // 过滤本 saga、按 seq 升序（resume 据此重建执行栈）；strip output/error_summary（port 契约）。
+        let mut entries: Vec<JournalEntry> = g
+            .iter()
+            .filter(|(sid, _)| *sid == id)
+            .map(|(_, e)| JournalEntry {
+                seq: e.seq,
+                step_name: e.step_name.clone(),
+                status: e.status,
+                output: None,
+                error_summary: None,
+            })
+            .collect();
+        entries.sort_by_key(|e| e.seq);
+        Ok(entries)
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaJournalError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
+// ── MemCheckpointStore：owner 断点续投 in-mem 替身 ─────────────────────────────
+
+/// checkpoint store 内部 HashMap 类型别名（规避 clippy::type_complexity）。
+type CheckpointMap = HashMap<(String, String), (Lsn, CheckpointVersion)>;
+
+/// in-mem owner checkpoint store（impl [`diport::OwnerCheckpointStore`]）：
+/// `(owner, id)` 主键 + `(offset, version)` CAS——`expected` 版本不符即 [`SaveOutcome::StaleVersion`]。
+///
+/// 对标 oxidecomputer/steno saga checkpoint + eventbus.md §Projection 断点续投 offset CAS。
+/// 生产替身走 postgres adapter；本 crate 仅测试/demo 用。
+#[derive(Clone, Default)]
+pub struct MemCheckpointStore {
+    // key: (owner.as_str(), id.as_str())；value: (offset, current_version)
+    inner: Arc<Mutex<CheckpointMap>>,
+}
+
+impl MemCheckpointStore {
+    /// 新建空 store。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl OwnerCheckpointStore for MemCheckpointStore {
+    async fn get_checkpoint(
+        &self,
+        owner: &CheckpointOwner,
+        id: &CheckpointId,
+    ) -> Result<Option<Checkpoint>, CheckpointStoreError> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (owner.as_str().to_string(), id.as_str().to_string());
+        Ok(g.get(&key)
+            .map(|&(offset, version)| Checkpoint { offset, version }))
+    }
+
+    async fn save_checkpoint(
+        &self,
+        owner: &CheckpointOwner,
+        id: &CheckpointId,
+        offset: Lsn,
+        expected: CheckpointVersion,
+    ) -> Result<SaveOutcome, CheckpointStoreError> {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (owner.as_str().to_string(), id.as_str().to_string());
+        match g.get(&key) {
+            // 首存：仅当 expected == version 0 时插入（约定「期望无既存行」用 version 0 表达）。
+            None if expected == CheckpointVersion::new(0) => {
+                g.insert(key, (offset, CheckpointVersion::new(1)));
+                Ok(SaveOutcome::Saved)
+            }
+            // 版本 CAS 成功：存储版本 == expected → 存 offset 并推进版本。
+            Some(&(_, stored_ver)) if stored_ver == expected => {
+                g.insert(key, (offset, expected.next()));
+                Ok(SaveOutcome::Saved)
+            }
+            // 其余（首存但 expected != 0，或版本失配）→ StaleVersion。
+            _ => Ok(SaveOutcome::StaleVersion),
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), CheckpointStoreError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +1001,101 @@ mod tests {
         fn assert_fenced_writer<T: FencedWriter>(_: PhantomData<T>) {}
         assert_leader_elector(PhantomData::<MemLeaderElector>);
         assert_fenced_writer(PhantomData::<MemFencedWriter>);
+    }
+
+    // ── MemSagaJournal 测试 ───────────────────────────────────────────────────
+
+    /// append 幂等 + read 按 seq 升序 + output 恒 None（port 契约）。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试用 canonical literal 构造 StepName/SagaId，item-level carve-out（error-handling.md §Carve-out）。
+    async fn mem_saga_journal_append_idempotent_and_read_order() {
+        use diport::{JournalEntry, SagaId};
+        use uuid::Uuid;
+
+        let journal = MemSagaJournal::new();
+        let saga_id = SagaId::new(Uuid::from_u128(1));
+        let step0 = consistency::StepName::parse("step0").unwrap();
+        let step1 = consistency::StepName::parse("step1").unwrap();
+        let step2 = consistency::StepName::parse("step2").unwrap();
+
+        // append seq 0, 1, 2（seq 2 携带 output 字节，read 应剥离）。
+        journal
+            .append(&saga_id, JournalEntry::executing(0, step0.clone()))
+            .await
+            .unwrap();
+        journal
+            .append(&saga_id, JournalEntry::executing(1, step1.clone()))
+            .await
+            .unwrap();
+        journal
+            .append(
+                &saga_id,
+                JournalEntry::completed(2, step2.clone(), b"output_data".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        // 重复 append (saga_id, seq=0) → no-op（幂等）。
+        journal
+            .append(&saga_id, JournalEntry::executing(0, step0.clone()))
+            .await
+            .unwrap();
+
+        let entries = journal.read(&saga_id).await.unwrap();
+        assert_eq!(entries.len(), 3, "重复 append 后应仍为 3 条");
+        assert_eq!(entries[0].seq, 0);
+        assert_eq!(entries[1].seq, 1);
+        assert_eq!(entries[2].seq, 2);
+        // read 路径 output 恒 None（port 契约：resume 只需 seq/step_name/status）。
+        assert!(entries[2].output.is_none(), "read 回传 output 须为 None");
+        assert!(entries[2].error_summary.is_none());
+    }
+
+    // ── MemCheckpointStore 测试 ───────────────────────────────────────────────
+
+    /// CAS 语义：首存 Saved、旧版重存 StaleVersion、下一版 Saved；get 返回正确 offset+version。
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path，item-level carve-out（error-handling.md §Carve-out）。
+    async fn mem_checkpoint_cas_rejects_stale_version() {
+        use diport::{CheckpointId, CheckpointOwner, CheckpointVersion, SaveOutcome};
+
+        let store = MemCheckpointStore::new();
+        let owner = CheckpointOwner::new("saga-executor");
+        let id = CheckpointId::new("saga-uuid-1");
+        let v0 = CheckpointVersion::new(0);
+        let v1 = CheckpointVersion::new(1);
+
+        // 首存（expected = v0）→ Saved，存储版本推进到 1。
+        let r1 = store
+            .save_checkpoint(&owner, &id, Lsn::new(10), v0)
+            .await
+            .unwrap();
+        assert_eq!(r1, SaveOutcome::Saved, "首存应 Saved");
+
+        // 旧版重存（expected = v0，但存储已是 v1）→ StaleVersion。
+        let r2 = store
+            .save_checkpoint(&owner, &id, Lsn::new(20), v0)
+            .await
+            .unwrap();
+        assert_eq!(r2, SaveOutcome::StaleVersion, "旧版重存应 StaleVersion");
+
+        // 正确下一版（expected = v1）→ Saved，版本推进到 2。
+        let r3 = store
+            .save_checkpoint(&owner, &id, Lsn::new(20), v1)
+            .await
+            .unwrap();
+        assert_eq!(r3, SaveOutcome::Saved, "正确版本应 Saved");
+
+        // get 读出 offset 20、version 2。
+        let cp = store
+            .get_checkpoint(&owner, &id)
+            .await
+            .unwrap()
+            .expect("checkpoint 应存在");
+        assert_eq!(cp.offset, Lsn::new(20));
+        assert_eq!(cp.version, CheckpointVersion::new(2));
     }
 }

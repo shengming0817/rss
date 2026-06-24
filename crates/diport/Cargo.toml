@@ -25,6 +25,8 @@ thiserror = { workspace = true }
 vocab = { path = "../vocab" }
 # OutboxEmitter port 签名引 consistency::outbox::Entry（引擎类型）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
 consistency = { path = "../consistency" }
+# SagaJournal port 的 SagaId(uuid::Uuid)：saga 实例标识下沉 diport（eventexec::SagaId re-export 本类型）。
+uuid = { workspace = true }
 # Subscriber port 返回 MessageStream = Pin<Box<dyn Stream + Send>>（futures::Stream）。
 futures = { workspace = true }
 # Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 bootstrap shutdown 同源）。
