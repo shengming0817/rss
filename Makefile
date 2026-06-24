@@ -4,15 +4,18 @@
 # 一直引用的 `make verify` / `make ci` 名字提供入口。
 #
 #   make verify       本地 stable-only 快门：fmt + meta + build + clippy + nextest + deny + dylint。
+#   make verify-fast  verify 的无编译子集（仅 fmt + meta + deny），供快速迭代（= cargo xtask verify --fast）。
 #   make ci           CI lane 超集（= azure-pipelines.yml 调的同一条 `cargo xtask ci`）：verify 全门 +
 #                     build/clippy 升 --all-features --all-targets + 覆盖率门（llvm-cov，引擎/基础 ≥90%）
-#                     + public-api --check（轴 A）。需全套工具 + nightly（llvm-cov / public-api / dylint）。
+#                     + public-api --check（轴 A）+ cargo-audit（供应链漏洞，#1133）。需全套工具 + nightly。
+#   make audit        供应链漏洞刷新 lane（= azure-pipelines.yml 每日 cron 调的同一条 `cargo xtask audit`，
+#                     #1133）：advisory-scoped `deny check advisories` + cargo-audit（皆 no-compile、快）。
 #
 # CI lane = azure-pipelines.yml（issue #1132）：PR 触发 + 失败阻断合入经 Azure 分支策略 build validation。
 # 激活前（AZURE_HAS_CI=false，见 hack/automation/forge.conf 激活 runbook）`make ci` 本地即等价门——azure
 # CI 未启用期间它是治理门的实际 gate。门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci
+.PHONY: verify verify-fast ci audit
 
 verify:
 	cargo xtask verify
@@ -22,3 +25,6 @@ verify-fast:
 
 ci:
 	cargo xtask ci
+
+audit:
+	cargo xtask audit

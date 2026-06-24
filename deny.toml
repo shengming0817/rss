@@ -14,6 +14,12 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# advisories 门双轨（issue #1133）：`cargo deny check advisories` 与 `cargo audit` 同查 RustSec、互为独立
+# 第二实现（防御纵深）。二者各有独立 ignore 机制：本 `ignore`（按 feature-resolved 依赖图）vs cargo-audit 的
+# `--ignore`（在 xtask `step_cargo_audit`，扫 Cargo.lock 全量——会多报 phantom 条目，如 rsa RUSTSEC-2023-0071）。
+# 不变式（守卫 `deny_audit_ignore_lists_reconciled`，xtask/src/verify.rs，Medium）：**本 ignore ⊆ cargo-audit
+# --ignore**——deny 接受的任一**图内** advisory 必须同步到 cargo-audit 侧，否则 deny 绿而 audit 红（一过一红、
+# 阻断合入）。反向 audit 可多 ignore（phantom-only，本图里没有，无需在此 ignore）。故本表当前为空（无图内豁免）。
 ignore = []
 
 [licenses]
@@ -43,6 +49,12 @@ multiple-versions = "warn"     # pre-GA 容忍多版本；趋近 GA 收紧为 de
 wildcards = "deny"             # 禁外部 `*` 版本依赖
 allow-wildcard-paths = true    # 但放行内部 workspace path 依赖（无版本即隐式 `*`，合法）
 deny = [
+  # 供应链 phantom 守卫（issue #1133）：rsa 当前是 phantom Cargo.lock 条目（经 sqlx-mysql，mysql feature 未启用 ⇒
+  # `cargo tree -i rsa --all-features --target all` 为空、不编译进产物），其 RUSTSEC-2023-0071（Marvin Attack、
+  # 无修复版本）在 cargo-audit 侧 `--ignore`（见 xtask `step_cargo_audit`）。本 ban 是把「phantom 论证」从 Soft
+  # 升 Medium 的**机器守卫**：rsa 一旦进入 feature-resolved 依赖图（如有人启用 mysql feature），`deny check bans`
+  # 即非零退出——强制显式决策（移除本 ban + 修复/重新评估漏洞 + 同步 cargo-audit --ignore）。图外时本 ban 为 no-op。
+  { crate = "rsa" },
   # 外部禁用（provider 收敛）
   { crate = "openssl", use-instead = "rustls" },
   { crate = "openssl-sys", use-instead = "rustls" },

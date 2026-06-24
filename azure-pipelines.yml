@@ -1,12 +1,14 @@
-# azure-pipelines.yml — RSS CI lane（issue #1132）。
+# azure-pipelines.yml — RSS CI lane（issue #1132 + 供应链门 #1133）。
 #
-# 薄壳：所有治理门逻辑单源在 `cargo xtask ci`（INVARIANT CI-PIPELINE-DELEGATE-01，xtask/src/verify.rs；
+# 薄壳：所有治理门逻辑单源在 `cargo xtask <ci|audit>`（INVARIANT CI-PIPELINE-DELEGATE-01，xtask/src/verify.rs；
 # 由 xtask 治理测试守「除工具安装外唯一的 cargo run 是 cargo xtask」）。本文件只负责：装 toolchain +
 # 工具，再调一条聚合命令。本地等价 = `make ci`。
 #
 # 覆盖 issue #1132 验收：build --all-features --all-targets / fmt / clippy -D warnings / nextest --workspace
 # + llvm-cov 引擎-基础 ≥90% 覆盖率门 / xtask verify 聚合（contract validate·layer-deps·codegen drift·deny·
 # dylint）/ public-api --check（轴 A）。
+# 覆盖 issue #1133 验收：cargo-deny advisories(RustSec) + cargo-audit + licenses+bans（PR 门 ci 全查、阻断合入）
+# + 每日 `schedules:` cron 定时刷新 lane（lean `cargo xtask audit`，捕「未变依赖」新 CVE）。SBOM 见 release-lane follow-up。
 #
 # 激活 runbook（org 侧一次性，本仓库无法代办）：见 hack/automation/forge.conf 的 AZURE_HAS_CI 注释 +
 # docs/ops/202606231530-001-ci-lane.md。要点：① 申请 Microsoft-hosted 免费并行额度（aka.ms/azpipelines-parallelism-request）
@@ -23,6 +25,19 @@ trigger:
     include:
       - develop
 pr: none
+
+# 供应链漏洞**定时刷新** lane（issue #1133）。每日 cron 重跑 advisory 维度——PR 门只在 PR 上跑，对
+# **未变依赖**新披露的 RustSec CVE 要等下个 PR 才捕获；定时刷新填这个时间盲区（替代 gocell security-vuln.yml
+# 的定时供应链 workflow）。`always: true` ← 关键：无代码变更也跑，否则捕不到「未变依赖新 CVE」。定时 run
+# 跑 lean `cargo xtask audit`（见下方 Build.Reason 条件分流），非全量 ci。
+# **告警语义**：定时 run 无 PR 可阻断，红即 Azure 通知 → 人工接力；合入阻断仍由 PR 门的 ci（build validation）承载。
+schedules:
+  - cron: "0 6 * * *"
+    displayName: 每日供应链漏洞刷新（RustSec advisory-db）
+    branches:
+      include:
+        - develop
+    always: true
 
 pool:
   vmImage: ubuntu-latest
@@ -73,13 +88,26 @@ steps:
       cargo install cargo-binstall@1.20.1 --locked
       cargo binstall -y --locked \
         cargo-nextest@0.9.137 cargo-deny@0.19.9 cargo-dylint@6.0.1 dylint-link@6.0.1 \
-        cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0
-    displayName: '装 CI 工具（钉版 binstall + nextest / deny / dylint / llvm-cov / public-api）'
+        cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0 cargo-audit@0.22.2
+    displayName: '装 CI 工具（钉版 binstall + nextest / deny / dylint / llvm-cov / public-api / audit）'
 
-  # 单 job 串行全门（控制面仓库，简洁优先；fmt/meta 排前，快门先短路）。wall-clock 分片/矩阵化 = follow-up #1145。
+  # Build.Reason 条件分流（issue #1133）：PR/push → 全量 ci（含 deny check + cargo-audit，合入阻断门）；
+  # 每日 Schedule → lean audit（advisory 刷新，不重跑 build/coverage/public-api）。两步互斥，各调一条 xtask 子命令。
+  # 简洁取舍：toolchain/工具安装步**不**按 Build.Reason 条件化（缓存热路径下成本低；定时 lane 严格只需
+  # stable+deny+audit 的安装精简留作可选 follow-up，不在 v1 引 YAML 条件复杂度）。
+
+  # PR/push lane：单 job 串行全门（控制面仓库，简洁优先；fmt/meta 排前，快门先短路）。wall-clock 分片/矩阵化 = follow-up #1145。
   # 入口用 `cargo run --locked -p xtask`（非 alias）：`--locked` 锁 xtask 子树依赖解析、CI 确定性——Cargo.lock
   # 漂移即 fail（不静默改锁）；内部 build/clippy/coverage 门亦 --locked，共同锁全链（review codex F2）。
   - script: |
       set -euo pipefail
       cargo run --locked -p xtask -- ci
-    displayName: 'cargo xtask ci（聚合全门：build/clippy/fmt/coverage/deny/dylint/public-api/contract-validate/layer-deps/codegen）'
+    displayName: 'cargo xtask ci（聚合全门：build/clippy/fmt/coverage/deny/audit/dylint/public-api/contract-validate/layer-deps/codegen）'
+    condition: ne(variables['Build.Reason'], 'Schedule')
+
+  # 每日定时刷新 lane（issue #1133）：advisory-scoped deny + cargo-audit，捕获「未变依赖」新披露 CVE。
+  - script: |
+      set -euo pipefail
+      cargo run --locked -p xtask -- audit
+    displayName: 'cargo xtask audit（供应链漏洞刷新：deny advisories + audit 两门）'
+    condition: eq(variables['Build.Reason'], 'Schedule')

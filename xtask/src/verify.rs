@@ -21,11 +21,17 @@
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 是 **CI 全工具超集**——二者经
 //! [`full_plan`] / [`ci_plan`] 共享 fmt/meta/deny/dylint 同一构造，杜绝两份计划漂移。
 //!
-//! **`cargo-udeps` 仍不入两者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
+//! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，azure-pipelines.yml
+//! 每日 `schedules:` cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
+//! （皆 no-compile、快）。PR 门（ci）已含全量 `deny check`（advisories+licenses+bans+sources）+ cargo-audit；
+//! audit lane 专攻**时间维度**——对「未变依赖」新披露的 CVE，PR 门要等下个 PR 才捕获，故每日重跑漏洞维度。
+//! audit lane = **告警**（无 PR 可阻断）；PR 门 ci = **合入阻断**。
+//!
+//! **`cargo-udeps` 仍不入三者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
 //! `cargo-semver-checks`（轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒ `--workspace` 选 0 包、门
 //! 空转，故本轮不入 ci（public-api --check 已非空转兜轴 A）；待 crate 可发布后 follow-up 接入（见 PR body）。
 //!
-//! INVARIANT: VERIFY-AGGREGATE-01 —— 任一门步失败 ⇒ verify/ci 非零退出（聚合 fail-fast，不吞错）。
+//! INVARIANT: VERIFY-AGGREGATE-01 —— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 —— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: CI-PIPELINE-DELEGATE-01 —— azure-pipelines.yml 只调 `cargo xtask ci`、不逐条重列门 run
 //!   命令（门逻辑单源在 xtask）；由 `azure_pipeline_delegates_to_xtask_ci` 治理测试守。
@@ -150,6 +156,63 @@ fn step_deny() -> Step {
         env: &[],
         needs_compile: false,
     }
+}
+/// audit 定时 lane 专用：advisory-scoped `cargo deny check advisories`（只查 RustSec 漏洞库，
+/// licenses/bans 留给 PR 门的全量 [`step_deny`]）。issue #1133 每日 cron 刷新只需漏洞维度。
+fn step_deny_advisories() -> Step {
+    Step {
+        label: "deny-advisories",
+        args: &["deny", "check", "advisories"],
+        kind: StepKind::Tool {
+            probe: "deny",
+            install_hint: "cargo install cargo-deny --locked",
+        },
+        env: &[],
+        needs_compile: false,
+    }
+}
+/// 供应链漏洞门（issue #1133）：`cargo audit` 查 RustSec advisory-db，命中漏洞即非零退出。
+/// 与 [`step_deny_advisories`] 同查 RustSec 的**独立第二实现**（防御纵深，防 deny.toml advisories 配置被
+/// 误改架空）。朴素形（无 `--deny warnings`）：仅漏洞致非零，unmaintained/yanked 仅 warn。这**不**漏检
+/// yanked——deny.toml `yanked = "deny"` 使**同 plan 并跑的** deny 门（ci 的全量 `deny check` / audit lane 的
+/// [`step_deny_advisories`]）对 yanked 即非零退出；cargo-audit 无需重复 deny yanked，二者在**漏洞**维度对齐、
+/// 避免一门红一门绿。
+///
+/// `--ignore` = cargo-audit 侧 ignore 单源（cwd-无关、机器可见，不依赖 audit.toml 自动发现——已实测 cargo-audit
+/// 不从 cwd 加载 `audit.toml`）。两门 ignore 一致性（deny.toml ⊆ 本 ignore 集）由
+/// `deny_audit_ignore_lists_reconciled` 守。
+///
+/// **RUSTSEC-2023-0071（rsa Marvin Attack）**：rsa 是 **phantom Cargo.lock 条目**——`cargo audit`（扫 Cargo.lock
+/// 全量）报，但 `cargo deny advisories`（按 feature-resolved 依赖图，all-features）**不**报，且
+/// `cargo tree -i rsa --all-features --target all` 为空 ⇒ 任何 feature/target 组合下都**不编译进产物**、无暴露面。
+/// 且该 advisory「无可升级修复版」。故按 phantom-only 形态 ignore（deny 侧无需 ignore——其图里根本没有 rsa）。
+fn step_cargo_audit() -> Step {
+    Step {
+        label: "audit",
+        args: &["audit", "--ignore", "RUSTSEC-2023-0071"],
+        kind: StepKind::Tool {
+            probe: "audit",
+            install_hint: "cargo install cargo-audit --locked",
+        },
+        env: &[],
+        needs_compile: false,
+    }
+}
+
+/// 从 cargo-audit 步 args 提取 ignore 的 advisory ID 集（每个 `--ignore` 后紧跟的 token）。
+/// cargo-audit 侧 ignore 单源——`deny_audit_ignore_lists_reconciled` 据此与 deny.toml ignore 对账。
+#[cfg(test)]
+fn cargo_audit_ignored_ids() -> Vec<&'static str> {
+    let args = step_cargo_audit().args;
+    args.iter()
+        .enumerate()
+        .filter_map(|(i, &a)| {
+            (a == "--ignore")
+                .then(|| args.get(i + 1))
+                .flatten()
+                .copied()
+        })
+        .collect()
 }
 fn step_dylint() -> Step {
     Step {
@@ -311,7 +374,8 @@ fn full_plan() -> Vec<Step> {
 
 /// ci 超集门步计划（issue #1132 CI lane）。与 verify 共享 fmt/meta/deny/dylint 同一构造；build/clippy 升
 /// `--all-features --all-targets`；覆盖率门替 nextest（兼跑 workspace 测试）；尾追 public-api --check（轴 A）。
-/// ci 恒全量（无 `--fast`）。
+/// `audit`（cargo-audit）紧随 `deny` 后（issue #1133：供应链漏洞门入 PR 阻断 lane，独立于 deny advisories 的
+/// 防御纵深）。ci 恒全量（无 `--fast`）。
 fn ci_plan() -> Vec<Step> {
     vec![
         step_fmt(),
@@ -322,9 +386,21 @@ fn ci_plan() -> Vec<Step> {
         step_clippy_all_features(),
         step_coverage(),
         step_deny(),
+        step_cargo_audit(),
         step_dylint(),
         step_public_api(),
     ]
+}
+
+/// audit 精简供应链门步计划（issue #1133；azure-pipelines.yml 每日 cron 调 `cargo xtask audit`）。
+/// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
+/// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
+/// [`ci_plan`] 已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一 [`step_cargo_audit`] 构造。
+///
+/// INVARIANT: CI-PIPELINE-DELEGATE-01 —— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
+/// 由 `azure_pipeline_has_scheduled_audit_lane` 守。
+fn audit_plan() -> Vec<Step> {
+    vec![step_deny_advisories(), step_cargo_audit()]
 }
 
 /// 纯函数：按 opts 产出有序门步计划。`--fast` 裁掉 `needs_compile` 步（fmt+meta+deny 保留）。
@@ -471,6 +547,25 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
         run_one(step, &opts, &root)?;
     }
     eprintln!("ci：全部通过");
+    Ok(())
+}
+
+/// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
+/// azure-pipelines.yml 每日 cron 调 `cargo xtask audit`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01 同族）。
+/// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
+pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools,
+    };
+    let root = workspace_root()?;
+    let plan = audit_plan();
+    eprintln!("audit：{} 步（供应链漏洞刷新 lane）", plan.len());
+    for (i, step) in plan.iter().enumerate() {
+        eprintln!("audit: [{}/{}] {}", i + 1, plan.len(), step.label);
+        run_one(step, &opts, &root)?;
+    }
+    eprintln!("audit：全部通过");
     Ok(())
 }
 
@@ -627,7 +722,8 @@ mod tests {
 
     // ---- ci 超集计划（issue #1132）----
 
-    /// ci_plan 顺序与门集（单一事实源；CI lane 实跑顺序）。
+    /// ci_plan 顺序与门集（单一事实源；CI lane 实跑顺序）。`audit`（cargo-audit）紧随 `deny` 后
+    /// （issue #1133：供应链漏洞门入 PR 阻断 lane，防御纵深独立于 deny advisories）。
     #[test]
     fn ci_plan_order_and_count() {
         assert_eq!(
@@ -641,6 +737,7 @@ mod tests {
                 "clippy",
                 "coverage",
                 "deny",
+                "audit",
                 "dylint",
                 "public-api",
             ]
@@ -720,6 +817,56 @@ mod tests {
         }
     }
 
+    // ---- audit 精简供应链 lane（issue #1133；每日 cron advisory 刷新）----
+
+    /// audit_plan 顺序与门集（单一事实源；scheduled lane 实跑顺序）：advisory-scoped deny + cargo-audit。
+    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的 ci 已全查。
+    #[test]
+    fn audit_plan_order_and_count() {
+        assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
+    }
+
+    /// audit lane 的 deny 步是 **advisory-scoped**（`deny check advisories`），非裸 `deny check`——
+    /// 定时刷新只查漏洞库，licenses/bans 留给 PR 门的全量 `deny check`。
+    #[test]
+    fn audit_plan_deny_is_advisories_scoped() -> anyhow::Result<()> {
+        let plan = audit_plan();
+        let deny = plan
+            .iter()
+            .find(|s| s.label == "deny-advisories")
+            .ok_or_else(|| anyhow::anyhow!("audit_plan 缺 deny-advisories 步"))?;
+        assert_eq!(deny.args, &["deny", "check", "advisories"]);
+        assert!(matches!(deny.kind, StepKind::Tool { probe: "deny", .. }));
+        Ok(())
+    }
+
+    /// cargo-audit 步是 Tool gate、probe `audit`（缺工具 fail-closed，复用 VERIFY-TOOL-GATE-01）；
+    /// 首 arg 是 `audit` 子命令，no-compile。
+    #[test]
+    fn cargo_audit_step_is_tool_gate_probe_audit() {
+        let step = step_cargo_audit();
+        assert_eq!(step.label, "audit");
+        assert_eq!(step.args.first(), Some(&"audit"));
+        assert!(matches!(step.kind, StepKind::Tool { probe: "audit", .. }));
+        assert!(!step.needs_compile, "cargo audit 只读 Cargo.lock，无需编译");
+        // phantom rsa 豁免须在 args（唯一 cargo-audit ignore 单源）；删掉它定时 lane 会在 phantom 条目上误红。
+        assert!(
+            step.args
+                .windows(2)
+                .any(|w| w[0] == "--ignore" && w[1] == "RUSTSEC-2023-0071"),
+            "cargo audit 步须 --ignore phantom rsa RUSTSEC-2023-0071，实际 {:?}",
+            step.args
+        );
+    }
+
+    /// cargo-audit 步在 ci（PR 阻断门）与 audit（定时 lane）里**逐字相同**（同一构造，不漂移）。
+    #[test]
+    fn cargo_audit_step_shared_between_ci_and_audit_verbatim() {
+        let find = |plan: &[Step]| plan.iter().find(|s| s.label == "audit").cloned();
+        assert_eq!(find(&ci_plan()), find(&audit_plan()));
+        assert!(find(&ci_plan()).is_some(), "ci_plan 须含 audit 步");
+    }
+
     /// ToolGatedInternal 缺工具 + 不宽限 ⇒ `Err`（fail-closed；不执行内部逻辑）。INVARIANT VERIFY-TOOL-GATE-01。
     #[test]
     fn run_one_toolgated_missing_fail_closed_is_err() -> anyhow::Result<()> {
@@ -778,10 +925,34 @@ mod tests {
             .collect()
     }
 
-    /// 委托谓词（正向白名单）：YAML 含 xtask ci 规范形之一，且每个 `cargo <sub>` 的 sub ∈
+    /// 剥 `#` 注释 + 去缩进后的 YAML「代码行」（注释行 → 空串）。委托守卫据此**绑定结构**而非裸全文匹配——
+    /// 散文注释（已剥）与 displayName/name 等字符串字段值都不能满足守卫（fail-closed，对标 codex F1：
+    /// 守卫不可被注释 / displayName 文本误满足）。
+    fn yaml_code_lines(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim())
+            .collect()
+    }
+
+    /// 某委托命令形是否出现在**真实 script 命令**里（而非注释 / displayName 等字符串字段）。命令形态：
+    /// `script: |` block 的命令体行（trimmed 以委托形起头），或 inline `- script: <cmd>`（`script:` 冒号后含委托形）。
+    /// displayName/name 行的引号内文本既不以委托形起头、也无 `script:` 前缀 ⇒ 被排除（结构绑定，非裸 `contains`）。
+    fn form_in_script(yaml: &str, forms: &[&str]) -> bool {
+        yaml_code_lines(yaml).iter().any(|&raw| {
+            let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
+            let is_script = line.starts_with("script:");
+            let cmd = line.strip_prefix("script:").map(str::trim).unwrap_or(line);
+            forms
+                .iter()
+                .any(|f| cmd.starts_with(f) || (is_script && cmd.contains(f)))
+        })
+    }
+
+    /// 委托谓词（正向白名单）：YAML 的**真实 script 命令**含 xtask ci 规范形之一（经 [`form_in_script`] 结构
+    /// 绑定，不被注释 / displayName 误满足；codex F1 同类加固），且每个 `cargo <sub>` 的 sub ∈
     /// [`DELEGATION_CARGO_SUBCOMMANDS`]——即除安装/跑 xtask 外不逐条重列任何门。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
-        XTASK_CI_FORMS.iter().any(|f| yaml.contains(f))
+        form_in_script(yaml, XTASK_CI_FORMS)
             && cargo_subcommands(yaml)
                 .iter()
                 .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
@@ -814,6 +985,14 @@ mod tests {
         assert!(!pipeline_delegates_to_xtask_ci(
             "steps:\n  - script: cargo clippy --workspace\n"
         ));
+        // 红（codex F1）：xtask ci 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足（安装步通过白名单但 form_in_script 假）。
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "# cargo xtask ci\nsteps:\n  - script: cargo install cargo-binstall\n"
+        ));
+        // 红（codex F1）：xtask ci 形仅在 **displayName**（字符串字段值）、无真实 script 委托 → 不满足。
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo xtask ci'\n"
+        ));
         // 红：调了 xtask ci 但仍重列门——逐一覆盖（含黑名单曾漏的 build / llvm-cov / public-api / fmt）。
         for gate in [
             "cargo clippy -- -D warnings",
@@ -842,6 +1021,179 @@ mod tests {
         assert!(
             pipeline_delegates_to_xtask_ci(&yaml),
             "azure-pipelines.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
+        );
+        Ok(())
+    }
+
+    // ---- 供应链定时刷新 lane 守卫（issue #1133）----
+
+    /// xtask audit 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形与 CI 锁定入口形。
+    const XTASK_AUDIT_FORMS: &[&str] =
+        &["cargo xtask audit", "cargo run --locked -p xtask -- audit"];
+
+    /// 调度 lane 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。YAML 须同时
+    /// 满足——① 顶层 `schedules:` 键（去注释后整行 == `schedules:`，非字符串值）；② `always: true` 映射项
+    /// （无代码变更也跑，否则捕不到「未变依赖」新披露 CVE，是定时刷新核心用途）；③ audit 委托形在**真实 script
+    /// 命令**（[`form_in_script`]，非 displayName / 注释；门逻辑单源在 xtask，CI-PIPELINE-DELEGATE-01 同族）；
+    /// ④ Build.Reason **互斥分流**两 `condition:` 都在（`eq(...,'Schedule')` 给 audit lane、`ne(...,'Schedule')` 给
+    /// ci lane）——缺任一则两步可能都跑或都不跑；⑤ 每个 `cargo <sub>` ∈ 委托白名单。
+    fn pipeline_has_scheduled_audit_lane(yaml: &str) -> bool {
+        let code = yaml_code_lines(yaml);
+        let line_is = |s: &str| code.contains(&s);
+        let condition_has = |needle: &str| {
+            code.iter()
+                .any(|l| l.starts_with("condition:") && l.contains(needle))
+        };
+        line_is("schedules:")
+            && line_is("always: true")
+            && form_in_script(yaml, XTASK_AUDIT_FORMS)
+            && condition_has("eq(variables['Build.Reason'], 'Schedule')")
+            && condition_has("ne(variables['Build.Reason'], 'Schedule')")
+            && cargo_subcommands(yaml)
+                .iter()
+                .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
+    }
+
+    /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
+    #[test]
+    fn scheduled_audit_lane_predicate_green_and_red() {
+        let green = "schedules:\n  - cron: \"0 6 * * *\"\n    always: true\nsteps:\n  - script: cargo install cargo-binstall\n  - script: cargo run --locked -p xtask -- ci\n    condition: ne(variables['Build.Reason'], 'Schedule')\n  - script: cargo run --locked -p xtask -- audit\n    condition: eq(variables['Build.Reason'], 'Schedule')\n";
+        assert!(
+            pipeline_has_scheduled_audit_lane(green),
+            "完整定时 lane 应为真"
+        );
+        // 红：逐一抽掉一个必需子句。
+        assert!(
+            !pipeline_has_scheduled_audit_lane(&green.replace("schedules:", "trigger:")),
+            "缺 schedules 块"
+        );
+        assert!(
+            !pipeline_has_scheduled_audit_lane(&green.replace("    always: true\n", "")),
+            "缺 always:true（无代码变更不跑、捕不到未变依赖新 CVE）"
+        );
+        assert!(
+            !pipeline_has_scheduled_audit_lane(
+                &green.replace("ne(variables['Build.Reason'], 'Schedule')", "always()")
+            ),
+            "缺 ne 分流条件（ci/audit 可能都跑或都不跑）"
+        );
+        assert!(
+            !pipeline_has_scheduled_audit_lane(
+                &green.replace("cargo run --locked -p xtask -- audit", "cargo xtask ci")
+            ),
+            "缺 audit 委托形"
+        );
+        // 红：内联 `cargo audit` 门命令（不委托 xtask）——门逻辑须单源在 xtask。
+        assert!(
+            !pipeline_has_scheduled_audit_lane(&format!("{green}  - script: cargo audit\n")),
+            "内联 cargo audit 门命令"
+        );
+        // 红（codex F1 核心）：全部关键字仅在**注释**里、无真实结构 → 结构绑定守卫不满足
+        //（旧裸 `yaml.contains` 谓词会误判为真）。安装步使 cargo_subcommands 通过，隔离出结构断言失败。
+        assert!(
+            !pipeline_has_scheduled_audit_lane(
+                "# schedules:\n# always: true\n# condition: eq(variables['Build.Reason'], 'Schedule')\n# condition: ne(variables['Build.Reason'], 'Schedule')\n# cargo run --locked -p xtask -- audit\nsteps:\n  - script: cargo install cargo-binstall\n"
+            ),
+            "关键字仅在注释里不应满足守卫（fail-closed）"
+        );
+        // 红（codex F1 核心）：audit 委托形仅在 **displayName**（字符串字段值）、无真实 audit script → 不满足。
+        assert!(
+            !pipeline_has_scheduled_audit_lane(
+                "schedules:\n  - cron: \"0 6 * * *\"\n    always: true\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: ne(variables['Build.Reason'], 'Schedule')\n  - script: cargo install cargo-binstall\n    displayName: 'cargo run --locked -p xtask -- audit'\n    condition: eq(variables['Build.Reason'], 'Schedule')\n"
+            ),
+            "audit 形仅在 displayName 不应满足守卫（fail-closed）"
+        );
+    }
+
+    /// 真实 committed 文件：azure-pipelines.yml 含每日定时刷新 lane，经 `cargo xtask audit` 委托
+    /// （issue #1133：捕获「未变依赖」新披露 CVE；门逻辑单源在 xtask，不内联）。
+    #[test]
+    fn azure_pipeline_has_scheduled_audit_lane() -> anyhow::Result<()> {
+        let path = workspace_root()?.join("azure-pipelines.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            pipeline_has_scheduled_audit_lane(&yaml),
+            "azure-pipelines.yml 须含 `schedules:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
+        );
+        Ok(())
+    }
+
+    /// 双工具 advisory ignore 对账守卫（issue #1133）。deny 与 cargo-audit 同查 RustSec、各有独立 ignore
+    /// 机制（deny.toml `[advisories].ignore` vs cargo-audit `--ignore`），且 cargo-audit 扫 Cargo.lock 全量、
+    /// deny 按 feature-resolved 图——cargo-audit 会多报 phantom 条目（如 rsa RUSTSEC-2023-0071）。
+    ///
+    /// 正确不变式 = **非对称包含**：`deny.toml.ignore ⊆ cargo-audit.ignore`。即任何 deny 接受（ignore）的
+    /// **图内** advisory 必须也被 cargo-audit 接受——否则 deny 绿而 audit 红（一过一红、阻断合入）。反向 audit
+    /// 可多 ignore（phantom-only，deny 图里根本没有，无需 deny 侧 ignore）。两门互为 in-graph 漏洞的 backstop：
+    /// 谁单边 ignore 一个**真·图内**漏洞，另一门仍会红，故无静默架空。本守卫把「deny 接受却忘了同步 audit」
+    /// 这一会导致 audit 误红的漂移从 Soft 升为 Medium tripwire。
+    /// anti-vacuity：构造 deny ⊄ audit 的反例 → 判定返回 false（守卫非恒真）。
+    #[test]
+    fn deny_audit_ignore_lists_reconciled() -> anyhow::Result<()> {
+        // 解析 deny.toml `[advisories].ignore`：兼容裸字符串形 `"RUSTSEC-..."` 与结构化形
+        // `{ id = "RUSTSEC-...", reason = "..." }`（cargo-deny 0.16+）——否则对结构化条目静默返回空、守卫恒真。
+        fn deny_advisory_ignores(toml_src: &str) -> Result<Vec<String>> {
+            let v: toml::Value = toml::from_str(toml_src)?;
+            Ok(v.get("advisories")
+                .and_then(|a| a.get("ignore"))
+                .and_then(|i| i.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| {
+                            e.as_str().map(str::to_owned).or_else(|| {
+                                e.get("id").and_then(toml::Value::as_str).map(str::to_owned)
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default())
+        }
+        // 子集判定：deny.ignore ⊆ audit.ignore。
+        fn deny_subset_audit(deny: &[String], audit: &[&str]) -> bool {
+            deny.iter().all(|d| audit.contains(&d.as_str()))
+        }
+        // anti-vacuity ①：deny ignore 某 ID 但 audit 没有 → 非对账（子集判定非恒真）。
+        assert!(!deny_subset_audit(
+            &["RUSTSEC-2099-9999".to_owned()],
+            &["RUSTSEC-2023-0071"]
+        ));
+        assert!(deny_subset_audit(&[], &["RUSTSEC-2023-0071"])); // 空 ⊆ 任意
+        // anti-vacuity ②：结构化 ignore 形 `{ id = ... }` 也被解析（防解析器对结构化条目静默丢、守卫恒真）。
+        assert_eq!(
+            deny_advisory_ignores(
+                "[advisories]\nignore = [{ id = \"RUSTSEC-2023-0071\", reason = \"x\" }]\n"
+            )?,
+            vec!["RUSTSEC-2023-0071".to_owned()]
+        );
+        let path = workspace_root()?.join("deny.toml");
+        let toml_src = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        let deny = deny_advisory_ignores(&toml_src)?;
+        let audit = cargo_audit_ignored_ids();
+        // anti-vacuity ③：args 解析必须真解析出 cargo-audit 侧 ignore（含已知 phantom rsa）——否则 args 解析
+        // 静默失效时 audit=[] 会让「空 deny ⊆ 空 audit」恒真，对账失去意义。锁住 parser 有效。
+        assert!(
+            audit.contains(&"RUSTSEC-2023-0071"),
+            "cargo_audit_ignored_ids 未解析出 phantom rsa ignore（step_cargo_audit args 解析失效？）：{audit:?}"
+        );
+        assert!(
+            deny_subset_audit(&deny, &audit),
+            "deny.toml [advisories].ignore ⊄ cargo-audit --ignore：deny 接受的图内 advisory 须同步到 \
+             step_cargo_audit 的 --ignore，否则 cargo-audit 仍报、一过一红。deny={deny:?} audit={audit:?}"
+        );
+        Ok(())
+    }
+
+    /// 反向守卫（issue #1133）：workspace root 不得有 `audit.toml`。cargo-audit ignore 单源 = `step_cargo_audit`
+    /// 的 `--ignore`（已实测 0.22.2 不从 cwd 自动加载 audit.toml）；若有人放 audit.toml 会引入第三套 ignore 源、
+    /// 绕过 `deny_audit_ignore_lists_reconciled` 对账。本守卫确保该文件不存在（anti-vacuity：文件在即红）。
+    #[test]
+    fn no_audit_toml_at_workspace_root() -> anyhow::Result<()> {
+        let path = workspace_root()?.join("audit.toml");
+        assert!(
+            !path.exists(),
+            "workspace root 不应有 audit.toml（cargo-audit ignore 单源 = step_cargo_audit --ignore，见其 rustdoc）"
         );
         Ok(())
     }
