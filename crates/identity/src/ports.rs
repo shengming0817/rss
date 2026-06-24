@@ -34,7 +34,7 @@ pub use vocab::TenantId;
 /// 全局角色定义，须拆独立 `GlobalRoleRepo`，不得复用本租户内 repo 签名。
 /// **W 阶段补真实 repo 接缝**（issue #1083 已 defer 的「repo/服务接缝 + PORT-SHAPE」）时须按需补齐：
 /// - **可读 accessor**：adapter impl body 需读取实体时，把 `RoleId::as_str` / `Role::id|name|…` 由
-///   `pub(crate)` 按需升 `pub`（当前 `pub(crate)` + body=`todo!()`，编译证明阶段不需读）。
+///   `pub(crate)` 按需升 `pub`（accessor body PR1 已写实，仅可见性仍 `pub(crate)`；编译证明阶段不需跨 crate 读）。
 /// - **查询形态**：按业务补 `list_by_tenant` / `find_by_name` / `exists` 等惯用方法 + 强制分页（`limit≤500`）。
 #[trait_variant::make(RoleRepo: Send)]
 #[dynosaur(pub DynRoleRepo = dyn(box) RoleRepo, bridge(dyn))]
@@ -55,10 +55,10 @@ mod smoke {
     //! build smoke：域形 async repo port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
     //! `Box<DynRoleRepo>` 装入（PORT-SHAPE-01/02）。
     //!
-    //! 与 diport `signer.rs` smoke 的差异：identity 域类型构造器全为 `todo!()`（签名冻结，ADR-004 C8），
-    //! 无法在运行期构造 `RoleId`/`Role`，故本 smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触
-    //! `todo!()`）。async future 的 Send + 跨 `tokio::spawn` 调度由 diport `signer.rs`
-    //! `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
+    //! 与 diport `signer.rs` smoke 的差异：identity 域类型（`RoleId`/`Role`）构造器 **PR1 已写实**，但本 port
+    //! 的 repo impl（`NoopRoleRepo` / mock）方法 body 仍 `todo!()`（真实 repo 接缝待 W，issue #1083），故本
+    //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
+    //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{DynRoleRepo, IdentityError, Role, RoleId, RoleRepo, TenantId};
 
     struct NoopRoleRepo;

@@ -2229,6 +2229,7 @@ dependencies = [
  "mockall",
  "observ",
  "primitives",
+ "rstest",
  "runctx",
  "secure",
  "serde_json",

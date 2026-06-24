@@ -1,7 +1,20 @@
 //! identity::domain — 身份域类型与纯逻辑（dylint rss_domain_no_serialize 守护区）。
 //!
-//! 本模块是 dylint `rss_domain_no_serialize` lint 的扫描边界：
+//! 本模块（及子模块 `rbac` / `abac` / `account`）是 dylint `rss_domain_no_serialize` lint 的扫描边界：
 //! 定义在 `domain` 路径段下的类型**不可 derive Serialize/Deserialize**。
+//!
+//! 子域拆分（spec 003 T001，每子 PR 独占其文件，降并行写冲突）：
+//! - `mod.rs`（本文件）：共享 newtype funnel（`RoleId` / `PermissionId` / `PolicyId` / `ResourcePattern`
+//!   / `AttributeKey` / `AttributeValue`）+ `IdentityError` + 子模块 re-export 枢纽。【PR1】
+//! - `rbac`：`Permission` / `Role` / `RoleBinding` + `authorize_rbac`。【PR1 实现】
+//! - `abac`：`AbacAttribute` / `PolicyRule` / `Policy` + `evaluate_abac`。【PR2，签名冻结】
+//! - `account`：`AccountStatus`。【PR3 扩展】
+//!
+//! # newtype funnel 校验（严格白名单，fail-closed）
+//!
+//! 字符串入口经单一 `parse`（fallible，对外校验入口）；空 → `*Error::Empty`，越界 / 含白名单外字符
+//! → `*Error::Format`，**永不 panic**（零信任）。`new`（部分 newtype）是 crate 内「已校验值」信任构造器
+//! （funnel 边界 = `pub(crate)`，不对外）。
 //!
 //! # 对标
 //!
@@ -12,12 +25,86 @@
 //! 采纳：闭值集枚举、纯函数求值、强类型 newtype（不走裸 `Vec<Vec<String>>`）。
 //! 复用 `vocab::Decision`（2 值；casbin 的 Indeterminate 映射为 Deny，fail-closed）。
 
+mod abac;
+mod account;
+mod rbac;
+
+// 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
+pub use rbac::Role; // Role 是 pub（ports::RoleRepo 签名实体，跨 crate 命名）。
+// reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
+// 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
+#[allow(unused_imports)]
+pub(crate) use abac::{AbacAttribute, Policy, PolicyRule, evaluate_abac};
+// reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
+#[allow(unused_imports)]
+pub(crate) use account::AccountStatus;
+// reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
+#[allow(unused_imports)]
+pub(crate) use rbac::{Permission, RoleBinding, authorize_rbac};
+
+// ---------------------------------------------------------------------------
+// 共享校验 helper（ID 三连复用：同字符集 + 长度上界 + IdParseError）
+// ---------------------------------------------------------------------------
+
+/// ID newtype 字符集长度上界（`RoleId` / `PermissionId` / `PolicyId` 共用）。
+// reason: 仅被 pub(crate) parse funnel 引用，funnel 生产调用方待 W ⇒ 非 test 构建链路 dead（ADR-004 C8）。
+#[allow(dead_code)]
+const ID_MAX_LEN: usize = 128;
+/// 资源模式长度上界。
+#[allow(dead_code)]
+const PATTERN_MAX_LEN: usize = 256;
+/// 属性键长度上界。
+#[allow(dead_code)]
+const ATTR_KEY_MAX_LEN: usize = 128;
+
+/// 校验失败原因（私有；各 newtype 映射到自己的对外错误枚举 Empty / Format）。
+// reason: 同上（仅被 parse funnel 引用，链路 dead 待 W；ADR-004 C8）。
+#[allow(dead_code)]
+enum Reason {
+    Empty,
+    Format,
+}
+
+/// 通用 fail-closed token 校验：非空 + 全字符过 `allowed` 白名单 + 长度 ≤ `max`。
+///
+/// 严格白名单（零信任）：空→`Reason::Empty`；越界 / 含白名单外字符→`Reason::Format`。**永不 panic**。
+/// `raw.len()`（字节）作上界守卫：白名单仅 ASCII ⇒ 合法输入字节数 == 字符数；非 ASCII 先被白名单拒。
+// reason: 同上（仅被 parse funnel 引用，链路 dead 待 W；ADR-004 C8）。
+#[allow(dead_code)]
+fn validate_token(raw: &str, max: usize, allowed: impl Fn(char) -> bool) -> Result<(), Reason> {
+    if raw.is_empty() {
+        return Err(Reason::Empty);
+    }
+    if raw.len() > max || !raw.chars().all(allowed) {
+        return Err(Reason::Format);
+    }
+    Ok(())
+}
+
+/// ID 三连白名单字符：字母数字 + `_` `-` `.` `:`（`:` / `.` 供命名空间，如 `docs:read`）。
+// reason: 同上（仅被 parse funnel 引用，链路 dead 待 W；ADR-004 C8）。
+#[allow(dead_code)]
+fn is_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
+}
+
+/// `RoleId` / `PermissionId` / `PolicyId` 共用解析（同字符集 + 同 `IdParseError`，避免三处重复）。
+// reason: 同上（仅被 parse funnel 引用，链路 dead 待 W；ADR-004 C8）。
+#[allow(dead_code)]
+fn parse_id(raw: &str) -> Result<String, IdParseError> {
+    validate_token(raw, ID_MAX_LEN, is_id_char).map_err(|r| match r {
+        Reason::Empty => IdParseError::Empty,
+        Reason::Format => IdParseError::Format,
+    })?;
+    Ok(raw.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // ID 解析错误（newtype funnel 共用）
 // ---------------------------------------------------------------------------
 
 /// ID 解析错误（RoleId / PermissionId / PolicyId 共用）。
-// reason: 签名冻结期枚举已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
+// reason: 库错误枚举尚无生产返回方（funnel 调用方待 W），dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -36,27 +123,33 @@ pub(crate) enum IdParseError {
 ///
 /// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 签名实体被独立 adapter crate 跨 crate 命名/收发；
 /// 字段仍私有、构造器仍 `pub(crate)`（funnel）——外部可命名/接收 `RoleId` 但**不可伪造**（fail-closed）。
-// reason: 签名冻结期字段已声明但 body 全为 todo!()，dead_code 来自冻结期，非 API 漂移（ADR-004 C8）。
+// reason: 类型作 ports 签名实体已被引用；其 pub(crate) 方法生产调用方待 W ⇒ 非 test 构建 dead（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoleId(String);
 
-// reason: 签名冻结期所有方法尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
+// reason: pub(crate) 方法生产调用方待 W，当前仅测试消费 ⇒ 非 test 构建 dead（ADR-004 C8）。
 #[allow(dead_code)]
 impl RoleId {
-    /// 构造 RoleId（由已校验字符串）。
-    pub(crate) fn new(_raw: impl Into<String>) -> Self {
-        todo!()
+    /// 构造 RoleId（由**已校验**字符串；funnel 边界 = `pub(crate)`，crate 内信任；对外校验入口是 `parse`）。
+    ///
+    /// # 不变式（调用方责任）
+    ///
+    /// `raw` 必须已是合法 ID（经 `parse` 校验，或同等约束的内部来源如 repo 读出的已存值）。`new` **不**重复
+    /// 校验、不返回 `Result`——传入未校验 / 空 / 非法值属调用方契约违反，非 `new` 的失败模式。所有外部字符串
+    /// 入口（handler / wire）一律走 `parse`。
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
     }
 
-    /// 解析字符串为 RoleId；拒绝空值 / 非法格式。
-    pub(crate) fn parse(_raw: &str) -> Result<Self, IdParseError> {
-        todo!()
+    /// 解析字符串为 RoleId；拒绝空值 / 非法格式（严格白名单，fail-closed）。
+    pub(crate) fn parse(raw: &str) -> Result<Self, IdParseError> {
+        Ok(Self(parse_id(raw)?))
     }
 
     /// 取 ID 字符串引用。
     pub(crate) fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -65,27 +158,28 @@ impl RoleId {
 // ---------------------------------------------------------------------------
 
 /// 权限标识 newtype（私有字段；构造经 funnel；不 derive Serialize——域类型）。
-// reason: 同 RoleId（ADR-004 C8 签名冻结期）。
+// reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PermissionId(String);
 
-// reason: 同 RoleId impl（ADR-004 C8）。
+// reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl PermissionId {
-    /// 构造 PermissionId（由已校验字符串）。
-    pub(crate) fn new(_raw: impl Into<String>) -> Self {
-        todo!()
+    /// 构造 PermissionId（由已校验字符串；不变式同 [`RoleId::new`]——调用方保证已校验，`new` 不重校验，
+    /// 外部字符串入口走 `parse`）。
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
     }
 
-    /// 解析字符串为 PermissionId；拒绝空值 / 非法格式。
-    pub(crate) fn parse(_raw: &str) -> Result<Self, IdParseError> {
-        todo!()
+    /// 解析字符串为 PermissionId；拒绝空值 / 非法格式（严格白名单，fail-closed）。
+    pub(crate) fn parse(raw: &str) -> Result<Self, IdParseError> {
+        Ok(Self(parse_id(raw)?))
     }
 
     /// 取 ID 字符串引用。
     pub(crate) fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -94,7 +188,7 @@ impl PermissionId {
 // ---------------------------------------------------------------------------
 
 /// 资源模式解析错误。
-// reason: 签名冻结期枚举已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
+// reason: 库错误枚举尚无生产返回方（funnel 调用方待 W），dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -108,177 +202,37 @@ pub(crate) enum PatternError {
 /// 资源模式 newtype（如 `"users:*"` / `"devices:{id}"`；私有字段；构造经 funnel）。
 ///
 /// 不 derive Serialize——域类型（dylint 守护）。
-// reason: 签名冻结期字段已声明但 body 全为 todo!()（ADR-004 C8）。
+// reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResourcePattern(String);
 
-// reason: 同 RoleId impl（ADR-004 C8）。
+// reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl ResourcePattern {
-    /// 解析资源模式；拒绝空值 / 非法格式。
-    pub(crate) fn parse(_raw: &str) -> Result<Self, PatternError> {
-        todo!()
+    /// 解析资源模式；拒绝空值 / 非法格式（严格白名单 + glob `* ?` + 占位 `{ }` + 路径 `/`，fail-closed）。
+    pub(crate) fn parse(raw: &str) -> Result<Self, PatternError> {
+        // 白名单：ID 字符 + glob（`* ?`）+ 占位（`{ }`，对应 doc 例 `devices:{id}`）+ 路径分隔（`/`）。
+        let allowed = |c: char| is_id_char(c) || matches!(c, '*' | '?' | '{' | '}' | '/');
+        validate_token(raw, PATTERN_MAX_LEN, allowed).map_err(|r| match r {
+            Reason::Empty => PatternError::Empty,
+            Reason::Format => PatternError::Format,
+        })?;
+        Ok(Self(raw.to_string()))
     }
 
     /// 取模式字符串引用。
     pub(crate) fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
 // ---------------------------------------------------------------------------
-// Permission — action + resource_pattern
-// ---------------------------------------------------------------------------
-
-/// 权限定义：action（`vocab::Action`）+ 资源模式（`ResourcePattern`）。
-///
-/// 不 derive Serialize——域类型。
-// reason: 同 RoleId（ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct Permission {
-    id: PermissionId,
-    action: vocab::Action,
-    resource_pattern: ResourcePattern,
-}
-
-// reason: 同 RoleId impl（ADR-004 C8）。
-#[allow(dead_code)]
-impl Permission {
-    /// 构造权限（位置参，必填；缺失即编译错误）。
-    pub(crate) fn new(
-        _id: PermissionId,
-        _action: vocab::Action,
-        _resource_pattern: ResourcePattern,
-    ) -> Self {
-        todo!()
-    }
-
-    /// 取权限 ID 引用。
-    pub(crate) fn id(&self) -> &PermissionId {
-        todo!()
-    }
-
-    /// 取授权动作引用。
-    pub(crate) fn action(&self) -> &vocab::Action {
-        todo!()
-    }
-
-    /// 取资源模式引用。
-    pub(crate) fn resource_pattern(&self) -> &ResourcePattern {
-        todo!()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Role — 角色（含权限集）
-// ---------------------------------------------------------------------------
-
-/// 角色实体（含权限集；私有字段；不 derive Serialize——域类型）。
-///
-/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 返回聚合被 adapter 跨 crate 命名；字段私有、构造经
-/// `Role::new`（`pub(crate)` funnel）——adapter 可接收/返回 `Role` 但**不可伪造其不变式**。`permissions`
-/// 等字段类型仍 `pub(crate)`（`pub struct` + 私有字段不外泄字段类型）。
-// reason: 同 RoleId（ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct Role {
-    id: RoleId,
-    name: String,
-    permissions: Vec<PermissionId>,
-}
-
-// reason: 同 RoleId impl（ADR-004 C8）。
-#[allow(dead_code)]
-impl Role {
-    /// 构造角色（位置参，必填）。
-    pub(crate) fn new(
-        _id: RoleId,
-        _name: impl Into<String>,
-        _permissions: Vec<PermissionId>,
-    ) -> Self {
-        todo!()
-    }
-
-    /// 取角色 ID 引用。
-    pub(crate) fn id(&self) -> &RoleId {
-        todo!()
-    }
-
-    /// 取角色名引用。
-    pub(crate) fn name(&self) -> &str {
-        todo!()
-    }
-
-    /// 取权限 ID 列表引用。
-    pub(crate) fn permissions(&self) -> &[PermissionId] {
-        todo!()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RoleBinding — principal <-> role 绑定（含租户）
-// ---------------------------------------------------------------------------
-
-/// 角色绑定（principal subject + role + tenant 三元组；私有字段；不 derive Serialize——域类型）。
-///
-/// 多租隔离：binding 必须带 tenant（对应 casbin domain-aware RBAC）。
-///
-/// Debug 手写 redacted：subject 可能是 email / username 等 PII，不得原文打印到日志；
-/// role_id 和 tenant 非敏感，正常打印。
-// reason: 同 RoleId（ADR-004 C8）。
-#[allow(dead_code)]
-pub(crate) struct RoleBinding {
-    subject: String,
-    role_id: RoleId,
-    tenant: vocab::TenantId,
-}
-
-impl std::fmt::Debug for RoleBinding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RoleBinding")
-            .field("subject", &"<redacted>")
-            .field("role_id", &self.role_id)
-            .field("tenant", &self.tenant)
-            .finish()
-    }
-}
-
-// reason: 同 RoleId impl（ADR-004 C8）。
-#[allow(dead_code)]
-impl RoleBinding {
-    /// 构造角色绑定（subject / role / tenant 必填）。
-    pub(crate) fn new(
-        _subject: impl Into<String>,
-        _role_id: RoleId,
-        _tenant: vocab::TenantId,
-    ) -> Self {
-        todo!()
-    }
-
-    /// 取 subject 引用。
-    pub(crate) fn subject(&self) -> &str {
-        todo!()
-    }
-
-    /// 取角色 ID 引用。
-    pub(crate) fn role_id(&self) -> &RoleId {
-        todo!()
-    }
-
-    /// 取绑定租户。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
-        todo!()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ABAC 属性
+// ABAC 属性键 / 值 newtype（共享；ABAC 求值在 `abac` 子模块）
 // ---------------------------------------------------------------------------
 
 /// 属性键解析错误。
-// reason: 签名冻结期枚举已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
+// reason: 库错误枚举尚无生产返回方（funnel 调用方待 W），dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -290,29 +244,34 @@ pub(crate) enum AttributeKeyError {
 }
 
 /// ABAC 属性键 newtype（不 derive Serialize——域类型）。
-// reason: 同 RoleId（ADR-004 C8）。
+// reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AttributeKey(String);
 
-// reason: 同 RoleId impl（ADR-004 C8）。
+// reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl AttributeKey {
-    /// 解析属性键；拒绝空值 / 非法格式。
-    pub(crate) fn parse(_raw: &str) -> Result<Self, AttributeKeyError> {
-        todo!()
+    /// 解析属性键；拒绝空值 / 非法格式（严格白名单：字母数字 + `_` `-` `.`，fail-closed）。
+    pub(crate) fn parse(raw: &str) -> Result<Self, AttributeKeyError> {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+        validate_token(raw, ATTR_KEY_MAX_LEN, allowed).map_err(|r| match r {
+            Reason::Empty => AttributeKeyError::Empty,
+            Reason::Format => AttributeKeyError::Format,
+        })?;
+        Ok(Self(raw.to_string()))
     }
 
     /// 取键字符串引用。
     pub(crate) fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
 /// ABAC 属性值 newtype（不 derive Serialize——域类型）。
 ///
 /// Debug 手写 redacted：属性值可能含 PII / 敏感信息，不得原文打印到日志。
-// reason: 同 RoleId（ADR-004 C8）。
+// reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AttributeValue(String);
@@ -323,45 +282,22 @@ impl std::fmt::Debug for AttributeValue {
     }
 }
 
-// reason: 同 RoleId impl（ADR-004 C8）。
+// reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl AttributeValue {
-    /// 构造属性值（任意字符串）。
-    pub(crate) fn new(_raw: impl Into<String>) -> Self {
-        todo!()
+    /// 构造属性值（任意字符串；**不校验**）。
+    ///
+    /// reason: 与 `AttributeKey`（句法标识，严格白名单 + 上界）不对称是有意的——属性值是 ABAC 的不透明
+    /// 载荷（claim / 设备属性 / 租户标签），无句法白名单可言；且冻结签名为不可失败构造（返回 `Self` 非
+    /// `Result`），无法在此 fail-closed。值的语义校验与长度上界（若需 DoS 防护）由 ABAC 求值 / 持久化
+    /// 边界承载（PR2，spec 003 US2）。本类型仅保证 Debug 脱敏，防 PII 泄漏。
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
     }
 
     /// 取值字符串引用。
     pub(crate) fn as_str(&self) -> &str {
-        todo!()
-    }
-}
-
-/// ABAC 属性（key-value 对；不 derive Serialize——域类型）。
-// reason: 同 RoleId（ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct AbacAttribute {
-    key: AttributeKey,
-    value: AttributeValue,
-}
-
-// reason: 同 RoleId impl（ADR-004 C8）。
-#[allow(dead_code)]
-impl AbacAttribute {
-    /// 构造 ABAC 属性。
-    pub(crate) fn new(_key: AttributeKey, _value: AttributeValue) -> Self {
-        todo!()
-    }
-
-    /// 取属性键引用。
-    pub(crate) fn key(&self) -> &AttributeKey {
-        todo!()
-    }
-
-    /// 取属性值引用。
-    pub(crate) fn value(&self) -> &AttributeValue {
-        todo!()
+        &self.0
     }
 }
 
@@ -370,117 +306,23 @@ impl AbacAttribute {
 // ---------------------------------------------------------------------------
 
 /// 策略标识 newtype（私有字段；构造经 funnel；不 derive Serialize——域类型）。
-// reason: 签名冻结期字段已声明但 body 全为 todo!()，dead_code 来自冻结期，非 API 漂移（ADR-004 C8）。
+// reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PolicyId(String);
 
-// reason: 签名冻结期所有方法尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
+// reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl PolicyId {
-    /// 解析字符串为 PolicyId；拒绝空值 / 非法格式。
-    pub(crate) fn parse(_raw: &str) -> Result<Self, IdParseError> {
-        todo!()
+    /// 解析字符串为 PolicyId；拒绝空值 / 非法格式（严格白名单，fail-closed）。
+    pub(crate) fn parse(raw: &str) -> Result<Self, IdParseError> {
+        Ok(Self(parse_id(raw)?))
     }
 
     /// 取 ID 字符串引用。
     pub(crate) fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
-}
-
-// ---------------------------------------------------------------------------
-// Policy / PolicyRule — ABAC 策略
-// ---------------------------------------------------------------------------
-
-/// 策略规则（条件表达式；不 derive Serialize——域类型）。
-///
-/// 单条规则：属性键 + 期望值 → 匹配则贡献 Allow；
-/// 缺失属性 fail-closed（贡献 Deny）。
-// reason: 同 RoleId（ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct PolicyRule {
-    attribute_key: AttributeKey,
-    expected_value: AttributeValue,
-}
-
-// reason: 同 RoleId impl（ADR-004 C8）。
-#[allow(dead_code)]
-impl PolicyRule {
-    /// 构造策略规则（期望值匹配时允许）。
-    pub(crate) fn new(_attribute_key: AttributeKey, _expected_value: AttributeValue) -> Self {
-        todo!()
-    }
-
-    /// 取属性键引用。
-    pub(crate) fn attribute_key(&self) -> &AttributeKey {
-        todo!()
-    }
-
-    /// 取期望值引用。
-    pub(crate) fn expected_value(&self) -> &AttributeValue {
-        todo!()
-    }
-}
-
-/// ABAC 策略（规则集；全部规则满足才 Allow，否则 Deny；不 derive Serialize——域类型）。
-///
-/// fail-closed 语义：空规则集或规则缺失属性均返回 `Decision::Deny`。
-/// 多租隔离：策略必须归属租户（对标 `RoleBinding.tenant`）。
-// reason: 同 RoleId（ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct Policy {
-    id: PolicyId,
-    tenant: vocab::TenantId,
-    rules: Vec<PolicyRule>,
-}
-
-// reason: 同 RoleId impl（ADR-004 C8）。
-#[allow(dead_code)]
-impl Policy {
-    /// 构造策略（id + tenant + 规则集，必填）。
-    pub(crate) fn new(_id: PolicyId, _tenant: vocab::TenantId, _rules: Vec<PolicyRule>) -> Self {
-        todo!()
-    }
-
-    /// 取策略 ID 引用。
-    pub(crate) fn id(&self) -> &PolicyId {
-        todo!()
-    }
-
-    /// 取绑定租户。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
-        todo!()
-    }
-
-    /// 取规则列表引用。
-    pub(crate) fn rules(&self) -> &[PolicyRule] {
-        todo!()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AccountStatus — 账号状态（fail-closed）
-// ---------------------------------------------------------------------------
-
-/// 账号状态（闭值集，fail-closed；`#[non_exhaustive]` 保留扩展窗口）。
-///
-/// 默认行为：未知状态视同 `Suspended`——fail-closed。
-// reason: 签名冻结期枚举已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub(crate) enum AccountStatus {
-    /// 正常激活。
-    Active,
-    /// 暂停（可恢复）。
-    Suspended,
-    /// 锁定（需管理员解锁，如多次登录失败）。
-    Locked,
-    /// 已注销（不可恢复）。
-    Deactivated,
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +333,13 @@ pub(crate) enum AccountStatus {
 ///
 /// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 方法错误类型被 adapter 跨 crate 命名（adapter 把内部
 /// 持久化错误映射成本枚举）。`#[non_exhaustive]` 保留扩展窗口。
-// reason: 签名冻结期枚举已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
+///
+/// **与 authz 决策分轨**：`authorize_rbac` / `evaluate_abac` 的允许/拒绝经 `vocab::Decision` 表达，**不**
+/// 走本枚举。本枚举是 repo / 服务操作的失败通道，各 variant 触发路径：
+/// - `RoleNotFound`：`RoleRepo` 查无角色。
+/// - `InvalidPolicy`：策略构造 / 校验失败。
+/// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
+// reason: 库错误枚举尚无生产返回方（repo / handler 接线待 W），dead_code 来自冻结期（ADR-004 C8）。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -505,52 +353,145 @@ pub enum IdentityError {
 }
 
 // ---------------------------------------------------------------------------
-// 非 DI 纯逻辑自由函数（L0 纯计算；body = todo!()）
+// 共享 newtype funnel 测试（表驱动；正常 / 空 / 非法字符 / 超长 fail-closed）
 // ---------------------------------------------------------------------------
 
-/// RBAC 授权求值（纯函数，L0；fail-closed 语义）。
-///
-/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 — 实现仅对 `binding.tenant == principal.tenant()` 的
-/// `RoleBinding` 求值；`principal.tenant()` 为 `None`（Service/SuperAdmin 跨租场景）时返回
-/// `Decision::Deny`（通用 RBAC 路径不放行跨租，跨租走独立管理面）。
-///
-/// fail-closed：principal 无绑定、角色不存在、权限未声明、`principal.tenant()` 为 `None` 时返回
-/// `Decision::Deny`。
-/// 多租隔离：只考虑与 `principal.tenant()` 匹配的 `RoleBinding`
-/// （对应 casbin domain-aware RBAC，ref: casbin/casbin-rs rbac/default_role_manager.rs）。
-///
-/// 函数体 = `todo!()` 直至行为 PR。
-// reason: 签名冻结期函数已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
-#[allow(dead_code)]
-pub(crate) fn authorize_rbac(
-    _principal: &authn::Principal,
-    _bindings: &[RoleBinding],
-    _roles: &[Role],
-    _perm: &Permission,
-) -> vocab::Decision {
-    todo!()
-}
+#[cfg(test)]
+mod tests {
+    use super::{
+        AttributeKey, AttributeKeyError, AttributeValue, IdParseError, PatternError, PermissionId,
+        PolicyId, ResourcePattern, RoleId,
+    };
+    use rstest::rstest;
 
-/// ABAC 策略求值（纯函数，L0；fail-closed 语义）。
-///
-/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 — 实现仅对 `_policy.tenant() == _principal.tenant()`
-/// 的策略求值；`_principal.tenant()` 为 `None`（Service/SuperAdmin 跨租场景）时返回
-/// `Decision::Deny`（通用 ABAC 路径不放行跨租，跨租走独立管理面）。
-///
-/// 签名与 `authorize_rbac` 对称：`_principal` 位参使「跨租 mismatch fail-closed」由签名承载
-/// （Hard），而非依赖调用方约定（Soft）。
-///
-/// fail-closed：空策略、缺失属性、规则不匹配、`_principal.tenant()` 为 `None` 时均返回
-/// `Decision::Deny`。全部规则满足才返回 `Decision::Allow`
-/// （ref: casbin/casbin-rs core_api.rs enforce 元组求值）。
-///
-/// 函数体 = `todo!()` 直至行为 PR。
-// reason: 签名冻结期函数已声明但尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
-#[allow(dead_code)]
-pub(crate) fn evaluate_abac(
-    _principal: &authn::Principal,
-    _attrs: &[AbacAttribute],
-    _policy: &Policy,
-) -> vocab::Decision {
-    todo!()
+    /// ID 三连（RoleId / PermissionId / PolicyId）共用 parse 的期望形态。
+    #[derive(Debug, PartialEq, Eq)]
+    enum Out {
+        Ok,
+        Empty,
+        Format,
+    }
+
+    // ID 上界 128（见 ID_MAX_LEN）；200 字符必越界。
+    fn over_max() -> String {
+        "a".repeat(200)
+    }
+
+    // RoleId::parse 全面覆盖共享 parse_id（正常 / 空 / 非法字符 / 超长）。
+    #[rstest]
+    #[case("admin", Out::Ok)]
+    #[case("docs:read", Out::Ok)] // 命名空间 ':' 合法
+    #[case("role-1.v2_x", Out::Ok)] // '-' '.' '_' 合法
+    #[case("", Out::Empty)]
+    #[case("has space", Out::Format)]
+    #[case("bad!char", Out::Format)]
+    #[case("emoji😀", Out::Format)]
+    fn role_id_parse(#[case] raw: &str, #[case] want: Out) {
+        let got = match RoleId::parse(raw) {
+            Ok(id) => {
+                assert_eq!(id.as_str(), raw, "as_str 必须回显原值");
+                Out::Ok
+            }
+            Err(IdParseError::Empty) => Out::Empty,
+            Err(IdParseError::Format) => Out::Format,
+        };
+        assert_eq!(got, want, "input={raw:?}");
+    }
+
+    #[test]
+    fn id_parse_rejects_over_max_len() {
+        assert!(matches!(
+            RoleId::parse(&over_max()),
+            Err(IdParseError::Format)
+        ));
+        assert!(matches!(
+            PermissionId::parse(&over_max()),
+            Err(IdParseError::Format)
+        ));
+        assert!(matches!(
+            PolicyId::parse(&over_max()),
+            Err(IdParseError::Format)
+        ));
+    }
+
+    // PermissionId / PolicyId 经同一 parse_id：各取一正一负确认接线。
+    // （IdParseError 冻结无 PartialEq，用 matches! 而非 Result 直接比较。）
+    #[test]
+    fn permission_id_and_policy_id_share_funnel() {
+        assert!(matches!(PermissionId::parse("docs:read"), Ok(p) if p.as_str() == "docs:read"));
+        assert!(matches!(PermissionId::parse(""), Err(IdParseError::Empty)));
+        assert!(matches!(PolicyId::parse("policy.1"), Ok(p) if p.as_str() == "policy.1"));
+        // '/' 有意不在 ID 白名单（仅 ResourcePattern 含路径分隔符；ID 用 `:` `.` 命名空间）。
+        assert!(matches!(PolicyId::parse("x/y"), Err(IdParseError::Format)));
+    }
+
+    // new()：已校验值信任构造（不校验，funnel 边界 = pub(crate)）。
+    #[test]
+    fn id_new_wraps_value() {
+        assert_eq!(RoleId::new("admin").as_str(), "admin");
+        assert_eq!(PermissionId::new("docs:read").as_str(), "docs:read");
+    }
+
+    #[rstest]
+    #[case("users:*", true)] // glob '*'
+    #[case("devices:{id}", true)] // 占位 '{ }'
+    #[case("a/b/c", true)] // 路径 '/'
+    #[case("read?", true)] // glob '?'
+    #[case("", false)]
+    #[case("has space", false)]
+    #[case("bad%char", false)]
+    fn resource_pattern_parse(#[case] raw: &str, #[case] ok: bool) {
+        match ResourcePattern::parse(raw) {
+            Ok(p) => {
+                assert!(ok, "input={raw:?} 应被拒");
+                assert_eq!(p.as_str(), raw);
+            }
+            Err(PatternError::Empty) => {
+                assert!(!ok);
+                assert!(raw.is_empty(), "Empty 仅对空串");
+            }
+            Err(PatternError::Format) => assert!(!ok),
+        }
+    }
+
+    #[test]
+    fn resource_pattern_rejects_over_max_len() {
+        // 资源模式上界 256（见 PATTERN_MAX_LEN）；300 字符必越界。
+        let long = "a".repeat(300);
+        assert!(matches!(
+            ResourcePattern::parse(&long),
+            Err(PatternError::Format)
+        ));
+    }
+
+    #[rstest]
+    #[case("department", true)]
+    #[case("env.region", true)]
+    #[case("tier-1_x", true)]
+    #[case("", false)]
+    #[case("has:colon", false)] // ':' 不在属性键白名单
+    #[case("has space", false)]
+    fn attribute_key_parse(#[case] raw: &str, #[case] ok: bool) {
+        match AttributeKey::parse(raw) {
+            Ok(k) => {
+                assert!(ok, "input={raw:?} 应被拒");
+                assert_eq!(k.as_str(), raw);
+            }
+            Err(AttributeKeyError::Empty) => {
+                assert!(!ok);
+                assert!(raw.is_empty());
+            }
+            Err(AttributeKeyError::Format) => assert!(!ok),
+        }
+    }
+
+    // AttributeValue：任意字符串构造 + as_str 回显 + Debug 脱敏（不泄原值）。
+    #[test]
+    fn attribute_value_new_and_redacted_debug() {
+        let v = AttributeValue::new("s3cr3t-payload");
+        assert_eq!(v.as_str(), "s3cr3t-payload");
+        let dbg = format!("{v:?}");
+        assert_eq!(dbg, "AttributeValue(<redacted>)");
+        assert!(!dbg.contains("s3cr3t"), "Debug 不得泄露明文值");
+    }
 }

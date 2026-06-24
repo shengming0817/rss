@@ -105,10 +105,8 @@ fn decode_claims(raw: &str) -> Result<Claims, AuthnError> {
 /// `row_visibility` 从已认证 principal + ctx 派生行级可见域（ADR-002）。
 pub struct Principal {
     kind: PrincipalKind,
-    /// subject 标识（内部，不入 wire）；供 session store / audit 读取，外部消费待后续 W 接缝落地。
-    // reason: subject 是 Principal 核心标识字段，生产读路径在 session store / audit（W 阶段），
-    // 当前 crate 内暂无消费方；保留 allow 避免误删（ADR-004 C8 遗留期 carve-out）。
-    #[allow(dead_code)]
+    /// subject 标识（内部，不入 wire）；经 [`Principal::matches_subject`] 受控比较（不泄露明文）；
+    /// session store / audit 读路径待 W 阶段接缝落地。
     subject: String,
     /// 所属租户（`None` 仅限 `Service` / `SuperAdmin` 跨租户场景）。
     tenant: Option<TenantId>,
@@ -199,7 +197,10 @@ impl Principal {
     }
 
     /// 测试专用构造（不进生产/wire 路径）。
-    #[cfg(test)]
+    ///
+    /// `#[cfg(any(test, feature = "test-support"))]`：authn 自测 + 下游域 crate（经 `test-support`
+    /// feature → `test_support::principal`）共用。生产构建不编译——seal 不变。
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_test(
         _kind: PrincipalKind,
         _subject: impl Into<String>,
@@ -220,6 +221,15 @@ impl Principal {
     /// 返回所属租户（跨租户 principal 为 `None`）。
     pub fn tenant(&self) -> Option<TenantId> {
         self.tenant
+    }
+
+    /// 本主体 subject 是否等于 `subject`（**受控比较，不泄露明文 subject**）。
+    ///
+    /// 授权路径用此判定某条绑定（如 `RoleBinding.subject`）是否归属本 principal——把「绑定属于本主体」
+    /// 从调用方预过滤约定（Soft）上移为类型层受控入口：消费方只能问「是否匹配」、拿不到 subject 明文
+    /// （PII 不出 authn 边界）。
+    pub fn matches_subject(&self, subject: &str) -> bool {
+        self.subject == subject
     }
 
     /// 从 principal + 请求 ctx 派生行级可见性义务（ADR-002）。
@@ -263,6 +273,32 @@ impl Principal {
             // Service / Anonymous 及 #[non_exhaustive] 未来 kind：fail-closed，无可派生行级可见域。
             _ => Err(runctx::MissingCtx),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 测试支撑（`test-support` feature）：下游域 crate 单测构造 Principal
+// ---------------------------------------------------------------------------
+
+/// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译。
+///
+/// 下游域 crate（如 `identity`）的 authz 纯逻辑单测（`authorize_rbac(&Principal, …)`）需带特定
+/// `tenant` 的 [`Principal`]，但生产派生入口收紧为已验签 newtype（`VerifiedJwt` 等，`pub(crate)` seal，
+/// 外部 crate 不可 mint，INVARIANT AUTHN-VERIFIEDJWT-SEAL-01）。本模块经 feature 门控暴露受控测试构造器，
+/// **不削弱生产 seal**（生产构建 feature off ⇒ 本模块及 [`Principal::for_test`] 均不编译）。与既有
+/// `runctx::test_support` 同信任模型。
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::{Principal, PrincipalKind};
+    use vocab::tenant::TenantId;
+
+    /// 构造测试 [`Principal`]（kind / subject / tenant 任意；不进生产 / wire 路径）。
+    pub fn principal(
+        kind: PrincipalKind,
+        subject: impl Into<String>,
+        tenant: Option<TenantId>,
+    ) -> Principal {
+        Principal::for_test(kind, subject, tenant)
     }
 }
 

@@ -8,9 +8,14 @@
 //!
 //! # 实现状态（部分写实）
 //!
-//! `domain`（RBAC/ABAC 值类型与纯逻辑）仍**签名冻结**（函数体 = `todo!()`，smoke 只绑函数指针）；
+//! `domain` 子域分层推进（spec 003 wave 拆分）：
+//! - **RBAC（`domain::rbac`）+ 共享 newtype funnel（`domain::mod`）已写实**（`authorize_rbac` subject+tenant
+//!   匹配 + 表驱动测试；newtype 严格白名单 parse）——PR1。
+//! - **ABAC（`domain::abac`：`evaluate_abac` / `Policy`）+ `AccountStatus`（`domain::account`）仍签名冻结**
+//!   （函数体 = `todo!()`）——PR2/PR3。
+//!
 //! `application`（登录接缝：[`LoginService`] / [`IdentityDomain`]）**RW-G1 已写实**——打通 identity
-//! 登录 → outbox。余下（authz 纯逻辑、真实 JWT/密码哈希）留 W。`application` 模块私有，只 re-export facade。
+//! 登录 → outbox。余下（ABAC 求值、真实 JWT/密码哈希）留 W。`application` 模块私有，只 re-export facade。
 //!
 //! # 对标
 //!

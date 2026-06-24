@@ -8,6 +8,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# test-support：暴露 `test_support::principal` 供**下游域 crate**（如 identity）单测构造 `Principal`
+# （authz 纯逻辑入参）。仅 test/dev 构建启用，生产不编译——VerifiedJwt 派生 seal 与
+# AUTHN-VERIFIEDJWT-SEAL-01 在生产构建中保持不可表达。与既有 runctx `test-support` 同范式。
+test-support = []
+
 [dependencies]
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
