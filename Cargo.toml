@@ -123,6 +123,16 @@ deadpool-redis = { version = "0.23", default-features = false, features = ["rt_t
 # 集成测试 / per-domain vhost 隔离够用）。default-runtime = tokio executor + reactor。生产 AMQPS/TLS
 # provider license 甄别 = follow-up（见 PR body）。ref: lapin examples/pubsub.rs@main
 lapin = { version = "4", default-features = false, features = ["default-runtime"] }
+# 对象存储 provider（adapters/s3，#1011）：AWS 官方 SDK，对标 gocell s3.ObjectUploader@aws-sdk-go-v2。
+# default-features=false 关默认 HTTPS client（default-https-client 会拉 aws-lc-rs / ring，二者 license
+# 均不在 deny.toml allow-list，cargo-deny 连 optional 树也校验——同 lapin 上文的 TLS 收口理由）。adapter
+# 只持有 Client（组合根 / 集成测试注入 endpoint + 连接器）；plaintext MinIO 集成测试用裸 http 连接器，生产
+# HTTPS/TLS provider license 甄别 = follow-up（见 PR body）。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio"] }
+# aws-sdk-s3 客户端测试 mock（dev-only，adapters/s3）：canned 响应规则注入确定性单测。经 test-util 传递
+# 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
+# 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
+aws-smithy-mocks = "0.2"
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
 typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x

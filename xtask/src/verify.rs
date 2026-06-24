@@ -8,8 +8,12 @@
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
-//!   6. `cargo deny check`（外部工具）
-//!   7. `cargo dylint --all`（外部工具；跑 `lints/` 嵌套 nightly workspace；`DYLINT_RUSTFLAGS=-D warnings`
+//!   6. feature-gated 行为测试门（确定性 mock / lazy）：`cargo nextest run -p s3 --features backend` +
+//!      `-p redis-adapter --features backend`（默认 feature workspace nextest 不编入这些 `#[cfg(feature)]`
+//!      测试模块；按包显式补跑，见 [`feature_test_steps`]——不用 `--all-features --workspace` 以免误触
+//!      postgres/redis 的 `integration`（需 live 后端）门）
+//!   7. `cargo deny check`（外部工具）
+//!   8. `cargo dylint --all`（外部工具；跑 `lints/` 嵌套 nightly workspace；`DYLINT_RUSTFLAGS=-D warnings`
 //!      把默认 `Warn` 的注册 lint 升为 fail-closed）
 //!
 //! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
@@ -290,6 +294,52 @@ fn step_nextest() -> Step {
     }
 }
 
+// ---- feature-gated 行为测试门（确定性 mock / lazy 构造，无需 live 后端）----
+//
+// 默认 feature 的 workspace nextest（[`step_nextest`] / coverage）**不编入** adapter 的
+// `#[cfg(all(test, feature = "..."))]` 行为测试模块，故按包显式补跑——否则 backend 真身行为只靠人工命令记忆、
+// 不在机器门内（azure 无 CI ⇒ verify 是唯一 gate，缺这步等于 S3/redis backend 行为无门）。**不**用
+// `--all-features --workspace` nextest：会误触 postgres `integration` / redis `integration` 等需 live 后端的
+// 门（s3 / redis 的 `backend` 是 aws-smithy-mocks / deadpool lazy-pool 确定性测试，postgres `integration` 需
+// 真实 DB）。**不**带 `--no-tests=pass`：targeted 包必有该 feature 行为测试，0 选中即 feature gate 漂移 ⇒ 须
+// fail-loud（不可空转）。新增确定性 feature 行为测试的 adapter 在 [`feature_test_steps`] 追加一条（显式清单，
+// 与 coverage STRICT_CRATES 同款机制）。
+fn step_s3_backend_tests() -> Step {
+    Step {
+        label: "s3-backend-tests",
+        args: &["nextest", "run", "-p", "s3", "--features", "backend"],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
+fn step_redis_backend_tests() -> Step {
+    Step {
+        label: "redis-backend-tests",
+        args: &[
+            "nextest",
+            "run",
+            "-p",
+            "redis-adapter",
+            "--features",
+            "backend",
+        ],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
+/// 确定性 feature 行为测试门集（verify 与 ci 共用，单一事实源；新增确定性 feature 行为测试的 adapter 在此追加）。
+fn feature_test_steps() -> Vec<Step> {
+    vec![step_s3_backend_tests(), step_redis_backend_tests()]
+}
+
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
 // public-api --check（轴 A）。
@@ -356,9 +406,9 @@ fn step_public_api() -> Step {
     }
 }
 
-/// verify 全量门步计划（单一事实源；顺序 = 执行顺序）。
+/// verify 全量门步计划（单一事实源；顺序 = 执行顺序）。feature-test 门紧随 nextest（同测试相位）。
 fn full_plan() -> Vec<Step> {
-    vec![
+    let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
         step_layer_deps(),
@@ -367,9 +417,11 @@ fn full_plan() -> Vec<Step> {
         step_integration_compile(),
         step_clippy_workspace(),
         step_nextest(),
-        step_deny(),
-        step_dylint(),
-    ]
+    ];
+    plan.extend(feature_test_steps());
+    plan.push(step_deny());
+    plan.push(step_dylint());
+    plan
 }
 
 /// ci 超集门步计划（issue #1132 CI lane）。与 verify 共享 fmt/meta/deny/dylint 同一构造；build/clippy 升
@@ -377,7 +429,7 @@ fn full_plan() -> Vec<Step> {
 /// `audit`（cargo-audit）紧随 `deny` 后（issue #1133：供应链漏洞门入 PR 阻断 lane，独立于 deny advisories 的
 /// 防御纵深）。ci 恒全量（无 `--fast`）。
 fn ci_plan() -> Vec<Step> {
-    vec![
+    let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
         step_layer_deps(),
@@ -385,11 +437,13 @@ fn ci_plan() -> Vec<Step> {
         step_build_all_features(),
         step_clippy_all_features(),
         step_coverage(),
-        step_deny(),
-        step_cargo_audit(),
-        step_dylint(),
-        step_public_api(),
-    ]
+    ];
+    plan.extend(feature_test_steps());
+    plan.push(step_deny());
+    plan.push(step_cargo_audit());
+    plan.push(step_dylint());
+    plan.push(step_public_api());
+    plan
 }
 
 /// audit 精简供应链门步计划（issue #1133；azure-pipelines.yml 每日 cron 调 `cargo xtask audit`）。
@@ -598,6 +652,8 @@ mod tests {
                 "integration-compile",
                 "clippy",
                 "nextest",
+                "s3-backend-tests",
+                "redis-backend-tests",
                 "deny",
                 "dylint",
             ]
@@ -736,6 +792,8 @@ mod tests {
                 "build",
                 "clippy",
                 "coverage",
+                "s3-backend-tests",
+                "redis-backend-tests",
                 "deny",
                 "audit",
                 "dylint",

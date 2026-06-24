@@ -6,7 +6,7 @@
 //!
 //! ## 派发策略（ADR-003）
 //!
-//! - **async DI port**（`Signer` / `Publisher` / `Subscriber` / `AuditSink` / `ManagedResource`）：native AFIT + dynosaur
+//! - **async DI port**（`Signer` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ManagedResource`）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
 //!   - **Send**：dyn wrapper 的 boxed future 须 `Send`（ShutdownStack 经 `tokio::spawn` 隔离 panic）。
@@ -76,6 +76,7 @@
 pub mod audit_sink;
 pub mod clock;
 pub mod managed_resource;
+pub mod object_store;
 pub mod pdp;
 pub mod publisher;
 pub mod rate_limiter;
@@ -86,6 +87,9 @@ pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAud
 pub use clock::Clock;
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,
+};
+pub use object_store::{
+    DynObjectStore, ObjectByteStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError,
 };
 pub use pdp::{CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
 pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};

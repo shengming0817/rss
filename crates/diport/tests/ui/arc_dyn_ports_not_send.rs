@@ -10,7 +10,8 @@
 //! wrapper 改为 `Send + Sync`（ADR-003 Option A，#1152），对应 `assert_send` 转可编译，强制有意识更新本
 //! 测试 + ADR + crate rustdoc，而非静默漂移。
 use diport::{
-    DynAuditSink, DynManagedResource, DynPublisher, DynRateLimiter, DynSigner, DynSubscriber,
+    DynAuditSink, DynManagedResource, DynObjectStore, DynPdp, DynPublisher, DynRateLimiter,
+    DynSigner, DynSubscriber,
 };
 use std::sync::Arc;
 
@@ -24,4 +25,6 @@ fn main() {
     assert_send::<Arc<DynSigner<'static>>>();
     assert_send::<Arc<DynRateLimiter<'static>>>();
     assert_send::<Arc<DynManagedResource<'static>>>();
+    assert_send::<Arc<DynObjectStore<'static>>>();
+    assert_send::<Arc<DynPdp<'static>>>();
 }

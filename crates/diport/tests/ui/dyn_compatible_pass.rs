@@ -1,10 +1,12 @@
 //! pass：dynosaur Send DI port 可 native AFIT impl + 经 `Box<DynX>` / `Arc<DynX>` 注入。
-//! 覆盖全部 6 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ManagedResource。
+//! 覆盖全部 8 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource。
 use diport::{
-    AuditSink, AuditSinkError, DynAuditSink, DynManagedResource, DynPublisher, DynRateLimiter,
-    DynSigner, DynSubscriber, KeyId, ManagedResource, MessageStream, PublishRequest, Publisher,
-    PublisherError, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter, ShutdownError,
-    SignRequest, Signature, Signer, SignerError, SigningPurpose, Subscriber, SubscriberError, Topic,
+    AuditSink, AuditSinkError, DynAuditSink, DynManagedResource, DynObjectStore, DynPdp,
+    DynPublisher, DynRateLimiter, DynSigner, DynSubscriber, KeyId, ManagedResource, MessageStream,
+    ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError, Pdp, PdpError, PublishRequest,
+    Publisher, PublisherError, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
+    RawCredential, ShutdownError, SignRequest, Signature, Signer, SignerError, SigningPurpose,
+    Subscriber, SubscriberError, Topic, VerifiedClaims,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -82,6 +84,31 @@ impl ManagedResource for OkManagedResource {
     }
 }
 
+struct OkObjectStore;
+
+impl ObjectStore for OkObjectStore {
+    async fn put_object(&self, _key: ObjectKey, _body: Vec<u8>) -> Result<(), ObjectStoreError> {
+        Ok(())
+    }
+    async fn get_object(&self, _key: ObjectKey) -> Result<Option<ObjectPayload>, ObjectStoreError> {
+        Ok(None)
+    }
+    async fn delete_object(&self, _key: ObjectKey) -> Result<(), ObjectStoreError> {
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<(), ObjectStoreError> {
+        Ok(())
+    }
+}
+
+struct OkPdp;
+
+impl Pdp for OkPdp {
+    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
+        Ok(VerifiedClaims::new("sub", None, None))
+    }
+}
+
 fn main() {
     let _boxed: Box<DynSigner> = DynSigner::new_box(OkSigner);
     let _arced: Arc<DynSigner> = DynSigner::new_arc(OkSigner);
@@ -111,4 +138,12 @@ fn main() {
     // ManagedResource：async DI port（shutdown 编排），dyn(box) wrapper 可 Box/Arc 注入。
     let _mr_boxed: Box<DynManagedResource> = DynManagedResource::new_box(OkManagedResource);
     let _mr_arced: Arc<DynManagedResource> = DynManagedResource::new_arc(OkManagedResource);
+
+    // ObjectStore：async DI port（#1011），dyn(box) wrapper 可 Box/Arc 注入。
+    let _obj_boxed: Box<DynObjectStore> = DynObjectStore::new_box(OkObjectStore);
+    let _obj_arced: Arc<DynObjectStore> = DynObjectStore::new_arc(OkObjectStore);
+
+    // Pdp：async DI port（#1109 验签 provider），dyn(box) wrapper 可 Box/Arc 注入。
+    let _pdp_boxed: Box<DynPdp> = DynPdp::new_box(OkPdp);
+    let _pdp_arced: Arc<DynPdp> = DynPdp::new_arc(OkPdp);
 }

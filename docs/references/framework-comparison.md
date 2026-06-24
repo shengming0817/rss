@@ -45,6 +45,7 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 | 错误模型 | `vocab` | `dtolnay/thiserror`（`src/lib.rs`，库错误枚举） | `shepmaster/snafu`（`src/lib.rs`，带 context，TiKV / GreptimeDB 在用） |
 | xtask / 内部 codegen + lint 范本 | `xtask` | `rust-lang/rust-analyzer`（`xtask/src/main.rs`） | `matklad/cargo-xtask`（`README.md`，约定 spec） |
 | redis adapter — 幂等 claimer / kv 去重（`IdempotencyStore` provider）+ 连接池 `ManagedResource` | `adapters/redis` | `redis-rs/redis-rs`（`redis/src/cmd.rs` — `cmd("SET").arg(..).arg("NX").arg("EX") + query_async`）· `deadpool-rs/deadpool`（`deadpool-redis/src/lib.rs` — `Pool`/`Config`/`Runtime`；`Pool::close` ⇒ `ManagedResource::shutdown`） | — |
+| s3 adapter — 对象存储（`ObjectStore` provider: put/get/delete）+ `ManagedResource` | `adapters/s3` | `awslabs/aws-sdk-rust`（`sdk/s3/src/client.rs` — `Client::{put_object,get_object,delete_object}`；对标 gocell `s3.ObjectUploader`@aws-sdk-go-v2；`default-features=false` 关 `default-https-client` 收 TLS license） · `awslabs/smithy-rs`（`aws-smithy-mocks`，canned 响应单测 mock） | `apache/arrow-rs`（`object_store/src/aws`，provider-agnostic 概念参考） |
 
 ## Rust 标准库参考
 

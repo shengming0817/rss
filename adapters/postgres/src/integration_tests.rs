@@ -203,7 +203,7 @@ async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
 
 use std::sync::{Arc, Mutex};
 
-use consistency::{Disposition, Entry, IdemKey, OutboxRelay, OutboxSource, OutboxSweeper, Topic};
+use consistency::{Disposition, Entry, OutboxRelay, OutboxSource, OutboxSweeper, Topic};
 use diport::{DynPublisher, PublishRequest, Publisher, PublisherError};
 
 use crate::outbox::{

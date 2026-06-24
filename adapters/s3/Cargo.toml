@@ -8,15 +8,30 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
+# adapter 真身（#1011 对象存储）：始终 impl diport::ManagedResource；`backend` feature 开时增补
+# impl diport::ObjectStore（aws-sdk-s3 put/get/delete）。后端 aws-sdk-s3 经 feature 门控（default
+# build 轻量、仍保 freeze smoke 类型断言），与 redis/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守）。
 [dependencies]
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+aws-sdk-s3 = { workspace = true, optional = true }
+# redacted 结构化日志（仅 backend）：secure::redact_error funnel + tracing（observability.md：错误经 redact）。
+secure = { path = "../../crates/secure", optional = true }
+tracing = { workspace = true, optional = true }
+# 构造期 bucket 校验错误（fail-fast，非静默）。
+thiserror = { workspace = true, optional = true }
+# get 读取 stream-first：把 aws ByteStream 经 futures::stream::unfold 映射为 diport::ObjectByteStream（不 collect 整对象）。
+futures = { workspace = true, optional = true }
+
+[features]
+default = []
+backend = ["dep:aws-sdk-s3", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
+# dev-only 经 test-util 传递引入 hyper（MIT）作 mock http client 载体，但**不拉 TLS crypto**
+# （ring/aws-lc-rs/openssl/rustls 均不进树，deny licenses/bans 全绿）。live MinIO 集成 = follow-up（见 PR body）。
+aws-smithy-mocks = { workspace = true }
+# test-util 仅测试启用（with_test_defaults_v2 + mock http client 由 mock_client! 注入）；不进 production lib
+# 依赖面（production lib 仍 crypto-free / 无 hyper）。
+aws-sdk-s3 = { workspace = true, features = ["test-util"] }
