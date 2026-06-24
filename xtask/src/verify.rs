@@ -273,6 +273,8 @@ fn step_integration_compile() -> Step {
             "-p",
             "amqp",
             "-p",
+            "mqtt",
+            "-p",
             "journeys",
             "--features",
             "integration",
@@ -303,13 +305,15 @@ fn step_integration_run() -> Step {
             "-p",
             "amqp",
             "-p",
+            "mqtt",
+            "-p",
             "journeys",
             "--features",
             "integration",
         ],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked（实跑还需 docker 或设 PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL 等 env URL）",
+            install_hint: "cargo install cargo-nextest --locked（实跑还需 docker 或设 PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 等 env URL）",
         },
         env: &[],
         needs_compile: true,
@@ -582,7 +586,7 @@ fn integration_plan() -> Vec<Step> {
     vec![step_integration_run()]
 }
 
-/// 三资源 env URL 全在 ⇒ 对接长存外部 pg/redis/rabbitmq，无需 docker self-provision（testkit 的
+/// 四资源 env URL 全在 ⇒ 对接长存外部 pg/redis/rabbitmq/mosquitto，无需 docker self-provision（testkit 的
 /// `env_or_*` resolver 同款判据）。任一缺则容器路径，需 docker。
 ///
 /// **postgres 外部路径**：须同时满足：
@@ -592,7 +596,7 @@ fn integration_plan() -> Vec<Step> {
 ///
 /// 仅满足其一不足以跳过 docker（testkit 会用容器路径或报缺失 key 错误）。
 ///
-/// redis / amqp 路径：`REDIS_TEST_URL` / `RSS_AMQP_TEST_URL` 存在（不变）。
+/// redis / amqp / mqtt 路径：`REDIS_TEST_URL` / `RSS_AMQP_TEST_URL` / `RSS_MQTT_TEST_URL` 存在（不变）。
 fn all_integration_env_urls_present() -> bool {
     let pg_opt_in = std::env::var_os("RSS_TEST_ALLOW_EXTERNAL_POSTGRES").is_some();
     let pg_five_tuple = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]
@@ -601,7 +605,8 @@ fn all_integration_env_urls_present() -> bool {
     let pg_all = pg_opt_in && pg_five_tuple;
     let redis = std::env::var_os("REDIS_TEST_URL").is_some();
     let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
-    pg_all && redis && amqp
+    let mqtt = std::env::var_os("RSS_MQTT_TEST_URL").is_some();
+    pg_all && redis && amqp && mqtt
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::clean_cmd`]
@@ -1134,19 +1139,19 @@ mod tests {
             step.args
         );
         assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
-        for p in ["postgres", "redis-adapter", "amqp", "journeys"] {
+        for p in ["postgres", "redis-adapter", "amqp", "mqtt", "journeys"] {
             assert!(step.args.contains(&p), "integration 实跑须覆盖 {p}");
         }
     }
 
-    /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖三 adapter + journeys durable journey
-    /// （F7 + #1137：原仅 postgres）。
+    /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey
+    /// （F7 + #1137：原仅 postgres；#1010 加 mqtt）。
     #[test]
     fn integration_compile_covers_adapters_and_journeys_no_run() {
         let step = step_integration_compile();
         assert_eq!(step.label, "integration-compile");
         assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
-        for p in ["postgres", "redis-adapter", "amqp", "journeys"] {
+        for p in ["postgres", "redis-adapter", "amqp", "mqtt", "journeys"] {
             assert!(step.args.contains(&p), "integration-compile 须覆盖 {p}");
         }
     }

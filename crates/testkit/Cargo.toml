@@ -20,7 +20,7 @@ thiserror = { workspace = true }                     # TestkitError 库错误枚
 # 容器 fixture（#1137，仅 `containers` feature）：testcontainers 起真 pg/redis/rabbitmq；tokio time 重试；
 # anyhow = FixtureError（测试体 `?` 组合）。默认构建 / 契约 harness 消费方不拉此树。
 testcontainers = { workspace = true, optional = true }
-testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq"] }
+testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq", "mosquitto"] }
 tokio = { workspace = true, optional = true, features = ["time"] }
 anyhow = { workspace = true, optional = true }
 

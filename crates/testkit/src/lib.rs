@@ -33,8 +33,8 @@ pub use response::{ContractResponse, WireError};
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    FixtureError, PgConnParams, PgFixture, RabbitFixture, RedisFixture, env_or_postgres,
-    env_or_rabbitmq, env_or_redis,
+    FixtureError, MqttFixture, PgConnParams, PgFixture, RabbitFixture, RedisFixture,
+    env_or_mosquitto, env_or_postgres, env_or_rabbitmq, env_or_redis,
 };
 
 /// testkit harness 错误。harness 自身不 panic（workspace `panic`/`unwrap_used` deny）——

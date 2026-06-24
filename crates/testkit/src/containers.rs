@@ -24,6 +24,7 @@ use std::time::Duration;
 use testcontainers::ContainerAsync;
 use testcontainers::core::ExecCommand;
 use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::mosquitto::Mosquitto;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::rabbitmq::RabbitMq;
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
@@ -35,6 +36,7 @@ type Result<T> = std::result::Result<T, FixtureError>;
 /// 容器内固定端口（modules 镜像默认暴露端口）。
 const PG_PORT: u16 = 5432;
 const AMQP_PORT: u16 = 5672;
+const MQTT_PORT: u16 = 1883;
 /// 容器路径 postgres db 名：含 `test` 以满足 adapters/postgres 毁灭性-DDL 守卫。
 const PG_DB: &str = "rss_test";
 const PG_USER: &str = "postgres";
@@ -390,6 +392,66 @@ async fn run_rabbitmqctl(container: &ContainerAsync<RabbitMq>, args: &[&str]) ->
     ))
 }
 
+// ── mqtt（mosquitto）─────────────────────────────────────────────────────────
+
+/// mqtt fixture guard：持容器句柄（自起路径）到 `Drop` + `mqtt://` base URL。**须绑定到测试结束**。
+///
+/// MQTT **无 vhost**（不同于 rabbitmq）——跨域隔离经 per-domain broker 凭据 + broker 侧 ACL（operator
+/// provision），非命名空间段。故 fixture 只回 base broker URL（无 `vhost_url`），比 [`RabbitFixture`] 简单。
+pub struct MqttFixture {
+    _container: Option<Box<ContainerAsync<Mosquitto>>>,
+    url: String,
+}
+
+impl MqttFixture {
+    /// `mqtt://host:port` 连接 URL（明文；mosquitto fixture 镜像 anonymous，无凭据段）。
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// 校验 MQTT test URL scheme（须 `mqtt://`——明文，adapter v1 仅支持明文；`mqtts://` / 非 mqtt 协议拒绝）。
+///
+/// 对齐 [`validate_amqp_base_url`] 的对称 scheme 校验：防 `RSS_MQTT_TEST_URL` 误设非 mqtt 协议在集成测试
+/// 中产生难诊断的连接错误。
+fn validate_mqtt_url(url: &str) -> Result<()> {
+    if url.strip_prefix("mqtt://").is_none() {
+        return Err(anyhow::anyhow!(
+            "RSS_MQTT_TEST_URL 须以 mqtt:// 开头（adapter v1 仅明文 MQTT），实际: {url}"
+        ));
+    }
+    Ok(())
+}
+
+/// **默认起容器（fail-closed 安全语义）**。仅当 `RSS_MQTT_TEST_URL` 存在时走外部 broker 路径。
+///
+/// 自起路径用 `testcontainers_modules::mosquitto::Mosquitto`（`eclipse-mosquitto`，anonymous，1883）。
+/// 外部路径：`RSS_MQTT_TEST_URL` 须为 `mqtt://` base URL（caller 负责 broker 可达 / 鉴权）。
+///
+/// # Example
+///
+/// ```ignore
+/// let mqtt = testkit::env_or_mosquitto().await?;
+/// // mqtt.url() 返回 "mqtt://host:port"
+/// ```
+pub async fn env_or_mosquitto() -> Result<MqttFixture> {
+    if let Ok(url) = std::env::var("RSS_MQTT_TEST_URL") {
+        validate_mqtt_url(&url)?;
+        return Ok(MqttFixture {
+            _container: None,
+            url,
+        });
+    }
+    let container = Mosquitto::default().start().await?;
+    let host = container.get_host().await?.to_string();
+    let port = container.get_host_port_ipv4(MQTT_PORT).await?;
+    let url = format!("mqtt://{host}:{port}");
+    Ok(MqttFixture {
+        _container: Some(Box::new(container)),
+        url,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +519,24 @@ mod tests {
         assert!(!strict_test_db_name("testdb"), "testdb 须拒");
         // 拒：test 在前但以 _prod 结尾
         assert!(!strict_test_db_name("test_prod"), "test_prod 须拒");
+    }
+
+    /// validate_mqtt_url：mqtt:// 通过；非 mqtt 协议（http/mqtts）拒绝。
+    #[test]
+    fn validate_mqtt_url_table() {
+        assert!(validate_mqtt_url("mqtt://h:1883").is_ok(), "mqtt:// 须通");
+        assert!(
+            validate_mqtt_url("mqtt://user:pass@h:1883").is_ok(),
+            "含凭据 mqtt:// 须通"
+        );
+        assert!(
+            validate_mqtt_url("mqtts://h:8883").is_err(),
+            "mqtts:// 须拒（adapter v1 仅明文）"
+        );
+        assert!(
+            validate_mqtt_url("http://h:1883").is_err(),
+            "非 mqtt 协议须拒"
+        );
     }
 
     /// validate_amqp_base_url：base URL（无 vhost）通过；含非空 vhost 段报错。
