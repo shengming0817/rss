@@ -4720,14 +4720,11 @@ dependencies = [
 name = "softca"
 version = "0.0.0"
 dependencies = [
- "consistency",
  "diport",
- "ids",
- "primitives",
- "runctx",
- "secure",
- "support",
- "vocab",
+ "ring",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
