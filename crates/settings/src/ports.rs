@@ -1,23 +1,29 @@
-//! settings::ports — 配置域**专属** repo DI port（Option 2 / ADR-005）。
+//! settings::ports — 配置域**专属** repo / UoW DI port（Option 2 / ADR-005）。
 //!
 //! 归属（ADR-005 category line）：provider-agnostic 基建 port（`Clock`/`Publisher`/`AuditSink`…）在
-//! `diport`；**域形** repo port——签名引用域内实体（`ConfigEntry`/`SettingKey`，域 crate `pub` 类型、
+//! `diport`；**域形** repo / UoW port——签名引用域内实体（`ConfigEntry`/`SettingKey`，域 crate `pub` 类型、
 //! 字段私有 + 构造 funnel）——**无法**收敛 `diport`（否则 diport→域 反向依赖、层序倒置、deny 红），故归
 //! 本域 crate `ports` 模块。adapter（如 `postgres`）依赖 `settings`、以 native AFIT impl 本 port（DIP 内向边，
 //! `adapters→域` 单向）。派发与 diport DI port 同范式：`#[trait_variant::make(X: Send)]` Send 变体 +
-//! `#[dynosaur(...)]` `DynX`，构造器注入 `Box<DynConfigRepo>`（ADR-004 C1/C5）。
+//! `#[dynosaur(...)]` `DynX`，构造器注入 `Box<DynConfigRepo>` / `Box<DynConfigUnitOfWork>`（ADR-004 C1/C5）。
 //!
-//! 跨 crate 可见性：repo port 须 `pub`（独立 adapter crate impl）；签名实体 `ConfigEntry`/`SettingKey`/
-//! `SettingsError` 经下方 `pub use` 暴露——字段私有 + 构造经 `pub(crate)` funnel，外部可命名/收发但**不可伪造**。
-//! `ConfigVersion`（pub(crate)）不入签名——版本号在 wire/port 面以裸 `u64` 表达，避免泄漏内部 newtype。
+//! 跨 crate 可见性：repo / UoW port 须 `pub`（独立 adapter crate impl）；签名实体 `ConfigEntry`/`SettingKey`/
+//! `SettingsError`/`ConfigRepoError` 经下方 `pub use` 暴露——字段私有 + 构造经 `pub(crate)` funnel，外部可
+//! 命名/收发但**不可伪造**。`ConfigVersion`（pub(crate)）不入签名——版本号在 wire/port 面以裸 `u64` 表达。
+//!
+//! 错误分层（#1226）：repo / UoW 返回 [`ConfigRepoError`]（业务 `VersionConflict` + 基础设施 `Storage`）；
+//! 域**校验**错误 `SettingsError`（key 格式 / 百分比）属构造 funnel，不出现在仓储签名。
 //!
 //! ref: Cockburn Hexagonal Ports&Adapters / Evans DDD Repository（repo 接口归域核心、adapter 经 DIP 实现）
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型：save 以 version+1 守乐观并发）
+//! ref: debezium outbox SMT / MassTransit Bus Outbox（业务写 + outbox 行同一本地事务，producer 侧 durable）
 
+use consistency::Entry;
+use diport::OutboxEnvelopeParts;
 use dynosaur::dynosaur;
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
-pub use crate::domain::{ConfigEntry, SettingKey, SettingsError};
+pub use crate::domain::{ConfigEntry, ConfigRepoError, SettingKey, SettingsError};
 pub use vocab::TenantId;
 
 /// 版本化配置仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
@@ -27,42 +33,86 @@ pub use vocab::TenantId;
 /// `ConfigVersion`），租户必经 typed [`TenantId`] 位置参做 RLS / store scope（多租隔离签名承载）。
 ///
 /// CAS 语义（etcd 版本模型）：[`ConfigRepo::save`] 要求 `entry.version()` 恰等于当前最高版本 + 1
-/// （首版要求 `1`），否则返回 [`SettingsError::VersionConflict`]——乐观并发写冲突由业务层读后重写重试。
-///
-/// rollback 读旧版本 + 写新版本须由实现方保证原子（postgres adapter 同事务 find_version+save，防 TOCTOU）。
+/// （首版要求 `1`），否则返回 [`ConfigRepoError::VersionConflict`]——乐观并发写冲突由业务层读后重写重试。
+/// 原子的「save + 同事务 outbox append」由 sibling [`ConfigUnitOfWork`] 承载（消除 emit-after-save 窗口）。
 #[trait_variant::make(ConfigRepo: Send)]
 #[dynosaur(pub DynConfigRepo = dyn(box) ConfigRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `ConfigRepo` 变体 + dynosaur
 // `DynConfigRepo` 承载（DI 注入走 Send wrapper）。与 diport DI port 同范式（ADR-003/ADR-004 C1）。
 pub trait ConfigRepoLocal {
-    /// 取 key 当前（最高版本）活跃配置；不存在返回 `Ok(None)`。
+    /// 取 key 当前活跃配置（最高版本且**非 tombstone**）；不存在 / 已删（latest 为 tombstone）返回 `Ok(None)`。
     async fn find(
         &self,
         tenant: TenantId,
         key: &SettingKey,
-    ) -> Result<Option<ConfigEntry>, SettingsError>;
+    ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
 
-    /// 取指定版本号的历史配置条目；不存在返回 `Ok(None)`（回滚读取旧值用）。
+    /// 取指定版本号的历史配置条目；不存在 / 该版本是 tombstone 返回 `Ok(None)`（回滚读取旧值用）。
     async fn find_version(
         &self,
         tenant: TenantId,
         key: &SettingKey,
         version: u64,
-    ) -> Result<Option<ConfigEntry>, SettingsError>;
+    ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
+
+    /// 取 key 当前**最高版本号**（含 tombstone，不存在返回 `Ok(None)`）——业务层据此算下一版本（`+1`）。
+    ///
+    /// 与 [`ConfigRepo::find`] 区别：`find` 返回**活跃值**（tombstone ⇒ `None`），本方法返回**版本计数器**
+    /// （含 tombstone）——delete tombstone 使 version 单调不重置（#1249 F1），故 next-version 不能用 `find`
+    /// （删后 `find=None` 会误判 v1、复用 event_id），须用本方法的真实最高版本。
+    async fn latest_version(
+        &self,
+        tenant: TenantId,
+        key: &SettingKey,
+    ) -> Result<Option<u64>, ConfigRepoError>;
 
     /// CAS 追加新版本（`entry.version()` 须等于当前最高版本 + 1，否则 `VersionConflict`）。
-    async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), SettingsError>;
+    async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError>;
 
-    /// 硬删除 key 及其版本历史（幂等：不存在视为成功）。tombstone / 版本删除事件留订阅缓存单元（#1120）。
-    async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), SettingsError>;
+    /// 软删除 key（tombstone）：在 `max+1` 追加一条 tombstone 版本 → version 单调不重置（防 event_id 复用，
+    /// #1249 F1）；幂等（latest 已 tombstone / key 不存在 ⇒ no-op）。`find` 此后返回 `None`，历史值行保留可经
+    /// `find_version` 读。删除事件（`config-version-deleted`）留订阅缓存单元（#1120），tombstone 自身不发事件。
+    async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError>;
+}
+
+/// 配置写入 **co-tx** Unit-of-Work DI port（L2 OutboxFact 同事务接缝）。
+///
+/// [`ConfigUnitOfWork::save_and_append_outbox`] 把 CAS 配置写（同 [`ConfigRepo::save`] 语义）与
+/// `settings.config-version-changed` outbox 行 append **同一本地事务**原子落库（both-or-neither）——消除
+/// 「先 save 后 emit」的 write-without-event 窗口（#1232）。`outbox_entry` / `envelope` 由应用层内容派生
+/// 构造（topic / IdemKey / opaque subjectId），adapter 仅在事务内复用既有 `append_outbox` 落 durable outbox；
+/// relay 异步投递（at-least-once + 幂等去重）。provider 可换：prod postgres co-tx / test in-mem（非原子替身）。
+///
+/// 与 [`ConfigRepo`] 同 native-AFIT + trait_variant Send + dynosaur 范式；组合根经 `Box<DynConfigUnitOfWork>` 注入。
+#[trait_variant::make(ConfigUnitOfWork: Send)]
+#[dynosaur(pub DynConfigUnitOfWork = dyn(box) ConfigUnitOfWork, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: 同 ConfigRepoLocal——Send 由 trait_variant `ConfigUnitOfWork` 变体 + dynosaur wrapper 承载。
+pub trait ConfigUnitOfWorkLocal {
+    /// CAS 写新配置版本 + 同事务 append outbox 行（both-or-neither）。CAS 冲突返
+    /// [`ConfigRepoError::VersionConflict`]、持久化失败返 [`ConfigRepoError::Storage`]；任一步失败整事务
+    /// 回滚（配置写与 outbox 行皆不落库）。
+    async fn save_and_append_outbox(
+        &self,
+        tenant: TenantId,
+        entry: ConfigEntry,
+        outbox_entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), ConfigRepoError>;
 }
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：域形 async repo port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
-    //! `Box<DynConfigRepo>` 装入（PORT-SHAPE-01/02）。不调用方法 → 不依赖具体存储语义。
-    use super::{ConfigEntry, ConfigRepo, DynConfigRepo, SettingKey, SettingsError, TenantId};
+    //! build smoke：域形 async repo / UoW port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
+    //! `Box<DynX>` 装入（PORT-SHAPE-01/02）。不调用方法 → 不依赖具体存储语义。
+    use consistency::Entry;
+    use diport::OutboxEnvelopeParts;
+
+    use super::{
+        ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, DynConfigRepo,
+        DynConfigUnitOfWork, SettingKey, TenantId,
+    };
 
     struct NoopConfigRepo;
     impl ConfigRepo for NoopConfigRepo {
@@ -70,7 +120,7 @@ mod smoke {
             &self,
             _tenant: TenantId,
             _key: &SettingKey,
-        ) -> Result<Option<ConfigEntry>, SettingsError> {
+        ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
             Ok(None)
         }
         async fn find_version(
@@ -78,21 +128,48 @@ mod smoke {
             _tenant: TenantId,
             _key: &SettingKey,
             _version: u64,
-        ) -> Result<Option<ConfigEntry>, SettingsError> {
+        ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
             Ok(None)
         }
-        async fn save(&self, _tenant: TenantId, _entry: ConfigEntry) -> Result<(), SettingsError> {
+        async fn latest_version(
+            &self,
+            _tenant: TenantId,
+            _key: &SettingKey,
+        ) -> Result<Option<u64>, ConfigRepoError> {
+            Ok(None)
+        }
+        async fn save(
+            &self,
+            _tenant: TenantId,
+            _entry: ConfigEntry,
+        ) -> Result<(), ConfigRepoError> {
             Ok(())
         }
-        async fn delete(&self, _tenant: TenantId, _key: &SettingKey) -> Result<(), SettingsError> {
+        async fn delete(
+            &self,
+            _tenant: TenantId,
+            _key: &SettingKey,
+        ) -> Result<(), ConfigRepoError> {
+            Ok(())
+        }
+    }
+
+    struct NoopConfigUow;
+    impl ConfigUnitOfWork for NoopConfigUow {
+        async fn save_and_append_outbox(
+            &self,
+            _tenant: TenantId,
+            _entry: ConfigEntry,
+            _outbox_entry: Entry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<(), ConfigRepoError> {
             Ok(())
         }
     }
 
     fn assert_send<T: Send>(_: &T) {}
 
-    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体
-    // `DynConfigRepo` 且 wrapper `Send`（可跨 spawn 注入）。
+    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 wrapper `Send`。
     #[test]
     fn config_repo_impls_load_into_dyn_wrapper() {
         let from_impl: Box<DynConfigRepo> = DynConfigRepo::new_box(NoopConfigRepo);
@@ -101,26 +178,50 @@ mod smoke {
         assert_send(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynConfigRepo>` 作必填
-    // 位置参（非 Option），缺失即编译错误（ADR-004 C5）。
+    #[test]
+    fn config_uow_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynConfigUnitOfWork> = DynConfigUnitOfWork::new_box(NoopConfigUow);
+        assert_send(&from_impl);
+        let from_mock: Box<DynConfigUnitOfWork> =
+            DynConfigUnitOfWork::new_box(MockTestConfigUow::new());
+        assert_send(&from_mock);
+    }
+
+    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynConfigRepo>` /
+    // `Box<DynConfigUnitOfWork>` 作必填位置参（非 Option），缺失即编译错误（ADR-004 C5）。
     struct ConfigService {
         _repo: Box<DynConfigRepo<'static>>,
+        _writer: Box<DynConfigUnitOfWork<'static>>,
     }
     impl ConfigService {
-        fn new(repo: Box<DynConfigRepo<'static>>) -> Self {
-            Self { _repo: repo }
+        fn new(
+            repo: Box<DynConfigRepo<'static>>,
+            writer: Box<DynConfigUnitOfWork<'static>>,
+        ) -> Self {
+            Self {
+                _repo: repo,
+                _writer: writer,
+            }
         }
     }
 
     #[test]
-    fn config_repo_is_required_ctor_injectable() {
-        let from_impl = ConfigService::new(DynConfigRepo::new_box(NoopConfigRepo));
-        assert_send(&from_impl._repo);
-        let from_mock = ConfigService::new(DynConfigRepo::new_box(MockTestConfigRepo::new()));
-        assert_send(&from_mock._repo);
+    fn config_ports_are_required_ctor_injectable() {
+        let svc = ConfigService::new(
+            DynConfigRepo::new_box(NoopConfigRepo),
+            DynConfigUnitOfWork::new_box(NoopConfigUow),
+        );
+        assert_send(&svc._repo);
+        assert_send(&svc._writer);
+        let svc_mock = ConfigService::new(
+            DynConfigRepo::new_box(MockTestConfigRepo::new()),
+            DynConfigUnitOfWork::new_box(MockTestConfigUow::new()),
+        );
+        assert_send(&svc_mock._repo);
+        assert_send(&svc_mock._writer);
     }
 
-    // mock 是 native trait impl（`async fn` 直接声明，非 `#[async_trait]`），经 `new_box` 进 `DynConfigRepo`。
+    // mock 是 native trait impl（`async fn` 直接声明，非 `#[async_trait]`），经 `new_box` 进 dyn wrapper。
     mockall::mock! {
         TestConfigRepo {}
         impl ConfigRepo for TestConfigRepo {
@@ -128,15 +229,33 @@ mod smoke {
                 &self,
                 tenant: TenantId,
                 key: &SettingKey,
-            ) -> Result<Option<ConfigEntry>, SettingsError>;
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
             async fn find_version(
                 &self,
                 tenant: TenantId,
                 key: &SettingKey,
                 version: u64,
-            ) -> Result<Option<ConfigEntry>, SettingsError>;
-            async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), SettingsError>;
-            async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), SettingsError>;
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
+            async fn latest_version(
+                &self,
+                tenant: TenantId,
+                key: &SettingKey,
+            ) -> Result<Option<u64>, ConfigRepoError>;
+            async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError>;
+            async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError>;
+        }
+    }
+
+    mockall::mock! {
+        TestConfigUow {}
+        impl ConfigUnitOfWork for TestConfigUow {
+            async fn save_and_append_outbox(
+                &self,
+                tenant: TenantId,
+                entry: ConfigEntry,
+                outbox_entry: Entry,
+                envelope: OutboxEnvelopeParts,
+            ) -> Result<(), ConfigRepoError>;
         }
     }
 }

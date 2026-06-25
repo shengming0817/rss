@@ -4,7 +4,7 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 settings 的 `Domain::init` → Registry 收集配置路由组（声明、不执行）。
-//! - DI 注入：settings 经 `Box<DynOutboxEmitter>`（memory MemEmitter）发射 config-version-changed fact；clock 注入。
+//! - DI 注入：settings 经具体 `memory::MemEmitter`（co-tx UoW 须 Sync）发射 config-version-changed fact；clock 注入。
 //! - L2 OutboxFact：publish_config CAS 写 v1 → 发 outbox fact → MemBus → 订阅者消费（跨域只经 contract）。
 //!
 //! 追踪弹边界（同 identity G1）：服务层闭环——配置服务直接调用，不逐字节跑 axum（httpserve mount 留 Join）；
@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use diport::{DynOutboxEmitter, Subscriber, Topic};
+use diport::{Subscriber, Topic};
 use futures::StreamExt;
 use generated::event::settings_v1::{
     SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
@@ -55,7 +55,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
 
     // 4. 发布配置：注入 MemEmitter + 固定时钟，CAS 写 v1 + 发 version-changed fact。
     let service = SettingsService::with_seed(
-        DynOutboxEmitter::new_box(MemEmitter::new(bus.clone())),
+        MemEmitter::new(bus.clone()),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let tenant = TenantId::parse(CANON_TENANT)?;
@@ -102,7 +102,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
 
     // 3. service（with_seed 注入 MemEmitter + 固定时钟）。
     let service = SettingsService::with_seed(
-        DynOutboxEmitter::new_box(MemEmitter::new(bus.clone())),
+        MemEmitter::new(bus.clone()),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let tenant = TenantId::parse(CANON_TENANT)?;

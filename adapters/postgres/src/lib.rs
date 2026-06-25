@@ -15,6 +15,8 @@
 //! postgres-backed `RoleRepo` 属 identity 域 W 阶段（需 roles 表 + tenant RLS）。
 
 mod checkpoint;
+mod config_repo;
+mod cotx;
 mod dead_letter;
 mod emitter;
 mod inbox;
@@ -26,6 +28,7 @@ mod session_uow;
 mod tx;
 
 pub use checkpoint::PgCheckpointStore;
+pub use config_repo::PgConfigRepo;
 pub use dead_letter::PgDeadLetterStore;
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
@@ -76,8 +79,8 @@ mod smoke {
     //! panic，review F3）。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo edge proof +
     //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal +
-    //! OwnerCheckpointStore on PgCheckpointStore + SessionUnitOfWork on PgSessionUnitOfWork（真实 impl，#1083/#1192）；
-    //! 去掉任一即编译失败（anti-vacuity）。
+    //! OwnerCheckpointStore on PgCheckpointStore + SessionUnitOfWork on PgSessionUnitOfWork（真实 impl，#1083/#1192）+
+    //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）；去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
@@ -86,6 +89,8 @@ mod smoke {
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
     fn assert_session_uow<T: identity::ports::SessionUnitOfWork>(_: PhantomData<T>) {}
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
+    fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
+    fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
 
@@ -116,6 +121,9 @@ mod smoke {
         assert_session_uow(PhantomData::<super::PgSessionUnitOfWork>);
         // `PgInboxStore: IdempotencyStore` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_idempotency_store(PhantomData::<super::PgInboxStore>);
+        // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。
+        assert_config_repo(PhantomData::<super::PgConfigRepo>);
+        assert_config_uow(PhantomData::<super::PgConfigRepo>);
         // `PgSagaJournal: SagaJournal` + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
         assert_saga_journal(PhantomData::<super::PgSagaJournal>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);

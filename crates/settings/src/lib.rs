@@ -37,9 +37,9 @@ mod smoke {
     //! **不调用** `todo!()` body。
 
     use crate::domain::{
-        ConfigDelta, ConfigEntry, ConfigValue, ConfigVersion, EvalContext, FlagDecision, FlagKey,
-        FlagState, RolloutOperator, RolloutPercentage, RolloutRule, SettingKey, SettingsError,
-        diff, evaluate_flag,
+        ConfigDelta, ConfigEntry, ConfigRepoError, ConfigValue, ConfigVersion, EvalContext,
+        FlagDecision, FlagKey, FlagState, RolloutOperator, RolloutPercentage, RolloutRule,
+        SettingKey, SettingsError, diff, evaluate_flag,
     };
     use vocab::TenantId;
 
@@ -88,8 +88,18 @@ mod smoke {
         let e = SettingsError::KeyInvalid;
         match e {
             SettingsError::KeyInvalid => {}
+            SettingsError::SensitiveKey => {}
             SettingsError::PercentageOutOfRange => {}
-            SettingsError::VersionConflict => {}
+        }
+    }
+
+    #[test]
+    fn config_repo_error_enum_is_exhaustive() {
+        // 业务/基础设施分层（#1226）：VersionConflict（CAS）+ Storage(#[source])（持久化）。
+        let e = ConfigRepoError::VersionConflict;
+        match e {
+            ConfigRepoError::VersionConflict => {}
+            ConfigRepoError::Storage(_) => {}
         }
     }
 

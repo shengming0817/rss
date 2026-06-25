@@ -3591,6 +3591,7 @@ dependencies = [
  "runctx",
  "secure",
  "serde_json",
+ "settings",
  "sqlx",
  "support",
  "testkit",

@@ -1,8 +1,10 @@
 //! settings 应用层：版本化配置 CRUD/CAS + 发布/回滚（L2 OutboxFact）+ feature flag 求值编排。
 //!
-//! 配置写入路径证明 L2 接缝：CAS upsert 新版本（[`crate::ports::ConfigRepo`]）→ 构造 `consistency::Entry`
-//! 经 [`diport::OutboxEmitter`] 落 durable outbox（in-mem `memory::MemEmitter` / 生产 postgres）→ 返回新版本。
-//! 发布与回滚复用同一 fact，`changeKind` 判别（published / rolledBack）。flag 求值经域内
+//! 配置写入路径证明 L2 接缝：CAS upsert 新版本 + outbox append 经 [`crate::ports::ConfigUnitOfWork`]
+//! **同事务**原子落库（both-or-neither，消除 emit-after-save 的 write-without-event 窗口，#1232；in-mem 共享
+//! store 替身 / 生产 postgres `PgConfigUnitOfWork`）→ 返回新版本。读路径（next_version / get_value /
+//! rollback 源值）经 [`crate::ports::ConfigRepo`]。发布与回滚复用同一 fact，`changeKind` 判别（published /
+//! rolledBack）。flag 求值经域内
 //! [`crate::internal::ports::FlagStore`] 取快照 + `domain::evaluate_flag`（L0 纯计算）。
 //!
 //! 追踪弹边界（同 identity G1）：服务由组合根（journeys）直接调用，**不逐字节跑 axum**；[`SettingsDomain`]
@@ -17,7 +19,7 @@ use std::time::SystemTime;
 
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
-use diport::{Clock, DynOutboxEmitter, OutboxEmitter, OutboxEnvelopeParts};
+use diport::{Clock, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
     CONTRACT_ID, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
     TOPIC as VERSION_CHANGED_TOPIC,
@@ -29,13 +31,15 @@ use primitives::ListenerKind;
 use vocab::TenantId;
 
 use crate::domain::{
-    ConfigEntry, ConfigValue, ConfigVersion, EvalContext, FlagDecision, FlagKey, SettingKey,
-    SettingsError, evaluate_flag,
+    ConfigEntry, ConfigRepoError, ConfigValue, ConfigVersion, EvalContext, FlagDecision, FlagKey,
+    SettingKey, SettingsError, evaluate_flag,
 };
 #[cfg(any(test, feature = "seed-data"))]
-use crate::internal::mem::{InMemConfigRepo, InMemFlagStore};
+use crate::internal::mem::{
+    InMemConfigRepo, InMemConfigUnitOfWork, InMemFlagStore, new_config_store,
+};
 use crate::internal::ports::FlagStore;
-use crate::ports::{ConfigRepo, DynConfigRepo};
+use crate::ports::{ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfWork};
 
 /// 配置路由组前缀（Primary listener，业务 API）。
 pub const SETTINGS_ROUTE_PREFIX: &str = "/api/v1/settings";
@@ -65,17 +69,28 @@ pub enum SettingsServiceError {
     /// outbox Entry 构造失败（topic / idem-key 形态非法——programmer error，topic/event_id 内部派生）。
     #[error("config-version-changed outbox entry build failed")]
     EntryBuild,
-    /// config-version-changed outbox 发射失败（原始错误进 source）。
-    #[error("config-version-changed emit failed")]
-    Emit(#[source] diport::OutboxEmitError),
+    /// 底层存储失败（配置写 / 同事务 outbox append 持久化错误；原始错误进 source，不进 Display/wire）。
+    #[error("config storage failed")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<SettingsError> for SettingsServiceError {
     fn from(error: SettingsError) -> Self {
         match error {
-            SettingsError::KeyInvalid => Self::InvalidKey,
+            // 敏感 key 拒绝与格式非法同属 4xx 客户端键错误（域层保留 SensitiveKey 具体语义供日志/诊断）。
+            SettingsError::KeyInvalid | SettingsError::SensitiveKey => Self::InvalidKey,
             SettingsError::PercentageOutOfRange => Self::PercentageOutOfRange,
-            SettingsError::VersionConflict => Self::VersionConflict,
+        }
+    }
+}
+
+impl From<ConfigRepoError> for SettingsServiceError {
+    fn from(error: ConfigRepoError) -> Self {
+        match error {
+            // 业务：乐观并发 CAS 冲突（读后重写重试可恢复）。
+            ConfigRepoError::VersionConflict => Self::VersionConflict,
+            // 基础设施：保留 source 链（adapter 已 redact 日志；5xx 时 wire strip）。
+            ConfigRepoError::Storage(source) => Self::Storage(source),
         }
     }
 }
@@ -94,29 +109,34 @@ fn wire_version(version: u64) -> i64 {
 }
 
 /// settings 应用服务。必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）。
+///
+/// 读路径经 [`ConfigRepo`]（`configs`）；写路径（publish / rollback）经 **co-tx** [`ConfigUnitOfWork`]
+/// （`writer`）——CAS 配置写 + outbox append 同事务原子（#1232），消除「先 save 后 emit」write-without-event
+/// 窗口（旧 emitter 字段已删除，发射收口进 `writer`）。
 pub struct SettingsService {
     configs: Box<DynConfigRepo<'static>>,
+    writer: Box<DynConfigUnitOfWork<'static>>,
     flags: Box<dyn FlagStore>,
-    emitter: Box<DynOutboxEmitter<'static>>,
     clock: Box<dyn Clock>,
 }
 
 impl SettingsService {
-    /// 构造（必填位置参注入仓储 + outbox emitter + clock）。`pub(crate)`：`flags` 为域内 [`FlagStore`]，不外泄；
-    /// 生产组合根经 `with_seed`（in-mem）或后续 Join 真实 adapter 构造。
+    /// 构造（必填位置参注入读仓储 + 写 co-tx UoW + clock）。`pub(crate)`：`flags` 为域内 [`FlagStore`]，不外泄；
+    /// 开发 / 测试经 `with_seed`（in-mem）构造；生产组合根经后续 Join 注入真实 postgres adapter
+    /// （`PgConfigRepo` + `PgConfigUnitOfWork`）——届时新增非门控 `pub` 构造器（#1272）。
     ///
-    /// # Future：生产构造器（注入真实 postgres ConfigRepo + flag store + PgEmitter）留 Join，届时新增非门控构造器。
+    /// # Future：生产构造器（注入真实 postgres provider + flag store）留组合根 Join，届时新增非门控构造器。
     #[cfg(any(test, feature = "seed-data"))]
     pub(crate) fn new(
         configs: Box<DynConfigRepo<'static>>,
+        writer: Box<DynConfigUnitOfWork<'static>>,
         flags: Box<dyn FlagStore>,
-        emitter: Box<DynOutboxEmitter<'static>>,
         clock: Box<dyn Clock>,
     ) -> Self {
         Self {
             configs,
+            writer,
             flags,
-            emitter,
             clock,
         }
     }
@@ -125,13 +145,22 @@ impl SettingsService {
     ///
     /// 门控于 `test` / `seed-data` feature（编译期边界，对标 identity seed-login）：生产组合根不启用即无
     /// in-mem provider 路径。组合根（journeys）经 `settings = { features = ["seed-data"] }` 启用 + 注入
-    /// `memory::MemEmitter`。真实持久化（postgres adapter impl [`crate::ports::ConfigRepo`] + `PgEmitter`）留 Join。
+    /// `memory::MemEmitter`。读端口 [`InMemConfigRepo`] 与写 UoW [`InMemConfigUnitOfWork`] 经 `Arc` **共享同一
+    /// store**——`find` 读得到 `save_and_append_outbox` 写入。真实持久化（postgres adapter）留 Join。
+    ///
+    /// `emitter` 取**具体** [`diport::OutboxEmitter`] 类型（非 `Box<DynOutboxEmitter>`）：in-mem co-tx UoW 须
+    /// `Sync`（`ConfigUnitOfWork: Send` 端口），dyn wrapper 仅 `Send`；组合根（journey）传 `memory::MemEmitter`
+    /// （`Arc` 底座，`Sync`）。详见 [`InMemConfigUnitOfWork`]。
     #[cfg(any(test, feature = "seed-data"))]
-    pub fn with_seed(emitter: Box<DynOutboxEmitter<'static>>, clock: Box<dyn Clock>) -> Self {
+    pub fn with_seed<E>(emitter: E, clock: Box<dyn Clock>) -> Self
+    where
+        E: diport::OutboxEmitter + Send + Sync + 'static,
+    {
+        let store = new_config_store();
         Self::new(
-            DynConfigRepo::new_box(InMemConfigRepo::new()),
+            DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, emitter)),
             Box::new(InMemFlagStore::new()),
-            emitter,
             clock,
         )
     }
@@ -142,25 +171,27 @@ impl SettingsService {
         tenant: TenantId,
         key: &SettingKey,
     ) -> Result<u64, SettingsServiceError> {
-        let current = self.configs.find(tenant, key).await?;
-        Ok(current.map_or(1, |entry| entry.version().get() + 1))
+        // 真实最高版本（含 tombstone）+ 1——delete 软删后 version 单调不重置，防 event_id 复用（#1249 F1）。
+        // 用 `latest_version` 而非 `find`：`find` 排除 tombstone，删后返 `None` 会误回 v1 → 复用旧 event_id。
+        let current = self.configs.latest_version(tenant, key).await?;
+        Ok(current.map_or(1, |v| v + 1))
     }
 
-    /// 构造 `config-version-changed` [`Entry`] 经 [`OutboxEmitter`] 落 durable outbox（L2 OutboxFact）。
+    /// 构造 `config-version-changed` outbox [`Entry`] + [`OutboxEnvelopeParts`]（纯派生，无 I/O）；实际落
+    /// durable outbox 与配置写**同事务**由 [`ConfigUnitOfWork::save_and_append_outbox`] 承载（L2 OutboxFact）。
     ///
     /// EventId（outbox `event_id` / `IdemKey`）= 内容派生 `{topic}:{tenant}:{key}:v{version}`：每个
     /// (tenant, key, version) 仅一次发射（version 单调递增，publish/rollback 各产新版本），故按内容确定唯一——
     /// 重试同版本产同锚点，经 relay 盖章 broker message_id 流回消费侧实现「至少一次 + 幂等」端到端去重（#1100）。
     /// tenant 是可观测标识（非凭据，ADR-002）；key 是 opaque 配置标识（非 value，无 secret）。
-    #[tracing::instrument(skip_all, err, fields(topic = VERSION_CHANGED_TOPIC, change_kind = %change_kind))]
-    async fn emit_version_changed(
+    fn build_version_changed_entry(
         &self,
         key: &SettingKey,
         tenant: TenantId,
         version: u64,
         change_kind: SettingsConfigChangeKind,
         source_version: Option<u64>,
-    ) -> Result<(), SettingsServiceError> {
+    ) -> Result<(Entry, OutboxEnvelopeParts), SettingsServiceError> {
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.as_str().to_string(),
@@ -184,10 +215,7 @@ impl SettingsService {
             contract_id: CONTRACT_ID.to_string(),
             subject_id: key.as_str().to_string(), // opaque 配置 key（无 PII / secret）
         };
-        self.emitter
-            .emit(entry, envelope)
-            .await
-            .map_err(SettingsServiceError::Emit)
+        Ok((entry, envelope))
     }
 
     /// 写入新配置版本并发射 outbox fact（L2 OutboxFact）。CAS：读当前版本 → 写 +1；并发冲突冒泡 `VersionConflict`。
@@ -207,15 +235,18 @@ impl SettingsService {
             tenant,
             ConfigVersion::new(version),
         );
-        self.configs.save(tenant, entry).await?;
-        self.emit_version_changed(
+        let (outbox_entry, envelope) = self.build_version_changed_entry(
             &key,
             tenant,
             version,
             SettingsConfigChangeKind::Published,
             None,
-        )
-        .await?;
+        )?;
+        // co-tx：CAS 配置写 + outbox append 同事务（both-or-neither）——冲突冒泡 `VersionConflict`，
+        // 存储失败冒泡 `Storage`；二者皆使配置写与 outbox 行共回滚（消除 write-without-event 窗口）。
+        self.writer
+            .save_and_append_outbox(tenant, entry, outbox_entry, envelope)
+            .await?;
         Ok(SettingsConfigPublishResponse {
             data: SettingsConfigPublishData {
                 key: key.as_str().to_string(),
@@ -240,18 +271,22 @@ impl SettingsService {
             .find_version(tenant, &key, to_version)
             .await?
             .ok_or(SettingsServiceError::NotFound)?;
-        let value = source.value().clone();
+        let value = ConfigValue::new(source.value());
         let version = self.next_version(tenant, &key).await?;
         let entry = ConfigEntry::new(key.clone(), value, tenant, ConfigVersion::new(version));
-        self.configs.save(tenant, entry).await?;
-        self.emit_version_changed(
+        let (outbox_entry, envelope) = self.build_version_changed_entry(
             &key,
             tenant,
             version,
             SettingsConfigChangeKind::RolledBack,
             Some(to_version),
-        )
-        .await?;
+        )?;
+        // co-tx：回滚新版本写 + outbox append 同事务（both-or-neither）。源值（`find_version` 读历史行）
+        // 不可变无 TOCTOU；新版本号（`next_version`）存在 read-then-write 窗口，由 CAS INSERT 守住——并发
+        // 冲突返 `VersionConflict`，调用方读后重写重试。
+        self.writer
+            .save_and_append_outbox(tenant, entry, outbox_entry, envelope)
+            .await?;
         Ok(SettingsConfigPublishResponse {
             data: SettingsConfigPublishData {
                 key: key.as_str().to_string(),
@@ -272,10 +307,14 @@ impl SettingsService {
             .configs
             .find(tenant, &key)
             .await?
-            .map(|entry| entry.value().as_str().to_string()))
+            .map(|entry| entry.value().to_string()))
     }
 
-    /// 硬删除 key 及其版本历史（幂等）。
+    /// 软删除 key（tombstone，幂等）：仓储在 `max+1` 追加 tombstone 版本 → version 单调不重置（防 event_id
+    /// 复用，#1249 F1）；此后 `get_value` 返回 `None`，历史值仍可 `find_version` 读。
+    ///
+    /// **不发射删除事件**（已知 gap）：订阅缓存 consumer（flag 缓存 / 投影）感知删除的 `config-version-deleted`
+    /// 事件留订阅缓存单元 #1120（同 `ports.rs` 注记）；届时 delete 亦走 co-tx writer 发 tombstone fact。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn delete(&self, tenant: TenantId, key: &str) -> Result<(), SettingsServiceError> {
         let key = SettingKey::parse(key)?;
@@ -315,7 +354,8 @@ impl Domain for SettingsDomain {
         //   httpserve::mount_primary(router, PrimaryRoute { method, path, contract_id, opt_out }, handler)
         // 挂真实 axum 路由（settings.config-publish 鉴权由 listener auth plan 承载，无 Public 降级）。
         reg.route_group(ListenerKind::Primary, SETTINGS_ROUTE_PREFIX, Ok)?;
-        // TODO(Join): 接 postgres ConfigRepo 时注册 configs_ready readiness probe
+        // pending #1272：接 postgres ConfigRepo 生产 wiring 时注册 configs_ready readiness probe（postgres 不可用
+        // 时不应 ready；本 PR #1249 仅落 adapter，生产组合根 wiring + HTTP 挂载留 Join）。
         Ok(())
     }
 }
@@ -326,7 +366,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use diport::OutboxEmitError;
+    use diport::{OutboxEmitError, OutboxEmitter};
 
     use crate::domain::{FlagState, RolloutPercentage, RolloutRule};
 
@@ -365,10 +405,13 @@ mod tests {
     }
 
     fn service_with(capture: &CapturingEmitter, flags: InMemFlagStore) -> SettingsService {
+        // 读端口与写 UoW 共享同一 store（与 with_seed / postgres 同源一致性）；emitter 取具体
+        // `CapturingEmitter`（`Arc` 底座 Sync）满足 co-tx UoW 的 Send/Sync 约束。
+        let store = new_config_store();
         SettingsService::new(
-            DynConfigRepo::new_box(InMemConfigRepo::new()),
+            DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
             Box::new(flags),
-            DynOutboxEmitter::new_box(capture.clone()),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
@@ -481,7 +524,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn cas_conflict_on_stale_save() {
         // 直接对 repo 验 CAS：写 v1 后，再写 v1（陈旧版本号）→ VersionConflict。
-        let repo = InMemConfigRepo::new();
+        let repo = InMemConfigRepo::from_shared(new_config_store());
         let t = tenant();
         let key = SettingKey::parse("app.k").expect("key");
         let entry_v1 = ConfigEntry::new(
@@ -494,7 +537,7 @@ mod tests {
         let stale = ConfigEntry::new(key, ConfigValue::new("v1b"), t, ConfigVersion::new(1));
         assert!(matches!(
             repo.save(t, stale).await,
-            Err(SettingsError::VersionConflict)
+            Err(ConfigRepoError::VersionConflict)
         ));
     }
 
@@ -707,21 +750,70 @@ mod tests {
     // delete 后底层 find_version 断言已清除 + 不存在 key delete 幂等。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn delete_clears_version_history_and_is_idempotent() {
+    async fn delete_hides_value_and_is_idempotent() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         svc.publish_config(tenant(), publish_req("app.k", "v1"))
             .await
             .expect("publish");
 
-        // 删除。
+        // 软删（tombstone）。
         svc.delete(tenant(), "app.k").await.expect("delete");
 
-        // get_value 已是 None。
+        // get_value 已是 None（latest 为 tombstone）。
         assert_eq!(svc.get_value(tenant(), "app.k").await.expect("get"), None);
 
-        // 对不存在 key 再次 delete 应幂等（返回 Ok）。
+        // 再次 delete 应幂等（latest 已 tombstone → no-op，返回 Ok）。
         svc.delete(tenant(), "app.k").await.expect("幂等 delete");
+    }
+
+    // F1 回归（service 层）：delete 软删后 republish **不重置版本**——next_version 经 latest_version（含
+    // tombstone），故 publish v1 → delete(tombstone v2) → publish 得 v3（而非 v1），event_id 不复用。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn delete_then_republish_continues_version_not_reset() {
+        let capture = CapturingEmitter::default();
+        let svc = service_with(&capture, InMemFlagStore::new());
+
+        let v1 = svc
+            .publish_config(tenant(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish v1");
+        assert_eq!(v1.data.version, 1);
+
+        svc.delete(tenant(), "app.k").await.expect("delete");
+
+        // republish：版本继续递增（v1 + tombstone v2 → v3），**非**重置回 1。
+        let v3 = svc
+            .publish_config(tenant(), publish_req("app.k", "v1-again"))
+            .await
+            .expect("republish");
+        assert_eq!(
+            v3.data.version, 3,
+            "delete 软删后 republish 版本应继续（v3），不重置回 1"
+        );
+        assert_eq!(
+            svc.get_value(tenant(), "app.k").await.expect("get"),
+            Some("v1-again".to_string()),
+            "republish 后活跃值恢复"
+        );
+
+        // 发射事实：publish v1 + republish v3 = 2 条，version 各异 → event_id 不复用（防 outbox 吞事件）。
+        let facts = emitted_facts(&capture);
+        assert_eq!(
+            facts.len(),
+            2,
+            "delete 不发事件；publish v1 + republish v3 = 2 条 fact"
+        );
+        assert_eq!(facts[0].payload.version, 1);
+        assert_eq!(
+            facts[1].payload.version, 3,
+            "republish 事件版本 = 3（新 event_id）"
+        );
+        assert_ne!(
+            facts[0].idem, facts[1].idem,
+            "delete+republish 的 event_id 不复用"
+        );
     }
 
     // 多 key 独立版本：publish "app.a" 与 "app.b" 各 v1，两者 version 均为 1。
@@ -745,63 +837,73 @@ mod tests {
     }
 
     // F2：service 层并发 CAS 回归——两个并发 publish 同 key，恰一个成功一个 VersionConflict，只发一条 fact。
-    // barrier 迫使两个 publish 都读到同版本（None）后再各自 save，制造 read-then-write 竞争。
+    // barrier 迫使两个 publish 都读到同版本（latest_version=None）后再各自 save，制造 read-then-write 竞争。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn concurrent_publish_same_key_one_wins_one_conflicts() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // 前 2 次 find 在 barrier(2) 同步；后续 find 直通（避免末尾 get_value 死锁）。
+        // next_version 经 latest_version 读版本——前 2 次在 barrier(2) 同步；后续直通（避免末尾死锁）。
         struct BarrierConfigRepo {
             inner: InMemConfigRepo,
             barrier: tokio::sync::Barrier,
-            finds: AtomicUsize,
+            version_reads: AtomicUsize,
         }
         impl ConfigRepo for BarrierConfigRepo {
             async fn find(
                 &self,
                 tenant: TenantId,
                 key: &SettingKey,
-            ) -> Result<Option<ConfigEntry>, SettingsError> {
-                let result = self.inner.find(tenant, key).await;
-                if self.finds.fetch_add(1, Ordering::SeqCst) < 2 {
-                    self.barrier.wait().await;
-                }
-                result
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.inner.find(tenant, key).await
             }
             async fn find_version(
                 &self,
                 tenant: TenantId,
                 key: &SettingKey,
                 version: u64,
-            ) -> Result<Option<ConfigEntry>, SettingsError> {
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
                 self.inner.find_version(tenant, key, version).await
+            }
+            async fn latest_version(
+                &self,
+                tenant: TenantId,
+                key: &SettingKey,
+            ) -> Result<Option<u64>, ConfigRepoError> {
+                let result = self.inner.latest_version(tenant, key).await;
+                if self.version_reads.fetch_add(1, Ordering::SeqCst) < 2 {
+                    self.barrier.wait().await;
+                }
+                result
             }
             async fn save(
                 &self,
                 tenant: TenantId,
                 entry: ConfigEntry,
-            ) -> Result<(), SettingsError> {
+            ) -> Result<(), ConfigRepoError> {
                 self.inner.save(tenant, entry).await
             }
             async fn delete(
                 &self,
                 tenant: TenantId,
                 key: &SettingKey,
-            ) -> Result<(), SettingsError> {
+            ) -> Result<(), ConfigRepoError> {
                 self.inner.delete(tenant, key).await
             }
         }
 
         let capture = CapturingEmitter::default();
+        // 读端口（barrier-wrapped）与写 UoW 共享同一 store：barrier 同步两 find（皆读 None）后，各自经
+        // writer.save_and_append_outbox 对共享 store CAS，制造 read-then-write 竞争（恰一胜一冲突）。
+        let store = new_config_store();
         let svc = SettingsService::new(
             DynConfigRepo::new_box(BarrierConfigRepo {
-                inner: InMemConfigRepo::new(),
+                inner: InMemConfigRepo::from_shared(store.clone()),
                 barrier: tokio::sync::Barrier::new(2),
-                finds: AtomicUsize::new(0),
+                version_reads: AtomicUsize::new(0),
             }),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
             Box::new(InMemFlagStore::new()),
-            DynOutboxEmitter::new_box(capture.clone()),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),

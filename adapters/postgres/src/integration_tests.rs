@@ -1453,3 +1453,532 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
     store.shutdown().await?;
     Ok(())
 }
+
+// ── PgConfigRepo / PgConfigUnitOfWork：配置仓储 + co-tx 集成测试（#1249）─────────────
+//
+// OUTBOX-COTX-CONFIG-01 anti-vacuity：正向 `tc5` 证真实 method commit 两行皆在 ↔ 负向双覆盖——`tc6` 经真实
+// `co_tx_with_outbox`（业务写真插一行后强制 Err）证两写共回滚，`tc7` 驱动真实 `save_and_append_outbox` 的 CAS
+// 冲突分支证「冲突 → 无 outbox 行」（write-without-event 不发生）。
+
+use settings::ports::{ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey};
+
+use crate::PgConfigRepo;
+use crate::cotx::co_tx_with_outbox;
+
+/// config 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值，避免两 const 漂移）。
+const CONFIG_TENANT: &str = COTX_TENANT_A;
+/// 第二租户（跨租户隔离测试 tc9）——与 `application.rs` 单测 TENANT_B 同值。
+const CONFIG_TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
+/// config-version-changed 契约 topic 局部单源。
+const CONFIG_VERSION_CHANGED_TOPIC: &str = "settings.config-version-changed";
+
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+fn config_tenant() -> TenantId {
+    TenantId::parse(CONFIG_TENANT).unwrap()
+}
+
+/// 构造 ConfigEntry（经 `ConfigEntry::hydrate` 跨 crate pub funnel）。
+#[allow(clippy::unwrap_used)]
+fn config_entry(key: &str, value: &str, version: u64) -> ConfigEntry {
+    ConfigEntry::hydrate(
+        SettingKey::parse(key).unwrap(),
+        value,
+        config_tenant(),
+        version,
+    )
+}
+
+/// 构造 config-version-changed outbox Entry。
+#[allow(clippy::unwrap_used)]
+fn config_outbox_entry(event_id: &str) -> Entry {
+    Entry::new(
+        Topic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
+        IdemKey::parse(event_id).unwrap(),
+        br#"{"key":"app.k","version":1}"#.to_vec(),
+    )
+}
+
+/// 构造 config-version-changed envelope（opaque subject = 配置 key）。
+fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
+    OutboxEnvelopeParts {
+        domain: "settings".to_string(),
+        contract_id: CONFIG_VERSION_CHANGED_TOPIC.to_string(),
+        subject_id: subject.to_string(),
+    }
+}
+
+/// setup：应用 migration（含 config_entries 表），清空 config_entries（防测试间污染）。outbox 用唯一
+/// event_id 隔离断言，无需全表清。integration profile 串行执行（`.config/nextest.toml` `integration`
+/// group `max-threads = 1` + self-provision 容器每轮独占），故全表 DELETE 无并发竞态。
+async fn setup_config(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    store.run_migrations().await?;
+    sqlx::query("DELETE FROM config_entries")
+        .execute(&store.pool)
+        .await?;
+    Ok(())
+}
+
+/// tc1：save → find round-trip（未写 → None；写后 getter 全字段正确）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1_config_save_find_roundtrip() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.timeout").unwrap();
+
+    assert!(repo.find(tenant, &key).await?.is_none(), "未写入 → None");
+
+    repo.save(tenant, config_entry("app.timeout", "30s", 1))
+        .await?;
+    let found = repo.find(tenant, &key).await?.unwrap();
+    assert_eq!(found.value(), "30s", "find 取回值");
+    assert_eq!(found.version(), 1, "find 取回版本");
+    assert_eq!(found.key().as_str(), "app.timeout", "find 取回 key");
+    assert_eq!(found.tenant(), tenant, "find 取回 tenant（tenant-correct）");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc2：版本历史——find = max(version)；find_version 取精确历史版本；缺失版本 → None。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc2_config_find_version_returns_history() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.k").unwrap();
+
+    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
+    repo.save(tenant, config_entry("app.k", "v2", 2)).await?;
+
+    assert_eq!(
+        repo.find(tenant, &key).await?.unwrap().value(),
+        "v2",
+        "find = 最高版本"
+    );
+    assert_eq!(
+        repo.find_version(tenant, &key, 1).await?.unwrap().value(),
+        "v1",
+        "find_version(1) = 历史 v1"
+    );
+    assert_eq!(
+        repo.find_version(tenant, &key, 2).await?.unwrap().value(),
+        "v2"
+    );
+    assert!(
+        repo.find_version(tenant, &key, 9).await?.is_none(),
+        "缺失版本 → None"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc3：CAS——陈旧版本（重复）与跳版（gap）均 VersionConflict；恰 max+1 成功。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc3_config_save_cas_conflict() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+
+    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
+    // 陈旧：再写 v1 → 冲突。
+    assert!(matches!(
+        repo.save(tenant, config_entry("app.k", "v1b", 1)).await,
+        Err(ConfigRepoError::VersionConflict)
+    ));
+    // 跳版：max 是 1，写 v3 → 冲突（非 max+1）。
+    assert!(matches!(
+        repo.save(tenant, config_entry("app.k", "v3", 3)).await,
+        Err(ConfigRepoError::VersionConflict)
+    ));
+    // 恰 max+1：v2 成功。
+    repo.save(tenant, config_entry("app.k", "v2", 2)).await?;
+    assert_eq!(
+        repo.find(tenant, &SettingKey::parse("app.k").unwrap())
+            .await?
+            .unwrap()
+            .value(),
+        "v2"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc4：delete 软删（tombstone）——find 返 None；历史值行**保留**（find_version 可读）；幂等。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.k").unwrap();
+
+    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
+    repo.save(tenant, config_entry("app.k", "v2", 2)).await?;
+
+    repo.delete(tenant, &key).await?;
+    assert!(
+        repo.find(tenant, &key).await?.is_none(),
+        "delete 后 find None（latest 为 tombstone）"
+    );
+    // 软删：历史值行保留——find_version 仍可读 v1/v2（audit 友好）。
+    assert_eq!(
+        repo.find_version(tenant, &key, 1).await?.unwrap().value(),
+        "v1",
+        "历史 v1 保留"
+    );
+    assert_eq!(
+        repo.find_version(tenant, &key, 2).await?.unwrap().value(),
+        "v2",
+        "历史 v2 保留"
+    );
+    // tombstone 版本（v3）本身 find_version 返 None。
+    assert!(
+        repo.find_version(tenant, &key, 3).await?.is_none(),
+        "tombstone 版本 v3 不可读"
+    );
+    // latest_version 含 tombstone（= 3），version 不重置。
+    assert_eq!(repo.latest_version(tenant, &key).await?, Some(3));
+    // 幂等：latest 已 tombstone → 再删 no-op（latest_version 不变）。
+    repo.delete(tenant, &key).await?;
+    assert_eq!(
+        repo.latest_version(tenant, &key).await?,
+        Some(3),
+        "再删幂等：不追加新 tombstone"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc5：co-tx commit → config 行 + outbox 行皆在（OUTBOX-COTX-CONFIG-01 正向）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+    let event_id = unique_event_id("cfg-tc5-evt");
+
+    repo.save_and_append_outbox(
+        tenant,
+        config_entry("app.k", "v1", 1),
+        config_outbox_entry(&event_id),
+        config_envelope("app.k"),
+    )
+    .await?;
+
+    // config 行：恰 1（v1），且 tenant_id 正确落库（tenant-correct，co-tx SET LOCAL + 显式列写入；对齐 t11）。
+    let crow: (i64, String) = sqlx::query_as(
+        "SELECT count(*), max(tenant_id::text) FROM config_entries WHERE config_key = $1 AND version = 1",
+    )
+    .bind("app.k")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(crow.0, 1, "config 行应写入");
+    assert_eq!(
+        crow.1, CONFIG_TENANT,
+        "config 行 tenant_id（tenant-correct）"
+    );
+    // outbox 行：恰 1。
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 1, "outbox 行应写入（co-tx 两行皆在）");
+    // 值经 find 取回正确。
+    assert_eq!(
+        repo.find(tenant, &SettingKey::parse("app.k").unwrap())
+            .await?
+            .unwrap()
+            .value(),
+        "v1"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc6：co-tx 业务写后强制 Err → config 行 + outbox 行**共回滚**（both-or-neither，真实 `co_tx_with_outbox`）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let tenant = config_tenant();
+    let tenant_uuid = tenant.as_uuid().to_string();
+    let event_id = unique_event_id("cfg-tc6-evt");
+    let entry = config_outbox_entry(&event_id);
+    let env = OutboxEnvelope::new(
+        "settings".to_string(),
+        CONFIG_VERSION_CHANGED_TOPIC.to_string(),
+        OutboxMetadata::new().with_subject_id("app.rollback".to_string()),
+    );
+
+    // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
+    let result = co_tx_with_outbox(
+        &store.pool,
+        &tenant_uuid,
+        &entry,
+        &env,
+        move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO config_entries (tenant_id, config_key, version, value) \
+                     VALUES ($1::uuid, $2, $3, $4)",
+                )
+                .bind(CONFIG_TENANT)
+                .bind("app.rollback")
+                .bind(1_i64)
+                .bind("v1")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
+            })
+        },
+        |e| ConfigRepoError::Storage(Box::new(e)),
+    )
+    .await;
+    assert!(matches!(result, Err(ConfigRepoError::VersionConflict)));
+
+    // both-or-neither：config 行回滚（不落库）+ outbox 行不落库。
+    let cfg_cnt: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind("app.rollback")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cfg_cnt.0, 0, "业务写失败 → 配置行回滚（不落库）");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        ob_cnt.0, 0,
+        "业务写失败 → outbox 行不落库（both-or-neither）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc7：**真实 method** `save_and_append_outbox` 的 CAS 冲突分支 → VersionConflict 且**无 outbox 行**
+/// （write-without-event 不发生）；原版本不被覆盖。
+///
+/// 与 tc6（直测 `co_tx_with_outbox` 骨架的业务写失败回滚）互补：tc7 驱动**真实 method** 的 rollback 路径
+/// （CAS Err → 整事务回滚 → outbox 不落库），对齐 session t14「直测真实 method rollback 分支」范式，消除 tc6
+/// 仅测骨架的盲区——OUTBOX-COTX-CONFIG-01 anti-vacuity（正向 tc5 ↔ 负向 tc6+tc7）由此闭合。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+
+    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
+
+    // 以陈旧 v1 走 co-tx → CAS 冲突 → 整事务回滚（无 outbox 行）。
+    let event_id = unique_event_id("cfg-tc7-evt");
+    let result = repo
+        .save_and_append_outbox(
+            tenant,
+            config_entry("app.k", "v1-stale", 1),
+            config_outbox_entry(&event_id),
+            config_envelope("app.k"),
+        )
+        .await;
+    assert!(matches!(result, Err(ConfigRepoError::VersionConflict)));
+
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        ob_cnt.0, 0,
+        "CAS 冲突 → 无 outbox 行（write-without-event 不发生）"
+    );
+    // 原 v1 不被覆盖。
+    assert_eq!(
+        repo.find(tenant, &SettingKey::parse("app.k").unwrap())
+            .await?
+            .unwrap()
+            .value(),
+        "v1",
+        "冲突写不覆盖原值"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc8：storage 错误通道——关池后 find 返回 `ConfigRepoError::Storage`（基础设施错误分层映射，保留 source）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc8_config_find_maps_storage_error() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+
+    // 关池（PgConfigRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 sqlx 错误 → Storage。
+    store.shutdown().await?;
+    let result = repo
+        .find(tenant, &SettingKey::parse("app.k").unwrap())
+        .await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::Storage(_))),
+        "关池后 find 应映射为 ConfigRepoError::Storage（基础设施错误分层，保留 source）"
+    );
+
+    Ok(())
+}
+
+/// tc9：**跨租户隔离**——tenant A 的配置对 tenant B 不可见，独立版本空间，delete 互不影响。
+///
+/// pre-GA 无 RLS policy，租户隔离完全依赖各查询的显式 `WHERE tenant_id = $1::uuid`——本例是该约束在真实
+/// postgres 路径下的**唯一自动化门**（in-mem 路径由 `application.rs::cross_tenant_isolation` 守，二者实现不同）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc9_config_cross_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant_a = config_tenant();
+    let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
+    let key = SettingKey::parse("app.k").unwrap();
+
+    // tenant A 写 app.k v1。
+    repo.save(
+        tenant_a,
+        ConfigEntry::hydrate(SettingKey::parse("app.k").unwrap(), "a-secret", tenant_a, 1),
+    )
+    .await?;
+
+    // tenant B 读同 key → None（find / find_version 均不泄漏 A 的数据）。
+    assert!(
+        repo.find(tenant_b, &key).await?.is_none(),
+        "tenant B 不应看到 tenant A 的 config（find 隔离）"
+    );
+    assert!(
+        repo.find_version(tenant_b, &key, 1).await?.is_none(),
+        "tenant B find_version 同样隔离"
+    );
+
+    // tenant B 写同 key v1（独立版本空间，不受 A 的 v1 影响）→ 成功；各读各的值。
+    repo.save(
+        tenant_b,
+        ConfigEntry::hydrate(SettingKey::parse("app.k").unwrap(), "b-value", tenant_b, 1),
+    )
+    .await?;
+    assert_eq!(
+        repo.find(tenant_a, &key).await?.unwrap().value(),
+        "a-secret",
+        "tenant A 值不被 tenant B 覆盖"
+    );
+    assert_eq!(
+        repo.find(tenant_b, &key).await?.unwrap().value(),
+        "b-value",
+        "tenant B 读自己的值"
+    );
+
+    // tenant B delete 不影响 tenant A。
+    repo.delete(tenant_b, &key).await?;
+    assert!(
+        repo.find(tenant_b, &key).await?.is_none(),
+        "tenant B 删除后自身不可见"
+    );
+    assert_eq!(
+        repo.find(tenant_a, &key).await?.unwrap().value(),
+        "a-secret",
+        "tenant B delete 不影响 tenant A"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 构造 application 同款 event_id（`{topic}:{tenant}:{key}:v{version}`）——tc10 验 delete+republish 不复用。
+fn config_event_id(tenant: TenantId, key: &str, version: u64) -> String {
+    format!("{CONFIG_VERSION_CHANGED_TOPIC}:{tenant}:{key}:v{version}")
+}
+
+/// tc10：**F1 回归（postgres 层，exercises ON CONFLICT dedup）**——delete 软删后 republish 不复用 event_id，
+/// outbox 事件不被吞（write-without-event 不重现）。
+///
+/// 旧 bug：delete 物理清历史 → republish 经 `latest_version` 回 v1 → event_id `...:v1` 复用 → outbox
+/// `append_outbox` 的 `ON CONFLICT (event_id) DO NOTHING` 吞掉新事件（config 写入但事件丢失）。tombstone 软删
+/// 使 version 单调（v1 → tombstone v2 → republish v3）→ event_id 不复用 → 两次 publish 各落一条 outbox 行。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store);
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.k").unwrap();
+
+    // publish v1 经 co-tx（content-派生 event_id ...:v1）。
+    let ev1 = config_event_id(tenant, "app.k", 1);
+    repo.save_and_append_outbox(
+        tenant,
+        config_entry("app.k", "v1", 1),
+        config_outbox_entry(&ev1),
+        config_envelope("app.k"),
+    )
+    .await?;
+
+    // delete → tombstone v2（version 不重置）。
+    repo.delete(tenant, &key).await?;
+
+    // republish：下一版本 = latest_version(含 tombstone) + 1 = 3（**非**重置回 1，旧 bug 的根因）。
+    let next = repo
+        .latest_version(tenant, &key)
+        .await?
+        .map_or(1, |v| v + 1);
+    assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
+    let ev3 = config_event_id(tenant, "app.k", next);
+    assert_ne!(ev1, ev3, "republish event_id 不复用（v1 ≠ v3）");
+    repo.save_and_append_outbox(
+        tenant,
+        config_entry("app.k", "v1-again", next),
+        config_outbox_entry(&ev3),
+        config_envelope("app.k"),
+    )
+    .await?;
+
+    // 两次 publish 各落一条 outbox 行——republish 事件未被 ON CONFLICT 吞。
+    let ob1: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&ev1)
+        .fetch_one(&store.pool)
+        .await?;
+    let ob3: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&ev3)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob1.0, 1, "v1 outbox 行存在");
+    assert_eq!(
+        ob3.0, 1,
+        "republish (v3) outbox 行存在——event_id 不复用，事件未被吞"
+    );
+    // 活跃值恢复。
+    assert_eq!(
+        repo.find(tenant, &key).await?.unwrap().value(),
+        "v1-again",
+        "republish 后活跃值恢复"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}

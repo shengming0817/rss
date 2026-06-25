@@ -32,7 +32,7 @@ const MAX_KEY_LEN: usize = 256;
 pub struct SettingKey(String);
 
 impl SettingKey {
-    /// 解析并校验配置键格式（`<namespace>.<key>`，恰两段、均非空、字符集 `[a-zA-Z0-9_-]`）。
+    /// 解析并校验配置键格式（`<namespace>.<key>`，恰两段、均非空、字符集 `[a-zA-Z0-9_-]`）；并拒敏感命名空间。
     pub fn parse(raw: &str) -> Result<Self, SettingsError> {
         if raw.len() > MAX_KEY_LEN {
             return Err(SettingsError::KeyInvalid);
@@ -45,6 +45,10 @@ impl SettingKey {
         };
         if !is_key_segment(namespace) || !is_key_segment(key) {
             return Err(SettingsError::KeyInvalid);
+        }
+        // 敏感 namespace 守卫（#1249 F2）：settings 明文落库不承载 secret——key 命中敏感词即拒（fail-closed）。
+        if is_sensitive_key(raw) {
+            return Err(SettingsError::SensitiveKey);
         }
         Ok(Self(raw.to_string()))
     }
@@ -61,6 +65,18 @@ fn is_key_segment(segment: &str) -> bool {
         && segment
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// 敏感配置键守卫（#1249 F2）：settings 配置值明文落库（postgres `config_entries.value text`），故**禁止**
+/// 承载 secret——key 任一处含 `secret`/`token`/`password`/`credential`（大小写不敏感子串）即拒。
+///
+/// fail-closed **宁误拒**：substring 匹配会过拒形似但非 secret 的 key（如 `app.token_bucket`），这是刻意的安全
+/// 取舍（明文落库面零容忍）；合法 secret 经 AEAD 加密 / Vault reference 的彻底支持见 #1274（届时放开 + 加密
+/// 存储）。守卫落在 `SettingKey::parse` 单一 newtype funnel（构造唯一入口，类型层不可绕过）。
+fn is_sensitive_key(raw: &str) -> bool {
+    const SENSITIVE: &[&str] = &["secret", "token", "password", "credential"];
+    let lower = raw.to_ascii_lowercase();
+    SENSITIVE.iter().any(|needle| lower.contains(needle))
 }
 
 // ---------------------------------------------------------------------------
@@ -145,24 +161,43 @@ impl ConfigEntry {
         }
     }
 
-    /// 取键引用。
-    pub(crate) fn key(&self) -> &SettingKey {
+    /// 从受信源（adapter DB row）跨 crate 重建条目（受控构造 funnel：字段私有 + 经此入口，外部不可伪造）。
+    ///
+    /// adapter（如 postgres）从**已校验**持久化行 hydrate：`value` 为 opaque 原始串（不在此重新类型化解释）、
+    /// `version` 为持久化版本号。与 [`ConfigEntry::new`] 同 funnel（私有字段），但 `pub` 供独立 adapter crate
+    /// 跨 crate 构造（#1215 / ADR-005 Option 2：域形实体经域 crate `pub` 入口由 adapter 重建）。
+    pub fn hydrate(
+        key: SettingKey,
+        value: impl Into<String>,
+        tenant: vocab::TenantId,
+        version: u64,
+    ) -> Self {
+        Self {
+            key,
+            value: ConfigValue::new(value),
+            tenant,
+            version: ConfigVersion::new(version),
+        }
+    }
+
+    /// 取键引用（`SettingKey` 已 `pub`；出现在公开 [`crate::ports::ConfigRepo`] 签名 + adapter 持久化读取路径）。
+    pub fn key(&self) -> &SettingKey {
         &self.key
     }
 
-    /// 取值引用。
-    pub(crate) fn value(&self) -> &ConfigValue {
-        &self.value
+    /// 取配置值原始串（opaque；内部 `ConfigValue` newtype 不外泄——wire / adapter 面以裸 `&str` 表达）。
+    pub fn value(&self) -> &str {
+        self.value.as_str()
     }
 
     /// 取租户 ID。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> vocab::TenantId {
         self.tenant
     }
 
-    /// 取版本。
-    pub(crate) fn version(&self) -> &ConfigVersion {
-        &self.version
+    /// 取版本号（wire / adapter 面以裸 `u64` 表达，不外泄内部 `ConfigVersion` newtype）。
+    pub fn version(&self) -> u64 {
+        self.version.get()
     }
 }
 
@@ -631,12 +666,12 @@ pub(crate) fn diff(a: &ConfigEntry, b: &ConfigEntry) -> ConfigDelta {
     if a.key().as_str() != b.key().as_str() || a.tenant() != b.tenant() {
         return ConfigDelta::KeyMismatch;
     }
-    if a.value().as_str() == b.value().as_str() {
+    if a.value() == b.value() {
         ConfigDelta::Unchanged
     } else {
         ConfigDelta::ValueChanged {
-            old: a.value().clone(),
-            new: b.value().clone(),
+            old: ConfigValue::new(a.value()),
+            new: ConfigValue::new(b.value()),
         }
     }
 }
@@ -645,19 +680,39 @@ pub(crate) fn diff(a: &ConfigEntry, b: &ConfigEntry) -> ConfigDelta {
 // 错误枚举
 // ---------------------------------------------------------------------------
 
-/// settings 域错误（库枚举；message 为 const 静态字面量）。出现在公开 [`crate::ports::ConfigRepo`] 签名 ⇒ `pub`。
+/// settings 域**校验**错误（库枚举；message 为 const 静态字面量）。出现在 `SettingKey::parse` 等 funnel 与
+/// 公开 [`crate::ports::ConfigRepo`] 派生签名 ⇒ `pub`。仓储 / UoW 存储与并发错误见 [`ConfigRepoError`]（分层）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SettingsError {
     /// 配置键格式非法（namespace 校验未通过）。
     #[error("setting key is invalid")]
     KeyInvalid,
+    /// 配置键命中敏感命名空间（secret/token/password/credential）——settings 明文落库不承载 secret（#1249 F2）。
+    #[error(
+        "setting key uses a sensitive namespace; store secrets in a secret store, not settings"
+    )]
+    SensitiveKey,
     /// 灰度百分比超出 0..=100 范围。
     #[error("percentage out of range; must be 0..=100")]
     PercentageOutOfRange,
-    /// 版本冲突（乐观并发写冲突）。
-    #[error("version conflict")]
+}
+
+/// 配置仓储 / UoW 端口错误（[`crate::ports::ConfigRepo`] / [`crate::ports::ConfigUnitOfWork`] 返回）。
+///
+/// **业务错误与基础设施错误分层**（#1226）：[`ConfigRepoError::VersionConflict`] 是乐观并发 CAS 业务冲突
+/// （读后重写重试可恢复）；[`ConfigRepoError::Storage`] 包底层持久化错误（如 sqlx），保留 `#[source]` 链供
+/// 服务端日志（adapter 侧经 `secure::redact_error` 脱敏，永不进 wire）。域 crate **不依赖**具体存储 driver，
+/// 故 `Storage` 持 `Box<dyn Error + Send + Sync>`——adapter 在边界把存储错误装箱注入（保留 source、零 sqlx 反向依赖）。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConfigRepoError {
+    /// 版本冲突（乐观并发写：`entry.version()` ≠ 当前最高版本 + 1）。
+    #[error("config version conflict")]
     VersionConflict,
+    /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
+    #[error("config storage error")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +755,30 @@ mod tests {
     fn setting_key_roundtrips_as_str() {
         let key = SettingKey::parse("app.timeout").expect("valid");
         assert_eq!(key.as_str(), "app.timeout");
+    }
+
+    // F2 守卫：格式合法但命中敏感命名空间（secret/token/password/credential，大小写不敏感子串）→ SensitiveKey。
+    #[rstest]
+    #[case("app.secret")] // 命中 "secret"
+    #[case("db.password")] // 命中 "password"
+    #[case("auth.token")] // 命中 "token"
+    #[case("svc.credential")] // 命中 "credential"
+    #[case("app.API_TOKEN")] // 大小写不敏感
+    #[case("app.token_bucket")] // fail-closed 过拒（形似非 secret，刻意拒）
+    fn setting_key_rejects_sensitive_namespace(#[case] raw: &str) {
+        assert!(matches!(
+            SettingKey::parse(raw),
+            Err(SettingsError::SensitiveKey)
+        ));
+    }
+
+    // 非敏感 key（含与敏感词无关字符）正常通过——守卫不误伤普通 key。
+    #[rstest]
+    #[case("app.timeout")]
+    #[case("app.k")]
+    #[case("ui.theme")]
+    fn setting_key_accepts_non_sensitive(#[case] raw: &str) {
+        assert!(SettingKey::parse(raw).is_ok());
     }
 
     // --- FlagKey::parse ----------------------------------------------------
