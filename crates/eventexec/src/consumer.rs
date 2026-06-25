@@ -21,13 +21,15 @@ use diport::{Message, MessageStream};
 
 use crate::MAX_REDELIVERY;
 
-// ── 安全摘要常量（≥3 处使用抽 const，rust-standards §工程护栏）────────────────
+// ── DLX 摘要 fallback 常量（仅 None 防御；正常路径走 HandleResult::error_summary，#1125）──────────
 
-/// DLX 摘要：requeue 预算耗尽（不含 payload 原文，HandleResult 已丢弃 error 详情；
-/// 见 #1118 冻结——更丰富摘要需扩 HandleResult，属后续）。
+/// DLX 摘要 fallback：requeue 耗尽但 `HandleResult::error_summary()` 为 `None`——仅防御未来 non_exhaustive
+/// `Disposition` 新变体（被 `_ => {}` 保守当 Requeue 却从不 set 摘要）。正常 requeue 路径用 handler 的 error
+/// kind 摘要（#1125），此 fallback 不可达于现有变体，非死代码（`// reason:` 见 call-site）。
 const SUMMARY_REQUEUE_EXHAUSTED: &str = "requeue budget exhausted";
 
-/// DLX 摘要：handler 永久 reject（disposition 语义级，不含 handler 原始错误）。
+/// DLX 摘要 fallback：reject 但 `HandleResult::error_summary()` 为 `None`（类型层 ack 形 `None` 防御）。
+/// 正常 reject 路径用 handler 的 PermanentError kind 摘要（#1125）。
 const SUMMARY_PERMANENT_REJECTION: &str = "permanent rejection";
 
 // ── ConsumerMeta（消费契约元数据）─────────────────────────────────────────────
@@ -152,9 +154,12 @@ async fn handle_fresh<S, H>(
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
+    // requeue 路径记下最近一次 error kind 摘要，耗尽时随 DLX 落日志（#1125）。
+    let mut last_requeue_summary: Option<&'static str> = None;
     // 含首投在内至多 MAX_REDELIVERY 次（bounded，对齐 watermill retry.go MaxRetries+1 次尝试）。
     for attempt in 1..=MAX_REDELIVERY {
-        match handler(msg.clone()).await.disposition() {
+        let result = handler(msg.clone()).await;
+        match result.disposition() {
             consistency::outbox::Disposition::Ack => {
                 commit_key(idempotency, key, msg.id.as_str()).await;
                 return;
@@ -167,15 +172,22 @@ async fn handle_fresh<S, H>(
                     meta,
                     &msg,
                     attempt,
-                    SUMMARY_PERMANENT_REJECTION,
+                    // reject 构造器恒携 Some(kind 摘要，#1125)；unwrap_or 是对 `None` 的防御
+                    // （类型层 ack 形 None），非死代码——正常路径取真实 error kind 摘要。
+                    result
+                        .error_summary()
+                        .unwrap_or(SUMMARY_PERMANENT_REJECTION),
                 )
                 .await;
                 return;
             }
             consistency::outbox::Disposition::Requeue => {
-                // 继续循环重投；耗尽在循环外收口。
+                // 记下本轮 requeue 的 error kind 摘要；耗尽时随 DLX 落日志（#1125）。
+                last_requeue_summary = result.error_summary();
             }
-            // reason: Disposition 是 #[non_exhaustive]，保守按 Requeue 处理未知变体（防耗尽后进 DLX）。
+            // reason: Disposition 是 #[non_exhaustive]，未知变体保守 continue（非终态，对齐 Requeue 的循环
+            // 续命，防误判终态后进 DLX）；但**不** set last_requeue_summary，故耗尽时摘要走
+            // SUMMARY_REQUEUE_EXHAUSTED fallback（无 kind 摘要可取）。
             _ => {}
         }
     }
@@ -187,7 +199,9 @@ async fn handle_fresh<S, H>(
         meta,
         &msg,
         MAX_REDELIVERY,
-        SUMMARY_REQUEUE_EXHAUSTED,
+        // 正常 requeue 路径恒 Some(kind 摘要)；unwrap_or 仅防御未来未知 Disposition 变体经 `_ => {}`
+        // 未 set 摘要时的 `None`（非死代码，见 SUMMARY_REQUEUE_EXHAUSTED 注释）。
+        last_requeue_summary.unwrap_or(SUMMARY_REQUEUE_EXHAUSTED),
     )
     .await;
 }
@@ -230,8 +244,9 @@ where
 ///
 /// 各步错误结构化 error 日志（不 panic）。
 ///
-/// `error_summary` 是安全摘要：仅 disposition 语义级，不含 handler error/payload 原文。
-/// HandleResult 不携带 error 详情（#1118 冻结）；更丰富摘要需扩 HandleResult，属后续。
+/// `error_summary` 是安全摘要：`&'static str` const（来自 handler 的 error kind message，经
+/// `HandleResult::error_summary()` 流到此处，#1125），不含 handler error/payload 原文。PII-safe（const
+/// literal，无 runtime 数据），下游 `DeadLetterSummary::new` 仍强制 const 收口。
 async fn dead_letter<S>(
     dlx: &DynDeadLetterStore<'static>,
     idempotency: &Arc<S>,
@@ -625,6 +640,21 @@ mod tests {
         }
     }
 
+    /// 恒 Reject handler（`Invariant` kind；用于核 error kind 摘要随 HandleResult 流到 DLX，#1125）。
+    fn handler_reject_invariant(
+        counter: Arc<AtomicU32>,
+    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+        move |_msg| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                HandleResult::reject(consistency::outbox::PermanentError::new(
+                    consistency::outbox::PermanentErrorKind::Invariant,
+                ))
+            })
+        }
+    }
+
     // ── TC1：handler 恒 Ack ──────────────────────────────────────────────────
 
     /// TC1：handler 恒 Ack → handler 调 1 次、commit 1 次、无 dlx 写。
@@ -681,9 +711,11 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         // reason: 测试断言前置 assert_eq 已验证 write_count==1，last_record 必然 Some；item-level carve-out。
         let (summary, attempts) = dlx_store.last_record().unwrap();
-        assert!(
-            summary.contains("exhausted"),
-            "summary 应含 exhausted: {summary}"
+        // #1125：requeue 耗尽后 DLX 摘要反映 handler 的 EngineError kind（Transient），
+        // 而非旧通用常量 "requeue budget exhausted"。
+        assert_eq!(
+            summary, "transient engine error",
+            "summary 应为 requeue kind 的 const message: {summary}"
         );
         assert_eq!(
             attempts, MAX_REDELIVERY,
@@ -720,11 +752,43 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         // reason: 测试断言前置 assert_eq 已验证 write_count==1，last_record 必然 Some；item-level carve-out。
         let (summary, _attempts) = dlx_store.last_record().unwrap();
-        assert!(
-            summary.contains("permanent"),
-            "summary 应含 permanent: {summary}"
+        // #1125：DLX 摘要为 handler 的 PermanentError kind（Permanent）const message，
+        // 而非旧通用常量 "permanent rejection"。
+        assert_eq!(
+            summary, "permanent error",
+            "summary 应为 reject kind 的 const message: {summary}"
         );
         assert_eq!(idem.commit_count(), 1, "commit 应调 1 次");
+    }
+
+    // ── TC9：reject(Invariant) → DLX 摘要反映 Invariant kind（#1125 anti-vacuity）──
+
+    /// TC9：handler reject(Invariant) → DLX 摘要 == "invariant violated"（≠ TC3 的 "permanent error"），
+    /// 证 error kind 真实随 HandleResult 流到 DLX（摘要非硬编码、随 kind 变化）。
+    #[tokio::test]
+    async fn tc9_reject_invariant_surfaces_kind_summary() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+
+        run_consumer(
+            stream_of(&[("msg-reject-inv", b"payload")]),
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_reject_invariant(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(dlx_store.write_count(), 1, "dlx 应写 1 次");
+        #[allow(clippy::unwrap_used)]
+        // reason: 前置 assert_eq 已验证 write_count==1，last_record 必然 Some；item-level carve-out。
+        let (summary, _attempts) = dlx_store.last_record().unwrap();
+        assert_eq!(
+            summary, "invariant violated",
+            "Invariant kind 摘要应为 'invariant violated'（随 kind 变化，非硬编码）: {summary}"
+        );
     }
 
     // ── TC4：check 返 Duplicate ──────────────────────────────────────────────

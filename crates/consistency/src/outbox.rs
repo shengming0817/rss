@@ -78,42 +78,62 @@ impl PermanentError {
 }
 
 /// 业务 handler 结果（私有字段；禁裸 struct literal，经 `ack`/`requeue`/`reject` 构造器 —— eventbus.md）。
+///
+/// `error_summary` 捕获 `reject`/`requeue` 的 error kind 的 `&'static str` const message（#1125）——error 不再在
+/// HandleResult 边界被静默丢弃（构造即捕获，Hard），由消费方 ConsumerBase DLX funnel 落日志。摘要恒为 const
+/// literal（来自 `EngineErrorKind`/`PermanentErrorKind::message()`，无 runtime 数据）⇒ PII-safe，对齐
+/// `diport::DeadLetterSummary` 的 const 收口（DIPORT-DLX-SUMMARY-STATIC-01）。
+///
+/// # INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01
+///
+/// `error_summary` 只能取 `*ErrorKind::message()` 的 `&'static str` const（reject/requeue 构造器内单源填入，
+/// ack 为 `None`）——类型层杜绝 runtime `String` 入摘要（PII-safe，Hard）。
 #[derive(Debug)]
 pub struct HandleResult {
     disposition: Disposition,
+    /// error kind 的 const 摘要（`ack` 无 error ⇒ `None`；`reject`/`requeue` 恒 `Some`）。
+    error_summary: Option<&'static str>,
 }
 
 impl HandleResult {
-    /// 成功。
+    /// 成功（无 error）。
     pub fn ack() -> Self {
         Self {
             disposition: Disposition::Ack,
+            error_summary: None,
         }
     }
 
     /// 瞬态失败 → 退避重试（携因由进引擎错误通道）。
     #[allow(clippy::needless_pass_by_value)]
-    // reason: 签名冻结（ADR-004 C8）——HandleResult 字段集只含 disposition，不能为消 lint 把 `error` 改
-    // by-ref（破坏已冻结调用约定）。`error` 由构造 HandleResult 的 relay/subscriber 在丢弃前自行落日志
-    // （持有方在 call site 即有 error；adapter 层 T004+ 落地强制日志，见 #1125），本纯态机不接 tracing 依赖。
-    pub fn requeue(_error: crate::error::EngineError) -> Self {
+    // reason: 签名冻结期 by-value 调用约定（caller 交出 error 所有权）；`error` 现被消费为 const-message 摘要
+    // （`error_summary`），不再丢弃（#1125）。kind message 是 `&'static str` const，本纯态机不接 tracing 依赖。
+    pub fn requeue(error: crate::error::EngineError) -> Self {
         Self {
             disposition: Disposition::Requeue,
+            error_summary: Some(error.kind().message()),
         }
     }
 
-    /// 永久失败 → DLX。
+    /// 永久失败 → DLX（携永久错误因由）。
     #[allow(clippy::needless_pass_by_value)]
-    // reason: 同 `requeue`（签名冻结，by-ref 破坏调用约定）；`error` 由 relay/subscriber 丢弃前落日志（#1125）。
-    pub fn reject(_error: PermanentError) -> Self {
+    // reason: 同 `requeue`（签名冻结期 by-value 约定）；`error` 被消费为 const-message 摘要，不再丢弃（#1125）。
+    pub fn reject(error: PermanentError) -> Self {
         Self {
             disposition: Disposition::Reject,
+            error_summary: Some(error.kind().message()),
         }
     }
 
     /// 处置（subscriber/relay 穷尽 match）。
     pub fn disposition(&self) -> Disposition {
         self.disposition
+    }
+
+    /// error kind 的 const 摘要（`reject`/`requeue` 携 `Some`，`ack` 为 `None`）。
+    /// 由消费方 ConsumerBase DLX 落日志（#1125）；恒 `&'static str` const ⇒ PII-safe。
+    pub fn error_summary(&self) -> Option<&'static str> {
+        self.error_summary
     }
 }
 
@@ -362,7 +382,7 @@ mod tests {
         }
     }
 
-    // ack/requeue/reject 构造器置正确 disposition（error 参数接收后丢弃，日志在 relay 层）。
+    // ack/requeue/reject 构造器置正确 disposition（error kind 摘要见 handle_result_carries_error_summary）。
     #[test]
     fn handle_result_constructors_set_disposition() {
         assert_eq!(HandleResult::ack().disposition(), Disposition::Ack);
@@ -373,6 +393,54 @@ mod tests {
         assert_eq!(
             HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent)).disposition(),
             Disposition::Reject
+        );
+    }
+
+    // reject/requeue 把 error kind 的 const message 捕获进 error_summary（#1125）；ack 无 error → None。
+    // 摘要恒 `&'static str` const（来自 *ErrorKind::message()），无 runtime 数据 ⇒ PII-safe。
+    // INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01
+    #[test]
+    fn handle_result_carries_error_summary() {
+        // ack 无 error → None。
+        assert_eq!(HandleResult::ack().error_summary(), None);
+
+        // requeue：穷举 EngineErrorKind 全部变体 → 各自 const message（kind 增变体时本表须同步）。
+        let requeue_cases: &[(EngineErrorKind, &str)] = &[
+            (EngineErrorKind::Transient, "transient engine error"),
+            (EngineErrorKind::Permanent, "permanent engine error"),
+            (EngineErrorKind::Invariant, "engine invariant violated"),
+        ];
+        for &(kind, expected) in requeue_cases {
+            assert_eq!(
+                HandleResult::requeue(EngineError::new(kind)).error_summary(),
+                Some(expected),
+                "requeue kind={kind:?}"
+            );
+        }
+
+        // reject：穷举 PermanentErrorKind 全部变体 → 各自 const message。
+        let reject_cases: &[(PermanentErrorKind, &str)] = &[
+            (PermanentErrorKind::Permanent, "permanent error"),
+            (PermanentErrorKind::Invariant, "invariant violated"),
+        ];
+        for &(kind, expected) in reject_cases {
+            assert_eq!(
+                HandleResult::reject(PermanentError::new(kind)).error_summary(),
+                Some(expected),
+                "reject kind={kind:?}"
+            );
+        }
+
+        // anti-vacuity：不同 kind → 不同摘要（摘要随 kind 变化，非硬编码常量）——requeue / reject 各验一次。
+        assert_ne!(
+            HandleResult::requeue(EngineError::new(EngineErrorKind::Transient)).error_summary(),
+            HandleResult::requeue(EngineError::new(EngineErrorKind::Permanent)).error_summary()
+        );
+        assert_ne!(
+            HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
+                .error_summary(),
+            HandleResult::reject(PermanentError::new(PermanentErrorKind::Invariant))
+                .error_summary()
         );
     }
 

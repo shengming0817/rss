@@ -84,17 +84,22 @@ sealed 单 pod 原语 funnel。权威语义见 `bootstrap::sagaprojectiondeps` �
 ```rust
 async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
     if permanent {
-        return outbox::HandleResult::reject(outbox::PermanentError::new(err));
+        // reject 接 PermanentError（kind: Permanent | Invariant，排除 Transient）
+        return outbox::HandleResult::reject(outbox::PermanentError::new(perm_kind));
     }
     if transient {
-        return outbox::HandleResult::requeue(err);
+        // requeue 接 EngineError（不同类型；kind message 进 error_summary 落 DLX）
+        let engine_err: consistency::error::EngineError = /* 瞬态因由 */;
+        return outbox::HandleResult::requeue(engine_err);
     }
     outbox::HandleResult::ack()
 }
 ```
 
 `HandleResult` 不用裸构造（无公开字段构造路径）；业务代码使用 `ack`、`requeue`、`reject`
-构造器，不手写 struct literal。subscriber 层扩展信息放 `DeliveryOutcome`，不污染业务结果。
+构造器，不手写 struct literal。`reject`/`requeue` 携带的 error kind 经 `HandleResult::error_summary()`
+（`&'static str` const，PII-safe）随结果流到 ConsumerBase 的 DLX funnel 落日志（#1125），不再在 HandleResult
+边界静默丢弃；更丰富的 per-delivery 扩展信息仍走 `DeliveryOutcome`，不污染业务结果。
 
 ## Disposition
 
