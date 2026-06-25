@@ -2056,3 +2056,172 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// PgRoleRepo（identity 角色仓储）集成测试（#1250）：CRUD / upsert / tenant 行级隔离 / 并发收敛。
+//
+// 构造 `Role` 经 `Role::hydrate`（pub funnel，无需 identity test-support）；`RoleId` 经 `role.id().clone()`
+// 取得——RoleId 构造封闭（`pub(crate)` parse/new），测试不可裸 mint，符合 funnel 设计（外部可读不可伪造）。
+// ───────────────────────────────────────────────────────────────────────────
+
+use identity::ports::{Role, RoleRepo};
+
+use crate::PgRoleRepo;
+
+const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+fn role_tenant(raw: &str) -> Result<TenantId, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(TenantId::parse(raw)?)
+}
+
+// CRUD：save 新角色 → find 往返一致；同 id 二次 save → upsert 覆盖 name+permissions（非新增行）；查无 → None。
+#[tokio::test(flavor = "multi_thread")]
+async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgRoleRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+
+    // 未保存 → None（fail-closed，anti-vacuity 的负例基线）。
+    let admin = Role::hydrate("role-admin", "Admin", &["docs:read".to_string()])?;
+    let admin_id = admin.id().clone();
+    assert!(
+        repo.find(tenant, admin_id.clone()).await?.is_none(),
+        "未保存 → None"
+    );
+
+    // save → find 往返一致（id / name / permissions）。
+    repo.save(tenant, admin).await?;
+    let got = repo
+        .find(tenant, admin_id.clone())
+        .await?
+        .expect("saved role visible");
+    assert_eq!(got.id().as_str(), "role-admin");
+    assert_eq!(got.name(), "Admin");
+    assert_eq!(got.permission_ids().collect::<Vec<_>>(), vec!["docs:read"]);
+
+    // 同 id 二次 save → upsert 覆盖 name + permissions。
+    let admin_v2 = Role::hydrate(
+        "role-admin",
+        "Administrator",
+        &["docs:read".to_string(), "docs:write".to_string()],
+    )?;
+    repo.save(tenant, admin_v2).await?;
+    let got2 = repo
+        .find(tenant, admin_id)
+        .await?
+        .expect("upserted role visible");
+    assert_eq!(got2.name(), "Administrator", "upsert 覆盖 name");
+    assert_eq!(
+        got2.permission_ids().collect::<Vec<_>>(),
+        vec!["docs:read", "docs:write"],
+        "upsert 覆盖 permissions"
+    );
+    // upsert 不新增行（DO UPDATE，非 INSERT）。
+    let n: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM roles WHERE tenant_id = $1::uuid AND id = $2")
+            .bind(ROLE_TENANT_A)
+            .bind("role-admin")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(n.0, 1, "upsert 不新增行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// tenant 行级隔离：A 保存的角色 B 查不到（负例）；A 自己可见（正例 anti-vacuity）。
+#[tokio::test(flavor = "multi_thread")]
+async fn role_repo_tenant_row_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgRoleRepo::new(&store);
+    let tenant_a = role_tenant(ROLE_TENANT_A)?;
+    let tenant_b = role_tenant(ROLE_TENANT_B)?;
+
+    let role = Role::hydrate("shared-id", "OnlyInA", &["docs:read".to_string()])?;
+    let id = role.id().clone();
+    repo.save(tenant_a, role).await?;
+
+    // 跨租不可见（负例）：tenant B 查同 id → None（行级隔离，不泄露存在性）。
+    assert!(
+        repo.find(tenant_b, id.clone()).await?.is_none(),
+        "跨租 find → None（tenant 行级隔离）"
+    );
+    // 同租可见（正例，证明上面 None 非因数据未写入 = anti-vacuity）。
+    assert_eq!(
+        repo.find(tenant_a, id)
+            .await?
+            .expect("visible in own tenant")
+            .name(),
+        "OnlyInA"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// 并发：同 (tenant,id) 并发 save → ON CONFLICT 收敛、全 Ok（无 PK 错逃逸）、终态单行；不同 id 并发 → 各自落库。
+#[tokio::test(flavor = "multi_thread")]
+async fn role_repo_concurrent_save_converges() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = Arc::new(PgRoleRepo::new(&store));
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+
+    // 同 id 并发 upsert：8 个 task 竞写同一 (tenant,id)。
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let repo = Arc::clone(&repo);
+        handles.push(tokio::spawn(async move {
+            let role = Role::hydrate("contended", "C", &[format!("perm:{i}")])?;
+            repo.save(tenant, role).await
+        }));
+    }
+    for h in handles {
+        // 每个 save 必 Ok——并发 PK 冲突由 ON CONFLICT DO UPDATE 收敛，不逃逸为 unique violation。
+        h.await.expect("join")?;
+    }
+    // throwaway role 取 contended 的 RoleId（不 save，仅为 mint id 查终态）。
+    let contended_id = Role::hydrate("contended", "x", &[])?.id().clone();
+    let got = repo
+        .find(tenant, contended_id)
+        .await?
+        .expect("contended role converged");
+    assert_eq!(got.id().as_str(), "contended");
+    // name 在所有 writer 间确定（恒 "C"）→ 终态 name 一致；permissions 因 writer 非确定（perm:0..7）不断言具体值。
+    assert_eq!(got.name(), "C", "并发收敛终态 name 一致");
+    let n: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM roles WHERE tenant_id = $1::uuid AND id = $2")
+            .bind(ROLE_TENANT_A)
+            .bind("contended")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(n.0, 1, "并发同 id → 终态单行");
+
+    // 不同 id 并发 save → 各自落库（无相互干扰）。
+    let mut handles2 = Vec::new();
+    for i in 0..8 {
+        let repo = Arc::clone(&repo);
+        handles2.push(tokio::spawn(async move {
+            let role = Role::hydrate(&format!("role-{i}"), "N", &[])?;
+            repo.save(tenant, role).await
+        }));
+    }
+    for h in handles2 {
+        h.await.expect("join")?;
+    }
+    let n2: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM roles WHERE tenant_id = $1::uuid AND id LIKE 'role-%'",
+    )
+    .bind(ROLE_TENANT_A)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(n2.0, 8, "8 个不同 id 各落一行");
+
+    store.shutdown().await?;
+    Ok(())
+}

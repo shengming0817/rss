@@ -10,9 +10,9 @@
 //! 不变式（#1116 决策 1）；且为 `pub(crate)`（裸事务非公开 API，review F2）。
 //!
 //! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleRepo`，经 deny.toml identity wrapper +
-//! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由 `#[cfg(test)]` 的 **edge proof** 类型承载——
-//! **不**让可构造的生产 `PgStore` 挂未实现的 `RoleRepo`（否则运行时 `todo!()` panic，review F3）；真实
-//! postgres-backed `RoleRepo` 属 identity 域 W 阶段（需 roles 表 + tenant RLS）。
+//! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由生产 [`PgRoleRepo`]（impl
+//! `identity::ports::RoleRepo`，roles 表 + tenant scope，#1250）承载——替换原 `#[cfg(test)]` `RoleRepoEdgeProof`
+//! 编译证明（body `todo!()`）。
 
 mod checkpoint;
 mod config_repo;
@@ -23,6 +23,7 @@ mod inbox;
 mod migrator;
 mod outbox;
 mod pool;
+mod role_repo;
 mod saga_journal;
 mod session_uow;
 mod tx;
@@ -32,6 +33,7 @@ pub use config_repo::PgConfigRepo;
 pub use dead_letter::PgDeadLetterStore;
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
+pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
 pub use session_uow::PgSessionUnitOfWork;
 
@@ -74,16 +76,14 @@ impl ManagedResource for PgStore {
 #[cfg(test)]
 mod smoke {
     //! build smoke：编译期断言冻结的 DI port trait——生产 `PgStore` impl `diport::ManagedResource`；
-    //! adapter→域 DIP 内向边（postgres 可 impl `identity::ports::RoleRepo`，命名其 pub 实体 Role/RoleId）由
-    //! `#[cfg(test)]` 的 `RoleRepoEdgeProof` 承载——**不**挂在可构造的生产 `PgStore` 上（避免运行时 todo!()
-    //! panic，review F3）。PhantomData 绑定检查，不构造、不执行 body。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo edge proof +
+    //! adapter→域 DIP 内向边（postgres impl `identity::ports::RoleRepo`，命名其 pub 实体 Role/RoleId）由生产
+    //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
+    //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
+    //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
     //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionUnitOfWork on PgSessionUnitOfWork（真实 impl，#1083/#1192）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）；去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
-
-    use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
@@ -94,29 +94,11 @@ mod smoke {
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
 
-    /// adapter→域 DIP 内向边编译证明：postgres 依赖 identity 并 impl 其域形 `RoleRepo`（native AFIT，
-    /// 不 invoke dynosaur 宏）。仅作类型级编译证明（PhantomData 绑定），body 永不执行；真实 postgres-backed
-    /// `RoleRepo` 属 identity 域 W 阶段（需 roles 表 + tenant RLS）。
-    struct RoleRepoEdgeProof;
-
-    impl RoleRepo for RoleRepoEdgeProof {
-        async fn find(
-            &self,
-            _tenant: TenantId,
-            _id: RoleId,
-        ) -> Result<Option<Role>, IdentityError> {
-            todo!()
-        }
-
-        async fn save(&self, _tenant: TenantId, _role: Role) -> Result<(), IdentityError> {
-            todo!()
-        }
-    }
-
     #[test]
     fn impls_frozen_ports() {
         assert_managed_resource(PhantomData::<super::PgStore>);
-        assert_role_repo(PhantomData::<RoleRepoEdgeProof>);
+        // `PgRoleRepo: RoleRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
+        assert_role_repo(PhantomData::<super::PgRoleRepo>);
         // `PgSessionUnitOfWork: SessionUnitOfWork` 真实 impl（非 edge proof）——co-tx UoW（#1083/#1192）。
         assert_session_uow(PhantomData::<super::PgSessionUnitOfWork>);
         // `PgInboxStore: IdempotencyStore` 类型级 anti-vacuity edge proof（不构造、不执行 body）。

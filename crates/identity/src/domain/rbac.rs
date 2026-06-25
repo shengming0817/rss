@@ -8,7 +8,7 @@
 //! ref: casbin/casbin-rs src/core_api.rs@master（enforce 元组求值，闭值集 Decision，fail-closed）
 //! ref: casbin/casbin-rs src/rbac/default_role_manager.rs@master（多租隔离，域 Role 绑定）
 
-use super::{PermissionId, ResourcePattern, RoleId};
+use super::{IdentityError, PermissionId, ResourcePattern, RoleId};
 
 // ---------------------------------------------------------------------------
 // Permission — action + resource_pattern
@@ -66,10 +66,9 @@ impl Permission {
 /// 角色实体（含权限集；私有字段；不 derive Serialize——域类型）。
 ///
 /// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 返回聚合被 adapter 跨 crate 命名；字段私有、构造经
-/// `Role::new`（`pub(crate)` funnel）——adapter 可接收/返回 `Role` 但**不可伪造其不变式**。`permissions`
-/// 等字段类型仍 `pub(crate)`（`pub struct` + 私有字段不外泄字段类型）。
-// reason: 同 Permission（生产调用方待 W；当前仅测试消费）。
-#[allow(dead_code)]
+/// `Role::new`（crate 内信任 funnel）/ `Role::hydrate`（跨 crate 受控重建 funnel）——adapter 可接收/返回
+/// `Role`、按需读其访问器，但**不可伪造其不变式**（id / permission 必经 parse 白名单）。`permissions`
+/// 字段类型 `PermissionId` 仍 `pub(crate)` 不外泄；adapter 读侧经 `permission_ids()`（`&str` 迭代器）取用。
 #[derive(Debug)]
 pub struct Role {
     id: RoleId,
@@ -77,10 +76,8 @@ pub struct Role {
     permissions: Vec<PermissionId>,
 }
 
-// reason: 同 Permission（生产调用方待 W；当前仅测试消费）。
-#[allow(dead_code)]
 impl Role {
-    /// 构造角色（位置参，必填）。
+    /// 构造角色（位置参，必填；crate 内「已校验值」信任构造器，funnel 边界 = `pub(crate)`）。
     pub(crate) fn new(id: RoleId, name: impl Into<String>, permissions: Vec<PermissionId>) -> Self {
         Self {
             id,
@@ -89,17 +86,46 @@ impl Role {
         }
     }
 
-    /// 取角色 ID 引用。
-    pub(crate) fn id(&self) -> &RoleId {
+    /// 跨 crate 受控重建 funnel（#1250）：postgres `PgRoleRepo` 从持久化行（raw 串）重建 `Role`。
+    ///
+    /// `id` / 各 `permission_ids` 经 `parse` 白名单复核——持久化值写入时已校验，复核失败属**数据完整性**
+    /// 问题（损坏行），归 [`IdentityError::Storage`]（保留原 `IdParseError` 于 source 链，fail-closed，不静默
+    /// 接受脏数据）。返 `IdentityError`（非 `pub(crate)` 的 `IdParseError`）避免私有类型泄漏 `pub` 签名，
+    /// 且 adapter 直接 `?` 冒泡即落 `RoleRepo` 错误通道。`RoleId`/`PermissionId` 构造仍封闭（外部不可伪造）。
+    pub fn hydrate(
+        id: &str,
+        name: impl Into<String>,
+        permission_ids: &[String],
+    ) -> Result<Role, IdentityError> {
+        let id = RoleId::parse(id).map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        let permissions = permission_ids
+            .iter()
+            .map(|p| PermissionId::parse(p))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        Ok(Role::new(id, name, permissions))
+    }
+
+    /// 取角色 ID 引用。`pub`（#1250）：adapter 跨 crate 读以绑 `roles.id`。
+    pub fn id(&self) -> &RoleId {
         &self.id
     }
 
-    /// 取角色名引用。
-    pub(crate) fn name(&self) -> &str {
+    /// 取角色名引用。`pub`（#1250）：adapter 跨 crate 读以绑 `roles.name`。
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// 取权限 ID 列表引用。
+    /// 权限 ID 字符串迭代器（adapter 读侧绑 `roles.permissions text[]`）。返 `&str` 而非 `&PermissionId`——
+    /// 不外泄 `pub(crate)` 的 `PermissionId` 类型（封装边界，rbac.rs 设计意图）。
+    pub fn permission_ids(&self) -> impl Iterator<Item = &str> {
+        self.permissions.iter().map(PermissionId::as_str)
+    }
+
+    /// 取权限 ID 列表引用（域内 `authorize_rbac` 用）。
+    // reason: 唯一消费方 `authorize_rbac` 生产接线待 W 阶段（PR5）⇒ 非 test 构建链路 dead（ADR-004 C8）；
+    // 收窄为 item-level allow（id/name/permission_ids/hydrate 已有生产消费方，不再 dead）。
+    #[allow(dead_code)]
     pub(crate) fn permissions(&self) -> &[PermissionId] {
         &self.permissions
     }
@@ -398,5 +424,56 @@ mod tests {
     fn authorize_rbac_cases(#[case] scn: Scenario, #[case] want: Decision) {
         let (principal, bindings, roles, target) = build(&scn);
         assert_eq!(authorize_rbac(&principal, &bindings, &roles, &target), want);
+    }
+
+    // -----------------------------------------------------------------------
+    // Role::hydrate（受控重建 funnel）+ permission_ids（adapter 读侧）
+    // 跨 crate adapter（postgres PgRoleRepo）经 `Role::hydrate`（raw 串，内部 parse）从持久化行重建 Role；
+    // 非法持久化值（损坏数据）→ Err（adapter 映射为存储错误，fail-closed，不静默接受脏数据）。
+    // -----------------------------------------------------------------------
+
+    use crate::domain::IdentityError;
+
+    fn perm_ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    // 测试 helper：已知合法 / 损坏输入断言——expect item-level carve-out（error-handling.md §Carve-out；
+    // expect 收口于 helper、rstest 用例体不直接 expect，与 settings/rbac 既有 helper 范式一致）。
+    #[allow(clippy::expect_used)]
+    fn hydrate_ok(id: &str, name: &str, perms: &[&str]) -> Role {
+        Role::hydrate(id, name, &perm_ids(perms)).expect("valid persisted role")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn hydrate_err(id: &str, name: &str, perms: &[&str]) -> IdentityError {
+        Role::hydrate(id, name, &perm_ids(perms)).expect_err("corrupt persisted value")
+    }
+
+    // 合法 raw 往返：id / name / permissions 经 hydrate 重建后与输入一致；permission_ids 保序。
+    #[rstest]
+    #[case::two_perms("admin", "Admin", &["docs:read", "docs:write"][..])]
+    #[case::single_perm("viewer", "Viewer", &["docs:read"][..])]
+    #[case::no_perms("guest", "Guest", &[][..])]
+    fn hydrate_roundtrip(#[case] id: &str, #[case] name: &str, #[case] perms: &[&str]) {
+        let r = hydrate_ok(id, name, perms);
+        assert_eq!(r.id().as_str(), id);
+        assert_eq!(r.name(), name);
+        assert_eq!(r.permission_ids().collect::<Vec<_>>(), perms);
+    }
+
+    // 损坏持久化值（非法 role id / 非法 permission id）→ Err（fail-closed，归存储错误）。
+    // 与上 roundtrip 正例配对作 anti-vacuity：证明 hydrate 真校验、非恒 Ok。
+    #[rstest]
+    #[case::role_id_space("bad id", "X", &[][..])]
+    #[case::role_id_empty("", "X", &[][..])]
+    #[case::perm_id_space("admin", "Admin", &["bad perm"][..])]
+    #[case::perm_id_empty("admin", "Admin", &[""][..])]
+    fn hydrate_rejects_corrupt(#[case] id: &str, #[case] name: &str, #[case] perms: &[&str]) {
+        let err = hydrate_err(id, name, perms);
+        assert!(
+            matches!(err, IdentityError::Storage(_)),
+            "非法持久化值须归 Storage 通道: {err:?}"
+        );
     }
 }

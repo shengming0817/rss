@@ -161,7 +161,10 @@ impl RoleId {
     }
 
     /// 取 ID 字符串引用。
-    pub(crate) fn as_str(&self) -> &str {
+    ///
+    /// `pub`（#1250）：postgres `PgRoleRepo` adapter 跨 crate 读取以绑 `roles.id` 列（find/save）。
+    /// 字段仍私有、构造仍经 `pub(crate)` funnel（`new` / `parse`）——外部可读不可伪造。
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -354,7 +357,12 @@ impl PolicyId {
 /// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
 /// - `CredentialNotFound`：`CredentialRepo` 查无凭据（PR3）。
 /// - `VersionConflict`：`CredentialRepo::bump_version` CAS 期望版本不匹配（并发密码变更，PR3）。
-// reason: 库错误枚举尚无生产返回方（repo / handler 接线待 W），dead_code 来自冻结期（ADR-004 C8）。
+/// - `Storage`：持久化层错误（`RoleRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。
+///   原始错误进 `#[source]`，不进 Display / wire——message 是 `&'static str` const literal，
+///   runtime 细节仅进服务端日志（error-handling.md §Message 与 PII）。
+// reason: `RoleNotFound` / `PermissionDenied` / `InvalidPolicy` / `CredentialNotFound` / `VersionConflict`
+// 生产返回方（repo / handler 接线）待 W ⇒ 冻结期 dead（ADR-004 C8）；`Storage` 已由 PgRoleRepo + Role::hydrate
+// 真实构造（非 dead）。变体级 dead 由 enum 级 allow 覆盖该子集，待消费方落地后逐个收窄。
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -369,6 +377,9 @@ pub enum IdentityError {
     CredentialNotFound,
     #[error("credential version conflict")]
     VersionConflict,
+    /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
+    #[error("identity storage error")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ---------------------------------------------------------------------------

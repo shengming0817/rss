@@ -38,17 +38,15 @@ pub use vocab::TenantId;
 /// dyn-safe（ADR-003 §4.6）：方法 `&self`、参数/返回为具体类型、supertrait 仅 Send。归属为域形 port
 /// （签名引用 `Role`/`RoleId`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
 ///
-/// ⚠ **范围 = ADR-005 分层放宽的最小编译证明，非完整生产 repo 设计范式（勿照抄查询集）**。本 port 只为
-/// 验证 `adapter→域` DIP 内向边 + 域内 dynosaur + `pub` 实体真实编译。安全 scope 已由签名承载：
-/// `Role` 按租户内角色建模，repo 方法必须接收 typed `TenantId` 位置参做 RLS / store scope；若后续需要
-/// 全局角色定义，须拆独立 `GlobalRoleRepo`，不得复用本租户内 repo 签名。
-/// **W 阶段补真实 repo 接缝**（RoleRepo 自身的 roles 表 + RBAC 持久化属后续，与 #1083 session 接缝解耦；
-/// session co-tx 接缝已由 sibling [`SessionUnitOfWork`] 交付——#1083/#1192，postgres `PgSessionUnitOfWork`）
-/// 时须按需补齐：
-/// - **可读 accessor**：adapter impl body 需读取实体时，把 `RoleId::as_str` / `Role::id|name|…` 由
-///   `pub(crate)` 按需升 `pub`（accessor body PR1 已写实，仅可见性仍 `pub(crate)`；编译证明阶段不需跨 crate 读）。
-///   ——session 实体的同款升 `pub` 已在 [`SessionUnitOfWork`] 落地（[`Session`] accessor 真升 `pub`）。
-/// - **查询形态**：按业务补 `list_by_tenant` / `find_by_name` / `exists` 等惯用方法 + 强制分页（`limit≤500`）。
+/// ⚠ **当前方法集 = 最小生产接缝（find / save），非完整 repo 设计范式（勿照抄查询集）**。安全 scope 由签名
+/// 承载：`Role` 按租户内角色建模，repo 方法必须接收 typed `TenantId` 位置参做 store scope（pre-GA：显式
+/// `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨 roles/sessions/
+/// config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立 `GlobalRoleRepo`，
+/// 不得复用本租户内 repo 签名。
+/// **生产 postgres impl 已由 postgres `PgRoleRepo` 承载**（roles 表 + tenant scope + `Role::hydrate` 受控重建，
+/// #1250；替换原 `#[cfg(test)]` `RoleRepoEdgeProof` 编译证明）——签名实体 accessor（`RoleId::as_str` /
+/// `Role::id|name|permission_ids` / `Role::hydrate`）已按需升 `pub`（字段私有 + 构造经 funnel，外部可读不可伪造）。
+/// **查询形态后续**：按业务补 `list_by_tenant` / `find_by_name` / `exists` 等惯用方法 + 强制分页（`limit≤500`）。
 #[trait_variant::make(RoleRepo: Send)]
 #[dynosaur(pub DynRoleRepo = dyn(box) RoleRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
