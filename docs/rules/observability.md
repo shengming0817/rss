@@ -90,6 +90,24 @@ label 闭值集纪律：
 新增或改名上述 metric / label 必须同步 schema、tests、dashboard、`docs/ops/outbox-relay-alerts.rules.yaml`
 与 emit site。
 
+### Consumer Settle Metrics（#1142）
+
+at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker 结算投递发射：
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `consumer_settle_total` | Counter | `domain`,`action`,`outcome` | 单条 broker 结算（action=ack/requeue/reject；outcome=ok/error） |
+
+label 闭值集纪律：
+
+- `action` 闭合于 `diport::AckAction::as_label()`（`ack`/`requeue`/`reject`）；`outcome` 闭合于
+  `ok`/`error`（settle 调用是否成功）——crate 自有闭映射，无副本可漂移。
+- `domain` 来自 `eventexec::ConsumerMeta`（注册期绑定的 domain/contract/topic 三元组），非请求/租户派生，基数有界。
+- emit site = `eventexec::consumer::settle`（minimal 直发 `metrics` facade，无 recorder 即 no-op）；告警面 =
+  `outcome="error"`（结算失败）。注入式 `ConsumerMetrics` 端口（与 `OutboxMetrics` 同形、组合根注入、成功/失败
+  统一）属重构，随 consumer worker 生命周期落地（**#1301**）。`run_consumer`（brokerless / auto-ack）无 broker
+  结算 ⇒ 不发本 metric。
+
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
 ## Cross-domain Transport

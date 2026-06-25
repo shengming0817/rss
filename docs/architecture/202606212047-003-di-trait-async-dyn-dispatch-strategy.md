@@ -5,6 +5,7 @@
 - **关联**：issue #995 [RW-G0.5] · epic #991 · 落地单元 #1049 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
 - **后续修订**：**ADR-005**（#1083，2026-06-23）把「所有 DI port 收敛 diport」部分化——域形 repo/service port 归域 crate（§6 偏离 2 + §7 行 1 已就地重写并重评威胁矩阵）。
 - **后续修订**：**Amendment（#1095，2026-06-23）**——async DI port 注入形态收口（`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 `!Send`；多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`）。§4.3 / §4.5 冲突段就地重写、§7 威胁矩阵补行、Option A defer。见下「Amendment」节。
+- **后续修订**：**Amendment（#1142，2026-06-25）**——新增 ack-capable delivery seam（`Acker` / `AckableSubscriber` 两个 async DI port + `Delivery`/`AckAction` 值类型），照本 ADR 既定 `make(X: Send)`+dynosaur 范式扩端口（**非新机制**），使 AMQP 消费达成 at-least-once。§7 补行、威胁矩阵重评。见下「Amendment（#1142）」节。
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
 
@@ -86,6 +87,46 @@ trait-variant / dynosaur 是否接受 / 传递 `Send + Sync` 在 pinned pre-1.0�
 - **provider 可互换性**：泛型静态分发经 `S: X` trait bound 保持（与 dyn 注入同等可换 provider、同样经构造器
   必填参注入），未削弱 §2「可替换 provider」与 §7 其余行——安全模型不退化。
 - INVARIANT: DIPORT-ASYNC-ARC-SEND-01（`diport` crate rustdoc「注入形态」节 + 负例 + 本节，三处同源）。
+
+---
+
+## Amendment（2026-06-25，#1142）：ack-capable delivery seam（`Acker` / `AckableSubscriber`）
+
+**触发**：#1142（P7）——AMQP subscriber P6 用 `no_ack=true`（auto-ack，at-most-once），`eventexec::run_consumer`
+只做 idempotency/DLX bookkeeping、**从不触达 broker**，崩溃窗口在途消息丢失。要 at-least-once，须把 broker 的
+ack/requeue/reject 接到消费侧。
+
+**决策**：在 `diport` 新增**两个 async DI port** + 两个值类型，**完全照本 ADR 既定范式扩端口**（`#[trait_variant::make(X: Send)]`
++ `#[dynosaur(pub DynX = dyn(box) X, bridge(dyn))]`，re-export Send 变体 + `DynX`）——**不引入任何新机制 / 新范本**：
+
+- `Acker`（`async fn settle(&self, action: AckAction) -> Result<(), AckError>`）+ `DynAcker`：单条投递的 broker
+  结算句柄（provider-agnostic）。注入形态走「单 owner、move 进终态」= `Box<DynAcker<'static>>`（Amendment #1095
+  三分表第 1 行），由 [`Delivery`] 携带、`run_consumer_ackable` 每条终态恰 `settle` 一次。
+- `AckableSubscriber`（`subscribe_ackable(..) -> Result<DeliveryStream, _>`）+ `DynAckableSubscriber`：at-least-once
+  订阅端口，与既有 `Subscriber`（at-most-once，`MessageStream`）**对偶并存**（双端口拆分，按投递保证拆，不删旧路径）。
+- `AckAction { Ack, Requeue, Reject }`（typed enum，非 `requeue: bool`——typed function choice，§7 范本）+
+  `Delivery { message: Message, acker: Box<DynAcker<'static>> }`（acker 与 message **并置**，不挂 `Message`）。
+
+`AckAction` 是 provider-agnostic 的 broker 词汇，**不复用** `consistency::outbox::Disposition`——「引擎 disposition + DLX
+写结果 → `AckAction`」的映射在 `eventexec::run_consumer_ackable` 完成（终态映射表见 `docs/rules/eventbus.md`
+§Acker / 投递结算 seam）。
+
+### 威胁矩阵 / 安全模型重评（ai-robust：amendment 须同步重评）
+
+- **新增攻击面**：无。新端口是既有 dyn-port 范式的实例，攻击面与 `Subscriber` / `DeadLetterStore` 同构。
+- **`Message` 冻结值类型不变式保持（关键）**：acker 落**独立 seam**（`Delivery` 并置 `Box<DynAcker>`），**不**给
+  `Message` 加 Ack/Nack 字段或方法——`Message` 的 ADR-003 冻结（无 metadata setter、payload Debug 脱敏，
+  DIPORT-DTO-PII-DEBUG-REDACT-01）与 eventbus.md「subscriber 层扩展信息放 `DeliveryOutcome`，不污染业务结果」
+  规约**不退化**。本 amendment 正是该 `DeliveryOutcome` 规约的落地。
+- **PII 边界**：`AckError` 经 `RedactedSource`（DIPORT-ERR-SOURCE-REDACT-01，与 `SubscriberError` 同范式），
+  broker 原始错误不经 `Error` 接口暴露。
+- **定义面 / impl 面守卫复用**：两个新端口的 dynosaur/trait-variant 宏依赖落在 `diport`（DIPORT-MACRO-CONFINE-01′
+  白名单已含 `diport`，`deny.toml` **无需改**）；production impl（`adapters/amqp` 的 `AmqpAcker` / `AckableSubscriber`）
+  受 dylint `rss_diport_impl_allowlist`（DIPORT-IMPL-ALLOWLIST-01，adapter 路径放行）守；test-cfg 替身（`eventexec`
+  `#[cfg(test)]` `FakeAcker`）与既有 `FakeDeadLetterStore` 同位置、同豁免。
+- **provider 可互换性**：`AckableSubscriber` / `Acker` 经 trait bound + 构造器必填参注入，与 §2 一致，未削弱安全模型。
+- **范围边界**：consumer worker 生命周期（`run_consumer_ackable` spawn + `ManagedResource`/`ShutdownStack` + probe）
+  与 MQTT manual-ack（#1265）不在本 amendment——前者派生 follow-up issue 跟踪、后者已有 open issue。
 
 ---
 
@@ -367,6 +408,7 @@ dylint Medium（#1060 闭环）。
 | **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |
 | **shutdown 逆序关闭** | **Soft（当前）→ Medium（`bootstrap` 框架落地后）** | 逆序类型系统管不到（无 async Drop）。`bootstrap` shutdown 框架（§8 follow-up，**尚未落地**）按注册逆序统一执行 `shutdown()` 后升 Medium；在此之前为 Soft，故该框架是 `diport` 实落的**前置项**而非可选 follow-up——**禁止**长期停留在「组合根手记顺序」的 Soft 纪律。 |
 | **多次调用 async 消费者注入形态收口**（Amendment #1095：`Arc<DynX>` 跨 Send future 不可表达，改泛型静态分发） | **Hard（类型系统）+ Medium 回归锁** | `Arc<DynX>: !Send`（`DynX` Send 非 Sync）使误用 `tokio::spawn` 处 `E0277`（Hard，不依赖人记）；负例 `tests/ui/arc_dyn_ports_not_send.rs`（trybuild compile-fail，**Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁事实，改 Send+Sync（Option A）即破。详见 Amendment（#1095）。 |
+| **ack seam 不挂 `Message` 冻结值类型**（Amendment #1142：acker 落 `Delivery` 独立 seam） | **Hard（类型系统）** | `Acker` 句柄经 `Delivery { message, acker }` 与 `Message` 并置，`Message` 无 ack/nack 字段或方法——给 `Message` 加 acker 即触其冻结（无 setter / Debug 脱敏 DIPORT-DTO-PII-DEBUG-REDACT-01）。`AckAction` 用 typed enum 而非 `requeue: bool`（typed function choice 范本）。新端口宏依赖/impl 面复用 DIPORT-MACRO-CONFINE-01′ + DIPORT-IMPL-ALLOWLIST-01（`deny.toml` 无需改）。详见 Amendment（#1142）。 |
 
 ---
 

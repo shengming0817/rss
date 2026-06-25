@@ -73,6 +73,7 @@
 //! `[lints] workspace = true`。dynosaur→diport 收敛改由 deny.toml wrapper 守（DI port 集中 + 单一
 //! dyn-dispatch 依赖点），与 unsafe 无关。dynosaur exact-pin `=0.3.0`：升级须复测本不变式 + 审 changelog。
 
+pub mod acker;
 pub mod audit_sink;
 pub mod checkpoint_store;
 pub mod clock;
@@ -94,6 +95,10 @@ pub mod saga_journal;
 pub mod signer;
 pub mod subscriber;
 
+pub use acker::{
+    AckAction, AckError, AckableSubscriber, Acker, Delivery, DeliveryStream, DynAckableSubscriber,
+    DynAcker,
+};
 pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
 pub use checkpoint_store::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,

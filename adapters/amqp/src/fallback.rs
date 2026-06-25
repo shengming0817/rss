@@ -9,8 +9,8 @@
 //! 杜绝生产路径拿到 panic-on-call provider（review F4）。smoke test 仅 PhantomData 绑定检查、不构造。
 
 use diport::{
-    ManagedResource, MessageStream, PublishRequest, Publisher, PublisherError, ShutdownError,
-    Subscriber, SubscriberError, Topic,
+    AckableSubscriber, DeliveryStream, ManagedResource, MessageStream, PublishRequest, Publisher,
+    PublisherError, ShutdownError, Subscriber, SubscriberError, Topic,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -67,6 +67,22 @@ impl ManagedResource for AmqpSubscriber {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        todo!()
+    }
+}
+
+impl AckableSubscriber for AmqpSubscriber {
+    async fn subscribe_ackable(
+        &self,
+        _topic: Topic,
+        _token: CancellationToken,
+    ) -> Result<DeliveryStream, SubscriberError> {
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        todo!()
+    }
+
+    async fn shutdown(&self) -> Result<(), SubscriberError> {
         // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
         todo!()
     }

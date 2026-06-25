@@ -111,6 +111,40 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 
 `PermanentError` 只是错误分类，不自动把 Requeue 改成 Reject。
 
+## Acker / 投递结算 seam（at-least-once）
+
+`Disposition` 表的「broker ack / nack」由 **ack seam** 落地（#1142）。纯逻辑驱动 `eventexec::run_consumer`
+（消费 `diport::MessageStream`）只做幂等 + DLX bookkeeping、**不触达 broker**——配 in-mem bus / auto-ack 传输
+即 at-most-once。要 **at-least-once**，consumer 走 ackable 变体：
+
+- provider 实现 `diport::AckableSubscriber`（`subscribe_ackable` → `DeliveryStream`；AMQP `no_ack=false` +
+  `basic_qos` prefetch 限 channel 上 unacked 上限），每条 `Delivery { message, acker }` 携一个 `diport::Acker`
+  结算句柄。`Acker` 是**独立 seam**（`Delivery` 并置），**不挂** `Message`（冻结值类型）——即 §ConsumerBase
+  所述 `DeliveryOutcome` 规约的落地（ADR-003 Amendment #1142）。
+- `eventexec::run_consumer_ackable` 消费 `DeliveryStream`，每条消息**终态恰一次**调 `acker.settle(AckAction)`。
+  `AckAction { Ack, Requeue, Reject }` 是 provider-agnostic broker 词汇（adapter 翻成 AMQP
+  `basic_ack` / `basic_nack(requeue=true)` / `basic_nack(requeue=false)`，后者路由 broker 端 DLX/丢弃）。
+
+终态 → `AckAction` 映射（引擎动作不变，settle 叠加）：
+
+| 终态 | 引擎动作 | settle |
+|------|---------|--------|
+| handler `Ack` | commit key | `Ack` |
+| `Reject` / `Requeue` 耗尽 → DLX 写成功 | commit key | `Ack`（引擎自持 DLX，broker 移除） |
+| DLX 写失败 | release key | `Requeue`（broker 重投重试 DLX，防静默丢失） |
+| 幂等 `check` 瞬态 Err | 不 commit | `Requeue` |
+| `Duplicate` | 跳过（不调 handler/不 commit） | `Ack`（已处理，移除） |
+| `IdemKey` parse 失败（malformed） | 不 commit（无法去重） | `Reject`（→broker DLX 留证，不无限重投） |
+| 未知 `SeenState` | 不 commit/release（保守） | `Requeue` |
+
+崩溃安全：消费者在 settle 前崩溃 / channel 关闭 → broker 自动 requeue 未 ack 投递（RabbitMQ channel close
+语义）→ 重投经 idempotency `check` 去重，达成 at-least-once。
+
+**双端口拆分**：`Subscriber`+`MessageStream`（at-most-once：in-mem / MQTT QoS auto-ack / `run_dispatch`）与
+`AckableSubscriber`+`DeliveryStream`（at-least-once：AMQP / `run_consumer_ackable`）按投递保证并存。MQTT
+manual-ack（broker-native DLX 之外的 MQTT 特殊语义）见 #1265；consumer worker 生命周期 spawn（managed worker +
+两阶段关闭 + probe）见 #1142 派生 follow-up。
+
 ## Service required deps
 
 service 必填依赖走构造器**必填参数**（非 `Option`）——缺失即编译错误。可选依赖在构造器内或 builder 给默认值，

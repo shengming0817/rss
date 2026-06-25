@@ -17,7 +17,7 @@ use diport::dead_letter_store::{
     DeadLetterRecord, DeadLetterStore as _, DeadLetterStoreError, DeadLetterSummary,
     DynDeadLetterStore,
 };
-use diport::{Message, MessageStream};
+use diport::{Acker as _, Message, MessageStream};
 
 use crate::MAX_REDELIVERY;
 
@@ -88,8 +88,9 @@ impl ConsumerMeta {
 ///   one-shot 写入语义不需要共享，owned 注入更自然（类型层明确消费权）。
 ///
 /// **worker 生命周期豁免**：本驱动是 plain async fn（对齐 `run_dispatch` 范式），
-/// `ManagedResource` / probe / `ShutdownStack` 两阶段关闭接入随组合根 spawn（T008）落地，
-/// 属 follow-up；与 relay.rs 的 `RelayWorker` 不同，T007 只交付驱动函数本体。
+/// `ManagedResource` / probe / `ShutdownStack` 两阶段关闭接入随组合根 spawn 落地，
+/// 属 consumer worker 生命周期 follow-up（#1142 派生，组合根 spawn + ManagedResource/ShutdownStack + probe）；
+/// 与 relay.rs 的 `RelayWorker` 不同，本任务只交付驱动函数本体。
 ///
 /// ref: watermill message/router/middleware/poison.go（DLX ack 收口）
 ///      watermill message/router/middleware/retry.go（MaxRetries+1 次尝试首投）
@@ -104,7 +105,51 @@ pub async fn run_consumer<S, H>(
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     while let Some(msg) = stream.next().await {
-        consume_one(&idempotency, &dlx, &meta, &handler, msg).await;
+        consume_one(&idempotency, &dlx, &meta, &handler, msg, None).await;
+    }
+}
+
+/// at-least-once 消费驱动：消费 [`diport::DeliveryStream`]，解构每条 [`diport::Delivery`]，
+/// 把 broker 结算句柄传给 `consume_one` 在终态调 [`diport::AckAction`]。
+///
+/// 与 [`run_consumer`] 对偶：`run_consumer` 消费 `MessageStream`（brokerless / MemBus，acker=None），
+/// 本函数消费 `DeliveryStream`（AMQP 等支持 broker 确认的 provider），每条消息终态恰向 broker settle 一次。
+///
+/// **终态→AckAction 映射**（见 `consume_one`/`handle_fresh`/`dead_letter` 的 acker 传递）：
+/// - handler Ack / DLX 写成功 → broker `Ack`
+/// - DLX 写失败 / check 返 Err / unknown SeenState → broker `Requeue`
+/// - Duplicate → broker `Ack`（幂等短路，已处理）
+/// - IdemKey parse 失败 → broker `Reject`（malformed，不重投）
+///
+/// **settle 失败语义（不丢失）**：`settle` 失败仅结构化 error 日志、**不中断**消费循环。终态 `Ack` 走
+/// commit→settle 顺序（handler 副作用在 `handler()` 内已持久 + 幂等键已 `commit` 标记 done **先于** broker
+/// ack）；故 `settle(Ack)` 失败时，消息在 broker channel close 后被自动重投、再经幂等 `check` 去重
+/// （`Duplicate`→`Ack`）——副作用恰一次、消息不丢失（最坏仅滞留队列直至 ack 成功）。broker channel 错误致
+/// stream 终止后的**有监督重启**（+ settle 失败 metric）属 consumer worker 生命周期 follow-up（#1142 派生）。
+///
+/// ref: lapin message::Delivery.acker（AMQP 手工 ack 范式）
+///      watermill-amqp pkg/amqp/subscriber.go@master（Ack/Nack 驱动模型）
+pub async fn run_consumer_ackable<S, H>(
+    mut stream: diport::DeliveryStream,
+    idempotency: Arc<S>,
+    dlx: Box<DynDeadLetterStore<'static>>,
+    meta: ConsumerMeta,
+    handler: H,
+) where
+    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+{
+    while let Some(d) = stream.next().await {
+        let diport::Delivery { message, acker } = d;
+        consume_one(
+            &idempotency,
+            &dlx,
+            &meta,
+            &handler,
+            message,
+            Some(acker.as_ref()),
+        )
+        .await;
     }
 }
 
@@ -116,6 +161,7 @@ async fn consume_one<S, H>(
     meta: &ConsumerMeta,
     handler: &H,
     msg: Message,
+    acker: Option<&diport::DynAcker<'static>>,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
@@ -125,6 +171,14 @@ async fn consume_one<S, H>(
         Ok(k) => k,
         Err(_) => {
             log_parse_failed(&msg);
+            // malformed id：broker Reject（不重投）。
+            settle(
+                acker,
+                diport::AckAction::Reject,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
             return;
         }
     };
@@ -132,12 +186,43 @@ async fn consume_one<S, H>(
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs::dispatch_one 范式）。
     match idempotency.check(&key).await {
         // 瞬态后端故障：结构化 warn，不 commit（下次重投）。
-        Err(e) => log_check_failed(&msg, &e),
-        // 幂等短路：不调 handler、不 commit。
-        Ok(SeenState::Duplicate) => log_duplicate(&msg, meta),
-        Ok(SeenState::Fresh) => handle_fresh(idempotency, dlx, meta, handler, msg, &key).await,
+        Err(e) => {
+            log_check_failed(&msg, &e);
+            // 瞬态故障：broker Requeue（等下次重投）。
+            settle(
+                acker,
+                diport::AckAction::Requeue,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
+        }
+        // 幂等短路：不调 handler、不 commit；broker Ack（已处理过，无需再投）。
+        Ok(SeenState::Duplicate) => {
+            log_duplicate(&msg, meta);
+            settle(
+                acker,
+                diport::AckAction::Ack,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
+        }
+        Ok(SeenState::Fresh) => {
+            handle_fresh(idempotency, dlx, meta, handler, msg, &key, acker).await;
+        }
         // reason: SeenState 是 #[non_exhaustive]，兜底臂保守丢弃（对齐 relay.rs 非 Ack 处置保守降级）。
-        Ok(_) => log_unknown_seen_state(&msg),
+        Ok(_) => {
+            log_unknown_seen_state(&msg);
+            // 未知状态：保守 Requeue（不静默 Ack，也不 Reject——语义不明时可重投再判）。
+            settle(
+                acker,
+                diport::AckAction::Requeue,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
+        }
     }
 }
 
@@ -150,6 +235,7 @@ async fn handle_fresh<S, H>(
     handler: &H,
     msg: Message,
     key: &IdemKey,
+    acker: Option<&diport::DynAcker<'static>>,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
@@ -161,7 +247,14 @@ async fn handle_fresh<S, H>(
         let result = handler(msg.clone()).await;
         match result.disposition() {
             consistency::outbox::Disposition::Ack => {
-                commit_key(idempotency, key, msg.id.as_str()).await;
+                // 仅 commit（幂等 done 标记）成功才 broker Ack；commit 失败 → Requeue（不移除投递，
+                // 待 broker 重投后幂等去重收口），守「ack only after durable commit」（review #265 F1/C1）。
+                let action = if commit_key(idempotency, key, msg.id.as_str()).await {
+                    diport::AckAction::Ack
+                } else {
+                    diport::AckAction::Requeue
+                };
+                settle(acker, action, meta.domain(), msg.id.as_str()).await;
                 return;
             }
             consistency::outbox::Disposition::Reject => {
@@ -177,6 +270,7 @@ async fn handle_fresh<S, H>(
                     result
                         .error_summary()
                         .unwrap_or(SUMMARY_PERMANENT_REJECTION),
+                    acker,
                 )
                 .await;
                 return;
@@ -202,21 +296,30 @@ async fn handle_fresh<S, H>(
         // 正常 requeue 路径恒 Some(kind 摘要)；unwrap_or 仅防御未来未知 Disposition 变体经 `_ => {}`
         // 未 set 摘要时的 `None`（非死代码，见 SUMMARY_REQUEUE_EXHAUSTED 注释）。
         last_requeue_summary.unwrap_or(SUMMARY_REQUEUE_EXHAUSTED),
+        acker,
     )
     .await;
 }
 
-/// commit key（claimed→done）：错误结构化 error 日志（不 panic）。
-async fn commit_key<S>(idempotency: &Arc<S>, key: &IdemKey, message_id: &str)
+/// commit key（claimed→done）：返回 commit 是否成功。错误结构化 error 日志（不 panic）。
+///
+/// 返回值 gate broker Ack 决策（review #265 F1/C1）：commit 失败**不可**移除 broker 投递——
+/// handler-Ack / DLX-写成功两条终态仅在 commit 成功后 broker `Ack`，失败转 `Requeue`
+/// （守「ack only after durable commit」：done 标记未持久时不出队，待 broker 重投经幂等去重收口）。
+async fn commit_key<S>(idempotency: &Arc<S>, key: &IdemKey, message_id: &str) -> bool
 where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
-    if let Err(e) = idempotency.commit(key).await {
-        tracing::error!(
-            message_id,
-            error = %e,
-            "consumer: idempotency commit failed"
-        );
+    match idempotency.commit(key).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(
+                message_id,
+                error = %e,
+                "consumer: idempotency commit failed"
+            );
+            false
+        }
     }
 }
 
@@ -238,15 +341,18 @@ where
 /// 死信路径：
 /// 1. 结构化 `error!`（T007.5：domain/contract_id/topic/num_attempts/error_summary 五字段，含 message_id）。
 /// 2. `dlx.write_dead_letter(record)`。
-/// 3. dlx **写成功** → `idempotency.commit(key)`（标记 done，终态收口）；
-///    dlx **写失败** → `idempotency.release(key)`（claimed→absent，使 broker 重投时 check 回 Fresh、
-///    重新尝试 DLX），避免静默丢失（消息永久消失 + 死信未落 DB）。
+/// 3. dlx **写成功** → `idempotency.commit(key)`（标记 done，终态收口）+ broker `Ack`；
+///    dlx **写失败** → `idempotency.release(key)`（claimed→absent，使 broker 重投时 check 回 Fresh）
+///    + broker `Requeue`，避免静默丢失（消息永久消失 + 死信未落 DB）。
 ///
 /// 各步错误结构化 error 日志（不 panic）。
 ///
 /// `error_summary` 是安全摘要：`&'static str` const（来自 handler 的 error kind message，经
 /// `HandleResult::error_summary()` 流到此处，#1125），不含 handler error/payload 原文。PII-safe（const
 /// literal，无 runtime 数据），下游 `DeadLetterSummary::new` 仍强制 const 收口。
+#[allow(clippy::too_many_arguments)]
+// reason: 8 参数是 DLX 路径的最小必要集合（dlx/idempotency/key/meta/msg/attempts/summary/acker 各自语义独立）；
+// 引入聚合 struct 会增加间接层且不适用于本模块的借用生命周期，item-level carve-out。
 async fn dead_letter<S>(
     dlx: &DynDeadLetterStore<'static>,
     idempotency: &Arc<S>,
@@ -255,6 +361,7 @@ async fn dead_letter<S>(
     msg: &Message,
     num_attempts: u32,
     error_summary: &'static str,
+    acker: Option<&diport::DynAcker<'static>>,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
@@ -276,25 +383,82 @@ async fn dead_letter<S>(
 
     match dlx.write_dead_letter(record).await {
         Ok(()) => {
-            // dlx 写成功 → commit（标记 done，终态收口，ack 原消息语义）。
-            commit_key(idempotency, key, msg.id.as_str()).await;
+            // dlx 写成功 → commit（标记 done）。仅 commit 成功才 broker Ack；commit 失败 → Requeue
+            // （DLX 已落但 done 标记未持久，重投经幂等 Duplicate 收口，守「ack only after durable commit」F1/C1）。
+            let action = if commit_key(idempotency, key, msg.id.as_str()).await {
+                diport::AckAction::Ack
+            } else {
+                diport::AckAction::Requeue
+            };
+            settle(acker, action, meta.domain(), msg.id.as_str()).await;
         }
         Err(e) => {
             // dlx 写失败 → release（claimed→absent），使 broker 重投时 check 回 Fresh、
             // 重新尝试 DLX，避免静默丢失（消息进 done + 死信未落 DB = 不可恢复审计盲点）。
             log_dlx_write_failed(meta, &e);
             release_key(idempotency, key, msg.id.as_str()).await;
+            // broker Requeue：DLX 未落，原投递重投等待再次尝试。
+            settle(
+                acker,
+                diport::AckAction::Requeue,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
         }
     }
 }
 
+/// 向 broker settle 本条投递（ack / requeue / reject）+ 发结算 metric。
+///
+/// `acker = None` 是 brokerless / MemBus 路径（`run_consumer`），noop（无 broker、不发 metric）。
+/// `acker = Some(a)` 是 at-least-once 路径（`run_consumer_ackable`）：结算失败仅结构化 error 日志（不 panic），
+/// 并发 `consumer_settle_total{domain,action,outcome}` counter 供告警（review #265 F3/C3）——闭值集 label：
+/// `action`=[`diport::AckAction::as_label`]、`outcome`=`ok|error`、`domain` 由 [`ConsumerMeta`] 封边。
+///
+/// metric 形态：minimal 直发 `metrics` facade（无 recorder 即 no-op，对齐 `relay_metrics::MetricsOutboxMetrics`
+/// 的底层发射）；注入式 `ConsumerMetrics` port（与 `OutboxMetrics` 同形、组合根注入）属重构，随 consumer worker
+/// 生命周期落地（follow-up #1301）。
+///
+/// `error = %e` 安全前提：`AckError::Display` 是 const literal `"ack settle failed"`，不携 runtime 数据
+/// （见 `diport::AckError` rustdoc，INVARIANT DIPORT-ERR-SOURCE-REDACT-01）。
+async fn settle(
+    acker: Option<&diport::DynAcker<'static>>,
+    action: diport::AckAction,
+    domain: &str,
+    message_id: &str,
+) {
+    let Some(a) = acker else { return };
+    let outcome = match a.settle(action).await {
+        Ok(()) => "ok",
+        Err(e) => {
+            tracing::error!(
+                message_id,
+                action = action.as_label(),
+                error = %e,
+                "consumer: broker settle failed"
+            );
+            "error"
+        }
+    };
+    // 闭值集 label：domain 由 ConsumerMeta 封边、action/outcome 编译期闭集；domain 在发射处才降 owned String。
+    metrics::counter!(
+        "consumer_settle_total",
+        "domain" => domain.to_owned(),
+        "action" => action.as_label(),
+        "outcome" => outcome,
+    )
+    .increment(1);
+}
+
 // ── 日志 helper（tracing 宏收口，控制调用方认知复杂度 ≤15；同 lib.rs::log_dropped_* 范式）──
 
-/// IdemKey parse 失败（key 漂移 fail-closed 丢弃）。
+/// IdemKey parse 失败（malformed id，fail-closed 不重投）。
 fn log_parse_failed(msg: &Message) {
     tracing::warn!(
         message_id = msg.id.as_str(),
-        "consumer: IdemKey parse failed, message dropped"
+        // 处置随路径：ackable 路径 settle(Reject)（→broker DLX，不无限重投）；brokerless 路径丢弃。
+        "consumer: IdemKey parse failed (malformed), rejected to broker DLX (dropped if brokerless)"
     );
 }
 
@@ -322,11 +486,12 @@ fn log_duplicate(msg: &Message, meta: &ConsumerMeta) {
     );
 }
 
-/// 未知 `SeenState` 变体（#[non_exhaustive] 兜底保守丢弃）。
+/// 未知 `SeenState` 变体（#[non_exhaustive] 兜底保守处置）。
 fn log_unknown_seen_state(msg: &Message) {
     tracing::warn!(
         message_id = msg.id.as_str(),
-        "consumer: unknown SeenState variant, message dropped"
+        // 处置随路径：ackable 路径 settle(Requeue)（重投，非丢弃）；brokerless 路径无 broker（丢弃）。
+        "consumer: unknown SeenState variant, conservatively requeued (dropped if brokerless)"
     );
 }
 
@@ -373,8 +538,9 @@ mod tests {
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
+    use diport::{AckAction, Acker, DeliveryStream, DynAcker};
 
-    use super::{ConsumerMeta, run_consumer};
+    use super::{ConsumerMeta, run_consumer, run_consumer_ackable};
     use crate::MAX_REDELIVERY;
 
     // ── 工厂 helper ──────────────────────────────────────────────────────────
@@ -407,34 +573,36 @@ mod tests {
         check_count: AtomicU32,
         commit_count: AtomicU32,
         release_count: AtomicU32,
+        /// commit 恒失败（F1：测 commit 失败 → broker Requeue 不 Ack）。
+        commit_fails: bool,
     }
 
     impl FakeIdempotencyStore {
-        fn fresh() -> Arc<Self> {
+        fn with(check_result: CheckResult, commit_fails: bool) -> Arc<Self> {
             Arc::new(Self {
-                check_result: CheckResult::Fresh,
+                check_result,
                 check_count: AtomicU32::new(0),
                 commit_count: AtomicU32::new(0),
                 release_count: AtomicU32::new(0),
+                commit_fails,
             })
+        }
+
+        fn fresh() -> Arc<Self> {
+            Self::with(CheckResult::Fresh, false)
         }
 
         fn duplicate() -> Arc<Self> {
-            Arc::new(Self {
-                check_result: CheckResult::Duplicate,
-                check_count: AtomicU32::new(0),
-                commit_count: AtomicU32::new(0),
-                release_count: AtomicU32::new(0),
-            })
+            Self::with(CheckResult::Duplicate, false)
         }
 
         fn err() -> Arc<Self> {
-            Arc::new(Self {
-                check_result: CheckResult::Err,
-                check_count: AtomicU32::new(0),
-                commit_count: AtomicU32::new(0),
-                release_count: AtomicU32::new(0),
-            })
+            Self::with(CheckResult::Err, false)
+        }
+
+        /// Fresh check + commit 恒失败（F1/C1：commit 失败终态须 broker Requeue、不可 Ack）。
+        fn fresh_commit_fails() -> Arc<Self> {
+            Self::with(CheckResult::Fresh, true)
         }
 
         #[allow(dead_code)]
@@ -469,6 +637,11 @@ mod tests {
 
         async fn commit(&self, _key: &IdemKey) -> Result<(), consistency::error::EngineError> {
             self.commit_count.fetch_add(1, Ordering::Release);
+            if self.commit_fails {
+                return Err(consistency::error::EngineError::new(
+                    consistency::error::EngineErrorKind::Transient,
+                ));
+            }
             Ok(())
         }
 
@@ -593,6 +766,60 @@ mod tests {
             }
         }
         DynDeadLetterStore::new_box(ArcProxy(store))
+    }
+
+    // ── FakeAcker ────────────────────────────────────────────────────────────
+
+    /// fake broker acker：记录每次 settle 的 AckAction（Arc<Mutex<Vec>> 范式）。
+    ///
+    /// 用法：
+    /// 1. `FakeAcker::new()` 得到 `(Arc<FakeAcker>, Box<DynAcker<'static>>)`；
+    /// 2. 把 box 装入 Delivery 流驱动；
+    /// 3. 测试后从 `Arc<FakeAcker>` 读 `settled_actions()` 断言。
+    struct FakeAcker {
+        actions: Mutex<Vec<AckAction>>,
+    }
+
+    impl FakeAcker {
+        /// 构造 FakeAcker + 对应 Box<DynAcker<'static>>（Arc 代理范式，与 fake_dlx 同构）。
+        fn new() -> (Arc<Self>, Box<DynAcker<'static>>) {
+            let arc = Arc::new(Self {
+                actions: Mutex::new(vec![]),
+            });
+            struct ArcProxy(Arc<FakeAcker>);
+            impl Acker for ArcProxy {
+                async fn settle(&self, action: AckAction) -> Result<(), diport::AckError> {
+                    #[allow(clippy::unwrap_used)]
+                    // reason: 测试 happy-path，item-level carve-out
+                    self.0.actions.lock().unwrap().push(action);
+                    Ok(())
+                }
+            }
+            let boxed = DynAcker::new_box(ArcProxy(arc.clone()));
+            (arc, boxed)
+        }
+
+        /// 读取已记录的 settle action 序列（克隆快照）。
+        fn settled_actions(&self) -> Vec<AckAction> {
+            #[allow(clippy::unwrap_used)]
+            // reason: 测试 happy-path，item-level carve-out
+            self.actions.lock().unwrap().clone()
+        }
+    }
+
+    /// 构造 DeliveryStream（每条消息配独立 FakeAcker）。
+    /// 返回 (stream, Vec<Arc<FakeAcker>>)——acker 句柄与消息顺序一一对应。
+    fn delivery_stream_of(payloads: &[(&str, &[u8])]) -> (DeliveryStream, Vec<Arc<FakeAcker>>) {
+        let mut ackers = Vec::with_capacity(payloads.len());
+        let mut deliveries = Vec::with_capacity(payloads.len());
+        for (id, p) in payloads {
+            let (arc, boxed) = FakeAcker::new();
+            let msg = Message::new(*id, p.to_vec());
+            deliveries.push(diport::Delivery::new(msg, boxed));
+            ackers.push(arc);
+        }
+        let stream: DeliveryStream = Box::pin(futures::stream::iter(deliveries));
+        (stream, ackers)
     }
 
     // ── handler 工厂 ─────────────────────────────────────────────────────────
@@ -1067,6 +1294,322 @@ mod tests {
         assert!(
             !all_values.contains("SENSITIVE_PAYLOAD_BYTES"),
             "字段值不得含 payload 原文: {all_values}"
+        );
+    }
+
+    // ── 七个 ackable 终态测试 ────────────────────────────────────────────────
+
+    /// ACK-1：handler 恒 Ack → settle=[Ack]，commit 1 次，dlx 0 次。
+    #[tokio::test]
+    async fn ack1_handler_ack_settles_ack() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack1", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            handler_count.load(Ordering::Relaxed),
+            1,
+            "handler 应调 1 次"
+        );
+        assert_eq!(idem.commit_count(), 1, "commit 应 1 次");
+        assert_eq!(dlx_store.write_count(), 0, "dlx 应 0 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Ack],
+            "settle 应为 [Ack]"
+        );
+    }
+
+    /// ACK-2：handler 恒 Reject + DLX 写成功 → settle=[Ack]，dlx 1 次，commit 1 次。
+    #[tokio::test]
+    async fn ack2_handler_reject_dlx_ok_settles_ack() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack2", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_reject(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            handler_count.load(Ordering::Relaxed),
+            1,
+            "handler 应调 1 次"
+        );
+        assert_eq!(dlx_store.write_count(), 1, "dlx 应 1 次");
+        assert_eq!(idem.commit_count(), 1, "commit 应 1 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Ack],
+            "DLX 写成功后 settle 应为 [Ack]"
+        );
+    }
+
+    /// ACK-3：handler 恒 Requeue（耗尽）+ DLX 写成功 → settle=[Ack]，dlx 1 次，commit 1 次。
+    #[tokio::test]
+    async fn ack3_handler_requeue_exhausted_dlx_ok_settles_ack() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack3", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_requeue(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            handler_count.load(Ordering::Relaxed),
+            MAX_REDELIVERY,
+            "handler 应调 MAX_REDELIVERY 次"
+        );
+        assert_eq!(dlx_store.write_count(), 1, "dlx 应 1 次");
+        assert_eq!(idem.commit_count(), 1, "commit 应 1 次（dlx 终态收口）");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Ack],
+            "Requeue 耗尽 DLX 成功后 settle 应为 [Ack]"
+        );
+    }
+
+    /// ACK-4：handler 恒 Reject + DLX 写失败 → settle=[Requeue]，release 1，commit 0。
+    #[tokio::test]
+    async fn ack4_handler_reject_dlx_fail_settles_requeue() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = AlwaysErrDeadLetterStore::new();
+        let dlx = fake_dlx_always_err(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack4", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_reject(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            handler_count.load(Ordering::Relaxed),
+            1,
+            "handler 应调 1 次"
+        );
+        assert_eq!(dlx_store.write_count(), 1, "dlx write 应尝试 1 次");
+        assert_eq!(idem.commit_count(), 0, "dlx 写失败时 commit 应 0");
+        assert_eq!(idem.release_count(), 1, "dlx 写失败时 release 应 1");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "DLX 写失败后 settle 应为 [Requeue]"
+        );
+    }
+
+    /// ACK-5：幂等 check 返 Err → settle=[Requeue]，handler 0，commit 0。
+    #[tokio::test]
+    async fn ack5_check_err_settles_requeue() {
+        let idem = FakeIdempotencyStore::err();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack5", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(handler_count.load(Ordering::Relaxed), 0, "handler 应 0 次");
+        assert_eq!(idem.commit_count(), 0, "commit 应 0");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "check Err 后 settle 应为 [Requeue]"
+        );
+    }
+
+    /// ACK-6：check 返 Duplicate → settle=[Ack]，handler 0，commit 0。
+    #[tokio::test]
+    async fn ack6_duplicate_settles_ack() {
+        let idem = FakeIdempotencyStore::duplicate();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack6", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(handler_count.load(Ordering::Relaxed), 0, "handler 应 0 次");
+        assert_eq!(idem.commit_count(), 0, "commit 应 0");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Ack],
+            "Duplicate 后 settle 应为 [Ack]"
+        );
+    }
+
+    /// ACK-7：空 id（parse 失败）→ settle=[Reject]，handler 0，commit 0。
+    #[tokio::test]
+    async fn ack7_parse_failed_settles_reject() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        // 空 id → IdemKey::parse 失败
+        let (stream, ackers) = delivery_stream_of(&[("", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(handler_count.load(Ordering::Relaxed), 0, "handler 应 0 次");
+        assert_eq!(idem.commit_count(), 0, "commit 应 0");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Reject],
+            "parse 失败后 settle 应为 [Reject]"
+        );
+    }
+
+    // ── F1（review #265 C1）：commit 失败终态须 broker Requeue、不可 Ack ──────────
+
+    /// F1a：handler Ack + commit 失败 → settle 序列 [Requeue]（非 Ack）、commit 尝试 1 次。
+    /// 守「ack only after durable commit」——done 标记未持久不可移除 broker 投递。
+    #[tokio::test]
+    async fn ack_commit_fail_requeues_not_ack() {
+        let idem = FakeIdempotencyStore::fresh_commit_fails();
+        let dlx = fake_dlx(FakeDeadLetterStore::new());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("m-cf", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            handler_count.load(Ordering::Relaxed),
+            1,
+            "handler 应调 1 次"
+        );
+        assert_eq!(idem.commit_count(), 1, "commit 应尝试 1 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "commit 失败时 settle 应为 [Requeue]（非 Ack）"
+        );
+    }
+
+    /// F1b：handler Reject + DLX 写成功 + commit 失败 → settle [Requeue]、dlx 写 1 次、commit 尝试 1 次。
+    /// DLX 已落但 done 标记未持久 ⇒ 不 Ack，重投经幂等 Duplicate 收口。
+    #[tokio::test]
+    async fn reject_dlx_ok_commit_fail_requeues() {
+        let idem = FakeIdempotencyStore::fresh_commit_fails();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("m-cf-dlx", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_reject(handler_count.clone()),
+        )
+        .await;
+
+        assert_eq!(dlx_store.write_count(), 1, "dlx 应写 1 次");
+        assert_eq!(idem.commit_count(), 1, "commit 应尝试 1 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "DLX 成功但 commit 失败时 settle 应为 [Requeue]（非 Ack）"
+        );
+    }
+
+    // ── F3（review #265 C3）：settle 发 consumer_settle_total metric ──────────────
+
+    /// F3：ackable Ack settle 成功 → 发 `consumer_settle_total{domain,action,outcome}`
+    /// （domain=identity / action=ack / outcome=ok）。with_local_recorder + block_on 单线程捕获（同 TC5 范式）。
+    #[test]
+    fn settle_emits_consumer_settle_total_metric() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        #[allow(clippy::unwrap_used)]
+        // reason: 测试 runtime 构造，item-level carve-out
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let idem = FakeIdempotencyStore::fresh();
+                let dlx = fake_dlx(FakeDeadLetterStore::new());
+                let handler_count = Arc::new(AtomicU32::new(0));
+                let (stream, _ackers) = delivery_stream_of(&[("m-metric", b"payload")]);
+                run_consumer_ackable(stream, idem, dlx, meta(), handler_ack(handler_count)).await;
+            });
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("consumer_settle_total"),
+            "缺 metric consumer_settle_total: {rendered}"
+        );
+        assert!(
+            rendered.contains("domain=\"identity\""),
+            "缺 domain label: {rendered}"
+        );
+        assert!(
+            rendered.contains("action=\"ack\""),
+            "缺 action=ack label: {rendered}"
+        );
+        assert!(
+            rendered.contains("outcome=\"ok\""),
+            "缺 outcome=ok label: {rendered}"
         );
     }
 }
