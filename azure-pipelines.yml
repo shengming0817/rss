@@ -5,8 +5,8 @@
 # 工具，再调一条聚合命令。本地等价 = `make ci`。
 #
 # 覆盖 issue #1132 验收：build --all-features --all-targets / fmt / clippy -D warnings / nextest --workspace
-# + llvm-cov 引擎-基础 ≥90% 覆盖率门 / xtask verify 聚合（contract validate·layer-deps·codegen drift·deny·
-# dylint）/ public-api --check（轴 A）。
+# + llvm-cov 覆盖率门（引擎-基础 ≥90% 绝对地板 + 本 PR diff 增量 ≥80%，#1145 第①项，复用同一 profdata）/
+# xtask verify 聚合（contract validate·layer-deps·codegen drift·deny·dylint）/ public-api --check（轴 A）。
 # 覆盖 issue #1133 验收：cargo-deny advisories(RustSec) + cargo-audit + licenses+bans（PR 门 ci 全查、阻断合入）
 # + 每日 `schedules:` cron 定时刷新 lane（lean `cargo xtask audit`，捕「未变依赖」新 CVE）。SBOM 见 release-lane follow-up。
 #
@@ -50,7 +50,7 @@ variables:
 steps:
   - checkout: self
     fetchDepth: 0
-    displayName: 'Checkout（fetchDepth 0：覆盖率全量 + 未来 semver/diff-cov baseline 需见 origin/develop）'
+    displayName: 'Checkout（fetchDepth 0：diff-cov 增量门依赖 origin/develop 可见——浅克隆即 fail-closed〔#1145〕；+ 覆盖率全量 + 未来 semver baseline）'
 
   - script: |
       set -euo pipefail
@@ -102,7 +102,7 @@ steps:
   - script: |
       set -euo pipefail
       cargo run --locked -p xtask -- ci
-    displayName: 'cargo xtask ci（聚合全门：build/clippy/fmt/coverage/deny/audit/dylint/public-api/contract-validate/layer-deps/codegen）'
+    displayName: 'cargo xtask ci（聚合全门：build/clippy/fmt/coverage〔绝对地板+diff增量〕/deny/audit/dylint/public-api/contract-validate/layer-deps/codegen）'
     condition: ne(variables['Build.Reason'], 'Schedule')
 
   # 每日定时刷新 lane（issue #1133）：advisory-scoped deny + cargo-audit，捕获「未变依赖」新披露 CVE。

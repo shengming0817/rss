@@ -16,7 +16,8 @@
 //!   `cargo xtask ci [--allow-missing-tools]`
 //!                                      CI lane **超集**聚合（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
 //!                                      verify 全门（build/clippy 升 `--all-features --all-targets`）+ 覆盖率门
-//!                                      （`cargo llvm-cov nextest` 替 nextest，强制 basis/engine ≥90%）+ public-api
+//!                                      （`cargo llvm-cov nextest` 替 nextest，单跑两子门：basis/engine ≥90% 绝对
+//!                                      地板 + 本 PR diff 增量 ≥80%，见 `coverage.rs`/`diffcov.rs`）+ public-api
 //!                                      --check（轴 A）+ cargo-audit（供应链漏洞，#1133）。verify 仍是本地 stable-only 快门，ci 是 CI 全工具超集。详见 `verify.rs`。
 //!   `cargo xtask audit [--allow-missing-tools]`
 //!                                      供应链漏洞**定时刷新** lane（issue #1133，azure-pipelines.yml 每日 `schedules:`
@@ -32,6 +33,7 @@ mod codegen;
 mod contract;
 mod coverage;
 mod diagnostic;
+mod diffcov;
 mod layerdeps;
 mod layers;
 mod pathsafe;

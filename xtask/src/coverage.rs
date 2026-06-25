@@ -1,6 +1,12 @@
-//! `cargo xtask ci` 覆盖率门 —— 跑 `cargo llvm-cov nextest --workspace`（**兼作 nextest 门**：测试必须
-//! 全绿）+ 解析 llvm-cov export JSON，对 basis/engine 严格 crate（`vocab`/`ids`/`consistency`/`primitives`，
-//! CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集）按 per-crate 行覆盖率下限判定。
+//! `cargo xtask ci` 覆盖率门 —— 跑**一次** `cargo llvm-cov nextest --workspace`（出 export JSON，**兼作
+//! nextest 门**：测试必须全绿，并留下 profdata）后评**两子门**（不重复跑测试）：
+//!
+//! 1. **绝对地板门**（本模块）：export JSON → basis/engine 严格 crate（`vocab`/`ids`/`consistency`/
+//!    `primitives`，CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集）per-crate 行覆盖率下限。
+//! 2. **per-diff 增量门**（[`crate::diffcov`]）：复用同一 profdata 经 `cargo llvm-cov report --lcov` 出 lcov
+//!    （[`lcov_report`]，不重跑测试）→ 本 PR diff（相对 base，默认 `origin/develop`）新增/修改可执行行聚合
+//!    覆盖率 ≥80%（CLAUDE.md「新增/修改代码 ≥80%」）。补地板门测不到的「新代码自身被测」洞——全在
+//!    adapters/域 crate 的大改动可零新测试照样过地板门。
 //!
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
 //! 全 workspace 跑），只在 `cargo xtask ci`（CI 超集）内、由 azure-pipelines.yml 调用。issue #1132 验收
@@ -13,11 +19,9 @@
 //! （已实现的 idempotency/outbox/error ~100%）。故 `consistency` 暂设 ratchet 下限 85%（[`RATCHET_FLOORS`]，
 //! 留 thaw 余量）；待接缝兑现+测试落地后 restore 90%（follow-up #1146）。其余 STRICT crate 守默认 90%。
 //!
-//! per-PR-diff **增量** ≥80% 覆盖率门（issue 验收另一子项）= follow-up #1145（diff-cov 语义，需 base-ref
-//! 比对，与本「全 crate 绝对地板」语义不同）。
-//!
 //! INVARIANT: COVERAGE-STRICT-FLOOR-01 —— [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限
 //!   **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。缺测量也 fail：杜绝「没跑到 = 静默绿」的 vacuity。
+//!   per-diff 增量门的不变式（COVERAGE-DIFF-FLOOR-01）见 [`crate::diffcov`]。
 
 use crate::cmd::clean_cmd;
 use crate::workspace_root;
@@ -154,33 +158,42 @@ fn render_failures(failing: &[Shortfall]) -> String {
     )
 }
 
-/// ci 覆盖率门：跑 llvm-cov nextest（= nextest 门）→ 解析 → STRICT per-crate 下限判定。
+/// ci 覆盖率门：跑 llvm-cov nextest（= nextest 门，留 profdata）→ 评**两子门**（任一红即 ci 非零退出）：
+/// ① 绝对地板（export JSON）；② per-diff 增量（复用同一 profdata 出 lcov，不重跑测试，见 [`crate::diffcov`]）。
 pub(crate) fn run() -> Result<()> {
     let root = workspace_root()?;
     let json = run_llvm_cov(&root)?;
+    // ① 绝对地板门：basis/engine STRICT crate per-crate 行覆盖率下限（COVERAGE-STRICT-FLOOR-01）。
     let per_crate = aggregate(&json, STRICT_CRATES)?;
     let failing = evaluate(&per_crate, STRICT_CRATES);
     if !failing.is_empty() {
         bail!("coverage: {}", render_failures(&failing));
     }
+    // ratchet 提示从 RATCHET_FLOORS 派生（单源，避免硬编码 "85%" 与 ratchet 改动漂移）。
+    let ratchet = RATCHET_FLOORS
+        .iter()
+        .map(|(c, f)| format!("{c} ratchet {f:.0}%"))
+        .collect::<Vec<_>>()
+        .join("、");
     eprintln!(
-        "coverage: STRICT basis/engine crate 均达行覆盖率下限（{}；consistency ratchet 85%）",
+        "coverage: STRICT basis/engine crate 均达行覆盖率下限（{}；{ratchet}）",
         STRICT_CRATES.join(", ")
     );
-    Ok(())
+    // ② per-diff 增量门：复用 nextest 跑测试留下的 profdata 出 lcov（不重跑测试），本 PR 新增/修改可执行行
+    //    ≥80%（COVERAGE-DIFF-FLOOR-01，见 crate::diffcov）。
+    let lcov = lcov_report(&root)?;
+    crate::diffcov::check(&root, &lcov)
 }
 
 /// 跑 `cargo llvm-cov nextest --workspace --json --output-path <file>`（默认 feature——集成测试不编入
 /// ⇒ 无需 DB/broker）。stdio 继承（实时看测试输出）。非零退出 = 测试失败（nextest 门）⇒ `Err`。
 /// `NEXTEST_PROFILE=ci`（fail-fast=false + retries，见 `.config/nextest.toml`；用 env 而非 `--profile`
-/// 避免与 llvm-cov 自身 `--profile`（cargo build profile）的 flag 撞名）。
+/// 避免与 llvm-cov 自身 `--profile`（cargo build profile）的 flag 撞名）。本步留下的 profdata 由
+/// [`lcov_report`] 复用出 lcov（per-diff 增量门），不重跑测试。
 fn run_llvm_cov(root: &Path) -> Result<String> {
     // 跟随 CARGO_TARGET_DIR（clean_cmd 不清它——见 cmd.rs STRIPPED_ENV charter），否则默认 root/target；
     // 与 llvm-cov 实际写 JSON 的 target 目录一致（review #206 C6）。
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"));
-    let out = target_dir.join("xtask-ci-coverage.json");
+    let out = coverage_target_dir(root).join("xtask-ci-coverage.json");
     let out_str = out.to_str().context("覆盖率 JSON 输出路径非法 UTF-8")?;
     let status = clean_cmd(
         "cargo",
@@ -205,6 +218,39 @@ fn run_llvm_cov(root: &Path) -> Result<String> {
         bail!("coverage: nextest 门失败（cargo llvm-cov nextest 退出码 {code}）");
     }
     std::fs::read_to_string(&out).with_context(|| format!("读覆盖率 JSON 失败: {}", out.display()))
+}
+
+/// 复用 [`run_llvm_cov`] 跑测试留下的 profdata 出 lcov（`cargo llvm-cov report --lcov`，**不重跑测试**），
+/// 供 per-diff 增量门（[`crate::diffcov`]）。落盘同 [`run_llvm_cov`] 跟随 `CARGO_TARGET_DIR`。
+///
+/// **不传 `--workspace`**（与 [`run_llvm_cov`] 不同）：`report` 无编译阶段，覆盖范围由上一步 `--workspace`
+/// instrumented 编译的 profdata 决定，已含全 workspace（实测 `report` 输出全 workspace crate 的 lcov）；
+/// 且 `cargo llvm-cov report` **不接受** `--workspace`（传入即报错）——勿误加。
+fn lcov_report(root: &Path) -> Result<String> {
+    let out = coverage_target_dir(root).join("xtask-ci-coverage.lcov");
+    let out_str = out.to_str().context("覆盖率 lcov 输出路径非法 UTF-8")?;
+    let status = clean_cmd(
+        "cargo",
+        &["llvm-cov", "report", "--lcov", "--output-path", out_str],
+        &[],
+        Some(root),
+    )
+    .status()
+    .context("启动 cargo llvm-cov report --lcov 失败")?;
+    if !status.success() {
+        let code = status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        bail!("coverage: cargo llvm-cov report --lcov 退出码 {code}");
+    }
+    std::fs::read_to_string(&out).with_context(|| format!("读覆盖率 lcov 失败: {}", out.display()))
+}
+
+/// 覆盖率产物落盘目录：跟随 `CARGO_TARGET_DIR`（clean_cmd 不清它），否则默认 `root/target`。JSON / lcov 共用。
+fn coverage_target_dir(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"))
 }
 
 #[cfg(test)]
