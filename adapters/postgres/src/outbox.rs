@@ -16,6 +16,8 @@
 //! ref: serverlesstechnology/cqrs `persistence/postgres-es/src/event_repository.rs@main`
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
+use std::time::SystemTime;
+
 use consistency::{
     BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxRelay,
     OutboxSource, OutboxSweeper, Topic,
@@ -49,6 +51,12 @@ const RESERVED_METADATA_KEYS: [&str; 4] = ["trace", "correlation", "principal", 
 /// metadata 主体 id key（仅 opaque subject，不容完整 Principal / email / 姓名 / phone）。
 const METADATA_SUBJECT_KEY: &str = "subjectId";
 
+/// reserved envelope key `occurred_at`（由 [`OutboxMetadata::new`] **构造期必填**注入；属 [`RESERVED_METADATA_KEYS`]）。
+/// 注入集 ⊆ 拒绝集由单测 `occurred_at_key_is_reserved` drift-lock 守（**Medium**）；occurred_at「producer 不可漏接」
+/// 由 `new` 必填位置参承载（**Hard**：无 occurred_at 的 metadata 类型层不可表达）；「业务不可伪造」由
+/// [`OutboxMetadata::try_insert`] 对 free-form 路径 fail-closed 拒 reserved 承载（**Hard**）。两轴正交。
+const KEY_OCCURRED_AT: &str = "occurred_at";
+
 /// [`OutboxMetadata`] 构造错误（free-form key 命中 reserved 集）。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum MetadataError {
@@ -71,9 +79,23 @@ pub(crate) enum MetadataError {
 pub(crate) struct OutboxMetadata(serde_json::Map<String, serde_json::Value>);
 
 impl OutboxMetadata {
-    /// 空 metadata。
-    pub(crate) fn new() -> Self {
-        Self(serde_json::Map::new())
+    /// 由 reserved `occurred_at`（unix 秒 i64，producer 端事件发生时刻）构造——**occurred_at 构造期必填**
+    /// （#1129/#262 F1）。
+    ///
+    /// occurred_at 注入折叠进构造器 ⇒「无 occurred_at 的 outbox metadata」**类型层不可表达**（Hard），杜绝
+    /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionUnitOfWork` / `PgConfigRepo`）各从注入 `Clock`
+    /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
+    /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
+    ///
+    /// `occurred_at` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace / correlation /
+    /// principal 为后续 follow-up（#1296）接线的空接缝，本 PR 不写。
+    pub(crate) fn new(occurred_at_secs: i64) -> Self {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            KEY_OCCURRED_AT.to_string(),
+            serde_json::Value::from(occurred_at_secs),
+        );
+        Self(map)
     }
 
     /// 设置 opaque 主体 id（唯一允许的 principal 形态——不容完整 Principal / PII）。
@@ -110,10 +132,24 @@ impl OutboxMetadata {
     }
 }
 
-impl Default for OutboxMetadata {
-    fn default() -> Self {
-        Self::new()
-    }
+// ── 时间编码 ──────────────────────────────────────────────────────────────────
+
+/// `SystemTime` → UNIX epoch 秒（i64）；负偏移收口 0、溢出收口 `i64::MAX`。
+///
+/// 本 crate **时间编码单源**（#1129 合并）：emitter / session_uow 的 envelope `occurred_at` 与 session 行
+/// `expires_at` / `created_at` 共用，消除同 crate 内重复。timestamptz / 整数秒由 server-side `to_timestamp($N)`
+/// 或直绑生成（不给 sqlx 加 time feature）。负偏移 / 正常路径由 outbox 单测 `unix_secs_*` 守。
+///
+/// 溢出分支（`as_secs > i64::MAX`，约年 ~2920 亿）为防御性收口：`i64::try_from(..).unwrap_or(i64::MAX)`
+/// **类型层静态保证不 panic**；该输入 `SystemTime` 不可移植构造（`UNIX_EPOCH + Duration::from_secs(u64::MAX)`
+/// 在 `SystemTime::add` 即 panic），故不写平台相关红 case（沿用合并前 session_uow 的既定理由）。
+///
+/// 跨 crate 另有 `identity::application::unix_secs` / `settings::application::unix_secs` 同名 helper（域 crate
+/// 不依赖本 adapter，故各自「独立维护、语义对齐」）；跨 crate 收敛为单源 + governance 守语义一致已登记 #1294。
+pub(crate) fn unix_secs(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 // ── OutboxEnvelope ────────────────────────────────────────────────────────────
@@ -646,8 +682,9 @@ pub(crate) fn backoff_seconds(retry_count: i32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, MetadataError, OutboxMetadata, STATUS_DLX,
-        STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds,
+        KEY_OCCURRED_AT, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, MetadataError, OutboxMetadata,
+        RESERVED_METADATA_KEYS, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING,
+        backoff_seconds, unix_secs,
     };
 
     // OutboxEnvelope 构造 + 字段访问（metadata 经 OutboxMetadata funnel，F1）。
@@ -657,40 +694,114 @@ mod tests {
         let env = OutboxEnvelope::new(
             "identity".to_string(),
             "contract-1".to_string(),
-            OutboxMetadata::new().with_subject_id("tenant-42"),
+            OutboxMetadata::new(1_700_000_000).with_subject_id("tenant-42"),
         );
         assert_eq!(env.domain(), "identity");
         assert_eq!(env.contract_id(), "contract-1");
-        assert_eq!(env.metadata_json(), r#"{"subjectId":"tenant-42"}"#);
+        // serde_json::Map 默认 BTreeMap（键序字母）：occurred_at < subjectId。
+        assert_eq!(
+            env.metadata_json(),
+            r#"{"occurred_at":1700000000,"subjectId":"tenant-42"}"#
+        );
     }
 
-    // metadata_json 空 metadata 退化 "{}"。
+    // #262 F1：occurred_at 构造期必填——`new(secs)` 仅 occurred_at（无 subject）即含该 reserved key。
     #[test]
-    fn envelope_metadata_json_empty_object() {
+    fn metadata_new_always_carries_occurred_at() {
         use super::OutboxEnvelope;
-        let env = OutboxEnvelope::new("d".to_string(), "c".to_string(), OutboxMetadata::new());
-        assert_eq!(env.metadata_json(), "{}");
+        let env = OutboxEnvelope::new("d".to_string(), "c".to_string(), OutboxMetadata::new(0));
+        assert_eq!(env.metadata_json(), r#"{"occurred_at":0}"#);
     }
 
     // F1 负向（anti-vacuity，INVARIANT OUTBOX-METADATA-FUNNEL-01）：reserved key 经 try_insert
-    // fail-closed 拒；非 reserved key 接受并经 funnel 序列化。
+    // fail-closed 拒；非 reserved key 接受并经 funnel 序列化（occurred_at 由 new 构造期注入）。
     #[test]
     fn metadata_try_insert_rejects_reserved_key() {
         for reserved in ["trace", "correlation", "principal", "occurred_at"] {
-            let mut m = OutboxMetadata::new();
+            let mut m = OutboxMetadata::new(0);
             assert_eq!(
                 m.try_insert(reserved, serde_json::Value::Bool(true)),
                 Err(MetadataError::ReservedKey),
                 "reserved key must be rejected: {reserved}"
             );
         }
-        let mut ok = OutboxMetadata::new();
+        let mut ok = OutboxMetadata::new(0);
         assert!(
             ok.try_insert("tenantTier", serde_json::Value::String("gold".into()))
                 .is_ok()
         );
         let env = super::OutboxEnvelope::new("d".to_string(), "c".to_string(), ok);
-        assert_eq!(env.metadata_json(), r#"{"tenantTier":"gold"}"#);
+        // 键序字母：occurred_at < tenantTier。
+        assert_eq!(
+            env.metadata_json(),
+            r#"{"occurred_at":0,"tenantTier":"gold"}"#
+        );
+    }
+
+    // #1129/#262 F1：new(secs) 构造期注入 reserved occurred_at（unix 秒 i64）；opaque subjectId 共存；
+    // 其余三个 reserved key（trace/correlation/principal）为空接缝、本 PR 不写（defer #1296）。
+    #[test]
+    fn metadata_new_writes_occurred_at_unix_secs() {
+        let env = super::OutboxEnvelope::new(
+            "identity".to_string(),
+            "c".to_string(),
+            OutboxMetadata::new(1_700_000_000).with_subject_id("subj-1"),
+        );
+        let json = env.metadata_json();
+        assert!(
+            json.contains(r#""occurred_at":1700000000"#),
+            "occurred_at 应以 unix 秒 i64 写入: {json}"
+        );
+        assert!(
+            json.contains(r#""subjectId":"subj-1""#),
+            "opaque subjectId 应共存: {json}"
+        );
+        for absent in ["trace", "correlation", "principal"] {
+            assert!(
+                !json.contains(absent),
+                "空接缝 reserved key {absent} 本 PR 不应写入: {json}"
+            );
+        }
+    }
+
+    // #1129/#262 anti-vacuity：构造期 new 注入 occurred_at，而业务 free-form try_insert 对同名 reserved key
+    // 仍 fail-closed 拒——构造期注入与业务写入两路径互斥，业务侧不可伪造 reserved。
+    #[test]
+    fn occurred_at_construct_writes_but_free_form_rejects() {
+        // 构造期注入成功。
+        let sealed = OutboxMetadata::new(42);
+        let env = super::OutboxEnvelope::new("d".to_string(), "c".to_string(), sealed);
+        assert!(env.metadata_json().contains(r#""occurred_at":42"#));
+        // 业务 free-form 路径仍拒同名 reserved key。
+        let mut free = OutboxMetadata::new(0);
+        assert_eq!(
+            free.try_insert(KEY_OCCURRED_AT, serde_json::Value::from(42)),
+            Err(MetadataError::ReservedKey),
+            "业务 free-form 路径不得写 reserved occurred_at"
+        );
+    }
+
+    // #1129 drift-lock：构造期注入的 occurred_at key 必属 reserved 集（注入集 ⊆ 拒绝集，防漂移）。
+    #[test]
+    fn occurred_at_key_is_reserved() {
+        assert!(
+            RESERVED_METADATA_KEYS.contains(&KEY_OCCURRED_AT),
+            "new 写的 occurred_at key 必须在 RESERVED_METADATA_KEYS 内"
+        );
+    }
+
+    // #1129 unix_secs 边界收口（从 session_uow 合并入本 crate 单源）：正常偏移直映。
+    #[test]
+    fn unix_secs_maps_offset() {
+        let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert_eq!(unix_secs(t), 1_700_000_000);
+    }
+
+    // 负偏移（早于 epoch，时钟偏斜）：duration_since 返回 Err → 收口 0（不 panic、不返负）。
+    #[test]
+    fn unix_secs_clamps_before_epoch_to_zero() {
+        let t = std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(unix_secs(t), 0);
     }
 
     // 常量合理值（MAX_PUBLISH_ATTEMPTS > 0；LEASE_TTL_SECONDS > 0）——编译期常量断言（强于运行期）。

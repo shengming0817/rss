@@ -23,29 +23,32 @@
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 //! ref: MassTransit Bus Outbox（一应用方法 co-persist 实体 + outbox 经共享事务/scoped DbContext）
 
-use std::time::SystemTime;
-
 use consistency::Entry;
-use diport::{OutboxEmitError, OutboxEnvelopeParts};
+use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{Session, SessionUnitOfWork};
 use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox};
+use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox, unix_secs};
 
 /// PostgreSQL 会话 co-tx UoW adapter（impl [`SessionUnitOfWork`]）。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，与 [`crate::PgEmitter`] 同形）clone 构造；
 /// 不持 `PgStore`（避免 ManagedResource 所有权耦合）。
+///
+/// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Box<dyn Clock>`，同 [`crate::PgEmitter`] 与全项目约定）：
+/// envelope `occurred_at` 时间源（#1129）。
 pub struct PgSessionUnitOfWork {
     pool: PgPool,
+    clock: Box<dyn Clock>,
 }
 
 impl PgSessionUnitOfWork {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
-    pub fn new(store: &PgStore) -> Self {
+    /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    pub fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
             pool: store.pool.clone(),
+            clock,
         }
     }
 }
@@ -57,27 +60,17 @@ impl SessionUnitOfWork for PgSessionUnitOfWork {
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
-        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgEmitter）。
+        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgEmitter）。reserved key
+        // occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1）；其余 reserved key
+        // 为后续 follow-up（#1296）空接缝（业务侧不可伪造，同 PgEmitter）。
         let env = OutboxEnvelope::new(
             envelope.domain,
             envelope.contract_id,
-            OutboxMetadata::new().with_subject_id(envelope.subject_id),
+            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(envelope.subject_id),
         );
         let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
         persist_and_emit_in_tx(tx, &session, &entry, &env).await
     }
-}
-
-/// `SystemTime` → UNIX epoch 秒（i64）；负偏移收口 0、溢出收口 `i64::MAX`。
-///
-/// adapter 自持（**不** import 域私有 `identity::application::unix_secs`，避免跨 crate 依赖域内私有 fn）；
-/// 与 `application.rs::unix_secs` **独立维护、语义对齐**（边界收口一致，两处同改）。timestamptz 由
-/// server-side `to_timestamp($N)` 生成（不给 sqlx 加 time feature，同 outbox 范式 outbox.rs:165）。
-/// 边界收口由下方 `unix_secs_*` 单测守（review #1192 F4）。
-fn unix_secs(t: SystemTime) -> i64 {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
 
 /// co-tx 事务体：写两行（SET LOCAL + INSERT session + append_outbox）→ 单 commit；失败 rollback + warn
@@ -155,29 +148,4 @@ async fn rollback_warn(tx: sqlx::Transaction<'_, sqlx::Postgres>) {
             "session co-tx: rollback failed after write error"
         );
     }
-}
-
-#[cfg(test)]
-mod tests {
-    //! `unix_secs` 边界收口单测（纯逻辑，无 DB；非 integration 门控）——review #1192 F4。
-    use std::time::{Duration, SystemTime};
-
-    use super::unix_secs;
-
-    // 正常：epoch + N 秒 → N。
-    #[test]
-    fn unix_secs_maps_offset() {
-        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        assert_eq!(unix_secs(t), 1_700_000_000);
-    }
-
-    // 负偏移（早于 epoch，时钟偏斜）：`duration_since` 返回 Err → 收口 0（不 panic、不返负）。
-    #[test]
-    fn unix_secs_clamps_before_epoch_to_zero() {
-        let t = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
-        assert_eq!(unix_secs(t), 0);
-    }
-
-    // 注：溢出→`i64::MAX` 分支为防御性收口（`as_secs > i64::MAX` 对应年 ~2920 亿，`SystemTime` 实际不可
-    // 移植构造，不写平台相关红 case）；不 panic 由 `i64::try_from(..).unwrap_or(i64::MAX)` 类型层静态保证。
 }

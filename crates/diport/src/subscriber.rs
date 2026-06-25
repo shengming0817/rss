@@ -35,10 +35,10 @@ impl MessageId {
 /// 消息元数据（key-value 字符串映射，对齐 watermill Metadata）——只读访问。
 ///
 /// **冻结期不开放公开写入口**：reserved envelope key（trace / correlation / principal / occurred_at）
-/// 由 `outbox::Entry::new` + sealed option 注入，业务不得经 metadata 伪造（`docs/rules/observability.md`
-/// §Outbox Envelope）。free-form 非-reserved key 的受控写入路径（typed key funnel，排除 reserved key）
-/// 随 outbox envelope 行为 PR 落地。冻结期无 `set` ⇒ 经 metadata bag 伪造任何 key（含 reserved）从 API
-/// 面即不可表达（Hard：无 setter）。
+/// 由 adapter 在受控构造点经 sealed metadata funnel 注入（`occurred_at` 已接线 #1129，取注入 `Clock`；trace /
+/// correlation / principal 待 #1296），业务不得经 metadata 伪造（`docs/rules/observability.md` §Outbox Envelope）。
+/// 消费侧 free-form 非-reserved key 的受控写入路径（typed key funnel，排除 reserved key）与 emit 侧正交，待
+/// #1297 落地。冻结期无 `set` ⇒ 经 metadata bag 伪造任何 key（含 reserved）从 API 面即不可表达（Hard：无 setter）。
 #[derive(Debug, Clone, Default)]
 pub struct MessageMetadata(HashMap<String, String>);
 

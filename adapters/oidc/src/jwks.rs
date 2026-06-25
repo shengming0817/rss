@@ -285,30 +285,39 @@ fn spawn_poll(
 /// `ready=true`；失败保留 last-good + `ready=false`（degraded），**绝不** swap 空集或宽放（fail-closed）。
 fn refresh(source_id: &str, path: &Path, snapshot: &RwLock<Arc<KeySet>>, ready: &AtomicBool) {
     match read_and_parse(path) {
-        Ok(set) => {
-            *snapshot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(set);
-            ready.store(true, Ordering::Release);
-            tracing::debug!(
-                target: LOG_TARGET,
-                resource = LOG_TARGET,
-                source_id = source_id,
-                "jwks snapshot refreshed"
-            );
-        }
-        Err(e) => {
-            // reason: 保留 last-good 快照（不清空 → 不宽放、不误拒已签发合法 token）；标 degraded 供 readiness。
-            // source_id 定位多源中哪个坏；error_kind = 闭值枚举标签（均无 PII，无 path/字节/key 材料）。
-            ready.store(false, Ordering::Release);
-            tracing::warn!(
-                target: LOG_TARGET,
-                resource = LOG_TARGET,
-                source_id = source_id,
-                reason = "jwks_refresh_failed",
-                error_kind = e.reason_label(),
-                "jwks source refresh failed; retaining last-good snapshot"
-            );
-        }
+        Ok(set) => apply_fresh(source_id, snapshot, ready, set),
+        Err(e) => mark_degraded(source_id, ready, &e),
     }
+}
+
+/// 解析成功：原子换出快照 + `ready=true`（degraded 复位）。
+/// 从 [`refresh`] 抽出（tracing 宏膨胀使 `refresh` cognitive_complexity 触阈，拆分而非 carve-out）。
+///
+/// 注：写侧锁中毒（`unwrap_or_else(|e| e.into_inner())`）当前无 `tracing::error!`，与读侧 `snapshot()`
+/// 不对称——pre-existing 行为（本拆分仅原样保留），补对称告警见 #1295。
+fn apply_fresh(source_id: &str, snapshot: &RwLock<Arc<KeySet>>, ready: &AtomicBool, set: KeySet) {
+    *snapshot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(set);
+    ready.store(true, Ordering::Release);
+    tracing::debug!(
+        target: LOG_TARGET,
+        resource = LOG_TARGET,
+        source_id = source_id,
+        "jwks snapshot refreshed"
+    );
+}
+
+/// 解析失败：保留 last-good 快照（不清空 → 不宽放、不误拒已签发合法 token），标 degraded 供 readiness。
+/// `source_id` 定位多源中哪个坏；`error_kind` = 闭值枚举标签（均无 PII，无 path/字节/key 材料）。
+fn mark_degraded(source_id: &str, ready: &AtomicBool, e: &JwksError) {
+    ready.store(false, Ordering::Release);
+    tracing::warn!(
+        target: LOG_TARGET,
+        resource = LOG_TARGET,
+        source_id = source_id,
+        reason = "jwks_refresh_failed",
+        error_kind = e.reason_label(),
+        "jwks source refresh failed; retaining last-good snapshot"
+    );
 }
 
 /// 读源文件 + 解析 + 非空校验。空集（无可用 key）视为错误（构造期拒 / 刷新期保留 last-good）。

@@ -16,7 +16,7 @@
 //! ref: crates/identity 域形 UoW 端口范式 + adapters/postgres/src/session_uow.rs（co-tx 范式）
 
 use consistency::Entry;
-use diport::OutboxEnvelopeParts;
+use diport::{Clock, OutboxEnvelopeParts};
 use futures::future::BoxFuture;
 use settings::ports::{
     ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey, TenantId,
@@ -25,21 +25,27 @@ use sqlx::{Executor, PgConnection, Postgres, Row};
 
 use crate::PgStore;
 use crate::cotx::{co_tx_with_outbox, set_local_tenant};
-use crate::outbox::{OutboxEnvelope, OutboxMetadata};
+use crate::outbox::{OutboxEnvelope, OutboxMetadata, unix_secs};
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgSessionUnitOfWork`]）clone 构造；
 /// 读端口与 co-tx 写共用同一 `pool`（保证读得到已提交写）。
+///
+/// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Box<dyn Clock>`，同 [`crate::PgEmitter`] /
+/// [`crate::PgSessionUnitOfWork`]）：co-tx outbox envelope `occurred_at` 时间源（#1129/#262 F1——settings 的
+/// `settings.config-version-changed` 生产 outbox 路径，本是第三条漏接 occurred_at 的构造点）。
 pub struct PgConfigRepo {
     pool: sqlx::PgPool,
+    clock: Box<dyn Clock>,
 }
 
 impl PgConfigRepo {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
-    pub fn new(store: &PgStore) -> Self {
+    /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    pub fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
             pool: store.pool.clone(),
+            clock,
         }
     }
 }
@@ -279,10 +285,12 @@ impl ConfigUnitOfWork for PgConfigRepo {
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgSessionUnitOfWork）。
+        // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：
+        // settings 生产 outbox 路径补齐 occurred_at；漏接编译期不可表达）。
         let env = OutboxEnvelope::new(
             envelope.domain,
             envelope.contract_id,
-            OutboxMetadata::new().with_subject_id(envelope.subject_id),
+            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(envelope.subject_id),
         );
         let tenant_uuid = tenant_param(tenant);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整

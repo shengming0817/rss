@@ -15,25 +15,34 @@
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 
 use consistency::Entry;
-use diport::{OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
+use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox};
+use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox, unix_secs};
 
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，与 [`crate::PgOutbox`] 同形）clone 构造；
 /// 不持 `PgStore`（避免 ManagedResource 所有权耦合）。
+///
+/// **时间源**：`clock` 是注入的 [`Clock`]（必填构造器位置参，缺失即编译错误——rust-standards §工程护栏），
+/// 仅用于 envelope `occurred_at`。与 [`crate::PgOutbox`] 刻意用 SQL `now()` 的 lease/retry 谓词（多实例需单一、
+/// 无跨进程偏移的时间源）**不同**：那是 relay 端时间，本 emitter 的 `occurred_at` 是 producer 端事件发生时刻，
+/// 故注入 `Clock`（#1129）。
 pub struct PgEmitter {
     pool: PgPool,
+    clock: Box<dyn Clock>,
 }
 
 impl PgEmitter {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）。
-    pub fn new(store: &PgStore) -> Self {
+    /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    /// `clock` 为 `Box<dyn Clock>`（与全项目 clock 注入约定及 `diport::Clock` rustdoc 一致；adapter 独占其
+    /// 时钟、不跨线程共享，无需 `Arc`）。
+    pub fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
             pool: store.pool.clone(),
+            clock,
         }
     }
 }
@@ -45,12 +54,13 @@ impl OutboxEmitter for PgEmitter {
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。reserved key
-        // （trace / correlation / occurred_at）的受控注入路径属后续（funnel 现 fail-closed 拒 reserved、
-        // 无 sealed setter）——见 PR 说明 / #1100 OOS。
+        // occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接编译期不可表达）；
+        // trace / correlation / principal 为后续 follow-up（#1296）接线的空接缝。reserved key 业务侧不可伪造：
+        // 构造期注入 + free-form `try_insert` fail-closed 拒（observability.md §Outbox Envelope）。
         let env = OutboxEnvelope::new(
             envelope.domain,
             envelope.contract_id,
-            OutboxMetadata::new().with_subject_id(envelope.subject_id),
+            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(envelope.subject_id),
         );
         // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut PgConnection` ⇒ 必在事务内）。与
         // `PgStore::run_in_transaction` 同形（PgEmitter 经 share-pool 注入持 pool、非 PgStore 方法，故此处

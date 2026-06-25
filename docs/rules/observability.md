@@ -122,8 +122,19 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 
 ## Outbox Envelope
 
-trace、correlation、principal、occurred_at 等 envelope 字段由 `outbox::Entry::new` 和
-sealed option 注入。业务不得通过 metadata 伪造 reserved key。
+trace、correlation、principal、occurred_at 等 reserved envelope 字段由 **adapter 在受控构造点经
+sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；同 crate 时间编码
+单源）。`consistency::Entry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
+在 `diport`，`consistency` 不可依赖之）。当前 `occurred_at` 已接线；trace / correlation / principal 为
+typed-but-empty 接缝（待 observ trace 提取 / authn principal 接线，#1296）。
+
+两类 Hard 保证：
+
+- **producer 不可漏接** `occurred_at`：由 metadata funnel 的构造器 `OutboxMetadata::new(occurred_at)`
+  **必填位置参**承载——「无 occurred_at 的 outbox metadata」类型层不可表达，新增 outbox producer 必须从注入
+  `Clock` 提供（缺失即编译错误）。三条生产构造点（`PgEmitter` / `PgSessionUnitOfWork` / `PgConfigRepo`）同源。
+- **业务不可伪造** reserved key：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
+  fail-closed 拒；reserved key 不经任何业务可见入口写入（INVARIANT OUTBOX-METADATA-FUNNEL-01）。
 
 ## Audit
 

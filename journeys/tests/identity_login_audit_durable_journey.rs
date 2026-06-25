@@ -226,7 +226,10 @@ async fn login_audit_durable_topology() -> Result<()> {
     // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
     let tenant = TenantId::parse(CANON_TENANT)?;
     let login = LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(PgSessionUnitOfWork::new(&store)),
+        DynSessionUnitOfWork::new_box(PgSessionUnitOfWork::new(
+            &store,
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        )),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,

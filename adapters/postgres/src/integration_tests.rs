@@ -22,6 +22,34 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 use crate::test_pg::connect_pg;
 
+/// 测试用固定事件发生时刻（unix 秒）——t10/t11 断言 envelope `occurred_at`（#1129）。
+const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
+
+/// 固定时钟时刻（`Duration::from_secs` 取 `u64`）。
+fn fixed_clock_time() -> std::time::SystemTime {
+    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(TEST_OCCURRED_SECS)
+}
+
+/// DB 中 `occurred_at` 的期望编码值——经与生产**同一** `crate::outbox::unix_secs` 编码路径求得（`i64`），
+/// 避免断言端 `u64` 字面量与写入端 `i64` 在边界值上漂移（review F4）。
+fn expected_occurred_at() -> i64 {
+    crate::outbox::unix_secs(fixed_clock_time())
+}
+
+/// 集成测试固定时钟（impl [`diport::Clock`]）：确定性 `occurred_at`，不取系统时钟（#1129）。
+/// 本地定义——**不**引 `memory` adapter 作 dev-dep（避免 adapter→adapter 依赖），同 oidc/relay 各自定义替身范式。
+struct FixedClock(std::time::SystemTime);
+impl diport::Clock for FixedClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.0
+    }
+}
+
+/// 构造注入用 clock（`Box<dyn Clock>`，与全项目 clock 注入约定一致，固定 [`fixed_clock_time`]）。
+fn fixed_clock() -> Box<dyn diport::Clock> {
+    Box::new(FixedClock(fixed_clock_time()))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pool_connects_and_shuts_down() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -226,20 +254,23 @@ fn make_entry(event_id: &str) -> Entry {
     )
 }
 
+/// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
+/// 的用例，不断言 occurred_at 值）。`occurred_at` 构造期必填（#262 F1），此处取占位 0；envelope occurred_at 的
+/// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgSessionUnitOfWork`）/ config co-tx 专门覆盖（#1129）。
 fn make_envelope(event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         "test-domain".to_string(),
         "contract-1".to_string(),
-        OutboxMetadata::new().with_subject_id(event_id),
+        OutboxMetadata::new(0).with_subject_id(event_id),
     )
 }
 
-/// 构造测试 envelope（domain + contract_id，空 metadata）——去重 `OutboxEnvelope::new` 内联重复。
+/// 构造测试 envelope（domain + contract_id，仅占位 `occurred_at=0` 的 metadata）——去重 `OutboxEnvelope::new` 内联重复。
 fn make_test_env(domain: &str, contract_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
         contract_id.to_string(),
-        OutboxMetadata::new(),
+        OutboxMetadata::new(0),
     )
 }
 
@@ -321,7 +352,7 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new().with_subject_id(event_id.as_str()),
+                OutboxMetadata::new(0).with_subject_id(event_id.as_str()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -364,7 +395,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new().with_subject_id(event_id.as_str()),
+                OutboxMetadata::new(0).with_subject_id(event_id.as_str()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -408,7 +439,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(),
+                OutboxMetadata::new(0),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -456,7 +487,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
             let env = OutboxEnvelope::new(
                 "test-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(),
+                OutboxMetadata::new(0),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -527,7 +558,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
             let env = OutboxEnvelope::new(
                 "test-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(),
+                OutboxMetadata::new(0),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -916,7 +947,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         IdemKey::parse(&event_id).unwrap(),
         br#"{"sessionId":"s"}"#.to_vec(),
     );
-    crate::PgEmitter::new(&store)
+    crate::PgEmitter::new(&store, fixed_clock())
         .emit(
             entry,
             OutboxEnvelopeParts {
@@ -937,16 +968,23 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     assert_eq!(row.1, "identity", "domain");
     assert_eq!(row.2, SESSION_CREATED_TOPIC, "topic");
     assert_eq!(row.3, "pending", "新 entry pending 待 relay");
-    // metadata 仅含 opaque subjectId、无 PII / 无 reserved key（FR-020 funnel）。
+    // metadata 含 opaque subjectId + sealed 注入的 reserved occurred_at（#1129）；无完整 PII（FR-020 funnel）。
     assert!(
         row.4.contains("subjectId") && row.4.contains("subj-opaque-77"),
         "metadata 应含 opaque subjectId: {}",
         row.4
     );
-    for reserved in ["trace", "correlation", "principal", "occurred_at"] {
+    assert!(
+        row.4
+            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+        "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
+        row.4
+    );
+    // trace / correlation / principal 为后续 follow-up 空接缝，本 PR 不写。
+    for reserved in ["trace", "correlation", "principal"] {
         assert!(
             !row.4.contains(reserved),
-            "metadata 不应含 reserved key {reserved}: {}",
+            "空接缝 reserved key {reserved} 本 PR 不应写入: {}",
             row.4
         );
     }
@@ -1010,7 +1048,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
-    crate::PgSessionUnitOfWork::new(&store)
+    crate::PgSessionUnitOfWork::new(&store, fixed_clock())
         .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
         .await?;
 
@@ -1040,6 +1078,18 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
         .await?;
     assert_eq!(status.0, "pending", "新 outbox entry pending 待 relay");
 
+    // co-tx 路径（第二装配点）同样经构造期 OutboxMetadata::new 从注入 Clock 注入 reserved occurred_at（#1129）。
+    let meta: (String,) = sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert!(
+        meta.0
+            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+        "co-tx outbox metadata 应含 sealed 注入的 occurred_at: {}",
+        meta.0
+    );
+
     store.shutdown().await?;
     Ok(())
 }
@@ -1058,7 +1108,7 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let env = OutboxEnvelope::new(
         "identity".to_string(),
         SESSION_CREATED_TOPIC.to_string(),
-        OutboxMetadata::new().with_subject_id("subj-12"),
+        OutboxMetadata::new(0).with_subject_id("subj-12"),
     );
     let tenant = COTX_TENANT_A.to_string();
     let sid = session_id.clone();
@@ -1126,7 +1176,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
     let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let expires = created + Duration::from_secs(3_600);
-    let uow = crate::PgSessionUnitOfWork::new(&store);
+    let uow = crate::PgSessionUnitOfWork::new(&store, fixed_clock());
 
     for _ in 0..2 {
         let session = identity::test_support::session(
@@ -1150,6 +1200,17 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 1, "幂等：outbox 行恰 1");
+    // 幂等重写不覆盖 metadata（ON CONFLICT DO NOTHING）：occurred_at 仍是首次写入值（规约固化，review F5）。
+    let meta: (String,) = sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert!(
+        meta.0
+            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+        "幂等重写不应覆盖首次 occurred_at: {}",
+        meta.0
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -1430,7 +1491,7 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
-    let result = crate::PgSessionUnitOfWork::new(&store)
+    let result = crate::PgSessionUnitOfWork::new(&store, fixed_clock())
         .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
         .await;
     assert!(
@@ -1525,7 +1586,7 @@ async fn setup_config(store: &PgStore) -> Result<(), Box<dyn std::error::Error +
 async fn tc1_config_save_find_roundtrip() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.timeout").unwrap();
 
@@ -1549,7 +1610,7 @@ async fn tc1_config_save_find_roundtrip() -> TestResult {
 async fn tc2_config_find_version_returns_history() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -1585,7 +1646,7 @@ async fn tc2_config_find_version_returns_history() -> TestResult {
 async fn tc3_config_save_cas_conflict() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
 
     repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
@@ -1619,7 +1680,7 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
 async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -1667,7 +1728,7 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
 async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5-evt");
 
@@ -1697,6 +1758,19 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 1, "outbox 行应写入（co-tx 两行皆在）");
+    // #262 F1：settings config co-tx outbox metadata 含构造期注入的 occurred_at（第三装配点，从注入 Clock）。
+    let cfg_meta: (String,) =
+        sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        cfg_meta
+            .0
+            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+        "config co-tx outbox metadata 应含构造期注入的 occurred_at: {}",
+        cfg_meta.0
+    );
     // 值经 find 取回正确。
     assert_eq!(
         repo.find(tenant, &SettingKey::parse("app.k").unwrap())
@@ -1723,7 +1797,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     let env = OutboxEnvelope::new(
         "settings".to_string(),
         CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-        OutboxMetadata::new().with_subject_id("app.rollback".to_string()),
+        OutboxMetadata::new(0).with_subject_id("app.rollback".to_string()),
     );
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
@@ -1784,7 +1858,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
 async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
 
     repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
@@ -1829,7 +1903,7 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
 async fn tc8_config_find_maps_storage_error() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
 
     // 关池（PgConfigRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 sqlx 错误 → Storage。
@@ -1854,7 +1928,7 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
 async fn tc9_config_cross_tenant_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.k").unwrap();
@@ -1925,7 +1999,7 @@ fn config_event_id(tenant: TenantId, key: &str, version: u64) -> String {
 async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store);
+    let repo = PgConfigRepo::new(&store, fixed_clock());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
