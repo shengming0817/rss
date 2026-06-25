@@ -35,6 +35,7 @@ mod diagnostic;
 mod layerdeps;
 mod layers;
 mod pathsafe;
+mod pdpallow;
 mod publicapi;
 #[cfg(test)]
 mod testutil;

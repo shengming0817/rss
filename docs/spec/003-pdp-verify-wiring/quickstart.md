@@ -30,12 +30,12 @@ cargo nextest run --manifest-path crates/httpserve/Cargo.toml -p httpserve
 
 ```bash
 # 起 router + 真 OidcProvider（静态 key）+ verify-bridge
-cargo nextest run --manifest-path bins/server/Cargo.toml --features integration   # 或 dev-dep 门控
+cargo nextest run -p server -p rss   # in-process oneshot e2e（无需 feature gate；socket bind/serve = #1017）
 ```
 
 预期（ADR-006 §8 ③）：
 - 带有效 JWT（真 OidcProvider 验签通过）请求 `Require(Jwt)` 路由 → 200，request extension 携 `httpserve::Authenticated`（`scheme=Jwt` + principal_kind facet）、enforce `scheme()` exact-match 放行；**本批不承诺 handler 读完整 `Principal`**（完整 Principal 传播属 W 后续，见 spec US3 / data-model F3）。
-- 无 Authorization 头 / 坏签名 / 过期 / 错 aud → 401/403（含 requestId），tracing 记 `authz.decision=deny` + 对应 `PdpError` 变体，日志无 token/subject。
+- 无 Authorization 头 / 坏签名 / 过期 / 错 aud → 401/403（含 requestId），tracing 记 `authz.decision=deny` + `AuthnError` 变体（`TokenInvalid`/`TokenExpired` 两路；`PdpError` 三路分级须 authn 层让 `AuthnError` 携 `PdpError` 变体——follow-up #1275），日志无 token/subject。
 - 有效请求 → tracing 记 `authz.decision=allow` + `principal.kind`（无 PII）。
 
 ## ④ JWKS 轮转（PR-A2 / #1197 — 本地文件源 + 外部 agent 刷新）

@@ -4132,6 +4132,25 @@ dependencies = [
 [[package]]
 name = "rss"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "authn",
+ "axum",
+ "base64",
+ "bootstrap",
+ "diport",
+ "futures",
+ "hmac 0.12.1",
+ "httpserve",
+ "oidc",
+ "p256",
+ "primitives",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "rstest"
@@ -4583,6 +4602,25 @@ dependencies = [
 [[package]]
 name = "server"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "authn",
+ "axum",
+ "base64",
+ "bootstrap",
+ "diport",
+ "futures",
+ "hmac 0.12.1",
+ "httpserve",
+ "oidc",
+ "p256",
+ "primitives",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "settings"

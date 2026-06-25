@@ -7,3 +7,43 @@ publish = false
 
 [lints]
 workspace = true
+
+# 组合根（Root 层）：唯一能同时依赖 httpserve + authn + oidc 启用生产认证（CLAUDE.md §分层：bins 可依赖所有库 crate）。
+# lib + bin 双形态：组合根接线逻辑落 lib（`tests/` 集成测试可达 `server::*`），`main.rs` 为薄 entry。
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+bootstrap = { path = "../../crates/bootstrap" }
+httpserve = { path = "../../crates/httpserve" }
+authn = { path = "../../crates/authn" }
+primitives = { path = "../../crates/primitives" }
+diport = { path = "../../crates/diport" }
+# 生产验签 provider（真 RustCrypto ES256/HS256；backend feature 开 impl diport::Pdp）。安全同批门：依赖图引真
+# verifier、不引 stub（memory adapter 经 deny.toml 禁 server/rss）。
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
+axum = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+# verify_jwt(&DynPdp) future 为 !Send（DynPdp !Sync，DIPORT-ASYNC-ARC-SEND-01）；OidcProvider::verify 纯 CPU 无真
+# await ⇒ future 首 poll 即 ready。验签桥经 now_or_never() 同步驱动该 ready future，使中间件 future 保持 Send。
+futures = { workspace = true }
+# 从配置（env）解 ES256 SEC1 公钥（base64url）。
+base64 = { workspace = true }
+
+[dev-dependencies]
+# e2e `#[tokio::test]` 运行时（生产 `main` 当前同步、不 serve ⇒ tokio 仅测试用；#1017 加 `#[tokio::main]` 时移回生产 dep）。
+tokio = { workspace = true }
+# oneshot 驱动已组装 router（不真实绑端口；#1017 负责 serve）。
+tower = { workspace = true, features = ["util"] }
+# e2e 铸 ES256/HS256 测试 JWT（dev-only；生产依赖图无签发能力）。
+p256 = { workspace = true, features = ["ecdsa"] }
+hmac = { workspace = true, features = ["std"] }
+sha2 = { workspace = true }
+# 捕获 tracing 输出断言 authz.decision/principal.kind 埋点 + 无 token/subject 泄漏。
+tracing-subscriber = { workspace = true }

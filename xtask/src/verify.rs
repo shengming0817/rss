@@ -63,6 +63,8 @@ enum InternalCheck {
     LayerDeps,
     WsDepsDrift,
     CodegenCheck,
+    /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
+    PdpAllowGuard,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
     /// ci 专用：`public-api --check`（basis+engine 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
@@ -156,6 +158,15 @@ fn step_codegen_check() -> Step {
         label: "codegen-check",
         args: &[],
         kind: StepKind::Internal(InternalCheck::CodegenCheck),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_pdp_allow_guard() -> Step {
+    Step {
+        label: "pdp-allow-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::PdpAllowGuard),
         env: &[],
         needs_compile: false,
     }
@@ -535,6 +546,7 @@ fn full_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_codegen_check(),
+        step_pdp_allow_guard(),
         step_build_workspace(),
         step_integration_compile(),
         step_clippy_workspace(),
@@ -557,6 +569,7 @@ fn ci_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_codegen_check(),
+        step_pdp_allow_guard(),
         step_build_all_features(),
         step_clippy_all_features(),
         step_coverage(),
@@ -768,6 +781,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::CodegenCheck => codegen::run(true),
+        InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
@@ -857,6 +871,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "codegen-check",
+                "pdp-allow-guard",
                 "build",
                 "integration-compile",
                 "clippy",
@@ -873,7 +888,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(4) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(5) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -885,6 +900,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "codegen-check",
+                "pdp-allow-guard",
                 "deny"
             ]
         );
@@ -893,7 +909,7 @@ mod tests {
         }
     }
 
-    /// meta 四项（contract validate / layer-deps / wsdeps-drift / codegen）在两种模式恒在。
+    /// meta 五项（contract validate / layer-deps / wsdeps-drift / codegen / pdp-allow-guard）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -909,7 +925,8 @@ mod tests {
                     "contract-validate",
                     "layer-deps",
                     "wsdeps-drift",
-                    "codegen-check"
+                    "codegen-check",
+                    "pdp-allow-guard"
                 ],
                 "fast={fast}"
             );
@@ -1009,6 +1026,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "codegen-check",
+                "pdp-allow-guard",
                 "build",
                 "clippy",
                 "coverage",
