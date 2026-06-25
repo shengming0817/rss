@@ -10,7 +10,8 @@
 //! 把同一 CAS INSERT 与 outbox append 收进单事务（both-or-neither，OUTBOX-COTX-CONFIG-01）。
 //!
 //! storage 错误经 `ConfigRepoError::Storage(Box::new(sqlx_err))` 分层冒泡（保留 source 链；域 crate 不依赖
-//! sqlx）。读路径以显式 `WHERE tenant_id` 做租户 scope（pre-GA 无 RLS；写路径另经 co-tx SET LOCAL 锚点）。
+//! sqlx）。读路径经 [`tenant_scoped_read`]（cotx）注入 SET LOCAL，与 0009 迁移的 RLS policy
+//! `current_setting('rss.tenant_id', true)` 对齐（#1298）；写路径另经 co-tx SET LOCAL 锚点。
 //!
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型：save 以 version+1 守乐观并发）
 //! ref: crates/identity 域形 UoW 端口范式 + adapters/postgres/src/session_uow.rs（co-tx 范式）
@@ -24,7 +25,7 @@ use settings::ports::{
 use sqlx::{Executor, PgConnection, Postgres, Row};
 
 use crate::PgStore;
-use crate::cotx::{co_tx_with_outbox, set_local_tenant};
+use crate::cotx::{co_tx_with_outbox, set_local_tenant, tenant_scoped_read};
 use crate::outbox::{OutboxEnvelope, OutboxMetadata, unix_secs};
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
@@ -163,9 +164,24 @@ where
         .await
         .map_err(storage)?;
     match write(&mut tx).await {
-        Ok(()) => tx.commit().await.map_err(storage),
+        Ok(()) => tx.commit().await.map_err(|e| {
+            tracing::warn!(
+                target: "postgres",
+                tenant_id = tenant_uuid,
+                error = %secure::redact_error(&e),
+                "tenant_scoped: commit failed"
+            );
+            storage(e)
+        }),
         Err(e) => {
-            let _ = tx.rollback().await;
+            if let Err(rb) = tx.rollback().await {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = tenant_uuid,
+                    error = %secure::redact_error(&rb),
+                    "tenant_scoped: rollback failed after write error"
+                );
+            }
             Err(e)
         }
     }
@@ -177,19 +193,30 @@ impl ConfigRepo for PgConfigRepo {
         tenant: TenantId,
         key: &SettingKey,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 活跃值 = 最高版本行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
-        let row = sqlx::query(
-            r#"
-            SELECT config_key, value, version, deleted
-            FROM config_entries
-            WHERE tenant_id = $1::uuid AND config_key = $2
-            ORDER BY version DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(tenant_param(tenant))
-        .bind(key.as_str())
-        .fetch_optional(&self.pool)
+        // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned，不借连接）；hydrate_active 在 tx 外执行。
+        let tenant_uuid = tenant_param(tenant);
+        let key_str = key.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+
+        let row = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
+                        SELECT config_key, value, version, deleted
+                        FROM config_entries
+                        WHERE tenant_id = $1::uuid AND config_key = $2
+                        ORDER BY version DESC
+                        LIMIT 1
+                        "#,
+                )
+                .bind(tenant_uuid_q)
+                .bind(key_str)
+                .fetch_optional(&mut *conn)
+                .await
+            })
+        })
         .await
         .map_err(storage)?;
         hydrate_active(tenant, row)
@@ -201,17 +228,29 @@ impl ConfigRepo for PgConfigRepo {
         key: &SettingKey,
         version: u64,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
-        let row = sqlx::query(
-            r#"
-            SELECT config_key, value, version, deleted
-            FROM config_entries
-            WHERE tenant_id = $1::uuid AND config_key = $2 AND version = $3
-            "#,
-        )
-        .bind(tenant_param(tenant))
-        .bind(key.as_str())
-        .bind(version_param(version))
-        .fetch_optional(&self.pool)
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
+        // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned）；hydrate_active 在 tx 外执行。
+        let tenant_uuid = tenant_param(tenant);
+        let key_str = key.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+        let version_i = version_param(version);
+
+        let row = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
+                        SELECT config_key, value, version, deleted
+                        FROM config_entries
+                        WHERE tenant_id = $1::uuid AND config_key = $2 AND version = $3
+                        "#,
+                )
+                .bind(tenant_uuid_q)
+                .bind(key_str)
+                .bind(version_i)
+                .fetch_optional(&mut *conn)
+                .await
+            })
+        })
         .await
         .map_err(storage)?;
         hydrate_active(tenant, row)
@@ -222,13 +261,29 @@ impl ConfigRepo for PgConfigRepo {
         tenant: TenantId,
         key: &SettingKey,
     ) -> Result<Option<u64>, ConfigRepoError> {
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
-        let (mv,): (Option<i64>,) = sqlx::query_as(
-            "SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+        // rss_app 角色下 RLS 过滤后 max() 仅对当前 tenant 行计算（否则无 SET LOCAL 时 rss_app 下所有行不可见
+        // → max() 返 NULL，后续版本序列断裂）——此为 tenant_scoped_read 覆盖 latest_version 的关键理由。
+        let tenant_uuid = tenant_param(tenant);
+        let key_str = key.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+
+        let (mv,): (Option<i64>,) = tenant_scoped_read(
+            &self.pool,
+            &tenant_uuid,
+            move |conn| {
+                Box::pin(async move {
+                    sqlx::query_as(
+                        "SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str)
+                    .fetch_one(&mut *conn)
+                    .await
+                })
+            },
         )
-        .bind(tenant_param(tenant))
-        .bind(key.as_str())
-        .fetch_one(&self.pool)
         .await
         .map_err(storage)?;
         Ok(mv.and_then(|v| u64::try_from(v).ok()))

@@ -23,6 +23,54 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::outbox::{OutboxEnvelope, append_outbox};
 
+/// tenant-scoped 只读事务：begin → SET LOCAL `rss.tenant_id` → 读闭包 → commit。
+///
+/// 与写侧 [`co_tx_with_outbox`]（co-tx + outbox）对称，是读路径的 RLS policy
+/// `current_setting('rss.tenant_id', true)` 锚点（#1298）。读闭包仅做 SQL fetch 返回 owned 原始值
+/// （`Option<PgRow>` / 标量 / tuple），hydrate（域类型转换 / 域错误映射）在 tx 外执行，保持域错误
+/// 语义不变且不依赖 sqlx。失败时 rollback（不覆盖原错误）。
+///
+/// `tenant_uuid`：已 stringify 的租户 UUID（`set_config` 参数化绑定防注入）。
+///
+/// # INVARIANT: RLS-TENANT-SCOPE-READ-01
+///
+/// sessions / config_entries / roles 三表所有读路径（`find` / `find_version` / `latest_version`）
+/// 经此 helper 注入 SET LOCAL，与 0009 迁移的 RLS policy `current_setting` 对齐；当前业务池可能以
+/// owner/superuser 连接（superuser 绕过 RLS）；`tenant_scoped_read` 已就位 SET LOCAL 锚点，业务池切
+/// rss_app（dual-pool follow-up）后 DB 层 RLS 方强制生效；t20–t22 验证 rss_app 角色下的强制力。
+pub(crate) async fn tenant_scoped_read<T, F>(
+    pool: &PgPool,
+    tenant_uuid: &str,
+    read: F,
+) -> Result<T, sqlx::Error>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
+    T: Send,
+{
+    let mut tx = pool.begin().await?;
+    // SET LOCAL 注入 tenant scope（事务内有效，commit/rollback 自动失效；与写侧 set_local_tenant 共享锚点）。
+    set_local_tenant(&mut tx, tenant_uuid).await?;
+    let result = read(&mut tx).await;
+    // 读事务：成功 commit（RLS fail-closed 时 `read` 已 Err）；失败 rollback（warn 定位，不覆盖原错误）。
+    match result {
+        Ok(v) => {
+            tx.commit().await?;
+            Ok(v)
+        }
+        Err(e) => {
+            if let Err(rb) = tx.rollback().await {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = tenant_uuid,
+                    error = %secure::redact_error(&rb),
+                    "tenant_scoped_read: rollback failed after read error"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
 /// co-tx 写（[`co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）共享，
 /// 保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。

@@ -28,6 +28,24 @@
 - `CREATE INDEX CONCURRENTLY`：**仅** post-GA 给已填充、有在线流量的生产表加索引（不可在事务块内，
   需 `no_tx` 迁移）。pre-GA 阶段禁用。
 
+## Tenant 表 RLS（行级安全）
+
+新增含 `tenant_id` 列的表（tenant 表）必须随附 RLS 三件套，可在同一迁移或后续前向迁移中落地：
+
+1. `ENABLE ROW LEVEL SECURITY`
+2. `FORCE ROW LEVEL SECURITY`（使 owner 连接亦受 policy 约束）
+3. tenant-isolation policy：`USING/WITH CHECK (tenant_id = current_setting('rss.tenant_id', true)::uuid)`
+
+`cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
+Medium）扫描 schema 快照，缺三件套即门红。
+
+`0004` / `0005` / `0008` 建表时注释「预 GA 不建 RLS」；依「只增不改」规则不可回改——
+`0009_enable_tenant_rls.sql` 补齐三张 tenant 表（sessions / config_entries / roles）的 RLS，
+0009 起三表均受 policy 保护。
+
+非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS，仅三张 tenant 表的 DML grant）由 `0009`
+provision；生产 LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。
+
 ## 新字段
 
 新增列必须有默认值或允许 `NULL`（避免对已有行的 `NOT NULL` 回填失败）。

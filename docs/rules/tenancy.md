@@ -51,12 +51,20 @@ JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 
 
 ## RLS 与 PG scope
 
-PG tenant scope 使用 `SET LOCAL` 注入当前事务。scope 写入只允许通过受控 helper；
-绕过 TxManager 直接借连接必须 fail-fast。
+PG tenant scope 使用 `SET LOCAL` 注入当前事务，读路径（`tenant_scoped_read`）与写路径
+（`tenant_scoped` / `co_tx_with_outbox`）均经受控 helper 注入；绕过 TxManager 直接借连接
+必须 fail-fast。
 
-RLS policy shape 由 schema guard 检查。app-serving role 必须非 owner 且无 bypass RLS
-权限。写端点依靠 typed tenant 参数、ctx tenant 与 PostgreSQL FORCE RLS 维护 tenant
-边界。
+`cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
+Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` +
+`FORCE ROW LEVEL SECURITY` + tenant-isolation policy（`USING/WITH CHECK (tenant_id =
+current_setting('rss.tenant_id', true)::uuid)`）；缺失即门红。
+
+app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，仅授三张 tenant 表
+（sessions / config_entries / roles）的 DML；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受
+policy 约束。业务池以 rss_app 连接的 dual-pool 接线是 follow-up（bootstrap 接线未落地）。
+注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
+生产 owner 须为非 superuser。
 
 ## ABAC authz 接线（permission-based）
 

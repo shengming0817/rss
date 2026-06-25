@@ -65,6 +65,8 @@ enum InternalCheck {
     CodegenCheck,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
+    /// tenant 表 RLS 三件套守卫（TENANCY-RLS-FORCE-01；内容扫描迁移 SQL，no-compile）。
+    SchemaRlsGuard,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
     CommandSymmetry,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
@@ -169,6 +171,15 @@ fn step_pdp_allow_guard() -> Step {
         label: "pdp-allow-guard",
         args: &[],
         kind: StepKind::Internal(InternalCheck::PdpAllowGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_schema_rls_guard() -> Step {
+    Step {
+        label: "schema-rls",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::SchemaRlsGuard),
         env: &[],
         needs_compile: false,
     }
@@ -298,6 +309,8 @@ fn step_integration_compile() -> Step {
             "mqtt",
             "-p",
             "journeys",
+            "-p",
+            "rss",
             "--features",
             "integration",
             "--no-run",
@@ -330,6 +343,8 @@ fn step_integration_run() -> Step {
             "mqtt",
             "-p",
             "journeys",
+            "-p",
+            "rss",
             "--features",
             "integration",
         ],
@@ -560,6 +575,7 @@ fn full_plan() -> Vec<Step> {
         step_wsdeps_drift(),
         step_codegen_check(),
         step_pdp_allow_guard(),
+        step_schema_rls_guard(),
         step_command_symmetry(),
         step_build_workspace(),
         step_integration_compile(),
@@ -584,6 +600,7 @@ fn ci_plan() -> Vec<Step> {
         step_wsdeps_drift(),
         step_codegen_check(),
         step_pdp_allow_guard(),
+        step_schema_rls_guard(),
         step_command_symmetry(),
         step_build_all_features(),
         step_clippy_all_features(),
@@ -797,6 +814,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
+        InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
@@ -888,6 +906,7 @@ mod tests {
                 "wsdeps-drift",
                 "codegen-check",
                 "pdp-allow-guard",
+                "schema-rls",
                 "command-symmetry",
                 "build",
                 "integration-compile",
@@ -905,7 +924,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(6) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(7) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -918,6 +937,7 @@ mod tests {
                 "wsdeps-drift",
                 "codegen-check",
                 "pdp-allow-guard",
+                "schema-rls",
                 "command-symmetry",
                 "deny"
             ]
@@ -927,8 +947,8 @@ mod tests {
         }
     }
 
-    /// meta 六项（contract validate / layer-deps / wsdeps-drift / codegen / pdp-allow-guard /
-    /// command-symmetry）在两种模式恒在。
+    /// meta 七项（contract validate / layer-deps / wsdeps-drift / codegen / pdp-allow-guard /
+    /// schema-rls / command-symmetry）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -946,6 +966,7 @@ mod tests {
                     "wsdeps-drift",
                     "codegen-check",
                     "pdp-allow-guard",
+                    "schema-rls",
                     "command-symmetry"
                 ],
                 "fast={fast}"
@@ -1047,6 +1068,7 @@ mod tests {
                 "wsdeps-drift",
                 "codegen-check",
                 "pdp-allow-guard",
+                "schema-rls",
                 "command-symmetry",
                 "build",
                 "clippy",
@@ -1159,8 +1181,8 @@ mod tests {
         assert!(!labels(&ci_plan()).contains(&"integration-tests"));
     }
 
-    /// integration 实跑步：`--profile integration`（放宽 timeout）+ `--features integration` + 三 adapter 全覆盖；
-    /// Tool gate probe `nextest`（缺工具 fail-closed）。
+    /// integration 实跑步：`--profile integration`（放宽 timeout）+ `--features integration` + 全包覆盖
+    /// （postgres/redis-adapter/amqp/mqtt/journeys + rss）；Tool gate probe `nextest`（缺工具 fail-closed）。
     #[test]
     fn integration_run_step_profile_feature_and_coverage() {
         let step = step_integration_run();
@@ -1180,19 +1202,33 @@ mod tests {
             step.args
         );
         assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
-        for p in ["postgres", "redis-adapter", "amqp", "mqtt", "journeys"] {
+        for p in [
+            "postgres",
+            "redis-adapter",
+            "amqp",
+            "mqtt",
+            "journeys",
+            "rss",
+        ] {
             assert!(step.args.contains(&p), "integration 实跑须覆盖 {p}");
         }
     }
 
     /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey
-    /// （F7 + #1137：原仅 postgres；#1010 加 mqtt）。
+    /// （F7 + #1137：原仅 postgres；#1010 加 mqtt；#1298 加 rss bins integration 测试）。
     #[test]
     fn integration_compile_covers_adapters_and_journeys_no_run() {
         let step = step_integration_compile();
         assert_eq!(step.label, "integration-compile");
         assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
-        for p in ["postgres", "redis-adapter", "amqp", "mqtt", "journeys"] {
+        for p in [
+            "postgres",
+            "redis-adapter",
+            "amqp",
+            "mqtt",
+            "journeys",
+            "rss",
+        ] {
             assert!(step.args.contains(&p), "integration-compile 须覆盖 {p}");
         }
     }

@@ -5,7 +5,8 @@
 //! identity wrapper + `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）。
 //!
 //! 持久化模型（`0008_create_roles.sql`）：roles 表 PK (tenant_id, id)，permissions 序列化为 `text[]`。
-//! `find` = pool 直查 + 显式 `WHERE tenant_id`（pre-GA 无 RLS；跨租天然 → 0 行 → None）；`save` = tenant-scoped
+//! `find` = [`tenant_scoped_read`] tenant-scoped 事务（SET LOCAL 注入 RLS policy `current_setting` 锚点，#1298）+
+//! 显式 `WHERE tenant_id`（双重隔离）；`save` = tenant-scoped
 //! 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert（`ON CONFLICT (tenant_id, id) DO UPDATE`）。
 //! storage 错误经 `IdentityError::Storage` 分层冒泡（保留 source 链；域 crate 不依赖 sqlx）。读出行经
 //! `Role::hydrate` 受控重建——损坏持久化值（id / permission 复核失败）→ `Storage`（fail-closed，不静默接受脏数据）。
@@ -17,7 +18,7 @@ use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
 use sqlx::Row;
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::{set_local_tenant, tenant_scoped_read};
 
 /// identity 角色仓储的 PostgreSQL adapter。
 ///
@@ -48,29 +49,46 @@ fn tenant_param(tenant: TenantId) -> String {
 
 impl RoleRepo for PgRoleRepo {
     async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError> {
-        // 读经 pool 直查 + 显式 `WHERE tenant_id`（pre-GA 无 RLS policy，读路径不注入 SET LOCAL——与
-        // `config_repo::find` 同模式，仓库范围一致约定）；跨租 → 0 行 → None（fail-closed）。
-        // RLS policy 启用（仓库范围未来项）时，读路径须随之补 `SET LOCAL` 锚点以与 policy current_setting 对齐。
-        let row = sqlx::query(
-            r#"
-            SELECT name, permissions
-            FROM roles
-            WHERE tenant_id = $1::uuid AND id = $2
-            "#,
-        )
-        .bind(tenant_param(tenant))
-        .bind(id.as_str())
-        .fetch_optional(&self.pool)
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
+        // 读闭包内仅 SQL fetch + try_get 返回原始值；Role::hydrate（复核 id / permission 白名单）在 tx 外，
+        // 保持 IdentityError 语义不变（域错误不依赖 sqlx）。损坏持久化值 → Storage（fail-closed）。
+        let tenant_uuid = tenant_param(tenant);
+        let id_str = id.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+        let id_str_q = id_str.clone();
+
+        let raw = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+            Box::pin(async move {
+                let row = sqlx::query(
+                    r#"
+                        SELECT name, permissions
+                        FROM roles
+                        WHERE tenant_id = $1::uuid AND id = $2
+                        "#,
+                )
+                .bind(tenant_uuid_q)
+                .bind(id_str_q)
+                .fetch_optional(&mut *conn)
+                .await?;
+                match row {
+                    None => Ok(None),
+                    Some(r) => {
+                        let name: String = r.try_get("name")?;
+                        let permissions: Vec<String> = r.try_get("permissions")?;
+                        Ok(Some((name, permissions)))
+                    }
+                }
+            })
+        })
         .await
         .map_err(storage)?;
-        match row {
+
+        match raw {
             None => Ok(None),
-            Some(r) => {
-                let name: String = r.try_get("name").map_err(storage)?;
-                let permissions: Vec<String> = r.try_get("permissions").map_err(storage)?;
-                // 受控重建（WHERE 已锁 id = 入参，复用 `id` 即存储 id）；hydrate 复核 id / permission 白名单，
-                // 损坏值（脏行）→ Storage。
-                Ok(Some(Role::hydrate(id.as_str(), name, &permissions)?))
+            Some((name, permissions)) => {
+                // 受控重建（WHERE 已锁 id = 入参，复用 `id_str` 即存储 id）；hydrate 复核 id / permission
+                // 白名单，损坏值（脏行）→ Storage（fail-closed）。
+                Ok(Some(Role::hydrate(&id_str, name, &permissions)?))
             }
         }
     }
