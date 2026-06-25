@@ -31,5 +31,8 @@ default = []
 backend = ["dep:ring", "dep:thiserror", "dep:tracing"]
 
 [dev-dependencies]
-# 异步 Signer::sign 单测运行时（multi_thread 验 Send 变体跨 spawn）。
+# 异步 Signer::sign / RevocationStore 单测运行时（multi_thread 验 Send 变体跨 spawn）。
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# RevocationStore 测试构造 CertScope 的强类型标识（TenantId / DeviceId）；仅测试用。
+vocab = { path = "../../crates/vocab" }
+ids = { path = "../../crates/ids" }

@@ -1483,6 +1483,7 @@ dependencies = [
  "consistency",
  "dynosaur",
  "futures",
+ "ids",
  "mockall",
  "thiserror",
  "tokio",
@@ -4814,10 +4815,12 @@ name = "softca"
 version = "0.0.0"
 dependencies = [
  "diport",
+ "ids",
  "ring",
  "thiserror",
  "tokio",
  "tracing",
+ "vocab",
 ]
 
 [[package]]

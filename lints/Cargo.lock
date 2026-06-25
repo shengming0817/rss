@@ -374,6 +374,7 @@ dependencies = [
  "consistency",
  "dynosaur",
  "futures",
+ "ids",
  "thiserror 2.0.18",
  "tokio-util",
  "trait-variant",

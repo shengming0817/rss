@@ -1,16 +1,19 @@
-//! softca — RSS workspace（W 阶段真身，#1010 dev-CA 签名切片）。See docs/rules/architecture.md.
+//! softca — RSS workspace（W 阶段真身，#1010 dev-CA 签名 + #1260 撤销 store 切片）。See docs/rules/architecture.md.
 //!
-//! 单一 `SoftCaSigner`（sealed-marker）：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-11）。
-//! - `backend` feature 开时增补 `impl diport::Signer`（**ECDSA P-256 软件 dev CA**：构造时生成 / 加载注入
-//!   的 CA 私钥，对 deviceloop 递来的 TBS `message` 字节签名，输出 DER ECDSA 签名字节）。
+//! 两个 provider（impl 真身均 `backend` feature 门控）：
+//! - `SoftCaSigner`（sealed-marker）：始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-11）；
+//!   `backend` 增补 `impl diport::Signer`（**ECDSA P-256 软件 dev CA**：构造时生成 / 加载注入的 CA 私钥，对
+//!   deviceloop 递来的 TBS `message` 字节签名，输出 DER ECDSA 签名字节）。
+//! - `InMemRevocationLedger`（#1260 P0-2 首切片）：`backend` 时 `impl diport::RevocationStore`——in-mem 撤销集，
+//!   按 `(CertScope, CertSerial)` 键 correct-by-construction 租户 + 设备隔离，Clock 戳撤销时刻、`revoke` 幂等。
 //!
 //! **provider 范式**：对标 `adapters/vault`（Transit `sign` 切片，#1011）——sealed-marker + `backend` feature +
 //!   fail-fast 构造。`diport::Signer` 是 provider 无关「签字节」port（无 cert 授权 / X.509 组装语义）；X.509
 //!   TBS 组装与签名嵌入是消费方 `deviceloop` 的职责，softca 只持 CA 私钥签字节。
 //!
-//! **撤销 / 两级 CA / Ledger 不在本切片**：需要 `diport` 尚不存在的 `RevocationStore` port（跨域 DI 架构），
-//!   属独立 P0-2 epic（pri-P0）；#1010 是 cx-3 adapter，只实现已冻结的 `Signer`（详见 PR body）。
+//! **两级 CA / 共享 Ledger / CRL 仍不在本切片**：root→intermediate split、signer/revocation 同源共享 Ledger、
+//!   DER CRL 单调 Number 导出 + `revoked_at` 生产读路径属 P0-2 后续 wave（epic #991）；本切片
+//!   `InMemRevocationLedger` 是非持久 dev/demo store（重启清空），生产撤销走持久 CRL/OCSP 后端（同 port 可替换）。
 //!
 //! **CA 私钥 custody（软件 CA 固有边界——诚实声明，勿夸大）**：
 //!   - **进程内裸持是软件 CA 固有的**：CA 私钥 scalar 由 ring `EcdsaKeyPair` 持有**进程生命周期**，ring 不提供
@@ -28,8 +31,17 @@
 //! crate 保持 forbid(unsafe_code)（继承 workspace lints；ring 的 unsafe 是其 def-site，不外溢本 crate）。
 
 #[cfg(feature = "backend")]
-use diport::{KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
+use diport::{
+    CertScope, CertSerial, Clock, KeyId, RevocationStore, RevocationStoreError, SignRequest,
+    Signature, Signer, SignerError, SigningPurpose,
+};
 use diport::{ManagedResource, ShutdownError};
+#[cfg(feature = "backend")]
+use std::collections::HashMap;
+#[cfg(feature = "backend")]
+use std::sync::{Mutex, PoisonError};
+#[cfg(feature = "backend")]
+use std::time::SystemTime;
 
 /// ECDSA P-256 ASN.1（DER）签名算法——签名输出符合 X.509 期望的 DER ECDSA 形态，被 `deviceloop` 嵌入证书。
 #[cfg(feature = "backend")]
@@ -244,12 +256,134 @@ impl ManagedResource for SoftCaSigner {
     }
 }
 
+/// in-mem 证书撤销 Ledger（dev / demo `RevocationStore` provider）。
+///
+/// **correct-by-construction 隔离**：撤销记录按 `(CertScope, CertSerial)` 键存——`CertScope`（tenant + device）
+/// 是键的一部分，跨租户 / 跨设备的 `is_revoked` 天然返回 `false`（webpki `find_serial` 未命中语义），无需运行期
+/// scope gate。**幂等**：重复撤销同一 `(scope, serial)` 经 `entry().or_insert` 保留首次撤销时刻。
+///
+/// **dev / demo 边界**：进程内、非持久（重启即清空撤销集）——生产应走持久 CRL / OCSP 后端（同 port 可替换）。
+/// 与 [`SoftCaSigner`] 解耦（独立 struct）：本切片只落 store，signer / revocation 共享 Ledger（同源、两级 CA）
+/// 属 P0-2 后续 wave。
+#[cfg(feature = "backend")]
+pub struct InMemRevocationLedger {
+    clock: Box<dyn Clock>,
+    // value = 首次撤销时刻（Clock 戳）。**CRL 前瞻**：本切片只记不经 port 暴露——`revoked_at` 读路径 + DER CRL
+    // 单调 Number 导出由 P0-2 后续 wave 落地（届时 is_revoked 之外增 revocation-list 查询）。当前由
+    // `#[cfg(test)]` 的 `revoked_at` 断言记录正确，非死状态。
+    revoked: Mutex<HashMap<(CertScope, CertSerial), SystemTime>>,
+}
+
+#[cfg(feature = "backend")]
+impl InMemRevocationLedger {
+    /// 构造空 Ledger。`clock` 是**必填构造器位置参**（rust-standards：Clock 禁 builder / 禁默认系统时钟）——
+    /// revoke 据此戳撤销时刻；组合根注入 `SystemClock`，测试注入确定性替身。
+    ///
+    /// **⚠ 非持久（仅 dev / demo）**：撤销集存进程内存，**重启即清空所有撤销记录**——退役 / 泄漏的证书在重启后
+    /// 重新被判定为「未撤销」。生产环境须替换为持久 CRL / OCSP provider（同 [`diport::RevocationStore`] port 可替换）。
+    pub fn new(clock: Box<dyn Clock>) -> Self {
+        Self {
+            clock,
+            revoked: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[cfg(feature = "backend")]
+impl RevocationStore for InMemRevocationLedger {
+    #[tracing::instrument(
+        name = "softca.revoke",
+        skip_all,
+        fields(resource = "softca", operation = "revoke")
+    )]
+    async fn revoke(
+        &self,
+        serial: CertSerial,
+        scope: CertScope,
+    ) -> Result<(), RevocationStoreError> {
+        let at = self.clock.now();
+        // lock poison 恢复（不 panic）：当前撤销集（HashMap）无跨操作一致性不变式，毒化的内层状态仍可安全续用
+        // （unwrap_or_else，禁 unwrap）；若将来撤销集引入不变式（如 CRL 单调 Number），须重评此恢复语义。
+        let mut guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
+        // 幂等：重复撤销保留首次时刻（对标 webpki CRL 撤销记录的 revocation_date 不可变）。CertScope Copy。
+        guard.entry((scope, serial)).or_insert(at);
+        // 撤销是安全相关事件——留审计轨迹；仅记 tenant / device 非机密标识（device 取 uuid，DeviceId 无 Display）。
+        tracing::info!(
+            tenant = %scope.tenant(),
+            device = %scope.device().as_uuid(),
+            "softca: certificate revoked"
+        );
+        Ok(())
+    }
+
+    // 撤销查询是证书校验热路径——debug 级 span（默认静默、开 debug 可观测查询轨迹）；仅记 tenant / device
+    // 非机密标识，结果 `revoked` 入 span。skip_all 杜绝 serial / self 进 span。
+    #[tracing::instrument(
+        name = "softca.is_revoked",
+        skip_all,
+        level = "debug",
+        fields(resource = "softca", operation = "is_revoked", tenant = %scope.tenant(), device = %scope.device().as_uuid())
+    )]
+    async fn is_revoked(
+        &self,
+        serial: CertSerial,
+        scope: CertScope,
+    ) -> Result<bool, RevocationStoreError> {
+        let guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
+        let revoked = guard.contains_key(&(scope, serial));
+        tracing::debug!(revoked, "softca: revocation status checked");
+        Ok(revoked)
+    }
+
+    async fn shutdown(&self) -> Result<(), RevocationStoreError> {
+        // reason: 纯进程内 in-mem 撤销集，无外部资源可释放（同 SoftCaSigner::shutdown）。
+        Ok(())
+    }
+}
+
+// F2：与 `SoftCaSigner` 对称——撤销 Ledger 也 impl ManagedResource，使组合根可经 `bootstrap::ShutdownStack`
+// 统一逆序编排关闭（当前 in-mem 无外部资源，shutdown 为 noop；持久 CRL/OCSP 替换后此路径承载真实 teardown）。
+#[cfg(feature = "backend")]
+impl ManagedResource for InMemRevocationLedger {
+    fn name(&self) -> &str {
+        "softca-revocation-ledger"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        // reason: 纯进程内 in-mem 撤销集，无外部资源可释放（同 RevocationStore::shutdown）。
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "backend"))]
+impl InMemRevocationLedger {
+    /// 测试支持：读回撤销时刻——断言 Clock 戳的时间被正确记录（让记录的时间在本切片即被测，非死状态）。
+    /// `#[cfg(test)]`：生产读路径（CRL 导出）属 P0-2 后续 wave，不在本切片暴露。
+    pub(crate) fn revoked_at(&self, serial: CertSerial, scope: CertScope) -> Option<SystemTime> {
+        let guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.get(&(scope, serial)).copied()
+    }
+
+    /// 测试支持：故意毒化撤销集 `Mutex`（同线程持锁 `panic` + `catch_unwind` 同帧捕获，不外传）——驱动
+    /// `revoke` / `is_revoked` 的 lock-poison 恢复分支（`unwrap_or_else(PoisonError::into_inner)`，F5）。
+    /// 生产代码无任何路径在持 `self.revoked` 锁时 panic，故该恢复分支只能经本测试钩子驱动。
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    pub(crate) fn poison_lock_for_test(&self) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.revoked.lock().unwrap();
+            panic!("intentional poison for test");
+        }));
+        debug_assert!(outcome.is_err(), "poison helper 应捕获 panic");
+    }
+}
+
 #[cfg(test)]
 mod smoke {
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait（PhantomData 绑定检查，
     //! 不构造、不执行 body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-11 —— sealed-marker impl 冻结的 diport DI port trait（ManagedResource
-    //! 始终；Signer 于 backend）；去掉任一 impl 即编译失败（anti-vacuity）。
+    //! INVARIANT: ADAPTER-PORT-FREEZE-11 —— sealed-marker impl 冻结的 diport DI port trait（`SoftCaSigner`：
+    //! ManagedResource 始终 / Signer 于 backend；`InMemRevocationLedger`：RevocationStore + ManagedResource 于
+    //! backend）；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
@@ -266,6 +400,23 @@ mod smoke {
     #[test]
     fn impls_signer() {
         assert_signer(PhantomData::<super::SoftCaSigner>);
+    }
+
+    #[cfg(feature = "backend")]
+    fn assert_revocation_store<T: diport::RevocationStore>(_: PhantomData<T>) {}
+
+    #[cfg(feature = "backend")]
+    #[test]
+    fn impls_revocation_store() {
+        // InMemRevocationLedger 始终 impl RevocationStore（backend）；去掉即编译失败（anti-vacuity）。
+        assert_revocation_store(PhantomData::<super::InMemRevocationLedger>);
+    }
+
+    #[cfg(feature = "backend")]
+    #[test]
+    fn ledger_impls_managed_resource() {
+        // F2：撤销 Ledger 与 SoftCaSigner 对称 impl ManagedResource（backend）；去掉即编译失败（anti-vacuity）。
+        assert_managed_resource(PhantomData::<super::InMemRevocationLedger>);
     }
 }
 
@@ -462,5 +613,178 @@ mod backend_tests {
         assert_eq!(ManagedResource::name(&signer), "softca");
         assert!(ManagedResource::shutdown(&signer).await.is_ok());
         assert!(Signer::shutdown(&signer).await.is_ok());
+    }
+}
+
+#[cfg(all(test, feature = "backend"))]
+mod revocation_tests {
+    //! InMemRevocationLedger：revoke→is_revoked round-trip + (tenant,device) scope 隔离 + 幂等（保留首次
+    //! 撤销时刻）+ Clock 戳撤销时间 + shutdown，全进程内、无外部 infra（无 `#[ignore]`）。
+    use super::InMemRevocationLedger;
+    use diport::{CertScope, CertSerial, Clock, RevocationStore};
+    use ids::DeviceId;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
+    use vocab::TenantId;
+
+    // canonical lowercase-hyphenated（TenantId::parse fail-closed 只认 canonical）；DeviceId 同步用 canonical。
+    const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const TENANT_B: &str = "a1a2a3a4-b1b2-4cc3-8dd4-e1e2e3e4e5e6";
+    const DEVICE_1: &str = "11111111-1111-4111-8111-111111111111";
+    const DEVICE_2: &str = "22222222-2222-4222-8222-222222222222";
+    // 确定性起始撤销时刻（非系统时钟，不触 disallowed_methods）。
+    const REVOKED_AT_SECS: u64 = 1_700_000_000;
+
+    // 单调推进 Clock 替身：每次 now() +1s。验「撤销时间被记 + 幂等保留**首次**时刻」——固定 clock 无法区分
+    // 首 / 次插入，推进 clock 才能证明二次 revoke 的 or_insert 不覆盖首次戳。
+    struct AdvancingClock {
+        secs: AtomicU64,
+    }
+    impl AdvancingClock {
+        fn starting_at(secs: u64) -> Self {
+            Self {
+                secs: AtomicU64::new(secs),
+            }
+        }
+    }
+    impl Clock for AdvancingClock {
+        fn now(&self) -> SystemTime {
+            let s = self.secs.fetch_add(1, Ordering::SeqCst);
+            SystemTime::UNIX_EPOCH + Duration::from_secs(s)
+        }
+    }
+
+    fn ledger() -> InMemRevocationLedger {
+        InMemRevocationLedger::new(Box::new(AdvancingClock::starting_at(REVOKED_AT_SECS)))
+    }
+
+    // unwrap carve-out 集中此 helper（item-level）：canonical 常量保证 parse 成功。
+    #[allow(clippy::unwrap_used)]
+    fn scope(tenant: &str, device: &str) -> CertScope {
+        CertScope::new(
+            TenantId::parse(tenant).unwrap(),
+            DeviceId::parse(device).unwrap(),
+        )
+    }
+
+    fn serial() -> CertSerial {
+        serial_bytes(vec![0x01, 0x02, 0x03, 0x04])
+    }
+
+    // unwrap carve-out 集中此 helper（item-level）：canonical 1–20 字节 serial 必构造成功。
+    #[allow(clippy::unwrap_used)]
+    fn serial_bytes(bytes: impl Into<Vec<u8>>) -> CertSerial {
+        CertSerial::try_new(bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn revoke_then_is_revoked_true() {
+        let l = ledger();
+        let s = scope(TENANT_A, DEVICE_1);
+        // 撤销前：未命中（anti-vacuity 前置）。
+        assert!(!l.is_revoked(serial(), s).await.unwrap());
+        l.revoke(serial(), s).await.unwrap();
+        // 撤销后：命中。
+        assert!(l.is_revoked(serial(), s).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn unrevoked_serial_is_false() {
+        let l = ledger();
+        // 从未撤销 → false（webpki find_serial 未命中语义）。
+        assert!(
+            !l.is_revoked(serial(), scope(TENANT_A, DEVICE_1))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn scope_isolation_tenant_and_device() {
+        let l = ledger();
+        let revoked_scope = scope(TENANT_A, DEVICE_1);
+        l.revoke(serial(), revoked_scope).await.unwrap();
+        // anti-vacuity：同 (tenant, device, serial) 命中。
+        assert!(l.is_revoked(serial(), revoked_scope).await.unwrap());
+        // 异 device（同 tenant）→ 隔离，false。
+        assert!(
+            !l.is_revoked(serial(), scope(TENANT_A, DEVICE_2))
+                .await
+                .unwrap()
+        );
+        // 异 tenant（同 device）→ 隔离，false。
+        assert!(
+            !l.is_revoked(serial(), scope(TENANT_B, DEVICE_1))
+                .await
+                .unwrap()
+        );
+        // 异 serial（同 scope）→ false。
+        assert!(
+            !l.is_revoked(serial_bytes(vec![0xFF]), revoked_scope)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn revoke_is_idempotent_and_preserves_first_time() {
+        let l = ledger();
+        let s = scope(TENANT_A, DEVICE_1);
+        l.revoke(serial(), s).await.unwrap(); // 首次：戳 REVOKED_AT_SECS。
+        l.revoke(serial(), s).await.unwrap(); // 二次：or_insert no-op（clock 已推进，但不覆盖首次戳）。
+        assert!(l.is_revoked(serial(), s).await.unwrap());
+        let first = SystemTime::UNIX_EPOCH + Duration::from_secs(REVOKED_AT_SECS);
+        assert_eq!(
+            l.revoked_at(serial(), s),
+            Some(first),
+            "幂等：二次撤销须保留首次撤销时刻"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn revoked_at_records_clock_time() {
+        let l = ledger();
+        let s = scope(TENANT_A, DEVICE_1);
+        // 撤销前无记录。
+        assert_eq!(l.revoked_at(serial(), s), None);
+        l.revoke(serial(), s).await.unwrap();
+        // Clock 戳的首次时刻被正确记录（REVOKED_AT_SECS）。
+        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(REVOKED_AT_SECS);
+        assert_eq!(l.revoked_at(serial(), s), Some(expected));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn shutdown_ok() {
+        let l = ledger();
+        assert!(l.shutdown().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn recovers_from_poisoned_lock() {
+        // F5：撤销集 Mutex 毒化后，revoke / is_revoked 仍正确（PoisonError::into_inner 恢复内层数据，
+        // 不静默丢撤销记录、不 panic）——撤销是安全语义，毒化不得导致已撤销证书被误判未撤销。
+        let l = ledger();
+        let s = scope(TENANT_A, DEVICE_1);
+        l.revoke(serial(), s).await.unwrap();
+        l.poison_lock_for_test();
+        // 毒化后：已撤销记录仍可见。
+        assert!(
+            l.is_revoked(serial(), s).await.unwrap(),
+            "poison 后已撤销记录须仍可见"
+        );
+        // 毒化后：仍可继续撤销新证书。
+        let other = serial_bytes(vec![0x09, 0x09]);
+        l.revoke(other.clone(), s).await.unwrap();
+        assert!(
+            l.is_revoked(other, s).await.unwrap(),
+            "poison 后须仍可继续撤销"
+        );
     }
 }
