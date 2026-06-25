@@ -11,6 +11,10 @@
 pub mod consumer;
 pub use consumer::{ConsumerMeta, run_consumer, run_consumer_ackable};
 
+// 命令分发 runtime（P12，#1124）：sealed emit funnel + 幂等消费。`emit_async` 不在 crate root re-export
+// ——保留唯一路径 `eventexec::command::emit_async`，令 COMMAND-SYMMETRY-01 的「无裸 emit 出口」扫描可收口。
+pub mod command;
+
 pub mod relay;
 pub use relay::{
     OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker, SamplerWorker,

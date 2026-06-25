@@ -171,14 +171,53 @@ webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata�
 命令 dispatch 通过 generated typed API 和 Claimer 两阶段去重。producer 侧 key、
 consumer 侧 claim、组合根 wiring 必须同源；不得新增裸字符串 dispatch。
 
-producer 与 consumer **双侧**都收口到 codegen typed API：域 crate 经生成式
-`<cmd>::emit_async` / `<cmd>::emit_async_from_idempotency_key`（per-command wrapper，bake
-DispatchId + 锁 payload 为 `Request`）发命令，**不**直调 runtime `command::emit_async`
-（裸 DispatchId）。三层嵌套 funnel：业务 → 生成 wrapper（锁两个 runtime emit 出口的调用方为 generated/runtime）
-→ runtime `command::emit_async`（锁裸 `outbox::emit`/`Entry::new` 命令 topic 构造）→
-`outbox::Entry::new`。consumer 侧对称收口（dispatch caller + register caller 两道）。wrapper 存在性由 codegen + golden（Hard）守；
-caller funnel 用 sealed API + `pub(crate)` 可见性把裸 `emit` 出口封进 generated/runtime crate
-（Hard，编译期强制，比 Go 的 type-aware scan funnel 更强）。符号/盲区见对应 rustdoc。
+producer 与 consumer **双侧**都收口到 codegen typed API。五层 funnel：
+
+```
+业务/组合根
+  → generated::command::<cmd>::emit_async(emitter, request, subject_id, idempotency_key)
+      // per-command wrapper（codegen 生成）；bake CONTRACT_ID/TOPIC + 锁 typed Request
+      // subject_id 必填（落 envelope.subject）；idempotency_key 可选（Some→稳定 DispatchId / None→随机）
+      // generic over generated::command::CommandEmit seam
+  → 组合根 bridge impl CommandEmit
+      // 组合根唯一 sanctioned impl；serde_json 编码 payload；idempotency_key→DispatchId（Some 经
+      // from_idempotency_key、None mint 随机）；透传 subject_id；不在 generated 内实现
+  → eventexec::command::emit_async(emitter, dispatch_id, topic, contract_id, payload, subject)
+      // RUNTIME 层；调 outbox::Entry::new
+  → consistency::outbox::Entry::new(..)
+      // command-topic Entry 构造收口于此（设计 funnel 点）；当前 `Entry::new` 仍 public，类型层**未**
+      // sealed——裸构造由 COMMAND-SYMMETRY-01（AST 扫 BareEmitExit）+ COMMAND-IMPL-ALLOWLIST-01
+      // （Medium）守；Hard 化（sealed CommandTopic）见 follow-up（#1124 review F2 defer）
+  → diport::OutboxEmitter（注入的 Box<DynOutboxEmitter>）
+```
+
+**分层关键点**：`generated` 只可依赖基础 crate，不得依赖 `eventexec`（引擎/服务层）。
+`CommandEmit`/`CommandRegister` seam trait 定义在 `generated` 内，使 generated wrapper 可
+funneling 而无需依赖 runtime——组合根 bridge impl 是唯一衔接点。
+
+**DispatchId** 是封装 `consistency::idempotency::IdemKey` 的 sealed newtype，由 RUNTIME 层
+（`eventexec::command`）mint + seal，**不**在 generated wrapper 内构造——因为 `IdemKey` 是引擎层
+类型，`generated` 依赖图禁止命名它。wrapper 锁 topic + contract + typed Request + subject_id +
+idempotency_key（后者经组合根 bridge mint DispatchId：`Some`→`from_idempotency_key`、`None`→随机）。
+command-topic `Entry::new` 是设计上的构造收口点，但 `Entry::new` 仍 public（类型层未 sealed，见 funnel
+图注；裸构造由 AST 治理门 + follow-up Hard 化守）。
+
+consumer 侧对称：`generated::command::<cmd>::register_handler`（generic over
+`CommandRegister` seam）→ runtime `eventexec::command::register_command_handler`，复用
+`eventexec::run_consumer` + `consistency::idempotency::IdempotencyStore` claimer 做两阶段
+去重（同 DispatchId 再入 → `SeenState::Duplicate` → 拒绝）。
+
+**Guards**：wrapper 存在性由 codegen + golden（Hard，CODEGEN-DRIFT-01）守；DispatchId 不可
+伪造（sealed newtype，Hard）；双侧对称 + 无裸 emit 出口由 `COMMAND-SYMMETRY-01`（Medium，`cargo
+xtask` `syn` AST 扫描——含 `command::emit_async` 路径 / use-import / whitespace 形态；残留盲区
+`use … as alias` 重命名导入，见 rustdoc）守；`impl CommandEmit`/`impl CommandRegister` 仅限组合根
+`bins`/`assemblies` 由 `COMMAND-IMPL-ALLOWLIST-01`（Medium AST，对齐 `DIPORT-IMPL-ALLOWLIST-01`）守；
+`kind=command ⇒ OutboxFact` 由 contract validate R15（Medium）守。`Entry::new` Hard 化（sealed
+`CommandTopic`，覆盖 alias 残留）见 follow-up（generated seam 是 public trait、无法 seal，故 impl-site
+当前 Medium）。符号/盲区见对应 rustdoc。
+
+`consistencyLevel = OutboxFact`（R15 机器锁定）；command topic = `<domain>.commands.<name>`（稳定
+dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx）。
 
 ## Projection
 

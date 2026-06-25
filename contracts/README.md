@@ -30,10 +30,10 @@ contracts/{kind}/{domain}/{version}/
 | `owner` | 域名 或 `_framework`（provider-agnostic 中立契约归框架） | 是 |
 | `consistencyLevel` | `LocalOnly`/`LocalTx`/`OutboxFact`/`WorkflowEventual`/`DeviceLatent`（L0–L4） | 是 |
 | `lifecycle` | `draft`/`active`/`deprecated`（`active` 才需 assembly 接线，见 contract-fanout.md） | 是 |
-| `[schemas]` | `request`/`response`/`payload` → schema 文件名 | 按 kind |
+| `[schemas]` | `request`/`response`/`payload` → schema 文件名（http 需 `request`+`response`、event/saga 需 `payload`、**command 需 `request`**） | 按 kind（R4） |
 | `path` | http 业务路径（`/api/v{N}/{domain}/…` 约定，如 `/api/v1/_seed/echo`；形态安全由 R7 守：绝对、非 `//`、无 `..`/空白） | 按 kind（active http 必填，R8） |
 | `method` | http 方法 `GET`/`POST`/`PUT`/`PATCH`/`DELETE`（闭值集，非法即解析 `Err`） | 按 kind（active http 必填，R8） |
-| `topic` | event 稳定 dotted topic 名（如 `seed.thing-happened`；点分小写形态由 R7 守，同 `id`） | 按 kind（active event 必填，R8） |
+| `topic` | event 或 command 稳定 dotted topic 名（event 如 `seed.thing-happened`，command 如 `device.commands.reboot`；点分小写形态由 R7 守，同 `id`） | 按 kind（active event 必填，R8；active command 必填，R8） |
 | `delivery` | event 投递语义 `at-least-once`/`at-most-once`/`exactly-once`（闭值集）。**当前实现路径仅 `at-least-once`**（outbox + 幂等消费者）；`at-most-once`/`exactly-once` 为前瞻保留值（broker 链路无运行时保证），**active event 经 R11 机器拒**（仅放行 at-least-once），draft/deprecated 可表达前瞻设计 | 按 kind（active event 必填，R8；值由 R11 限） |
 | `[saga]` | saga 专属 block（TOML 键名 **camelCase**）：`steps`（`{ name, outputSchema }` 数组）+ `compensationOrder = "reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，非负由类型保证）。完整示例见 `xtask` 解析测试 `VALID_SAGA` | **kind=saga 必填（R10，无条件、不论 lifecycle）**；良构 R10 |
 | `[[subscriptions]]` | event 订阅声明（#1120，TOML 数组）：每项须含 `consumer`（消费者域 DomainId，如 `audit`）+ `group`（稳定 consumer group 名，如 `audit.session-created`，broker 消费位点唯一键）。未知子键由 `deny_unknown_fields` 拒。`#[serde(default)]` ⇒ 无此字段的既有契约仍解析（空数组）。codegen 由此派生 `SUBSCRIPTIONS: &[SubscriptionSpec]` 常量，bootstrap 消费接线。示例：`[[subscriptions]]\nconsumer="audit"\ngroup="audit.session-created"` | **`lifecycle=active && kind=event` 必须非空（R14，EVENT-ACTIVE-SUB-01）**；draft/deprecated 豁免 |
@@ -43,14 +43,14 @@ contracts/{kind}/{domain}/{version}/
 | 编号 | Rule 枚举名 | 描述 |
 |------|-------------|------|
 | R1 | `SagaConsistency` | `kind=saga` ⇒ `consistencyLevel=WorkflowEventual` |
-| R2 | `FrameworkKind` | `owner=_framework` ⇒ `kind ∈ {http,event}` |
+| R2 | `FrameworkKind` | `owner=_framework` ⇒ `kind ∈ {http,event,command}`（command 是 provider-agnostic 分发机制，#1124 扩展） |
 | R3 | `PathMismatch` | 磁盘路径段 `{kind}/{domain}/{version}` 须等于 manifest 字段 |
 | R4 | `SchemaShape` | kind→schema 形态须一致（http 需 request+response、event/saga 需 payload、command 需 request） |
 | R5 | `MissingSchema` | 声明的每个 schema 文件须存在于契约目录（含 saga step `outputSchema`） |
 | R6 | `UnsafeSchemaPath` | schema 文件名须为纯文件名，不得含 `../`、绝对路径等路径分量（防逃逸；含 saga step `outputSchema`） |
 | R7 | `IdentSyntax` | `domain`/`version`/`id`/`owner` + per-kind `path`/`topic`（若声明）先收口语法：`domain` 为安全段（`[a-z0-9_]+`，可 `_` 前缀保留段，无路径分量）、`version` = `v{N}`、`id`/`topic` 点分小写、`owner` 为合法域名（`[a-z][a-z0-9_]*`）或 `_framework`、`path` 为安全绝对路径（非 `//`、无 `..`/空白）——防坏值拼进派生 module 名 / 文件路径 / 鉴权挂载点 / wire routing key（与 codegen 写盘前防逃逸守卫互为表里） |
-| R8 | `PerKindActiveFields` | `lifecycle=active` ⇒ 按 kind 必填 **active 发布接线**字段（http `path`+`method` / event `topic`+`delivery`）；draft/deprecated 豁免，command 无 per-kind 必填。字段值形态由 R7 守。**saga 不在此**——`[saga]` 是结构语义、无条件必填（R10） |
-| R9 | `PerKindFieldScope` | per-kind 字段只允许出现在匹配 kind（`path`/`method` 仅 http、`topic`/`delivery` 仅 event、`[saga]` 仅 saga）——错配会被派生 silently-ignored，须拒 |
+| R8 | `PerKindActiveFields` | `lifecycle=active` ⇒ 按 kind 必填 **active 发布接线**字段（http `path`+`method` / event `topic`+`delivery` / command `topic`）；draft/deprecated 豁免。字段值形态由 R7 守。**saga 不在此**——`[saga]` 是结构语义、无条件必填（R10） |
+| R9 | `PerKindFieldScope` | per-kind 字段只允许出现在匹配 kind（`path`/`method` 仅 http、`topic`/`delivery` 仅 event 或 command（topic 允许 event ∪ command）、`[saga]` 仅 saga）——错配会被派生 silently-ignored，须拒 |
 | R10 | `SagaBlock` | **`kind=saga` ⇒ 须有非空 `[saga]` block（无条件、不论 lifecycle，saga.md governance）**；block 存在即查良构：≥1 step、step `name` 合法非关键字 Rust 标识符（拒 raw `r#`）且唯一、`outputSchema` 非空。非-saga kind 误带 `[saga]` 由 R9 拒 |
 | R11 | `ActiveDeliverySupported` | `lifecycle=active` 的 event 只能声明当前可兑现的投递语义（仅 `at-least-once`）；`at-most-once`/`exactly-once` broker 链路无运行时保证，能力落地前限 draft/deprecated（active 资源不得声明系统不能兑现的能力） |
 | R12 | `DuplicateId` | contract `id` 须跨**全部**契约全局唯一（跨契约扫描）；id 是契约注册标识，api-versioning.md 要求破坏式 wire 变更新建版本目录 **且** 新 contract ID。同根因只报 1 条（subject=该 id，detail 列冲突契约路径） |
@@ -74,7 +74,9 @@ contracts/{kind}/{domain}/{version}/
 
 `cargo xtask verify` 是本地全量治理门（门集**单一事实源** = `README.md` §构建与本地验证 / `xtask/src/verify.rs`）：除全 workspace 的 fmt / build / clippy / nextest / deny / dylint 外，**契约相关**的 `contract validate`（元数据校验）、`layer-deps`（分层依赖）、`codegen --check`（派生漂移门）也是其中的 in-process meta 步（亦含在 `--fast` 内），任一失败即停止。改契约后跑 `cargo xtask verify`（或 `--fast` 快检）即覆盖契约元数据 + 派生漂移校验；激活 forge=azure 无 CI ⇒ 此门是治理门的唯一实际 gate。
 
-per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block）已随 #1035 落地（见上 §contract.toml 字段 + 校验规则 R8–R10）；属预期附加演进（新增 optional 字段不破坏既有契约解析），非破坏冻结。codegen 不消费这些字段（只读 `*.schema.json`），故 `generated/` 不受影响。
+per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block、command 的 `topic`）已随 #1035 + #1124 落地（见上 §contract.toml 字段 + 校验规则 R8–R10 / R15）；属预期附加演进（新增 optional 字段不破坏既有契约解析），非破坏冻结。
+
+**codegen 消费面（例外）**：多数 per-kind 字段 codegen **不**消费（只读 `*.schema.json`），故 `generated/` 不受影响——**但 command 的 `topic` 是 codegen 输入**：派生 `generated/src/command/{domain}_{version}.rs` 的 `pub const TOPIC`（broker routing key 烤入 wrapper），故改 command `topic` 必须跑 `cargo xtask codegen --check`（漂移门）并更新已提交 `generated/`。event 的 `topic`/`delivery` 等仍不入 codegen。
 
 ### 敏感字段脱敏（codegen 单源，`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`）
 

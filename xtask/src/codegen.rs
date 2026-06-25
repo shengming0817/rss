@@ -45,11 +45,20 @@ pub(crate) fn generate(contracts_root: &Path, gen_src: &Path, check: bool) -> Re
     Ok(())
 }
 
+/// mod.rs 特化档：event kind 注入 `SubscriptionSpec` POD，command kind 注入 `CommandEmit`/`CommandRegister`
+/// seam，其余无特化。同一 `kind_dir` 内所有契约同 kind，故每 kind_dir 单一 `ModKind`。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModKind {
+    Plain,
+    Event,
+    Command,
+}
+
 /// 渲染全部期望文件（相对 `generated/src` 的路径 → 内容），确定性排序。
 fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>> {
     let mut files: Vec<(PathBuf, String)> = Vec::new();
-    // kinds: kind_dir → (modules, is_event_kind) ——event kind 需在 mod.rs 特化加 SubscriptionSpec 定义。
-    let mut kinds: BTreeMap<String, (BTreeSet<String>, bool)> = BTreeMap::new();
+    // kinds: kind_dir → (modules, mod_kind) ——event/command kind 需在 mod.rs 特化加 POD / seam 定义。
+    let mut kinds: BTreeMap<String, (BTreeSet<String>, ModKind)> = BTreeMap::new();
     for c in contracts {
         let kind_dir = c.manifest.kind.as_dir().to_string();
         let module = module_name(&c.manifest.domain, &c.manifest.version);
@@ -63,20 +72,23 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
                 c.manifest.version
             );
         }
+        let mod_kind = match c.manifest.kind {
+            ContractKind::Event => ModKind::Event,
+            ContractKind::Command => ModKind::Command,
+            ContractKind::Http | ContractKind::Saga => ModKind::Plain,
+        };
         let rel = PathBuf::from(&kind_dir).join(format!("{module}.rs"));
         files.push((rel, render_contract(c)?));
         let entry = kinds
             .entry(kind_dir)
-            .or_insert_with(|| (BTreeSet::new(), false));
+            .or_insert_with(|| (BTreeSet::new(), mod_kind));
         entry.0.insert(module);
-        if c.manifest.kind == ContractKind::Event {
-            entry.1 = true;
-        }
+        entry.1 = mod_kind; // 同 kind_dir 内所有契约同 kind
     }
-    for (kind_dir, (modules, is_event)) in &kinds {
+    for (kind_dir, (modules, mod_kind)) in &kinds {
         files.push((
             PathBuf::from(kind_dir).join("mod.rs"),
-            render_mod_rs(modules, *is_event),
+            render_mod_rs(modules, *mod_kind),
         ));
     }
     files.push((PathBuf::from("lib.rs"), render_lib_rs(kinds.keys())));
@@ -122,12 +134,100 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
 
     // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
     // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
-    if c.manifest.kind == ContractKind::Event {
-        let glue = render_event_glue(c)?;
-        Ok(format!("{}{}{}", generated_header(&source), payload, glue))
-    } else {
-        Ok(format!("{}{}", generated_header(&source), payload))
+    // command kind：追加 CONTRACT_ID/TOPIC + typed emit/register wrapper（triple funnel 顶层；泛型收口到
+    // command/mod.rs 的 CommandEmit/CommandRegister seam，generated 仍仅依赖 serde）。
+    match c.manifest.kind {
+        ContractKind::Event => {
+            let glue = render_event_glue(c)?;
+            Ok(format!("{}{}{}", generated_header(&source), payload, glue))
+        }
+        ContractKind::Command => {
+            let glue = render_command_glue(c)?;
+            Ok(format!("{}{}{}", generated_header(&source), payload, glue))
+        }
+        ContractKind::Http | ContractKind::Saga => {
+            Ok(format!("{}{}", generated_header(&source), payload))
+        }
     }
+}
+
+/// command kind 派生 glue：CONTRACT_ID / TOPIC 常量 + per-command typed `emit_async` / `register_handler`
+/// wrapper（triple funnel 顶层）。wrapper 泛型收口到 `command/mod.rs` 的 `CommandEmit` / `CommandRegister`
+/// seam——generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层），故经 seam 注入。
+///
+/// typed `Request` 类型名 = request schema 的 `title`（typify 用作根类型名）；拼进生成源前经
+/// `syn::Ident` 收口（防注入非法标识符）。CONTRACT_ID/TOPIC 由 manifest 派生（draft 无 topic 回退用 id）。
+fn render_command_glue(c: &DiscoveredContract) -> Result<String> {
+    let contract_id = &c.manifest.id;
+    let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+    let request_ty = command_request_type_name(c)?;
+    Ok(format!(
+        r#"
+/// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "{contract_id}";
+
+/// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
+/// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const TOPIC: &str = "{topic}";
+
+/// Producer wrapper（triple funnel 顶层）：把 typed [`{request_ty}`] 经注入的 [`super::CommandEmit`] 落
+/// durable outbox。baked `CONTRACT_ID` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
+/// `subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
+/// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
+/// 由 `cargo xtask codegen` 派生；勿手改。
+pub async fn emit_async<E: super::CommandEmit>(
+    emitter: &E,
+    request: {request_ty},
+    subject_id: ::std::string::String,
+    idempotency_key: ::core::option::Option<::std::string::String>,
+) -> ::core::result::Result<(), E::Error> {{
+    emitter
+        .emit(CONTRACT_ID, TOPIC, &request, &subject_id, idempotency_key.as_deref())
+        .await
+}}
+
+/// Consumer wrapper（consumer 侧对称收口）：把 typed [`{request_ty}`] handler 注册到注入的
+/// [`super::CommandRegister`]。baked `CONTRACT_ID` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
+pub fn register_handler<Reg, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output
+where
+    Reg: super::CommandRegister,
+    H: Fn({request_ty}) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
+    Fut: ::core::future::Future<Output = Reg::Outcome> + ::core::marker::Send + 'static,
+{{
+    registrar.register::<{request_ty}, H, Fut>(CONTRACT_ID, TOPIC, handler)
+}}
+"#
+    ))
+}
+
+/// 从 command 契约的 request schema 提取 typify 根类型名（= schema `title`）。拼进生成源前经
+/// `syn::Ident` 收口——拒非法 Rust 标识符 / raw `r#`（防注入生成代码；与 R7 互为上下游 funnel）。
+fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
+    let file = c
+        .manifest
+        .schemas
+        .request
+        .as_deref()
+        .context("command 契约缺 [schemas].request（R4 应已守）")?;
+    validate_schema_filename(file)?;
+    let path = c.dir.join(file);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("读 request schema {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("解析 request schema {}", path.display()))?;
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| {
+            format!(
+                "request schema {} 缺 title（codegen 派生类型名所需）",
+                path.display()
+            )
+        })?;
+    if title.starts_with("r#") || syn::parse_str::<syn::Ident>(title).is_err() {
+        bail!("command request schema title 非法 Rust 类型标识符（防注入生成代码）: {title:?}");
+    }
+    Ok(title.to_string())
 }
 
 /// event kind 订阅注册 glue（从 manifest 派生，不消费 schema）。
@@ -327,11 +427,79 @@ pub struct SubscriptionSpec {
 }
 "#;
 
-fn render_mod_rs(modules: &BTreeSet<String>, is_event: bool) -> String {
+/// command kind mod.rs 特化：定义 `CommandEmit` / `CommandRegister` 收口 seam（各 `{domain}_{version}.rs`
+/// 经 `super::` 引用）。generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层），故
+/// per-command wrapper 经这两个泛型 seam 注入——唯一 sanctioned 实现是组合根 bridge / registrar（委托
+/// `eventexec::command::emit_async` / `register_command_handler`）。零额外依赖（serde + core）。
+const COMMAND_SEAM_DEF: &str = r#"
+/// Producer 收口 seam——命令 emit 能力（triple funnel 中层接缝）。
+///
+/// per-command `emit_async` wrapper 经本 seam 泛型收口；唯一 sanctioned 实现是组合根 bridge（委托
+/// `eventexec::command::emit_async` → `outbox::Entry::new`）。由 `cargo xtask codegen` 派生；勿手改。
+pub trait CommandEmit {
+    /// emit 失败类型（实现绑定，如 `eventexec::command::CommandEmitError`）。
+    type Error;
+    /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract_id` / `topic` 是 generated
+    /// wrapper 注入的 baked 常量；`request` 是 typed payload（实现侧 `serde_json` 编码）；`subject_id` 是
+    /// **runtime 必填**的不透明主体标识（落 outbox envelope.subject，如设备 / 会话 ID）；`idempotency_key`
+    /// 是**可选**业务幂等键——`Some` ⇒ 经它 mint 稳定 `DispatchId`（同键二次 emit 被 claimer 拒），`None`
+    /// ⇒ bridge mint 随机 `DispatchId`（无业务去重）。
+    ///
+    /// # Impl guide（bridge 作者参考）
+    ///
+    /// 实现本方法须依次完成以下四步：
+    ///
+    /// 1. **序列化 payload**：`let bytes = serde_json::to_vec(request)?;`
+    /// 2. **生成 DispatchId**：`idempotency_key` 为 `Some(k)` ⇒
+    ///    `eventexec::command::DispatchId::from_idempotency_key(k)?`（稳定业务幂等键）；为 `None` ⇒
+    ///    `eventexec::command::DispatchId::from_idempotency_key(&Uuid::new_v4().to_string())?`（随机）。
+    /// 3. **透传 subject_id**：直接转发本参数（runtime 写入 outbox envelope.subject，不再由 bridge 编造）。
+    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract_id, bytes, subject_id.to_owned()).await`
+    ///
+    /// 组合根 bridge 是唯一 sanctioned 实现者；域 crate 不得直接 impl 本 trait（机器守 `COMMAND-IMPL-ALLOWLIST-01`）。
+    fn emit<R: ::serde::Serialize + ::core::marker::Send + ::core::marker::Sync>(
+        &self,
+        contract_id: &'static str,
+        topic: &'static str,
+        request: &R,
+        subject_id: &str,
+        idempotency_key: ::core::option::Option<&str>,
+    ) -> impl ::core::future::Future<Output = ::core::result::Result<(), Self::Error>>
+    + ::core::marker::Send;
+}
+
+/// Consumer 收口 seam——命令 handler 注册能力（consumer 侧对称收口）。
+///
+/// per-command `register_handler` wrapper 经本 seam 泛型收口；唯一 sanctioned 实现是组合根 registrar
+/// （委托 `eventexec::command::register_command_handler` → `run_consumer` + claimer 两阶段去重）。
+/// 由 `cargo xtask codegen` 派生；勿手改。
+pub trait CommandRegister {
+    /// handler 返回的处置结果类型（实现绑定，如 `consistency::HandleResult`）。
+    type Outcome;
+    /// `register` 的返回类型（如 `Result<(), KernelError>`）。
+    type Output;
+    /// 把 typed `R` handler 绑到 `contract_id` / `topic`。typed decode + claimer 接线在实现侧。
+    fn register<R, H, Fut>(
+        &mut self,
+        contract_id: &'static str,
+        topic: &'static str,
+        handler: H,
+    ) -> Self::Output
+    where
+        R: for<'de> ::serde::Deserialize<'de> + ::core::marker::Send + 'static,
+        H: Fn(R) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
+        Fut: ::core::future::Future<Output = Self::Outcome> + ::core::marker::Send + 'static;
+}
+"#;
+
+fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
     let mut s = generated_header("cargo xtask codegen (module funnel)");
-    // event kind：在 mod.rs 定义 SubscriptionSpec（各子模块经 `super::` 引用，消除重复定义）。
-    if is_event {
-        s.push_str(SUBSCRIPTION_SPEC_DEF);
+    // event kind：定义 SubscriptionSpec POD；command kind：定义 CommandEmit/CommandRegister seam
+    // （各子模块经 `super::` 引用，消除重复定义）。
+    match kind {
+        ModKind::Event => s.push_str(SUBSCRIPTION_SPEC_DEF),
+        ModKind::Command => s.push_str(COMMAND_SEAM_DEF),
+        ModKind::Plain => {}
     }
     for m in modules {
         s.push_str(&format!("pub mod {m};\n"));
@@ -911,6 +1079,128 @@ mod tests {
         assert!(
             result.is_err(),
             "含引号的 subscription group 须被 codegen 防注入守卫 bail"
+        );
+        Ok(())
+    }
+
+    /// 在 `root/contracts/command/_seed/v1` 落一个最小 command 契约（draft，request schema + topic）。
+    fn seed_command(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/command/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"seed.do-thing\"\n",
+                "kind = \"command\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"OutboxFact\"\n",
+                "lifecycle = \"draft\"\n",
+                "topic = \"seed.commands.do-thing\"\n",
+                "[schemas]\n",
+                "request = \"request.schema.json\"\n",
+            ),
+        )?;
+        // schema 与真实 contracts/command/_seed/v1/request.schema.json 对齐（targetId + amount）。
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedDoThingRequest\",\"type\":\"object\",\"required\":[\"targetId\",\"amount\"],\"properties\":{\"targetId\":{\"type\":\"string\"},\"amount\":{\"type\":\"integer\",\"format\":\"int64\"}},\"additionalProperties\":false}";
+        std::fs::write(dir.join("request.schema.json"), schema)?;
+        Ok(())
+    }
+
+    /// command glue 测试（#1124）：command 契约派生 .rs 须含 CONTRACT_ID / TOPIC + typed `emit_async` /
+    /// `register_handler` wrapper（triple funnel 顶层，锁 typed Request = schema title）；seam
+    /// `CommandEmit` / `CommandRegister` 定义在 `command/mod.rs`，子模块经 `super::` 引用（无重复定义）。
+    /// anti-vacuity：合法 command 契约正常派生全部 wrapper + seam。
+    #[test]
+    fn command_glue_with_wrappers_emitted() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_cmd");
+        seed_command(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("command/_seed_v1.rs"))?;
+        let mod_rs = std::fs::read_to_string(gen_src.join("command/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains(r#"pub const CONTRACT_ID: &str = "seed.do-thing";"#),
+            "缺 CONTRACT_ID:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"pub const TOPIC: &str = "seed.commands.do-thing";"#),
+            "缺 TOPIC:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("pub async fn emit_async<E: super::CommandEmit>"),
+            "缺 emit_async wrapper:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("pub fn register_handler<Reg, H, Fut>"),
+            "缺 register_handler wrapper:\n{rendered}"
+        );
+        // wrapper 锁 typed Request（= request schema title 派生）
+        assert!(
+            rendered.contains("request: SeedDoThingRequest"),
+            "emit_async 须锁 typed Request:\n{rendered}"
+        );
+        // F1（#1124 review）：wrapper + seam 把 subject_id（必填）+ idempotency_key（可选）纳入类型面，
+        // 否则 bridge 拿不到 runtime 必需的 per-call subject / 业务幂等键。
+        assert!(
+            rendered.contains("subject_id: ::std::string::String")
+                && rendered
+                    .contains("idempotency_key: ::core::option::Option<::std::string::String>"),
+            "emit_async wrapper 须含 subject_id + idempotency_key 参数:\n{rendered}"
+        );
+        assert!(
+            mod_rs.contains("subject_id: &str")
+                && mod_rs.contains("idempotency_key: ::core::option::Option<&str>"),
+            "CommandEmit::emit seam 须含 subject_id + idempotency_key 参数:\n{mod_rs}"
+        );
+        // seam 定义在 mod.rs，子模块经 super:: 引用
+        assert!(
+            mod_rs.contains("pub trait CommandEmit")
+                && mod_rs.contains("pub trait CommandRegister"),
+            "mod.rs 缺 CommandEmit/CommandRegister seam:\n{mod_rs}"
+        );
+        assert!(
+            rendered.contains("super::CommandEmit"),
+            "wrapper 应经 super:: 引用 seam:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    /// #1124 防注入红用例：command request schema title 非合法 Rust 标识符时 codegen 须 bail——typify 用
+    /// title 作根类型名，generated wrapper 也用同名，坏 title 会注入生成源码 / 致类型名不匹配。
+    /// 正向对照见 `command_glue_with_wrappers_emitted`（合法 title 正常派生）。
+    #[test]
+    fn command_request_title_injection_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_cmd");
+        let dir = root.join("contracts/command/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"seed.do-thing\"\n",
+                "kind = \"command\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"OutboxFact\"\n",
+                "lifecycle = \"draft\"\n",
+                "topic = \"seed.commands.do-thing\"\n",
+                "[schemas]\n",
+                "request = \"request.schema.json\"\n",
+            ),
+        )?;
+        // title 含空格 / 分号 → 非法 Rust 标识符（typify 类型名注入面）
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"Bad Title; evil\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        std::fs::write(dir.join("request.schema.json"), schema)?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result.is_err(),
+            "非法 title 须被 codegen bail（防注入类型名）"
         );
         Ok(())
     }

@@ -65,6 +65,8 @@ enum InternalCheck {
     CodegenCheck,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
+    /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
+    CommandSymmetry,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
     /// ci 专用：`public-api --check`（basis+engine 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
@@ -167,6 +169,15 @@ fn step_pdp_allow_guard() -> Step {
         label: "pdp-allow-guard",
         args: &[],
         kind: StepKind::Internal(InternalCheck::PdpAllowGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_command_symmetry() -> Step {
+    Step {
+        label: "command-symmetry",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::CommandSymmetry),
         env: &[],
         needs_compile: false,
     }
@@ -547,6 +558,7 @@ fn full_plan() -> Vec<Step> {
         step_wsdeps_drift(),
         step_codegen_check(),
         step_pdp_allow_guard(),
+        step_command_symmetry(),
         step_build_workspace(),
         step_integration_compile(),
         step_clippy_workspace(),
@@ -570,6 +582,7 @@ fn ci_plan() -> Vec<Step> {
         step_wsdeps_drift(),
         step_codegen_check(),
         step_pdp_allow_guard(),
+        step_command_symmetry(),
         step_build_all_features(),
         step_clippy_all_features(),
         step_coverage(),
@@ -782,6 +795,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
+        InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
@@ -872,6 +886,7 @@ mod tests {
                 "wsdeps-drift",
                 "codegen-check",
                 "pdp-allow-guard",
+                "command-symmetry",
                 "build",
                 "integration-compile",
                 "clippy",
@@ -888,7 +903,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(5) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(6) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -901,6 +916,7 @@ mod tests {
                 "wsdeps-drift",
                 "codegen-check",
                 "pdp-allow-guard",
+                "command-symmetry",
                 "deny"
             ]
         );
@@ -909,7 +925,8 @@ mod tests {
         }
     }
 
-    /// meta 五项（contract validate / layer-deps / wsdeps-drift / codegen / pdp-allow-guard）在两种模式恒在。
+    /// meta 六项（contract validate / layer-deps / wsdeps-drift / codegen / pdp-allow-guard /
+    /// command-symmetry）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -926,7 +943,8 @@ mod tests {
                     "layer-deps",
                     "wsdeps-drift",
                     "codegen-check",
-                    "pdp-allow-guard"
+                    "pdp-allow-guard",
+                    "command-symmetry"
                 ],
                 "fast={fast}"
             );
@@ -1027,6 +1045,7 @@ mod tests {
                 "wsdeps-drift",
                 "codegen-check",
                 "pdp-allow-guard",
+                "command-symmetry",
                 "build",
                 "clippy",
                 "coverage",
@@ -1107,6 +1126,8 @@ mod tests {
             "layer-deps",
             "wsdeps-drift",
             "codegen-check",
+            "pdp-allow-guard",
+            "command-symmetry",
             "deny",
             "dylint",
         ] {
