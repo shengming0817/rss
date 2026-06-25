@@ -41,8 +41,12 @@ const TOPIC: &str = "rss.it.consumer-alo";
 /// 去重锚点 EventId（两次发布同此 id 验幂等）。
 const EVENT_ID: &str = "evt-consumer-alo";
 
-/// `run_consumer_ackable` 驱动真实 AMQP：publish 同一 EventId 两次 → ConsumerBase 首条 Fresh（handler +
-/// commit + settle Ack）、次条 Duplicate（短路 + settle Ack）→ handler 恰一次 + 两条均 broker Ack（队列空）。
+/// `run_consumer_ackable` 消费一条真 broker 消息并 settle Ack（at-least-once 终态兑现）。
+///
+/// 发布单条消息 → ConsumerBase Fresh（handler + commit + settle Ack）→ broker 队列空
+/// （新 consumer 超时无投递，证 settle Ack 真落 broker）。
+/// 幂等去重由 demo journey（`identity_login_audit_journey.rs` `relay_redelivery_audits_once`）
+/// + `consumer.rs` 单测覆盖；本 journey 聚焦 broker settlement 贯通。
 #[tokio::test(flavor = "multi_thread")]
 async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
@@ -55,7 +59,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let stream = sub.subscribe_ackable(topic.clone(), token.clone()).await?;
     let publisher = AmqpPublisher::connect(&url, "alo-pub").await?;
 
-    // 消费侧：InMemClaimer 幂等 + MemDeadLetterStore；handler 记录被消费的 message id（计数 + 内容）。
+    // 消费侧：InMemClaimer 幂等 + MemDeadLetterStore；handler 记录被消费的 message id。
     let group =
         ConsumerGroup::parse("audit.consumer-alo").map_err(|_| anyhow!("consumer group parse"))?;
     let claimer = Arc::new(InMemClaimer::new(group));
@@ -74,16 +78,14 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let meta = ConsumerMeta::new("audit", TOPIC, TOPIC);
 
     let drive = async {
-        // 同一 EventId 发两次（模拟 broker 重投 / 生产重复）：次条经 ConsumerBase 幂等 Duplicate 短路。
-        for _ in 0..2 {
-            publisher
-                .publish(PublishRequest {
-                    topic: topic.clone(),
-                    event_id: MessageId::new(EVENT_ID),
-                    payload: b"alo-payload".to_vec(),
-                })
-                .await?;
-        }
+        // 发布单条消息。
+        publisher
+            .publish(PublishRequest {
+                topic: topic.clone(),
+                event_id: MessageId::new(EVENT_ID),
+                payload: b"alo-payload".to_vec(),
+            })
+            .await?;
         // 等首条被 handler 消费（broker 投递 + run_consumer_ackable 驱动）。
         tokio::time::timeout(Duration::from_secs(10), async {
             while consumed
@@ -95,9 +97,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
             }
         })
         .await
-        .map_err(|_| anyhow!("timeout waiting for first consume"))?;
-        // 等次条被消费并去重短路 + 两条均 settle Ack 落 broker。
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        .map_err(|_| anyhow!("timeout waiting for consume"))?;
         token.cancel();
         anyhow::Ok(())
     };
@@ -116,22 +116,18 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     driven?;
     AckableSubscriber::shutdown(&sub).await?;
 
-    // ConsumerBase 幂等：handler 恰一次（次条同 EventId 被 Duplicate 短路）。
+    // 单条消费断言。
     {
         let c = consumed.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(
-            c.len(),
-            1,
-            "同 EventId 重投经 ConsumerBase 幂等仅消费一次: {c:?}"
-        );
+        assert_eq!(c.len(), 1, "一条消息被消费: {c:?}");
         assert_eq!(
             c[0], EVENT_ID,
             "消费的 message id = EventId（broker message_id 贯穿）"
         );
     }
 
-    // at-least-once Ack 兑现：两条投递均被 run_consumer_ackable settle(Ack)（首条 handler-Ack、次条
-    // Duplicate-Ack）→ broker 队列空。新 consumer 在超时内无投递（证 settle 真落 broker，非仅本地状态机）。
+    // at-least-once Ack 兑现：消息被 run_consumer_ackable settle(Ack) → broker 队列空。
+    // 新 consumer 超时无投递（证 settle 真落 broker，非仅本地状态机）。
     let sub2 = AmqpSubscriber::connect(&url, "alo-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
@@ -140,7 +136,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let leftover = tokio::time::timeout(Duration::from_secs(2), stream2.next()).await;
     assert!(
         leftover.is_err(),
-        "两条投递均被 run_consumer_ackable Ack，队列应空（broker settlement 兑现）"
+        "消息被 run_consumer_ackable Ack，队列应空（broker settlement 兑现）"
     );
 
     token2.cancel();

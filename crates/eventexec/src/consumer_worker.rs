@@ -39,6 +39,19 @@
 //!      context 取消逐个收敛；RSS 偏离：per-worker 独立 ManagedResource + readyz 归因，非单 waitgroup）
 //!      serverlesstechnology/cqrs（背景 worker 解耦 + 取消安全两阶段关闭，`relay.rs` 同源）
 //!      lapin message::Delivery.acker（Durable 路径 manual-ack 生命周期，settle-once）
+//!
+//! # NOTE：runctx（`AppCtx` task-local）不跨线程传播
+//!
+//! Worker 跑在专用 OS 线程的独立 current-thread runtime，`runctx::AppCtx` 是
+//! task-local——**不跨线程传播**。Handler 实现**禁止**读 `runctx::try_current()`（会返回 `None`）；
+//! 租户上下文须从 message payload 解析（本 PR 各 handler 即如此）。
+//!
+//! # NOTE：AMQP-pending-#1017（`ConsumerWorker` 专用线程驱动的真 broker 验证）
+//!
+//! `ConsumerWorker` 的专用线程驱动在 demo（MemBus）+ eventexec 单测验证；真 AMQP broker 下经
+//! `ConsumerWorker` 的 worker 化（lapin cross-runtime）留 #1017。§6 集成 journey
+//! （`amqp_consumer_at_least_once_journey.rs`）用 inline `tokio::join!` 同 runtime 驱动
+//! `run_consumer_ackable` 证 broker settlement，覆盖接缝的 at-least-once 终态兑现。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -141,8 +154,10 @@ impl diport::ManagedResource for ConsumerWorker {
 /// 在专用 OS 线程建 current-thread runtime `block_on` 跑 `body`：无论正常返回（流终止）/ runtime 构建失败，
 /// loop 退出后 `health.mark_stopped()`（readyz Unhealthy）。
 ///
+/// `worker_name` 用于 runtime 构建失败时的结构化日志归因（`worker = worker_name` 字段）。
 /// `make_body` **必须** `Send`（捕获值跨线程移入），其返回的 future **无需** `Send`（在线程内构建与轮询）。
 fn spawn_consumer_thread<Fut, M>(
+    worker_name: &str,
     health: Arc<WorkerHealth>,
     make_body: M,
 ) -> std::thread::JoinHandle<()>
@@ -150,6 +165,7 @@ where
     M: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
 {
+    let worker_name = worker_name.to_string();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -157,7 +173,11 @@ where
         {
             Ok(rt) => rt,
             Err(e) => {
-                tracing::error!(error = %e, "consumer: worker runtime build failed; worker unhealthy");
+                tracing::error!(
+                    worker = worker_name,
+                    error = %e,
+                    "consumer: worker runtime build failed; worker unhealthy"
+                );
                 health.mark_stopped();
                 return;
             }
@@ -188,7 +208,7 @@ where
     S: IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
-    let handle = spawn_consumer_thread(health.clone(), move || async move {
+    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
         run_consumer(stream, idempotency, dlx, meta, handler).await;
     });
     ConsumerWorker::adopt(name, handle, health, token)
@@ -215,7 +235,7 @@ where
     S: IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
-    let handle = spawn_consumer_thread(health.clone(), move || async move {
+    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
         run_consumer_ackable(stream, idempotency, dlx, meta, handler).await;
     });
     ConsumerWorker::adopt(name, handle, health, token)
@@ -230,12 +250,12 @@ mod tests {
     use diport::dead_letter_store::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
     use diport::{AckAction, AckError, Acker, Delivery, DynAcker, ManagedResource};
     use futures::StreamExt;
-    use primitives::healthz::HealthStatus;
+    use primitives::healthz::{HealthStatus, ProbeName};
 
     use super::{
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
-        DynDeadLetterStore, HandleResult, IdempotencyStore, Message, MessageStream, Mutex,
-        WorkerHealth, spawn_consumer, spawn_consumer_ackable,
+        DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, Message,
+        MessageStream, Mutex, WorkerHealth, spawn_consumer, spawn_consumer_ackable,
     };
 
     // ── fakes / stream factories ───────────────────────────────────────────────
@@ -474,5 +494,19 @@ mod tests {
     fn consumer_worker_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ConsumerWorker>();
+    }
+
+    /// EVENT_CONSUMER_PROBE 可通过 ProbeName::parse + 无 `_ready` 后缀（运行时操作 probe，对标
+    /// relay.rs T12）。
+    #[test]
+    fn event_consumer_probe_name_parses_and_no_ready_suffix() {
+        assert!(
+            ProbeName::parse(EVENT_CONSUMER_PROBE).is_ok(),
+            "EVENT_CONSUMER_PROBE must parse as valid ProbeName"
+        );
+        assert!(
+            !EVENT_CONSUMER_PROBE.ends_with("_ready"),
+            "EVENT_CONSUMER_PROBE must not end with _ready"
+        );
     }
 }

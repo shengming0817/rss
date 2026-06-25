@@ -114,17 +114,36 @@ impl SubscriberHandlerError {
 /// 由 [`adapt_subscriber_handler`] 从 bootstrap-local [`SubscriberHandler`] 适配产出，供组合根
 /// （`journeys` / `bins`）接 `eventexec` 消费驱动——既证 subscriber 声明流到分发闭环，又不在
 /// bootstrap↔eventexec 间建兄弟服务依赖（返回 `consistency::HandleResult`，非 `eventexec` 类型）。
+///
+/// `Box<dyn Fn>` 直接 impl `Fn`（std blanket impl），无需调用方桥接即可传给 `eventexec::spawn_consumer`
+/// 的 `H: Fn` 约束（`Arc<dyn Fn>` 不 impl `Fn`，需手写桥——Box 消除该桥）。
 pub type ConsumerHandlerFn =
-    std::sync::Arc<dyn Fn(Message) -> BoxFuture<'static, consistency::HandleResult> + Send + Sync>;
+    Box<dyn Fn(Message) -> BoxFuture<'static, consistency::HandleResult> + Send + Sync>;
 
 /// 把 bootstrap-local [`SubscriberHandler`] 适配成 consumer 驱动的 [`ConsumerHandlerFn`]。
 ///
 /// 映射：`Ok(())` → [`consistency::HandleResult::ack`]；`Err(_)` → `reject`（永久——解码 / 租户非法
 /// 不可重试，对齐 audit handler 语义），由 ConsumerBase 收口到 DLX。瞬态→requeue 的 typed 分流是
 /// 独立 error-taxonomy 关注点（follow-up），本适配器不区分。
+///
+/// 返回 `Box<dyn Fn>`，直接满足 `eventexec::spawn_consumer` / `spawn_consumer_ackable` 的
+/// `H: Fn` 约束，无需调用方额外桥接。
+///
+/// # 组合根接线示例（3 步）
+///
+/// ```ignore
+/// // 1. 先订阅得 stream（subscribe-at-callsite，保证先于发布）。
+/// let stream = bus.subscriber().subscribe(Topic::new(topic), token.clone()).await?;
+/// // 2. adapt handler。
+/// let handler_fn = bootstrap::adapt_subscriber_handler(binding.handler);
+/// // 3. spawn worker + 注册关闭。
+/// let worker = eventexec::spawn_consumer(name, stream, idem, dlx, meta, handler_fn, token, health);
+/// stack.register_detached(diport::DynManagedResource::new_box(worker));
+/// ```
 pub fn adapt_subscriber_handler(handler: Box<dyn SubscriberHandler>) -> ConsumerHandlerFn {
+    // 内层保留 Arc：闭包多次调用（Fn，非 FnOnce），每次需 clone handler 进 async block。
     let handler: std::sync::Arc<dyn SubscriberHandler> = std::sync::Arc::from(handler);
-    std::sync::Arc::new(move |message: Message| {
+    Box::new(move |message: Message| {
         let handler = handler.clone();
         Box::pin(async move {
             match handler.handle(message).await {

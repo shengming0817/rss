@@ -204,16 +204,6 @@ where
     Ok(health)
 }
 
-/// 把 `bootstrap::ConsumerHandlerFn`（`Arc<dyn Fn..>`）包成可调用的 `Fn` 闭包。
-///
-/// `Arc<dyn Fn>` 自身不 impl `Fn`（std 仅对 `&F` / `Box<F>` 提供 blanket impl），故经 `as_ref()` 取
-/// `&dyn Fn`（impl `Fn`）再调用——组合根接 `run_consumer`（`H: Fn`）的一行桥。
-fn into_callable(
-    handler: bootstrap::ConsumerHandlerFn,
-) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static {
-    move |message: Message| handler.as_ref()(message)
-}
-
 /// 登录服务（注入 MemSessionUnitOfWork co-tx 替身 + 固定时钟 + 种子凭据）。
 #[allow(clippy::expect_used)]
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginService> {
@@ -269,7 +259,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         contract_id,
         topic,
         MemDeadLetterStore::new(),
-        into_callable(adapt_subscriber_handler(handler)),
+        adapt_subscriber_handler(handler),
         token.clone(),
         &mut stack,
     )
@@ -412,7 +402,8 @@ async fn relay_redelivery_audits_once() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("emit"))?;
     }
     wait_until(|| !audit.is_empty()).await?;
-    // 等二次投递被消费并去重短路，再关闭。
+    // reason: MemBus 同进程投递极快，50ms 足够二次投递被消费+Duplicate 短路；非确定性 predicate
+    // （Duplicate 不增 handler 计数，无可 poll 信号），in-mem 路径 flaky 风险可忽略。
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let failures = stack.shutdown().await;
@@ -455,7 +446,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
         contract_id,
         topic,
         MemDeadLetterStore::new(),
-        into_callable(adapt_subscriber_handler(handler)),
+        adapt_subscriber_handler(handler),
         token.clone(),
         &mut stack,
     )
@@ -558,6 +549,21 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
         records[0].topic(),
         SESSION_CREATED_TOPIC,
         "死信记录归因 topic"
+    );
+    assert_eq!(
+        records[0].domain(),
+        "audit",
+        "死信记录 domain 归因（ConsumerMeta domain）"
+    );
+    assert_eq!(
+        records[0].num_attempts(),
+        1,
+        "handler 恒 reject：首次即终态（Reject 路径不重投，num_attempts = 1）"
+    );
+    assert_eq!(
+        records[0].error_summary(),
+        "permanent error",
+        "PermanentErrorKind::Permanent 的 error_summary"
     );
     Ok(())
 }
