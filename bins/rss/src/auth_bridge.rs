@@ -18,7 +18,8 @@
 //!   不跨本桥自身 `.await`，故中间件 future 保持 `Send`（生产多线程 `serve` 必需）。`None`（理论上 verify 未
 //!   同步完成，CPU-only 前提下不可达）按 fail-closed 处理（不注证据、记 deny），不 panic。
 //! - **无 PII 埋点**：成功记 `authz.decision=allow` + `principal.kind`（[`vocab::PrincipalKind`] 脱敏枚举）；
-//!   失败记 `authz.decision=deny` + `AuthnError` 变体；**绝不**记 token / subject / claims。
+//!   失败记 `authz.decision=deny` + 闭值 `authz.deny_reason`（三路告警分级，见 [`deny_reason`]）+ `AuthnError`
+//!   变体；**绝不**记 token / subject / claims。
 //!
 //! `Authenticated::new` callsite 由 `rss_authenticated_callsite` dylint 限组合根（`server`/`rss` 在 allowlist）。
 //!
@@ -98,15 +99,14 @@ fn verify_principal(
 ///
 /// 各分支埋点拆独立 fn（每 fn 一条 `tracing` 宏；宏展开 cognitive-complexity 高，分摊保 ≤15）。
 ///
-/// 埋点变体粒度（评审 F18 决策）：`Some(Err)` 记 `AuthnError` 变体——`verify_jwt` 已把 `PdpError` 收敛
-/// （`InvalidSignature`/`Untrusted`→`TokenInvalid`，`Expired`→`TokenExpired`），故告警分级为**两路**
-/// （区分 Expired）。spec SC-006 期望的 `PdpError` 三路（区分 InvalidSignature vs Untrusted）须 authn 层让
-/// `AuthnError` 携 `PdpError` 变体——出 #1198 范围，跟踪 follow-up issue。本桥不为日志粒度旁路 `verify_jwt`
-/// funnel（保「唯一信任原点」姿态）。
+/// 埋点变体粒度（#1275，spec SC-006/FR-009）：`Some(Err)` 记 `AuthnError` 变体 + 闭值 `authz.deny_reason`。
+/// `verify_jwt` 的 `From<PdpError>` 三变体一一保真（`InvalidSignature`→`TokenInvalid`、`Untrusted`→`TokenUntrusted`、
+/// `Expired`→`TokenExpired`），故 [`deny_reason`] 据变体记**三路**告警分级（区分疑似攻击 vs 疑似配置错 vs 过期）。
+/// 本桥不为日志粒度旁路 `verify_jwt` funnel（保「唯一信任原点」姿态）——`deny_reason` 只读已收敛的 `AuthnError`。
 fn mint_evidence(state: &VerifyState, token: &str) -> Option<Authenticated> {
     match verify_principal(&state.provider, state.scheme, token) {
         Some(Ok(principal)) => Some(log_allow(state.scheme, &principal)),
-        // err = AuthnError 变体（PdpError 已被 verify_* 收敛，两路），脱敏；不产证据 ⇒ enforce fail-closed。
+        // err = AuthnError 变体（PdpError 经 verify_* 一一保真，三路），脱敏；不产证据 ⇒ enforce fail-closed。
         Some(Err(err)) => {
             log_deny_verify(&err);
             None
@@ -131,16 +131,48 @@ fn log_allow(scheme: RequiredScheme, principal: &authn::Principal) -> Authentica
     Authenticated::new(scheme, kind)
 }
 
-/// 验签失败 deny 埋点（AuthnError 变体，脱敏）。
+/// 验签失败 deny 埋点（`AuthnError` 变体 + 闭值 `authz.deny_reason`，脱敏）。
 fn log_deny_verify(err: &authn::AuthnError) {
-    tracing::warn!(authz.decision = "deny", error = ?err, "verify-bridge");
+    tracing::warn!(
+        authz.decision = "deny",
+        authz.deny_reason = deny_reason(err),
+        error = ?err,
+        "verify-bridge"
+    );
+}
+
+// deny 告警分级闭值集（observability.md「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
+// `authz.deny_reason` 仅取此 6 值，与 `AuthnError` deny 变体一一对应（#1275，spec SC-006/FR-009）：
+//   `SIGNATURE_INVALID` ← `TokenInvalid` = verifier 报告的**凭据签名/MAC/结构失败**（疑似攻击）；
+//   `UNTRUSTED`         ← `TokenUntrusted` = iss/aud/key-path 不受信（疑似配置错）；
+//   `EXPIRED`           ← `TokenExpired` = 时间窗越界；
+//   `PRINCIPAL_INVALID` ← `PrincipalInvalid` = **验签通过后**的 claims/principal 派生失败（良性，#1275 review
+//                          F1：与签名失败分开，杜绝把良性失败误报成 `signature_invalid` 攻击信号）；
+//   `INVALID`           ← `#[non_exhaustive]` 未来 / 本桥不可达变体（`SessionNotFound` / `Forbidden`）fail-safe 兜底；
+//   `NOT_SYNCHRONOUS`   ← verify future 未同步完成的防御式 deny（CPU-only 前提下不可达）。
+pub(crate) const DENY_REASON_SIGNATURE_INVALID: &str = "signature_invalid";
+pub(crate) const DENY_REASON_UNTRUSTED: &str = "untrusted";
+pub(crate) const DENY_REASON_EXPIRED: &str = "expired";
+pub(crate) const DENY_REASON_PRINCIPAL_INVALID: &str = "principal_invalid";
+pub(crate) const DENY_REASON_INVALID: &str = "invalid";
+pub(crate) const DENY_REASON_NOT_SYNCHRONOUS: &str = "not_synchronous";
+
+/// `AuthnError` 变体 → deny 告警分级闭值标签（无 PII；闭值集见上 `DENY_REASON_*`）。
+fn deny_reason(err: &authn::AuthnError) -> &'static str {
+    match err {
+        authn::AuthnError::TokenInvalid => DENY_REASON_SIGNATURE_INVALID,
+        authn::AuthnError::TokenUntrusted => DENY_REASON_UNTRUSTED,
+        authn::AuthnError::TokenExpired => DENY_REASON_EXPIRED,
+        authn::AuthnError::PrincipalInvalid => DENY_REASON_PRINCIPAL_INVALID,
+        _ => DENY_REASON_INVALID,
+    }
 }
 
 /// future 未同步完成 deny 埋点（CPU-only 前提下不可达）。
 fn log_deny_not_synchronous() {
     tracing::warn!(
         authz.decision = "deny",
-        reason = "verify_not_synchronous",
+        authz.deny_reason = DENY_REASON_NOT_SYNCHRONOUS,
         "verify-bridge"
     );
 }
@@ -158,4 +190,46 @@ async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) 
         }
     }
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DENY_REASON_EXPIRED, DENY_REASON_INVALID, DENY_REASON_PRINCIPAL_INVALID,
+        DENY_REASON_SIGNATURE_INVALID, DENY_REASON_UNTRUSTED, deny_reason,
+    };
+
+    /// `deny_reason` 闭值映射全臂覆盖（含 `_` 兜底）：四路一一保真（含 `PrincipalInvalid`→`principal_invalid`，
+    /// #1275 review F1：验签后良性失败不记 `signature_invalid`）+ 本桥不可达的 `SessionNotFound` / `Forbidden`
+    /// （非 verify funnel 产）fail-safe 落 `INVALID`。四路**端到端**可区分性见 auth_e2e.rs
+    /// `tracing_deny_logs_per_variant_reason_no_pii`（断言用 literal 钉死可观测告警 label 契约）。
+    #[test]
+    fn deny_reason_maps_every_variant_to_closed_value() {
+        assert_eq!(
+            deny_reason(&authn::AuthnError::TokenInvalid),
+            DENY_REASON_SIGNATURE_INVALID
+        );
+        assert_eq!(
+            deny_reason(&authn::AuthnError::TokenUntrusted),
+            DENY_REASON_UNTRUSTED
+        );
+        assert_eq!(
+            deny_reason(&authn::AuthnError::TokenExpired),
+            DENY_REASON_EXPIRED
+        );
+        assert_eq!(
+            deny_reason(&authn::AuthnError::PrincipalInvalid),
+            DENY_REASON_PRINCIPAL_INVALID,
+            "验签后良性派生失败 → principal_invalid（非 signature_invalid）"
+        );
+        assert_eq!(
+            deny_reason(&authn::AuthnError::SessionNotFound),
+            DENY_REASON_INVALID,
+            "本桥不可达变体 fail-safe 落 INVALID"
+        );
+        assert_eq!(
+            deny_reason(&authn::AuthnError::Forbidden),
+            DENY_REASON_INVALID
+        );
+    }
 }

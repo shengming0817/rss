@@ -497,35 +497,87 @@ async fn tracing_allow_logs_decision_and_kind_no_pii() {
     assert!(!logs.contains(&token), "禁泄漏原始 token: {logs}");
 }
 
+/// 四路 deny 分级（#1275 + review F1，spec SC-006/FR-009）：deny 路 tracing 须按 deny 来源记不同
+/// `authz.deny_reason` 闭值 **+ 对应 `AuthnError` 变体**（`error=?err`），且均无 PII（无 token / subject）：
+///   坏签名（PDP `InvalidSignature`）          → `signature_invalid` / `TokenInvalid`；
+///   错 issuer（PDP `Untrusted`）              → `untrusted`         / `TokenUntrusted`；
+///   过期（PDP `Expired`）                     → `expired`           / `TokenExpired`；
+///   **验签通过但缺 tenant**（authn 派生失败）  → `principal_invalid` / `PrincipalInvalid`。
+/// 末路是 review F1 回归锚：验签**通过后**的良性 principal 失败**不得**误报成 `signature_invalid` 攻击信号。
+/// 复用既有拒绝路径 token 构造（`bad_signature_is_401` / `wrong_issuer_is_401` / `expired_is_401`）。
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
-async fn tracing_deny_logs_decision_variant_no_token() {
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let sub = tracing_subscriber::fmt()
-        .with_writer(VecWriter(buf.clone()))
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let _g = tracing::subscriber::set_default(sub);
-
-    let token = super_admin_jwt(&sk_jwt(), NOW - 3600, ISS, AUD); // 过期 → deny
-    let st = status(
-        jwt_router(Some(RequiredScheme::Jwt)),
-        "/protected",
-        Some(&format!("Bearer {token}")),
-    )
-    .await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
-
-    let logs = captured(&buf);
-    assert!(
-        logs.contains("authz.decision"),
-        "须记结构化字段键 authz.decision: {logs}"
+async fn tracing_deny_logs_per_variant_reason_no_pii() {
+    // 验签通过（sk_jwt 签 + 正确 iss/aud/exp + kind=user 受信）但**无 tenant_id claim** → PDP 透传 tenant=None
+    // → authn `derive_from_claims` 派生失败（user 需 tenant）→ PrincipalInvalid（非 PDP 签名失败）。
+    let principal_invalid_jwt = mint_es256(
+        &sk_jwt(),
+        &format!(
+            r#"{{"sub":"alice","exp":{},"iss":"{ISS}","aud":"{AUD}","kind":"user"}}"#,
+            NOW + 3600
+        ),
     );
-    assert!(logs.contains("deny"), "deny 决策: {logs}");
-    assert!(
-        logs.contains("TokenExpired"),
-        "须记 AuthnError 变体（过期→TokenExpired）: {logs}"
-    );
-    assert!(!logs.contains(&token), "禁泄漏原始 token: {logs}");
-    assert!(!logs.contains("alice"), "禁泄漏 subject: {logs}");
+    for (token, want_reason, want_variant, label) in [
+        (
+            super_admin_jwt(&sk_other(), NOW + 3600, ISS, AUD),
+            "signature_invalid",
+            "TokenInvalid",
+            "坏签名→InvalidSignature",
+        ),
+        (
+            super_admin_jwt(&sk_jwt(), NOW + 3600, "https://evil.issuer", AUD),
+            "untrusted",
+            "TokenUntrusted",
+            "错 issuer→Untrusted",
+        ),
+        (
+            super_admin_jwt(&sk_jwt(), NOW - 3600, ISS, AUD),
+            "expired",
+            "TokenExpired",
+            "过期→Expired",
+        ),
+        (
+            principal_invalid_jwt.clone(),
+            "principal_invalid",
+            "PrincipalInvalid",
+            "验签通过缺 tenant→PrincipalInvalid",
+        ),
+    ] {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(VecWriter(buf.clone()))
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        let _g = tracing::subscriber::set_default(sub);
+
+        let st = status(
+            jwt_router(Some(RequiredScheme::Jwt)),
+            "/protected",
+            Some(&format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{label}");
+
+        let logs = captured(&buf);
+        assert!(
+            logs.contains("authz.decision"),
+            "{label}: 须记结构化字段键 authz.decision: {logs}"
+        );
+        assert!(logs.contains("deny"), "{label}: deny 决策: {logs}");
+        assert!(
+            logs.contains("authz.deny_reason"),
+            "{label}: 须记结构化字段键 authz.deny_reason（闭值告警分级）: {logs}"
+        );
+        assert!(
+            logs.contains(want_reason),
+            "{label}: 须记闭值 deny_reason={want_reason}: {logs}"
+        );
+        // review F2：守 `error=?err` 仍记 `AuthnError` 变体（若 error 字段被移除，此断言 FAIL）。
+        assert!(
+            logs.contains(want_variant),
+            "{label}: 须记 AuthnError 变体 {want_variant}（error=?err）: {logs}"
+        );
+        assert!(!logs.contains(&token), "{label}: 禁泄漏原始 token: {logs}");
+        assert!(!logs.contains("alice"), "{label}: 禁泄漏 subject: {logs}");
+    }
 }

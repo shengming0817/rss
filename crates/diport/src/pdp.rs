@@ -11,9 +11,10 @@ use dynosaur::dynosaur;
 ///
 /// PII 边界：变体不携 runtime 数据，`Display` 仅 provider 无关的安全摘要常量——adapter 把内部错误
 /// **归类**到这三种 taxonomy 变体（不经 `source` 透传原始错误，杜绝凭据 / 连接串泄漏）。消费侧据变体
-/// 映射 HTTP 语义（authn `From<PdpError>`，#1229）：`InvalidSignature` / `Untrusted` 均 →
-/// `TokenInvalid` = 401 `invalid_token`（RFC 6750 §3.1，凭据不可信 / 无效，verify 层纯认证不发 403）、
-/// `Expired` → `TokenExpired`；403 留给 authz 层「已认证但无权」。
+/// 映射 HTTP 语义（authn `From<PdpError>`，#1229 / #1275 三路一一保真）：`InvalidSignature` →
+/// `TokenInvalid`、`Untrusted` → `TokenUntrusted`、`Expired` → `TokenExpired`；三者 wire **均** 401
+/// `invalid_token`（RFC 6750 §3.1，verify 层纯认证不发 403；独立变体仅供 deny 路 `authz.deny_reason` 告警
+/// 分级，区分疑似攻击 vs 疑似配置错），403 留给 authz 层「已认证但无权」。
 /// `Clone`：消费侧单测 stub 按预置结果重放。
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
