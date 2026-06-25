@@ -20,7 +20,7 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 `tenant::RowVisibility::new` 拒绝 `RowScope::All`。跨租户可见性只能由
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
-`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。
+`RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。「同址」由 `authn` audited 派生 funnel 类型层强制——先写审计成功才签发 All-scope，audit 写失败 fail-closed（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01，封闭符号见 `crates/authn/src/lib.rs`）；裸同步 `Principal::row_visibility` 的 super-admin 分支不再签发 All-scope（无 `AuditSink` 无法同址，返回 deny）。live httpserve middleware 注入与持久 postgres audit adapter 是独立 follow-up（#1014）。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 `RowScopeAllUnsupportedError` / 501。super-admin 跨租户 audit read 只能走专用
@@ -46,7 +46,7 @@ JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 
 - normal user -> self
 - device -> device
 - admin -> tenant
-- super-admin -> all
+- super-admin -> fail-closed（裸同步 `row_visibility` 不签发 All-scope；跨租户 All 仅经 `Principal::audited_cross_tenant_visibility(...)` 同址审计派生，见上文 §RowScope）
 - service / anonymous / unknown -> fail-closed
 
 ## RLS 与 PG scope

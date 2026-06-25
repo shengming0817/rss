@@ -16,16 +16,16 @@
 //!
 //! ## fail-closed
 //!
-//! `Principal::row_visibility` 的 `Service` / `Anonymous` 分支返回 `Err(runctx::MissingCtx)`，
-//! 强制调用方 deny；字段私有，外部无法绕过 funnel 伪造特权主体。
+//! `Principal::row_visibility` 的 `SuperAdmin`（裸同步路径）/ `Service` / `Anonymous` 分支返回
+//! `Err(runctx::MissingCtx)`，强制调用方 deny；字段私有，外部无法绕过 funnel 伪造特权主体。
+//! 跨租户 All-scope 唯一经 [`Principal::audited_cross_tenant_visibility`] 派生——派生与持久 audit ledger
+//! **同址**（无审计无 All-scope，fail-closed），INVARIANT: TENANCY-CROSSTENANT-AUDIT-01。
 
 #![forbid(unsafe_code)]
 
 use base64::Engine;
 use vocab::PrincipalKind;
-use vocab::tenant::{
-    CrossTenantCapability, CrossTenantVisibility, RowVisibility, ScopedTenant, TenantId,
-};
+use vocab::tenant::{RowVisibility, ScopedTenant, TenantId};
 
 use primitives::authplan::{AuthPlan, AuthRequirement, RouteAuthOptOut, resolve_requirement};
 
@@ -223,7 +223,8 @@ impl Principal {
     /// principal 自带 tenant claim 与 `*ctx.tenant()` **一致**——不一致（如 tenant-A 令牌在 ctx-B 下）
     /// 返回 `Err`，杜绝越租户派生可见域（tenancy.md §Principal claim source）。
     ///
-    /// `Service` / `Anonymous` 及未来未知 kind 的 `_` 分支返回 `Err(runctx::MissingCtx)`：
+    /// `SuperAdmin`（跨租户 All-scope 须经 [`Principal::audited_cross_tenant_visibility`] 同址审计派生）、
+    /// `Service` / `Anonymous` 及未来未知 kind 的 `_` 分支返回 `Err(runctx::MissingCtx)`：经此 sync 路径
     /// fail-closed，无可派生行级可见域。`MissingCtx` 是冻结签名唯一 error 通道——消费方须将此 `Err`
     /// **一律按 deny 处理**，不区分「ctx 真缺失」与「主体不可派生 scope」成因（专用错误变体待签名破冻）。
     pub fn row_visibility(
@@ -241,18 +242,204 @@ impl Principal {
             PrincipalKind::User => scoped(ScopedTenant::SelfOnly),
             PrincipalKind::Device => scoped(ScopedTenant::Device),
             PrincipalKind::Admin => scoped(ScopedTenant::Tenant),
-            PrincipalKind::SuperAdmin => {
-                // INVARIANT: TENANCY-CROSSTENANT-CAP-01 —— authn super-admin 派生是唯一 sanctioned
-                // crosstenant capability 签发点（dylint rss_crosstenant_callsite allowlist=authn 守）。
-                // REQUIREMENT: tenancy.md §RowScope —— 调用方须在 super-admin All-scope 派生「同址」写
-                // 持久 audit ledger（tenant/principal/resource/action/request/correlation）。frozen 同步
-                // 签名无 AuditSink，本 PR 无法在此闭环；强制审计待 W httpserve/audit 接线，见 issue #1110。
-                let cap = CrossTenantCapability::issue_for_verified_super_admin();
-                let marker = CrossTenantVisibility::authorize(cap);
-                Ok(RowVisibility::new_cross_tenant(marker))
-            }
+            // super-admin All-scope 只能经 `audited_cross_tenant_visibility`（async）派生——派生与持久
+            // audit ledger「同址」（tenancy.md §RowScope，INVARIANT TENANCY-CROSSTENANT-AUDIT-01）。本 sync
+            // 签名无 `AuditSink`、无法闭环审计 ⇒ fail-closed 拒绝，杜绝「无审计 All-scope」后门。
+            PrincipalKind::SuperAdmin => Err(runctx::MissingCtx),
             // Service / Anonymous 及 #[non_exhaustive] 未来 kind：fail-closed，无可派生行级可见域。
             _ => Err(runctx::MissingCtx),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 跨租户 All-scope 审计漏斗（同址强制审计，INVARIANT: TENANCY-CROSSTENANT-AUDIT-01）
+// ---------------------------------------------------------------------------
+
+pub use crosstenant::{CrossTenantAuditContext, CrossTenantAuditError, CrossTenantError};
+
+/// 跨租户 All-scope 派生与持久审计「同址」漏斗。
+///
+/// # 类型层强制（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01）
+///
+/// All-scope `RowVisibility` 只能由本模块 `AuditedCrossTenant` receipt 经 `into_all_scope` 产出；receipt 的
+/// `seal` / `into_all_scope` 均**模块私有**，唯一 mint 点是 [`Principal::audited_cross_tenant_visibility`]
+/// ——它在 `sink.record(..).await?` 成功**之后**才 `seal`（`?`-链先审计后签发，同 verify→mint bridge 范式）。
+/// 故「无审计产 All-scope」在 authn 内**类型层不可表达**（模块封装 + 必填 receipt + 控制流顺序三重 Hard）。
+/// vocab 跨租户三步（issue→authorize→new_cross_tenant）的唯一 callsite 收敛到 `into_all_scope`（仍在 authn
+/// crate，dylint `rss_crosstenant_callsite` allowlist=authn 不变）。
+mod crosstenant {
+    use super::Principal;
+    // `record` 是 `AuditSink` trait 方法，须 trait 在 scope（`as _` 只引入方法、不污染名——funnel 全程
+    // 用 `diport::DynAuditSink` / `diport::AuditEvent` 全限定，同 row_visibility bridge 的 `Pdp as _`）。
+    use diport::AuditSink as _;
+    use vocab::PrincipalKind;
+    use vocab::tenant::{CrossTenantCapability, CrossTenantVisibility, RowVisibility};
+
+    /// 跨租户派生失败（fail-closed）：非 super-admin 或 audit 写失败均不签发 All-scope。
+    #[derive(Debug, thiserror::Error)]
+    #[non_exhaustive]
+    pub enum CrossTenantError {
+        /// 主体非 super-admin——无跨租户派生资格（不静默降级）。
+        #[error("principal is not a super-admin")]
+        NotSuperAdmin,
+        /// 同址持久 audit 写失败 ⇒ fail-closed，绝不签发 All-scope（source 经 diport 脱敏）。
+        #[error("cross-tenant audit write failed")]
+        Audit(#[source] diport::AuditSinkError),
+    }
+
+    /// 跨租户审计上下文构造失败（fail-closed）：任一字段空 ⇒ 不得构造，杜绝不完整 ledger 签发 All-scope。
+    #[derive(Debug, thiserror::Error)]
+    #[non_exhaustive]
+    pub enum CrossTenantAuditError {
+        /// 审计字段为空——跨租户 All-scope 派生要求字段完整（tenancy.md §RowScope：
+        /// tenant/principal/resource/action/request/correlation）。
+        #[error("cross-tenant audit context field must be non-empty")]
+        EmptyField,
+    }
+
+    /// super-admin 跨租户派生的审计上下文（funnel 入参）。
+    ///
+    /// `request_id` / `correlation_id` 是诊断信号、**不**在 `AppCtx`（runctx 边界约定），由 httpserve W
+    /// middleware 注入。私有字段 + [`Self::new`] **fail-closed** 构造 funnel（input-struct-field-exclusion +
+    /// 非空校验）：持有一个 `CrossTenantAuditContext` ⇒ 全字段非空（tenancy.md §RowScope 完整性，bundle 级
+    /// Hard），funnel 据此签发 All-scope 时审计字段不缺。不 derive `Serialize`；Debug 脱敏
+    /// `resource_id` / `request_id` / `correlation_id`（零信任，对齐 `diport::AuditEvent`，
+    /// DIPORT-DTO-PII-DEBUG-REDACT-01 同范式）。
+    pub struct CrossTenantAuditContext {
+        resource_kind: &'static str,
+        resource_id: String,
+        action: &'static str,
+        request_id: String,
+        correlation_id: String,
+    }
+
+    impl CrossTenantAuditContext {
+        /// 构造审计上下文（**fail-closed**：任一字段空 → `Err(CrossTenantAuditError::EmptyField)`，杜绝
+        /// 不完整 ledger 签发 All-scope，tenancy.md §RowScope）。
+        ///
+        /// # Arguments
+        /// - `resource_kind`：资源类别 const literal（如 `"cross_tenant_visibility"`）——与 `action` **同为
+        ///   `&'static str`，勿混淆顺序**（类型相同、误置编译器不报错）；非空。
+        /// - `resource_id`：资源标识（非空；裸 `String`，typed-id 待 diport W 阶段，对齐 `AuditEvent.resource_id`）。
+        /// - `action`：操作动作 const literal（如 `"derive_all_scope"`）；非空。
+        /// - `request_id` / `correlation_id`：**必填非空**——httpserve W middleware 注入；跨租户审计要求完整
+        ///   请求 / 关联上下文（tenancy.md §RowScope），空即拒绝构造（不再接受缺失）。
+        pub fn new(
+            resource_kind: &'static str,
+            resource_id: impl Into<String>,
+            action: &'static str,
+            request_id: impl Into<String>,
+            correlation_id: impl Into<String>,
+        ) -> Result<Self, CrossTenantAuditError> {
+            let resource_id = resource_id.into();
+            let request_id = request_id.into();
+            let correlation_id = correlation_id.into();
+            // fail-closed：跨租户 All-scope 审计字段须完整（tenancy.md §RowScope），任一空即拒绝。
+            if resource_kind.is_empty()
+                || resource_id.is_empty()
+                || action.is_empty()
+                || request_id.is_empty()
+                || correlation_id.is_empty()
+            {
+                return Err(CrossTenantAuditError::EmptyField);
+            }
+            Ok(Self {
+                resource_kind,
+                resource_id,
+                action,
+                request_id,
+                correlation_id,
+            })
+        }
+    }
+
+    // PII 边界（对齐 diport::AuditEvent）：resource_id / request_id / correlation_id 脱敏（必填非空、无 None
+    // 形态）；resource_kind / action 为 const literal 可观测。
+    impl std::fmt::Debug for CrossTenantAuditContext {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("CrossTenantAuditContext")
+                .field("resource_kind", &self.resource_kind)
+                .field("resource_id", &"<redacted>")
+                .field("action", &self.action)
+                .field("request_id", &"<redacted>")
+                .field("correlation_id", &"<redacted>")
+                .finish()
+        }
+    }
+
+    /// authn-owned receipt：持有它 == 已对本次跨租户派生写入持久 audit（fail-closed 后才 mint）。
+    ///
+    /// 私有 struct + **模块私有** `seal` / `into_all_scope`：外部 crate / authn 模块外均不可 mint，唯一
+    /// mint 点是本模块 [`Principal::audited_cross_tenant_visibility`]（record 成功后）。不 derive `Clone`
+    /// （一次性证据）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01
+    struct AuditedCrossTenant {
+        _seal: (),
+    }
+
+    impl AuditedCrossTenant {
+        /// 唯一 mint（模块私有）：仅本模块 audited funnel 在 audit `record` 成功后调用。
+        fn seal() -> Self {
+            Self { _seal: () }
+        }
+
+        /// 消费 receipt 产 All-scope（消费 `self` ⇒ 一审计→一 All-scope）。
+        ///
+        /// 这是 authn 内对 vocab 跨租户三步（issue→authorize→new_cross_tenant）的**唯一** callsite；
+        /// dylint `rss_crosstenant_callsite` 命中点从 `row_visibility` 收敛到此（crate=authn allowlist 不变）。
+        fn into_all_scope(self) -> RowVisibility {
+            let cap = CrossTenantCapability::issue_for_verified_super_admin();
+            RowVisibility::new_cross_tenant(CrossTenantVisibility::authorize(cap))
+        }
+    }
+
+    impl Principal {
+        /// super-admin 跨租户 All-scope 派生的【唯一】sanctioned 入口：先同址写持久 audit，record 成功
+        /// 才签发 All-scope（无审计无 All-scope）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01
+        ///
+        /// fail-closed：`record` 失败 → `Err(CrossTenantError::Audit)`，`?` 短路在 `seal` 之前，绝不签发；
+        /// 非 super-admin → `Err(CrossTenantError::NotSuperAdmin)`（不静默降级）。审计「先于」签发由 `?`-链
+        /// 顺序保证（同 verify→mint bridge `verify_jwt` 范式）。
+        ///
+        /// `sink` 取 dynosaur wrapper `&DynAuditSink`（caller 可持 `Box`/`Arc`，同 `verify_jwt` 的 `&DynPdp`）；
+        /// `clock` 取注入 [`diport::Clock`]（`occurred_at` 非系统时钟，rust-standards Clock 纪律）；`audit` 承载
+        /// caller 提供的审计字段（super-admin 自身 `tenant=None`，`tenant_id` 取 ctx 行使 All-scope 的租户上下文）。
+        ///
+        /// # 安全模型 / 可观测（NOTE）
+        ///
+        /// - 仅 super-admin **成功派生**写 audit（`outcome: Success`）；非 super-admin 提前 `NotSuperAdmin`
+        ///   return、**不**在此写审计——本 funnel 只审计「授予 All-scope」事件；越权拒绝的安全审计
+        ///   （`AuditOutcome::Failure`）归 httpserve authz 层（真实鉴权门，本检查是 defense-in-depth），
+        ///   不在此 defense-in-depth 处重复记录拒绝（follow-up issue 跟踪）。
+        /// - `tracing` span 留 httpserve W 接线（同 `verify_jwt` 的 NOTE #1109）：当前无生产调用方，不引
+        ///   `tracing` 依赖、不埋空转 span；W 注入时补「`authz.decision=allow` + `principal.kind`（无 PII）」。
+        pub async fn audited_cross_tenant_visibility(
+            &self,
+            ctx: &runctx::AppCtx,
+            sink: &diport::DynAuditSink<'_>,
+            clock: &dyn diport::Clock,
+            audit: &CrossTenantAuditContext,
+        ) -> Result<RowVisibility, CrossTenantError> {
+            if self.kind != PrincipalKind::SuperAdmin {
+                return Err(CrossTenantError::NotSuperAdmin);
+            }
+            // 同址持久 audit（先于签发）。
+            let event = diport::AuditEvent {
+                occurred_at: clock.now(),
+                principal_id: self.subject.clone(),
+                // reason: super-admin 自身 tenant=None；审计记录「行使 All-scope 的目标租户」= ctx.tenant，非自身 tenant。
+                tenant_id: *ctx.tenant(),
+                resource_kind: audit.resource_kind,
+                resource_id: audit.resource_id.clone(),
+                action: audit.action,
+                outcome: diport::AuditOutcome::Success,
+                // CrossTenantAuditContext 已 fail-closed 保证非空（tenancy.md §RowScope 完整性）。
+                request_id: Some(audit.request_id.clone()),
+                correlation_id: Some(audit.correlation_id.clone()),
+            };
+            sink.record(event).await.map_err(CrossTenantError::Audit)?;
+            // record 成功 → seal receipt → 经 receipt 签发 All-scope（唯一 mint 点）。
+            Ok(AuditedCrossTenant::seal().into_all_scope())
         }
     }
 }
@@ -608,7 +795,8 @@ fn test_jwt(payload_json: &str) -> String {
 #[cfg(test)]
 mod row_visibility_tests {
     //! 核心：`Principal::row_visibility` 身份→行级可见域派生（tenancy.md §Principal claim source）。
-    //! user→self / device→device / admin→tenant / super-admin→all / service·anonymous→fail-closed。
+    //! user→self / device→device / admin→tenant / super-admin→**fail-closed**（All 须经 audited funnel，
+    //! 见 `audited_cross_tenant_tests`，INVARIANT TENANCY-CROSSTENANT-AUDIT-01）/ service·anonymous→fail-closed。
     use super::{CANON_TENANT, Principal, PrincipalKind};
     use rstest::rstest;
     use vocab::tenant::{RowScope, TenantId};
@@ -618,10 +806,10 @@ mod row_visibility_tests {
         TenantId::parse(CANON_TENANT).expect("canonical tenant")
     }
 
-    /// 期望形态：scoped（Ok + 单租户）/ all（Ok + 跨租户无租户）/ fail-closed（Err）。
+    /// 期望形态：scoped（Ok + 单租户）/ fail-closed（Err）。
+    /// super-admin 经裸同步 `row_visibility` 归 fail-closed——All-scope 唯一经 audited funnel 派生。
     enum Expect {
         Scoped(RowScope),
-        All,
         FailClosed,
     }
 
@@ -629,7 +817,8 @@ mod row_visibility_tests {
     #[case(PrincipalKind::User, Expect::Scoped(RowScope::SelfOnly))]
     #[case(PrincipalKind::Device, Expect::Scoped(RowScope::Device))]
     #[case(PrincipalKind::Admin, Expect::Scoped(RowScope::Tenant))]
-    #[case(PrincipalKind::SuperAdmin, Expect::All)]
+    // super-admin 经 sync 路径 fail-closed（无 AuditSink 无法同址审计）；All 经 audited funnel。
+    #[case(PrincipalKind::SuperAdmin, Expect::FailClosed)]
     #[case(PrincipalKind::Service, Expect::FailClosed)]
     #[case(PrincipalKind::Anonymous, Expect::FailClosed)]
     fn row_visibility_maps_kind_to_scope(
@@ -650,12 +839,6 @@ mod row_visibility_tests {
                 let vis = principal.row_visibility(&ctx)?;
                 assert_eq!(vis.scope(), scope, "kind={kind:?}");
                 assert_eq!(vis.tenant(), Some(tid), "kind={kind:?}");
-            }
-            Expect::All => {
-                // super-admin → 跨租户 All，经 authn 唯一 sanctioned crosstenant callsite 派生。
-                let vis = principal.row_visibility(&ctx)?;
-                assert_eq!(vis.scope(), RowScope::All);
-                assert_eq!(vis.tenant(), None);
             }
             Expect::FailClosed => {
                 assert!(
@@ -687,6 +870,235 @@ mod row_visibility_tests {
                 "kind={kind:?} tenant 不一致须 fail-closed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod audited_cross_tenant_tests {
+    //! `Principal::audited_cross_tenant_visibility`：super-admin 跨租户 All-scope 派生**同址强制审计**
+    //! （tenancy.md §RowScope，INVARIANT TENANCY-CROSSTENANT-AUDIT-01）。先写持久 audit → record 成功才
+    //! 签发 All-scope（无审计无 All-scope）；audit 失败 fail-closed、非 super-admin 拒绝、均不签发。
+    use super::{
+        CrossTenantAuditContext, CrossTenantAuditError, CrossTenantError, Principal, PrincipalKind,
+    };
+    use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, Clock, DynAuditSink};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::SystemTime;
+    use vocab::tenant::{RowScope, TenantId};
+
+    const CANON_T: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    // ── 自包含测试替身（CLAUDE.md：单测不依赖 adapter crate） ────────────────────
+    /// 记录型 audit sink（可配置 `fail`）：克隆共享句柄供注入后断言已记录事件 / 调用次数。
+    #[derive(Clone)]
+    struct RecordingAuditSink {
+        events: Arc<Mutex<Vec<AuditEvent>>>,
+        calls: Arc<AtomicUsize>,
+        fail: bool,
+    }
+    impl RecordingAuditSink {
+        fn ok() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail: false,
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                fail: true,
+                ..Self::ok()
+            }
+        }
+        fn events(&self) -> Vec<AuditEvent> {
+            // reason: test-only stub——poison 代表 test-internal panic，取 inner 比再 panic 更利诊断。
+            self.events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+    impl AuditSink for RecordingAuditSink {
+        async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                // reason: 模拟持久 sink 写失败 → funnel 须 fail-closed、绝不签发 All-scope。
+                return Err(AuditSinkError::new(std::io::Error::other("test-sink-fail")));
+            }
+            self.events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event);
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), AuditSinkError> {
+            Ok(())
+        }
+    }
+
+    /// 确定性测试时钟（impl `diport::Clock`，不取系统时钟）。
+    struct TestClock(SystemTime);
+    impl Clock for TestClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> TenantId {
+        TenantId::parse(CANON_T).expect("canonical tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn audit_ctx() -> CrossTenantAuditContext {
+        CrossTenantAuditContext::new(
+            "cross_tenant_visibility",
+            "res-7",
+            "derive_all_scope",
+            "req-1",
+            "corr-9",
+        )
+        .expect("完整字段构造应成功")
+    }
+
+    /// 正常路径：super-admin + sink(ok) → 先写恰 1 条 audit（全字段断言）→ 签发 All-scope。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn audited_ok_writes_audit_then_mints_all_scope() {
+        let tid = tenant();
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let sink = RecordingAuditSink::ok();
+        let boxed = DynAuditSink::new_box(sink.clone());
+        let clock = TestClock(t0);
+        let principal = Principal::for_test(PrincipalKind::SuperAdmin, "root-subject", None);
+        let ctx = runctx::test_support::app_ctx(tid, "root-subject");
+
+        let vis = principal
+            .audited_cross_tenant_visibility(&ctx, &boxed, &clock, &audit_ctx())
+            .await
+            .expect("super-admin audited 派生应成功");
+
+        // 签发 All-scope（跨租户无租户约束）。
+        assert_eq!(vis.scope(), RowScope::All);
+        assert_eq!(vis.tenant(), None);
+
+        // 恰 1 条 audit，全字段同址。
+        let evs = sink.events();
+        assert_eq!(evs.len(), 1, "须恰写 1 条持久 audit");
+        let ev = &evs[0];
+        assert_eq!(ev.occurred_at, t0, "occurred_at 取注入 Clock");
+        assert_eq!(ev.principal_id, "root-subject");
+        assert_eq!(
+            ev.tenant_id, tid,
+            "tenant_id 取 ctx 行使 All-scope 的租户上下文"
+        );
+        assert_eq!(ev.resource_kind, "cross_tenant_visibility");
+        assert_eq!(ev.resource_id, "res-7");
+        assert_eq!(ev.action, "derive_all_scope");
+        assert_eq!(ev.outcome, AuditOutcome::Success);
+        assert_eq!(ev.request_id.as_deref(), Some("req-1"));
+        assert_eq!(ev.correlation_id.as_deref(), Some("corr-9"));
+    }
+
+    /// 核心 fail-closed：audit 写失败 → Err(Audit)，**绝不**签发 All-scope；
+    /// anti-vacuity：sink 确被调用 1 次（证明「先审计」非恒真、失败短路在签发前）。
+    #[tokio::test]
+    async fn audited_fail_closed_when_audit_fails() {
+        let tid = tenant();
+        let sink = RecordingAuditSink::failing();
+        let boxed = DynAuditSink::new_box(sink.clone());
+        let clock = TestClock(SystemTime::UNIX_EPOCH);
+        let principal = Principal::for_test(PrincipalKind::SuperAdmin, "root-subject", None);
+        let ctx = runctx::test_support::app_ctx(tid, "root-subject");
+
+        // RowVisibility 无 Debug（非 wire 类型）；map 到 () 以便诊断格式化。
+        let r = principal
+            .audited_cross_tenant_visibility(&ctx, &boxed, &clock, &audit_ctx())
+            .await
+            .map(|_| ());
+
+        assert!(
+            matches!(r, Err(CrossTenantError::Audit(_))),
+            "audit 写失败须 fail-closed，得 {r:?}"
+        );
+        assert!(r.is_err(), "绝不签发 All-scope");
+        assert_eq!(sink.calls(), 1, "anti-vacuity：sink 确被调用过（先审计）");
+        assert_eq!(
+            sink.events().len(),
+            0,
+            "audit 写失败不应持久化事件（fail-closed 完整性）"
+        );
+    }
+
+    /// 非 super-admin（含 service/anonymous/scoped）→ NotSuperAdmin，**零** audit（不写无谓审计）。
+    #[tokio::test]
+    async fn audited_rejects_non_super_admin() {
+        let tid = tenant();
+        for kind in [
+            PrincipalKind::User,
+            PrincipalKind::Device,
+            PrincipalKind::Admin,
+            PrincipalKind::Service,
+            PrincipalKind::Anonymous,
+        ] {
+            let sink = RecordingAuditSink::ok();
+            let boxed = DynAuditSink::new_box(sink.clone());
+            let clock = TestClock(SystemTime::UNIX_EPOCH);
+            let principal = Principal::for_test(kind, "subject-x", Some(tid));
+            let ctx = runctx::test_support::app_ctx(tid, "subject-x");
+
+            let r = principal
+                .audited_cross_tenant_visibility(&ctx, &boxed, &clock, &audit_ctx())
+                .await
+                .map(|_| ());
+
+            assert!(
+                matches!(r, Err(CrossTenantError::NotSuperAdmin)),
+                "kind={kind:?} 非 super-admin 须拒绝，得 {r:?}"
+            );
+            assert_eq!(sink.calls(), 0, "kind={kind:?} 非 super-admin 不写审计");
+        }
+    }
+
+    /// `CrossTenantAuditContext` Debug 脱敏：不泄 resource_id / request_id / correlation_id。
+    #[test]
+    fn audit_context_debug_redacts() {
+        let dbg = format!("{:?}", audit_ctx());
+        assert!(!dbg.contains("res-7"), "resource_id 泄漏: {dbg}");
+        assert!(!dbg.contains("req-1"), "request_id 泄漏: {dbg}");
+        assert!(!dbg.contains("corr-9"), "correlation_id 泄漏: {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted> 占位: {dbg}");
+    }
+
+    /// fail-closed 构造：任一审计字段空 → `Err(EmptyField)`，杜绝不完整 ledger 签发 All-scope
+    /// （tenancy.md §RowScope 完整性，codex review F1）。表驱动覆盖每个字段。
+    #[test]
+    fn audit_context_rejects_empty_fields() {
+        // (resource_kind, resource_id, action, request_id, correlation_id)
+        let empties = [
+            ("", "res", "act", "req", "corr"),
+            ("rk", "", "act", "req", "corr"),
+            ("rk", "res", "", "req", "corr"),
+            ("rk", "res", "act", "", "corr"),
+            ("rk", "res", "act", "req", ""),
+        ];
+        for (rk, rid, act, req, corr) in empties {
+            let r = CrossTenantAuditContext::new(rk, rid, act, req, corr);
+            assert!(
+                matches!(r.as_ref(), Err(CrossTenantAuditError::EmptyField)),
+                "空字段须 fail-closed 拒绝：({rk:?},{rid:?},{act:?},{req:?},{corr:?}) → {:?}",
+                r.map(|_| ())
+            );
+        }
+        // 完整字段成功（anti-vacuity：校验非恒拒绝）。
+        assert!(
+            CrossTenantAuditContext::new("rk", "res", "act", "req", "corr").is_ok(),
+            "完整字段须构造成功"
+        );
     }
 }
 
@@ -1146,6 +1558,37 @@ mod enum_exhaustiveness {
                 | AuthnError::Forbidden => {}
             }
         }
+    }
+
+    /// `CrossTenantError` 闭值集 + Display 非空 + Audit source 脱敏（消费方据 Display 映射状态码 / 日志）。
+    #[test]
+    fn cross_tenant_error_is_exhaustive_and_redacts_source() {
+        use super::CrossTenantError;
+        let leak = "leak-marker-crosstenant";
+        for e in [
+            CrossTenantError::NotSuperAdmin,
+            CrossTenantError::Audit(diport::AuditSinkError::new(std::io::Error::other(leak))),
+        ] {
+            assert!(!e.to_string().is_empty(), "错误 message 非空");
+            match e {
+                CrossTenantError::NotSuperAdmin | CrossTenantError::Audit(_) => {}
+            }
+        }
+        // 安全 + anti-vacuity：Audit 的 Display/Debug 均不泄漏底层 source（DIPORT-ERR-SOURCE-REDACT-01）。
+        let audit =
+            CrossTenantError::Audit(diport::AuditSinkError::new(std::io::Error::other(leak)));
+        assert!(
+            format!("{:?}", std::io::Error::other(leak)).contains(leak),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !audit.to_string().contains(leak),
+            "Display 泄漏 source: {audit}"
+        );
+        assert!(
+            !format!("{audit:?}").contains(leak),
+            "Debug 泄漏 source: {audit:?}"
+        );
     }
 }
 
