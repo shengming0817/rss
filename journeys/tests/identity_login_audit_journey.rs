@@ -1,53 +1,58 @@
-//! #1100 / T008 journey：identity 登录 → durable outbox 发射 → ConsumerBase 幂等消费 → audit append，
-//! 组装在 bootstrap（compose）+ eventexec（run_consumer）+ memory（in-mem DI port 替身）上，
-//! 端到端证明 L2 OutboxFact 闭环（登录 → outbox → relay/分发 → audit，以 EventId 幂等去重）。
+//! #1100 / #1171 journey：identity 登录 → durable outbox 发射 → ConsumerBase 幂等消费 → audit append，
+//! 组装在 bootstrap（compose + ShutdownStack）+ eventexec（ConsumerWorker 驱动 run_consumer）+ memory
+//! （in-mem DI port 替身）上，端到端证明 L2 OutboxFact 闭环（登录 → outbox → 受监督 worker 分发 → audit，
+//! 以 EventId 幂等去重）。
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
 //! - DI 注入：identity 经 `Box<DynSessionUnitOfWork>`（`MemSessionUnitOfWork`）co-tx 写 session + 发射 outbox
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
-//!   sink）；幂等 store 经 `run_consumer` 注入。
+//!   sink）；幂等 store 经 `memory::InMemClaimer` 注入、DLX 经 `memory::MemDeadLetterStore` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
-//! - 消费：bootstrap `SubscriberHandler` 经组合根 adapt 成 `run_consumer` 的 `HandleResult` handler，
-//!   `ConsumerBase` 自持 claim→handle→commit/release 幂等生命周期（键 = msg.id = EventId）。
+//! - **消费（#1171 实交付）**：bootstrap `SubscriberHandler` 经 `bootstrap::adapt_subscriber_handler` 适配成
+//!   `run_consumer` 的 `HandleResult` handler，再经 `eventexec::ConsumerWorker`（专用线程驱动 `run_consumer`、
+//!   impl `ManagedResource`）接 `bootstrap::shutdown::ShutdownStack` 两阶段关闭——闭合「`run_consumer` 0 个
+//!   真实调用点」缺口：ConsumerBase 由真实受监督后台 worker 驱动，而非内联 `tokio::join!`。
 //! - 幂等（acc #2）：relay 重投同一 EventId → audit 仅 append 一次（`relay_redelivery_audits_once`）。
+//! - DLX：handler 永久失败 → ConsumerBase 写死信到 `MemDeadLetterStore`（`demo_handler_error_writes_dead_letter`）。
 //!
-//! 并发形态：`run_consumer` future 持 `&DynDeadLetterStore`（Send-非-Sync）跨 await ⇒ **!Send**、不可
-//! `tokio::spawn`（与 eventexec 单测「直接 await」一致）。journey 用 `tokio::join!` 同任务并发驱动
-//! 消费 future 与「登录 emit + 等 sink + cancel」驱动 future——无跨线程 Send 约束。
+//! 订阅顺序：MemBus 无重放（订阅须先于发布），故 journey **先**同步 `subscribe(topic, token)` 得 stream、**再**
+//! spawn `ConsumerWorker` 驱动该 stream（subscribe-at-callsite，token 与 stream 同源；worker 在
+//! `ManagedResource::shutdown` 自取消 token 终止流——经 `register_detached` 注册）。
 //!
-//! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（admin 读 handler 经 axum oneshot 单测覆盖，
-//! 见 audit crate）；envelope 的 trace/correlation reserved-key 注入留 W（funnel 现无 sealed setter）；audit
-//! domain 哈希链 #1014 已写实——append 落每租户 keyed HMAC 链（journey 经捕获 verifier 端到端验链 append）。
-//! durable（postgres/amqp）拓扑闭环见 `identity_login_audit_durable_journey.rs`（`--features integration`）。
+//! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（admin 读 handler 经 axum oneshot 单测覆盖）；
+//! envelope 的 trace/correlation reserved-key 注入留 W；audit domain 哈希链 #1014 已写实。durable（postgres/amqp）
+//! 拓扑闭环见 `identity_login_audit_durable_journey.rs`（`--features integration`，#1171 §6：ackable consumer 真 broker）。
 //!
 //! ref: watermill message/router/middleware/poison.go（ConsumerBase DLX）
-//! ref: uber-go/fx app.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（组合根装配）
+//! ref: uber-go/fx app.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（组合根装配 + lifecycle 关闭）
 //!
 //! 注：本 journey **不** feature-gate——全程 in-process（in-mem DI 替身、确定性、毫秒级），是 `cargo test` /
 //! `cargo xtask verify` 默认跑的验收门，故有意不隔离。
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use audit::AuditDomain;
-use bootstrap::SubscriberHandler;
-use consistency::{
-    EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, PermanentError,
-    PermanentErrorKind, SeenState,
-};
+use bootstrap::shutdown::ShutdownStack;
+use bootstrap::{SubscriberBinding, SubscriberHandler, adapt_subscriber_handler};
+use consistency::{Entry, HandleResult, IdemKey, PermanentError, PermanentErrorKind};
 use diport::{
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, Message,
-    OutboxEmitter, OutboxEnvelopeParts, Subscriber, Topic,
+    DynDeadLetterStore, DynManagedResource, Message, OutboxEmitter, OutboxEnvelopeParts,
+    Subscriber, Topic,
 };
-use eventexec::{ConsumerMeta, run_consumer};
+use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::ports::DynSessionUnitOfWork;
 use identity::{IdentityDomain, LoginService};
-use memory::{FixedClock, MemBus, MemEmitter, MemSessionUnitOfWork};
+use memory::{
+    FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionUnitOfWork,
+};
+use primitives::healthz::HealthStatus;
 use primitives::{ListenerKind, Mac, MacAlgorithm, MacKey, MacVerifier};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
@@ -58,15 +63,12 @@ const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 /// 登录种子密码。
 const PASSWORD: &str = "correct-horse";
-/// 登录标识（`request.username`）——#1277 F1：可为**任意非 uuid 用户名**（email/UPN/username），仅作凭据
-/// 查找键（CredentialRepo 按 `(tenant, login)` 索引），永不写进 wire / audit。
+/// 登录标识（`request.username`）——#1277 F1：可为**任意非 uuid 用户名**，仅作凭据查找键，永不写进 wire / audit。
 const LOGIN_USERNAME: &str = "alice";
 /// canonical actor subject（credential 携带的 `ids::UserId`）——登录成功后**仅**此写 payload / envelope /
-/// session subject + 审计 actor。与登录标识解耦：旧实现把 username 直接当 subject 写 wire，真实用户名
-/// （非 uuid）会让 audit `ids::UserId::parse` fail-closed 断链——本 journey 用非 uuid 登录标识端到端证伪（#1277 F1）。
+/// session subject + 审计 actor。与登录标识解耦（#1277 F1）。
 const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
-/// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid），
-/// 非 uuid 会被 handler fail-closed 拒（F3）；故 session_id 须为 uuid。
+/// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid）。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
 /// journey 审计链 HMAC key（固定 32B）。
 const AUDIT_KEY: [u8; 32] = [0x5a; 32];
@@ -74,48 +76,11 @@ const AUDIT_KEY: [u8; 32] = [0x5a; 32];
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
 
-// ── 测试替身：demo 拓扑的幂等 store + DLX（生产经 topology 选型 postgres/redis）──────────
-
-/// 进程内幂等 store（impl `consistency::IdempotencyStore`）：以 key 集合记首见，首见 `Fresh`、再见
-/// `Duplicate`。等价 demo 拓扑的 in-mem claimer；journey-local 替身（`memory::InMemClaimer::new` 是
-/// `pub(crate)`、仅经 sealed resolver 可达，journey 用本地替身验幂等语义，不破坏 sealing）。
-#[derive(Default)]
-struct JourneyClaimer {
-    seen: Mutex<HashSet<String>>,
-}
-
-impl IdempotencyStore for JourneyClaimer {
-    async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
-        let fresh = self
-            .seen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.as_str().to_string());
-        Ok(if fresh {
-            SeenState::Fresh
-        } else {
-            SeenState::Duplicate
-        })
-    }
-
-    async fn commit(&self, _key: &IdemKey) -> Result<(), EngineError> {
-        // reason: HashSet 记首见集合（absent / seen），commit 不改集合 ⇒ check 仍 Duplicate，满足永久去重。
-        Ok(())
-    }
-
-    async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
-        self.seen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(key.as_str());
-        Ok(())
-    }
-}
+// ── 测试替身：审计链捕获 verifier（demo 拓扑的幂等 store / DLX 用 memory adapter 真实替身）──────────
 
 /// 审计链 HMAC 测试 verifier：捕获每次 `sign` 的 message（= 每次链 append 的 canonical 输入），并以确定性
 /// 折叠产出 32B 标签（链一致）。W 阶段审计落**域内哈希链**（无外部 sink），journey 经注入此 verifier
-/// 端到端断言审计 append 次数 + 内容贯穿（session_id / tenant / actor 进 canonical 链输入）。非加密——
-/// journey 只需确定性 + 可计数/可检视。
+/// 端到端断言审计 append 次数 + 内容贯穿。非加密——journey 只需确定性 + 可计数/可检视。
 #[derive(Clone, Default)]
 struct CapturingVerifier {
     messages: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -160,7 +125,6 @@ impl MacVerifier for CapturingVerifier {
     }
 
     fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
-        // journey 不走 list（不触发链 verify）；提供一致实现满足 trait 契约。
         primitives::constant_time_eq(
             self.sign(key, algorithm, message).as_bytes(),
             tag.as_bytes(),
@@ -177,47 +141,17 @@ fn audit_domain() -> (AuditDomain<CapturingVerifier>, CapturingVerifier) {
     (domain, verifier)
 }
 
-/// noop DLX（impl `diport::DeadLetterStore`）：journey 不验死信路径（eventexec consumer.rs 已覆盖），写入恒 Ok。
-struct NoopDlx;
-
-impl DeadLetterStore for NoopDlx {
-    async fn write_dead_letter(
-        &self,
-        _record: DeadLetterRecord,
-    ) -> Result<(), DeadLetterStoreError> {
-        // reason: journey 不触发死信（handler happy-path Ack）；DLX 三路径由 eventexec consumer 单测覆盖。
-        Ok(())
-    }
-    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
-        Ok(())
-    }
+/// 取唯一 session-created 订阅绑定（断言恰一个）。
+fn single_subscription(registry: bootstrap::Registry) -> anyhow::Result<SubscriberBinding> {
+    let mut subs = registry.into_subscribers();
+    anyhow::ensure!(subs.len() == 1, "恰一个 session-created 订阅");
+    subs.pop().ok_or_else(|| anyhow::anyhow!("订阅缺失"))
 }
 
-/// 把 bootstrap `SubscriberHandler` 适配成 `run_consumer` 的 `HandleResult` handler（组合根职责：
-/// bootstrap 与 eventexec 是兄弟服务、互不依赖，handler 类型在此跨接）。Ok→`ack`；Err→`reject`（永久——
-/// 解码 / 租户非法不可重试，对齐 audit handler 语义），由 ConsumerBase 收口到 DLX。
-fn consumer_handler(
-    handler: Box<dyn SubscriberHandler>,
-) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
-    let handler: Arc<dyn SubscriberHandler> = Arc::from(handler);
-    move |message: Message| {
-        let handler = handler.clone();
-        Box::pin(async move {
-            match handler.handle(message).await {
-                Ok(()) => HandleResult::ack(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "journey: subscriber handler errored, rejecting (permanent)");
-                    HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
-                }
-            }
-        })
-    }
-}
-
-/// 等待审计链非空（有界超时，防消费未跑挂死）。超时即 `Err`，由调用方在 cancel 后再传播（避免悬挂）。
-async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
+/// 有界等待断言条件成立（防消费未跑挂死）；超时即 `Err`。
+async fn wait_until(mut pred: impl FnMut() -> bool) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while audit.is_empty() {
+        while !pred() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -225,13 +159,73 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
     Ok(())
 }
 
-/// 取唯一 session-created 订阅绑定（断言恰一个）。
-fn single_subscription(
-    registry: bootstrap::Registry,
-) -> anyhow::Result<bootstrap::SubscriberBinding> {
-    let mut subs = registry.into_subscribers();
-    anyhow::ensure!(subs.len() == 1, "恰一个 session-created 订阅");
-    subs.pop().ok_or_else(|| anyhow::anyhow!("订阅缺失"))
+/// Demo 拓扑 consumer worker 接线（#1171）：MemBus **先**订阅（先于发布，token 与 stream 同源）→ spawn
+/// `ConsumerWorker`（专用线程驱动 `run_consumer`）→ `register_detached` 进 `ShutdownStack`。返回 worker 的
+/// health 句柄供断言（worker 已 move 进 stack）。
+///
+/// `register_detached`（非 `register_with_token`）：subscribe 在 callsite 先于 spawn、token 须与 stream 同源，
+/// worker 后台线程监听自持 token、于 `ManagedResource::shutdown` 自取消（不依赖 stack 阶段 1 广播）。
+#[allow(clippy::too_many_arguments)]
+// reason: journey 接线 helper 的参数集（bus/group/contract_id/topic/dlx/handler/token/stack 各自语义独立）；
+// 聚合 struct 仅此 3 测试复用、收益低，item-level carve-out（error-handling.md §Carve-out）。
+async fn wire_demo_consumer<H>(
+    bus: &MemBus,
+    group: consistency::ConsumerGroup,
+    contract_id: &'static str,
+    topic: &'static str,
+    dlx: MemDeadLetterStore,
+    handler: H,
+    token: CancellationToken,
+    stack: &mut ShutdownStack,
+) -> Result<Arc<WorkerHealth>>
+where
+    H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+{
+    let claimer = Arc::new(InMemClaimer::new(group));
+    // 订阅须先于发布（in-mem 无重放）：同步 subscribe 得 stream，再 spawn worker 驱动。
+    let stream = bus
+        .subscriber()
+        .subscribe(Topic::new(topic), token.clone())
+        .await?;
+    let meta = ConsumerMeta::new("audit", contract_id, topic);
+    let health = Arc::new(WorkerHealth::healthy());
+    let name = format!("{EVENT_CONSUMER_PROBE}:audit:{topic}");
+    let worker = spawn_consumer(
+        name,
+        stream,
+        claimer,
+        DynDeadLetterStore::new_box(dlx),
+        meta,
+        handler,
+        token,
+        health.clone(),
+    );
+    stack.register_detached(DynManagedResource::new_box(worker));
+    Ok(health)
+}
+
+/// 把 `bootstrap::ConsumerHandlerFn`（`Arc<dyn Fn..>`）包成可调用的 `Fn` 闭包。
+///
+/// `Arc<dyn Fn>` 自身不 impl `Fn`（std 仅对 `&F` / `Box<F>` 提供 blanket impl），故经 `as_ref()` 取
+/// `&dyn Fn`（impl `Fn`）再调用——组合根接 `run_consumer`（`H: Fn`）的一行桥。
+fn into_callable(
+    handler: bootstrap::ConsumerHandlerFn,
+) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static {
+    move |message: Message| handler.as_ref()(message)
+}
+
+/// 登录服务（注入 MemSessionUnitOfWork co-tx 替身 + 固定时钟 + 种子凭据）。
+#[allow(clippy::expect_used)]
+fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginService> {
+    Ok(LoginService::with_seed_credential(
+        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+        LOGIN_USERNAME,
+        ids::UserId::parse(CANON_USER)?,
+        PASSWORD,
+        tenant,
+    )?)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -258,57 +252,55 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     );
     assert_eq!(registry.probe_count(), 0, "未注册探针");
 
-    // 订阅经 run_consumer（幂等消费驱动）接线（订阅须先于发布——in-mem 无重放）。
-    let token = CancellationToken::new();
-    let claimer = Arc::new(JourneyClaimer::default());
+    // #1171：经受监督 ConsumerWorker（专用线程驱动 run_consumer）+ ShutdownStack 驱动订阅消费。
     let binding = single_subscription(registry)?;
     assert_eq!(binding.topic, SESSION_CREATED_TOPIC);
-    let stream = bus
-        .subscriber()
-        .subscribe(Topic::new(binding.topic), token.clone())
-        .await?;
-    let meta = ConsumerMeta::new("audit", binding.contract_id, binding.topic);
-    let consume = run_consumer(
-        stream,
-        claimer.clone(),
-        DynDeadLetterStore::new_box(NoopDlx),
-        meta,
-        consumer_handler(binding.handler),
-    );
+    let SubscriberBinding {
+        contract_id,
+        topic,
+        group,
+        handler,
+    } = binding;
+    let token = CancellationToken::new();
+    let mut stack = ShutdownStack::new(CancellationToken::new());
+    let health = wire_demo_consumer(
+        &bus,
+        group,
+        contract_id,
+        topic,
+        MemDeadLetterStore::new(),
+        into_callable(adapt_subscriber_handler(handler)),
+        token.clone(),
+        &mut stack,
+    )
+    .await?;
 
-    // 登录：注入 MemSessionUnitOfWork（co-tx demo 替身：session + outbox fan-out）+ 固定时钟。emit + 等 audit + cancel 收口。
-    // tenant 经 X-Tenant-ID header 解析（组合根职责）；此处 journey 直接 parse 注入 login 位置参。
+    // 登录（emit）+ 等 audit；worker 在独立线程并发消费，无需同任务 `tokio::join!`。
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let login = LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-        LOGIN_USERNAME,
-        ids::UserId::parse(CANON_USER)?,
-        PASSWORD,
-        tenant,
-    )?;
-    let drive = async {
-        let response = login
-            .login(
-                tenant,
-                IdentityLoginRequest {
-                    // 非 uuid 登录标识——旧实现会把 "alice" 当 subject 写 wire，audit 断链（#1277 F1 证伪点）。
-                    username: LOGIN_USERNAME.to_string(),
-                    password: PASSWORD.to_string(),
-                },
-            )
-            .await;
-        let waited = wait_until_audited(&audit).await;
-        token.cancel(); // 无条件 cancel：consume future 终止，join! 不悬挂。
-        let response = response?;
-        waited?;
-        anyhow::Ok(response)
-    };
+    let login = login_service(&bus, tenant)?;
+    let response = login
+        .login(
+            tenant,
+            IdentityLoginRequest {
+                // 非 uuid 登录标识——旧实现会把 "alice" 当 subject 写 wire，audit 断链（#1277 F1 证伪点）。
+                username: LOGIN_USERNAME.to_string(),
+                password: PASSWORD.to_string(),
+            },
+        )
+        .await?;
+    wait_until(|| !audit.is_empty()).await?;
 
-    // 同任务并发：consume future（!Send，不可 spawn）与 drive future。
-    let (_, response) = tokio::join!(consume, drive);
-    let response = response?;
+    // 两阶段关闭：ConsumerWorker 经 ManagedResource::shutdown 自取消 token → stream 终止 → join。
+    let failures = stack.shutdown().await;
+    assert!(
+        failures.is_empty(),
+        "ShutdownStack 关闭无失败: {failures:?}"
+    );
+    assert_eq!(
+        health.status(),
+        HealthStatus::Unhealthy,
+        "worker 退出后 health Unhealthy（readyz 翻）"
+    );
 
     assert!(!response.data.session_id.is_empty(), "返回会话 id");
     assert_eq!(
@@ -327,23 +319,15 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         "会话 id 贯穿闭环（进审计链 canonical 输入）"
     );
     assert!(contains(b"identity:login"), "登录动作贯穿闭环");
-    // F9：tenant / actor 的 16B 原始 UUID 字节贯穿到审计链 canonical 输入（防 audit 漏写关键 actor/tenant
-    // 字段而 journey 不报）。canonical_message 内 tenant/actor 是 uuid bytes（非字符串），故用 uuid 字节断言。
-    // #1277 F1：actor = canonical CANON_USER（credential.user_id），**非**登录标识 LOGIN_USERNAME="alice"——
-    // 用非 uuid 登录标识端到端证明 login 写的是 canonical subject、audit 不再断链（旧实现此处必失败）。
+    // F9：tenant / actor 的 16B 原始 UUID 字节贯穿到审计链 canonical 输入。#1277 F1：actor = canonical
+    // CANON_USER（credential.user_id），**非**登录标识 "alice"。
     let tenant_uuid_bytes = uuid::Uuid::parse_str(CANON_TENANT)?.into_bytes();
     let actor_uuid_bytes = uuid::Uuid::parse_str(CANON_USER)?.into_bytes();
-    assert!(
-        contains(&tenant_uuid_bytes),
-        "tenant UUID 16B 贯穿闭环（进审计链 canonical 输入）"
-    );
+    assert!(contains(&tenant_uuid_bytes), "tenant UUID 16B 贯穿闭环");
     assert!(
         contains(&actor_uuid_bytes),
-        "actor = canonical user id（credential.user_id）16B 贯穿闭环（非登录标识 \"alice\"，#1277 F1）"
+        "actor = canonical user id 16B 贯穿闭环（非登录标识 \"alice\"，#1277 F1）"
     );
-    // 反证：非 uuid 登录标识不得出现在审计链输入（旧实现把 username 当 subject 写 wire 会命中此串）。
-    // 前提（已人工核验）：CANON_USER 的 16B UUID 字节序列不含 LOGIN_USERNAME（"alice"）的 ASCII 编码，
-    // 故本字节搜索无假阳性——选取测试常量时须维持此前提（二者无字节子串包含）。
     assert!(
         !contains(LOGIN_USERNAME.as_bytes()),
         "登录标识 \"alice\" 不得进审计链 canonical 输入（准 PII，#1277 F1）"
@@ -352,158 +336,228 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 }
 
 /// acc #2（L2 consumer 幂等）：relay 重投同一 EventId 的 session.created → audit 仅 append 一次。
-/// 模拟：经 `MemEmitter` 发同一 `Entry`（同 EventId / idem_key）两次，共享同一幂等 claimer 经 `run_consumer`
-/// 消费——首次 `Fresh`（handler 跑、append）、二次 `Duplicate`（短路）。
+/// 经 `MemEmitter` 发同一 `Entry`（同 idem_key）两次，共享同一 `InMemClaimer` 经受监督 ConsumerWorker 消费——
+/// 首次 `Fresh`（handler 跑、append）、二次 `Duplicate`（短路）。
 #[tokio::test(flavor = "multi_thread")]
 async fn relay_redelivery_audits_once() -> Result<()> {
     let bus = MemBus::new();
     let (audit_domain, audit) = audit_domain();
     let registry = bootstrap::compose(&[&audit_domain])?;
 
-    let token = CancellationToken::new();
-    let claimer = Arc::new(JourneyClaimer::default());
-    let binding = single_subscription(registry)?;
+    let SubscriberBinding {
+        contract_id,
+        topic,
+        group,
+        handler,
+    } = single_subscription(registry)?;
 
-    // anti-vacuity（acc #2）：用计数器包装 handler，证明内层 handler 恰调用一次——
-    // ConsumerBase 幂等短路第二条投递（不执行 handler），而非 sink 自身去重。
-    let handler_call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    // anti-vacuity（acc #2）：计数器包装 handler，证明内层 handler 恰调用一次——ConsumerBase 幂等短路
+    // 第二条投递（不执行 handler），而非 sink 自身去重。
+    let handler_call_count = Arc::new(AtomicU32::new(0));
     let counter = handler_call_count.clone();
-    let inner_handler: Arc<dyn SubscriberHandler> = Arc::from(binding.handler);
-    let counted_handler = {
-        let inner = inner_handler.clone();
-        move |message: Message| -> futures::future::BoxFuture<'static, HandleResult> {
-            let inner = inner.clone();
-            let counter = counter.clone();
-            Box::pin(async move {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                match inner.handle(message).await {
-                    Ok(()) => HandleResult::ack(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "journey: counted handler errored, rejecting");
-                        HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
-                    }
+    let inner: Arc<dyn SubscriberHandler> = Arc::from(handler);
+    let counted = move |message: Message| -> BoxFuture<'static, HandleResult> {
+        let inner = inner.clone();
+        let counter = counter.clone();
+        Box::pin(async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            match inner.handle(message).await {
+                Ok(()) => HandleResult::ack(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "journey: counted handler errored, rejecting");
+                    HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
                 }
-            })
-        }
+            }
+        })
     };
 
-    let stream = bus
-        .subscriber()
-        .subscribe(Topic::new(binding.topic), token.clone())
-        .await?;
-    let meta = ConsumerMeta::new("audit", binding.contract_id, binding.topic);
-    let consume = run_consumer(
-        stream,
-        claimer.clone(),
-        DynDeadLetterStore::new_box(NoopDlx),
-        meta,
-        counted_handler,
-    );
+    let token = CancellationToken::new();
+    let mut stack = ShutdownStack::new(CancellationToken::new());
+    wire_demo_consumer(
+        &bus,
+        group,
+        contract_id,
+        topic,
+        MemDeadLetterStore::new(),
+        counted,
+        token.clone(),
+        &mut stack,
+    )
+    .await?;
 
-    // 同一 EventId（idem_key）的 entry 发两次 = relay 崩溃重启重投同一 outbox entry。payload 为合法
-    // session-created JSON（camelCase）；EventId 与 payload.sessionId 解耦（去重锚点是 EventId）。
+    // 同一 EventId（idem_key）的 entry 发两次 = relay 崩溃重启重投同一 outbox entry。
     const EVENT_ID: &str = "evt-redeliver-fixed";
     let payload = format!(
         r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_USER}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
     )
     .into_bytes();
     let emitter = MemEmitter::new(bus.clone());
-    let drive = async {
-        for _ in 0..2 {
-            let entry = Entry::new(
-                consistency::Topic::parse(SESSION_CREATED_TOPIC)
-                    .map_err(|_| anyhow::anyhow!("topic parse"))?,
-                IdemKey::parse(EVENT_ID).map_err(|_| anyhow::anyhow!("idem parse"))?,
-                payload.clone(),
-            );
-            emitter
-                .emit(
-                    entry,
-                    OutboxEnvelopeParts {
-                        domain: "identity".to_string(),
-                        contract_id: SESSION_CREATED_TOPIC.to_string(),
-                        subject_id: CANON_USER.to_string(),
-                    },
-                )
-                .await
-                .map_err(|_| anyhow::anyhow!("emit"))?;
-        }
-        let waited = wait_until_audited(&audit).await;
-        // 等二次投递被消费并去重短路，再 cancel。
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        token.cancel();
-        waited?;
-        anyhow::Ok(())
-    };
+    for _ in 0..2 {
+        let entry = Entry::new(
+            consistency::Topic::parse(SESSION_CREATED_TOPIC)
+                .map_err(|_| anyhow::anyhow!("topic parse"))?,
+            IdemKey::parse(EVENT_ID).map_err(|_| anyhow::anyhow!("idem parse"))?,
+            payload.clone(),
+        );
+        emitter
+            .emit(
+                entry,
+                OutboxEnvelopeParts {
+                    domain: "identity".to_string(),
+                    contract_id: SESSION_CREATED_TOPIC.to_string(),
+                    subject_id: CANON_USER.to_string(),
+                },
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("emit"))?;
+    }
+    wait_until(|| !audit.is_empty()).await?;
+    // 等二次投递被消费并去重短路，再关闭。
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (_, driven) = tokio::join!(consume, drive);
-    driven?;
+    let failures = stack.shutdown().await;
+    assert!(
+        failures.is_empty(),
+        "ShutdownStack 关闭无失败: {failures:?}"
+    );
 
     assert_eq!(
         audit.audited().len(),
         1,
         "重投同一 EventId → audit 链仅 append 一次（L2 consumer 幂等）"
     );
-    // anti-vacuity（acc #2）：handler 仅被调用一次（ConsumerBase Duplicate 短路第二条投递）。
     assert_eq!(
-        handler_call_count.load(std::sync::atomic::Ordering::SeqCst),
+        handler_call_count.load(Ordering::SeqCst),
         1,
         "ConsumerBase 幂等：handler 恰调用一次，第二次投递被 Duplicate 短路"
     );
     Ok(())
 }
 
-/// 负路径：未知用户登录被拒，不发射事件 ⇒ audit sink 保持空（闭环不被错误触发）。
+/// 负路径：未知用户登录被拒，不发射事件 ⇒ audit 保持空（闭环不被错误触发）。
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
     let (audit_domain, audit) = audit_domain();
     let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
 
+    let SubscriberBinding {
+        contract_id,
+        topic,
+        group,
+        handler,
+    } = single_subscription(registry)?;
     let token = CancellationToken::new();
-    let claimer = Arc::new(JourneyClaimer::default());
-    let binding = single_subscription(registry)?;
-    let stream = bus
-        .subscriber()
-        .subscribe(Topic::new(binding.topic), token.clone())
-        .await?;
-    let meta = ConsumerMeta::new("audit", binding.contract_id, binding.topic);
-    let consume = run_consumer(
-        stream,
-        claimer.clone(),
-        DynDeadLetterStore::new_box(NoopDlx),
-        meta,
-        consumer_handler(binding.handler),
-    );
+    let mut stack = ShutdownStack::new(CancellationToken::new());
+    wire_demo_consumer(
+        &bus,
+        group,
+        contract_id,
+        topic,
+        MemDeadLetterStore::new(),
+        into_callable(adapt_subscriber_handler(handler)),
+        token.clone(),
+        &mut stack,
+    )
+    .await?;
 
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let login = LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-        LOGIN_USERNAME,
-        ids::UserId::parse(CANON_USER)?,
-        PASSWORD,
-        tenant,
-    )?;
-    let drive = async {
-        let result = login
-            .login(
-                tenant,
-                IdentityLoginRequest {
-                    username: "mallory".to_string(),
-                    password: PASSWORD.to_string(),
-                },
-            )
-            .await;
-        // 给任何误发射的事件被消费的时间，随后 cancel。
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        token.cancel();
-        result
-    };
+    let login = login_service(&bus, tenant)?;
+    let result = login
+        .login(
+            tenant,
+            IdentityLoginRequest {
+                username: "mallory".to_string(),
+                password: PASSWORD.to_string(),
+            },
+        )
+        .await;
+    // 给任何误发射的事件被消费的时间，随后关闭。
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let failures = stack.shutdown().await;
+    assert!(
+        failures.is_empty(),
+        "ShutdownStack 关闭无失败: {failures:?}"
+    );
 
-    let (_, result) = tokio::join!(consume, drive);
     assert!(result.is_err(), "未知用户登录被拒");
     assert!(audit.is_empty(), "登录失败不产生审计链 append");
+    Ok(())
+}
+
+/// Demo DLX 分支：handler 永久失败 → ConsumerBase 写死信到 `MemDeadLetterStore`（重投预算后落库收口）。
+/// 证 demo 拓扑 consumer worker 的死信路径接线（生产走 `PgDeadLetterStore`，逻辑同源）。
+#[tokio::test(flavor = "multi_thread")]
+async fn demo_handler_error_writes_dead_letter() -> Result<()> {
+    let bus = MemBus::new();
+    let (audit_domain, _audit) = audit_domain();
+    let registry = bootstrap::compose(&[&audit_domain])?;
+
+    let SubscriberBinding {
+        contract_id,
+        topic,
+        group,
+        handler: _,
+    } = single_subscription(registry)?;
+
+    // 永久失败 handler（绕过真实 audit handler）：恒 reject → ConsumerBase 写 DLX。
+    let erroring = move |_msg: Message| -> BoxFuture<'static, HandleResult> {
+        Box::pin(
+            async move { HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent)) },
+        )
+    };
+
+    let dlx = MemDeadLetterStore::new();
+    let token = CancellationToken::new();
+    let mut stack = ShutdownStack::new(CancellationToken::new());
+    wire_demo_consumer(
+        &bus,
+        group,
+        contract_id,
+        topic,
+        dlx.clone(),
+        erroring,
+        token.clone(),
+        &mut stack,
+    )
+    .await?;
+
+    // 发一条 session-created → handler reject → DLX 写一条。
+    let entry = Entry::new(
+        consistency::Topic::parse(SESSION_CREATED_TOPIC)
+            .map_err(|_| anyhow::anyhow!("topic parse"))?,
+        IdemKey::parse("evt-dlx-fixed").map_err(|_| anyhow::anyhow!("idem parse"))?,
+        b"{}".to_vec(),
+    );
+    MemEmitter::new(bus.clone())
+        .emit(
+            entry,
+            OutboxEnvelopeParts {
+                domain: "identity".to_string(),
+                contract_id: SESSION_CREATED_TOPIC.to_string(),
+                subject_id: CANON_USER.to_string(),
+            },
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("emit"))?;
+    wait_until(|| dlx.len() == 1).await?;
+
+    let failures = stack.shutdown().await;
+    assert!(
+        failures.is_empty(),
+        "ShutdownStack 关闭无失败: {failures:?}"
+    );
+
+    let records = dlx.records();
+    assert_eq!(
+        records.len(),
+        1,
+        "永久失败 → 死信落 MemDeadLetterStore 一条"
+    );
+    assert_eq!(
+        records[0].topic(),
+        SESSION_CREATED_TOPIC,
+        "死信记录归因 topic"
+    );
     Ok(())
 }

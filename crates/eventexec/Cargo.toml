@@ -22,8 +22,10 @@ tracing = { workspace = true }
 consistency = { path = "../consistency" }
 # WorkerHealth 三态聚合（HealthStatus/ProbeName）。
 primitives = { path = "../primitives" }
-# relay_loop / sweeper_loop interval 计时 + RelayWorker/SweeperWorker Mutex<JoinHandle>。
-tokio = { workspace = true, features = ["time", "sync"] }
+# relay_loop / sweeper_loop interval 计时 + RelayWorker/SweeperWorker Mutex<JoinHandle>；
+# `rt`：ConsumerWorker 在专用 OS 线程建 current-thread runtime `block_on` 驱动 !Send 消费 future +
+# shutdown 经 `spawn_blocking` join 线程（#1171，consumer_worker.rs）。
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（relay_loop/sweeper_loop 取消信号）。
 tokio-util = { workspace = true }
 # #1209 outbox metrics 发射（MetricsOutboxMetrics 经 metrics facade）。硬依赖、非 optional——idiomatic

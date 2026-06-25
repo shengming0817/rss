@@ -106,6 +106,38 @@ impl SubscriberHandlerError {
     }
 }
 
+/// 已适配的 consumer handler：`run_consumer` / `run_consumer_ackable` 的 handler 形态
+/// （`Fn(Message) -> BoxFuture<'static, consistency::HandleResult>`）。
+///
+/// 由 [`adapt_subscriber_handler`] 从 bootstrap-local [`SubscriberHandler`] 适配产出，供组合根
+/// （`journeys` / `bins`）接 `eventexec` 消费驱动——既证 subscriber 声明流到分发闭环，又不在
+/// bootstrap↔eventexec 间建兄弟服务依赖（返回 `consistency::HandleResult`，非 `eventexec` 类型）。
+pub type ConsumerHandlerFn =
+    std::sync::Arc<dyn Fn(Message) -> BoxFuture<'static, consistency::HandleResult> + Send + Sync>;
+
+/// 把 bootstrap-local [`SubscriberHandler`] 适配成 consumer 驱动的 [`ConsumerHandlerFn`]。
+///
+/// 映射：`Ok(())` → [`consistency::HandleResult::ack`]；`Err(_)` → `reject`（永久——解码 / 租户非法
+/// 不可重试，对齐 audit handler 语义），由 ConsumerBase 收口到 DLX。瞬态→requeue 的 typed 分流是
+/// 独立 error-taxonomy 关注点（follow-up），本适配器不区分。
+pub fn adapt_subscriber_handler(handler: Box<dyn SubscriberHandler>) -> ConsumerHandlerFn {
+    let handler: std::sync::Arc<dyn SubscriberHandler> = std::sync::Arc::from(handler);
+    std::sync::Arc::new(move |message: Message| {
+        let handler = handler.clone();
+        Box::pin(async move {
+            match handler.handle(message).await {
+                Ok(()) => consistency::HandleResult::ack(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "consumer: subscriber handler errored, rejecting (permanent)");
+                    consistency::HandleResult::reject(consistency::PermanentError::new(
+                        consistency::PermanentErrorKind::Permanent,
+                    ))
+                }
+            }
+        }) as BoxFuture<'static, consistency::HandleResult>
+    })
+}
+
 /// bootstrap-local 健康探针擦除接缝。
 ///
 /// 实现者在 `check` 中执行探针逻辑并返回单条 [`primitives::HealthCheck`]（纯值，含探针名 +
@@ -921,5 +953,52 @@ mod finalize {
             .await
             .expect("oneshot ok");
         assert_eq!(leaked_internal.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod handler_adapt {
+    //! `adapt_subscriber_handler` 适配器：Ok→Ack / Err→Reject(permanent) 映射验证。
+    use super::{Message, SubscriberHandler, SubscriberHandlerError, adapt_subscriber_handler};
+    use futures::future::BoxFuture;
+
+    struct OkHandler;
+    impl SubscriberHandler for OkHandler {
+        fn handle(
+            &self,
+            _message: Message,
+        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct ErrHandler;
+    impl SubscriberHandler for ErrHandler {
+        fn handle(
+            &self,
+            _message: Message,
+        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+            Box::pin(async { Err(SubscriberHandlerError::new(std::io::Error::other("boom"))) })
+        }
+    }
+
+    #[tokio::test]
+    async fn adapt_maps_ok_to_ack() {
+        let handler_fn = adapt_subscriber_handler(Box::new(OkHandler));
+        let message = diport::Message::new("test-ok", vec![]);
+        let result = handler_fn(message).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
+        assert_eq!(result.error_summary(), None);
+    }
+
+    #[tokio::test]
+    async fn adapt_maps_err_to_reject() {
+        let handler_fn = adapt_subscriber_handler(Box::new(ErrHandler));
+        let message = diport::Message::new("test-err", vec![]);
+        let result = handler_fn(message).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Reject);
+        // anti-vacuity：reject 携 permanent error 摘要，与 ack 的 None 不同。
+        assert_eq!(result.error_summary(), Some("permanent error"));
+        assert_ne!(result.error_summary(), None);
     }
 }

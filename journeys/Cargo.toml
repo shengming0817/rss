@@ -41,6 +41,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 # durable 拓扑 journey（`integration` feature）：PgStore/PgEmitter/PgOutbox/PgInboxStore 端到端闭环。
 postgres = { path = "../adapters/postgres" }
+# #1171 §6：AMQP at-least-once journey（`integration` feature）——AmqpSubscriber/AmqpPublisher 真 broker
+# 驱动 run_consumer_ackable。无 integration feature 时 amqp 退化为 sealed-marker 签名壳（非本文件编译）。
+amqp = { path = "../adapters/amqp" }
 # F6：durable journey 经 payload 解码关联本轮 session-created entry（F1 后 idem_key = 独立 EventId ≠ session_id）。
 serde_json = { workspace = true }
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
@@ -53,4 +56,4 @@ testkit = { path = "../crates/testkit" }
 # durable 拓扑 journey（identity_login_audit_durable_journey.rs）需真实 postgres——默认不编译/不跑，
 # 经 `--features integration` 显式启用。testkit/containers 经此传递激活 testcontainers（self-provision pg，
 # 无需手工预置；设 PGHOST 等则对接长存外部 pg，对齐 adapters/postgres 集成测试约定）。
-integration = ["testkit/containers"]
+integration = ["testkit/containers", "amqp/integration"]
