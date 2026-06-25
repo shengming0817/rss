@@ -25,6 +25,7 @@ mod outbox;
 mod pool;
 mod role_repo;
 mod saga_journal;
+mod secret_repo;
 mod session_uow;
 mod tx;
 
@@ -35,6 +36,7 @@ pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
 pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
+pub use secret_repo::PgSecretRepo;
 pub use session_uow::PgSessionUnitOfWork;
 
 #[cfg(all(test, feature = "integration"))]
@@ -44,7 +46,7 @@ mod integration_tests;
 mod test_pg;
 
 pub use inbox::PgInboxStore;
-pub use pool::{PgConfig, PgError, PgPassword};
+pub use pool::{PgConfig, PgError, PgPassword, PoolReadiness};
 // re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。
 pub use sqlx::postgres::PgSslMode;
 
@@ -82,7 +84,8 @@ mod smoke {
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
     //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionUnitOfWork on PgSessionUnitOfWork（真实 impl，#1083/#1192）+
-    //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）；去掉任一即编译失败（anti-vacuity）。
+    //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
+    //! SecretRepo on PgSecretRepo（真实 impl，#1274）；去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
@@ -93,6 +96,7 @@ mod smoke {
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
+    fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
@@ -109,6 +113,8 @@ mod smoke {
         // `PgSagaJournal: SagaJournal` + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
         assert_saga_journal(PhantomData::<super::PgSagaJournal>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
+        // `PgSecretRepo: SecretRepo` 真实 impl（非 edge proof）——secret 引用坐标仓储（#1274）。
+        assert_secret_repo(PhantomData::<super::PgSecretRepo>);
     }
 
     #[test]

@@ -83,6 +83,9 @@ impl From<SettingsError> for SettingsServiceError {
             // 敏感 key 拒绝与格式非法同属 4xx 客户端键错误（域层保留 SensitiveKey 具体语义供日志/诊断）。
             SettingsError::KeyInvalid | SettingsError::SensitiveKey => Self::InvalidKey,
             SettingsError::PercentageOutOfRange => Self::PercentageOutOfRange,
+            // secret 键 / 引用格式错误：同属 4xx 客户端输入错误（secret path 不走 config service 处理路径，
+            // 此分支为 From impl 穷举完整性守卫，不应在 config 发布流程中命中）。
+            SettingsError::SecretKeyInvalid | SettingsError::SecretRefInvalid => Self::InvalidKey,
         }
     }
 }
@@ -111,6 +114,12 @@ fn wire_version(version: u64) -> i64 {
     i64::try_from(version).unwrap_or(i64::MAX)
 }
 
+/// 不透明 flag 仓储封装（newtype funnel，Hard）。
+///
+/// `FlagStore` trait 保持 `pub(crate)`；外部组合根经 [`crate::empty_flag_store`] 构造此 box，
+/// 再传给 [`SettingsService::with_postgres`]——无需在外部 crate 命名 `FlagStore` trait。
+pub struct FlagStoreBox(pub(crate) Box<dyn FlagStore>);
+
 /// settings 应用服务。必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）。
 ///
 /// 读路径经 [`ConfigRepo`]（`configs`）；写路径（publish / rollback）经 **co-tx** [`ConfigUnitOfWork`]
@@ -124,11 +133,28 @@ pub struct SettingsService {
 }
 
 impl SettingsService {
-    /// 构造（必填位置参注入读仓储 + 写 co-tx UoW + clock）。`pub(crate)`：`flags` 为域内 [`FlagStore`]，不外泄；
-    /// 开发 / 测试经 `with_seed`（in-mem）构造；生产组合根经后续 Join 注入真实 postgres adapter
-    /// （`PgConfigRepo` + `PgConfigUnitOfWork`）——届时新增非门控 `pub` 构造器（#1272）。
+    /// 生产构造器（非门控 `pub`，组合根注入真实 postgres provider）。
     ///
-    /// # Future：生产构造器（注入真实 postgres provider + flag store）留组合根 Join，届时新增非门控构造器。
+    /// `flags` 为域内 `FlagStore` newtype，经 [`crate::empty_flag_store`] 构造后传入；
+    /// `clock` 是构造器位置参（rust-standards §Clock 构造器位置参），生产传 `SystemClock`。
+    ///
+    /// `flags` 类型使用不透明封装 [`FlagStoreBox`]——调用方无需知道 `FlagStore` trait（`pub(crate)`）。
+    pub fn with_postgres(
+        configs: Box<DynConfigRepo<'static>>,
+        writer: Box<DynConfigUnitOfWork<'static>>,
+        flags: FlagStoreBox,
+        clock: Box<dyn Clock>,
+    ) -> Self {
+        Self {
+            configs,
+            writer,
+            flags: flags.0,
+            clock,
+        }
+    }
+
+    /// 构造（必填位置参注入读仓储 + 写 co-tx UoW + clock）。`pub(crate)`：`flags` 为域内 [`FlagStore`]，不外泄；
+    /// 开发 / 测试经 `with_seed`（in-mem）构造；生产组合根经 [`Self::with_postgres`] 注入真实 postgres adapter。
     #[cfg(any(test, feature = "seed-data"))]
     pub(crate) fn new(
         configs: Box<DynConfigRepo<'static>>,
@@ -357,8 +383,9 @@ impl Domain for SettingsDomain {
         //   rb.mount_primary(PrimaryRoute { method, path, contract_id, opt_out }, handler)
         // 挂真实 axum 路由（settings.config-publish 鉴权由 listener auth plan 承载，无 Public 降级）。
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, Ok)?;
-        // pending #1272：接 postgres ConfigRepo 生产 wiring 时注册 configs_ready readiness probe（postgres 不可用
-        // 时不应 ready；本 PR #1249 仅落 adapter，生产组合根 wiring + HTTP 挂载留 Join）。
+        // configs_ready readiness probe 由组合根（bins/rss·server 的 wire_settings）经 registry.probe() 注册
+        // （持有 PgStore 的组合根决定 probe 生命周期，Domain::init 保持声明式、不做 I/O）。
+        // 生产 HTTP 挂载留 Join #1017（生产 run() 接 wire_settings 见 #1309）。
         Ok(())
     }
 }
@@ -940,5 +967,56 @@ mod tests {
             val == Some("a".to_string()) || val == Some("b".to_string()),
             "最终值是某个胜者的值"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // with_postgres 构造器 + empty_flag_store 工厂签名锁（fn-pointer smoke）
+    // ---------------------------------------------------------------------------
+
+    /// `with_postgres` 接受 in-mem box 后可正常 publish v1（end-to-end 构造器 smoke）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn with_postgres_constructs_and_publishes() {
+        let store = new_config_store();
+        let capture = CapturingEmitter::default();
+        let svc = SettingsService::with_postgres(
+            DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
+            FlagStoreBox(Box::new(InMemFlagStore::new())),
+            Box::new(FixedClock(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+            )),
+        );
+        let resp = svc
+            .publish_config(tenant(), publish_req("app.smoke", "v1-value"))
+            .await
+            .expect("publish ok");
+        assert_eq!(resp.data.version, 1);
+        assert_eq!(resp.data.key, "app.smoke");
+
+        let facts = emitted_facts(&capture);
+        assert_eq!(facts.len(), 1, "with_postgres 路径应发射一条 outbox fact");
+        assert_eq!(facts[0].payload.version, 1);
+    }
+
+    /// `with_postgres` 函数指针签名锁（fn-pointer 不调用 body，仅断言签名稳定）。
+    #[test]
+    #[allow(clippy::type_complexity)]
+    // incidental: 预存 type_complexity（函数指针类型用于签名锁定测试，不可拆分为 type alias 而不改变语义）。
+    fn with_postgres_fn_pointer_locks_signature() {
+        let _lock: fn(
+            Box<DynConfigRepo<'static>>,
+            Box<DynConfigUnitOfWork<'static>>,
+            FlagStoreBox,
+            Box<dyn Clock>,
+        ) -> SettingsService = SettingsService::with_postgres;
+        let _ = _lock;
+    }
+
+    /// `empty_flag_store` 函数指针签名锁（fn-pointer smoke）。
+    #[test]
+    fn empty_flag_store_fn_pointer_locks_signature() {
+        let _lock: fn() -> FlagStoreBox = crate::empty_flag_store;
+        let _ = _lock;
     }
 }

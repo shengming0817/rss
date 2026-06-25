@@ -25,7 +25,8 @@ use diport::{
     FencedWriter, FencedWriterError, JournalEntry, LeaderElector, LeaderElectorError, LeaderId,
     LeaseToken, Message, MessageId, MessageStream, OutboxEmitError, OutboxEmitter,
     OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, SagaId,
-    SagaJournal, SagaJournalError, SaveOutcome, Subscriber, SubscriberError, Topic, WriteOutcome,
+    SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate, SecretMaterial, SecretResolver,
+    SecretResolverError, Subscriber, SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -607,6 +608,97 @@ impl OwnerCheckpointStore for MemCheckpointStore {
     }
 }
 
+// ── MemSecretResolver：in-mem secret 解析替身（journey / e2e / 单测用）─────────────────────────
+
+/// `MemSecretResolver` 内部 store 类型别名（key = (tenant_uuid_str, store_id, key)；value = raw bytes）。
+type SecretStoreMap = std::collections::HashMap<(String, String, String), Vec<u8>>;
+
+/// in-mem secret 解析端口（impl [`diport::SecretResolver`]）：按 `(tenant_uuid, store_id, key)` 命中
+/// 返 [`SecretMaterial`]，未命中返 [`SecretResolverError::NotFound`]。
+///
+/// 仅供测试 / journey 使用——不在生产组合根注入（provider 为 Vault / AWS SM 等 adapter）。
+///
+/// 附调试旋钮（[`MemSecretResolver::set_unreachable`]）：置位后所有 resolve 返回
+/// [`SecretResolverError::StoreUnreachable`]，用于验证 fail-closed 路径。
+///
+/// 附调试旋钮（[`MemSecretResolver::set_forbidden`]）：置位后所有 resolve 返回
+/// [`SecretResolverError::Forbidden`]，用于验证 IAM 拒绝路径。
+///
+/// # 安全语义
+///
+/// 设计与 [`diport::SecretMaterial`] 同边界：材料字节写入 store 后不存在 owned clone 路径（HashMap
+/// 存储 `Vec<u8>`，`resolve` 经 `SecretMaterial::new(bytes.clone())` 新建，drop 触发 `ZeroizeOnDrop`）。
+#[derive(Default)]
+pub struct MemSecretResolver {
+    /// key = (tenant_uuid_str, store_id, secret_key)；value = raw bytes。
+    store: Arc<Mutex<SecretStoreMap>>,
+    /// 旋钮：置位后所有 resolve 返 `StoreUnreachable`。
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
+    /// 旋钮：置位后所有 resolve 返 `Forbidden`。
+    forbidden: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MemSecretResolver {
+    /// 新建空 resolver（无预设 secret，默认可达且未 forbidden）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 向 store 注入一条 secret（覆盖写）。调用方持有字节，resolver 存 clone。
+    ///
+    /// `tenant`：租户隔离键（`store_id` + `key` 同 tenant 不同值互不干扰）。
+    pub fn insert(&self, tenant: vocab::TenantId, store_id: &str, key: &str, bytes: Vec<u8>) {
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            (
+                tenant.as_uuid().to_string(),
+                store_id.to_string(),
+                key.to_string(),
+            ),
+            bytes,
+        );
+    }
+
+    /// 打开 `StoreUnreachable` 旋钮（置位后所有 resolve 返 Err）。
+    pub fn set_unreachable(&self, v: bool) {
+        self.unreachable
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 打开 `Forbidden` 旋钮（置位后所有 resolve 返 Err）。
+    pub fn set_forbidden(&self, v: bool) {
+        self.forbidden
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl SecretResolver for MemSecretResolver {
+    async fn resolve(
+        &self,
+        tenant: vocab::TenantId,
+        coord: &SecretCoordinate,
+    ) -> Result<SecretMaterial, SecretResolverError> {
+        // 旋钮检查（fail-closed 优先于命中查询）。
+        if self.unreachable.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(SecretResolverError::store_unreachable(
+                std::io::Error::other("mem-resolver: store marked unreachable"),
+            ));
+        }
+        if self.forbidden.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(SecretResolverError::Forbidden);
+        }
+        let g = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let lookup_key = (
+            tenant.as_uuid().to_string(),
+            coord.store_id().to_string(),
+            coord.key().to_string(),
+        );
+        match g.get(&lookup_key) {
+            Some(bytes) => Ok(SecretMaterial::new(bytes.clone())),
+            None => Err(SecretResolverError::NotFound),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,5 +1189,111 @@ mod tests {
             .expect("checkpoint 应存在");
         assert_eq!(cp.offset, Lsn::new(20));
         assert_eq!(cp.version, CheckpointVersion::new(2));
+    }
+
+    // ── MemSecretResolver smoke ───────────────────────────────────────────────
+
+    const STORE_ID: &str = "mem-store";
+    const SECRET_KEY: &str = "db/password";
+
+    #[allow(clippy::expect_used)]
+    fn resolver_tenant() -> TenantId {
+        TenantId::parse(CANON_TENANT).expect("canonical tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn sample_coord() -> SecretCoordinate {
+        SecretCoordinate::new(STORE_ID, SECRET_KEY, None)
+    }
+
+    /// 命中返回 material bytes（happy path）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_secret_resolver_hit_returns_material() {
+        let r = MemSecretResolver::new();
+        r.insert(
+            resolver_tenant(),
+            STORE_ID,
+            SECRET_KEY,
+            b"secret-value".to_vec(),
+        );
+        let mat = r
+            .resolve(resolver_tenant(), &sample_coord())
+            .await
+            .expect("resolve ok");
+        assert_eq!(mat.expose(), b"secret-value");
+    }
+
+    /// 未命中返回 NotFound。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_secret_resolver_miss_returns_not_found() {
+        let r = MemSecretResolver::new();
+        let err = r
+            .resolve(resolver_tenant(), &sample_coord())
+            .await
+            .expect_err("not found");
+        assert!(matches!(err, SecretResolverError::NotFound));
+    }
+
+    /// `set_unreachable(true)` 后返回 StoreUnreachable（fail-closed 旋钮）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_secret_resolver_unreachable_toggle() {
+        let r = MemSecretResolver::new();
+        r.insert(resolver_tenant(), STORE_ID, SECRET_KEY, b"x".to_vec());
+        r.set_unreachable(true);
+        let err = r
+            .resolve(resolver_tenant(), &sample_coord())
+            .await
+            .expect_err("unreachable");
+        assert!(matches!(err, SecretResolverError::StoreUnreachable { .. }));
+        // 关闭旋钮 → 恢复正常命中。
+        r.set_unreachable(false);
+        let mat = r
+            .resolve(resolver_tenant(), &sample_coord())
+            .await
+            .expect("ok after reset");
+        assert_eq!(mat.expose(), b"x");
+    }
+
+    /// `set_forbidden(true)` 后返回 Forbidden（IAM 拒绝旋钮）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_secret_resolver_forbidden_toggle() {
+        let r = MemSecretResolver::new();
+        r.insert(resolver_tenant(), STORE_ID, SECRET_KEY, b"x".to_vec());
+        r.set_forbidden(true);
+        let err = r
+            .resolve(resolver_tenant(), &sample_coord())
+            .await
+            .expect_err("forbidden");
+        assert!(matches!(err, SecretResolverError::Forbidden));
+    }
+
+    /// 租户隔离：tenant_a 的 secret 不被 tenant_b resolve。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_secret_resolver_tenant_isolation() {
+        let tenant_b = TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("tenant b");
+        let r = MemSecretResolver::new();
+        r.insert(
+            resolver_tenant(),
+            STORE_ID,
+            SECRET_KEY,
+            b"tenant-a-secret".to_vec(),
+        );
+        let err = r
+            .resolve(tenant_b, &sample_coord())
+            .await
+            .expect_err("tenant b not found");
+        assert!(matches!(err, SecretResolverError::NotFound));
+    }
+
+    /// 编译锁：MemSecretResolver impl SecretResolver（trait 约束满足）。
+    #[test]
+    fn mem_secret_resolver_impl_secret_resolver() {
+        fn _assert<T: SecretResolver>() {}
+        _assert::<MemSecretResolver>();
     }
 }

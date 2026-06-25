@@ -92,6 +92,7 @@ pub mod rate_limiter;
 // pub(crate) 与 PR214 pub-enum 错误不兼容）。
 mod redacted;
 pub mod saga_journal;
+pub mod secret_resolver;
 pub mod signer;
 pub mod subscriber;
 
@@ -131,6 +132,9 @@ pub use rate_limiter::{
 pub use redacted::RedactedSource;
 pub use saga_journal::{
     DynSagaJournal, JournalEntry, JournalStatus, SagaId, SagaJournal, SagaJournalError,
+};
+pub use secret_resolver::{
+    DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
 };
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
 pub use subscriber::{

@@ -12,8 +12,10 @@ workspace = true
 # impl diport::Signer（HashiCorp Vault Transit `sign`）。后端 HTTP 客户端经 feature 门控（default build 轻量、
 # 仍保 freeze smoke 类型断言），与 redis/s3/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守）。
 [dependencies]
-# 实现 diport 已冻 DI port trait（Signer + ManagedResource，native AFIT）。
+# 实现 diport 已冻 DI port trait（Signer + ManagedResource + SecretResolver，native AFIT）。
 diport = { path = "../../crates/diport" }
+# SecretResolver::resolve 签名中的 TenantId（tenant 隔离位置参，Hard）。
+vocab = { path = "../../crates/vocab" }
 # Transit 签名 HTTP 客户端（TLS-agnostic）：reqwest default-features=false 不绑 crypto provider——
 # TLS provider（rustls+ring，对齐 sqlx，避开 deny.toml openssl/aws-lc-sys/ring-license ban）与 roots 由
 # 组合根在 Join 阶段经 reqwest tls feature 选定后构造并注入预配置 Client（对标 s3 注入 aws Client 不配 TLS）。

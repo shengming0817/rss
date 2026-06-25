@@ -16,12 +16,21 @@
 pub mod auth_bridge;
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use base64::Engine as _;
+use diport::DynSecretResolver;
 use oidc::OidcProvider;
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
+use postgres::{PgConfig, PgPassword, PgSecretRepo, PgStore, PoolReadiness};
+use primitives::{
+    AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName, RequiredScheme,
+};
+use settings::{
+    SecretService, SettingsDomain, SettingsService, empty_flag_store,
+    ports::{DynConfigRepo, DynConfigUnitOfWork},
+};
+use vault::{TenantStoreAllowlist, VaultSecretResolver};
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -194,17 +203,218 @@ pub fn assemble_authed_routers(
     Ok(out)
 }
 
+// ── postgres 配置 wiring ─────────────────────────────────────────────────────────────────────
+
+/// 从注入的配置读取器构造 `PgConfig`（fail-fast：任一必填 env 缺失立即返 `Err`）。
+///
+/// 必填变量：
+/// - `RSS_PG_HOST` — postgres 主机（非空）。
+/// - `RSS_PG_PORT` — postgres 端口（非零 u16，默认 5432 需显式声明）。
+/// - `RSS_PG_DATABASE` — 数据库名（非空）。
+/// - `RSS_PG_USERNAME` — 连接用户（非空）。
+/// - `RSS_PG_PASSWORD` — 连接密码（非空）。
+///
+/// TLS 默认 `VerifyFull`（零信任）；生产须配私有 CA 证书（`PgConfig::with_ssl_root_cert` 待 Join #1017）。
+/// **禁止 localhost fallback**（生产配置规范，rust-standards §安全检查点）。
+pub(crate) fn build_pg_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PgConfig> {
+    let host = get("RSS_PG_HOST")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_HOST"))?;
+    let port_str = get("RSS_PG_PORT")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_PORT"))?;
+    let port: u16 = port_str.parse().with_context(|| {
+        format!("RSS_PG_PORT must be a valid port number (1-65535): {port_str}")
+    })?;
+    let database = get("RSS_PG_DATABASE")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_DATABASE"))?;
+    let username = get("RSS_PG_USERNAME")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_USERNAME"))?;
+    let password = get("RSS_PG_PASSWORD")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_PASSWORD"))?;
+
+    // PgConfig::new 存储参数；validate 在 PgStore::connect 内调用（pub(crate)）。
+    // 这里只做构造，连接时再 fail-fast（组合根在 wire_settings 中 connect）。
+    Ok(PgConfig::new(
+        host,
+        port,
+        database,
+        username,
+        PgPassword::new(password),
+    ))
+}
+
+/// 从 `std::env` 构造 `PgConfig`。
+pub fn build_pg_config() -> anyhow::Result<PgConfig> {
+    build_pg_config_from(|name| std::env::var(name).ok())
+}
+
+// ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
+
+/// 默认 Vault 请求超时（pre-GA 合理值；生产可经 env 覆盖，待 Join #1017）。
+const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 启动时安全警告（pre-GA 安全警告，Finding 6）：系统默认 TLS + 空 allowlist。
+// reason: tracing::warn! 宏展开在 clippy cognitive_complexity 计数时贡献额外节点，
+// 实际控制流简单（2 warn！+ 1 if），item-level carve-out（error-handling.md §Carve-out）。
+#[allow(clippy::cognitive_complexity)]
+fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
+    tracing::warn!(
+        reason = "system-default-tls",
+        "vault client using system-default TLS; production must configure rustls+ring (#1017)"
+    );
+    if stores.is_empty() {
+        tracing::warn!(
+            reason = "empty-allowlist",
+            "vault TenantStoreAllowlist is empty: all secret resolve calls will return Forbidden (fail-closed); populate allowlist for production (#1272)"
+        );
+    }
+}
+
+/// 从注入的配置读取器构造 `VaultSecretResolver`（fail-fast：必填 env 缺失立即返 `Err`）。
+///
+/// 必填变量：
+/// - `RSS_VAULT_ADDR` — Vault base URL（如 `https://vault.example:8200`）。
+/// - `RSS_VAULT_TOKEN` — Vault 认证 token（非空）。
+///
+/// mount 不再是全局 env——它是 **per-store 坐标**，随 `StoreBinding` 进 `TenantStoreAllowlist`（F1，
+/// 坐标模型单源）。**Pre-GA：`TenantStoreAllowlist` 为空**——无生产 secret reader，所有 resolve 返
+/// `Forbidden`（含 store binding 的 mount/prefix 配置加载待 #1272）。
+pub(crate) fn build_vault_resolver_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<VaultSecretResolver> {
+    let addr = get("RSS_VAULT_ADDR")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_VAULT_ADDR"))?;
+    let token = get("RSS_VAULT_TOKEN")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_VAULT_TOKEN"))?;
+
+    // Join #1017: 配置 TLS client（rustls + ring，对齐 sqlx）；当前传 Client::new()（pre-GA）。
+    let client = reqwest::Client::new();
+
+    // pre-GA 空 allowlist：无生产 secret reader → 所有 resolve fail-closed Forbidden（网络前拦截）。
+    // 待后续 issue 填充 TenantStoreAllowlist（per-store mount + prefix，#1272 follow-up）。
+    let stores = TenantStoreAllowlist::new(std::iter::empty())
+        .map_err(|e| anyhow::anyhow!("vault store allowlist config error: {e}"))?;
+
+    warn_vault_startup_security(&stores);
+
+    VaultSecretResolver::new(client, addr, token, DEFAULT_VAULT_TIMEOUT, stores)
+        .map_err(|e| anyhow::anyhow!("vault resolver config error: {e}"))
+}
+
+// ── ConfigsReadyProbe ─────────────────────────────────────────────────────────────────────────
+
+/// probe 探针稳定名（`ProbeName::parse` 校验合法字符；underscore_case，与 prometheus metric 约定一致）。
+const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
+
+/// postgres 连接池 readiness 探针——报告配置存储（postgres pool）当前状态。
+///
+/// `check`（sync，non-blocking）：读 `PgStore::pool_readiness()` 原子计数器，无 I/O：
+/// - `PoolReadiness::Ready` → `Healthy`（`detail = "ready"`）
+/// - `PoolReadiness::Saturated` → `Degraded`（`detail = "saturated"`）
+/// - `PoolReadiness::Down` → `Unhealthy`（`detail = "down"`）
+///
+/// `detail` 固定 `&'static str` const（`HealthCheck::detail` 类型约束，禁夹带 runtime PII）。
+pub struct ConfigsReadyProbe {
+    store: Arc<PgStore>,
+    /// 探针自报名（重建 `HealthCheck` 时 registry 使用声明名权威，此字段保留供 debug inspect）。
+    name: ProbeName,
+}
+
+impl ConfigsReadyProbe {
+    /// 构造 `ConfigsReadyProbe`。
+    ///
+    /// `name` 应使用 [`CONFIGS_READY_PROBE_NAME`] 常量以确保与 registry 声明名一致。
+    #[allow(clippy::expect_used)]
+    pub fn new(store: Arc<PgStore>) -> Self {
+        // reason: CONFIGS_READY_PROBE_NAME 是 kebab-case const literal，ProbeName::parse 仅失败于
+        // 非法字符；const 已手工验证，expect 是构造期 programmer error（此处不可恢复）。
+        let name = ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
+        Self { store, name }
+    }
+}
+
+/// `PoolReadiness` → `(HealthStatus, detail)`（纯函数，可独立测试）。
+fn readiness_to_health(r: PoolReadiness) -> (HealthStatus, &'static str) {
+    match r {
+        PoolReadiness::Ready => (HealthStatus::Healthy, "ready"),
+        PoolReadiness::Saturated => (HealthStatus::Degraded, "saturated"),
+        PoolReadiness::Down => (HealthStatus::Unhealthy, "down"),
+        // reason: PoolReadiness 是 non_exhaustive；未知变体 fail-closed（Unhealthy）。
+        _ => (HealthStatus::Unhealthy, "unknown"),
+    }
+}
+
+impl bootstrap::HealthProbe for ConfigsReadyProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = readiness_to_health(self.store.pool_readiness());
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+// ── settings + secret wiring ─────────────────────────────────────────────────────────────────
+
+/// 接线 settings 域：构造 `SettingsService` + `SecretService`，注册 `ConfigsReadyProbe`。
+///
+/// - `store`：已建 `PgStore`（`Arc` 共享给 probe + repo）。
+/// - `registry`：bootstrap registry，用于注册 `ConfigsReadyProbe`（`probe` 方法）。
+///
+/// 返回 `(SettingsService, SecretService)` 供组合根继续组装（#1017 绑 domain + serve）。
+///
+/// # 注意
+///
+/// 当前 `empty_flag_store()` 返回空 in-mem store（`seed-data` feature，fail-closed 语义）；
+/// 生产 flag store 待 #1120。
+pub async fn wire_settings(
+    store: Arc<PgStore>,
+    registry: &mut bootstrap::Registry,
+) -> anyhow::Result<(SettingsService, SecretService)> {
+    // 注册 configs_ready probe（bootstrap 声明名权威，重建 HealthCheck 时用声明名）。
+    let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
+        .context("configs_ready probe name is invalid")?;
+    registry
+        .probe(probe_name, Box::new(ConfigsReadyProbe::new(store.clone())))
+        .context("register configs_ready probe")?;
+
+    // 构造 vault resolver（pre-GA 空 allowlist → 所有 resolve fail-closed Forbidden）。
+    let resolver = build_vault_resolver_from(|name| std::env::var(name).ok())
+        .context("vault resolver config")?;
+
+    // PgConfigRepo / PgSecretRepo 持 pool clone（内部 Arc，轻量），接受 &PgStore。
+    let config_repo_r = postgres::PgConfigRepo::new(&store, Box::new(SystemClock));
+    let config_repo_w = postgres::PgConfigRepo::new(&store, Box::new(SystemClock));
+    let pg_secret_repo = PgSecretRepo::new(&store);
+
+    let settings_svc = SettingsService::with_postgres(
+        DynConfigRepo::new_box(config_repo_r),
+        DynConfigUnitOfWork::new_box(config_repo_w),
+        empty_flag_store(),
+        Box::new(SystemClock),
+    );
+
+    let secret_svc = SecretService::with_postgres(
+        settings::ports::DynSecretRepo::new_box(pg_secret_repo),
+        DynSecretResolver::new_box(resolver),
+        Box::new(SystemClock),
+    );
+
+    Ok((settings_svc, secret_svc))
+}
+
 /// 生产组合根入口：构造 provider → compose 域 → 装配认证接线。
 ///
-/// 本 PR（#1198）域图为空；socket bind / serve / 信号优雅关停 / 全量生产域注册 = **Join #1017**。
+/// settings + secret wiring 待 Join #1017（`wire_settings` 已就位，`run` 内待接线）。
+/// socket bind / serve / 信号优雅关停 = **Join #1017**。
 pub fn run() -> anyhow::Result<()> {
     let provider = Arc::new(build_provider()?);
-    let registry = bootstrap::compose(&[]).context("compose domains")?;
+    // settings domain 已注册（#1272/#1274）；wire_settings 在 Join #1017 接线（需异步 PgStore::connect）。
+    let registry = bootstrap::compose(&[&SettingsDomain]).context("compose domains")?;
     let _authed = assemble_authed_routers(registry, provider)?;
     // TODO(#1017): 消费 `_authed`——对每个 `(listener, AuthenticatedRoutes)` 调 `.into_make_service()`（**唯一**
     //   bindable 出口，ROUTE-AUTH-FUNNEL-02）→ `axum::serve(<该 listener 的 socket>, make_service)`；+ 信号优雅
-    //   关停 + 全量生产域注册（identity/settings/audit/...）。`_authed` 当前被 drop（bind 点未接线）；接线时
-    //   勿绕开 `into_make_service` 改走裸 router 路径（类型层已封死，见 httpserve::routes）。
+    //   关停 + 全量生产域注册（identity/settings/audit/...）+ PgStore::connect + run_migrations + wire_settings
+    //   （生产 settings/secret wiring，C2/#1309）。`_authed` 当前被 drop（bind 点未接线）；接线时勿绕开
+    //   `into_make_service` 改走裸 router 路径（类型层已封死，见 httpserve::routes）。
     Ok(())
 }
 
@@ -369,5 +579,167 @@ mod tests {
         let registry = bootstrap::compose(&[]).expect("compose empty");
         let routers = assemble_authed_routers(registry, provider).expect("assemble ok");
         assert!(routers.is_empty(), "空域图 ⇒ 无 per-listener router");
+    }
+
+    // ── build_pg_config_from 测试 ──────────────────────────────────────────────────────────
+
+    fn full_pg_get(k: &str) -> Option<String> {
+        match k {
+            "RSS_PG_HOST" => Some("pg.internal".to_string()),
+            "RSS_PG_PORT" => Some("5432".to_string()),
+            "RSS_PG_DATABASE" => Some("rss_db".to_string()),
+            "RSS_PG_USERNAME" => Some("rss_user".to_string()),
+            "RSS_PG_PASSWORD" => Some("s3cr3t".to_string()),
+            _ => None,
+        }
+    }
+
+    /// 全必填 env 均有 → 构造成功。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_from_happy() {
+        let cfg = build_pg_config_from(full_pg_get).expect("all required vars present");
+        // 验证 host 被记录（不泄露 password，只断言端口和 host 可 debug 比较）。
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("pg.internal"), "host 在 debug 输出中");
+        assert!(!debug.contains("s3cr3t"), "password 不在 debug 输出中");
+    }
+
+    /// `RSS_PG_HOST` 缺失 → Err 含变量名（fail-fast）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_from_missing_host() {
+        let get = |k: &str| {
+            if k == "RSS_PG_HOST" {
+                None
+            } else {
+                full_pg_get(k)
+            }
+        };
+        let err = build_pg_config_from(get).expect_err("host required");
+        assert!(
+            err.to_string().contains("RSS_PG_HOST"),
+            "error contains var name"
+        );
+    }
+
+    /// `RSS_PG_PASSWORD` 缺失 → Err 含变量名（fail-fast）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_from_missing_password() {
+        let get = |k: &str| {
+            if k == "RSS_PG_PASSWORD" {
+                None
+            } else {
+                full_pg_get(k)
+            }
+        };
+        let err = build_pg_config_from(get).expect_err("password required");
+        assert!(
+            err.to_string().contains("RSS_PG_PASSWORD"),
+            "error contains var name"
+        );
+    }
+
+    /// `RSS_PG_PORT` 缺失 → Err 含变量名（fail-fast）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_from_missing_port() {
+        let get = |k: &str| {
+            if k == "RSS_PG_PORT" {
+                None
+            } else {
+                full_pg_get(k)
+            }
+        };
+        let err = build_pg_config_from(get).expect_err("port required");
+        assert!(
+            err.to_string().contains("RSS_PG_PORT"),
+            "error contains var name"
+        );
+    }
+
+    /// 默认 TLS 模式 = VerifyFull（零信任；禁 localhost 回退）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_defaults_ssl_verify_full() {
+        use postgres::PgSslMode;
+        let cfg = build_pg_config_from(full_pg_get).expect("ok");
+        // PgConfig 的 ssl_mode 字段私有，经 connect_options() 读取；此处通过 debug 输出检查（适度）。
+        // VerifyFull 是安全默认值（rust-standards §安全检查点）。
+        let debug = format!("{cfg:?}");
+        assert!(
+            debug.contains("VerifyFull"),
+            "默认 TLS = VerifyFull，但 debug 输出为: {debug}"
+        );
+        // 通过 fn-pointer smoke 绑定确认 PgSslMode::VerifyFull 变体可构造（Anti-vacuity）。
+        let _mode: PgSslMode = PgSslMode::VerifyFull;
+    }
+
+    // ── ConfigsReadyProbe / readiness_to_health 测试 ─────────────────────────────────────
+
+    /// `PoolReadiness::Ready` → `(Healthy, "ready")`。
+    #[test]
+    fn configs_ready_maps_ready_to_healthy() {
+        let (status, detail) = readiness_to_health(PoolReadiness::Ready);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert_eq!(detail, "ready");
+    }
+
+    /// `PoolReadiness::Down` → `(Unhealthy, "down")`。
+    #[test]
+    fn configs_ready_maps_down_to_unhealthy() {
+        let (status, detail) = readiness_to_health(PoolReadiness::Down);
+        assert_eq!(status, HealthStatus::Unhealthy);
+        assert_eq!(detail, "down");
+    }
+
+    /// `PoolReadiness::Saturated` → `(Degraded, "saturated")`。
+    #[test]
+    fn configs_ready_maps_saturated_to_degraded() {
+        let (status, detail) = readiness_to_health(PoolReadiness::Saturated);
+        assert_eq!(status, HealthStatus::Degraded);
+        assert_eq!(detail, "saturated");
+    }
+
+    /// detail 是 `&'static str`（编译期类型约束；类型已由 HealthCheck::detail() -> &'static str 守）。
+    #[test]
+    fn configs_ready_detail_is_static() {
+        // `readiness_to_health` 返回 `(HealthStatus, &'static str)`——类型级 Hard 约束。
+        // 赋值为 `&'static str` 类型绑定即证明（如果改返 String，此处编译失败）。
+        let (_status, detail): (HealthStatus, &'static str) =
+            readiness_to_health(PoolReadiness::Ready);
+        let _ = detail;
+    }
+
+    /// `CONFIGS_READY_PROBE_NAME` 是合法 `ProbeName`（`ProbeName::parse` 校验 kebab-case 字符集）。
+    /// registry.probe 接受注册 + 重复注册返 Err（probe 名唯一性守）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn configs_ready_registers_and_is_unique() {
+        // reason: CONFIGS_READY_PROBE_NAME 是 const literal，parse 只可能在字符非法时失败。
+        let probe_name_a =
+            primitives::ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
+        let probe_name_b =
+            primitives::ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
+        let mut registry = bootstrap::compose(&[&SettingsDomain]).expect("compose settings");
+
+        // 注册一个实现了 HealthProbe 的占位 probe（不需要 PgStore，不连 DB）。
+        struct NullProbe;
+        impl bootstrap::HealthProbe for NullProbe {
+            fn check(&self) -> HealthCheck {
+                let name = primitives::ProbeName::parse("configs_ready").expect("valid");
+                HealthCheck::new(name, HealthStatus::Healthy, "null")
+            }
+        }
+
+        // 第一次注册成功。
+        registry
+            .probe(probe_name_a, Box::new(NullProbe))
+            .expect("first register ok");
+
+        // 重复注册同名 probe → Err（bootstrap registry 守唯一性）。
+        let result = registry.probe(probe_name_b, Box::new(NullProbe));
+        assert!(result.is_err(), "duplicate probe name should be rejected");
     }
 }

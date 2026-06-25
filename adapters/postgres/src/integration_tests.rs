@@ -2057,6 +2057,542 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     Ok(())
 }
 
+// ── PgSecretRepo：secret 引用坐标仓储集成测试（#1274）──────────────────────────
+//
+// ts1:  save → find round-trip（全字段回环）
+// ts1b: ref_version=None round-trip
+// ts2:  find_version 历史（精确版本）
+// ts3:  CAS 冲突（陈旧 + 跳版 → VersionConflict；恰 max+1 成功）
+// ts4:  delete tombstone + 幂等（latest_version 含 tombstone；历史行保留；不存在 key → no-op）
+// ts5:  storage 错误通道（关池 → SecretRepoError::Storage）
+// ts6:  跨租户隔离（find / find_version / delete 互不影响）
+// ts7:  delete + republish 版本不重置（version 单调）
+// ts8:  material-never-persisted 断言（information_schema.columns 列集校验）
+
+use settings::ports::{SecretEntry, SecretKey, SecretRepo, SecretRepoError, StoreId};
+
+use crate::PgSecretRepo;
+
+/// secret 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值）。
+const SECRET_TENANT_A: &str = COTX_TENANT_A;
+/// 第二租户（跨租户隔离 ts6）。
+const SECRET_TENANT_B: &str = CONFIG_TENANT_B;
+
+/// setup：应用 migration（含 secret_refs 表），清空 secret_refs（防测试间污染）。
+async fn setup_secret(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    store.run_migrations().await?;
+    sqlx::query("DELETE FROM secret_refs")
+        .execute(&store.pool)
+        .await?;
+    Ok(())
+}
+
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+fn secret_tenant_a() -> TenantId {
+    TenantId::parse(SECRET_TENANT_A).unwrap()
+}
+
+/// 构造 SecretEntry（经 `SecretEntry::hydrate` 跨 crate pub funnel）。
+#[allow(clippy::unwrap_used)]
+fn make_secret_entry(
+    key: &str,
+    store_id: &str,
+    ref_key: &str,
+    ref_version: Option<&str>,
+    version: u64,
+    tenant: TenantId,
+) -> SecretEntry {
+    SecretEntry::hydrate(
+        SecretKey::parse(key).unwrap(),
+        StoreId::parse(store_id).unwrap(),
+        ref_key,
+        ref_version.map(|s| s.to_string()),
+        tenant,
+        version,
+    )
+}
+
+/// ts1：save → find round-trip（store_id / ref_key / ref_version / version / tenant 全字段正确）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts1_secret_save_find_roundtrip() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+    let key = SecretKey::parse("myapp/db-password").unwrap();
+
+    // 未写入 → None。
+    assert!(repo.find(tenant, &key).await?.is_none(), "未写入 → None");
+
+    repo.save(
+        tenant,
+        make_secret_entry(
+            "myapp/db-password",
+            "vault",
+            "secret/data/myapp",
+            Some("v2"),
+            1,
+            tenant,
+        ),
+    )
+    .await?;
+
+    let found = repo.find(tenant, &key).await?.unwrap();
+    assert_eq!(found.key().as_str(), "myapp/db-password", "key 回环");
+    assert_eq!(
+        found.secret_ref().store_id().as_str(),
+        "vault",
+        "store_id 回环"
+    );
+    assert_eq!(
+        found.secret_ref().ref_key(),
+        "secret/data/myapp",
+        "ref_key 回环"
+    );
+    assert_eq!(
+        found.secret_ref().ref_version(),
+        Some("v2"),
+        "ref_version 回环"
+    );
+    assert_eq!(found.version(), 1, "version 回环");
+    assert_eq!(found.tenant(), tenant, "tenant 回环（tenant-correct）");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts1b：ref_version=None（NULL=latest）round-trip。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+
+    repo.save(
+        tenant,
+        make_secret_entry(
+            "myapp/api-key",
+            "k8s-secrets",
+            "ns/my-secret",
+            None,
+            1,
+            tenant,
+        ),
+    )
+    .await?;
+
+    let found = repo
+        .find(tenant, &SecretKey::parse("myapp/api-key").unwrap())
+        .await?
+        .unwrap();
+    assert_eq!(
+        found.secret_ref().ref_version(),
+        None,
+        "ref_version=None 回环"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts2：find_version 历史（精确版本；缺失版本 → None）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts2_secret_find_version_history() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+    let key = SecretKey::parse("myapp/db-pass").unwrap();
+
+    repo.save(
+        tenant,
+        make_secret_entry("myapp/db-pass", "vault", "secret/v1", None, 1, tenant),
+    )
+    .await?;
+    repo.save(
+        tenant,
+        make_secret_entry(
+            "myapp/db-pass",
+            "vault",
+            "secret/v2",
+            Some("rev-2"),
+            2,
+            tenant,
+        ),
+    )
+    .await?;
+
+    // find 取最高版本。
+    let latest = repo.find(tenant, &key).await?.unwrap();
+    assert_eq!(latest.version(), 2, "find = max version");
+    assert_eq!(latest.secret_ref().ref_key(), "secret/v2");
+
+    // find_version 精确历史。
+    let v1 = repo.find_version(tenant, &key, 1).await?.unwrap();
+    assert_eq!(v1.secret_ref().ref_key(), "secret/v1", "find_version(1)");
+    let v2 = repo.find_version(tenant, &key, 2).await?.unwrap();
+    assert_eq!(
+        v2.secret_ref().ref_version(),
+        Some("rev-2"),
+        "find_version(2)"
+    );
+
+    // 缺失版本 → None。
+    assert!(
+        repo.find_version(tenant, &key, 9).await?.is_none(),
+        "缺失版本 → None"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts3：CAS——陈旧版本与跳版均 VersionConflict；恰 max+1 成功。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts3_secret_save_cas_conflict() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+
+    repo.save(
+        tenant,
+        make_secret_entry("myapp/token", "vault", "secret/tok", None, 1, tenant),
+    )
+    .await?;
+
+    // 陈旧：再写 v1 → VersionConflict。
+    assert!(
+        matches!(
+            repo.save(
+                tenant,
+                make_secret_entry("myapp/token", "vault", "secret/tok-b", None, 1, tenant),
+            )
+            .await,
+            Err(SecretRepoError::VersionConflict)
+        ),
+        "陈旧版本 → VersionConflict"
+    );
+
+    // 跳版：max=1，写 v3 → VersionConflict（非 max+1）。
+    assert!(
+        matches!(
+            repo.save(
+                tenant,
+                make_secret_entry("myapp/token", "vault", "secret/tok-c", None, 3, tenant),
+            )
+            .await,
+            Err(SecretRepoError::VersionConflict)
+        ),
+        "跳版 → VersionConflict"
+    );
+
+    // 恰 max+1：v2 成功。
+    repo.save(
+        tenant,
+        make_secret_entry("myapp/token", "vault", "secret/tok-v2", None, 2, tenant),
+    )
+    .await?;
+    assert_eq!(
+        repo.find(tenant, &SecretKey::parse("myapp/token").unwrap())
+            .await?
+            .unwrap()
+            .secret_ref()
+            .ref_key(),
+        "secret/tok-v2"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts4：delete tombstone + 幂等（find → None；latest_version 含 tombstone；历史行保留；再删 no-op；
+/// 不存在 key → no-op）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+    let key = SecretKey::parse("myapp/cred").unwrap();
+
+    repo.save(
+        tenant,
+        make_secret_entry("myapp/cred", "vault", "secret/cred", None, 1, tenant),
+    )
+    .await?;
+    repo.save(
+        tenant,
+        make_secret_entry(
+            "myapp/cred",
+            "vault",
+            "secret/cred-v2",
+            Some("r2"),
+            2,
+            tenant,
+        ),
+    )
+    .await?;
+
+    // delete → tombstone（v3）。
+    repo.delete(tenant, &key).await?;
+    assert!(
+        repo.find(tenant, &key).await?.is_none(),
+        "delete 后 find None（latest 为 tombstone）"
+    );
+
+    // 历史行保留：find_version 可读 v1/v2（audit 友好）。
+    assert_eq!(
+        repo.find_version(tenant, &key, 1)
+            .await?
+            .unwrap()
+            .secret_ref()
+            .ref_key(),
+        "secret/cred",
+        "历史 v1 保留"
+    );
+    assert_eq!(
+        repo.find_version(tenant, &key, 2)
+            .await?
+            .unwrap()
+            .secret_ref()
+            .ref_key(),
+        "secret/cred-v2",
+        "历史 v2 保留"
+    );
+
+    // tombstone 版本（v3）本身 find_version 返 None（deleted=true）。
+    assert!(
+        repo.find_version(tenant, &key, 3).await?.is_none(),
+        "tombstone v3 不可读"
+    );
+
+    // latest_version 含 tombstone（= 3），version 不重置。
+    assert_eq!(repo.latest_version(tenant, &key).await?, Some(3));
+
+    // 幂等：latest 已 tombstone → 再删 no-op（latest_version 不变）。
+    repo.delete(tenant, &key).await?;
+    assert_eq!(
+        repo.latest_version(tenant, &key).await?,
+        Some(3),
+        "再删幂等：不追加新 tombstone"
+    );
+
+    // 不存在 key → no-op（无 panic / 无错误）。
+    let phantom = SecretKey::parse("myapp/nonexistent").unwrap();
+    repo.delete(tenant, &phantom).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts5：storage 错误通道——关池后 find 返回 `SecretRepoError::Storage`（基础设施错误分层映射）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts5_secret_find_maps_storage_error() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+
+    // 关池（PgSecretRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 → Storage。
+    store.shutdown().await?;
+    let result = repo
+        .find(tenant, &SecretKey::parse("myapp/k").unwrap())
+        .await;
+    assert!(
+        matches!(result, Err(SecretRepoError::Storage(_))),
+        "关池后 find 应映射为 SecretRepoError::Storage"
+    );
+
+    Ok(())
+}
+
+/// ts6：跨租户隔离——tenant A 的 secret 对 tenant B 不可见；各自独立版本空间；delete 互不影响。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts6_secret_cross_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant_a = secret_tenant_a();
+    let tenant_b = TenantId::parse(SECRET_TENANT_B).unwrap();
+    let key = SecretKey::parse("shared/key").unwrap();
+
+    // tenant A 写 v1。
+    repo.save(
+        tenant_a,
+        make_secret_entry("shared/key", "vault-a", "secret/a", None, 1, tenant_a),
+    )
+    .await?;
+
+    // tenant B 读同 key → None（find / find_version 均不泄漏 A 的数据）。
+    assert!(
+        repo.find(tenant_b, &key).await?.is_none(),
+        "tenant B 不应看到 tenant A 的 secret（find 隔离）"
+    );
+    assert!(
+        repo.find_version(tenant_b, &key, 1).await?.is_none(),
+        "tenant B find_version 同样隔离"
+    );
+
+    // tenant B 写同 key v1（独立版本空间，不受 A 的 v1 影响）→ 成功。
+    repo.save(
+        tenant_b,
+        make_secret_entry("shared/key", "vault-b", "secret/b", None, 1, tenant_b),
+    )
+    .await?;
+    assert_eq!(
+        repo.find(tenant_a, &key)
+            .await?
+            .unwrap()
+            .secret_ref()
+            .store_id()
+            .as_str(),
+        "vault-a",
+        "tenant A 值不被 tenant B 覆盖"
+    );
+    assert_eq!(
+        repo.find(tenant_b, &key)
+            .await?
+            .unwrap()
+            .secret_ref()
+            .store_id()
+            .as_str(),
+        "vault-b",
+        "tenant B 读自己的值"
+    );
+
+    // tenant B delete 不影响 tenant A。
+    repo.delete(tenant_b, &key).await?;
+    assert!(
+        repo.find(tenant_b, &key).await?.is_none(),
+        "tenant B 删除后自身不可见"
+    );
+    assert_eq!(
+        repo.find(tenant_a, &key)
+            .await?
+            .unwrap()
+            .secret_ref()
+            .store_id()
+            .as_str(),
+        "vault-a",
+        "tenant B delete 不影响 tenant A"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts7：delete + republish 版本不重置——delete 软删后 republish 取 latest_version+1（非重置回 1）。
+///
+/// 对标 tc10 config 同款回归防护：tombstone 使 version 单调，防止版本号复用。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_secret(&store).await?;
+    let repo = PgSecretRepo::new(&store);
+    let tenant = secret_tenant_a();
+    let key = SecretKey::parse("myapp/rotate-key").unwrap();
+
+    // 写 v1。
+    repo.save(
+        tenant,
+        make_secret_entry(
+            "myapp/rotate-key",
+            "vault",
+            "secret/rotate",
+            None,
+            1,
+            tenant,
+        ),
+    )
+    .await?;
+
+    // delete → tombstone v2。
+    repo.delete(tenant, &key).await?;
+    assert_eq!(
+        repo.latest_version(tenant, &key).await?,
+        Some(2),
+        "tombstone v2"
+    );
+
+    // republish：下一版本 = latest+1 = 3（不是重置回 1）。
+    let next = repo
+        .latest_version(tenant, &key)
+        .await?
+        .map_or(1, |v| v + 1);
+    assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
+
+    repo.save(
+        tenant,
+        make_secret_entry(
+            "myapp/rotate-key",
+            "vault",
+            "secret/rotate-new",
+            Some("v3"),
+            next,
+            tenant,
+        ),
+    )
+    .await?;
+
+    // 活跃值恢复，版本 = 3。
+    let active = repo.find(tenant, &key).await?.unwrap();
+    assert_eq!(active.version(), 3, "republish 后版本 = 3");
+    assert_eq!(active.secret_ref().ref_key(), "secret/rotate-new");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// ts8：material-never-persisted 断言——`information_schema.columns` 校验 secret_refs 列集
+/// 恰为 {created_at, deleted, ref_key, ref_version, secret_key, store_id, tenant_id, version}，
+/// 无任何 secret 材料列（review-critical）。
+#[tokio::test(flavor = "multi_thread")]
+async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    // 从 information_schema.columns 取 secret_refs 的全部列名（ORDER BY 确定顺序）。
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_name = 'secret_refs' AND table_schema = 'public' \
+         ORDER BY column_name",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+
+    let cols: Vec<&str> = rows.iter().map(|(s,)| s.as_str()).collect();
+
+    // 期望的列集（字母序排列后）：坐标列 + 版本标记列，无任何材料列。
+    let expected = [
+        "created_at",
+        "deleted",
+        "ref_key",
+        "ref_version",
+        "secret_key",
+        "store_id",
+        "tenant_id",
+        "version",
+    ];
+    assert_eq!(
+        cols, expected,
+        "secret_refs 列集应恰为坐标列（无材料列），实际：{cols:?}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // PgRoleRepo（identity 角色仓储）集成测试（#1250）：CRUD / upsert / tenant 行级隔离 / 并发收敛。
 //

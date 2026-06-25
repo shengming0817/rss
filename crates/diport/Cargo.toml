@@ -32,6 +32,10 @@ futures = { workspace = true }
 # Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 bootstrap shutdown 同源）。
 tokio-util = { workspace = true }
 
+# SecretMaterial ZeroizeOnDrop：secret 材料 drop 时自动清零（零信任，类型层 Hard）。
+# `zeroize_derive` feature 启用 proc-macro derive（ZeroizeOnDrop）；`alloc` 已在 workspace 基础上开。
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 trybuild = { workspace = true }

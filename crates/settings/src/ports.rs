@@ -24,6 +24,7 @@ use dynosaur::dynosaur;
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 pub use crate::domain::{ConfigEntry, ConfigRepoError, SettingKey, SettingsError};
+pub use crate::domain::{SecretEntry, SecretKey, SecretRef, SecretRepoError, StoreId};
 pub use vocab::TenantId;
 
 /// 版本化配置仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
@@ -100,6 +101,50 @@ pub trait ConfigUnitOfWorkLocal {
         outbox_entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError>;
+}
+
+/// secret 引用仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
+///
+/// 公开 [`SecretRepo`] 是 **Send 变体**，[`DynSecretRepo`] 是其 dyn-compatible wrapper
+/// （组合根经 `Box<DynSecretRepo>` 注入）。租户必经 typed [`TenantId`] 位置参做 RLS 分隔。
+///
+/// **无 resolve**：secret 材料解析是 diport seam（`diport::SecretResolver`），不在此 port。
+/// **无 UoW**：secret 写入是 L1 本地事务，不需与 outbox 同事务（与 config 的 L2 OutboxFact 分叉）。
+///
+/// CAS 语义（mirror [`ConfigRepo::save`]）：`save` 要求 `entry.version()` = 当前最高版本 + 1
+/// （首版要求 `1`），否则 [`SecretRepoError::VersionConflict`]。tombstone 软删使 version 单调不重置。
+#[trait_variant::make(SecretRepo: Send)]
+#[dynosaur(pub DynSecretRepo = dyn(box) SecretRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: 同 ConfigRepoLocal——Send 由 trait_variant `SecretRepo` 变体 + dynosaur wrapper 承载。
+pub trait SecretRepoLocal {
+    /// 取 key 当前活跃 secret 引用（最高版本且非 tombstone）；不存在 / 已删返回 `Ok(None)`。
+    async fn find(
+        &self,
+        tenant: TenantId,
+        key: &SecretKey,
+    ) -> Result<Option<SecretEntry>, SecretRepoError>;
+
+    /// 取指定版本号的历史条目；不存在 / 该版本是 tombstone 返回 `Ok(None)`。
+    async fn find_version(
+        &self,
+        tenant: TenantId,
+        key: &SecretKey,
+        version: u64,
+    ) -> Result<Option<SecretEntry>, SecretRepoError>;
+
+    /// 取 key 当前**最高版本号**（含 tombstone，不存在返回 `Ok(None)`）。
+    async fn latest_version(
+        &self,
+        tenant: TenantId,
+        key: &SecretKey,
+    ) -> Result<Option<u64>, SecretRepoError>;
+
+    /// CAS 追加新版本（`entry.version()` 须等于当前最高版本 + 1，否则 `VersionConflict`）。
+    async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError>;
+
+    /// 软删除 key（tombstone）：version 单调不重置；幂等（latest 已 tombstone / key 不存在 ⇒ no-op）。
+    async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError>;
 }
 
 #[cfg(test)]
@@ -256,6 +301,99 @@ mod smoke {
                 outbox_entry: Entry,
                 envelope: OutboxEnvelopeParts,
             ) -> Result<(), ConfigRepoError>;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // SecretRepo smoke
+    // ---------------------------------------------------------------------------
+
+    use super::{DynSecretRepo, SecretEntry, SecretKey, SecretRepo, SecretRepoError};
+
+    struct NoopSecretRepo;
+    impl SecretRepo for NoopSecretRepo {
+        async fn find(
+            &self,
+            _tenant: TenantId,
+            _key: &SecretKey,
+        ) -> Result<Option<SecretEntry>, SecretRepoError> {
+            Ok(None)
+        }
+        async fn find_version(
+            &self,
+            _tenant: TenantId,
+            _key: &SecretKey,
+            _version: u64,
+        ) -> Result<Option<SecretEntry>, SecretRepoError> {
+            Ok(None)
+        }
+        async fn latest_version(
+            &self,
+            _tenant: TenantId,
+            _key: &SecretKey,
+        ) -> Result<Option<u64>, SecretRepoError> {
+            Ok(None)
+        }
+        async fn save(
+            &self,
+            _tenant: TenantId,
+            _entry: SecretEntry,
+        ) -> Result<(), SecretRepoError> {
+            Ok(())
+        }
+        async fn delete(&self, _tenant: TenantId, _key: &SecretKey) -> Result<(), SecretRepoError> {
+            Ok(())
+        }
+    }
+
+    // PORT-SHAPE-03：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 wrapper `Send`。
+    #[test]
+    fn secret_repo_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynSecretRepo> = DynSecretRepo::new_box(NoopSecretRepo);
+        assert_send(&from_impl);
+        let from_mock: Box<DynSecretRepo> = DynSecretRepo::new_box(MockTestSecretRepo::new());
+        assert_send(&from_mock);
+    }
+
+    // PORT-SHAPE-04：消费侧构造器必填位置参注入（ADR-004 C5）。
+    struct SecretService {
+        _repo: Box<DynSecretRepo<'static>>,
+    }
+    impl SecretService {
+        fn new(repo: Box<DynSecretRepo<'static>>) -> Self {
+            Self { _repo: repo }
+        }
+    }
+
+    #[test]
+    fn secret_repo_is_required_ctor_injectable() {
+        let svc = SecretService::new(DynSecretRepo::new_box(NoopSecretRepo));
+        assert_send(&svc._repo);
+        let svc_mock = SecretService::new(DynSecretRepo::new_box(MockTestSecretRepo::new()));
+        assert_send(&svc_mock._repo);
+    }
+
+    mockall::mock! {
+        TestSecretRepo {}
+        impl SecretRepo for TestSecretRepo {
+            async fn find(
+                &self,
+                tenant: TenantId,
+                key: &SecretKey,
+            ) -> Result<Option<SecretEntry>, SecretRepoError>;
+            async fn find_version(
+                &self,
+                tenant: TenantId,
+                key: &SecretKey,
+                version: u64,
+            ) -> Result<Option<SecretEntry>, SecretRepoError>;
+            async fn latest_version(
+                &self,
+                tenant: TenantId,
+                key: &SecretKey,
+            ) -> Result<Option<u64>, SecretRepoError>;
+            async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError>;
+            async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError>;
         }
     }
 }

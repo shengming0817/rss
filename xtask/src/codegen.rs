@@ -112,6 +112,7 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
         c.manifest.domain,
         c.manifest.version
     );
+    let mut sensitive_titles = BTreeSet::new();
     for schema_file in c.manifest.schemas.declared_files() {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
@@ -119,6 +120,11 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
         let path = c.dir.join(schema_file);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读 schema {}", path.display()))?;
+        // 收集 `x-sensitive` 标记类型名（F6）：typify 不消费该扩展关键字，故另解析通用 Value 读取。
+        // 标记的 wire 类型由 strip_sensitive_debug 去 Debug derive（secret store 坐标单源在 schema）。
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("解析 schema {}", path.display()))?;
+        collect_sensitive_titles(&value, &mut sensitive_titles);
         let root: RootSchema = serde_json::from_str(&text)
             .with_context(|| format!("解析 schema {}", path.display()))?;
         space
@@ -127,7 +133,7 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     }
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
-    strip_sensitive_debug(&mut parsed);
+    strip_sensitive_debug(&mut parsed, &sensitive_titles);
     allow_derivable_default_impls(&mut parsed);
     allow_unwrap_in_defaults_mod(&mut parsed);
     let payload = prettyplease::unparse(&parsed);
@@ -305,23 +311,51 @@ fn is_safe_codegen_ident(s: &str) -> bool {
         })
 }
 
-/// 含凭据级字段（password/secret/token/credential）的 generated struct 去掉 `Debug` derive——
-/// 杜绝 `{:?}` 泄露凭据进日志（PR #186 F2）。sensitive-field redaction 单源在 codegen（不手改 committed
-/// generated）；去 Debug 后该类型从类型层**不可** Debug-format（Hard），输出由 golden 锁。
-/// `INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`。
-fn strip_sensitive_debug(file: &mut syn::File) {
+/// 递归收集 schema 中标 `"x-sensitive": true` 的类型名（取同一对象的 `title`，即 typify 生成的
+/// struct 名）。`x-sensitive` 是 codegen 私有扩展关键字（typify 不消费）：标记后该 wire 类型由
+/// [`strip_sensitive_debug`] 去 `Debug` derive——用于 secret store 坐标类（storeId/refKey/refVersion
+/// 属敏感拓扑，`{:?}` 泄漏等同路径泄漏，对齐手写 `diport::SecretCoordinate` / `settings::SecretRef`
+/// 的 redacted Debug）。redaction 单源在 schema（contract 单一事实源），非字段名启发式（F6）。
+fn collect_sensitive_titles(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("x-sensitive") == Some(&serde_json::Value::Bool(true))
+                && let Some(serde_json::Value::String(title)) = map.get("title")
+            {
+                out.insert(title.clone());
+            }
+            for v in map.values() {
+                collect_sensitive_titles(v, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_sensitive_titles(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// generated struct 去掉 `Debug` derive 的条件（命中即剥）：①任一字段名含凭据词
+/// （password/secret/token/credential，PR #186 F2），或 ②类型名经 schema `x-sensitive` 标记
+/// （secret store 坐标类，F6——见 [`collect_sensitive_titles`]）。杜绝 `{:?}` 把凭据 / 坐标拓扑打进
+/// 日志。sensitive redaction 单源在 codegen（不手改 committed generated）；去 Debug 后该类型从类型层
+/// **不可** Debug-format（Hard），输出由 golden 锁。`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`。
+fn strip_sensitive_debug(file: &mut syn::File, sensitive_titles: &BTreeSet<String>) {
     const SENSITIVE: &[&str] = &["password", "passwd", "secret", "token", "credential"];
     for item in &mut file.items {
         let syn::Item::Struct(s) = item else {
             continue;
         };
-        let has_sensitive = s.fields.iter().any(|f| {
+        let has_sensitive_field = s.fields.iter().any(|f| {
             f.ident.as_ref().is_some_and(|id| {
                 let name = id.to_string().to_ascii_lowercase();
                 SENSITIVE.iter().any(|kw| name.contains(kw))
             })
         });
-        if !has_sensitive {
+        let is_marked_sensitive = sensitive_titles.contains(&s.ident.to_string());
+        if !has_sensitive_field && !is_marked_sensitive {
             continue;
         }
         for attr in &mut s.attrs {
@@ -715,6 +749,26 @@ mod tests {
         Ok(())
     }
 
+    /// 落一个 http 契约：request 标 `"x-sensitive": true` 但**无**凭据字段名（坐标类：storeId）——
+    /// 验 codegen 经 schema 标记（非字段名启发式）剥 `Debug`；response 无标记保留 `Debug`（F6）。
+    fn seed_http_x_sensitive(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/http/_xsens/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            "id = \"xsens.publish\"\nkind = \"http\"\ndomain = \"_xsens\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"LocalOnly\"\nlifecycle = \"draft\"\n[schemas]\nrequest = \"request.schema.json\"\nresponse = \"response.schema.json\"\n",
+        )?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"XSensCoordRequest\",\"type\":\"object\",\"x-sensitive\":true,\"required\":[\"storeId\"],\"properties\":{\"storeId\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        )?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"XSensCoordResponse\",\"type\":\"object\",\"required\":[\"ok\"],\"properties\":{\"ok\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        )?;
+        Ok(())
+    }
+
     /// 派生 .rs 中名为 `name` 的 struct 是否 derive `Debug`。
     fn struct_derives_debug(file: &syn::File, name: &str) -> bool {
         file.items.iter().any(|item| {
@@ -763,6 +817,31 @@ mod tests {
         assert!(
             struct_derives_debug(&parsed, "SensitiveSeedResponse"),
             "非敏感 struct 应保留 Debug（anti-vacuity 对照）:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    /// schema `"x-sensitive": true` 标记的 wire struct（**无**凭据字段名）须被 codegen 剥 `Debug`
+    /// （`collect_sensitive_titles` → `strip_sensitive_debug`，F6，CODEGEN-SENSITIVE-NODEBUG-01）；
+    /// 未标记 struct 保留 `Debug`（anti-vacuity 对照）。证明 redaction 由 schema 标记驱动，非仅字段名启发式。
+    #[test]
+    fn x_sensitive_marked_struct_drops_debug_derive() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http_x_sensitive(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_xsens_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        let parsed = syn::parse_str::<syn::File>(&rendered).context("解析派生 .rs")?;
+        assert!(
+            !struct_derives_debug(&parsed, "XSensCoordRequest"),
+            "x-sensitive 标记的 struct（即使无凭据字段名）不应 derive Debug:\n{rendered}"
+        );
+        assert!(
+            struct_derives_debug(&parsed, "XSensCoordResponse"),
+            "未标记 struct 应保留 Debug（anti-vacuity 对照）:\n{rendered}"
         );
         Ok(())
     }
