@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/cannot_construct_listener_router.rs:6:62
+  |
+6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new());
+  |                                                              ^^^ private associated function
+  |
+ ::: src/routes.rs
+  |
+  |     pub(crate) fn new(router: axum::Router) -> Self {
+  |     ----------------------------------------------- private associated function defined here

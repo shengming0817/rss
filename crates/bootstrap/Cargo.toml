@@ -8,8 +8,11 @@ publish = false
 [lints]
 workspace = true
 
-# bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎+DI-infra」连基础+引擎+diport，
-# 不依赖兄弟服务（resolver 等由组合根 bins/server / assembly 注入，不在此预连）。见 PR #137 review F1。
+# bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎+DI-infra」连基础+引擎+diport。
+# 一般不依赖兄弟服务（resolver 等由组合根 bins/server / assembly 注入，不在此预连，PR #137 review F1）；
+# **受控例外**：依赖 httpserve 的**编译期路由类型词汇**（ListenerRouter<L> / UnfinalizedRoutes，typed
+# route funnel #1113/#1103），经 ADR-009 sanction 的 `bootstrap → httpserve` 边（layers.rs route_funnel_allows，
+# INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01）。F1 的「不向兄弟服务要 runtime provider」原则不变——本边仅取类型词汇。
 [dependencies]
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
@@ -18,6 +21,9 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
+# 受控 `bootstrap → httpserve` 边（ADR-009）：route_group 的 listener-typed builder ListenerRouter<L> +
+# finalize_routes 产出的 sealed UnfinalizedRoutes（auth-finalize-before-bind funnel）。裸 axum::Router 不出 httpserve。
+httpserve = { path = "../httpserve" }
 # DI-infra：ManagedResource port trait + DynManagedResource（Send dyn wrapper）+ ShutdownError 单源。
 # 服务→DI-infra 下行依赖（layers.rs allows）。dynosaur 派发统一替代原 async-trait（ADR-003）。
 # SubscriberHandler::handle 消费 diport::Message（不引兄弟服务 eventexec）。
@@ -31,14 +37,15 @@ tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-# 域 init 阶段路由组注册闭包参数（register: FnOnce(axum::Router) -> ...）——签名冻结需要，
-# 无运行时依赖（todo!() 体不调用；实现阶段由 httpserve 组合驱动，组合根注入）。
-axum = { workspace = true }
 
 [dev-dependencies]
 # test-util：tokio 虚拟时钟（start_paused）做确定性超时测试，不靠真实 sleep（防 flaky）。
 tokio = { workspace = true, features = ["test-util", "macros", "rt", "time"] }
-# finalize_routes 的 listener 隔离测试（INVARIANT BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01）：
-# tower::ServiceExt::oneshot 对 per-listener Router 发请求，断言一个 listener 的路由不会出现在
-# 另一个 listener 的 Router 上（sanctioned handler 测试 idiom，rust-standards.md §覆盖率）。仅测试用。
+# finalize_routes 的 listener 隔离行为测试（ROUTE-LISTENER-TYPED-01 类型层守的运行期补充）：
+# tower::ServiceExt::oneshot 对 per-listener Router（经 UnfinalizedRoutes::into_router_for_test 取回）发请求，
+# 断言路由不串台（sanctioned handler 测试 idiom，rust-standards.md §覆盖率）。axum 仅测试构建请求/handler 用。
 tower = { workspace = true, features = ["util"] }
+axum = { workspace = true }
+# 隔离测试经 httpserve 的 test-util feature 取回裸 Router（`UnfinalizedRoutes::into_router_for_test`）做 oneshot；
+# 生产构建无此 feature ⇒ 该入口编译期不存在（ADR-009 §6 Soft→Medium）。
+httpserve = { path = "../httpserve", features = ["test-util"] }

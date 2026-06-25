@@ -1,0 +1,33 @@
+error[E0277]: the trait bound `MyListener: routes::sealed::Sealed` is not satisfied
+ --> tests/ui/cannot_impl_listener_for_external.rs:6:30
+  |
+6 | impl httpserve::Listener for MyListener {
+  |                              ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `routes::sealed::Sealed` is not implemented for `MyListener`
+ --> tests/ui/cannot_impl_listener_for_external.rs:4:1
+  |
+4 | struct MyListener;
+  | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `routes::sealed::Sealed`
+ --> src/routes.rs
+  |
+  | impl sealed::Sealed for Primary {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `httpserve::Primary`
+  | impl sealed::Sealed for Internal {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `httpserve::Internal`
+  | impl sealed::Sealed for Admin {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `httpserve::Admin`
+  | impl sealed::Sealed for Health {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `httpserve::Health`
+note: required by a bound in `Listener`
+ --> src/routes.rs
+  |
+  | pub trait Listener: sealed::Sealed {
+  |                     ^^^^^^^^^^^^^^ required by this bound in `Listener`
+  = note: `Listener` is a "sealed trait", because to implement it you also need to implement `httpserve::routes::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            httpserve::Primary
+            httpserve::Internal
+            httpserve::Admin
+            httpserve::Health

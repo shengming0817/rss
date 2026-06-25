@@ -161,22 +161,34 @@ fn required_scheme(listener: ListenerKind) -> Option<RequiredScheme> {
     }
 }
 
-/// 排空 registry 的 per-listener router，按 listener 装配 `finalize_auth` + 外层验签桥。
+/// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 `finalize_auth` + 外层验签桥。
 ///
-/// 每 listener：`finalize_auth(router, plan)`（注入 AuthPlan + framework 中间件）→ 据 `required_scheme` 叠
-/// 外层 `verify_bridge`（`NoAuth` listener 无桥）。产出交 #1017 绑 socket + serve。
+/// 每 listener：`finalize_auth(routes, plan)`（消费 `UnfinalizedRoutes` 产 `AuthenticatedRoutes`，注入
+/// AuthPlan 与 framework 中间件）→ 据 `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）。
+/// 产出 `AuthenticatedRoutes` 交 #1017 经 `into_make_service` 绑 socket + serve——bind 点天生只能消费已认证
+/// router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
 pub fn assemble_authed_routers(
     mut registry: bootstrap::Registry,
     provider: Arc<OidcProvider>,
-) -> anyhow::Result<Vec<(ListenerKind, axum::Router)>> {
+) -> anyhow::Result<Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>> {
     let mut out = Vec::new();
-    for (listener, router) in registry.finalize_routes().context("finalize_routes")? {
-        let plan = AuthPlan::new(listener, auth_scheme(listener)).context("build auth plan")?;
-        let authed = httpserve::finalize_auth(router, plan).context("finalize_auth")?;
-        let wired = match required_scheme(listener) {
-            Some(scheme) => auth_bridge::apply_verify_bridge(authed, provider.clone(), scheme),
+    for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
+        let scheme = auth_scheme(listener);
+        let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
+        let authed = httpserve::finalize_auth(routes, plan).context("finalize_auth")?;
+        let required = required_scheme(listener);
+        let wired = match required {
+            Some(req) => auth_bridge::apply_verify_bridge(authed, provider.clone(), req),
             None => authed,
         };
+        // 装配决策可观测：operator 启动时从日志核查每 listener 的 auth scheme + 是否挂验签桥
+        //（闭值枚举，无 PII）——否则「Primary 究竟 Jwt+桥 还是意外 NoAuth」从日志无从核查。
+        tracing::info!(
+            listener = ?listener,
+            auth_scheme = ?scheme,
+            verify_bridge = required.is_some(),
+            "listener auth wiring assembled"
+        );
         out.push((listener, wired));
     }
     Ok(out)
@@ -189,7 +201,10 @@ pub fn run() -> anyhow::Result<()> {
     let provider = Arc::new(build_provider()?);
     let registry = bootstrap::compose(&[]).context("compose domains")?;
     let _authed = assemble_authed_routers(registry, provider)?;
-    // TODO(#1017): 绑各 listener socket + axum::serve + 信号优雅关停 + 全量生产域注册（identity/settings/audit/...）。
+    // TODO(#1017): 消费 `_authed`——对每个 `(listener, AuthenticatedRoutes)` 调 `.into_make_service()`（**唯一**
+    //   bindable 出口，ROUTE-AUTH-FUNNEL-02）→ `axum::serve(<该 listener 的 socket>, make_service)`；+ 信号优雅
+    //   关停 + 全量生产域注册（identity/settings/audit/...）。`_authed` 当前被 drop（bind 点未接线）；接线时
+    //   勿绕开 `into_make_service` 改走裸 router 路径（类型层已封死，见 httpserve::routes）。
     Ok(())
 }
 

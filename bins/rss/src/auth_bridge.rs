@@ -33,7 +33,7 @@ use axum::http::{HeaderMap, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use futures::FutureExt;
-use httpserve::Authenticated;
+use httpserve::{Authenticated, AuthenticatedRoutes};
 use oidc::OidcProvider;
 use primitives::RequiredScheme;
 
@@ -45,13 +45,14 @@ struct VerifyState {
     scheme: RequiredScheme,
 }
 
-/// 在 `finalize_auth` 返回的 router **外层**叠验签桥。组合根按 listener 的已验证 [`RequiredScheme`] 调用。
+/// 在 `finalize_auth` 产出的 [`AuthenticatedRoutes`] **外层**叠验签桥（经 `AuthenticatedRoutes::layer` 只能加层、
+/// 不能替换，funnel 封印不破）。组合根按 listener 的已验证 [`RequiredScheme`] 调用。
 pub fn apply_verify_bridge(
-    router: axum::Router,
+    routes: AuthenticatedRoutes,
     provider: Arc<OidcProvider>,
     scheme: RequiredScheme,
-) -> axum::Router {
-    router.layer(middleware::from_fn_with_state(
+) -> AuthenticatedRoutes {
+    routes.layer(middleware::from_fn_with_state(
         VerifyState { provider, scheme },
         verify,
     ))

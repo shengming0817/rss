@@ -13,7 +13,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, StatusCode, header};
 use axum::routing::get;
@@ -142,29 +141,30 @@ fn hs256_provider() -> (OidcProvider, Vec<u8>) {
 // ── router 装配（Primary/Jwt：Require /protected + Public /public） ────────────────
 /// `bridge = None` ⇒ 不挂验签桥（回归用例）；`Some(scheme)` ⇒ 挂 es256_provider 桥（用 `scheme` 验证）。
 #[allow(clippy::expect_used)]
-fn jwt_router(bridge: Option<RequiredScheme>) -> Router {
-    let router = httpserve::mount_primary(
-        Router::new(),
-        httpserve::PrimaryRoute {
-            method: Method::GET,
-            path: "/protected",
-            contract_id: "test.protected",
-            opt_out: None,
-        },
-        get(|| async { "ok" }),
-    );
-    let router = httpserve::mount_primary(
-        router,
-        httpserve::PrimaryRoute {
-            method: Method::GET,
-            path: "/public",
-            contract_id: "test.public",
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(|| async { "pub" }),
-    );
+fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes {
+    // typed Primary builder（`ListenerRouter::new` 是 pub(crate)，外部测试经 `unfinalized_for_test` 构造 funnel 输入）。
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            httpserve::PrimaryRoute {
+                method: Method::GET,
+                path: "/protected",
+                contract_id: "test.protected",
+                opt_out: None,
+            },
+            get(|| async { "ok" }),
+        )
+        .mount_primary(
+            httpserve::PrimaryRoute {
+                method: Method::GET,
+                path: "/public",
+                contract_id: "test.public",
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(|| async { "pub" }),
+        )
+    });
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
-    let authed = httpserve::finalize_auth(router, plan).expect("finalize_auth");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
     match bridge {
         Some(scheme) => apply_verify_bridge(authed, Arc::new(es256_provider()), scheme),
         None => authed,
@@ -172,12 +172,18 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> Router {
 }
 
 #[allow(clippy::unwrap_used)]
-async fn status(app: Router, uri: &str, bearer: Option<&str>) -> StatusCode {
+async fn status(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+) -> StatusCode {
     let mut builder = axum::http::Request::builder().method(Method::GET).uri(uri);
     if let Some(value) = bearer {
         builder = builder.header(header::AUTHORIZATION, value);
     }
+    // 取回裸 Router 做 oneshot（`#[doc(hidden)]` 测试入口；生产经 into_make_service bind，无此出口）。
     let resp = app
+        .into_router_for_test()
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -408,17 +414,18 @@ async fn service_token_hs256_is_200() {
             NOW + 3600
         ),
     );
-    let router = httpserve::mount(
-        Router::new(),
-        httpserve::Route {
-            method: Method::GET,
-            path: "/svc",
-            contract_id: "test.svc",
-        },
-        get(|| async { "ok" }),
-    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+        rb.mount(
+            httpserve::Route {
+                method: Method::GET,
+                path: "/svc",
+                contract_id: "test.svc",
+            },
+            get(|| async { "ok" }),
+        )
+    });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
-    let authed = httpserve::finalize_auth(router, plan).expect("finalize_auth");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
     let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
     assert_eq!(
         status(app, "/svc", Some(&format!("Bearer {token}"))).await,

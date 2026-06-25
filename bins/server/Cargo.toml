@@ -47,3 +47,6 @@ hmac = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
 # 捕获 tracing 输出断言 authz.decision/principal.kind 埋点 + 无 token/subject 泄漏。
 tracing-subscriber = { workspace = true }
+# auth_e2e 经 httpserve test-util 构造 funnel 输入（`routes::unfinalized_for_test`）+ 取回裸 Router
+# （`AuthenticatedRoutes::into_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
+httpserve = { path = "../../crates/httpserve", features = ["test-util"] }

@@ -11,16 +11,18 @@
 use crate::domain::KernelError;
 use diport::Message;
 use futures::future::BoxFuture;
+use httpserve::{Listener, ListenerRouter, UnfinalizedRoutes};
 use primitives::ListenerKind;
 
-/// 路由组注册的延迟闭包类型。
+/// 路由组注册的延迟闭包类型（listener-typed，#1103）。
 ///
-/// 接受 axum `Router`，追加本组 routes 后返回更新后的 `Router`；
-/// 失败时返回 `Err(KernelError)` 冒泡到 bootstrap。
+/// 接受本 listener 的 [`UnfinalizedRoutes`] 累加器，把本组路由 nest 进去后返回更新后的累加器；
+/// 失败时返回 `Err(KernelError)` 冒泡到 bootstrap。listener marker `L` 已在 [`Registry::route_group`]
+/// 处擦除（`nest_group::<L>` 捕获进 box），裸 `axum::Router` 不出 httpserve（封印见 `httpserve::routes`）。
 ///
 /// `FnOnce`——一次性执行，finalize 后不可重入；多次 finalize 见幂等 drain 说明。
 type RouteRegisterFn =
-    Box<dyn FnOnce(axum::Router) -> Result<axum::Router, KernelError> + Send + 'static>;
+    Box<dyn FnOnce(UnfinalizedRoutes) -> Result<UnfinalizedRoutes, KernelError> + Send + 'static>;
 
 /// 路由组声明（由 [`Registry::route_group`] 收集）。
 /// `listener`/`prefix` 经 [`Registry::route_groups`] 暴露；`register` 闭包（`FnOnce`，一次性执行，
@@ -152,22 +154,34 @@ impl Registry {
         }
     }
 
-    /// 声明路由组。
+    /// 声明路由组——**listener 由类型参数 `L` 携带**（#1103 typed per-listener route-group）。
     ///
-    /// `register` 是同步闭包：接受 axum `Router`，追加本组 routes 后返回；
+    /// `L` 是 httpserve listener marker（[`httpserve::Primary`] / `Internal` / `Admin` / `Health`），
+    /// `L::KIND` 给出运行期 listener 值（fold 分组键）。`register` 是同步闭包：接受 listener-typed
+    /// [`ListenerRouter<L>`]，经 `mount`(非-Primary) / `mount_primary`(Primary) 追加本组 routes 后返回；
     /// 失败时返回 `Err` 冒泡为 [`KernelError`]。
     ///
-    /// 闭包延迟到 finalize 阶段由 bootstrap 统一执行，不在 `init` 中立即调用。
-    pub fn route_group(
+    /// INVARIANT: ROUTE-LISTENER-TYPED-01 —— 域 crate 误声明（把 Internal 路由挂 Primary）类型层不可表达：
+    /// 路由经 `ListenerRouter<L>` 挂载、随组 fold 进 `L::KIND` listener 的 Router，且非-Primary listener 拿不到
+    /// `mount_primary`（opt-out）。取代旧 `route_group(listener: ListenerKind, ..)` 的运行期值传参 + SEGREGATION-01
+    /// runtime 守（Medium→Hard）。listener marker `L` 经 [`UnfinalizedRoutes::nest_group`] 擦除进 box。
+    ///
+    /// 闭包延迟到 finalize 阶段由 bootstrap 统一执行（[`finalize_routes`](Self::finalize_routes)），不在 `init` 中立即调用。
+    pub fn route_group<L>(
         &mut self,
-        listener: ListenerKind,
         prefix: &'static str,
-        register: impl FnOnce(axum::Router) -> Result<axum::Router, KernelError> + Send + 'static,
-    ) -> Result<(), KernelError> {
+        register: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, KernelError>
+        + Send
+        + 'static,
+    ) -> Result<(), KernelError>
+    where
+        L: Listener,
+    {
         self.route_groups.push(RouteGroupDecl {
-            listener,
+            listener: L::KIND,
             prefix,
-            register: Box::new(register),
+            // 擦除 L：box 内 `nest_group::<L>` 把本组路由 nest 进 listener 累加器（裸 Router 不出 httpserve）。
+            register: Box::new(move |acc: UnfinalizedRoutes| acc.nest_group(prefix, register)),
         });
         Ok(())
     }
@@ -265,37 +279,55 @@ impl Registry {
         primitives::HealthReport::aggregate(checks)
     }
 
-    /// 按 listener 分组折叠路由组 register 闭包，每 listener 产出一个 axum [`Router`](axum::Router)。
+    /// 按 listener 分组折叠路由组 register 闭包，每 listener 产出一个 [`UnfinalizedRoutes`]（未认证安全态）。
     ///
     /// 排空 `route_groups`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
     /// [`into_subscribers`](Self::into_subscribers) 不争用消费权；消费顺序由组合根定）。同一 listener 的
-    /// 多个组折叠进同一 Router；不同 listener 各自独立 Router——`Internal`/`Admin`/`Health` 路由**不可**
-    /// 落到 `Primary`（对外）Router 上。register 闭包 Err 原样冒泡（保留变体），并记 listener/prefix/error
-    /// 结构化错误日志。
+    /// 多个组折叠进同一累加器；不同 listener 各自独立——`Internal`/`Admin`/`Health` 路由**不可**
+    /// 落到 `Primary`（对外）listener（由 [`route_group`](Self::route_group) 的 typed `L` 类型层守）。
+    /// register 闭包 Err 原样冒泡（保留变体），并记 listener/prefix/error 结构化错误日志。
     ///
-    /// **挂载语义**：每个路由组的 register 闭包在一个**新鲜 `axum::Router`** 上构建本组路由
-    /// （路径相对于 `prefix`），finalize 将该子 Router **nest** 进所属 listener 的累加 Router 的
-    /// `prefix` 前缀下——声明 `prefix` 即实际挂载前缀，消除「声明 prefix vs axum 实际路径」漂移。
+    /// **挂载语义**：每个路由组的 register 闭包经 typed `ListenerRouter<L>` 在**新鲜 Router** 上构建本组路由
+    /// （路径相对于 `prefix`），[`UnfinalizedRoutes::nest_group`] 将其 **nest** 进所属 listener 累加器的
+    /// `prefix` 前缀下——声明 `prefix` 即实际挂载前缀，消除「声明 prefix vs 实际路径」漂移。
     ///
     /// 幂等 drain——`route_groups` 排空后再次调用返回空 `Vec`（非错误：routes 已交出，组合根只应调一次）。
     ///
-    /// 产出的 per-listener Router 交组合根：再跑 `httpserve::finalize_auth` + 绑各自 socket（Join #1017）——
-    /// 本 crate 不引 httpserve、不做 auth、不 bind。
+    /// **结果不变式**：每个 `ListenerKind` 在返回 `Vec` 中**最多出现一次**（同 listener 的多个路由组已折叠进同一
+    /// 累加器）；组合根可安全对结果逐项 `into_iter` 按 listener bind，无需去重。
+    ///
+    /// 产出的 per-listener [`UnfinalizedRoutes`] 交组合根：再跑 `httpserve::finalize_auth` 换
+    /// `AuthenticatedRoutes` + 绑各自 socket（Join #1017）。`UnfinalizedRoutes` **无 public bindable 出口**，
+    /// 故组合根**不可能**跳过 `finalize_auth` 直接 bind 未认证 router（#1113 funnel Hard）。
+    /// 经受控 `bootstrap → httpserve` 编译期路由类型边（ADR-009）：bootstrap 只碰 sealed `UnfinalizedRoutes`，
+    /// 裸 `axum::Router` 全程不出 httpserve。
     /// ref: oxidecomputer/omicron nexus/src/lib.rs（internal vs external server 分 listener 隔离）。
     ///
     /// # Finalize order
     ///
     /// 推荐调用顺序见 [`Registry`] struct 文档 §Finalize order。
     ///
-    /// INVARIANT: BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 —— 不同 listener 的路由进各自 Router，不串台
-    /// （Medium：由 `finalize` 测试模块的 `finalize_routes_keeps_listeners_isolated` oneshot 反例守）。
-    pub fn finalize_routes(&mut self) -> Result<Vec<(ListenerKind, axum::Router)>, KernelError> {
-        let mut by_listener: Vec<(ListenerKind, axum::Router)> = Vec::new();
+    /// INVARIANT: ROUTE-AUTH-FUNNEL-01 —— 产出 `UnfinalizedRoutes`（无 bindable 出口），唯有
+    /// `httpserve::finalize_auth` 能换出可 bind 的 `AuthenticatedRoutes`（auth-finalize-before-bind，Hard）。
+    /// listener 隔离由 [`route_group`](Self::route_group) 的 typed `L`（ROUTE-LISTENER-TYPED-01，#1103
+    /// Medium→Hard）守——取代旧 BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 runtime 反例测试。
+    pub fn finalize_routes(
+        &mut self,
+    ) -> Result<Vec<(ListenerKind, UnfinalizedRoutes)>, KernelError> {
+        let mut by_listener: Vec<(ListenerKind, UnfinalizedRoutes)> = Vec::new();
         for decl in std::mem::take(&mut self.route_groups) {
             let listener = decl.listener;
             let prefix = decl.prefix;
-            // 闭包在 fresh Router 上构建本组路由（相对 prefix）；失败原样冒泡 + 记 listener/prefix/error。
-            let group = (decl.register)(axum::Router::new()).inspect_err(|e| {
+            let idx = match by_listener.iter().position(|(l, _)| *l == listener) {
+                Some(i) => i,
+                None => {
+                    by_listener.push((listener, UnfinalizedRoutes::empty()));
+                    by_listener.len() - 1
+                }
+            };
+            // 本组路由 nest 进该 listener 累加器（声明 prefix 即实际挂载前缀）；闭包 Err 原样冒泡 + 记 listener/prefix/error。
+            let acc = std::mem::replace(&mut by_listener[idx].1, UnfinalizedRoutes::empty());
+            by_listener[idx].1 = (decl.register)(acc).inspect_err(|e| {
                 tracing::error!(
                     listener = ?listener,
                     prefix,
@@ -303,20 +335,10 @@ impl Registry {
                     "route group register closure failed"
                 );
             })?;
-            let idx = match by_listener.iter().position(|(l, _)| *l == listener) {
-                Some(i) => i,
-                None => {
-                    by_listener.push((listener, axum::Router::new()));
-                    by_listener.len() - 1
-                }
-            };
-            // 声明 prefix 即实际挂载前缀：本组 Router nest 进该 listener 累加 Router 的 prefix 下。
-            let base = std::mem::take(&mut by_listener[idx].1);
-            by_listener[idx].1 = base.nest(prefix, group);
         }
         tracing::info!(
             listener_count = by_listener.len(),
-            "route groups finalized into per-listener routers"
+            "route groups finalized into per-listener UnfinalizedRoutes"
         );
         Ok(by_listener)
     }
@@ -403,6 +425,7 @@ mod collect {
     use super::{Message, Registry, SubscriberHandler, SubscriberHandlerError};
     use crate::domain::{Domain, KernelError, compose};
     use futures::future::BoxFuture;
+    use httpserve::Primary;
     use primitives::ListenerKind;
 
     struct OkHandler;
@@ -422,7 +445,7 @@ mod collect {
         let group =
             consistency::ConsumerGroup::parse("audit.session-created").expect("valid group");
         let mut reg = Registry::new();
-        reg.route_group(ListenerKind::Primary, "/api/v1/identity", Ok)
+        reg.route_group::<Primary>("/api/v1/identity", Ok)
             .expect("route group declared");
         reg.subscriber(
             "identity.session-created",
@@ -450,7 +473,7 @@ mod collect {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
             let group = consistency::ConsumerGroup::parse("domain-a.topic-a")
                 .map_err(|_| KernelError::Subscriber)?;
-            reg.route_group(ListenerKind::Primary, "/api/v1/a", Ok)?;
+            reg.route_group::<Primary>("/api/v1/a", Ok)?;
             reg.subscriber("contract.topic-a", "topic.a", group, Box::new(OkHandler))?;
             Ok(())
         }
@@ -497,10 +520,12 @@ mod collect {
 #[cfg(test)]
 mod finalize {
     //! W 阶段 finalize driver：`readyz_report`（探针 worst-of 聚合）+ `finalize_routes`
-    //! （按 listener 分组折叠 register 闭包）。前者复用 `primitives::HealthReport::aggregate`；
-    //! 后者守 INVARIANT BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01（不同 listener 路由各自 Router）。
+    //! （按 listener 分组折叠 typed register 闭包为 per-listener `UnfinalizedRoutes`）。前者复用
+    //! `primitives::HealthReport::aggregate`；后者经 typed `route_group::<L>` 守 listener 隔离
+    //! （ROUTE-LISTENER-TYPED-01 类型层，#1103 Medium→Hard）+ ROUTE-AUTH-FUNNEL-01（无 bindable 出口）。
     use super::{HealthProbe, Registry};
     use crate::domain::KernelError;
+    use httpserve::{Health, Internal, Primary};
     use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
     use std::sync::{Arc, Mutex};
 
@@ -703,7 +728,7 @@ mod finalize {
         let log: CallLog = Arc::new(Mutex::new(Vec::new()));
         let mut reg = Registry::new();
         let l = Arc::clone(&log);
-        reg.route_group(ListenerKind::Primary, "/api/v1/a", move |r| {
+        reg.route_group::<Primary>("/api/v1/a", move |r| {
             record(&l, "a");
             Ok(r)
         })
@@ -725,7 +750,7 @@ mod finalize {
         let prefixes = [("/api/v1/x", "a"), ("/api/v1/y", "b")];
         for (prefix, tag) in prefixes {
             let l = Arc::clone(&log);
-            reg.route_group(ListenerKind::Primary, prefix, move |r| {
+            reg.route_group::<Primary>(prefix, move |r| {
                 record(&l, tag);
                 Ok(r)
             })
@@ -743,9 +768,9 @@ mod finalize {
     #[allow(clippy::expect_used)]
     fn finalize_routes_separates_distinct_listeners() {
         let mut reg = Registry::new();
-        reg.route_group(ListenerKind::Primary, "/api/v1/p", Ok)
+        reg.route_group::<Primary>("/api/v1/p", Ok)
             .expect("primary declared");
-        reg.route_group(ListenerKind::Internal, "/internal/v1/i", Ok)
+        reg.route_group::<Internal>("/internal/v1/i", Ok)
             .expect("internal declared");
 
         let routers = reg.finalize_routes().expect("finalize ok");
@@ -759,10 +784,8 @@ mod finalize {
     fn finalize_routes_bubbles_closure_error() {
         let mut reg = Registry::new();
         #[allow(clippy::expect_used)]
-        reg.route_group(ListenerKind::Primary, "/api/v1/bad", |_r| {
-            Err(KernelError::RouteGroup)
-        })
-        .expect("route group declared");
+        reg.route_group::<Primary>("/api/v1/bad", |_r| Err(KernelError::RouteGroup))
+            .expect("route group declared");
 
         let result = reg.finalize_routes();
         assert!(matches!(result, Err(KernelError::RouteGroup)));
@@ -777,16 +800,14 @@ mod finalize {
         let mut reg = Registry::new();
 
         let l = Arc::clone(&log);
-        reg.route_group(ListenerKind::Primary, "/api/v1/ok", move |r| {
+        reg.route_group::<Primary>("/api/v1/ok", move |r| {
             record(&l, "first-ran");
             Ok(r)
         })
         .expect("first route group declared");
 
-        reg.route_group(ListenerKind::Primary, "/api/v1/bad", |_r| {
-            Err(KernelError::RouteGroup)
-        })
-        .expect("second route group declared");
+        reg.route_group::<Primary>("/api/v1/bad", |_r| Err(KernelError::RouteGroup))
+            .expect("second route group declared");
 
         let result = reg.finalize_routes();
         assert!(matches!(result, Err(KernelError::RouteGroup)));
@@ -794,52 +815,72 @@ mod finalize {
         assert_eq!(calls(&log), vec!["first-ran"]);
     }
 
-    /// INVARIANT BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 的反例守卫（anti-regression）：
-    /// Primary listener 上注册的路由必须只出现在 Primary 的 Router 上，不串到 Internal 的 Router。
-    /// 用 sanctioned 的 tower::ServiceExt::oneshot 实发请求断言（rust-standards.md §覆盖率）。
-    /// 同时验证第三个 listener（Health）的隔离：N-way segregation。
+    /// ROUTE-LISTENER-TYPED-01 的**行为**补充测试（类型层已守误声明，本测试守 fold/nest 运行期机制）：
+    /// 经 typed `route_group::<L>` + `mount`/`mount_primary` 声明的路由，finalize 后必须只出现在 `L::KIND`
+    /// listener 的 Router 上，不串台。用 sanctioned 的 tower::ServiceExt::oneshot 实发请求断言
+    /// （rust-standards.md §覆盖率）。N-way（Primary/Internal/Health）隔离 + 裸路径 404 守 prefix 参与挂载。
     ///
-    /// F2 回归守卫：路由在 nest 后必须通过**完整前缀路径**访问；裸相对路径（无 prefix）在同一 listener
-    /// 上应返回 404——验证声明 prefix 确实参与挂载（不漂移）。
+    /// 裸 Router 经 `UnfinalizedRoutes::into_router_for_test`（`#[doc(hidden)]` 测试入口）取回做 oneshot——
+    /// 生产路径无此 bindable 出口（ROUTE-AUTH-FUNNEL-01）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn finalize_routes_keeps_listeners_isolated() {
         use axum::body::Body;
-        use axum::http::{Request, StatusCode};
+        use axum::http::{Method, Request, StatusCode};
         use axum::routing::get;
+        use httpserve::{PrimaryRoute, Route};
         use tower::ServiceExt;
 
         let mut reg = Registry::new();
-        // register 闭包在 fresh Router 上构建相对 prefix 的路由；finalize 将其 nest 到声明 prefix 下。
-        reg.route_group(ListenerKind::Primary, "/api/v1/p", |r| {
-            Ok(r.route("/primary-only", get(|| async { "p" })))
+        // register 闭包经 typed builder 在 fresh Router 上 mount 相对 prefix 的路由；finalize nest 到声明 prefix 下。
+        reg.route_group::<Primary>("/api/v1/p", |rb| {
+            Ok(rb.mount_primary(
+                PrimaryRoute {
+                    method: Method::GET,
+                    path: "/primary-only",
+                    contract_id: "test.primary",
+                    opt_out: None,
+                },
+                get(|| async { "p" }),
+            ))
         })
         .expect("primary declared");
-        reg.route_group(ListenerKind::Internal, "/internal/v1/i", |r| {
-            Ok(r.route("/internal-only", get(|| async { "i" })))
+        reg.route_group::<Internal>("/internal/v1/i", |rb| {
+            Ok(rb.mount(
+                Route {
+                    method: Method::GET,
+                    path: "/internal-only",
+                    contract_id: "test.internal",
+                },
+                get(|| async { "i" }),
+            ))
         })
         .expect("internal declared");
-        reg.route_group(ListenerKind::Health, "/health/v1/h", |r| {
-            Ok(r.route("/health-only", get(|| async { "h" })))
+        reg.route_group::<Health>("/health/v1/h", |rb| {
+            Ok(rb.mount(
+                Route {
+                    method: Method::GET,
+                    path: "/health-only",
+                    contract_id: "test.health",
+                },
+                get(|| async { "h" }),
+            ))
         })
         .expect("health declared");
 
-        let routers = reg.finalize_routes().expect("finalize ok");
-        let primary = routers
-            .iter()
-            .find(|(l, _)| *l == ListenerKind::Primary)
-            .map(|(_, r)| r.clone())
-            .expect("primary router present");
-        let internal = routers
-            .iter()
-            .find(|(l, _)| *l == ListenerKind::Internal)
-            .map(|(_, r)| r.clone())
-            .expect("internal router present");
-        let health = routers
-            .iter()
-            .find(|(l, _)| *l == ListenerKind::Health)
-            .map(|(_, r)| r.clone())
-            .expect("health router present");
+        // 取回各 listener 的裸 Router（测试专用入口）做 oneshot 断言。
+        let (mut primary, mut internal, mut health) = (None, None, None);
+        for (listener, routes) in reg.finalize_routes().expect("finalize ok") {
+            match listener {
+                ListenerKind::Primary => primary = Some(routes.into_router_for_test()),
+                ListenerKind::Internal => internal = Some(routes.into_router_for_test()),
+                ListenerKind::Health => health = Some(routes.into_router_for_test()),
+                _ => {}
+            }
+        }
+        let primary = primary.expect("primary router present");
+        let internal = internal.expect("internal router present");
+        let health = health.expect("health router present");
 
         let req = |uri: &str| {
             Request::builder()
@@ -848,13 +889,15 @@ mod finalize {
                 .expect("request built")
         };
 
-        // primary-only 在 primary Router 的完整路径（prefix + 相对路径）命中。
+        // primary-only 在 primary Router 的完整路径（prefix + 相对路径）命中：matched ⇒ 路由的 enforce
+        // layer 运行。本 fold-only 测试未跑 finalize_auth（无 AuthPlan extension），故 enforce fail-closed
+        // 403——403（matched + enforce 守）vs 404（未挂载）即区分「路由挂在本 listener」，正是隔离断言。
         let hit = primary
             .clone()
             .oneshot(req("/api/v1/p/primary-only"))
             .await
             .expect("oneshot ok");
-        assert_eq!(hit.status(), StatusCode::OK);
+        assert_eq!(hit.status(), StatusCode::FORBIDDEN);
 
         // F2 回归守卫：裸相对路径在同一 listener 应 404（声明 prefix 确实参与挂载）。
         let bare = primary
@@ -872,13 +915,13 @@ mod finalize {
             .expect("oneshot ok");
         assert_eq!(leaked.status(), StatusCode::NOT_FOUND);
 
-        // 反向：internal-only 只在 internal Router（完整路径）。
+        // 反向：internal-only 只在 internal Router（完整路径）——matched ⇒ enforce fail-closed 403（见上）。
         let hit = internal
             .clone()
             .oneshot(req("/internal/v1/i/internal-only"))
             .await
             .expect("oneshot ok");
-        assert_eq!(hit.status(), StatusCode::OK);
+        assert_eq!(hit.status(), StatusCode::FORBIDDEN);
 
         // F2 回归守卫：裸路径在 internal listener 上 404。
         let bare = internal
@@ -895,13 +938,13 @@ mod finalize {
             .expect("oneshot ok");
         assert_eq!(leaked.status(), StatusCode::NOT_FOUND);
 
-        // health-only 只在 health Router（完整路径）；primary 和 internal 均缺失（N-way 隔离）。
+        // health-only 只在 health Router（完整路径）；primary 和 internal 均缺失（N-way 隔离）。matched ⇒ 403（见上）。
         let hit = health
             .clone()
             .oneshot(req("/health/v1/h/health-only"))
             .await
             .expect("oneshot ok");
-        assert_eq!(hit.status(), StatusCode::OK);
+        assert_eq!(hit.status(), StatusCode::FORBIDDEN);
 
         // F2 回归守卫：裸路径在 health listener 上 404。
         let bare = health

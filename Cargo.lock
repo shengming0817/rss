@@ -928,6 +928,7 @@ dependencies = [
  "consistency",
  "diport",
  "futures",
+ "httpserve",
  "ids",
  "primitives",
  "runctx",
@@ -2346,6 +2347,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "futures",
+ "httpserve",
  "primitives",
  "serde",
  "serde_json",
@@ -2353,6 +2355,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "trybuild",
  "uuid",
  "vocab",
 ]

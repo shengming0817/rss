@@ -9,7 +9,7 @@
 //!
 //! 追踪弹边界（同 identity G1）：服务由组合根（journeys）直接调用，**不逐字节跑 axum**；[`SettingsDomain`]
 //! 只经 bootstrap [`Registry`] **声明**配置路由组（register 闭包收集、不执行）。真实持久化（postgres adapter）
-//! + axum 挂载（`httpserve::mount_primary`）+ wire `ERR_SETTINGS_*` 前缀注册留 Join。
+//! + axum 挂载（域 crate 经 `reg.route_group::<httpserve::Primary>` 收到的 `ListenerRouter<Primary>` 的 `mount_primary` 方法，#1113/#1103 typed route funnel——非已退役的 `httpserve::mount_primary` 自由函数）+ wire `ERR_SETTINGS_*` 前缀注册留 Join。
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
@@ -27,6 +27,9 @@ use generated::event::settings_v1::{
 use generated::http::settings_v1::{
     SettingsConfigPublishData, SettingsConfigPublishRequest, SettingsConfigPublishResponse,
 };
+use httpserve::Primary;
+// ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
+#[cfg(test)]
 use primitives::ListenerKind;
 use vocab::TenantId;
 
@@ -350,10 +353,10 @@ pub struct SettingsDomain;
 
 impl Domain for SettingsDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        // 配置路由组（Primary listener）。register 闭包追踪弹不执行：Join 经
-        //   httpserve::mount_primary(router, PrimaryRoute { method, path, contract_id, opt_out }, handler)
+        // 配置路由组（Primary listener，typed marker）。register 闭包追踪弹不执行：Join 经
+        //   rb.mount_primary(PrimaryRoute { method, path, contract_id, opt_out }, handler)
         // 挂真实 axum 路由（settings.config-publish 鉴权由 listener auth plan 承载，无 Public 降级）。
-        reg.route_group(ListenerKind::Primary, SETTINGS_ROUTE_PREFIX, Ok)?;
+        reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, Ok)?;
         // pending #1272：接 postgres ConfigRepo 生产 wiring 时注册 configs_ready readiness probe（postgres 不可用
         // 时不应 ready；本 PR #1249 仅落 adapter，生产组合根 wiring + HTTP 挂载留 Join）。
         Ok(())

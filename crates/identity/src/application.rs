@@ -19,6 +19,9 @@ use generated::event::identity_v1::{CONTRACT_ID, IdentitySessionCreatedPayload, 
 use generated::http::identity_v1::{
     IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse,
 };
+use httpserve::Primary;
+// ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
+#[cfg(test)]
 use primitives::ListenerKind;
 use uuid::Uuid;
 use vocab::TenantId;
@@ -304,11 +307,11 @@ pub struct IdentityDomain;
 
 impl Domain for IdentityDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        // 登录路由组（Primary listener）。register 闭包追踪弹不执行：W 阶段经
-        //   httpserve::mount_primary(router, PrimaryRoute { method: POST, path: "/login",
+        // 登录路由组（Primary listener，typed marker）。register 闭包追踪弹不执行：W 阶段经
+        //   rb.mount_primary(PrimaryRoute { method: POST, path: "/login",
         //     contract_id: "identity.login", opt_out: Some(RouteAuthOptOut::Public) }, handler)
         // 挂真实 axum 路由（登录 Public opt-out 仅 Primary listener 可降级，AUTH-OPTOUT-PRIMARYONLY-01）。
-        reg.route_group(ListenerKind::Primary, LOGIN_ROUTE_PREFIX, Ok)?;
+        reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, Ok)?;
         Ok(())
     }
 }

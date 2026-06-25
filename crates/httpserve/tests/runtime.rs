@@ -10,7 +10,6 @@
 //! 隔离针对需外部资源（DB/broker/网络）的集成测试；本测试全程 in-process（axum oneshot、
 //! 确定性、毫秒级），是 `cargo test` 默认验收门，故有意不隔离（同 journeys/tests）。
 
-use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::routing::get;
@@ -18,9 +17,7 @@ use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOp
 use tower::ServiceExt; // oneshot
 use vocab::PrincipalKind;
 
-use httpserve::{
-    Authenticated, PrimaryRoute, Route, RouteMeta, finalize_auth, mount, mount_primary,
-};
+use httpserve::{Authenticated, PrimaryRoute, Route, RouteMeta, finalize_auth};
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -65,17 +62,18 @@ const X_REQUEST_ID: &str = "x-request-id";
 #[allow(clippy::unwrap_used)]
 async fn mount_non_primary_route_is_reachable_after_finalize() {
     // 非-Primary Route（无 opt-out 字段）+ NoAuth plan（Health listener 允许）→ Allow → 200。
-    let router = mount(
-        Router::new(),
-        Route {
-            method: Method::GET,
-            path: "/internal/v1/ping",
-            contract_id: C,
-        },
-        get(ok_handler),
-    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Health>(|rb| {
+        rb.mount(
+            Route {
+                method: Method::GET,
+                path: "/internal/v1/ping",
+                contract_id: C,
+            },
+            get(ok_handler),
+        )
+    });
     let plan = AuthPlan::none(ListenerKind::Health).unwrap();
-    let router = finalize_auth(router, plan).unwrap();
+    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
 
     let resp = router
         .clone()
@@ -97,17 +95,20 @@ async fn mount_non_primary_route_is_reachable_after_finalize() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn primary_public_opt_out_allows() {
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     // Public opt-out → Allow → 200，即便 plan 要求 Jwt 且无 Authorization。
     let resp = router
@@ -121,17 +122,20 @@ async fn primary_public_opt_out_allows() {
 #[allow(clippy::unwrap_used)]
 async fn primary_public_opt_out_with_evidence_is_200() {
     // 保险：opt_out=Public 是 Allow 分支，存在 Authenticated 证据不改变结论（证据不破坏 Allow）→ 仍 200。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -147,17 +151,20 @@ async fn primary_public_opt_out_with_evidence_is_200() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn primary_require_without_credential_is_401() {
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     // Require(Jwt) + 无 Authorization → 401 + ERR_CORE_UNAUTHENTICATED。
     let resp = router
@@ -174,17 +181,20 @@ async fn primary_require_without_credential_is_401() {
 async fn primary_require_is_fail_closed_401() {
     // fail-closed：httpserve 不验签——裸 Authorization header 非证据，仅请求携 Authenticated 证据
     // extension（验签桥外层 layer 注入）才放行，故带 header 仍 401（AUTH-EVIDENCE-REQUIRE-01）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -201,17 +211,20 @@ async fn primary_require_is_fail_closed_401() {
 async fn primary_require_with_authenticated_evidence_allows() {
     // AUTH-EVIDENCE-REQUIRE-01：Require(Jwt) 路由 + 请求携 Authenticated 证据 → 放行 200。
     // 证据由组合根验签桥（外层 layer）注入；此处直接 insert 到请求 extension 模拟该接缝。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -229,17 +242,20 @@ async fn primary_require_with_authenticated_evidence_allows() {
 async fn primary_require_with_mismatched_scheme_is_401() {
     // AUTH-EVIDENCE-REQUIRE-01 scheme exact-match：Require(Jwt) 路由 + Mtls 方案证据 → scheme 不匹配 → 401
     // （#1109 验签桥接入后杜绝 Jwt 证据过 Require(Mtls) 类 scheme 混淆）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -259,18 +275,19 @@ async fn primary_require_with_mismatched_scheme_is_401() {
 async fn primary_route_finalized_under_control_plane_plan_is_403() {
     // 残留 seam fail-closed：Primary route 带 opt-out，却在控制面（Internal）plan 下 finalize
     // → resolve_requirement = Deny → 403 ERR_CORE_FORBIDDEN（AUTH-FAILCLOSED-01 的 HTTP 落地）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(ok_handler),
-    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(ok_handler),
+        )
+    });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).unwrap();
-    let router = finalize_auth(router, plan).unwrap();
+    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -285,16 +302,18 @@ async fn primary_route_finalized_under_control_plane_plan_is_403() {
 #[allow(clippy::unwrap_used)]
 async fn missing_finalize_auth_is_fail_closed_403() {
     // finalize_auth 未跑 → enforce 层读不到 AuthPlan → fail-closed Deny → 403。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
+    let router = routes.into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -308,17 +327,20 @@ async fn missing_finalize_auth_is_fail_closed_403() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn request_id_is_generated_on_response() {
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -333,17 +355,20 @@ async fn request_id_is_generated_on_response() {
 #[allow(clippy::unwrap_used)]
 async fn incoming_request_id_is_echoed_and_in_envelope() {
     // 入站 X-Request-Id 透传到响应 header + 4xx envelope.requestId（enforce 层有 request 上下文）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -367,17 +392,20 @@ async fn incoming_request_id_is_echoed_and_in_envelope() {
 #[allow(clippy::unwrap_used)]
 async fn handler_panic_becomes_500_envelope_without_leaking_payload() {
     // F2：request-aware panic 中间件——requestId 来自请求上下文，panic payload 不泄漏 wire。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/boom",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(panicking_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/boom",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(panicking_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -409,18 +437,20 @@ async fn handler_panic_becomes_500_envelope_without_leaking_payload() {
 #[allow(clippy::unwrap_used)]
 async fn admin_opt_out_is_403() {
     // Admin listener + opt-out Public → Deny → 403（控制面 listener 永不降级）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(ok_handler),
-    );
+    // 使用 Primary listener 挂载 PrimaryRoute（带 opt_out），但以 Admin plan finalize。
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(ok_handler),
+        )
+    });
     let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).unwrap();
-    let router = finalize_auth(router, plan).unwrap();
+    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -435,17 +465,20 @@ async fn admin_opt_out_is_403() {
 #[allow(clippy::unwrap_used)]
 async fn primary_password_reset_exempt_allows() {
     // Primary + PasswordResetExempt opt-out → Allow → 200（无需 Authorization）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: Some(RouteAuthOptOut::PasswordResetExempt),
-        },
-        get(ok_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: Some(RouteAuthOptOut::PasswordResetExempt),
+            },
+            get(ok_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -458,18 +491,19 @@ async fn primary_password_reset_exempt_allows() {
 #[allow(clippy::unwrap_used)]
 async fn primary_noauth_plan_allows() {
     // Primary + NoAuth scheme（AuthPlan::none）→ Allow → 200（无需 Authorization header）。
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/x",
-            contract_id: C,
-            opt_out: None,
-        },
-        get(ok_handler),
-    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/x",
+                contract_id: C,
+                opt_out: None,
+            },
+            get(ok_handler),
+        )
+    });
     let plan = AuthPlan::none(ListenerKind::Primary).unwrap();
-    let router = finalize_auth(router, plan).unwrap();
+    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -490,17 +524,20 @@ async fn route_meta_in_request_extension() {
         meta.contract_id.to_owned()
     }
 
-    let router = mount_primary(
-        Router::new(),
-        PrimaryRoute {
-            method: Method::GET,
-            path: "/api/v1/meta",
-            contract_id: META_CONTRACT,
-            opt_out: Some(RouteAuthOptOut::Public),
-        },
-        get(meta_handler),
-    );
-    let router = finalize_auth(router, primary_plan(AuthScheme::Jwt)).unwrap();
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute {
+                method: Method::GET,
+                path: "/api/v1/meta",
+                contract_id: META_CONTRACT,
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(meta_handler),
+        )
+    });
+    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
+        .unwrap()
+        .into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/meta"))
@@ -519,7 +556,7 @@ async fn route_meta_in_request_extension() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn healthz_is_200() {
-    let router = Router::new().route("/healthz", httpserve::health::healthz());
+    let router = axum::Router::new().route("/healthz", httpserve::health::healthz());
     let resp = router
         .oneshot(empty_req(Method::GET, "/healthz"))
         .await
@@ -540,7 +577,7 @@ async fn readyz_reflects_aggregated_health() {
             "ok",
         )])
     };
-    let router = Router::new().route("/readyz", httpserve::health::readyz(healthy));
+    let router = axum::Router::new().route("/readyz", httpserve::health::readyz(healthy));
     let resp = router
         .oneshot(empty_req(Method::GET, "/readyz"))
         .await
@@ -555,7 +592,7 @@ async fn readyz_reflects_aggregated_health() {
             "down",
         )])
     };
-    let router = Router::new().route("/readyz", httpserve::health::readyz(unhealthy));
+    let router = axum::Router::new().route("/readyz", httpserve::health::readyz(unhealthy));
     let resp = router
         .oneshot(empty_req(Method::GET, "/readyz"))
         .await
@@ -564,7 +601,7 @@ async fn readyz_reflects_aggregated_health() {
 
     // 空 checks（fail-closed→Unhealthy）→ 503。
     let empty = || HealthReport::aggregate(vec![]);
-    let router = Router::new().route("/readyz", httpserve::health::readyz(empty));
+    let router = axum::Router::new().route("/readyz", httpserve::health::readyz(empty));
     let resp = router
         .oneshot(empty_req(Method::GET, "/readyz"))
         .await
