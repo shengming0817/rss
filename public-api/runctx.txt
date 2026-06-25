@@ -7,12 +7,12 @@ pub fn runctx::ctx::RequestCtx<T, P>::principal(&self) -> &P
 pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
 impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
 impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::eq(&self, &runctx::ctx::RequestCtx<T, P>) -> bool
-impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
 impl<T, P> core::marker::Freeze for runctx::ctx::RequestCtx<T, P> where T: core::marker::Freeze, P: core::marker::Freeze
 impl<T, P> core::marker::Send for runctx::ctx::RequestCtx<T, P> where T: core::marker::Send, P: core::marker::Send
 impl<T, P> core::marker::Sync for runctx::ctx::RequestCtx<T, P> where T: core::marker::Sync, P: core::marker::Sync
@@ -140,12 +140,12 @@ pub fn runctx::ctx::RequestCtx<T, P>::principal(&self) -> &P
 pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
 impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
 impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::eq(&self, &runctx::ctx::RequestCtx<T, P>) -> bool
-impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
 impl<T, P> core::marker::Freeze for runctx::ctx::RequestCtx<T, P> where T: core::marker::Freeze, P: core::marker::Freeze
 impl<T, P> core::marker::Send for runctx::ctx::RequestCtx<T, P> where T: core::marker::Send, P: core::marker::Send
 impl<T, P> core::marker::Sync for runctx::ctx::RequestCtx<T, P> where T: core::marker::Sync, P: core::marker::Sync

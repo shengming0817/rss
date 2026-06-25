@@ -1,6 +1,9 @@
 # dylint lint crate 须 nightly + rustc_private 组件（rustc-dev）。仅作用于 lints/ 子树，
 # 不影响根 stable 1.96 workspace（lints/ 已自成 workspace + 根 exclude）。
 # channel ↔ clippy_utils rev（见 rss_domain_no_serialize/Cargo.toml）须成对升级，勿单独改其一。
+# channel 亦是 public-api baseline 的钉版 nightly（三方 SoT，xtask publicapi.rs PINNED_NIGHTLY / azure
+# RSS_NIGHTLY_PINNED，NIGHTLY-PIN-01 守一致）；bump 时须同步重跑 `cargo xtask public-api` 重生成
+# public-api/*.txt（忘记会被 --check drift-fail 抓住）。
 # ref: dylint internal/template/rust-toolchain@v6.0.1
 [toolchain]
 channel = "nightly-2026-04-16"

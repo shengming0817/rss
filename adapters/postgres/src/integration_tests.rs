@@ -215,12 +215,14 @@ use crate::outbox::{
     MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, PgOutbox, SettleOutcome, append_outbox,
 };
 
-/// setup 阶段：应用 migration（含 outbox 表），清空 outbox（防测试间污染）。
+/// setup 阶段：应用 migration（含 outbox 表）。**不**全表 DELETE——每个 outbox 用例按唯一 `event_id`
+/// （[`unique_event_id`]）+ 唯一 domain 命名空间自隔离断言（`WHERE event_id = $1` / domain-scoped 查询用各自
+/// 专属 domain），故无需净表起点。去掉全表清后用例 correct-by-construction：在并发执行下亦互不污染——既覆盖
+/// 官方串行 lane（`cargo nextest run --profile integration`，`.config/nextest.toml` `integration` test-group
+/// `max-threads=1`），也覆盖直接 `cargo test -p postgres --features integration`（libtest 并行、绕过 nextest
+/// 串行组）这条残留路径，隔离不再依赖调度器串行（#1194；nextest 串行组保留作 defense-in-depth）。
 async fn setup_outbox(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     store.run_migrations().await?;
-    sqlx::query("DELETE FROM outbox")
-        .execute(&store.pool)
-        .await?;
     Ok(())
 }
 
@@ -243,6 +245,16 @@ fn uuid_like() -> String {
     format!("{:x}", CTR.fetch_add(1, Ordering::Relaxed))
 }
 
+/// 产生唯一 domain（防 **domain-scoped 聚合断言**被跨轮 / 并发旧行污染）——与 [`unique_event_id`] 同源唯一性。
+///
+/// INVARIANT：按 domain 聚合且断言**精确 depth/计数**的用例（t16–t19 的 `sample_backlog`）必须用 **per-run 唯一**
+/// domain。`outbox.event_id` UNIQUE + `ON CONFLICT (event_id) DO NOTHING` 只隔离**单行** `WHERE event_id` 查询；
+/// 对 `sample_backlog(domain)` 这种**按 domain 聚合**的查询不够——外部持久库重复跑时，上一轮同 domain 旧行会被
+/// 计入，使精确 depth 累加而 flaky（#1194 review F1）。去全表 DELETE 后唯一隔离手段即「event_id + domain 双唯一」。
+fn unique_domain(prefix: &str) -> String {
+    unique_event_id(prefix)
+}
+
 /// 构造测试用 Entry + Envelope。
 fn make_entry(event_id: &str) -> Entry {
     #[allow(clippy::unwrap_used)]
@@ -257,9 +269,9 @@ fn make_entry(event_id: &str) -> Entry {
 /// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
 /// 的用例，不断言 occurred_at 值）。`occurred_at` 构造期必填（#262 F1），此处取占位 0；envelope occurred_at 的
 /// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgSessionUnitOfWork`）/ config co-tx 专门覆盖（#1129）。
-fn make_envelope(event_id: &str) -> OutboxEnvelope {
+fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
-        "test-domain".to_string(),
+        domain.to_string(),
         "contract-1".to_string(),
         OutboxMetadata::new(0).with_subject_id(event_id),
     )
@@ -343,7 +355,7 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
 
     let event_id = unique_event_id("t1");
     let entry = make_entry(&event_id);
-    let env = make_envelope(&event_id);
+    let env = make_envelope("t1-domain", &event_id);
 
     // 事务内 append_outbox，然后返回 Err → 回滚。
     let result = store
@@ -386,7 +398,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
 
     let event_id = unique_event_id("t2");
     let entry = make_entry(&event_id);
-    let env = make_envelope(&event_id);
+    let env = make_envelope("t2-domain", &event_id);
 
     // 事务内 append_outbox + Ok → commit。
     store
@@ -414,7 +426,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
 
     assert_eq!(row.0, 1, "should have exactly 1 row");
     assert_eq!(row.1, "pending", "status should be pending");
-    assert_eq!(row.2, "test-domain", "domain should match");
+    assert_eq!(row.2, "t2-domain", "domain should match");
     assert_eq!(row.3, "test.event", "topic should match");
 
     store.shutdown().await?;
@@ -430,7 +442,9 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
 
     let event_id = unique_event_id("t3");
     let entry = make_entry(&event_id);
-    let env = make_envelope(&event_id);
+    // t3 仅验 relay 路径、不断言 metadata；用 make_test_env（无 subject_id），避免 make_envelope 的
+    // subject_id 在下方闭包重建时被丢弃的冗余（#1194 review F3）。
+    let env = make_test_env("t3-domain", "contract-1");
 
     // seed: 1 行 pending。
     store
@@ -485,7 +499,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
         .run_in_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
-                "test-domain".to_string(),
+                "t4-domain".to_string(),
                 "c".to_string(),
                 OutboxMetadata::new(0),
             );
@@ -531,7 +545,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
     assert!(future_check.0, "retry_after should be in the future");
 
     // 退避负向：retry_after 在将来 → poll_pending 本轮不应重新捞回该行（L2 退避可靠性闭环）。
-    let re = outbox.poll_pending("test-domain", 10).await?;
+    let re = outbox.poll_pending("t4-domain", 10).await?;
     assert!(
         !re.iter().any(|e| e.idem_key().as_str() == event_id),
         "requeued entry must not be re-polled within backoff window"
@@ -556,7 +570,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
         .run_in_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
-                "test-domain".to_string(),
+                "t5-domain".to_string(),
                 "c".to_string(),
                 OutboxMetadata::new(0),
             );
@@ -824,9 +838,26 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    // 保留期 3600s = 1h；旧 published 行 created_at 早于 2h 前 → 应被删（恰 1 条）。
+    // 保留期 3600s = 1h；本用例的旧 published 行 created_at 早于 2h 前 → 必被删。
+    // 注：`sweep` 是**全表** DELETE（无 domain 过滤），故**不**断言精确全局计数——去掉 `setup_outbox` 全表 DELETE
+    // 后本用例的 `event_fresh`（in-retention published，created_at≈now()）本轮不被删而遗留；外部持久库下若跨轮
+    // 间隔 > 保留期，遗留行老化后会被本轮 sweep 多删，使 `== 1` flaky（#1194 review F1）。改为：
+    //   ① 全局只断言「至少删 ≥1」(anti-vacuity，本用例 aged 行必被删)；
+    //   ② 精确性由下方 **event_id-scoped** 断言（被删的确是 event_pub）承载——跨轮 / 并发稳健。
     let deleted = outbox.sweep(3600).await?;
-    assert_eq!(deleted, 1, "sweep should delete exactly 1 published row");
+    assert!(
+        deleted >= 1,
+        "sweep should delete at least the aged published row"
+    );
+    // 被删的确是本用例的 aged published 行（event_pub）——event_id-scoped，非全局计数。
+    let pub_gone: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id=$1")
+        .bind(&event_pub)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        pub_gone.0, 0,
+        "aged published row (event_pub) must be swept"
+    );
 
     // dlx 行应保留。
     let remaining: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id=$1")
@@ -937,8 +968,9 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     use diport::{OutboxEmitter, OutboxEnvelopeParts};
 
     let (_pg, store) = connect_pg().await?;
-    // F5(#1194)：仅建表、不全表 DELETE——本用例按 unique `event_id` 隔离断言（`WHERE event_id = $1`），
-    // 不需净表起点，避免并发共享库下污染他用例刚写入的行（`setup_outbox` 的全表清理是 pre-existing，#1194 收口）。
+    // F5(#1194)：仅建表、不全表 DELETE——本用例按 unique `event_id` 隔离断言（`WHERE event_id = $1`），不需
+    // 净表起点。#1194 现已全量收口：`setup_outbox` 亦不再全表 DELETE，全部 outbox 用例按 event_id + 专属
+    // domain 自隔离（correct-by-construction，并发下亦不互污染）；此处直接 `run_migrations` 与之一致。
     store.run_migrations().await?;
 
     let event_id = unique_event_id("t10-emit");
@@ -1218,26 +1250,28 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
 
 // ── T15–T18: OutboxBacklog::sample_backlog（#1209）────────────────────────────
 //
-// T15: 空表 → BacklogSample::empty()（depth=0, age=0）。
+// T15: 专属 domain 无行 → BacklogSample::empty()（depth=0, age=0；domain-scoped，不依赖全表净起点）。
 // T16: pending 行计入 depth；published/dlx/publishing 行不计。
 // T17: oldest_age_seconds 来自 min(created_at)（最老 pending 行；允许小容差）。
 // T18: retry_after > now() 的行排除在 depth 之外（与 poll_pending pending 谓词同源）。
 
 use consistency::{BacklogSample, OutboxBacklog};
 
-/// T15: 空 outbox（仅 migrations）→ sample_backlog 返 BacklogSample::empty()。
+/// T15: 对一个无任何用例写入的专属 domain（`t15-domain`）采样 → sample_backlog 返 BacklogSample::empty()。
+/// domain-scoped 断言：不依赖全表净起点，去掉 `setup_outbox` 全表 DELETE 后仍恒空（#1194）。
 #[tokio::test(flavor = "multi_thread")]
-async fn t15_sample_backlog_empty_table_returns_empty() -> TestResult {
+async fn t15_sample_backlog_empty_domain_returns_empty() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let sample = outbox.sample_backlog("test-domain").await?;
+    // 用 t15 专属 domain（无任何其它用例写入）→ domain-scoped 采样恒空，断言不依赖全表净起点（#1194）。
+    let sample = outbox.sample_backlog("t15-domain").await?;
 
     assert_eq!(
         sample,
         BacklogSample::empty(),
-        "空表应返 BacklogSample::empty()"
+        "无写入的专属 domain 采样应返 BacklogSample::empty()"
     );
     assert_eq!(sample.depth(), 0);
     assert_eq!(sample.oldest_age_seconds(), 0);
@@ -1253,7 +1287,9 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let domain = "t16-domain";
+    // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
+    let domain = unique_domain("t16-domain");
+    let domain = domain.as_str();
 
     // seed：1 pending + 1 published + 1 dlx + 1 publishing。
     for (prefix, target_status) in [
@@ -1300,7 +1336,9 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let domain = "t17-domain";
+    // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
+    let domain = unique_domain("t17-domain");
+    let domain = domain.as_str();
 
     // 先插"新" pending 行（created_at = now()）。
     let new_id = unique_event_id("t17-new");
@@ -1361,7 +1399,9 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let domain = "t18-domain";
+    // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
+    let domain = unique_domain("t18-domain");
+    let domain = domain.as_str();
 
     // seed：1 到期 pending（retry_after IS NULL）+ 1 未到期 pending（retry_after = now()+3600）。
     let due_id = unique_event_id("t18-due");
@@ -1416,7 +1456,9 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let domain = "t19-domain";
+    // per-run 唯一 domain：sample_backlog 按 domain 聚合，跨轮持久库须唯一防旧行计入（#1194 review F1）。
+    let domain = unique_domain("t19-domain");
+    let domain = domain.as_str();
     let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
 
     // seed 两行 publishing：stale（updated_at 回拨 LEASE_TTL+10s）+ fresh（updated_at≈now()）。

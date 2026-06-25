@@ -10,8 +10,8 @@
 //! 自检可显式 `--allow-missing` 宽限缺失（drift 仍 fail）——对齐 cargo-public-api snapshot-gate
 //! 范式，杜绝「无 baseline 也绿」的误绿。
 //!
-//! 依赖：外部 `cargo-public-api`（`cargo install cargo-public-api`）+ nightly rustdoc-json
-//! （`rustup toolchain install nightly`）。未满足时本命令给指引并**非零退出**（非静默 noop）。
+//! 依赖：外部 `cargo-public-api`（`cargo install cargo-public-api@0.52.0`）+ 钉版 nightly rustdoc-json
+//! （`rustup toolchain install <PINNED_NIGHTLY>`，见 [`PINNED_NIGHTLY`]）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
 //! **不在 `cargo xtask verify` 聚合门内**：verify 聚合每次代码改动的强制门（fmt/build/clippy/nextest/deny/
 //! dylint + meta）；public-api 是**库封装面 baseline 冻结门**（轴 A SemVer，需 nightly rustdoc-json 重新生成
@@ -19,13 +19,32 @@
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 —— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 —— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
+//! INVARIANT: NIGHTLY-PIN-01 —— rustdoc-json 用钉版 nightly（[`PINNED_NIGHTLY`]，非 rolling）；该 pin 四处
+//!   一致：`PINNED_NIGHTLY` ⇔ `lints/rust-toolchain.toml` channel ⇔ azure `RSS_NIGHTLY_PINNED`（三方功能值，
+//!   `pinned_nightly_single_source_of_truth` 守）+ `verify.rs` public-api install_hint（`verify::tests::
+//!   public_api_install_hint_pins_nightly` 守，绑真实字段值非源码全文）。漂移即 fail。
 
 use crate::layers::{BASIS_CRATES, ENGINE_CRATES};
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
+use std::process::Command;
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
+
+/// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
+/// 编译器即强制回退 rolling `nightly`（其 rustdoc-json 格式随日期漂移 ⇒ baseline 误报）；本 const 经
+/// [`public_api_cmd`] 设 `RUSTUP_TOOLCHAIN`（等价 `cargo +<此值> public-api`）把 nightly 钉死，使快照可复现（#1145）。
+///
+/// **单一事实源（NIGHTLY-PIN-01）**：本 const ⇔ `lints/rust-toolchain.toml` 的 `[toolchain].channel`
+/// （dylint 实际 nightly）⇔ `azure-pipelines.yml` 的 `RSS_NIGHTLY_PINNED`（CI 安装的 nightly）三方功能值由
+/// `pinned_nightly_single_source_of_truth` 守；第四处 `verify.rs` public-api install_hint 由
+/// `verify::tests::public_api_install_hint_pins_nightly` 守（绑真实 install_hint 字段值、非源码全文，避免注释
+/// 含 pin 的误绿）——漂移即 fail。**与 dylint nightly 成对、CI 只装一份**：dylint 因 `clippy_utils` rev 升 nightly 时——
+/// 该 rev 与本 nightly 配对（见 `lints/rss_*/Cargo.toml`，由 dylint 编译失败 **Hard** 强制，非本治理测试
+/// 覆盖）——**须同步重跑 `cargo xtask public-api` 重生成 `public-api/*.txt`**；忘记不会静默，会被
+/// PUBLICAPI-DRIFT-GATE-01（`--check`，共用同一 pin）在 CI 直接 drift-fail 抓住。
+pub(crate) const PINNED_NIGHTLY: &str = "nightly-2026-04-16";
 
 /// 封装面 baseline 的目标层。无 `--layer` 时取 basis + engine 全集（收口 GATE 用）。
 /// 服务/域/adapters 内部接缝多变，不入 baseline。
@@ -92,15 +111,28 @@ fn ensure_tool_available() -> Result<()> {
     }
     bail!(
         "未找到 `cargo public-api`。安装：\n  \
-         cargo install cargo-public-api\n  \
-         rustup toolchain install nightly   # rustdoc-json 需 nightly\n\
+         cargo install cargo-public-api@0.52.0\n  \
+         rustup toolchain install {PINNED_NIGHTLY}   # rustdoc-json 需钉版 nightly（NIGHTLY-PIN-01）\n\
          仅基础/引擎层封装面冻结需要本工具（非全 workspace 强制门）。"
     )
 }
 
-/// 运行 `cargo public-api -p <crate>` 捕获其封装面快照文本。
+/// 构造 `cargo public-api -p <crate>` 子进程，经 [`crate::cmd::clean_cmd`] 漏斗把 `RUSTUP_TOOLCHAIN`
+/// 显式重设为 `toolchain`（剥离后成该变量唯一来源，CMD-ENV-CLEAN-01）——等价 `cargo +<toolchain> public-api`，
+/// 让 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json（`is_probably_stable()`==false ⇒ 透传当前
+/// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01.
+fn public_api_cmd(krate: &str, toolchain: &str) -> Command {
+    crate::cmd::clean_cmd(
+        "cargo",
+        &["public-api", "-p", krate],
+        &[("RUSTUP_TOOLCHAIN", toolchain)],
+        None,
+    )
+}
+
+/// 运行 `cargo public-api -p <crate>`（钉版 nightly）捕获其封装面快照文本。
 fn capture_public_api(krate: &str) -> Result<String> {
-    let out = crate::cmd::clean_cmd("cargo", &["public-api", "-p", krate], &[], None)
+    let out = public_api_cmd(krate, PINNED_NIGHTLY)
         .output()
         .with_context(|| format!("运行 cargo public-api -p {krate} 失败"))?;
     if !out.status.success() {
@@ -212,6 +244,170 @@ mod tests {
         let dir = baseline_dir()?;
         assert!(dir.ends_with("public-api"));
         assert!(dir.parent().is_some());
+        Ok(())
+    }
+
+    // ---- NIGHTLY-PIN-01：public-api 钉版 nightly（RUSTUP_TOOLCHAIN 重设）+ 三方 SoT 一致 ----
+
+    /// `public_api_cmd` 构造 `cargo public-api -p <crate>`、cwd 为 None（与原 capture 行为一致）。
+    #[test]
+    fn public_api_cmd_sets_program_and_args() {
+        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY);
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("cargo"));
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                std::ffi::OsStr::new("public-api"),
+                std::ffi::OsStr::new("-p"),
+                std::ffi::OsStr::new("vocab"),
+            ]
+        );
+        assert_eq!(cmd.get_current_dir(), None);
+    }
+
+    /// 传 `PINNED_NIGHTLY` 时 `RUSTUP_TOOLCHAIN` 被经 clean_cmd 显式重设为钉版 nightly
+    /// （等价 `cargo +nightly-2026-04-16 public-api`，使 rustdoc-json 可复现）。INVARIANT: NIGHTLY-PIN-01.
+    #[test]
+    fn public_api_cmd_injects_pinned_toolchain() {
+        let cmd = public_api_cmd("ids", PINNED_NIGHTLY);
+        let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")
+                    && *v == Some(std::ffi::OsStr::new(PINNED_NIGHTLY))),
+            "RUSTUP_TOOLCHAIN 应被显式重设为 PINNED_NIGHTLY"
+        );
+    }
+
+    /// 经 clean_cmd 漏斗：除 `RUSTUP_TOOLCHAIN`（本步显式重设）外，其它 ambient toolchain/flag 变量
+    /// （`RUSTC`/`RUSTDOC`/`RUSTFLAGS`/…）仍被 env_remove —— 剥离后由显式 env 成唯一来源（CMD-ENV-CLEAN-01）。
+    #[test]
+    fn public_api_cmd_strips_other_ambient_but_resets_toolchain() {
+        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY);
+        let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
+        for stripped in crate::cmd::STRIPPED_ENV
+            .iter()
+            .filter(|v| **v != "RUSTUP_TOOLCHAIN")
+        {
+            assert!(
+                envs.iter()
+                    .any(|(k, v)| *k == std::ffi::OsStr::new(stripped) && v.is_none()),
+                "{stripped} 应被 env_remove"
+            );
+        }
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")
+                    && *v == Some(std::ffi::OsStr::new(PINNED_NIGHTLY))),
+            "RUSTUP_TOOLCHAIN 在剥离后由显式 env 重设"
+        );
+    }
+
+    /// anti-vacuity：toolchain 入参透传（非把 `PINNED_NIGHTLY` 硬编码忽略参数）。
+    #[test]
+    fn public_api_cmd_toolchain_arg_flows_through() {
+        let fake = "nightly-1999-01-01";
+        let cmd = public_api_cmd("vocab", fake);
+        let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")
+                    && *v == Some(std::ffi::OsStr::new(fake))),
+            "toolchain 入参应透传进 RUSTUP_TOOLCHAIN"
+        );
+    }
+
+    // 三方 pinned-nightly SoT 解析（仅 test 用——production 无消费方读这两文件）。
+
+    /// 从 `rust-toolchain.toml` 文本取 `[toolchain].channel`。
+    fn parse_toolchain_channel(toml_src: &str) -> Option<String> {
+        toml_src
+            .parse::<toml::Value>()
+            .ok()?
+            .get("toolchain")?
+            .get("channel")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// 从 azure-pipelines.yml 文本取 `RSS_NIGHTLY_PINNED` 变量值：行扫描，先 `split('#')` 剥注释、
+    /// 再结构绑定 `RSS_NIGHTLY_PINNED:` 前缀——防注释内同名误满足（无 serde_yaml 依赖）。
+    fn azure_nightly_pinned(yaml_src: &str) -> Option<String> {
+        yaml_src.lines().find_map(|line| {
+            let code = line.split('#').next().unwrap_or("").trim();
+            let rest = code.strip_prefix("RSS_NIGHTLY_PINNED:")?;
+            Some(rest.trim().to_owned())
+        })
+    }
+
+    /// 三方 pinned-nightly 是否一致。
+    fn nightly_pins_agree(const_val: &str, channel: &str, azure: &str) -> bool {
+        const_val == channel && channel == azure
+    }
+
+    #[test]
+    fn parse_toolchain_channel_extracts_channel() {
+        assert_eq!(
+            parse_toolchain_channel("[toolchain]\nchannel = \"nightly-2026-04-16\"\n").as_deref(),
+            Some("nightly-2026-04-16")
+        );
+        // 缺 channel → None（不静默成空串）。
+        assert_eq!(
+            parse_toolchain_channel("[toolchain]\nprofile = \"minimal\"\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn azure_nightly_pinned_extracts_value() {
+        assert_eq!(
+            azure_nightly_pinned("variables:\n  RSS_NIGHTLY_PINNED: nightly-2026-04-16\n")
+                .as_deref(),
+            Some("nightly-2026-04-16")
+        );
+        // 值后带行尾注释：split('#') 剥注释后取值（YAML unquoted scalar 行尾注释语义，刻意支持）。
+        assert_eq!(
+            azure_nightly_pinned("  RSS_NIGHTLY_PINNED: nightly-2026-04-16 # 钉版\n").as_deref(),
+            Some("nightly-2026-04-16")
+        );
+        // synthetic red（fail-closed）：仅注释行不可误满足（对标 verify.rs codex F1）。
+        assert_eq!(
+            azure_nightly_pinned("  # RSS_NIGHTLY_PINNED: nightly-2026-04-16\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn nightly_pin_predicate_green_and_red() {
+        let p = PINNED_NIGHTLY;
+        // 绿：三相等。
+        assert!(nightly_pins_agree(p, p, p));
+        // 红：逐方向构造不一致三元组均 false（守卫非恒真）。
+        let other = "nightly-2026-05-01";
+        assert!(!nightly_pins_agree(p, p, other));
+        assert!(!nightly_pins_agree(p, other, p));
+        assert!(!nightly_pins_agree(other, p, p));
+    }
+
+    /// anti-vacuity 真实绿例：从真实 `lints/rust-toolchain.toml` + `azure-pipelines.yml` 解析，断言
+    /// 三方功能 pinned-nightly 一致（`PINNED_NIGHTLY` == lints channel == azure `RSS_NIGHTLY_PINNED`）。
+    /// 第四处镜像（verify.rs public-api install_hint）由 `verify::tests::public_api_install_hint_pins_nightly`
+    /// 守——绑真实 install_hint 字段值（非源码全文，避免注释含 pin 的误绿）。INVARIANT: NIGHTLY-PIN-01.
+    #[test]
+    fn pinned_nightly_single_source_of_truth() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let toolchain_toml =
+            std::fs::read_to_string(root.join("lints").join("rust-toolchain.toml"))?;
+        let azure_yaml = std::fs::read_to_string(root.join("azure-pipelines.yml"))?;
+        let channel = parse_toolchain_channel(&toolchain_toml)
+            .ok_or_else(|| anyhow::anyhow!("lints/rust-toolchain.toml 应有 [toolchain].channel"))?;
+        let azure = azure_nightly_pinned(&azure_yaml)
+            .ok_or_else(|| anyhow::anyhow!("azure-pipelines.yml 应有 RSS_NIGHTLY_PINNED 变量"))?;
+        assert!(
+            nightly_pins_agree(PINNED_NIGHTLY, &channel, &azure),
+            "pinned nightly 三方漂移：PINNED_NIGHTLY={PINNED_NIGHTLY}, lints channel={channel}, azure={azure}"
+        );
         Ok(())
     }
 }
