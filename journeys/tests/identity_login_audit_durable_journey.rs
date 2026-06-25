@@ -38,13 +38,14 @@ use postgres::{PgConfig, PgOutbox, PgPassword, PgSessionUnitOfWork, PgSslMode, P
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use vocab::TenantId;
 
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 const IDENTITY_DOMAIN: &str = "identity";
-const USERNAME: &str = "alice";
 const PASSWORD: &str = "correct-horse";
-/// 种子用户 subject——W 阶段审计 actor 是 typed `ids::UserId`（canonical uuid），故 subject 须为 uuid。
+/// 种子用户 subject = 登录标识（`request.username` 即 subject）。审计 actor 是 typed `ids::UserId`
+/// （canonical uuid），故 subject 须为 uuid。
 const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
@@ -221,23 +222,26 @@ async fn login_audit_durable_topology() -> Result<()> {
     // 生产侧：login → PgSessionUnitOfWork **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
     // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
     // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
-    let login = LoginService::with_seed_user(
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let login = LoginService::with_seed_credential(
         DynSessionUnitOfWork::new_box(PgSessionUnitOfWork::new(&store)),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
-        USERNAME,
-        PASSWORD,
         SUBJECT,
-        CANON_TENANT,
-    );
+        PASSWORD,
+        tenant,
+    )?;
     let relay = PgOutbox::new(&store, DynPublisher::new_box(bus.publisher()));
 
     let drive = async {
         let response = login
-            .login(IdentityLoginRequest {
-                username: USERNAME.to_string(),
-                password: PASSWORD.to_string(),
-            })
+            .login(
+                tenant,
+                IdentityLoginRequest {
+                    username: SUBJECT.to_string(),
+                    password: PASSWORD.to_string(),
+                },
+            )
             .await?;
         // F1 后：idem_key = 独立 EventId（非 session_id）；以 payload.sessionId 关联本轮 entry（F6）。
         let session_id = response.data.session_id.clone();

@@ -50,15 +50,16 @@ use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus, MemEmitter, MemSessionUnitOfWork};
 use primitives::{ListenerKind, Mac, MacAlgorithm, MacKey, MacVerifier};
 use tokio_util::sync::CancellationToken;
+use vocab::TenantId;
 
 /// canonical UUID 种子租户（TenantId::parse 接受形态）。
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 /// session-created event 契约 topic（identity 发布 / audit 订阅）。
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
-/// 登录种子凭据。
-const USERNAME: &str = "alice";
+/// 登录种子密码。
 const PASSWORD: &str = "correct-horse";
-/// 种子用户 subject——W 阶段审计 actor 是 typed `ids::UserId`（canonical uuid），故 subject 须为 uuid。
+/// 种子用户 subject = 登录标识（`request.username` 即 subject，CredentialRepo 按 `(tenant,subject)` 索引）。
+/// 审计 actor 是 typed `ids::UserId`（canonical uuid），故 subject 须为 uuid。
 const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
 /// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid），
 /// 非 uuid 会被 handler fail-closed 拒（F3）；故 session_id 须为 uuid。
@@ -272,21 +273,25 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     );
 
     // 登录：注入 MemSessionUnitOfWork（co-tx demo 替身：session + outbox fan-out）+ 固定时钟。emit + 等 audit + cancel 收口。
-    let login = LoginService::with_seed_user(
+    // tenant 经 X-Tenant-ID header 解析（组合根职责）；此处 journey 直接 parse 注入 login 位置参。
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let login = LoginService::with_seed_credential(
         DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
-        USERNAME,
-        PASSWORD,
         SUBJECT,
-        CANON_TENANT,
-    );
+        PASSWORD,
+        tenant,
+    )?;
     let drive = async {
         let response = login
-            .login(IdentityLoginRequest {
-                username: USERNAME.to_string(),
-                password: PASSWORD.to_string(),
-            })
+            .login(
+                tenant,
+                IdentityLoginRequest {
+                    username: SUBJECT.to_string(),
+                    password: PASSWORD.to_string(),
+                },
+            )
             .await;
         let waited = wait_until_audited(&audit).await;
         token.cancel(); // 无条件 cancel：consume future 终止，join! 不悬挂。
@@ -456,21 +461,24 @@ async fn rejected_login_does_not_audit() -> Result<()> {
         consumer_handler(binding.handler),
     );
 
-    let login = LoginService::with_seed_user(
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let login = LoginService::with_seed_credential(
         DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
-        USERNAME,
-        PASSWORD,
         SUBJECT,
-        CANON_TENANT,
-    );
+        PASSWORD,
+        tenant,
+    )?;
     let drive = async {
         let result = login
-            .login(IdentityLoginRequest {
-                username: "mallory".to_string(),
-                password: PASSWORD.to_string(),
-            })
+            .login(
+                tenant,
+                IdentityLoginRequest {
+                    username: "mallory".to_string(),
+                    password: PASSWORD.to_string(),
+                },
+            )
             .await;
         // 给任何误发射的事件被消费的时间，随后 cancel。
         tokio::time::sleep(Duration::from_millis(20)).await;

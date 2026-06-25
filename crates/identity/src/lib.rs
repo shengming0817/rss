@@ -13,10 +13,13 @@
 //!   匹配 + 表驱动测试；newtype 严格白名单 parse）——PR1。
 //! - **ABAC（`domain::abac`：`evaluate_abac` / `Policy` / typed `Operator` + `PolicyEffect`）已写实**
 //!   （deny-overrides + 租户门 + 重复 key / 类型不匹配 fail-closed + 表驱动测试）——PR2。
-//! - **`AccountStatus`（`domain::account`）仍签名冻结**（函数体 = `todo!()`）——PR3。
+//! - **账号子域（`domain::account`：`AccountStatus` 迁移 + argon2 哈希 `Credential` + `AccountLockout`
+//!   滑窗/锁定 TTL/lazy-unlock）已写实**（表驱动测试）——PR3；生产持久化消费（postgres adapter 直读）待 W（#1258）。
 //!
-//! `application`（登录接缝：[`LoginService`] / [`IdentityDomain`]）**RW-G1 已写实**——打通 identity
-//! 登录 → outbox。余下（真实 JWT/密码哈希）留 W。`application` 模块私有，只 re-export facade。
+//! `application`（登录生命周期：[`LoginService`] / [`IdentityDomain`]）**已写实**——哈希凭据 constant-time
+//! 验签 + lockout 门控/原子推进 + L2 co-tx（session + `identity.session-created` outbox 同一事务）+ 密码变更
+//! CAS + logout 软撤销；in-mem DI 替身（`with_seed_credential` 哈希种子）覆盖单测/journey。余下（真实 JWT 颁发、
+//! postgres 持久化接缝）留 W。`application` 模块私有，只 re-export facade。
 //!
 //! # 对标
 //!
@@ -26,14 +29,14 @@
 
 #![forbid(unsafe_code)]
 
-/// 应用层：登录编排 + bootstrap 生命周期（RW-G1 追踪弹）。私有——只经 facade re-export 暴露，
-/// 不外泄 tracer 常量 / 内部实现（domain-patterns.md §序列化边界 / 封装）。
+/// 应用层：登录生命周期编排（验签 / lockout / co-tx / 密码变更 / logout）+ bootstrap 生命周期。私有——
+/// 只经 facade re-export 暴露，不外泄内部实现（domain-patterns.md §序列化边界 / 封装）。
 mod application;
 pub(crate) mod domain;
 mod internal;
 pub mod ports;
 
-pub use application::{IdentityDomain, LoginError, LoginService};
+pub use application::{ChangePasswordError, IdentityDomain, LoginError, LoginService};
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///

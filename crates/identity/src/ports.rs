@@ -143,6 +143,33 @@ pub trait CredentialRepoLocal {
     async fn clear_lockout(&self, tenant: TenantId, subject: String) -> Result<(), IdentityError>;
 }
 
+/// 会话仓储 DI port（域形；provider 可换：prod postgres / test in-mem）。logout 软撤销 + 会话查询。
+///
+/// 公开 [`SessionRepo`] 是 **Send 变体**（adapter `impl SessionRepo for ...`），[`DynSessionRepo`] 是其
+/// dyn-compatible wrapper（组合根经 `Box<DynSessionRepo>` 注入）。
+///
+/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：方法接收 typed `TenantId`，跨租 find→None /
+/// revoke→幂等 no-op。
+///
+/// 会话**创建**不在本 port——登录经 `SessionUnitOfWork` co-tx（L2，session 行+outbox 同一事务）创建；本 port 仅
+/// L1 查询/撤销（spec 003 data-model「SessionRepo::create 仅 L1 子步骤、不单独成契约边界」+ OUTBOX-COTX-SESSION-01）。
+///
+/// ref: oxidecomputer/omicron（域 trait + 组合根 DI）；Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
+#[trait_variant::make(SessionRepo: Send)]
+#[dynosaur(pub DynSessionRepo = dyn(box) SessionRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: 同 RoleRepo——base trait 非 Send native AFIT，Send 由 trait_variant `SessionRepo` 变体 + dynosaur 承载。
+pub trait SessionRepoLocal {
+    /// 按 id 查会话（不存在 / 已撤销 / 跨租 → Ok(None)，不泄露存在性）。
+    async fn find(
+        &self,
+        tenant: TenantId,
+        session_id: SessionId,
+    ) -> Result<Option<Session>, IdentityError>;
+    /// 域侧**软撤销**会话（logout；幂等——重复/未知/跨租均 Ok 且 no-op）。已颁 JWT 在 TTL 内仍有效（硬吊销延 #1003）。
+    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError>;
+}
+
 /// 会话 **co-tx** Unit-of-Work DI port（async；provider 可换：prod postgres / demo in-mem）。
 ///
 /// L2 OutboxFact 完整语义（FR-003）：一次登录的**业务写**（[`Session`] 持久化）与 **outbox append**
@@ -196,8 +223,9 @@ mod smoke {
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        DynRoleRepo, DynSessionUnitOfWork, Entry, IdentityError, OutboxEmitError,
-        OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionUnitOfWork, TenantId,
+        DynRoleRepo, DynSessionRepo, DynSessionUnitOfWork, Entry, IdentityError, OutboxEmitError,
+        OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionRepo,
+        SessionUnitOfWork, TenantId,
     };
 
     struct NoopRoleRepo;
@@ -313,6 +341,72 @@ mod smoke {
                 entry: Entry,
                 envelope: OutboxEnvelopeParts,
             ) -> Result<(), OutboxEmitError>;
+        }
+    }
+
+    // ── SessionRepo（域形会话仓储 port）PORT-SHAPE ────────────────────────────
+    // 软撤销（logout）+ 会话查询接缝。创建不在本 port（co-tx 由 SessionUnitOfWork 承载）。
+    struct NoopSessionRepo;
+    impl SessionRepo for NoopSessionRepo {
+        async fn find(
+            &self,
+            _tenant: TenantId,
+            _session_id: SessionId,
+        ) -> Result<Option<Session>, IdentityError> {
+            todo!()
+        }
+        async fn revoke(
+            &self,
+            _tenant: TenantId,
+            _session_id: SessionId,
+        ) -> Result<(), IdentityError> {
+            todo!()
+        }
+    }
+
+    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体
+    // `DynSessionRepo` 且 wrapper `Send`（可跨 spawn 注入）。不调用方法 → 不触 `todo!()`。
+    #[test]
+    fn session_repo_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynSessionRepo> = DynSessionRepo::new_box(NoopSessionRepo);
+        assert_send(&from_impl);
+        let from_mock: Box<DynSessionRepo> = DynSessionRepo::new_box(MockTestSessionRepo::new());
+        assert_send(&from_mock);
+    }
+
+    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynSessionRepo>` 作必填
+    // 位置参（非 Option），缺失即编译错误（ADR-004 C5）。
+    struct SessionQueryService {
+        _repo: Box<DynSessionRepo<'static>>,
+    }
+    impl SessionQueryService {
+        fn new(repo: Box<DynSessionRepo<'static>>) -> Self {
+            Self { _repo: repo }
+        }
+    }
+
+    #[test]
+    fn session_repo_is_required_ctor_injectable() {
+        let from_impl = SessionQueryService::new(DynSessionRepo::new_box(NoopSessionRepo));
+        assert_send(&from_impl._repo);
+        let from_mock =
+            SessionQueryService::new(DynSessionRepo::new_box(MockTestSessionRepo::new()));
+        assert_send(&from_mock._repo);
+    }
+
+    mockall::mock! {
+        TestSessionRepo {}
+        impl SessionRepo for TestSessionRepo {
+            async fn find(
+                &self,
+                tenant: TenantId,
+                session_id: SessionId,
+            ) -> Result<Option<Session>, IdentityError>;
+            async fn revoke(
+                &self,
+                tenant: TenantId,
+                session_id: SessionId,
+            ) -> Result<(), IdentityError>;
         }
     }
 }

@@ -1,51 +1,15 @@
 //! in-memory 仓储实现（域内 / 域形 DI port 的 test / seed-login 替身）。生产持久化（postgres adapter）留 W。
 //!
-//! - [`InMemUserRepo`]：**RW-G1 追踪弹**明文 user 仓储（`G1 tracer`）——随 PR4 #1189 `LoginService` 重接线
-//!   消费 `CredentialRepo` 后删除（spec 003 T015 defer，见 `super::ports` 头注）。
 //! - [`InMemCredentialRepo`]：`CredentialRepo` 域形 DI port 的 in-mem 替身（哈希凭据 + 锁定态持久化），PR3。
+//! - [`InMemSessionRepo`]：`SessionRepo` 域形 DI port 的 in-mem 替身（软撤销标记），PR4 #1189。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use super::ports::{UserAccount, UserRepo};
-use crate::domain::{AccountLockout, AccountStatus, Credential, IdentityError};
-use crate::ports::CredentialRepo;
+use crate::domain::{AccountLockout, AccountStatus, Credential, IdentityError, Session, SessionId};
+use crate::ports::{CredentialRepo, SessionRepo};
 use vocab::TenantId;
-
-/// in-memory 用户仓储：用户名 → 账户。
-///
-/// **G1 tracer（明文比对，禁进生产）**：删除随 PR4 #1189 `LoginService` 重接线 `CredentialRepo`（T015）。
-pub(crate) struct InMemUserRepo {
-    users: HashMap<String, UserAccount>,
-}
-
-impl InMemUserRepo {
-    /// 以单个种子用户构造（追踪弹只需一条登录路径）。
-    pub(crate) fn with_user(
-        username: impl Into<String>,
-        password: impl Into<String>,
-        subject: impl Into<String>,
-        tenant_id: impl Into<String>,
-    ) -> Self {
-        let mut users = HashMap::new();
-        users.insert(
-            username.into(),
-            UserAccount {
-                subject: subject.into(),
-                tenant_id: tenant_id.into(),
-                password: password.into(),
-            },
-        );
-        Self { users }
-    }
-}
-
-impl UserRepo for InMemUserRepo {
-    fn find(&self, username: &str) -> Option<UserAccount> {
-        self.users.get(username).cloned()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // InMemCredentialRepo — CredentialRepo 域形 DI port 的 in-mem 替身（PR3）
@@ -55,10 +19,6 @@ impl UserRepo for InMemUserRepo {
 ///
 /// 内部 `Mutex`（trait 方法 `&self`，需内部可变；锁仅同步持有、**不跨 `.await`** ⇒ future 仍 `Send`）。
 /// 键含 `TenantId` ⇒ 跨租赁查找天然 fail-closed（`find(t ≠ 存入 tenant)` → `None`）。生产 postgres impl 留 W。
-// reason: 构造器（new / with_seed_credential）生产消费方 = PR4 #1189 LoginService 重接线（消费 CredentialRepo）；
-// PR3（Scope A）仅 test 构造、未接进 application.rs。`seed-login` feature 下亦随 PR4 接线（届时移除本 allow）。
-// `InMemUserRepo` 无此 allow 是因其已被 application.rs `with_seed_user`（seed-login）消费——本替身待 PR4 才接。
-#[allow(dead_code)]
 pub(crate) struct InMemCredentialRepo {
     creds: Mutex<HashMap<(TenantId, String), Credential>>,
     lockouts: Mutex<HashMap<(TenantId, String), AccountLockout>>,
@@ -68,12 +28,10 @@ pub(crate) struct InMemCredentialRepo {
 // reason: in-mem 替身锁仅同步持有、不跨 await；唯一毒化来源是持锁线程 panic（测试断言失败）——此时
 // into_inner 恢复 guard 让数据结构仍可读，不二次 panic 掩盖原始失败。生产 postgres adapter 无 Mutex，
 // 不沿用此模式（该替身门控于 test/seed-login，不进生产构建）。
-fn recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// reason: 同 struct（构造器生产消费方 = PR4 #1189；当前仅 test 构造）。
-#[allow(dead_code)]
 impl InMemCredentialRepo {
     /// 空仓储。
     pub(crate) fn new() -> Self {
@@ -186,12 +144,65 @@ impl CredentialRepo for InMemCredentialRepo {
     }
 }
 
+// ---------------------------------------------------------------------------
+// InMemSessionRepo — SessionRepo 域形 DI port 的 in-mem 替身（PR4 #1189）
+// ---------------------------------------------------------------------------
+
+/// `SessionRepo` 的 in-memory 替身：`SessionId` → `(Session, revoked_flag)`。
+///
+/// 软撤销（logout）：设 `revoked = true`，不删除记录（幂等：重复 revoke 仍 Ok）。
+/// 跨租隔离：find 过滤 `s.tenant() == tenant`；revoke 跨租 no-op（不报错、不撤销）。
+/// 内部 `Arc<Mutex<..>>`（`&self` + 内部可变；锁仅同步持有、**不跨 `.await`** ⇒ future 仍 `Send`）；
+/// `Arc` ⇒ clone 共享同一存储——测试侧持一克隆、`LoginService` 持另一克隆，可观测经 service `logout`
+/// 的软撤销效果（同 `CapturingSessionUoW` 共享状态范式）。
+#[derive(Clone, Default)]
+pub(crate) struct InMemSessionRepo {
+    // bool = revoked（软撤销标记）
+    sessions: Arc<Mutex<HashMap<SessionId, (Session, bool)>>>,
+}
+
+impl InMemSessionRepo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 测试种子接缝：种入活动会话（生产经 SessionUnitOfWork co-tx 写库，本 fake 用此直插）。
+    /// `#[cfg(test)]`：仅本 crate 单测用——`seed-login`（journey）路径只构造空 `InMemSessionRepo`、
+    /// 经 UoW 写会话，不经 insert ⇒ 非 test 的 seed-login 构建里 insert 无消费者（dead_code）。
+    #[cfg(test)]
+    pub(crate) fn insert(&self, session: Session) {
+        recover(&self.sessions).insert(session.id().clone(), (session, false));
+    }
+}
+
+impl SessionRepo for InMemSessionRepo {
+    async fn find(
+        &self,
+        tenant: TenantId,
+        session_id: SessionId,
+    ) -> Result<Option<Session>, IdentityError> {
+        Ok(recover(&self.sessions)
+            .get(&session_id)
+            .filter(|(s, revoked)| !*revoked && s.tenant() == tenant) // 跨租/已撤销 → None
+            .map(|(s, _)| s.clone()))
+    }
+
+    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError> {
+        if let Some(entry) = recover(&self.sessions).get_mut(&session_id)
+            && entry.0.tenant() == tenant
+        {
+            entry.1 = true; // 跨租 no-op；幂等
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{Credential, InMemCredentialRepo, TenantId};
-    use crate::domain::{AccountStatus, IdentityError};
-    use crate::ports::CredentialRepo;
+    use super::{Credential, InMemCredentialRepo, InMemSessionRepo, TenantId};
+    use crate::domain::{AccountStatus, IdentityError, Session, SessionId};
+    use crate::ports::{CredentialRepo, SessionRepo};
     use std::time::{Duration, SystemTime};
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -213,6 +224,21 @@ mod tests {
     fn epoch(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
+
+    fn make_session(sid: &str, tenant: TenantId) -> Session {
+        let now = epoch(1_000);
+        Session::new(
+            SessionId::new(sid),
+            "alice-subject",
+            tenant,
+            now + Duration::from_secs(3_600),
+            now,
+        )
+    }
+
+    // ---------------------------------------------------------------------------
+    // InMemCredentialRepo tests
+    // ---------------------------------------------------------------------------
 
     #[tokio::test]
     async fn save_then_find_roundtrip() {
@@ -418,5 +444,89 @@ mod tests {
         repo.clear_lockout(t, "ghost".to_string())
             .await
             .expect("clear idempotent");
+    }
+
+    // ---------------------------------------------------------------------------
+    // InMemSessionRepo tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn session_repo_insert_find_roundtrip() {
+        let repo = InMemSessionRepo::new();
+        let ta = tid(TENANT_A);
+        let session = make_session("sid-001", ta);
+        repo.insert(session.clone());
+        let found = repo
+            .find(ta, SessionId::new("sid-001"))
+            .await
+            .expect("find ok");
+        assert!(found.is_some(), "应能找到刚插入的会话");
+        assert_eq!(found.expect("some").id().as_str(), "sid-001");
+    }
+
+    #[tokio::test]
+    async fn session_repo_revoke_then_find_returns_none() {
+        let repo = InMemSessionRepo::new();
+        let ta = tid(TENANT_A);
+        repo.insert(make_session("sid-002", ta));
+        repo.revoke(ta, SessionId::new("sid-002"))
+            .await
+            .expect("revoke ok");
+        let found = repo
+            .find(ta, SessionId::new("sid-002"))
+            .await
+            .expect("find ok");
+        assert!(found.is_none(), "已撤销会话 find 应返回 None");
+    }
+
+    #[tokio::test]
+    async fn session_repo_revoke_idempotent() {
+        let repo = InMemSessionRepo::new();
+        let ta = tid(TENANT_A);
+        repo.insert(make_session("sid-003", ta));
+        // 第一次 revoke
+        repo.revoke(ta, SessionId::new("sid-003"))
+            .await
+            .expect("revoke 1");
+        // 第二次 revoke（幂等，应仍 Ok）
+        repo.revoke(ta, SessionId::new("sid-003"))
+            .await
+            .expect("revoke 2 idempotent");
+        // 未知 session id（幂等，no-op）
+        repo.revoke(ta, SessionId::new("no-such-sid"))
+            .await
+            .expect("revoke unknown idempotent");
+    }
+
+    #[tokio::test]
+    async fn session_repo_cross_tenant_find_returns_none() {
+        let repo = InMemSessionRepo::new();
+        let ta = tid(TENANT_A);
+        let tb = tid(TENANT_B);
+        repo.insert(make_session("sid-004", ta));
+        // 用 TENANT_B 查 TENANT_A 的 session → None（不泄露存在性）。
+        let found = repo
+            .find(tb, SessionId::new("sid-004"))
+            .await
+            .expect("find ok");
+        assert!(found.is_none(), "跨租查找应返回 None");
+    }
+
+    #[tokio::test]
+    async fn session_repo_cross_tenant_revoke_noop_then_original_tenant_finds() {
+        // TENANT_A 种入 → TENANT_B revoke（no-op）→ TENANT_A find 仍在。
+        let repo = InMemSessionRepo::new();
+        let ta = tid(TENANT_A);
+        let tb = tid(TENANT_B);
+        repo.insert(make_session("sid-005", ta));
+        // 跨租 revoke：no-op，不影响 TENANT_A 的记录。
+        repo.revoke(tb, SessionId::new("sid-005"))
+            .await
+            .expect("cross-tenant revoke");
+        let found = repo
+            .find(ta, SessionId::new("sid-005"))
+            .await
+            .expect("find ok");
+        assert!(found.is_some(), "TENANT_A 的会话不应被 TENANT_B 撤销");
     }
 }

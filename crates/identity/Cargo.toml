@@ -8,8 +8,8 @@ publish = false
 [lints]
 workspace = true
 
-# 明文种子登录（with_seed_user + in-mem user repo）仅追踪弹 / demo 用——经 feature 门控做编译期边界：
-# 生产组合根不启用即不编译，防 W 误用明文凭据路径（RW-G1 PR #186 F1，machine boundary）。
+# 种子登录（with_seed_credential：argon2 哈希凭据 + in-mem CredentialRepo/SessionRepo 替身）仅 test / demo 用——
+# 经 feature 门控做编译期边界：生产组合根不启用即不编译，防种子凭据路径误入生产（machine boundary）。
 [features]
 seed-login = []
 # test-support：暴露 `test_support::session` 供**下游 adapter crate**（如 postgres）集成测试构造

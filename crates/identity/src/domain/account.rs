@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime};
 /// - `Suspended` → `Active`（恢复）/ `Deactivated`。
 /// - `Locked` → `Active`（lazy-unlock / 管理员解锁）/ `Deactivated`。
 /// - `Deactivated` → ∅（终态，不可逆）。
-// reason: 迁移判定（can_transition_to）生产消费方（账户门控）待 PR4/PR5；当前仅 test / smoke 消费 ⇒
+// reason: 迁移判定（can_transition_to）生产消费方（账户门控）待 PR5/W；当前仅 test / smoke 消费 ⇒
 // 非 test 构建 dead（ADR-004 C8 遗留期）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub enum AccountStatus {
     Deactivated,
 }
 
-// reason: 同 enum（迁移判定生产消费方待 PR4；当前仅 test 消费）。
+// reason: 同 enum（迁移判定生产消费方待 PR5/W 账户门控；当前仅 test 消费）。
 #[allow(dead_code)]
 impl AccountStatus {
     /// 合法状态迁移判定（fail-closed：白名单外一律 `false`，含 `Deactivated` 终态与同态自迁）。
@@ -79,8 +79,8 @@ impl AccountStatus {
 /// 下 subject（UPN/email 派生或主体标识）按准 PII 处理，不随结构体打印进日志（observability §redaction）。
 /// `tenant`（[`vocab::TenantId`]）有意保留原值：tenant id 是 audit/tracing 合法可观测字段、非凭据
 /// （见 `vocab::tenant` rustdoc），脱敏反而损可观测。
-// reason: 类型作 ports 签名实体已被引用；pub(crate) 方法生产消费方（LoginService）待 PR4 ⇒ 非 test 构建
-// dead（ADR-004 C8 遗留期）。
+// reason: 类型作 ports 签名实体已被引用；pub(crate) 方法部分（verify_password/rotate/version）已被 PR4
+// LoginService::change_password 消费，其余（new/subject/tenant/password_hash）待 postgres adapter W (#1258)。
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct Credential {
@@ -101,7 +101,8 @@ impl std::fmt::Debug for Credential {
     }
 }
 
-// reason: 同 struct（生产消费方待 PR4；当前仅 test / seed-login 消费）。
+// reason: verify_password/rotate/version 已被 PR4 LoginService::change_password 消费；
+// new/subject/tenant/password_hash 待 postgres adapter W (#1258)；保留 allow 防 non-test dead_code。
 #[allow(dead_code)]
 impl Credential {
     /// 构造凭据（由已哈希密码；funnel 边界 = `pub(crate)`）。`version` 是 CAS pin（密码变更时 +1）。
@@ -160,13 +161,16 @@ impl Credential {
 // ---------------------------------------------------------------------------
 
 /// 连续失败阈值（达此次数触发锁定）。OWASP ASVS V2.2 节流方向；RSS 取 5（缺口 P1-12）。
-// reason: 锁定逻辑生产消费方（LoginService）待 PR4；当前仅 test / seed-login 消费（ADR-004 C8）。
+// reason: 锁定逻辑由 PR4 LoginService 经原子 port 方法（CredentialRepo）间接消费；域类型本身待 postgres
+// adapter W (#1258) 直接读取；当前仅 InMemCredentialRepo（test/seed-login 门控）直接使用（ADR-004 C8）。
 #[allow(dead_code)]
 const MAX_FAILURES: u32 = 5;
 /// 失败计数滑动窗口（窗口外失败 lazy-reset 计数）。NIST 800-63B §5.2.2 失败窗口方向；RSS 取 15min。
+// reason: 同 MAX_FAILURES（待 postgres adapter W #1258；PR4 login 经原子 port 间接消费）。
 #[allow(dead_code)]
 const WINDOW: Duration = Duration::from_secs(15 * 60);
 /// 锁定 TTL（达阈值后锁定时长，lazy-unlock，无后台 job）。RSS 取 15min。
+// reason: 同 MAX_FAILURES（待 postgres adapter W #1258；PR4 login 经原子 port 间接消费）。
 #[allow(dead_code)]
 const LOCK_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -183,8 +187,8 @@ const LOCK_TTL: Duration = Duration::from_secs(15 * 60);
 /// `LoginService` 登录路径 MUST：验签前 `CredentialRepo::lockout_status(now)` 拒绝已锁账户；验签失败后
 /// `record_failure(now)`（原子 RMW，返回是否锁定）；成功后 `clear_lockout`。PR3 交付机制 + 原子 port + 替身，
 /// 编排接线随 PR4（spec 003 US3 addendum；缺失则多实例暴破防御静默失效）。
-// reason: 类型 pub(crate)、方法生产消费方（LoginService / W postgres adapter）待 PR4 / #1258 ⇒ 非 test 构建
-// dead（ADR-004 C8 遗留期）。
+// reason: 类型 pub(crate)，PR4 LoginService 经 CredentialRepo 原子 port 间接消费；AccountLockout 自身
+// 仅 InMemCredentialRepo（test/seed-login 门控）直接使用，待 postgres adapter W (#1258) 直接读取。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AccountLockout {
@@ -193,7 +197,7 @@ pub struct AccountLockout {
     locked_until: Option<SystemTime>,
 }
 
-// reason: 同 struct（生产消费方待 PR4；当前仅 test / seed-login 消费）。
+// reason: 同 struct（PR4 经原子 port 间接消费；postgres adapter 直接消费待 W #1258）。
 #[allow(dead_code)]
 impl AccountLockout {
     /// 新建锁定态（零失败、未锁定；滑窗锚定 `now`）。`now` 由调用方注入 `Clock` 读出。
