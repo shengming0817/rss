@@ -541,7 +541,9 @@ fn step_public_api() -> Step {
         args: &[],
         kind: StepKind::ToolGatedInternal {
             probe: "public-api",
-            install_hint: "rustup toolchain install nightly && cargo install cargo-public-api --locked",
+            // 钉版 nightly + 钉版工具：须含 publicapi::PINNED_NIGHTLY（`&'static str` 字段无法引 const，
+            // 故字面量）；NIGHTLY-PIN-01 治理测试断言 verify.rs 含该值，bump 漏改即 fail。
+            install_hint: "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked",
             check: InternalCheck::PublicApiCheck,
         },
         env: &[],
@@ -1565,5 +1567,26 @@ mod tests {
             "workspace root 不应有 audit.toml（cargo-audit ignore 单源 = step_cargo_audit --ignore，见其 rustdoc）"
         );
         Ok(())
+    }
+
+    /// NIGHTLY-PIN-01 第四处镜像：public-api 门步的 `install_hint` 字面量（`&'static str` 字段无法引 const，
+    /// 故内嵌 nightly 版本）须含钉版 nightly `publicapi::PINNED_NIGHTLY`——**绑 `step_public_api()` 返回的真实
+    /// install_hint 字段值**（非 verify.rs 源码全文）：install_hint 回退 rolling `nightly`（或漏随 const bump）
+    /// 即 fail，且注释/其它字符串含 pin **不能**误满足（修复源码全文扫描的 anti-vacuity 盲区）。
+    /// INVARIANT: NIGHTLY-PIN-01.
+    #[test]
+    fn public_api_install_hint_pins_nightly() {
+        let pin = crate::publicapi::PINNED_NIGHTLY;
+        // reason: 非 ToolGatedInternal 变体回退空串（必不含 pin），令下面 assert 以失败信息暴露形态变化，
+        // 而非 panic（生产代码禁 panic，clippy Medium）。
+        let install_hint = match step_public_api().kind {
+            StepKind::ToolGatedInternal { install_hint, .. } => install_hint,
+            _ => "",
+        };
+        assert!(
+            install_hint.contains(pin),
+            "public-api install_hint 须为 ToolGatedInternal 且含钉版 nightly {pin}\
+             （NIGHTLY-PIN-01，与 publicapi::PINNED_NIGHTLY 同步）；当前: {install_hint:?}"
+        );
     }
 }

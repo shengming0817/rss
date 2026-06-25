@@ -7,7 +7,11 @@
 //!   `rust-toolchain.toml`（rustup 优先级 `RUSTUP_TOOLCHAIN` > `rust-toolchain.toml`），打破根 stable
 //!   1.96 与 `lints/` nightly 隔离；并污染 `cargo-public-api` 内部 `rustup run nightly cargo rustdoc`
 //!   的 nightly rustdoc-json 生成（其先 `cargo --version` 探测 stable 再强制 nightly，继承的
-//!   `RUSTUP_TOOLCHAIN=1.96.0` 会把内层强拉回 stable ⇒ 隔离失效）。
+//!   `RUSTUP_TOOLCHAIN=1.96.0` 会把内层强拉回 stable ⇒ 隔离失效）。剥离对**所有步**成立。
+//!   **public-api 步钉版**：剥离后由显式 `env` 把 `RUSTUP_TOOLCHAIN` 重设为 `publicapi::PINNED_NIGHTLY`
+//!   （等价 `cargo +<钉版> public-api`），使 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json
+//!   （否则在 root stable 下被强制回退 rolling `nightly`，格式随日期漂移致 baseline 误报）——这是
+//!   CMD-ENV-CLEAN-01「剥离后显式 env 成唯一来源」的标准用法，非隔离破例（NIGHTLY-PIN-01）。
 //! - **编译 / rustdoc flag**（`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`/`CARGO_BUILD_RUSTFLAGS`/
 //!   `DYLINT_RUSTFLAGS`，以及 rustdoc 家族 `RUSTDOCFLAGS`/`CARGO_ENCODED_RUSTDOCFLAGS`/
 //!   `CARGO_BUILD_RUSTDOCFLAGS`）会静默改变 `clippy -D warnings`/`dylint -D warnings` 判定，或经
