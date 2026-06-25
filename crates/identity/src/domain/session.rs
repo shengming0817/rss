@@ -62,7 +62,9 @@ impl SessionId {
 
 /// 会话持久化快照域实体（私有字段；构造经 funnel；不 derive Serialize——域类型）。
 ///
-/// `subject` 是凭据级标识（可能为 email / UPN），按 PII 处理 ⇒ Debug 手写脱敏（同 [`super::RoleBinding`]）。
+/// `subject` 是会话主体标识，持久化为 opaque `String`。生产 login 路径写入的是 canonical actor subject
+/// （`ids::UserId` hyphenated UUID，经 `AuthOutcome::Authenticated`，#1277 F1——**非**登录标识 username）；
+/// 历史上曾为 email/UPN，故 Debug 仍手写脱敏（canonical UUID 非 PII，脱敏属防御性无害，同 [`super::RoleBinding`]）。
 /// 时间字段由注入 [`diport::Clock`] 派生（不取系统时钟，rust-standards §Clock）：`created_at` = 登录时刻，
 /// `expires_at` = 登录时刻 + session_ttl。
 #[derive(Clone)]
@@ -78,7 +80,7 @@ impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("id", &self.id)
-            .field("subject", &"<redacted>") // subject 可能为 email/UPN，按 PII 脱敏（同 RoleBinding）
+            .field("subject", &"<redacted>") // 会话主体（生产为 canonical user id）；防御性脱敏（同 RoleBinding，#1277）
             .field("tenant", &self.tenant)
             .field("expires_at", &self.expires_at)
             .field("created_at", &self.created_at)

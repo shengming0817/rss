@@ -44,9 +44,11 @@ const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 const IDENTITY_DOMAIN: &str = "identity";
 const PASSWORD: &str = "correct-horse";
-/// 种子用户 subject = 登录标识（`request.username` 即 subject）。审计 actor 是 typed `ids::UserId`
-/// （canonical uuid），故 subject 须为 uuid。
-const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
+/// 登录标识（`request.username`）——#1277 F1：可为任意非 uuid 用户名，仅作凭据查找键，不写 wire/audit。
+const LOGIN_USERNAME: &str = "alice";
+/// canonical actor subject（credential 携带的 `ids::UserId`）——登录成功后写 payload/envelope/session subject
+/// + 审计 actor（audit `ids::UserId::parse` 必通）。与登录标识解耦（#1277 F1）。
+const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
 /// durable journey 审计链 HMAC key（固定 32B）。
@@ -227,7 +229,8 @@ async fn login_audit_durable_topology() -> Result<()> {
         DynSessionUnitOfWork::new_box(PgSessionUnitOfWork::new(&store)),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
-        SUBJECT,
+        LOGIN_USERNAME,
+        ids::UserId::parse(CANON_USER)?,
         PASSWORD,
         tenant,
     )?;
@@ -238,7 +241,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             .login(
                 tenant,
                 IdentityLoginRequest {
-                    username: SUBJECT.to_string(),
+                    username: LOGIN_USERNAME.to_string(),
                     password: PASSWORD.to_string(),
                 },
             )

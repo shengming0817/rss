@@ -5,7 +5,7 @@
   "required": ["sessionId", "subject", "tenantId", "occurredAt"],
   "properties": {
     "sessionId": { "type": "string" },
-    "subject": { "type": "string" },
+    "subject": { "type": "string", "format": "uuid" },
     "tenantId": { "type": "string" },
     "occurredAt": { "type": "integer", "format": "int64" }
   },

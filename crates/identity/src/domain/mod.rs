@@ -43,10 +43,11 @@ pub use session::{Session, SessionId};
 pub(crate) use abac::{
     AbacAttribute, GlobPattern, Operator, Policy, PolicyEffect, PolicyRule, evaluate_abac,
 };
-// Credential（find/save/bump 签名实体）/ AccountStatus（record_failure 返回）是 pub——经 ports facade 跨 crate
-// 收发；字段私有 + 构造器 pub(crate) funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 不在 port 签名
-// （锁定推进由原子方法 record_failure/lockout_status/clear_lockout 内部管理，返回 AccountStatus/bool）⇒ pub(crate)。
-pub use account::{AccountStatus, Credential};
+// Credential（find/authenticate/save/bump 签名实体）/ LoginIdentifier（查找键签名实体）/ AuthOutcome
+// （authenticate 返回）/ AccountStatus 是 pub——经 ports facade 跨 crate 收发；字段私有 + 构造器 pub(crate)
+// funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 不在 port 签名（锁定推进由 authenticate /
+// lockout_status 内部管理，返回 AuthOutcome/bool）⇒ pub(crate)。
+pub use account::{AccountStatus, AuthOutcome, Credential, LoginIdentifier};
 // reason: in-mem 替身（mem.rs，test/seed-login 门控）内部消费；非 gated 构建链路无调用方（ADR-004 C8）。
 #[allow(unused_imports)]
 pub(crate) use account::AccountLockout;

@@ -1,9 +1,13 @@
 //! identity::domain::account — 账号状态机 / 凭据 / 账户锁定（dylint rss_domain_no_serialize 守护区）。
 //!
-//! 子域类型（spec 003 US3，PR3 独占本文件）：
+//! 子域类型（spec 003 US3，PR3 独占本文件；#1277 增 LoginIdentifier / AuthOutcome 分层）：
 //! - [`AccountStatus`]：账号生命周期闭值集 + 合法迁移判定（fail-closed）。
-//! - [`Credential`]：argon2 哈希凭据（经 `secure::password`）+ 版本 pin（CAS）+ constant-time 验签；
-//!   明文永不存、`password_hash` 字段经 [`secure::PasswordHash`] 类型层脱敏（Debug 不泄）。
+//! - [`LoginIdentifier`]：登录标识 newtype（不透明查找键；与 canonical [`ids::UserId`] 类型层不可混淆，F1）。
+//! - [`AuthOutcome`]：验签原子结果三态（`Authenticated(UserId)` / `InvalidKnownUser` / `InvalidUnknown`），
+//!   provider 内「验签 + 仅对已知主体推进 lockout」单一出口（F1+F2）。
+//! - [`Credential`]：[`LoginIdentifier`] 查找键 + canonical [`ids::UserId`] subject + argon2 哈希凭据（经
+//!   `secure::password`）+ 版本 pin（CAS）+ constant-time 验签；明文永不存、`password_hash` 经
+//!   [`secure::PasswordHash`] 类型层脱敏（Debug 不泄）。
 //! - [`AccountLockout`]：暴力破解防御——阈值 5 / 滑窗 15min / 锁定 TTL 15min + lazy-unlock；窗口 / TTL
 //!   判定经**调用方注入的 `Clock` 读出的 `now`** 计算（域类型不持 `Clock`、不调 `SystemTime::now()`，
 //!   rust-standards §工程护栏；测试构造 `SystemTime` 模拟 fake-clock 推进）。
@@ -21,9 +25,9 @@ use std::time::{Duration, SystemTime};
 
 /// 账号状态（闭值集，fail-closed）。
 ///
-/// `pub`（[`crate::ports::CredentialRepo::record_failure`] 返回类型，被独立 adapter / 组合根跨 crate 收发）。
-/// `#[non_exhaustive]`：对外保留扩展窗口（外部 crate match 须带 `_` 兜底）；域内穷举 match 仍由编译器守
-/// 完整性（lib.rs smoke）。
+/// `pub`（账户状态闭值集，被独立 adapter / 组合根跨 crate 收发）；账户门控生产消费方待 PR5/W，当前由
+/// [`AccountLockout::record_failure`] 作推进结果返回（域内）。`#[non_exhaustive]`：对外保留扩展窗口
+/// （外部 crate match 须带 `_` 兜底）；域内穷举 match 仍由编译器守完整性（lib.rs smoke）。
 ///
 /// 合法迁移（[`AccountStatus::can_transition_to`]，其余皆拒，含同态自迁——非迁移）：
 /// - `Active` → `Suspended`（管理员暂停）/ `Locked`（[`AccountLockout`] 阈值触发）/ `Deactivated`（注销）。
@@ -66,25 +70,94 @@ impl AccountStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Credential — argon2 哈希凭据 + 版本 pin
+// LoginIdentifier — 登录标识（opaque 查找键，与 canonical UserId 类型层不可混淆，#1277 F1）
 // ---------------------------------------------------------------------------
 
-/// 主体凭据：argon2 哈希密码 + 版本 pin（CAS）。
+/// 登录标识：用户输入的不透明凭据查找键（username / email / UPN）。
+///
+/// `pub`（ADR-005 Option 2）：作 [`crate::ports::CredentialRepo`] 签名实体被独立 adapter crate 跨 crate
+/// 命名/收发（adapter 以 [`as_str`](LoginIdentifier::as_str) 做 `(tenant, login)` 查找键）；构造经 `pub(crate)`
+/// funnel——只在域内（登录应用边界 `LoginIdentifier::new(request.username)`）铸造，外部可命名/读值但**不可伪造**。
+///
+/// **与 [`ids::UserId`] 的类型层分层（#1277 F1）**：登录标识 ≠ canonical actor subject。登录标识是攻击者
+/// 可控的查找键（写不进 wire / audit）；canonical subject（[`Credential::user_id`]）才是写入
+/// `IdentitySessionCreatedPayload.subject` / outbox / 审计 actor 的稳定 UUID。二者为不同类型 ⇒「把 username
+/// 当 canonical subject 写进 wire」从类型层不可表达（AI-HARD：错位不可编译）。
+///
+/// `Debug` 手写脱敏：登录标识零信任下按准 PII 处理（可能为 email/UPN），不随结构体打印进日志。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct LoginIdentifier(String);
+
+impl std::fmt::Debug for LoginIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LoginIdentifier(<redacted>)")
+    }
+}
+
+impl LoginIdentifier {
+    /// 铸造登录标识（funnel 边界 = `pub(crate)`，仅域内构造）。登录标识是不透明查找键，无句法白名单——
+    /// 任意用户输入（email/UPN/username）皆合法；空串亦可构造但永不匹配任何凭据（fail-closed，不额外校验、
+    /// 不返回 `Result`：凭据查找失败已是统一 `InvalidCredentials` 出口）。
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    /// 取登录标识字符串引用（adapter 做 `(tenant, login)` 查找键）。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AuthOutcome — 验签原子结果（provider 内「验签 + 仅对已知主体推进 lockout」单一出口，#1277）
+// ---------------------------------------------------------------------------
+
+/// 验签结果（[`crate::ports::CredentialRepo::authenticate`] 返回；消费方据此分流，#1277 F1+F2）。
+///
+/// `pub`（adapter 跨 crate 构造/返回）。`#[non_exhaustive]` 保留扩展窗口。三态语义：
+/// - [`Authenticated`](AuthOutcome::Authenticated)：已知主体 + 密码正确——携 canonical [`ids::UserId`]
+///   （写 payload/envelope/session subject，audit 必可 `UserId::parse`）；provider 已原子清零失败计数。
+/// - [`InvalidKnownUser`](AuthOutcome::InvalidKnownUser)：已知主体 + 密码错——provider 已**原子推进** lockout。
+/// - [`InvalidUnknown`](AuthOutcome::InvalidUnknown)：查无凭据——恒定成本 KDF 已跑（消枚举时序差），但
+///   **不建 / 不动 lockout 态**（#1277 F2：未知主体不可被预置锁定、不撑大 lockout 表）。
+///
+/// 消费方对 `InvalidKnownUser` / `InvalidUnknown` 一律对外返回 `InvalidCredentials`（不向客户端区分以防枚举）；
+/// 二者之别只用于 provider 内 lockout 推进决策（已收进本 outcome，不外泄）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthOutcome {
+    /// 已知主体 + 密码正确：canonical actor subject（写 wire / audit）。
+    Authenticated(ids::UserId),
+    /// 已知主体 + 密码错（provider 已推进 lockout）。
+    InvalidKnownUser,
+    /// 查无凭据（恒定成本 KDF 已跑；不动 lockout 态）。
+    InvalidUnknown,
+}
+
+// ---------------------------------------------------------------------------
+// Credential — 登录标识 + canonical UserId + argon2 哈希凭据 + 版本 pin
+// ---------------------------------------------------------------------------
+
+/// 主体凭据：[`LoginIdentifier`] 查找键 + canonical [`ids::UserId`] subject + argon2 哈希密码 + 版本 pin（CAS）。
 ///
 /// `pub`（ADR-005 Option 2）：作 [`crate::ports::CredentialRepo`] 签名实体被独立 adapter crate 跨 crate
 /// 命名/收发；字段私有、构造器 `pub(crate)` funnel——外部可命名但**不可伪造**（fail-closed）。明文密码
 /// **永不进入本类型**（仅 [`secure::hash_password`] 入参，哈希后丢弃）。
 ///
-/// `Debug` 手写脱敏：`password_hash` 经 [`secure::PasswordHash`] 类型层已脱敏，`subject` 亦脱敏——零信任
-/// 下 subject（UPN/email 派生或主体标识）按准 PII 处理，不随结构体打印进日志（observability §redaction）。
-/// `tenant`（[`vocab::TenantId`]）有意保留原值：tenant id 是 audit/tracing 合法可观测字段、非凭据
+/// **登录标识 vs canonical subject（#1277 F1）**：`login` 是凭据查找键（攻击者可控的不透明输入）；`user_id`
+/// 是稳定 canonical actor subject——登录成功后**仅** `user_id` 写入 session / `IdentitySessionCreatedPayload`
+/// / outbox envelope（audit `ids::UserId::parse` 必通），`login`（准 PII）永不进 wire / broker metadata。
+///
+/// `Debug` 手写脱敏：`password_hash` 经 [`secure::PasswordHash`] 类型层已脱敏，`login`（[`LoginIdentifier`]）
+/// 亦脱敏（准 PII）。`tenant` / `user_id` 有意保留原值：均为 audit/tracing 合法可观测标识、非凭据
 /// （见 `vocab::tenant` rustdoc），脱敏反而损可观测。
 // reason: 类型作 ports 签名实体已被引用；pub(crate) 方法部分（verify_password/rotate/version）已被 PR4
-// LoginService::change_password 消费，其余（new/subject/tenant/password_hash）待 postgres adapter W (#1258)。
+// LoginService::change_password 消费，其余（new/login/user_id/tenant/password_hash）待 postgres adapter W (#1258)。
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct Credential {
-    subject: String,
+    login: LoginIdentifier,
+    user_id: ids::UserId,
     tenant: vocab::TenantId,
     password_hash: secure::PasswordHash,
     version: u32,
@@ -93,7 +166,8 @@ pub struct Credential {
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Credential")
-            .field("subject", &"<redacted>")
+            .field("login", &self.login) // LoginIdentifier Debug 已脱敏
+            .field("user_id", &self.user_id) // canonical UUID：可观测 actor 标识、非凭据
             .field("tenant", &self.tenant)
             .field("password_hash", &self.password_hash)
             .field("version", &self.version)
@@ -102,18 +176,21 @@ impl std::fmt::Debug for Credential {
 }
 
 // reason: verify_password/rotate/version 已被 PR4 LoginService::change_password 消费；
-// new/subject/tenant/password_hash 待 postgres adapter W (#1258)；保留 allow 防 non-test dead_code。
+// new/login/user_id/tenant/password_hash 待 postgres adapter W (#1258)；保留 allow 防 non-test dead_code。
 #[allow(dead_code)]
 impl Credential {
-    /// 构造凭据（由已哈希密码；funnel 边界 = `pub(crate)`）。`version` 是 CAS pin（密码变更时 +1）。
+    /// 构造凭据（由已哈希密码；funnel 边界 = `pub(crate)`）。`login` = 登录查找键，`user_id` = canonical
+    /// actor subject，`version` 是 CAS pin（密码变更时 +1）。
     pub(crate) fn new(
-        subject: impl Into<String>,
+        login: LoginIdentifier,
+        user_id: ids::UserId,
         tenant: vocab::TenantId,
         password_hash: secure::PasswordHash,
         version: u32,
     ) -> Self {
         Self {
-            subject: subject.into(),
+            login,
+            user_id,
             tenant,
             password_hash,
             version,
@@ -125,19 +202,25 @@ impl Credential {
         secure::verify_password(candidate, &self.password_hash)
     }
 
-    /// 密码轮换：返回 `version + 1` 的新凭据（subject / tenant 不变），供密码变更 CAS（PR4 编排）。
+    /// 密码轮换：返回 `version + 1` 的新凭据（login / user_id / tenant 不变），供密码变更 CAS（PR4 编排）。
     pub(crate) fn rotate(&self, new_hash: secure::PasswordHash) -> Credential {
         Credential {
-            subject: self.subject.clone(),
+            login: self.login.clone(),
+            user_id: self.user_id,
             tenant: self.tenant,
             password_hash: new_hash,
             version: self.version.saturating_add(1),
         }
     }
 
-    /// 主体标识（opaque subject，FR-020 无 PII）。
-    pub(crate) fn subject(&self) -> &str {
-        &self.subject
+    /// 登录标识（opaque 查找键；store key 派生用，FR-020 准 PII）。
+    pub(crate) fn login(&self) -> &LoginIdentifier {
+        &self.login
+    }
+
+    /// canonical actor subject（稳定 UUID；登录成功后写 payload/envelope/session subject，audit actor，#1277 F1）。
+    pub(crate) fn user_id(&self) -> ids::UserId {
+        self.user_id
     }
 
     /// 租户（RLS scope）。
@@ -176,17 +259,18 @@ const LOCK_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// 账户锁定态：失败计数 + 滑窗起点 + 锁定截止时刻。
 ///
-/// 域内纯逻辑值类型（`pub(crate)`，不在 port 签名——锁定推进经 `CredentialRepo` 的**原子方法**
-/// `record_failure` / `lockout_status` / `clear_lockout` 间接承载，见 ports.rs）。窗口 / TTL 判定全经
+/// 域内纯逻辑值类型（`pub(crate)`，不在 port 签名——锁定推进经 `CredentialRepo::authenticate` 内部**原子**
+/// 承载，#1277 折叠后不再有独立 `record_failure`/`clear_lockout` port 方法，见 ports.rs）。窗口 / TTL 判定全经
 /// **调用方注入 `Clock` 读出的 `now: SystemTime`** 计算——域类型不持 `Clock`、不调 `SystemTime::now()`
-/// （rust-standards §工程护栏；`record_failure`/`lockout_status` 的 `now` 参亦经注入 `Clock`，调用方禁直调
+/// （rust-standards §工程护栏；`authenticate`/`lockout_status` 的 `now` 参亦经注入 `Clock`，调用方禁直调
 /// `SystemTime::now()`——clippy `disallowed-methods` 静态守）。
 ///
-/// **多实例持久化契约（PR4 #1189 消费方义务）**：失败计数 = 安全关键状态，须经 `CredentialRepo` 跨实例
-/// 共享且**原子**推进（非外部读-改-写，F1），否则负载均衡下各实例独立计数 / 并发丢更新、暴破防御失效。PR4
-/// `LoginService` 登录路径 MUST：验签前 `CredentialRepo::lockout_status(now)` 拒绝已锁账户；验签失败后
-/// `record_failure(now)`（原子 RMW，返回是否锁定）；成功后 `clear_lockout`。PR3 交付机制 + 原子 port + 替身，
-/// 编排接线随 PR4（spec 003 US3 addendum；缺失则多实例暴破防御静默失效）。
+/// **多实例持久化契约（#1189 + #1277 消费方义务）**：失败计数 = 安全关键状态，须经 `CredentialRepo` 跨实例
+/// 共享且**原子**推进（非外部读-改-写，F1），否则负载均衡下各实例独立计数 / 并发丢更新、暴破防御失效。
+/// `LoginService` 登录路径：验签前 `CredentialRepo::lockout_status(now)` 拒绝已锁账户；`authenticate(now)`
+/// 内部据 `AuthOutcome` 原子完成「已知+错推进失败计数（达阈值即锁）/ 已知+正确清零 / 未知不动」——验签与
+/// lockout 推进收进单一原子调用（不再外部分步 record/clear，#1277）。postgres adapter（W #1258）须在
+/// 事务/行锁内等价实现该原子性；缺失则多实例暴破防御静默失效。
 // reason: 类型 pub(crate)，PR4 LoginService 经 CredentialRepo 原子 port 间接消费；AccountLockout 自身
 // 仅 InMemCredentialRepo（test/seed-login 门控）直接使用，待 postgres adapter W (#1258) 直接读取。
 #[allow(dead_code)]
@@ -296,25 +380,39 @@ impl AccountLockout {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{AccountLockout, AccountStatus, Credential, LOCK_TTL, MAX_FAILURES, WINDOW};
+    use super::{
+        AccountLockout, AccountStatus, Credential, LOCK_TTL, LoginIdentifier, MAX_FAILURES, WINDOW,
+    };
     use std::time::{Duration, SystemTime};
 
     use rstest::rstest;
 
     // canonical UUID 种子租户（vocab::TenantId::parse 接受形态）。
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    // canonical UUID 种子 user id（audit actor 形态；与登录标识 "alice-login" 解耦，#1277 F1）。
+    const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 
     fn tid(raw: &str) -> vocab::TenantId {
         vocab::TenantId::parse(raw).expect("canonical tenant parses")
+    }
+
+    fn uid(raw: &str) -> ids::UserId {
+        ids::UserId::parse(raw).expect("canonical user id parses")
     }
 
     fn epoch_plus(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    fn credential(subject: &str, password: &str, version: u32) -> Credential {
+    fn credential(login: &str, user: &str, password: &str, version: u32) -> Credential {
         let hash = secure::hash_password(password).expect("hash ok");
-        Credential::new(subject, tid(CANON_TENANT), hash, version)
+        Credential::new(
+            LoginIdentifier::new(login),
+            uid(user),
+            tid(CANON_TENANT),
+            hash,
+            version,
+        )
     }
 
     // --- AccountStatus 合法迁移（表驱动，含同态自迁与终态 fail-closed） ---
@@ -345,39 +443,51 @@ mod tests {
 
     #[test]
     fn credential_verify_correct_and_wrong() {
-        let cred = credential("alice-subject", "correct-horse", 1);
+        let cred = credential("alice-login", CANON_USER, "correct-horse", 1);
         assert!(cred.verify_password("correct-horse"));
         assert!(!cred.verify_password("wrong"));
-        assert_eq!(cred.subject(), "alice-subject");
+        // 登录标识与 canonical actor subject 解耦（#1277 F1）。
+        assert_eq!(cred.login().as_str(), "alice-login");
+        assert_eq!(cred.user_id(), uid(CANON_USER));
         assert_eq!(cred.version(), 1);
         assert_eq!(cred.tenant(), tid(CANON_TENANT));
     }
 
     #[test]
-    fn credential_debug_redacts_password_hash_and_subject() {
-        let cred = credential("alice-subject", "s3cr3t-pw", 1);
+    fn credential_debug_redacts_password_hash_and_login() {
+        let cred = credential("alice-login", CANON_USER, "s3cr3t-pw", 1);
         let dbg = format!("{cred:?}");
         assert!(dbg.contains("<redacted>"), "password_hash 必须脱敏");
         assert!(!dbg.contains("s3cr3t-pw"), "Debug 不得泄明文");
         assert!(!dbg.contains("argon2"), "Debug 不得泄哈希摘要");
         assert!(
-            !dbg.contains("alice-subject"),
-            "Debug 不得泄 subject（准 PII，零信任脱敏）"
+            !dbg.contains("alice-login"),
+            "Debug 不得泄登录标识（准 PII，零信任脱敏）"
         );
-        // tenant 有意可见（可观测标识、非凭据）。
+        // tenant / user_id 有意可见（可观测 actor 标识、非凭据）。
         assert!(
             dbg.contains(CANON_TENANT),
             "tenant 应保留（audit/tracing 合法字段）"
+        );
+        assert!(
+            dbg.contains(CANON_USER),
+            "user_id 应保留（canonical actor，audit/tracing 合法字段）"
         );
     }
 
     #[test]
     fn credential_rotate_bumps_version_and_swaps_hash() {
-        let cred = credential("alice-subject", "old-pw", 3);
+        let cred = credential("alice-login", CANON_USER, "old-pw", 3);
         let new_hash = secure::hash_password("new-pw").expect("hash ok");
         let rotated = cred.rotate(new_hash);
         assert_eq!(rotated.version(), 4, "rotate +1");
-        assert_eq!(rotated.subject(), "alice-subject");
+        // rotate 保持登录标识 + canonical subject 不变。
+        assert_eq!(rotated.login().as_str(), "alice-login");
+        assert_eq!(
+            rotated.user_id(),
+            uid(CANON_USER),
+            "rotate 保持 canonical subject"
+        );
         assert!(rotated.verify_password("new-pw"));
         assert!(!rotated.verify_password("old-pw"), "旧密码失效");
     }

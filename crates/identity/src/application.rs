@@ -1,8 +1,9 @@
 //! identity 应用层：登录编排（哈希凭据 + lockout + L2 co-tx）/ 密码变更（CAS）/ logout（软撤销），#1189。
 //!
-//! 登录路径（PR4 完整语义）：lockout 门控 → constant-time 验签 → 失败记 record_failure / 成功清 clear_lockout
-//! → mint 会话 → **co-tx**（[`Session`] 持久化 + `identity.session-created` outbox append 同一事务，
-//! 经 `ports::SessionUnitOfWork`）→ 返回 `IdentityLoginResponse`。
+//! 登录路径（PR4 + #1277）：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate` → `AuthOutcome` 分流：
+//! 已知+错推进 lockout、未知不建锁、成功清零）→ mint 会话（subject = credential 携带的 canonical
+//! `ids::UserId`，**非** 登录标识，F1）→ **co-tx**（[`Session`] 持久化 + `identity.session-created` outbox
+//! append 同一事务，经 `ports::SessionUnitOfWork`）→ 返回 `IdentityLoginResponse`。
 //!
 //! 下游 audit 订阅消费该事件。co-tx 接缝由 postgres adapter `PgSessionUnitOfWork`
 //! （INVARIANT OUTBOX-COTX-SESSION-01）落地。
@@ -22,7 +23,7 @@ use primitives::ListenerKind;
 use uuid::Uuid;
 use vocab::TenantId;
 
-use crate::domain::{IdentityError, Session, SessionId};
+use crate::domain::{AuthOutcome, IdentityError, LoginIdentifier, Session, SessionId};
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynSessionRepo, DynSessionUnitOfWork, SessionRepo,
     SessionUnitOfWork,
@@ -118,12 +119,13 @@ impl LoginService {
         session_uow: Box<DynSessionUnitOfWork<'static>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
-        subject: impl Into<String>,
+        login: impl Into<String>,
+        user_id: ids::UserId,
         password: &str,
         tenant: TenantId,
     ) -> Result<Self, secure::PasswordError> {
         let creds = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
-            subject, password, tenant,
+            login, user_id, password, tenant,
         )?;
         let sessions = crate::internal::mem::InMemSessionRepo::new();
         Ok(Self::new(
@@ -135,11 +137,12 @@ impl LoginService {
         ))
     }
 
-    /// 登录：lockout 门控 → constant-time 验签 → record_failure/clear_lockout → mint 会话 →
-    /// co-tx（session + outbox）→ 返回响应。
+    /// 登录：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate`）→ 据 [`AuthOutcome`] 分流 →
+    /// mint 会话 → co-tx（session + outbox）→ 返回响应。
     ///
-    /// `tenant` 已由 handler 从 `X-Tenant-ID` header parse，不在本方法重新 parse。
-    /// `subject` = `request.username`。
+    /// `tenant` 已由 handler 从 `X-Tenant-ID` header parse，不在本方法重新 parse。`request.username` 仅作
+    /// [`LoginIdentifier`] 凭据查找键；写 wire / audit 的是 credential 携带的 canonical [`ids::UserId`]
+    /// （`AuthOutcome::Authenticated`，#1277 F1）——登录标识（准 PII）永不进 payload / outbox / broker metadata。
     ///
     /// `skip_all`：不记 password / username（zero-trust：username 可能 email/UPN，按 PII 处理）；
     /// 失败经 `err` 记 [`LoginError`] Display（const literal，无 PII）。低基数定位字段
@@ -155,39 +158,37 @@ impl LoginService {
         tenant: TenantId,
         request: IdentityLoginRequest,
     ) -> Result<IdentityLoginResponse, LoginError> {
-        let subject = request.username;
+        let login = LoginIdentifier::new(request.username);
         let now = self.clock.now();
 
-        // 1. lockout 门控（验签前；已锁 → fail-closed InvalidCredentials，不验密码/不 record/零 UoW 写）
+        // 1. lockout 门控（验签前；已锁 → fail-closed InvalidCredentials，不验密码/零 UoW 写）
         if self
             .credentials
-            .lockout_status(tenant, subject.clone(), now)
+            .lockout_status(tenant, login.clone(), now)
             .await
             .map_err(LoginError::Credential)?
         {
             return Err(LoginError::InvalidCredentials);
         }
 
-        // 2. constant-time 验签
-        if !self
+        // 2. 恒定成本验签 + 原子锁定记账（F1+F2）：provider 据 outcome 分流——已知+错已推进 lockout、
+        //    未知不建锁、成功清零并返回 canonical actor subject；对外一律 InvalidCredentials（防枚举）。
+        let user_id = match self
             .credentials
-            .verify_password(tenant, subject.clone(), request.password)
+            .authenticate(tenant, login, request.password, now)
             .await
             .map_err(LoginError::Credential)?
         {
-            // 3a. 失败：原子 record_failure（推进锁定计数）→ fail-closed，零 UoW 写
-            self.credentials
-                .record_failure(tenant, subject.clone(), now)
-                .await
-                .map_err(LoginError::Credential)?;
-            return Err(LoginError::InvalidCredentials);
-        }
+            AuthOutcome::Authenticated(user_id) => user_id,
+            AuthOutcome::InvalidKnownUser | AuthOutcome::InvalidUnknown => {
+                return Err(LoginError::InvalidCredentials);
+            }
+        };
 
-        // 3b. 成功：清除锁定计数
-        self.credentials
-            .clear_lockout(tenant, subject.clone())
-            .await
-            .map_err(LoginError::Credential)?;
+        // 3. canonical subject（F1）：来自 credential 的 ids::UserId。payload.subject 是 typed `uuid::Uuid`
+        //    （下方直接 `user_id.as_uuid()`，schema `format:uuid`）；此 hyphenated 串供 envelope.subject_id /
+        //    Session.subject（仍 opaque String）。登录标识（准 PII）永不进 payload / outbox / broker metadata。
+        let subject = user_id.as_uuid().hyphenated().to_string();
 
         // 4. mint 会话
         let expires_at = now + self.session_ttl;
@@ -195,7 +196,9 @@ impl LoginService {
 
         let payload = IdentitySessionCreatedPayload {
             session_id: session_id.as_str().to_string(),
-            subject: subject.clone(),
+            // typed canonical actor subject（generated `subject: uuid::Uuid`，#1277 F1：schema `format:uuid`
+            // 收紧后非 UUID subject 在 wire decode 即不可表达，consumer 无需 parse）。
+            subject: user_id.as_uuid(),
             tenant_id: tenant.to_string(), // canonical hyphenated
             occurred_at: unix_secs(now),
         };
@@ -231,9 +234,12 @@ impl LoginService {
 
     /// 密码变更（校验当前密码 + CAS）。
     ///
-    /// `skip_all`：不记 subject / current_password / new_password（PII + 凭据，zero-trust）；失败经 `err`
-    /// 记 [`ChangePasswordError`] Display（const literal，无 PII）。低基数定位字段
-    /// `domain` / `operation` / `tenant_id` 显式记入（observability.md §日志，F5）；subject/密码仍 skip。
+    /// `user_id` = 认证主体的 canonical [`ids::UserId`]（self-scoped 锚点，#1277 F2）——身份来自认证上下文，
+    /// **非**请求体可选择的登录标识；调用方无法传 login 串定位他人凭据（类型层杜绝越权改他人密码）。
+    ///
+    /// `skip_all`：不记 current_password / new_password（凭据，zero-trust）；失败经 `err` 记
+    /// [`ChangePasswordError`] Display（const literal，无 PII）。低基数定位字段 `domain` / `operation` /
+    /// `tenant_id` 显式记入（observability.md §日志，F5）；密码仍 skip（user_id 是 canonical actor、非凭据）。
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "change_password", tenant_id = %tenant),
@@ -242,18 +248,18 @@ impl LoginService {
     pub async fn change_password(
         &self,
         tenant: TenantId,
-        subject: String,
+        user_id: ids::UserId,
         current_password: String,
         new_password: String,
     ) -> Result<(), ChangePasswordError> {
         let Some(credential) = self
             .credentials
-            .find(tenant, subject)
+            .find_by_user_id(tenant, user_id)
             .await
             .map_err(ChangePasswordError::Store)?
         else {
             // F3 等价成本盲化：查无凭据仍跑等价 argon2，消除 NotFound 与 InvalidCredentials 的账户枚举
-            // 时序差（与 login 路径 `verify_password_constant_time` 同源防御；selfScoped handler 已限 subject 为本人）。
+            // 时序差（与 login 路径 `verify_password_constant_time` 同源防御；身份锚点 = 认证主体 user_id，请求不可选目标账号）。
             let _ = secure::verify_password_constant_time(&current_password, None);
             return Err(ChangePasswordError::NotFound);
         };
@@ -317,6 +323,10 @@ mod tests {
     // canonical UUID 种子租户（TenantId::parse 接受形态）。
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000abc";
+    // canonical user id（audit actor 形态；与登录标识 "alice" 解耦，#1277 F1）。
+    const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
+    // 未种子化的 canonical user id（change_password 未知主体 → NotFound，#1277 F2）。
+    const GHOST_USER: &str = "99999999-8888-4777-8666-555544443333";
 
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：SessionUnitOfWork / Clock 替身在此手写。
     // 捕获 co-tx 写入（Session 业务实体 + Entry + envelope），断言登录恰调一次、参数正确。
@@ -363,7 +373,13 @@ mod tests {
         TenantId::parse(raw).expect("canonical tenant")
     }
 
-    /// 构造用 with_seed_credential 的 LoginService（默认 CANON_TENANT + alice/correct-horse）。
+    fn uid(raw: &str) -> ids::UserId {
+        #[allow(clippy::expect_used)]
+        ids::UserId::parse(raw).expect("canonical user id")
+    }
+
+    /// 构造用 with_seed_credential 的 LoginService（默认 CANON_TENANT + 登录标识 alice / canonical
+    /// CANON_USER / correct-horse）。
     fn seed_service(capture: &CapturingSessionUoW, now_secs: u64, ttl_secs: u64) -> LoginService {
         #[allow(clippy::expect_used)]
         LoginService::with_seed_credential(
@@ -371,6 +387,7 @@ mod tests {
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
             "alice",
+            uid(CANON_USER),
             "correct-horse",
             tid(CANON_TENANT),
         )
@@ -404,9 +421,13 @@ mod tests {
         let writes = capture.writes.lock().unwrap_or_else(|e| e.into_inner());
         let (session, entry, envelope) = &writes[0];
 
-        // Session 字段正确。
+        // Session 字段正确。subject = canonical user id（**非** 登录标识 "alice"，#1277 F1）。
         assert_eq!(session.id().as_str(), resp.data.session_id);
-        assert_eq!(session.subject(), "alice");
+        assert_eq!(
+            session.subject(),
+            CANON_USER,
+            "session subject = canonical user id，非登录标识"
+        );
         assert_eq!(session.tenant(), tid(CANON_TENANT));
         assert_eq!(
             session.created_at(),
@@ -426,18 +447,23 @@ mod tests {
             "EventId 不应等于 session_id（F1）"
         );
 
-        // payload 字段。
+        // payload 字段。subject 是 typed `uuid::Uuid`（generated `format:uuid`，#1277 F1）= canonical user id，
+        // **非**登录标识——旧实现写 username 会让 wire decode 失败（非 UUID 不可表达）。
         let payload: IdentitySessionCreatedPayload =
             serde_json::from_slice(entry.payload()).expect("decode payload");
-        assert_eq!(payload.subject, "alice");
+        assert_eq!(
+            payload.subject,
+            uid(CANON_USER).as_uuid(),
+            "payload.subject = canonical user id（typed uuid::Uuid），非登录标识 \"alice\""
+        );
         assert_eq!(payload.tenant_id, CANON_TENANT);
         assert_eq!(payload.session_id, resp.data.session_id);
         assert_eq!(payload.occurred_at, 1_000);
 
-        // envelope。
+        // envelope。subject_id = canonical user id（登录标识不进 broker metadata）。
         assert_eq!(envelope.domain, SESSION_DOMAIN);
         assert_eq!(envelope.contract_id, CONTRACT_ID);
-        assert_eq!(envelope.subject_id, "alice");
+        assert_eq!(envelope.subject_id, CANON_USER);
     }
 
     // ── 测试 2：login 密码错 ──────────────────────────────────────────────────
@@ -558,7 +584,7 @@ mod tests {
 
         svc.change_password(
             tid(CANON_TENANT),
-            "alice".to_string(),
+            uid(CANON_USER),
             "correct-horse".to_string(),
             "new-pw".to_string(),
         )
@@ -604,7 +630,7 @@ mod tests {
         let err = svc
             .change_password(
                 tid(CANON_TENANT),
-                "alice".to_string(),
+                uid(CANON_USER),
                 "wrong-current".to_string(),
                 "new-pw".to_string(),
             )
@@ -636,7 +662,7 @@ mod tests {
         let err = svc
             .change_password(
                 tid(CANON_TENANT),
-                "ghost".to_string(),
+                uid(GHOST_USER),
                 "any-pw".to_string(),
                 "new-pw".to_string(),
             )
@@ -657,7 +683,7 @@ mod tests {
         let err = svc
             .change_password(
                 tid(OTHER_TENANT),
-                "alice".to_string(),
+                uid(CANON_USER),
                 "correct-horse".to_string(),
                 "new-pw".to_string(),
             )
@@ -678,6 +704,50 @@ mod tests {
         .expect("original tenant credential intact");
     }
 
+    // ── 测试 8c：change_password 以 canonical user_id 定位（login≠user_id，self-scoped 锚点，#1277 F2）──
+    // 种子登录标识 "alice" 与 canonical user_id CANON_USER 解耦（不同值）。证明改密锚点是认证主体 user_id、
+    // 非请求可选的登录标识：① 用本人 user_id 改密成功（即便它≠login）；② 用他人 user_id 无法定位本凭据
+    // （type 层只能传 ids::UserId，无法用 login 串越权改他人密码）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn change_password_anchors_on_user_id_not_login() {
+        let capture = CapturingSessionUoW::default();
+        let svc = seed_service(&capture, 1_000, 3_600);
+
+        // ① 本人 canonical user_id（≠ 登录标识 "alice"）改密成功。
+        svc.change_password(
+            tid(CANON_TENANT),
+            uid(CANON_USER),
+            "correct-horse".to_string(),
+            "new-pw".to_string(),
+        )
+        .await
+        .expect("change by canonical user_id ok");
+
+        // ② 他人 user_id 无法定位本凭据 → NotFound（认证主体锚点，请求不可选目标账号）。
+        let err = svc
+            .change_password(
+                tid(CANON_TENANT),
+                uid(GHOST_USER),
+                "new-pw".to_string(),
+                "x".to_string(),
+            )
+            .await
+            .expect_err("other user_id must not locate this credential");
+        assert!(matches!(err, ChangePasswordError::NotFound));
+
+        // 新密码生效（login 路径仍以登录标识 "alice" 认证）。
+        svc.login(
+            tid(CANON_TENANT),
+            IdentityLoginRequest {
+                username: "alice".to_string(),
+                password: "new-pw".to_string(),
+            },
+        )
+        .await
+        .expect("login with new pw via login identifier");
+    }
+
     // ── 测试 9：change_password CAS 冲突（用 mockall 注入） ──────────────────
 
     #[tokio::test]
@@ -689,17 +759,18 @@ mod tests {
         mockall::mock! {
             CasCreds {}
             impl CredentialRepo for CasCreds {
-                async fn find(
+                async fn find_by_user_id(
                     &self,
                     tenant: TenantId,
-                    subject: String,
+                    user_id: ids::UserId,
                 ) -> Result<Option<crate::domain::Credential>, IdentityError>;
-                async fn verify_password(
+                async fn authenticate(
                     &self,
                     tenant: TenantId,
-                    subject: String,
+                    login: LoginIdentifier,
                     candidate: String,
-                ) -> Result<bool, IdentityError>;
+                    now: SystemTime,
+                ) -> Result<AuthOutcome, IdentityError>;
                 async fn save(
                     &self,
                     credential: crate::domain::Credential,
@@ -709,23 +780,12 @@ mod tests {
                     expected: u32,
                     next: crate::domain::Credential,
                 ) -> Result<(), IdentityError>;
-                async fn record_failure(
-                    &self,
-                    tenant: TenantId,
-                    subject: String,
-                    now: SystemTime,
-                ) -> Result<crate::domain::AccountStatus, IdentityError>;
                 async fn lockout_status(
                     &self,
                     tenant: TenantId,
-                    subject: String,
+                    login: LoginIdentifier,
                     now: SystemTime,
                 ) -> Result<bool, IdentityError>;
-                async fn clear_lockout(
-                    &self,
-                    tenant: TenantId,
-                    subject: String,
-                ) -> Result<(), IdentityError>;
             }
         }
 
@@ -734,19 +794,20 @@ mod tests {
         // 构造一个种子凭据（通过 InMemCredentialRepo 得到一个有效的 Credential）。
         let cred_repo = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
             "alice",
+            uid(CANON_USER),
             "correct-horse",
             tid(CANON_TENANT),
         )
         .expect("seed");
         let alice_cred = cred_repo
-            .find(tid(CANON_TENANT), "alice".to_string())
+            .find_by_user_id(tid(CANON_TENANT), uid(CANON_USER))
             .await
             .expect("find")
             .expect("some");
 
-        // Mock：find 返回 alice_cred，bump_version 返回 VersionConflict。
+        // Mock：find_by_user_id 返回 alice_cred，bump_version 返回 VersionConflict。
         let mut mock = MockCasCreds::new();
-        mock.expect_find().returning(move |_t, _s| {
+        mock.expect_find_by_user_id().returning(move |_t, _u| {
             let c = alice_cred.clone();
             Ok(Some(c))
         });
@@ -765,7 +826,7 @@ mod tests {
         let err = svc
             .change_password(
                 tid(CANON_TENANT),
-                "alice".to_string(),
+                uid(CANON_USER),
                 "correct-horse".to_string(),
                 "new-pw".to_string(),
             )
@@ -791,7 +852,7 @@ mod tests {
         let sessions = InMemSessionRepo::new();
         sessions.insert(Session::new(
             sid.clone(),
-            "alice",
+            CANON_USER, // canonical user id（与 F1 一致：session.subject 非登录标识）
             ta,
             now + Duration::from_secs(3_600),
             now,
@@ -806,8 +867,13 @@ mod tests {
             "logout 前应能找到会话"
         );
 
-        let creds = InMemCredentialRepo::with_seed_credential("alice", "correct-horse", ta)
-            .expect("seed creds");
+        let creds = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            ta,
+        )
+        .expect("seed creds");
         let svc = LoginService::new(
             DynCredentialRepo::new_box(creds),
             DynSessionRepo::new_box(sessions.clone()), // service 持共享克隆
@@ -839,14 +905,19 @@ mod tests {
         let sessions = InMemSessionRepo::new();
         sessions.insert(Session::new(
             sid.clone(),
-            "alice",
+            CANON_USER, // canonical user id（与 F1 一致：session.subject 非登录标识）
             ta,
             now + Duration::from_secs(3_600),
             now,
         ));
 
-        let creds =
-            InMemCredentialRepo::with_seed_credential("alice", "correct-horse", ta).expect("seed");
+        let creds = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            ta,
+        )
+        .expect("seed");
         let svc = LoginService::new(
             DynCredentialRepo::new_box(creds),
             DynSessionRepo::new_box(sessions.clone()),

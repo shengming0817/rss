@@ -48,7 +48,8 @@ pub mod error {
 ///      "type": "string"
 ///    },
 ///    "subject": {
-///      "type": "string"
+///      "type": "string",
+///      "format": "uuid"
 ///    },
 ///    "tenantId": {
 ///      "type": "string"
@@ -65,7 +66,7 @@ pub struct IdentitySessionCreatedPayload {
     pub occurred_at: i64,
     #[serde(rename = "sessionId")]
     pub session_id: ::std::string::String,
-    pub subject: ::std::string::String,
+    pub subject: ::uuid::Uuid,
     #[serde(rename = "tenantId")]
     pub tenant_id: ::std::string::String,
 }

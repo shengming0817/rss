@@ -211,15 +211,10 @@ where
                 );
                 SubscriberHandlerError::new(e)
             })?;
-            // actor fail-closed：subject 须是 canonical user id（审计链 actor 是 typed id，不裸 String）。
-            let actor = ids::UserId::parse(&payload.subject).map_err(|e| {
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    error = %e,
-                    "audit handler: non-canonical subject, refusing to audit"
-                );
-                SubscriberHandlerError::new(e)
-            })?;
+            // actor：subject 是 typed `uuid::Uuid`（generated `format:uuid`，#1277 F1）——非 UUID 在 payload
+            // decode 即 fail-closed（上方 `from_slice`，由 `rejects_non_canonical_subject` 守），此处直接
+            // `UserId::new`（无 parse、无失败分支；审计链 actor 是 typed id，不裸 String）。
+            let actor = ids::UserId::new(payload.subject);
             let action = vocab::Action::parse(ACTION_LOGIN).map_err(|e| {
                 tracing::error!(
                     message_id = msg_id.as_str(),
@@ -383,7 +378,9 @@ mod tests {
     fn payload_bytes_with_session(subject: &str, tenant: &str, session_id: &str) -> Vec<u8> {
         let payload = IdentitySessionCreatedPayload {
             session_id: session_id.to_string(),
-            subject: subject.to_string(),
+            // subject 是 typed `uuid::Uuid`（#1277 F1，schema `format:uuid`）——helper 入参为 canonical UUID 串，
+            // 非 UUID 用例（rejects_non_canonical_subject）走 raw JSON、不经本构造器。
+            subject: uuid::Uuid::parse_str(subject).expect("canonical subject uuid"),
             tenant_id: tenant.to_string(),
             occurred_at: 1_700_000_000,
         };
@@ -458,18 +455,23 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// #1277 F1：subject 是 typed `uuid::Uuid`（schema `format:uuid`）——非 UUID subject 在 payload **decode**
+    /// 即 fail-closed（serde 反序列化失败），不进链。用 raw JSON（typed 构造器无法表达非 UUID）证 decode-层拒绝。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn rejects_non_canonical_subject() {
         let repo = repo();
         let handler = SessionCreatedAuditHandler::new(repo.clone());
-        let result = handler
-            .handle(Message::new(
-                "m",
-                payload_bytes("alice-not-uuid", CANON_TENANT),
-            ))
-            .await;
-        assert!(result.is_err());
+        // 手造 payload JSON：subject 为非 UUID 字符串（typed `uuid::Uuid` 字段无法表达，故走 raw bytes）。
+        let raw = format!(
+            r#"{{"sessionId":"{CANON_SESSION}","subject":"alice-not-uuid","tenantId":"{CANON_TENANT}","occurredAt":1700000000}}"#
+        )
+        .into_bytes();
+        let result = handler.handle(Message::new("m", raw)).await;
+        assert!(
+            result.is_err(),
+            "非 UUID subject 须在 wire decode 层 fail-closed 拒（typed uuid::Uuid 不可表达）"
+        );
     }
 
     /// F3：非 canonical UUID 的 session_id 被 fail-closed 拒（不进链），与 tenant/actor 同纪律。

@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::domain::{AccountLockout, AccountStatus, Credential, IdentityError, Session, SessionId};
+use crate::domain::{
+    AccountLockout, AuthOutcome, Credential, IdentityError, LoginIdentifier, Session, SessionId,
+};
 use crate::ports::{CredentialRepo, SessionRepo};
 use vocab::TenantId;
 
@@ -15,13 +17,14 @@ use vocab::TenantId;
 // InMemCredentialRepo — CredentialRepo 域形 DI port 的 in-mem 替身（PR3）
 // ---------------------------------------------------------------------------
 
-/// `CredentialRepo` 的 in-memory 替身：`(tenant, subject)` → 哈希凭据 / 锁定态。
+/// `CredentialRepo` 的 in-memory 替身：`(tenant, login)` → 哈希凭据 / 锁定态。
 ///
 /// 内部 `Mutex`（trait 方法 `&self`，需内部可变；锁仅同步持有、**不跨 `.await`** ⇒ future 仍 `Send`）。
-/// 键含 `TenantId` ⇒ 跨租赁查找天然 fail-closed（`find(t ≠ 存入 tenant)` → `None`）。生产 postgres impl 留 W。
+/// 键含 `TenantId` ⇒ 跨租赁查找天然 fail-closed（`find(t ≠ 存入 tenant)` → `None`）。键的标识段是
+/// [`LoginIdentifier`]（登录查找键，非 canonical user id，#1277 F1）。生产 postgres impl 留 W。
 pub(crate) struct InMemCredentialRepo {
-    creds: Mutex<HashMap<(TenantId, String), Credential>>,
-    lockouts: Mutex<HashMap<(TenantId, String), AccountLockout>>,
+    creds: Mutex<HashMap<(TenantId, LoginIdentifier), Credential>>,
+    lockouts: Mutex<HashMap<(TenantId, LoginIdentifier), AccountLockout>>,
 }
 
 /// 取锁并从毒化恢复（集中 poison 处理理由，避免散落各方法）。
@@ -42,50 +45,82 @@ impl InMemCredentialRepo {
     }
 
     /// 以单个种子凭据构造（密码经 `secure::hash_password` 哈希，**不存明文**；version 起 1）。
-    /// 供 test / `seed-login`（PR4 真实登录种子）。
+    /// 供 test / `seed-login`（PR4 真实登录种子）。`login` = 登录查找键，`user_id` = canonical actor
+    /// subject（写 wire/audit；与 `login` 解耦，#1277 F1）。
     pub(crate) fn with_seed_credential(
-        subject: impl Into<String>,
+        login: impl Into<String>,
+        user_id: ids::UserId,
         plaintext: &str,
         tenant: TenantId,
     ) -> Result<Self, secure::PasswordError> {
         let hash = secure::hash_password(plaintext)?;
-        let credential = Credential::new(subject, tenant, hash, 1);
+        let credential = Credential::new(LoginIdentifier::new(login), user_id, tenant, hash, 1);
         let repo = Self::new();
         // key 派生自 credential（与 save 同——身份错位不可表达，F2）。
         recover(&repo.creds).insert(Self::cred_key(&credential), credential);
         Ok(repo)
     }
 
-    /// store key 单源：派生自 credential 自身（tenant + subject），消除外部 key 与存值错位（F2）。
-    fn cred_key(credential: &Credential) -> (TenantId, String) {
-        (credential.tenant(), credential.subject().to_string())
+    /// store key 单源：派生自 credential 自身（tenant + login），消除外部 key 与存值错位（F2）。
+    fn cred_key(credential: &Credential) -> (TenantId, LoginIdentifier) {
+        (credential.tenant(), credential.login().clone())
+    }
+
+    /// 测试可见：当前 lockout 表条目数（F2 断言——未知主体登录失败不建锁、不撑大表）。
+    #[cfg(test)]
+    pub(crate) fn lockout_len(&self) -> usize {
+        recover(&self.lockouts).len()
     }
 }
 
 impl CredentialRepo for InMemCredentialRepo {
-    async fn find(
+    async fn find_by_user_id(
         &self,
         tenant: TenantId,
-        subject: String,
+        user_id: ids::UserId,
     ) -> Result<Option<Credential>, IdentityError> {
-        Ok(recover(&self.creds).get(&(tenant, subject)).cloned())
+        // creds 按 (tenant, login) 索引——按 canonical user_id 查须线性扫本 tenant 凭据匹配 user_id。
+        // reason: in-mem 替身（test/seed-login 门控）规模小，O(n) 扫可接受；生产 postgres adapter（W #1258）
+        // 须为 user_id 建二级索引（O(1) 查），不沿用扫描。
+        Ok(recover(&self.creds)
+            .values()
+            .find(|c| c.tenant() == tenant && c.user_id() == user_id)
+            .cloned())
     }
 
-    async fn verify_password(
+    async fn authenticate(
         &self,
         tenant: TenantId,
-        subject: String,
+        login: LoginIdentifier,
         candidate: String,
-    ) -> Result<bool, IdentityError> {
-        // 恒定成本验签（F3）：克隆出哈希释放锁后，经 secure::verify_password_constant_time——查无凭据也跑
-        // 等价 argon2 KDF，消登录枚举时序差。fail-closed 不区分「无此凭据」与「密码错」（值 + 时延双不可分）。
-        let stored = recover(&self.creds)
-            .get(&(tenant, subject))
-            .map(|c| c.password_hash().clone());
-        Ok(secure::verify_password_constant_time(
-            &candidate,
-            stored.as_ref(),
-        ))
+        now: SystemTime,
+    ) -> Result<AuthOutcome, IdentityError> {
+        // 恒定成本验签（F3）：先克隆出 (hash, user_id) 释放 creds 锁，经 secure::verify_password_constant_time——
+        // 查无凭据也跑等价 argon2 KDF，消登录枚举时序差。再据「已知/未知」+「验签成败」原子分流（F1+F2）。
+        // INVARIANT: MEM-LOCK-ORDER-01 — creds 锁与 lockouts 锁**不交叉持有**：creds guard 在下方 `.map()`
+        // 临时表达式结束即析构释放，KDF 在两锁之外计算，之后才取 lockouts 锁。重构勿引入同时持两锁（防死锁）。
+        let key = (tenant, login);
+        let found = recover(&self.creds)
+            .get(&key)
+            .map(|c| (c.password_hash().clone(), c.user_id()));
+        let ok = secure::verify_password_constant_time(&candidate, found.as_ref().map(|(h, _)| h));
+        Ok(match (found, ok) {
+            // 已知 + 正确：成功重置失败计数（原子清锁内 RMW），返回 canonical actor subject。
+            (Some((_, user_id)), true) => {
+                recover(&self.lockouts).remove(&key);
+                AuthOutcome::Authenticated(user_id)
+            }
+            // 已知 + 错：原子推进 lockout（锁内 RMW，达阈值即锁）；对外仍 InvalidCredentials。
+            (Some(_), false) => {
+                recover(&self.lockouts)
+                    .entry(key)
+                    .or_insert_with(|| AccountLockout::new(now))
+                    .record_failure(now);
+                AuthOutcome::InvalidKnownUser
+            }
+            // 查无凭据：KDF 已跑（防枚举时序差），但**不建/不动** lockout 态（F2：未知主体不可预置锁定/不撑大表）。
+            (None, _) => AuthOutcome::InvalidUnknown,
+        })
     }
 
     async fn save(&self, credential: Credential) -> Result<(), IdentityError> {
@@ -107,40 +142,21 @@ impl CredentialRepo for InMemCredentialRepo {
         }
     }
 
-    async fn record_failure(
-        &self,
-        tenant: TenantId,
-        subject: String,
-        now: SystemTime,
-    ) -> Result<AccountStatus, IdentityError> {
-        // 原子 RMW（锁内，F1）：读锁定态-or-新建 → record_failure → 持久化（entry 引用即原地写）。并发不丢更新。
-        let mut guard = recover(&self.lockouts);
-        let lockout = guard
-            .entry((tenant, subject))
-            .or_insert_with(|| AccountLockout::new(now));
-        Ok(lockout.record_failure(now))
-    }
-
     async fn lockout_status(
         &self,
         tenant: TenantId,
-        subject: String,
+        login: LoginIdentifier,
         now: SystemTime,
     ) -> Result<bool, IdentityError> {
         // 原子 RMW（锁内，F1）：lazy-unlock（TTL 过则原地清）后返回 is_locked。查无锁定态 → 未锁定。
         let mut guard = recover(&self.lockouts);
-        match guard.get_mut(&(tenant, subject)) {
+        match guard.get_mut(&(tenant, login)) {
             Some(lockout) => {
                 lockout.try_lazy_unlock(now);
                 Ok(lockout.is_locked(now))
             }
             None => Ok(false),
         }
-    }
-
-    async fn clear_lockout(&self, tenant: TenantId, subject: String) -> Result<(), IdentityError> {
-        recover(&self.lockouts).remove(&(tenant, subject));
-        Ok(())
     }
 }
 
@@ -201,20 +217,33 @@ impl SessionRepo for InMemSessionRepo {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{Credential, InMemCredentialRepo, InMemSessionRepo, TenantId};
-    use crate::domain::{AccountStatus, IdentityError, Session, SessionId};
+    use crate::domain::{AuthOutcome, IdentityError, LoginIdentifier, Session, SessionId};
     use crate::ports::{CredentialRepo, SessionRepo};
     use std::time::{Duration, SystemTime};
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
+    // canonical user id（audit actor 形态；与登录标识 "alice" 解耦，#1277 F1）。
+    const USER_ALICE: &str = "11111111-2222-4333-8444-555555555555";
+    // 未种子化的 canonical user id（find_by_user_id 未知主体 → None，#1277 F2）。
+    const USER_GHOST: &str = "99999999-8888-4777-8666-555544443333";
 
     fn tid(raw: &str) -> TenantId {
         TenantId::parse(raw).expect("canonical tenant parses")
     }
 
-    fn cred(subject: &str, password: &str, version: u32, tenant: TenantId) -> Credential {
+    fn uid(raw: &str) -> ids::UserId {
+        ids::UserId::parse(raw).expect("canonical user id parses")
+    }
+
+    fn lid(raw: &str) -> LoginIdentifier {
+        LoginIdentifier::new(raw)
+    }
+
+    fn cred(login: &str, user: &str, password: &str, version: u32, tenant: TenantId) -> Credential {
         Credential::new(
-            subject,
+            LoginIdentifier::new(login),
+            uid(user),
             tenant,
             secure::hash_password(password).expect("hash"),
             version,
@@ -227,9 +256,10 @@ mod tests {
 
     fn make_session(sid: &str, tenant: TenantId) -> Session {
         let now = epoch(1_000);
+        // subject = canonical user id（与 F1 一致：session.subject 是 ids::UserId hyphenated UUID，非登录标识）。
         Session::new(
             SessionId::new(sid),
-            "alice-subject",
+            USER_ALICE,
             tenant,
             now + Duration::from_secs(3_600),
             now,
@@ -245,12 +275,22 @@ mod tests {
         let repo = InMemCredentialRepo::new();
         let t = tid(TENANT_A);
         // save key 派生自 credential（F2，无独立 tenant 参）。
-        repo.save(cred("alice", "pw", 1, t)).await.expect("save");
-        let found = repo.find(t, "alice".to_string()).await.expect("find");
-        assert!(found.is_some());
-        assert_eq!(found.expect("some").version(), 1);
+        repo.save(cred("alice", USER_ALICE, "pw", 1, t))
+            .await
+            .expect("save");
+        let found = repo
+            .find_by_user_id(t, uid(USER_ALICE))
+            .await
+            .expect("find")
+            .expect("some");
+        assert_eq!(found.version(), 1);
+        assert_eq!(
+            found.user_id(),
+            uid(USER_ALICE),
+            "canonical subject 随凭据存取"
+        );
         assert!(
-            repo.find(t, "nobody".to_string())
+            repo.find_by_user_id(t, uid(USER_GHOST))
                 .await
                 .expect("find")
                 .is_none()
@@ -258,64 +298,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_password_correct_wrong_and_unknown() {
-        let repo = InMemCredentialRepo::with_seed_credential("alice", "correct", tid(TENANT_A))
-            .expect("seed");
+    async fn authenticate_known_wrong_and_unknown_outcomes() {
+        let repo = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(USER_ALICE),
+            "correct",
+            tid(TENANT_A),
+        )
+        .expect("seed");
         let t = tid(TENANT_A);
-        assert!(
-            repo.verify_password(t, "alice".to_string(), "correct".to_string())
+        let now = epoch(1_000);
+        // 已知 + 正确 → Authenticated(canonical user id)。
+        assert_eq!(
+            repo.authenticate(t, lid("alice"), "correct".to_string(), now)
                 .await
-                .expect("v")
+                .expect("auth"),
+            AuthOutcome::Authenticated(uid(USER_ALICE))
         );
-        assert!(
-            !repo
-                .verify_password(t, "alice".to_string(), "wrong".to_string())
+        // 已知 + 错 → InvalidKnownUser。
+        assert_eq!(
+            repo.authenticate(t, lid("alice"), "wrong".to_string(), now)
                 .await
-                .expect("v")
+                .expect("auth"),
+            AuthOutcome::InvalidKnownUser
         );
-        // 查无主体 → false（恒定成本路径仍跑 argon2，F3；不 panic）。
-        assert!(
-            !repo
-                .verify_password(t, "ghost".to_string(), "correct".to_string())
+        // 查无主体 → InvalidUnknown（恒定成本 KDF 仍跑，F3；不 panic）。
+        assert_eq!(
+            repo.authenticate(t, lid("ghost"), "correct".to_string(), now)
                 .await
-                .expect("v")
+                .expect("auth"),
+            AuthOutcome::InvalidUnknown
         );
     }
 
     #[tokio::test]
-    async fn cross_tenant_find_verify_and_lockout_fail_closed() {
-        let repo = InMemCredentialRepo::with_seed_credential("alice", "correct", tid(TENANT_A))
-            .expect("seed");
+    async fn authenticate_unknown_subject_does_not_create_lockout() {
+        // F2：未知主体登录失败**不建** lockout 态——不可预置任意用户名锁定、不经枚举撑大 lockout 表。
+        let repo = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(USER_ALICE),
+            "correct",
+            tid(TENANT_A),
+        )
+        .expect("seed");
+        let t = tid(TENANT_A);
+        let now = epoch(1_000);
+        for i in 0..50 {
+            assert_eq!(
+                repo.authenticate(t, lid(&format!("ghost-{i}")), "x".to_string(), now)
+                    .await
+                    .expect("auth"),
+                AuthOutcome::InvalidUnknown
+            );
+        }
+        assert_eq!(
+            repo.lockout_len(),
+            0,
+            "未知主体失败不建锁定态（lockout 表不随枚举增长，F2）"
+        );
+        // 对比：已知主体失败才建恰一条。
+        repo.authenticate(t, lid("alice"), "wrong".to_string(), now)
+            .await
+            .expect("auth");
+        assert_eq!(repo.lockout_len(), 1, "已知主体失败建恰一条 lockout 态");
+    }
+
+    #[tokio::test]
+    async fn cross_tenant_find_authenticate_and_lockout_fail_closed() {
+        let repo = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(USER_ALICE),
+            "correct",
+            tid(TENANT_A),
+        )
+        .expect("seed");
         let a = tid(TENANT_A);
         let other = tid(TENANT_B);
-        // 跨租赁查找 → None（不泄露存在性），验签 → false。
+        let t0 = epoch(1_000);
+        // 跨租赁查找 → None（不泄露存在性），authenticate → InvalidUnknown（跨租即未知，不建锁）。
         assert!(
-            repo.find(other, "alice".to_string())
+            repo.find_by_user_id(other, uid(USER_ALICE))
                 .await
                 .expect("find")
                 .is_none()
         );
-        assert!(
-            !repo
-                .verify_password(other, "alice".to_string(), "correct".to_string())
+        assert_eq!(
+            repo.authenticate(other, lid("alice"), "correct".to_string(), t0)
                 .await
-                .expect("v")
+                .expect("auth"),
+            AuthOutcome::InvalidUnknown
         );
-        // 在 TENANT_A 把 alice 锁定，TENANT_B 视角 lockout_status 仍 false（隔离，不推进/不读到别租计数）。
-        let t0 = epoch(1_000);
+        assert_eq!(repo.lockout_len(), 0, "跨租未知主体失败不建锁（F2 + 隔离）");
+        // 在 TENANT_A 把 alice 锁定（5 次错密码），TENANT_B 视角 lockout_status 仍 false（隔离）。
         for i in 1..=5 {
-            repo.record_failure(a, "alice".to_string(), t0 + Duration::from_secs(i))
-                .await
-                .expect("rf");
+            repo.authenticate(
+                a,
+                lid("alice"),
+                "wrong".to_string(),
+                t0 + Duration::from_secs(i),
+            )
+            .await
+            .expect("auth");
         }
         assert!(
-            repo.lockout_status(a, "alice".to_string(), t0 + Duration::from_secs(5))
+            repo.lockout_status(a, lid("alice"), t0 + Duration::from_secs(5))
                 .await
                 .expect("ls")
         );
         assert!(
             !repo
-                .lockout_status(other, "alice".to_string(), t0 + Duration::from_secs(5))
+                .lockout_status(other, lid("alice"), t0 + Duration::from_secs(5))
                 .await
                 .expect("ls"),
             "TENANT_B 视角不应受 TENANT_A 锁定影响"
@@ -327,12 +419,16 @@ mod tests {
         let a = tid(TENANT_A);
         let other = tid(TENANT_B);
         let repo = InMemCredentialRepo::new();
-        repo.save(cred("alice", "pw", 1, a)).await.expect("save");
+        repo.save(cred("alice", USER_ALICE, "pw", 1, a))
+            .await
+            .expect("save");
         // 跨租 bump：next 在 TENANT_B（key 派生自 next）→ 查无 → CredentialNotFound，不动 TENANT_A。
-        let res = repo.bump_version(1, cred("alice", "pw2", 2, other)).await;
+        let res = repo
+            .bump_version(1, cred("alice", USER_ALICE, "pw2", 2, other))
+            .await;
         assert!(matches!(res, Err(IdentityError::CredentialNotFound)));
         let still = repo
-            .find(a, "alice".to_string())
+            .find_by_user_id(a, uid(USER_ALICE))
             .await
             .expect("find")
             .expect("some");
@@ -344,106 +440,177 @@ mod tests {
     async fn bump_version_cas_hit_miss_and_unknown() {
         let repo = InMemCredentialRepo::new();
         let t = tid(TENANT_A);
-        repo.save(cred("alice", "pw", 1, t)).await.expect("save");
+        repo.save(cred("alice", USER_ALICE, "pw", 1, t))
+            .await
+            .expect("save");
         // 期望版本不匹配 → VersionConflict（key 派生自 next）。
-        let conflict = repo.bump_version(99, cred("alice", "pw2", 2, t)).await;
+        let conflict = repo
+            .bump_version(99, cred("alice", USER_ALICE, "pw2", 2, t))
+            .await;
         assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
         // 期望版本命中 → 替换。
-        repo.bump_version(1, cred("alice", "pw2", 2, t))
+        repo.bump_version(1, cred("alice", USER_ALICE, "pw2", 2, t))
             .await
             .expect("cas hit");
         let found = repo
-            .find(t, "alice".to_string())
+            .find_by_user_id(t, uid(USER_ALICE))
             .await
             .expect("find")
             .expect("some");
         assert_eq!(found.version(), 2);
         assert!(found.verify_password("pw2"));
         // 查无凭据 → CredentialNotFound。
-        let missing = repo.bump_version(1, cred("ghost", "x", 1, t)).await;
+        let missing = repo
+            .bump_version(1, cred("ghost", USER_ALICE, "x", 1, t))
+            .await;
         assert!(matches!(missing, Err(IdentityError::CredentialNotFound)));
     }
 
     #[tokio::test]
-    async fn record_failure_accumulates_atomically_then_locks() {
-        // 原子 RMW（F1）：连续 record_failure 经仓储持久化累计——每次读的是已存计数（非外部 stale 副本）。
-        let repo = InMemCredentialRepo::new();
+    async fn authenticate_wrong_password_accumulates_then_locks() {
+        // 原子 RMW（F1）：连续 authenticate(错) 经仓储持久化累计——每次读已存计数（非外部 stale 副本）。
+        let repo = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(USER_ALICE),
+            "correct",
+            tid(TENANT_A),
+        )
+        .expect("seed");
         let t = tid(TENANT_A);
         let t0 = epoch(1_000);
         for i in 1..5 {
-            let st = repo
-                .record_failure(t, "alice".to_string(), t0 + Duration::from_secs(i))
+            assert_eq!(
+                repo.authenticate(
+                    t,
+                    lid("alice"),
+                    "wrong".to_string(),
+                    t0 + Duration::from_secs(i)
+                )
                 .await
-                .expect("rf");
-            assert_eq!(st, AccountStatus::Active, "第 {i} 次失败仍 Active");
+                .expect("auth"),
+                AuthOutcome::InvalidKnownUser,
+                "第 {i} 次失败"
+            );
+            assert!(
+                !repo
+                    .lockout_status(t, lid("alice"), t0 + Duration::from_secs(i))
+                    .await
+                    .expect("ls"),
+                "未达阈值仍未锁"
+            );
         }
-        // 第 5 次（窗口内）→ Locked。
-        let st = repo
-            .record_failure(t, "alice".to_string(), t0 + Duration::from_secs(5))
-            .await
-            .expect("rf");
-        assert_eq!(st, AccountStatus::Locked);
+        // 第 5 次（窗口内）→ 达阈值锁定。
+        repo.authenticate(
+            t,
+            lid("alice"),
+            "wrong".to_string(),
+            t0 + Duration::from_secs(5),
+        )
+        .await
+        .expect("auth");
         assert!(
-            repo.lockout_status(t, "alice".to_string(), t0 + Duration::from_secs(5))
+            repo.lockout_status(t, lid("alice"), t0 + Duration::from_secs(5))
                 .await
                 .expect("ls")
         );
     }
 
     #[tokio::test]
-    async fn lockout_status_lazy_unlocks_and_clear_resets() {
-        let repo = InMemCredentialRepo::new();
+    async fn lockout_lazy_unlocks_after_ttl() {
+        let repo = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(USER_ALICE),
+            "correct",
+            tid(TENANT_A),
+        )
+        .expect("seed");
         let t = tid(TENANT_A);
         let t0 = epoch(1_000);
         for i in 1..=5 {
-            repo.record_failure(t, "alice".to_string(), t0 + Duration::from_secs(i))
-                .await
-                .expect("rf");
+            repo.authenticate(
+                t,
+                lid("alice"),
+                "wrong".to_string(),
+                t0 + Duration::from_secs(i),
+            )
+            .await
+            .expect("auth");
         }
         let lock_at = t0 + Duration::from_secs(5);
         let lock_ttl = Duration::from_secs(15 * 60);
         // TTL 内仍锁定。
         assert!(
-            repo.lockout_status(
-                t,
-                "alice".to_string(),
-                lock_at + lock_ttl - Duration::from_secs(1)
-            )
-            .await
-            .expect("ls")
+            repo.lockout_status(t, lid("alice"), lock_at + lock_ttl - Duration::from_secs(1))
+                .await
+                .expect("ls")
         );
         // lockout_status 在 TTL 后原子 lazy-unlock → false（且持久化解锁）。
         assert!(
             !repo
-                .lockout_status(
-                    t,
-                    "alice".to_string(),
-                    lock_at + lock_ttl + Duration::from_secs(1)
-                )
+                .lockout_status(t, lid("alice"), lock_at + lock_ttl + Duration::from_secs(1))
                 .await
                 .expect("ls")
         );
-        // 解锁后再失败从 1 重计（不沿用旧计数）→ Active。
+        // 解锁后再失败从 1 重计（不沿用旧计数）→ InvalidKnownUser、未锁。
         let after = lock_at + lock_ttl + Duration::from_secs(2);
         assert_eq!(
-            repo.record_failure(t, "alice".to_string(), after)
+            repo.authenticate(t, lid("alice"), "wrong".to_string(), after)
                 .await
-                .expect("rf"),
-            AccountStatus::Active
+                .expect("auth"),
+            AuthOutcome::InvalidKnownUser
         );
-        // clear_lockout 重置：未知主体幂等 Ok；清除后 status false。
-        repo.clear_lockout(t, "alice".to_string())
-            .await
-            .expect("clear");
         assert!(
             !repo
-                .lockout_status(t, "alice".to_string(), after)
+                .lockout_status(t, lid("alice"), after)
                 .await
                 .expect("ls")
         );
-        repo.clear_lockout(t, "ghost".to_string())
+    }
+
+    #[tokio::test]
+    async fn authenticate_success_clears_lockout() {
+        // 成功登录原子清零该主体失败计数（authenticate 内折叠 clear——不再需独立 clear_lockout 端口）。
+        let repo = InMemCredentialRepo::with_seed_credential(
+            "alice",
+            uid(USER_ALICE),
+            "correct",
+            tid(TENANT_A),
+        )
+        .expect("seed");
+        let t = tid(TENANT_A);
+        let t0 = epoch(1_000);
+        // 4 次错（未达阈值 5，未锁）→ lockout 态存在。
+        for i in 1..=4 {
+            assert_eq!(
+                repo.authenticate(
+                    t,
+                    lid("alice"),
+                    "wrong".to_string(),
+                    t0 + Duration::from_secs(i)
+                )
+                .await
+                .expect("auth"),
+                AuthOutcome::InvalidKnownUser
+            );
+        }
+        assert_eq!(repo.lockout_len(), 1, "失败累积建一条 lockout 态");
+        // 正确密码 → Authenticated + 原子清除 lockout 态。
+        assert_eq!(
+            repo.authenticate(
+                t,
+                lid("alice"),
+                "correct".to_string(),
+                t0 + Duration::from_secs(5)
+            )
             .await
-            .expect("clear idempotent");
+            .expect("auth"),
+            AuthOutcome::Authenticated(uid(USER_ALICE))
+        );
+        assert_eq!(
+            repo.lockout_len(),
+            0,
+            "成功登录清除该主体 lockout 态（计数重置）"
+        );
     }
 
     // ---------------------------------------------------------------------------

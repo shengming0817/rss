@@ -58,9 +58,13 @@ const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 /// 登录种子密码。
 const PASSWORD: &str = "correct-horse";
-/// 种子用户 subject = 登录标识（`request.username` 即 subject，CredentialRepo 按 `(tenant,subject)` 索引）。
-/// 审计 actor 是 typed `ids::UserId`（canonical uuid），故 subject 须为 uuid。
-const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
+/// 登录标识（`request.username`）——#1277 F1：可为**任意非 uuid 用户名**（email/UPN/username），仅作凭据
+/// 查找键（CredentialRepo 按 `(tenant, login)` 索引），永不写进 wire / audit。
+const LOGIN_USERNAME: &str = "alice";
+/// canonical actor subject（credential 携带的 `ids::UserId`）——登录成功后**仅**此写 payload / envelope /
+/// session subject + 审计 actor。与登录标识解耦：旧实现把 username 直接当 subject 写 wire，真实用户名
+/// （非 uuid）会让 audit `ids::UserId::parse` fail-closed 断链——本 journey 用非 uuid 登录标识端到端证伪（#1277 F1）。
+const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 /// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid），
 /// 非 uuid 会被 handler fail-closed 拒（F3）；故 session_id 须为 uuid。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
@@ -279,7 +283,8 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
-        SUBJECT,
+        LOGIN_USERNAME,
+        ids::UserId::parse(CANON_USER)?,
         PASSWORD,
         tenant,
     )?;
@@ -288,7 +293,8 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
             .login(
                 tenant,
                 IdentityLoginRequest {
-                    username: SUBJECT.to_string(),
+                    // 非 uuid 登录标识——旧实现会把 "alice" 当 subject 写 wire，audit 断链（#1277 F1 证伪点）。
+                    username: LOGIN_USERNAME.to_string(),
                     password: PASSWORD.to_string(),
                 },
             )
@@ -323,15 +329,24 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     assert!(contains(b"identity:login"), "登录动作贯穿闭环");
     // F9：tenant / actor 的 16B 原始 UUID 字节贯穿到审计链 canonical 输入（防 audit 漏写关键 actor/tenant
     // 字段而 journey 不报）。canonical_message 内 tenant/actor 是 uuid bytes（非字符串），故用 uuid 字节断言。
+    // #1277 F1：actor = canonical CANON_USER（credential.user_id），**非**登录标识 LOGIN_USERNAME="alice"——
+    // 用非 uuid 登录标识端到端证明 login 写的是 canonical subject、audit 不再断链（旧实现此处必失败）。
     let tenant_uuid_bytes = uuid::Uuid::parse_str(CANON_TENANT)?.into_bytes();
-    let actor_uuid_bytes = uuid::Uuid::parse_str(SUBJECT)?.into_bytes();
+    let actor_uuid_bytes = uuid::Uuid::parse_str(CANON_USER)?.into_bytes();
     assert!(
         contains(&tenant_uuid_bytes),
         "tenant UUID 16B 贯穿闭环（进审计链 canonical 输入）"
     );
     assert!(
         contains(&actor_uuid_bytes),
-        "actor UUID 16B 贯穿闭环（进审计链 canonical 输入）"
+        "actor = canonical user id（credential.user_id）16B 贯穿闭环（非登录标识 \"alice\"，#1277 F1）"
+    );
+    // 反证：非 uuid 登录标识不得出现在审计链输入（旧实现把 username 当 subject 写 wire 会命中此串）。
+    // 前提（已人工核验）：CANON_USER 的 16B UUID 字节序列不含 LOGIN_USERNAME（"alice"）的 ASCII 编码，
+    // 故本字节搜索无假阳性——选取测试常量时须维持此前提（二者无字节子串包含）。
+    assert!(
+        !contains(LOGIN_USERNAME.as_bytes()),
+        "登录标识 \"alice\" 不得进审计链 canonical 输入（准 PII，#1277 F1）"
     );
     Ok(())
 }
@@ -389,7 +404,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     // session-created JSON（camelCase）；EventId 与 payload.sessionId 解耦（去重锚点是 EventId）。
     const EVENT_ID: &str = "evt-redeliver-fixed";
     let payload = format!(
-        r#"{{"sessionId":"{CANON_SESSION}","subject":"{SUBJECT}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
+        r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_USER}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
     )
     .into_bytes();
     let emitter = MemEmitter::new(bus.clone());
@@ -407,7 +422,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
                     OutboxEnvelopeParts {
                         domain: "identity".to_string(),
                         contract_id: SESSION_CREATED_TOPIC.to_string(),
-                        subject_id: SUBJECT.to_string(),
+                        subject_id: CANON_USER.to_string(),
                     },
                 )
                 .await
@@ -466,7 +481,8 @@ async fn rejected_login_does_not_audit() -> Result<()> {
         DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
-        SUBJECT,
+        LOGIN_USERNAME,
+        ids::UserId::parse(CANON_USER)?,
         PASSWORD,
         tenant,
     )?;
