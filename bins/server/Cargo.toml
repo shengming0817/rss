@@ -27,6 +27,17 @@ diport = { path = "../../crates/diport" }
 # 生产验签 provider（真 RustCrypto ES256/HS256；backend feature 开 impl diport::Pdp）。安全同批门：依赖图引真
 # verifier、不引 stub（memory adapter 经 deny.toml 禁 server/rss）。
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
+# settings 域（SecretService + SettingsService + empty_flag_store 工厂）。
+# seed-data feature 开：empty_flag_store（in-mem 空 flag store）可用——生产 flag store 待 #1120，
+# 当前空 store 满足 fail-closed 语义（未知 flag 返回 false）。
+settings = { path = "../../crates/settings", features = ["seed-data"] }
+# postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo）。
+postgres = { path = "../../adapters/postgres" }
+# Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
+vault = { path = "../../adapters/vault", features = ["backend"] }
+# VaultSecretResolver 构造：reqwest::Client（TLS-agnostic；组合根构造并注入）。
+# Join #1017：配置 TLS provider（rustls+ring，对齐 sqlx）—— 当前组合根传 Client::new()（pre-GA）。
+reqwest = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
@@ -47,3 +58,6 @@ hmac = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
 # 捕获 tracing 输出断言 authz.decision/principal.kind 埋点 + 无 token/subject 泄漏。
 tracing-subscriber = { workspace = true }
+# auth_e2e 经 httpserve test-util 构造 funnel 输入（`routes::unfinalized_for_test`）+ 取回裸 Router
+# （`AuthenticatedRoutes::into_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
+httpserve = { path = "../../crates/httpserve", features = ["test-util"] }

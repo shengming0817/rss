@@ -88,7 +88,8 @@ deny = [
   # postgres impl RoleRepo + SessionUnitOfWork（co-tx，#1083/#1192）；memory impl SessionUnitOfWork（demo
   #   provider，#1192）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
   { crate = "identity", wrappers = ["server", "rss", "xtask", "journeys", "postgres", "memory"] },
-  # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper。
+  # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
+  # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
   { crate = "settings", wrappers = ["server", "rss", "xtask", "journeys", "postgres"] },
   { crate = "audit", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "contractreg", wrappers = ["server", "rss", "xtask", "journeys"] },

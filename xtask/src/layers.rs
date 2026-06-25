@@ -158,6 +158,21 @@ pub(crate) fn basis_intra_dag_allows(from_crate: &str, to_crate: &str) -> bool {
     matches!((rank(from_crate), rank(to_crate)), (Some(f), Some(t)) if f > t)
 }
 
+/// 受控 `bootstrap → httpserve` **编译期路由类型边**放行（INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
+///
+/// typed route funnel（#1113 auth-finalize-before-bind + #1103 typed per-listener route-group）要求 bootstrap
+/// 取 httpserve 的路由类型词汇（`ListenerRouter<L>` / `UnfinalizedRoutes`）——三段「produce（bootstrap
+/// `finalize_routes`）→ seal → transform（httpserve `finalize_auth`）」须 **co-locate** 才能类型层 Hard，故
+/// sanction 这条**唯一**的 `Service → Service` 有向边（对齐 ADR-005 sanctioned `adapter → 域` DIP 内向边范式）。
+/// `layerdeps::check_layers` 在 `!allows(Service,Service)` 时叠加本判定。
+///
+/// **不放宽**一般 `Service → Service`：兄弟服务互不依赖仍守（PR #137 F1 的「不向兄弟服务要 runtime provider」
+/// 原则不变——本边仅取**编译期类型**，不取 runtime provider）。fail-closed：只放行这一对有向边，反向
+/// （`httpserve → bootstrap`，httpserve 仍禁依赖 bootstrap）/ 其它任意 `Service → Service` 一律交回 [`allows`] 禁。
+pub(crate) fn route_funnel_allows(from_crate: &str, to_crate: &str) -> bool {
+    (from_crate, to_crate) == ("bootstrap", "httpserve")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +256,27 @@ mod tests {
         #[case] want: bool,
     ) {
         assert_eq!(basis_intra_dag_allows(from, to), want);
+    }
+
+    /// 受控路由类型边只放行 `bootstrap → httpserve`（INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01 anti-vacuity）：
+    /// 反向 / 其它 Service→Service / 任一端非该对一律 false（交回 `allows` 禁）。
+    #[rstest]
+    // sanctioned 唯一边：放行。
+    #[case("bootstrap", "httpserve", true)]
+    // 反向边：禁（httpserve 仍禁依赖 bootstrap）。
+    #[case("httpserve", "bootstrap", false)]
+    // 其它 Service→Service：本例外不适用（false ⇒ 交回 allows 禁）。
+    #[case("bootstrap", "authn", false)]
+    #[case("eventexec", "httpserve", false)]
+    // 非 Service 端 / 无关对：false。
+    #[case("identity", "httpserve", false)]
+    #[case("bootstrap", "bootstrap", false)]
+    fn route_funnel_allows_bootstrap_to_httpserve_only(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] want: bool,
+    ) {
+        assert_eq!(route_funnel_allows(from, to), want);
     }
 
     #[rstest]

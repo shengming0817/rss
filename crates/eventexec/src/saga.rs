@@ -86,13 +86,17 @@ pub enum SagaOutcome {
     },
 }
 
-/// saga 控制命令（编排面接缝）。
+/// saga 编排控制命令（saga-orchestration control 接缝，非通用命令分发）。
 ///
-/// **F14：crate-internal（`pub(crate)`）**——P9 无 saga 命令分发路径（`Start`/`Cancel` 均无 executor 执行
-/// 入口），故不暴露公开 API（避免「公开命令面暗示 runtime 已支持」）。命令分发落地（P11 中断语义 / P12
-/// command dispatch）时再公开。
+/// **F14：crate-internal（`pub(crate)`）**——P9 无 saga 控制命令执行路径（`Start`/`Cancel` 均无
+/// executor 入口），故不暴露公开 API（避免「公开命令面暗示 runtime 已支持」）。
+///
+/// **注意**：此枚举是 saga Start/Cancel 编排控制的未来接缝，与 #1124 交付的**通用 outbox-topic 命令
+/// 分发机制**（`eventexec::command` + `generated::command`）无关。通用命令 dispatch 已落地；此枚举
+/// 待 saga 控制面（中断语义 / leader-elect 等后续 issue）消费时再公开。
 #[allow(dead_code)]
-// reason: 冻结接缝占位（#997 saga seam）；P9 无命令分发消费者，pub(crate) 隐藏未实现命令面（F14），待 P11/P12 消费
+// reason: 冻结 saga 编排控制接缝占位（#997 saga seam）；P9 无 saga 控制命令消费者，pub(crate) 隐藏
+// 未实现命令面（F14），待 saga 控制面后续 issue 消费（与通用 command dispatch #1124 无关）
 #[derive(Debug)]
 #[non_exhaustive]
 pub(crate) enum SagaCommand {

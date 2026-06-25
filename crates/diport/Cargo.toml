@@ -23,6 +23,8 @@ trait-variant = { workspace = true }
 thiserror = { workspace = true }
 # AuditEvent.tenant_id: vocab::TenantId（基础层强类型租户标识，fail-closed）。DiPort 依赖基础合规。
 vocab = { path = "../vocab" }
+# CertScope.device: ids::DeviceId（基础层强类型设备标识，RevocationStore scope 隔离）。DiPort 依赖基础合规。
+ids = { path = "../ids" }
 # OutboxEmitter port 签名引 consistency::outbox::Entry（引擎类型）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
 consistency = { path = "../consistency" }
 # SagaJournal port 的 SagaId(uuid::Uuid)：saga 实例标识下沉 diport（eventexec::SagaId re-export 本类型）。
@@ -31,6 +33,10 @@ uuid = { workspace = true }
 futures = { workspace = true }
 # Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 bootstrap shutdown 同源）。
 tokio-util = { workspace = true }
+
+# SecretMaterial ZeroizeOnDrop：secret 材料 drop 时自动清零（零信任，类型层 Hard）。
+# `zeroize_derive` feature 启用 proc-macro derive（ZeroizeOnDrop）；`alloc` 已在 workspace 基础上开。
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

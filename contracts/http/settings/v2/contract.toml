@@ -1,0 +1,14 @@
+# settings secret-publish HTTP 契约（draft）——secret 引用坐标写入，请求/响应绝无 secret 材料。
+# L1 LocalTx：单域本地事务，无 outbox 发布（secret publish 只写坐标不发事件）。
+# draft：不挂活 handler；graduate 到 active（含 path+method）留 Join。
+id = "settings.secret-publish"
+kind = "http"
+domain = "settings"
+version = "v2"
+owner = "settings"
+consistencyLevel = "LocalTx"
+lifecycle = "draft"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"

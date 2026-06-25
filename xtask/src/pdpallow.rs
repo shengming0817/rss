@@ -15,19 +15,25 @@
 //! 的任一 crate `impl Pdp` 都会触 dylint，逃生门可在任一处抑制）。`adapters/*`（合法 Pdp impl 站点）不扫；
 //! `*/tests/`（集成测试）非 `src/`、不扫——test 替身合法（与 dylint 默认不扫 `#[cfg(test)]` 一致）。
 //!
-//! 盲区（AI-robust 写明）：comment-strip 不处理 raw string（`r"..."`）；**字符串字面量内**的 `allow(...lint...)`
-//! （如本 governance 工具自身的演示串）会误判——故本扫描**不含** `xtask/`（工具自身）与 `lints/`（独立 workspace）。
+//! 盲区（AI-robust 写明）：`strip_comments`（来自 `crate::src_scan`）不处理 raw string（`r"..."`）；
+//! **字符串字面量内**的 `allow(...lint...)`（如本 governance 工具自身的演示串）不会触发——字面量内容被丢弃。
+//! 故本扫描**不含** `xtask/`（工具自身）与 `lints/`（独立 workspace）——见 `src_scan::SCAN_EXCLUDED_SEGMENTS`。
 //!
 //! 评级 Medium（CI 门，接入 `cargo xtask verify`，no-compile meta 步）；synthetic red case + anti-vacuity 见
 //! `#[cfg(test)]`：红向（单行 / 多行 / `expect` allow-attr 必判）+ 绿向（doc 提名 / 其它 allow / 真工作区 0 用量）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
+use crate::src_scan::{is_excluded, member_dirs, rs_files, strip_comments};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
+
+/// pdp-allow 扫描根：`crates/*` + `bins/*` 的 `src/`。`adapters/*`（**合法** `impl Pdp` 站点）**不在内**——
+/// 故与 `command_symmetry` 的更宽根集不同源（#1124 review F5：根集随各 invariant 边界，不共享）。
+const PDP_SCAN_ROOTS: &[&str] = &["crates", "bins"];
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,9 +44,6 @@ pub(crate) enum Rule {
 
 /// 守卫的 dylint 名（逃生门即 `#[allow(<此名>)]` / `#[expect(<此名>)]`）。
 const LINT: &str = "rss_pdp_impl_adapter_only";
-
-/// 扫描的生产源根（dylint 适用全面，排除 adapters legit impl 站点 + 工具自身）：`crates/*` + `bins/*` 的 `src/`。
-const ROOTS: &[&str] = &["crates", "bins"];
 
 pub(crate) struct PdpAllowGuard;
 
@@ -62,66 +65,6 @@ impl GovernanceCheck for PdpAllowGuard {
         );
         Ok((summary, findings))
     }
-}
-
-/// string-aware 去 `//` 行注释 + `/* */` 块注释（→ 丢弃，保留 `\n` 供行号计算；保留字符串字面量）。
-/// 杜绝 doc / 注释里 `allow(...lint...)` 示例误判。盲区：raw string（`r"..."`）不特判（罕见）。
-fn strip_comments(src: &str) -> String {
-    #[derive(PartialEq)]
-    enum St {
-        Code,
-        Line,
-        Block,
-        Str,
-    }
-    let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
-    let mut st = St::Code;
-    while let Some(c) = chars.next() {
-        match st {
-            St::Code => match c {
-                '/' if chars.peek() == Some(&'/') => {
-                    chars.next();
-                    st = St::Line;
-                }
-                '/' if chars.peek() == Some(&'*') => {
-                    chars.next();
-                    st = St::Block;
-                }
-                '"' => {
-                    st = St::Str;
-                    out.push('"');
-                }
-                _ => out.push(c),
-            },
-            St::Line => {
-                if c == '\n' {
-                    st = St::Code;
-                    out.push('\n');
-                }
-            }
-            St::Block => {
-                if c == '*' && chars.peek() == Some(&'/') {
-                    chars.next();
-                    st = St::Code;
-                } else if c == '\n' {
-                    out.push('\n');
-                }
-            }
-            St::Str => match c {
-                '\\' => {
-                    chars.next();
-                }
-                '"' => {
-                    st = St::Code;
-                    out.push('"');
-                }
-                '\n' => out.push('\n'),
-                _ => out.push(c),
-            },
-        }
-    }
-    out
 }
 
 /// comment-stripped 内容里 `allow(...lint...)` / `expect(...lint...)` 逃生门的 1-based 行号（去重排序）。纯函数。
@@ -159,9 +102,12 @@ fn escape_hatch_lines(content: &str) -> Vec<usize> {
 fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let mut findings = Vec::new();
     let mut scanned = 0usize;
-    for top in ROOTS {
+    for top in PDP_SCAN_ROOTS {
         let top_dir = root.join(top);
         for member in member_dirs(&top_dir)? {
+            if is_excluded(&member) {
+                continue;
+            }
             for path in rs_files(&member.join("src"))? {
                 scanned += 1;
                 let content = std::fs::read_to_string(&path).map_err(|e| {
@@ -180,48 +126,6 @@ fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding>)> {
         }
     }
     Ok((scanned, findings))
-}
-
-/// `top_dir` 下的直接子目录（workspace 成员目录；`top_dir` 不存在 → 空）。
-fn member_dirs(top_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    if !top_dir.is_dir() {
-        return Ok(out);
-    }
-    let entries = std::fs::read_dir(top_dir)
-        .map_err(|e| anyhow::anyhow!("pdp-allow-guard: 读目录 {} 失败: {e}", top_dir.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|e| anyhow::anyhow!("pdp-allow-guard: 遍历 {} 失败: {e}", top_dir.display()))?
-            .path();
-        if path.is_dir() {
-            out.push(path);
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// 递归收集 `dir` 下全部 `.rs` 文件（目录不存在 → 空，由 canary 兜底）。
-fn rs_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    if !dir.is_dir() {
-        return Ok(out);
-    }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("pdp-allow-guard: 读目录 {} 失败: {e}", dir.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|e| anyhow::anyhow!("pdp-allow-guard: 遍历 {} 失败: {e}", dir.display()))?
-            .path();
-        if path.is_dir() {
-            out.extend(rs_files(&path)?);
-        } else if path.extension().is_some_and(|x| x == "rs") {
-            out.push(path);
-        }
-    }
-    out.sort();
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -274,7 +178,7 @@ mod tests {
         assert!(
             escape_hatch_lines("#![allow(clippy::unwrap_used, clippy::expect_used)]\n").is_empty()
         );
-        // 普通代码提名（无 allow/expect 包裹）。
+        // 普通代码提名（无 allow/expect 包裹）——字符串字面量内容被 strip_comments 丢弃，不判。
         assert!(escape_hatch_lines("const X: &str = \"rss_pdp_impl_adapter_only\";\n").is_empty());
     }
 

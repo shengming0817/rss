@@ -194,6 +194,42 @@ impl PgConfig {
     }
 }
 
+/// 连接池当前可用性（同步、无阻塞）。
+///
+/// - `Ready`：池未关闭且有空闲连接可立即取用。
+/// - `Saturated`：池未关闭但无空闲连接（全部活跃，下一次 acquire 可能超时）。
+/// - `Down`：池已关闭（shutdown 已调用或建池失败）。
+///
+/// 用于 `ConfigsReadyProbe::check`（sync `HealthProbe`，poll 时不阻塞 reactor）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PoolReadiness {
+    /// 有空闲连接，可立即处理请求。
+    Ready,
+    /// 无空闲连接，正在高负载运行；acquire 可能等待或超时。
+    Saturated,
+    /// 连接池已关闭（shutdown 或建池失败）。
+    Down,
+}
+
+impl PgStore {
+    /// 返回连接池当前可用性（同步、不阻塞——轮询 `PgPool` 的原子计数器）。
+    ///
+    /// 用于 `bootstrap::HealthProbe` impl（`fn check(&self) -> HealthCheck`，sync）。
+    /// 不建立新连接、不发 SQL——仅读内存状态。
+    #[must_use]
+    pub fn pool_readiness(&self) -> PoolReadiness {
+        if self.pool.is_closed() {
+            return PoolReadiness::Down;
+        }
+        if self.pool.num_idle() > 0 {
+            PoolReadiness::Ready
+        } else {
+            PoolReadiness::Saturated
+        }
+    }
+}
+
 impl PgStore {
     /// 建池并连接 postgres：先 fail-fast 校验配置，再 `PgPoolOptions::connect_with`。
     ///
@@ -328,5 +364,88 @@ mod tests {
         assert_eq!(DEFAULT_MAX_CONNECTIONS, 10);
         assert_eq!(DEFAULT_ACQUIRE_TIMEOUT, Duration::from_secs(30));
         assert!(matches!(DEFAULT_SSL_MODE, PgSslMode::VerifyFull));
+    }
+
+    // ---------------------------------------------------------------------------
+    // PoolReadiness 单元测试（pool_readiness 使用真实 PgPool，不连 DB）
+    // ---------------------------------------------------------------------------
+
+    /// `PoolReadiness` 变体 enum 可构造且 exhaustive match。
+    #[test]
+    fn pool_readiness_enum_is_exhaustive() {
+        let r = PoolReadiness::Ready;
+        match r {
+            PoolReadiness::Ready => {}
+            PoolReadiness::Saturated => {}
+            PoolReadiness::Down => {}
+        }
+    }
+
+    /// `PoolReadiness` Clone + Copy + PartialEq 满足（fn-pointer smoke）。
+    #[test]
+    #[allow(clippy::clone_on_copy)]
+    // incidental: 预存 clone_on_copy；此处故意调 .clone() 验证 Clone trait 派生（覆盖 derive 路径，非多余调用）。
+    fn pool_readiness_traits_hold() {
+        let a = PoolReadiness::Saturated;
+        let b = a; // Copy
+        assert_eq!(a, b); // PartialEq
+        let c = a.clone(); // Clone
+        assert_eq!(a, c);
+    }
+
+    /// 已关闭（`pool.close` 后 `is_closed()` = true）的 PgPool → `Down`。
+    ///
+    /// 不连真实 DB：`connect_lazy_with` 延迟建连；`pool.close()` 后 `is_closed()` = true。
+    #[tokio::test]
+    async fn pool_readiness_closed_pool_is_down() {
+        // reason: connect_lazy_with 不真连 DB（延迟）；close() 将 is_closed 标为 true。
+        // `PgConnectOptions` 使用任意地址，不建真实连接。
+        let opts = PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(5999)
+            .database("rss_test")
+            .username("u")
+            .password("p");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(opts);
+        pool.close().await;
+        let store = PgStore { pool };
+        assert_eq!(
+            store.pool_readiness(),
+            PoolReadiness::Down,
+            "closed pool → Down"
+        );
+    }
+
+    /// 新建延迟池（未关闭、size=0、num_idle=0）→ `Saturated`（无空闲连接）。
+    ///
+    /// 新 lazy pool：size()=0, num_idle()=0, is_closed()=false → Saturated（无空闲）。
+    /// 这是未建立任何连接时的期望行为——池未关但也无可用连接，指示外部调用方需等待。
+    #[tokio::test]
+    async fn pool_readiness_new_lazy_pool_is_saturated() {
+        let opts = PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(5999)
+            .database("rss_test")
+            .username("u")
+            .password("p");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(opts);
+        let store = PgStore { pool };
+        // 未关闭 + num_idle=0 → Saturated
+        assert_eq!(
+            store.pool_readiness(),
+            PoolReadiness::Saturated,
+            "新 lazy pool（num_idle=0, not closed）→ Saturated"
+        );
+    }
+
+    /// `pool_readiness_fn_pointer_locks_signature`：函数指针签名锁。
+    #[test]
+    fn pool_readiness_fn_pointer_locks_signature() {
+        let _lock: fn(&PgStore) -> PoolReadiness = PgStore::pool_readiness;
+        let _ = _lock;
     }
 }

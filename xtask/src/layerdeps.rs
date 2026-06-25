@@ -165,8 +165,12 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
             // 未分类成员已单独 flag（LAYER-DEPS-05）；edges 只含内部成员，无外部边。
             continue;
         };
-        // 基础同层横向默认禁；唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）。
-        if !layers::allows(from, to) && !layers::basis_intra_dag_allows(&edge.from, &edge.to) {
+        // 基础同层横向默认禁，唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）；
+        // Service 同层横向默认禁，唯一例外 = 受控 bootstrap → httpserve 路由类型边（LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
+        if !layers::allows(from, to)
+            && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
+            && !layers::route_funnel_allows(&edge.from, &edge.to)
+        {
             findings.push(finding(
                 violation_rule(from, to),
                 edge.from.clone(),
@@ -876,6 +880,30 @@ mod tests {
             m("identity", "crates/identity", Some(Layer::Domain)),
         ];
         assert!(check_layers(&members, &[e("postgres", "identity")]).is_empty());
+    }
+
+    /// ADR-009：受控 `bootstrap → httpserve` 路由类型边在 `check_layers` 端到端**不报** finding（anti-vacuity
+    /// 绿；与 layers.rs `route_funnel_allows` + LAYER-DEPS-ROUTE-FUNNEL-01 互证）。反向 `httpserve → bootstrap`
+    /// 仍红见下方 `check_layers_red_route_funnel_reverse`；其它 Service→Service 仍红见 `check_layers_red_same_layer_service`。
+    #[test]
+    fn check_layers_green_route_funnel_bootstrap_to_httpserve() {
+        let members = vec![
+            m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+        ];
+        assert!(check_layers(&members, &[e("bootstrap", "httpserve")]).is_empty());
+    }
+
+    /// 反向 `httpserve → bootstrap` 仍红（httpserve 禁依赖 bootstrap，funnel 例外只放行单向）——BackPath。
+    #[test]
+    fn check_layers_red_route_funnel_reverse() {
+        let members = vec![
+            m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+        ];
+        let findings = check_layers(&members, &[e("httpserve", "bootstrap")]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::BackPath);
     }
 
     #[test]

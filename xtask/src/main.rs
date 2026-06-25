@@ -30,6 +30,7 @@
 //!                                      azure-pipelines 接线待 #1145（需 docker agent）。详见 `verify.rs`。
 mod cmd;
 mod codegen;
+mod command_symmetry;
 mod contract;
 mod coverage;
 mod diagnostic;
@@ -39,6 +40,7 @@ mod layers;
 mod pathsafe;
 mod pdpallow;
 mod publicapi;
+mod src_scan;
 #[cfg(test)]
 mod testutil;
 mod verify;

@@ -10,15 +10,31 @@ route group 类型位于 `httpserve`。
 
 ## RouteGroup
 
-域 crate 在 `init(&self, reg: &mut Registry)` 中通过 `reg.route_group(...)` 声明 listener、prefix、register
-闭包。闭包返回 `Result<(), _>`，错误必须冒泡到 bootstrap；禁止 `expect` / `unwrap` 风格 panic。
+域 crate 在 `init(&self, reg: &mut Registry)` 中通过 **`reg.route_group::<L>(prefix, register)`** 声明路由组——
+**listener 由类型参数 `L` 携带**（`httpserve::{Primary, Internal, Admin, Health}` marker，#1103 typed per-listener
+route-group，ROUTE-LISTENER-TYPED-01）。register 闭包签名 `FnOnce(httpserve::ListenerRouter<L>) ->
+Result<httpserve::ListenerRouter<L>, KernelError>`，错误必须冒泡到 bootstrap；禁止 `expect` / `unwrap` 风格 panic。
 
-业务路由按 listener 二选一挂载（router 为 axum `Router`），均承载 method、path、contract ID：
+业务路由经传入的 listener-typed builder `rb: ListenerRouter<L>` 二选一挂载（**`mount`/`mount_primary` 是
+`ListenerRouter<L>` 的方法**，非自由函数；裸 `axum::Router` 不出 httpserve，ADR-009），均承载 method、path、contract ID：
 
-- 非-`Primary` listener（`Internal` / `Admin` / `Health`）：`httpserve::mount(router, httpserve::Route { .. })`——`Route` 类型层**无** opt-out 字段。
-- `Primary` listener：`httpserve::mount_primary(router, httpserve::PrimaryRoute { .., opt_out })`——`PrimaryRoute` 是**唯一**可携 opt-out 的 route 类型。
+- 非-`Primary` listener（`Internal` / `Admin` / `Health`）：`rb.mount(httpserve::Route { method, path, contract_id }, handler)`——`Route` 类型层**无** opt-out 字段；`mount` 仅 `L: NonPrimaryListener` 可用。
+- `Primary` listener：`rb.mount_primary(httpserve::PrimaryRoute { .., opt_out }, handler)`——`PrimaryRoute` 是**唯一**可携 opt-out 的 route 类型；`mount_primary` 仅 `ListenerRouter<Primary>` 可用。
 
-Public 和 password-reset-exempt 只能经 `PrimaryRoute.opt_out`（`Some(RouteAuthOptOut::Public | PasswordResetExempt)`）在 `Primary` listener 上声明；plain `Route` 类型层无此字段（input-struct-field-exclusion，Hard，INVARIANT AUTH-OPTOUT-PRIMARYONLY-01）。
+示例（域 crate `Domain::init`）：
+```rust
+reg.route_group::<httpserve::Primary>("/api/v1/identity", |rb| {
+    Ok(rb.mount_primary(
+        httpserve::PrimaryRoute { method: Method::POST, path: "/login",
+            contract_id: "identity.login", opt_out: Some(RouteAuthOptOut::Public) },
+        post(login_handler),
+    ))
+})?;
+```
+
+Public 和 password-reset-exempt 只能经 `PrimaryRoute.opt_out`（`Some(RouteAuthOptOut::Public | PasswordResetExempt)`）在 `Primary` listener 上声明；plain `Route` 类型层无此字段，且非-Primary listener 拿不到 `mount_primary`（input-struct-field-exclusion + typed function choice，Hard，INVARIANT AUTH-OPTOUT-PRIMARYONLY-01 / ROUTE-LISTENER-TYPED-01）。
+
+`finalize_routes` 产出 per-listener `httpserve::UnfinalizedRoutes`（**无 public bindable 出口**）；组合根经 `httpserve::finalize_auth` 换 `AuthenticatedRoutes` 后才可 `into_make_service` bind——未跑 auth 装配的 router 类型层不可 bind（#1113 funnel，ROUTE-AUTH-FUNNEL-01/02）。
 
 ## Listener
 

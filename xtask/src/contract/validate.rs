@@ -52,7 +52,7 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 pub(crate) enum Rule {
     /// R1：`kind = saga` ⇒ `consistencyLevel = WorkflowEventual`。
     SagaConsistency,
-    /// R2：`owner = _framework` ⇒ `kind ∈ {http, event}`。
+    /// R2：`owner = _framework` ⇒ `kind ∈ {http, event, command}`。
     FrameworkKind,
     /// R3：磁盘段 `{kind}/{domain}/{version}` 须等于 manifest 字段。
     PathMismatch,
@@ -90,6 +90,13 @@ pub(crate) enum Rule {
     /// synthetic red：active event + 空 subscriptions → Finding；
     /// anti-vacuity：① active event + ≥1 subscription → 通过；② draft event + 空 subscriptions → 通过。
     ActiveSubscriber,
+    /// R15：`kind = command` ⇒ `consistencyLevel = OutboxFact`（无条件，同 R1 saga）。
+    ///
+    /// command 分发 = 本地事务 + outbox 发布（L2 OutboxFact 语义，`docs/rules/eventbus.md` §command
+    /// dispatch）：经 outbox relay 投递、consumer 侧 claimer 两阶段去重。consistencyLevel 是 kind 内蕴
+    /// wire 语义（与 lifecycle 无关），R8 此前只校验 active command 的 `topic`、未机器锁一致性等级（#1124
+    /// review F6）；本规则补足，防 command 契约误标 L0/L1/L3/L4 致 outbox 接线语义漂移。
+    CommandConsistency,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -154,6 +161,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     let label = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
     let mut findings = Vec::new();
     findings.extend(rule_saga_consistency(&c.manifest, &label));
+    findings.extend(rule_command_consistency(&c.manifest, &label));
     findings.extend(rule_framework_kind(&c.manifest, &label));
     findings.extend(rule_path_match(c, &label));
     findings.extend(rule_schema_shape(&c.manifest, &label));
@@ -184,16 +192,38 @@ fn rule_saga_consistency(m: &ContractManifest, label: &str) -> Option<Finding> {
     None
 }
 
-/// R2：framework owner ⇒ kind ∈ {http, event}。
+/// R15：command ⇒ OutboxFact（无条件，同 R1 saga）。kind 内蕴 wire 语义，防误标致 outbox 接线漂移。
+fn rule_command_consistency(m: &ContractManifest, label: &str) -> Option<Finding> {
+    if m.kind == ContractKind::Command && m.consistency_level != ConsistencyLevel::OutboxFact {
+        return Some(finding(
+            Rule::CommandConsistency,
+            label,
+            format!(
+                "kind=command 须 consistencyLevel=OutboxFact（docs/rules/eventbus.md §command dispatch），实为 {:?}",
+                m.consistency_level
+            ),
+        ));
+    }
+    None
+}
+
+/// R2：framework owner ⇒ kind ∈ {http, event, command}。
+///
+/// command 是 framework-neutral 分发机制（provider-agnostic：claimer / outbox provider 可互换），与设备
+/// 身份 / 证书签发同列对齐 cert-manager/SPIFFE 的 `_framework` 归属语义（#1124）。saga 仍排除——saga 是
+/// 跨域编排，天然绑定某域 owner（R1 + saga.md）。
 fn rule_framework_kind(m: &ContractManifest, label: &str) -> Option<Finding> {
     let framework = matches!(m.owner, ContractOwner::Framework);
-    let kind_ok = matches!(m.kind, ContractKind::Http | ContractKind::Event);
+    let kind_ok = matches!(
+        m.kind,
+        ContractKind::Http | ContractKind::Event | ContractKind::Command
+    );
     if framework && !kind_ok {
         return Some(finding(
             Rule::FrameworkKind,
             label,
             format!(
-                "owner=_framework 仅允许 kind ∈ {{http,event}}，实为 {:?}",
+                "owner=_framework 仅允许 kind ∈ {{http,event,command}}，实为 {:?}",
                 m.kind
             ),
         ));
@@ -389,9 +419,12 @@ fn is_safe_http_path(s: &str) -> bool {
             .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
 }
 
-/// R8：`lifecycle=active` ⇒ 按 kind 必填 **active 发布接线**字段（http path+method / event topic+delivery）。
-/// draft/deprecated 豁免（种子 draft 不受约束）；command 无 per-kind 必填（request schema 由 R4 守）。
-/// 每缺一项一条 finding。字段值形态由 R7 守。
+/// R8：`lifecycle=active` ⇒ 按 kind 必填 **active 发布接线**字段（http path+method / event topic+delivery /
+/// command topic）。draft/deprecated 豁免（种子 draft 不受约束）。每缺一项一条 finding。字段值形态由 R7 守。
+///
+/// **command topic**：命令分发的 broker routing key（`<domain>.commands.<name>`，#1124），active command
+/// 无 topic ⇒ 无路由出口 = 死分发，故必填（与 active event 要求 topic 同理；command 无 `delivery`——OutboxFact
+/// 经 outbox relay 投递，delivery 语义由 outbox 引擎固定，不在契约面声明）。request schema 仍由 R4 守。
 ///
 /// **saga 不在此**：`[saga]` block 是 saga 契约的**结构语义**（saga.md governance），非「仅 active 生效的
 /// 发布接线字段」，故 `kind=saga` 无条件必填（不论 lifecycle）由 R10 守——不混进本 active-only 集。
@@ -408,8 +441,10 @@ fn rule_perkind_active_fields(m: &ContractManifest, label: &str) -> Vec<Finding>
             (FIELD_TOPIC, m.topic.is_some()),
             (FIELD_DELIVERY, m.delivery.is_some()),
         ],
-        // saga block 无条件必填（R10）；command 无 per-kind 必填（R4）。
-        ContractKind::Saga | ContractKind::Command => &[],
+        // command：active 必有 topic（路由出口）；request schema 由 R4 守。
+        ContractKind::Command => &[(FIELD_TOPIC, m.topic.is_some())],
+        // saga block 无条件必填（R10）。
+        ContractKind::Saga => &[],
     };
     required
         .iter()
@@ -430,24 +465,33 @@ fn rule_perkind_active_fields(m: &ContractManifest, label: &str) -> Vec<Finding>
 /// R9：per-kind 字段只允许出现在匹配 kind——错配（如 event 带 `path`、http 带 `[saga]`）会被
 /// 后续派生 silently-ignored，故拒。不沿用 `Schemas`「只查必填、放任 stray」旧惯例（彻底性）。
 fn rule_perkind_field_scope(m: &ContractManifest, label: &str) -> Vec<Finding> {
-    // （字段名, 是否出现, 唯一合法 kind）
-    let checks: [(&str, bool, ContractKind); 5] = [
-        (FIELD_PATH, m.path.is_some(), ContractKind::Http),
-        (FIELD_METHOD, m.method.is_some(), ContractKind::Http),
-        (FIELD_TOPIC, m.topic.is_some(), ContractKind::Event),
-        (FIELD_DELIVERY, m.delivery.is_some(), ContractKind::Event),
-        (FIELD_SAGA, m.saga.is_some(), ContractKind::Saga),
+    // （字段名, 是否出现, 合法 kind 集）。`topic` 是 event ∪ command 的 routing key，故双 kind 合法；
+    // 其余字段单 kind。
+    let checks: [(&str, bool, &[ContractKind]); 5] = [
+        (FIELD_PATH, m.path.is_some(), &[ContractKind::Http]),
+        (FIELD_METHOD, m.method.is_some(), &[ContractKind::Http]),
+        (
+            FIELD_TOPIC,
+            m.topic.is_some(),
+            &[ContractKind::Event, ContractKind::Command],
+        ),
+        (FIELD_DELIVERY, m.delivery.is_some(), &[ContractKind::Event]),
+        (FIELD_SAGA, m.saga.is_some(), &[ContractKind::Saga]),
     ];
     checks
         .iter()
-        .filter(|(_, present, allowed)| *present && m.kind != *allowed)
+        .filter(|(_, present, allowed)| *present && !allowed.contains(&m.kind))
         .map(|(field, _, allowed)| {
+            let allowed_dirs = allowed
+                .iter()
+                .map(|k| k.as_dir())
+                .collect::<Vec<_>>()
+                .join("/");
             finding(
                 Rule::PerKindFieldScope,
                 label,
                 format!(
-                    "per-kind 字段 {field} 仅允许 kind={}，实为 kind={}",
-                    allowed.as_dir(),
+                    "per-kind 字段 {field} 仅允许 kind={allowed_dirs}，实为 kind={}",
                     m.kind.as_dir()
                 ),
             )
@@ -897,20 +941,71 @@ mod tests {
         assert!(rule_saga_consistency(&m, "x").is_none());
     }
 
-    #[test]
-    fn r2_framework_command_rejected() {
-        let m = manifest(
+    /// 测试辅助：command 契约骨架（request schema，level 可变）。
+    fn command_manifest(level: ConsistencyLevel) -> ContractManifest {
+        let mut m = manifest(
             ContractKind::Command,
-            ConsistencyLevel::LocalTx,
+            level,
             ContractOwner::Framework,
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
             },
         );
+        m.id = "seed.do-thing".to_string();
+        m
+    }
+
+    /// R15 红向（#1124 F6）：command + 非 OutboxFact（如 LocalTx）→ CommandConsistency，subject=label。
+    #[test]
+    fn r15_command_must_be_outboxfact() {
+        let m = command_manifest(ConsistencyLevel::LocalTx);
+        let f = rule_command_consistency(&m, "command/_seed/v1");
         assert_eq!(
-            rule_framework_kind(&m, "x").map(|f| f.rule),
-            Some(Rule::FrameworkKind)
+            f.as_ref().map(|f| f.rule),
+            Some(Rule::CommandConsistency),
+            "command 非 OutboxFact 应报 R15"
+        );
+        assert_eq!(f.map(|f| f.subject), Some("command/_seed/v1".to_string()));
+    }
+
+    /// R15 绿向：command + OutboxFact → 通过；非 command kind（event + 任意 level）→ R15 不适用、不误报。
+    #[test]
+    fn r15_command_outboxfact_ok_and_noncommand_unaffected() {
+        assert!(
+            rule_command_consistency(&command_manifest(ConsistencyLevel::OutboxFact), "x")
+                .is_none(),
+            "command + OutboxFact 应通过"
+        );
+        // anti-vacuity（非 command kind 不触 R15）：event + LocalTx 不报。
+        let ev = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::LocalTx,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        assert!(
+            rule_command_consistency(&ev, "x").is_none(),
+            "非 command kind 不应触 R15"
+        );
+    }
+
+    /// R2（#1124）：kind=Command + owner=Framework → **允许**（command 是 framework-neutral 分发机制）。
+    /// anti-vacuity 对照见 `r2_framework_saga_rejected`（saga 仍拒）。
+    #[test]
+    fn r2_framework_command_allowed() {
+        let m = manifest(
+            ContractKind::Command,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            Schemas {
+                request: Some("request.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        assert!(
+            rule_framework_kind(&m, "x").is_none(),
+            "framework-owned command 应允许（#1124）"
         );
     }
 
@@ -1391,10 +1486,10 @@ mod tests {
         let mut deprecated = draft.clone();
         deprecated.lifecycle = Lifecycle::Deprecated;
         assert!(rule_perkind_active_fields(&deprecated, "x").is_empty());
-        // command active 无 per-kind 必填（request schema 由 R4 守）。
+        // command active 全填 topic → 无 finding（#1124：active command 必有 topic 路由出口）。
         let mut cmd = manifest(
             ContractKind::Command,
-            ConsistencyLevel::LocalTx,
+            ConsistencyLevel::OutboxFact,
             ContractOwner::Domain("identity".to_string()),
             Schemas {
                 request: Some("request.schema.json".to_string()),
@@ -1402,7 +1497,27 @@ mod tests {
             },
         );
         cmd.lifecycle = Lifecycle::Active;
+        cmd.topic = Some("identity.commands.revoke-session".to_string());
         assert!(rule_perkind_active_fields(&cmd, "x").is_empty());
+    }
+
+    /// R8（#1124 红用例）：active command 缺 topic → 缺路由出口 = 死分发，须报 PerKindActiveFields。
+    /// anti-vacuity 绿对照见 `r8_active_full_ok_and_draft_exempt`（active command + topic → 空）。
+    #[test]
+    fn r8_active_command_missing_topic() {
+        let mut m = manifest(
+            ContractKind::Command,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            Schemas {
+                request: Some("request.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        m.lifecycle = Lifecycle::Active; // 无 topic
+        let findings = rule_perkind_active_fields(&m, "x");
+        assert_eq!(findings.len(), 1, "active command 缺 topic 应报 1 条");
+        assert_eq!(findings[0].rule, Rule::PerKindActiveFields);
     }
 
     #[test]
@@ -1477,6 +1592,18 @@ mod tests {
         event.delivery = Some(Delivery::AtLeastOnce);
         assert!(rule_perkind_field_scope(&event, "x").is_empty());
         assert!(rule_perkind_field_scope(&saga_manifest(Some(valid_saga_block())), "x").is_empty());
+        // #1124：command 带 topic 合法（topic = event ∪ command 的 routing key）。
+        let mut cmd = manifest(
+            ContractKind::Command,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            Schemas {
+                request: Some("request.schema.json".to_string()),
+                ..Schemas::default()
+            },
+        );
+        cmd.topic = Some("seed.commands.do-thing".to_string());
+        assert!(rule_perkind_field_scope(&cmd, "x").is_empty());
     }
 
     /// R9 参数化：per-kind 字段出现在错 kind 须触发 PerKindFieldScope。case：(kind, 字段名)

@@ -31,8 +31,11 @@ use generated::event::identity_v1::{IdentitySessionCreatedPayload, SUBSCRIPTIONS
 use generated::http::audit_v1::{
     AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
 };
-use httpserve::{Route, mount};
-use primitives::{ListenerKind, MacKey, MacVerifier};
+use httpserve::{Admin, Route};
+use primitives::{MacKey, MacVerifier};
+// ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
+#[cfg(test)]
+use primitives::ListenerKind;
 
 use crate::domain::{AuditChainHasher, AuditEntry, AuditError, AuditOutcome, ResourceRef};
 use crate::internal::mem::InMemAuditRepo;
@@ -310,9 +313,9 @@ where
             Box::new(SessionCreatedAuditHandler::new(self.repo.clone())),
         )?;
 
-        // admin 读路由组（Admin listener；operator/管理面，非业务对外 Primary）。
+        // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
         let repo = self.repo.clone();
-        reg.route_group(ListenerKind::Admin, AUDIT_ROUTE_PREFIX, move |router| {
+        reg.route_group::<Admin>(AUDIT_ROUTE_PREFIX, move |rb| {
             let handler = axum::routing::get(
                 move |headers: axum::http::HeaderMap,
                       query: Result<Query<AuditListEntriesRequest>, QueryRejection>| {
@@ -332,8 +335,8 @@ where
                 },
             );
             // route group 内用相对 SUBPATH；nest 到 AUDIT_ROUTE_PREFIX 下真实路径 = AUDIT_ENTRIES_PATH（F1）。
-            Ok(mount(
-                router,
+            // Admin listener typed builder：`mount`（非-Primary，无 opt-out；Admin 不可携 opt-out）。
+            Ok(rb.mount(
                 Route {
                     method: axum::http::Method::GET,
                     path: AUDIT_ENTRIES_SUBPATH,
@@ -696,6 +699,8 @@ mod tests {
             .into_iter()
             .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
             .expect("admin router");
+        // 取回裸 Router 做 oneshot（`#[doc(hidden)]` 测试入口；生产无此 bindable 出口，ROUTE-AUTH-FUNNEL-01）。
+        let admin = admin.into_router_for_test();
 
         // contract 路径命中 route（enforce_layer 无 plan ⇒ fail-closed 403，证明 route 已挂载于此）。
         let hit = route_status(&admin, AUDIT_ENTRIES_PATH).await;

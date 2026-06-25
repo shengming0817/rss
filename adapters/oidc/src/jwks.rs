@@ -283,6 +283,11 @@ fn spawn_poll(
 
 /// 刷新原语（poll 任务与 [`JwksKeySource::reload`] 共用单源）：重读 + 解析成功才**原子换出**快照 +
 /// `ready=true`；失败保留 last-good + `ready=false`（degraded），**绝不** swap 空集或宽放（fail-closed）。
+// incidental: 预存阻塞（PR-254 #1197）。认知复杂度 16/15 由 `tracing::{debug,warn}!` 宏展开的条件分支撑高——
+// 非业务逻辑复杂（函数体仅一个 match + 两臂原子写）；这是 tracing 宏对 clippy::cognitive_complexity 的已知
+// false-positive，拆 helper 只搬走 tracing 调用、不增可读性。item-level carve-out（error-handling.md §Carve-out）。
+// 本 PR（#1274/#1272）随 workspace 门绿顺带收口此预存阻塞，不改 refresh 行为。
+#[allow(clippy::cognitive_complexity)]
 fn refresh(source_id: &str, path: &Path, snapshot: &RwLock<Arc<KeySet>>, ready: &AtomicBool) {
     match read_and_parse(path) {
         Ok(set) => apply_fresh(source_id, snapshot, ready, set),

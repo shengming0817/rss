@@ -2,6 +2,9 @@
 //!
 //! 所有类型字段私有，构造经显式 funnel；不序列化到 wire。
 //!
+//! 新增 secret 引用类型（`SecretKey`/`SecretRef`/`StoreId`/`SecretEntry`/`SecretRepoError`），
+//! 材料永不落库——只存「外部 store 引用坐标」（#1274 批次①）。
+//!
 //! # 实现状态（RW-W 行为）
 //!
 //! 签名冻结（G0）已补真实行为（issue #1013）：newtype 校验 funnel、CAS 版本号、`diff` /
@@ -220,6 +223,243 @@ pub(crate) enum ConfigDelta {
     ValueChanged { old: ConfigValue, new: ConfigValue },
     /// key 或 tenant 不同——比较无意义（programming error）。
     KeyMismatch,
+}
+
+// ---------------------------------------------------------------------------
+// Secret 引用模型（#1274 批次①）
+// 材料永不落库——只存「外部 store 引用坐标」，材料在 diport::SecretResolver 调用栈内存活。
+// ---------------------------------------------------------------------------
+
+/// secret store 标识 newtype（单段非空 + `[a-zA-Z0-9_-]` 字符集 + 长度 ≤ `MAX_KEY_LEN`）。
+///
+/// 对标配置键的 `SettingKey` newtype funnel：单一构造入口 `parse`，非法值不可表达（ADR-004）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoreId(String);
+
+impl StoreId {
+    /// 解析 store 标识（单段：非空 + `[a-zA-Z0-9_-]` + `len <= MAX_KEY_LEN`）。
+    pub fn parse(raw: &str) -> Result<Self, SettingsError> {
+        if raw.is_empty() || raw.len() > MAX_KEY_LEN || !is_key_segment(raw) {
+            return Err(SettingsError::SecretRefInvalid);
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// 借出底层标识。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// secret 路径 newtype（两段 `<ns>.<key>`；**不**调用 `is_sensitive_key` 守卫）。
+///
+/// 注意：secret 路径是敏感命名 key 的合法归宿——`settings.config_entries` 明文落库不承载 secret，
+/// 但 `secret_entries` 只存坐标引用（材料在 diport seam 解析）；故 secret key 命名不拒敏感词，
+/// 与 [`SettingKey::parse`] 分叉。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SecretKey(String);
+
+impl SecretKey {
+    /// 解析 secret 路径（两段 `<namespace>.<key>`，各段非空 + `[a-zA-Z0-9_-]`；**不**拒敏感词）。
+    pub fn parse(raw: &str) -> Result<Self, SettingsError> {
+        if raw.len() > MAX_KEY_LEN {
+            return Err(SettingsError::SecretKeyInvalid);
+        }
+        let mut segments = raw.split('.');
+        let (Some(namespace), Some(key), None) =
+            (segments.next(), segments.next(), segments.next())
+        else {
+            return Err(SettingsError::SecretKeyInvalid);
+        };
+        if !is_key_segment(namespace) || !is_key_segment(key) {
+            return Err(SettingsError::SecretKeyInvalid);
+        }
+        // is_sensitive_key 守卫**不**应用于 secret 路径——见 rustdoc 说明。
+        Ok(Self(raw.to_string()))
+    }
+
+    /// 借出底层路径字符串。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 外部 secret store 的引用坐标（store_id + ref_key + optional version）。
+///
+/// **`Debug` 手动实现输出 `SecretRef(<redacted>)`**——坐标（store 标识 / 路径）可能内嵌
+/// 租户 / 应用拓扑信息，经 Debug 进日志等同于路径泄漏。使用 accessor 方法读取具体字段。
+/// 对齐 `diport::SecretCoordinate` / `ConfigValue` 脱敏范式（#1274 F3 安全修复）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretRef {
+    store_id: StoreId,
+    key: String,
+    version: Option<String>,
+}
+
+impl SecretRef {
+    /// 解析并校验 secret 引用。`ref_key` 是 store 内**路径**（允许 `/` 分隔，与 adapter 按段解析同源，
+    /// 见 `vault::secret_resolver`）：非空 + 无控制字符/空白 + `len <= MAX_KEY_LEN` + 每个 `/`-分段须
+    /// 非空且非 `.` / `..`（路径穿越防御，**权威 funnel**——非法坐标从此不可表达）。`version` 若 Some
+    /// 同样长度上限。
+    pub fn parse(
+        store_id: StoreId,
+        ref_key: &str,
+        version: Option<&str>,
+    ) -> Result<Self, SettingsError> {
+        if ref_key.is_empty() || ref_key.len() > MAX_KEY_LEN {
+            return Err(SettingsError::SecretRefInvalid);
+        }
+        // 宽松字符校验：无控制字符 / 无 ASCII 空白（允许 '/' 等路径分隔符）。
+        if ref_key
+            .chars()
+            .any(|c| c.is_control() || c.is_ascii_whitespace())
+        {
+            return Err(SettingsError::SecretRefInvalid);
+        }
+        // 路径穿越防御（F1，权威坐标 funnel）：refKey 按 '/' 分段，每段须非空且非 '.' / '..'——
+        // 杜绝 "myapp/../evil"、前导/尾随/连续 '/'（空段）。adapter 按段 push 时 '..' 会被 broker
+        // 解释为上跳目录，故穿越在 domain parse 处 fail-closed（newtype funnel，Hard）。
+        if ref_key
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
+            return Err(SettingsError::SecretRefInvalid);
+        }
+        if let Some(v) = version
+            && (v.is_empty() || v.len() > MAX_KEY_LEN)
+        {
+            return Err(SettingsError::SecretRefInvalid);
+        }
+        Ok(Self {
+            store_id,
+            key: ref_key.to_string(),
+            version: version.map(|v| v.to_string()),
+        })
+    }
+
+    /// 受信 DB 行 hydrate（不再校验——字段已来自持久化行）。`pub(crate)` funnel。
+    pub(crate) fn from_parts(store_id: StoreId, key: String, version: Option<String>) -> Self {
+        Self {
+            store_id,
+            key,
+            version,
+        }
+    }
+
+    /// 取 store 标识引用。
+    pub fn store_id(&self) -> &StoreId {
+        &self.store_id
+    }
+
+    /// 取 secret 路径引用（store 内的 key 路径）。
+    pub fn ref_key(&self) -> &str {
+        &self.key
+    }
+
+    /// 取版本引用（`None` 表示最新版）。
+    pub fn ref_version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+}
+
+impl std::fmt::Debug for SecretRef {
+    /// PII 边界（对齐 diport::SecretCoordinate Debug 范式）：store_id / ref_key / version
+    /// 可能含租户 / 应用标识 + Vault 路径（内部拓扑）⇒ 只输出固定占位，原文不经 Debug 泄漏。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretRef(<redacted>)")
+    }
+}
+
+/// secret 条目版本 newtype（乐观并发；镜像 `ConfigVersion`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SecretVersion(u64);
+
+impl SecretVersion {
+    pub(crate) fn new(v: u64) -> Self {
+        Self(v)
+    }
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// 单条 secret 引用条目（key + secret_ref 坐标 + tenant + version；字段私有）。
+///
+/// **材料永不落库**：`SecretEntry` 只存坐标引用（`SecretRef`），material 由
+/// [`diport::SecretResolver::resolve`] 在调用栈内获取，不持久化、不进 `SecretEntry` 字段。
+#[derive(Debug, Clone)]
+pub struct SecretEntry {
+    key: SecretKey,
+    secret_ref: SecretRef,
+    tenant: vocab::TenantId,
+    version: SecretVersion,
+}
+
+impl SecretEntry {
+    /// 构造 secret 条目（构造器必填参数；`pub(crate)` funnel——外部可收发不可伪造）。
+    pub(crate) fn new(
+        key: SecretKey,
+        secret_ref: SecretRef,
+        tenant: vocab::TenantId,
+        version: SecretVersion,
+    ) -> Self {
+        Self {
+            key,
+            secret_ref,
+            tenant,
+            version,
+        }
+    }
+
+    /// 从受信源（adapter DB row）跨 crate 重建条目（`pub` 供独立 adapter crate 使用；内部经
+    /// `SecretRef::from_parts` 直构，不再校验——受信 DB 行）。
+    pub fn hydrate(
+        key: SecretKey,
+        store_id: StoreId,
+        ref_key: impl Into<String>,
+        ref_version: Option<String>,
+        tenant: vocab::TenantId,
+        version: u64,
+    ) -> Self {
+        Self {
+            key,
+            secret_ref: SecretRef::from_parts(store_id, ref_key.into(), ref_version),
+            tenant,
+            version: SecretVersion::new(version),
+        }
+    }
+
+    /// 取 secret 键引用。
+    pub fn key(&self) -> &SecretKey {
+        &self.key
+    }
+
+    /// 取 secret 引用坐标。
+    pub fn secret_ref(&self) -> &SecretRef {
+        &self.secret_ref
+    }
+
+    /// 取租户 ID。
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// 取版本号（wire / adapter 面以裸 `u64` 表达）。
+    pub fn version(&self) -> u64 {
+        self.version.get()
+    }
+}
+
+/// secret 仓储端口错误（精确镜像 `ConfigRepoError`）。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SecretRepoError {
+    /// 版本冲突（乐观并发写：entry.version() ≠ 当前最高版本 + 1）。
+    #[error("secret version conflict")]
+    VersionConflict,
+    /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
+    #[error("secret storage error")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +936,12 @@ pub enum SettingsError {
     /// 灰度百分比超出 0..=100 范围。
     #[error("percentage out of range; must be 0..=100")]
     PercentageOutOfRange,
+    /// secret key 格式非法（必须为 `<namespace>.<key>`，两段均非空 + `[a-zA-Z0-9_-]`）。
+    #[error("secret key is invalid")]
+    SecretKeyInvalid,
+    /// secret 引用格式非法（store_id / ref_key / version 不符合约束）。
+    #[error("secret reference is invalid")]
+    SecretRefInvalid,
 }
 
 /// 配置仓储 / UoW 端口错误（[`crate::ports::ConfigRepo`] / [`crate::ports::ConfigUnitOfWork`] 返回）。
@@ -1115,5 +1361,236 @@ mod tests {
             FlagKey::parse(&long).is_err(),
             "超长 flag key 应 KeyInvalid"
         );
+    }
+
+    // --- SecretKey::parse -------------------------------------------------
+
+    /// 合法两段 secret key（含敏感命名——secret path 刻意放开）→ Ok。
+    #[rstest]
+    #[case("vault.password")] // 含 "password"——secret path 不拒敏感词
+    #[case("auth.token")] // 含 "token"——同上
+    #[case("app.secret")] // 含 "secret"——同上
+    #[case("ns1.key-2")]
+    #[case("db.credentials")] // 含 "credential"——同上
+    fn secret_key_accepts_sensitive_naming(#[case] raw: &str) {
+        assert!(
+            SecretKey::parse(raw).is_ok(),
+            "secret key '{raw}' 应 Ok（不拒敏感词）"
+        );
+    }
+
+    /// 非法格式 → `Err(SecretKeyInvalid)`。
+    #[rstest]
+    #[case("nodot")] // 单段
+    #[case("")] // 空
+    #[case("a.b.c")] // 三段
+    #[case(".key")] // 首段空
+    #[case("ns.")] // 尾段空
+    #[case("ns.k ey")] // 含空白
+    #[case("ns.k@y")] // 非法字符
+    fn secret_key_rejects_invalid(#[case] raw: &str) {
+        assert!(
+            matches!(SecretKey::parse(raw), Err(SettingsError::SecretKeyInvalid)),
+            "raw='{raw}' 应 SecretKeyInvalid"
+        );
+    }
+
+    #[test]
+    fn secret_key_rejects_over_max_len() {
+        // 超过 MAX_KEY_LEN（256）应 SecretKeyInvalid。
+        let long = format!("{}a.{}", "a".repeat(128), "b".repeat(128));
+        assert!(long.len() > MAX_KEY_LEN);
+        assert!(
+            matches!(
+                SecretKey::parse(&long),
+                Err(SettingsError::SecretKeyInvalid)
+            ),
+            "超长 secret key 应 SecretKeyInvalid"
+        );
+    }
+
+    /// 关键安全分叉锁：同一敏感 raw（`db.password`）在 SecretKey::parse 为 Ok，
+    /// 在 SettingKey::parse 为 Err(SensitiveKey)——锁定两路行为对称互补。
+    #[rstest]
+    #[case("db.password")]
+    #[case("auth.token")]
+    #[case("app.secret")]
+    fn secret_and_setting_key_parse_fork(#[case] raw: &str) {
+        // secret 路径放开敏感词 → Ok
+        assert!(
+            SecretKey::parse(raw).is_ok(),
+            "SecretKey::parse('{raw}') 应 Ok"
+        );
+        // config 路径仍拒敏感词 → SensitiveKey
+        assert!(
+            matches!(SettingKey::parse(raw), Err(SettingsError::SensitiveKey)),
+            "SettingKey::parse('{raw}') 应 SensitiveKey"
+        );
+    }
+
+    // --- StoreId::parse ---------------------------------------------------
+
+    #[rstest]
+    #[case("vault", true)]
+    #[case("store1", true)]
+    #[case("my-store", true)]
+    #[case("", false)] // 空
+    #[case("a.b", false)] // 含点（单段校验不允许）
+    #[case("has space", false)] // 含空白
+    fn store_id_parse_validates(#[case] raw: &str, #[case] ok: bool) {
+        assert_eq!(StoreId::parse(raw).is_ok(), ok, "raw='{raw}'");
+    }
+
+    #[test]
+    fn store_id_rejects_over_max_len() {
+        let long = "a".repeat(MAX_KEY_LEN + 1);
+        assert!(
+            matches!(StoreId::parse(&long), Err(SettingsError::SecretRefInvalid)),
+            "超长 store_id 应 SecretRefInvalid"
+        );
+    }
+
+    // --- SecretRef::parse -------------------------------------------------
+
+    #[allow(clippy::expect_used)]
+    fn store(s: &str) -> StoreId {
+        StoreId::parse(s).expect("valid store id")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn secret_ref_parse_valid() {
+        let sid = store("vault");
+        let r = SecretRef::parse(sid, "db/password", Some("v1")).expect("valid ref");
+        assert_eq!(r.store_id().as_str(), "vault");
+        assert_eq!(r.ref_key(), "db/password");
+        assert_eq!(r.ref_version(), Some("v1"));
+    }
+
+    #[test]
+    fn secret_ref_parse_version_none_ok() {
+        let sid = store("vault");
+        assert!(SecretRef::parse(sid, "db/password", None).is_ok());
+    }
+
+    #[test]
+    fn secret_ref_parse_empty_ref_key_err() {
+        let sid = store("vault");
+        assert!(
+            matches!(
+                SecretRef::parse(sid, "", None),
+                Err(SettingsError::SecretRefInvalid)
+            ),
+            "空 ref_key 应 SecretRefInvalid"
+        );
+    }
+
+    #[rstest]
+    #[case("key with space")]
+    #[case("key\twith\ttab")]
+    #[case("key\nwith\nnewline")]
+    fn secret_ref_parse_control_or_whitespace_in_key_err(#[case] bad_key: &str) {
+        let sid = store("vault");
+        assert!(
+            matches!(
+                SecretRef::parse(sid, bad_key, None),
+                Err(SettingsError::SecretRefInvalid)
+            ),
+            "ref_key='{bad_key}' 应 SecretRefInvalid"
+        );
+    }
+
+    /// F1 路径穿越防御：refKey 含 `.` / `..` 分段或空段（前导/尾随/连续 '/'）→ SecretRefInvalid。
+    /// adapter 按段 push 时 `..` 会被 broker 解释为上跳目录，故穿越在 domain parse 处 fail-closed。
+    #[rstest]
+    #[case("myapp/../evil")] // '..' 段
+    #[case("../evil")] // 前导 '..'
+    #[case("a/./b")] // '.' 段
+    #[case(".")] // 仅 '.'
+    #[case("..")] // 仅 '..'
+    #[case("/leading")] // 前导 '/' → 空段
+    #[case("trailing/")] // 尾随 '/' → 空段
+    #[case("a//b")] // 连续 '/' → 空段
+    fn secret_ref_parse_path_traversal_err(#[case] bad_key: &str) {
+        let sid = store("vault");
+        assert!(
+            matches!(
+                SecretRef::parse(sid, bad_key, None),
+                Err(SettingsError::SecretRefInvalid)
+            ),
+            "穿越/空段 ref_key='{bad_key}' 应 SecretRefInvalid"
+        );
+    }
+
+    /// Anti-vacuity：合法多段路径（含 '-' / '_' / '.' 在段内）应被接受——证明穿越守卫非恒拒。
+    #[rstest]
+    #[case("myapp/db-password")]
+    #[case("team/tenant_a/api.key")]
+    #[case("single")]
+    fn secret_ref_parse_valid_path_ok(#[case] good_key: &str) {
+        let sid = store("vault");
+        assert!(
+            SecretRef::parse(sid, good_key, None).is_ok(),
+            "合法路径 ref_key='{good_key}' 应被接受"
+        );
+    }
+
+    #[test]
+    fn secret_ref_parse_empty_version_err() {
+        let sid = store("vault");
+        assert!(
+            matches!(
+                SecretRef::parse(sid, "db/password", Some("")),
+                Err(SettingsError::SecretRefInvalid)
+            ),
+            "空 version 应 SecretRefInvalid"
+        );
+    }
+
+    // --- SecretEntry::hydrate + accessors round-trip ----------------------
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn secret_entry_hydrate_accessors_roundtrip() {
+        let key = SecretKey::parse("vault.db").expect("valid key");
+        let sid = StoreId::parse("mystore").expect("valid store");
+        let t = tenant(TENANT_A);
+        let entry = SecretEntry::hydrate(
+            key.clone(),
+            sid,
+            "path/to/secret",
+            Some("v2".to_string()),
+            t,
+            42,
+        );
+        assert_eq!(entry.key().as_str(), "vault.db");
+        assert_eq!(entry.secret_ref().ref_key(), "path/to/secret");
+        assert_eq!(entry.secret_ref().store_id().as_str(), "mystore");
+        assert_eq!(entry.secret_ref().ref_version(), Some("v2"));
+        assert_eq!(entry.tenant(), t);
+        assert_eq!(entry.version(), 42);
+    }
+
+    // --- SecretRef Debug 脱敏（Finding 3）--------------------------------
+
+    /// SecretRef Debug 输出为 `SecretRef(<redacted>)`，不含 store_id / ref_key 明文。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn secret_ref_debug_redacts() {
+        let sid = StoreId::parse("my-secret-store").expect("valid");
+        let r = SecretRef::parse(sid, "db/super-password", None).expect("valid ref");
+        let dbg = format!("{r:?}");
+        assert_eq!(dbg, "SecretRef(<redacted>)", "Debug 应完全脱敏: {dbg}");
+        assert!(
+            !dbg.contains("my-secret-store"),
+            "store_id 不应出现在 Debug: {dbg}"
+        );
+        assert!(
+            !dbg.contains("db/super-password"),
+            "ref_key 不应出现在 Debug: {dbg}"
+        );
+        // anti-vacuity：明文确实在字段里（Store / key 取值存在）。
+        assert_eq!(r.store_id().as_str(), "my-secret-store");
+        assert_eq!(r.ref_key(), "db/super-password");
     }
 }

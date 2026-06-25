@@ -23,12 +23,28 @@ fail-fast = false
 
 # 集成测试两个正交轴：编译期 feature 门 #[cfg(feature = "integration")] 决定是否编入二进制；
 # 下面 filter 仅在已编入的集成测试上做运行期串行调度（按测试名匹配，非 feature 门）。
+#
+# trybuild：各 trybuild UI 测试（`#[test] fn ui()`，分布在 authn/diport/eventexec::trybuild、
+# httpserve::funnel_ui 等多个测试二进制）内部各自 spawn `cargo`（trybuild 调 cargo build/run 编译
+# compile-fail/pass 用例）。nextest 默认每测试独立进程并发跑 ⇒ 多个 trybuild 二进制同时调 cargo 会争用
+# 同一 target/package 文件锁（日志 "Blocking waiting for file lock"），`*_pass.rs`（需编译**并执行**）因
+# 锁等待被 slow-timeout 杀 ⇒ 偶发 "execution unsuccessful but no output"（与代码无关的调度竞态）。
+# max-threads=1 串行化全部 trybuild ui 测试，消除 cargo 锁竞争（azure 无 CI ⇒ make verify 是唯一 gate，须稳定绿）。
 [test-groups]
 integration = { max-threads = 1 }
+trybuild = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(/integration/)'
 test-group = "integration"
+
+[[profile.default.overrides]]
+filter = 'test(/^ui$/)'
+test-group = "trybuild"
+
+[[profile.ci.overrides]]
+filter = 'test(/^ui$/)'
+test-group = "trybuild"
 
 # integration profile 全部测试纳入串行 group（`cargo xtask integration` 仅跑 --features integration
 # 真后端测试，全部串行正确且安全——避免共享 postgres 的 setup_outbox DELETE 全表竞态）。

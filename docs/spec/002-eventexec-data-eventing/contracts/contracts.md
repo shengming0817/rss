@@ -5,15 +5,22 @@
 ## 1. command 契约 kind（P12）
 
 新增 `contracts/command/<domain>/v1/`：
-- `contract.toml`：`id="<domain>.<command>"`、`kind="command"`、`consistencyLevel="OutboxFact"`(L2) 或 L3、`owner`。command **无 per-kind 必填字段**（README R8）；`topic`/`delivery` 仅属 event，出现在 command 会被 R9（`PerKindFieldScope`）拒——runtime command topic 由 generated/runtime 从 command id 派生，鉴权/路由经生成 wrapper + runtime 语义承载，不在 contract.toml 复用 event 字段。
+- `contract.toml`：`id="<domain>.<command>"`、`kind="command"`、`consistencyLevel="OutboxFact"`（L2，**机器锁定**：R15 `CommandConsistency` 强制 `kind=command ⇒ OutboxFact`，误标 L0/L1/L3/L4 即 verify 红，见 `docs/rules/eventbus.md` §command dispatch）、`owner`、`topic="<domain>.commands.<name>"`（R8：`lifecycle=active` 时 **必填**；R9 `PerKindFieldScope` 允许 event ∪ command 使用 `topic`，出现在 command 是合法的，不会被拒）。runtime consumer/producer 的路由 key 从此 `topic` 读取，经 codegen 烤入 wrapper 常量，不在运行期重新派生。
 - `*.schema.json`：command Request payload schema（typify 消费；R4 命令 kind 仅需 request）。
 
 **codegen 产物**（generated/）：
-- producer `<cmd>::emit_async(ctx, payload) -> DispatchId` wrapper（bake DispatchId + payload → runtime `command::emit_async`）。
-- consumer `<cmd>::register_handler(ctx, handler_fn)` wrapper（绑定 group name）。
-- **triple funnel**：业务 → 生成 wrapper → runtime `command::emit_async` → `outbox::Entry::new`。禁裸调 runtime emit（codegen 锁出口）。
+- producer wrapper `pub async fn emit_async<E: CommandEmit>(emitter: &E, request: <Cmd>Request, subject_id: String, idempotency_key: Option<String>) -> Result<(), E::Error>`。baked `CONTRACT_ID`/`TOPIC`；`subject_id` = 不透明主体标识（**runtime 必填**，落 outbox envelope.subject）；`idempotency_key` = 可选业务幂等键（`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被 claimer 拒；`None` ⇒ bridge mint 随机 `DispatchId`）。返回 `Result<()>` 而非 `DispatchId`（`DispatchId` 由 runtime 层 `eventexec::command` mint + seal，不返回给业务）。无 `ctx` 参数。
+- consumer wrapper `pub fn register_handler<Reg: CommandRegister, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output`。baked `CONTRACT_ID`/`TOPIC`（无显式 group-name 绑定参数；group 由 registrar 内部携带）。无 `ctx` 参数。
+- **triple funnel**：业务 → 生成 wrapper → 组合根 bridge impl `CommandEmit`/`CommandRegister` → runtime `command::emit_async` / `register_command_handler` → `outbox::Entry::new`。禁裸调 runtime emit（codegen 锁出口）。
 
-**治理**（xtask，COMMAND-SYMMETRY-01）：每 command schema 有对应 emit + register wrapper；emit 源有对应 consumer handler（双侧对称）；无手写裸 emit 出口。
+> **bridge 延迟落地**：`CommandEmit` / `CommandRegister` trait 定义在 `generated::command`，由组合根（bin / assembly crate）提供唯一 sanctioned impl（serde 编码 payload、mint `DispatchId`、转发到 `eventexec::command`）。该 bridge impl **随第一个真实命令消费域**一并接线，不在本 PR 的 mechanism-landing 阶段包含。首个域作者需实现的 bridge 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
+
+**治理**（xtask，Medium）：
+- `COMMAND-SYMMETRY-01`：每 command schema 有对应 emit + register wrapper（双侧对称）；`syn` AST 扫生产/组合根 src 无裸 `command::emit_async` 出口（含 use-import / whitespace 形态；AST 级无字符串/注释盲区）。
+- `COMMAND-IMPL-ALLOWLIST-01`：`impl CommandEmit`/`impl CommandRegister` 仅允许在组合根 `bins/`/`assemblies/`（sanctioned bridge/registrar）；非组合根 impl 即红（对齐 `DIPORT-IMPL-ALLOWLIST-01`）。
+- `R15 CommandConsistency`：`kind=command ⇒ consistencyLevel=OutboxFact`（contract validate）。
+
+> 真 Hard 化（base crate sealed `CommandTopic` 阻裸 `Entry::new` 构造 command topic，覆盖 rename-alias 残留盲区）见 follow-up（generated `CommandEmit` 是 public trait、无法 seal，故 impl-site 收口当前为 Medium AST 扫描）。
 
 ## 2. saga 契约 kind（P9）
 

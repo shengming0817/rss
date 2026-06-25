@@ -13,5 +13,9 @@ serde = { workspace = true }
 # 的 subject，#1277 F1：wire UUID 字段类型层强制，非 UUID 在 decode 即失败）。
 uuid = { workspace = true, features = ["serde"] }
 
+[dev-dependencies]
+# contract roundtrip 回归测试用（仅 tests/，不进 generated 产物 / 公开 API；F7）。
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

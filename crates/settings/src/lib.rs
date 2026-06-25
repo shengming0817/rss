@@ -22,10 +22,26 @@ mod application;
 pub(crate) mod domain;
 mod internal;
 pub mod ports;
+mod secret_application;
 
 pub use application::{
-    SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService, SettingsServiceError,
+    FlagStoreBox, SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService, SettingsServiceError,
 };
+pub use secret_application::{SecretService, SecretServiceError};
+
+/// 返回空 flag 仓储（不透明封装 [`FlagStoreBox`]）。
+///
+/// 生产 flag store 待 #1120（订阅缓存 consumer 填充快照）。当前空 store 满足 fail-closed 语义：
+/// 未知 flag 返回 `false`（`FlagStore::find` 返 `None`，`is_flag_enabled` 按 fail-closed 返 `false`）。
+///
+/// `FlagStore` trait 与 `InMemFlagStore` 类型保持 `pub(crate)` 封装；此工厂是唯一对外暴露的构造路径。
+/// 调用方只需持有 `FlagStoreBox` 并传给 [`SettingsService::with_postgres`]，无需命名内部 trait。
+///
+/// 仅在 `test` 或 `seed-data` feature 可用（`InMemFlagStore` 为域内 in-mem 实现，非生产 store）。
+#[cfg(any(test, feature = "seed-data"))]
+pub fn empty_flag_store() -> FlagStoreBox {
+    FlagStoreBox(Box::new(internal::mem::InMemFlagStore::new()))
+}
 
 // ---------------------------------------------------------------------------
 // smoke test（ADR-004 C8 豁免：只绑函数指针 / 构造 Copy enum，不触 todo!() body）
@@ -90,6 +106,8 @@ mod smoke {
             SettingsError::KeyInvalid => {}
             SettingsError::SensitiveKey => {}
             SettingsError::PercentageOutOfRange => {}
+            SettingsError::SecretKeyInvalid => {}
+            SettingsError::SecretRefInvalid => {}
         }
     }
 

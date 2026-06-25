@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/cannot_mint_authenticated.rs:5:51
+  |
+5 |     let _authed = httpserve::AuthenticatedRoutes::new(axum::Router::new());
+  |                                                   ^^^ private associated function
+  |
+ ::: src/routes.rs
+  |
+  |     pub(crate) fn new(router: axum::Router) -> Self {
+  |     ----------------------------------------------- private associated function defined here
