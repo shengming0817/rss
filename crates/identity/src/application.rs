@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use generated::event::identity_v1::{CONTRACT_ID, IdentitySessionCreatedPayload, TOPIC};
+use generated::event::identity_v1::{CONTRACT, IdentitySessionCreatedPayload, TOPIC};
 use generated::http::identity_v1::{
     IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse,
 };
@@ -32,8 +32,9 @@ use crate::ports::{
     SessionUnitOfWork,
 };
 
-/// 发布域（outbox envelope `domain` 字段；= contract.toml `domain`）。
-const SESSION_DOMAIN: &str = "identity";
+/// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
+/// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
+const SESSION_DOMAIN: &str = CONTRACT.domain();
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
 
@@ -214,11 +215,8 @@ impl LoginService {
             IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
             bytes,
         );
-        let envelope = OutboxEnvelopeParts {
-            domain: SESSION_DOMAIN.to_string(),
-            contract_id: CONTRACT_ID.to_string(),
-            subject_id: subject.clone(),
-        };
+        // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；business 只给 opaque subject。
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, subject.clone());
 
         // 5. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
         let session = Session::new(session_id.clone(), subject, tenant, expires_at, now);
@@ -463,10 +461,10 @@ mod tests {
         assert_eq!(payload.session_id, resp.data.session_id);
         assert_eq!(payload.occurred_at, 1_000);
 
-        // envelope。subject_id = canonical user id（登录标识不进 broker metadata）。
-        assert_eq!(envelope.domain, SESSION_DOMAIN);
-        assert_eq!(envelope.contract_id, CONTRACT_ID);
-        assert_eq!(envelope.subject_id, CANON_USER);
+        // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id 同源，#1193）；
+        // subject_id = canonical user id（登录标识不进 broker metadata）。
+        assert_eq!(*envelope.contract(), CONTRACT);
+        assert_eq!(envelope.subject_id(), CANON_USER);
     }
 
     // ── 测试 2：login 密码错 ──────────────────────────────────────────────────

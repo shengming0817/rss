@@ -17,7 +17,7 @@
 //! 消费 future 与「登录 emit + 等 sink + cancel」驱动 future——无跨线程 Send 约束。
 //!
 //! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（admin 读 handler 经 axum oneshot 单测覆盖，
-//! 见 audit crate）；envelope 的 trace/correlation reserved-key 注入留 W（funnel 现无 sealed setter）；audit
+//! 见 audit crate）；envelope 的 trace/correlation reserved-key sealed setter 已建（#1193），但注入源留 W（待 #1296）；audit
 //! domain 哈希链 #1014 已写实——append 落每租户 keyed HMAC 链（journey 经捕获 verifier 端到端验链 append）。
 //! durable（postgres/amqp）拓扑闭环见 `identity_login_audit_durable_journey.rs`（`--features integration`）。
 //!
@@ -419,11 +419,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
             emitter
                 .emit(
                     entry,
-                    OutboxEnvelopeParts {
-                        domain: "identity".to_string(),
-                        contract_id: SESSION_CREATED_TOPIC.to_string(),
-                        subject_id: CANON_USER.to_string(),
-                    },
+                    OutboxEnvelopeParts::new(generated::event::identity_v1::CONTRACT, CANON_USER),
                 )
                 .await
                 .map_err(|_| anyhow::anyhow!("emit"))?;

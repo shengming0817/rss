@@ -60,13 +60,15 @@ impl SessionUnitOfWork for PgSessionUnitOfWork {
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
-        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgEmitter）。reserved key
-        // occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1）；其余 reserved key
-        // 为后续 follow-up（#1296）空接缝（业务侧不可伪造，同 PgEmitter）。
+        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgEmitter）。`contract` 是
+        // 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at 由
+        // `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1）；trace / correlation 经 sealed
+        // setter（源待 #1296）、principal 待 #1296——业务侧均不可伪造（同 PgEmitter）。
+        let (contract, subject_id) = envelope.into_parts();
         let env = OutboxEnvelope::new(
-            envelope.domain,
-            envelope.contract_id,
-            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(envelope.subject_id),
+            contract.domain().to_string(),
+            contract.contract_id().to_string(),
+            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(subject_id),
         );
         let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
         persist_and_emit_in_tx(tx, &session, &entry, &env).await

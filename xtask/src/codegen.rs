@@ -249,8 +249,28 @@ fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
 /// 派生防御），非只锁单侧 callsite。
 fn render_event_glue(c: &DiscoveredContract) -> Result<String> {
     let contract_id = &c.manifest.id;
+    // domain + id 同源绑成 `CONTRACT: ContractBinding`（#1193）；domain 取自 manifest domain 字段（非 id 派生）。
+    let domain = &c.manifest.domain;
     // active event 必有 topic（R8）；draft 无 topic 则回退用 id，保持确定性（不出现 Option 条件代码分歧）。
     let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+    // 防注入自守（review #271 F4）：domain / id / topic 拼进生成 Rust 字符串字面量（`CONTRACT_ID` / `TOPIC` /
+    // `CONTRACT::from_static`），与 consumer / group 同款经 [`is_safe_codegen_ident`] 收口——codegen 可独立于
+    // `contract validate`（R7）运行，故不依赖上游已收口，自守拒引号 / 反斜杠 / 控制字符等可破坏字面量的字符
+    // （容 `[a-z0-9._-]`：`_seed` / 点分 id / 连字符 topic 均合法）。红用例 `event_glue_rejects_unsafe_domain`。
+    for (field, value) in [
+        ("domain", domain.as_str()),
+        ("id", contract_id.as_str()),
+        ("topic", topic),
+    ] {
+        if !is_safe_codegen_ident(value) {
+            bail!(
+                "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
+    }
     // 每个 [[subscriptions]] 条目一行 SubscriptionSpec 字面量；拼前防注入收口（见函数 doc）。
     let mut subs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
     for s in &c.manifest.subscriptions {
@@ -291,6 +311,13 @@ pub const CONTRACT_ID: &str = "{contract_id}";
 /// 稳定事件 topic（broker routing key；active event 来自 `contract.toml` `topic` 字段，draft 回退用 id）。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "{topic}";
+
+/// 契约绑定（`domain` + `id` 同源类型化常量，#1193）。outbox envelope / 事件 producer 以
+/// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
+/// 由 `cargo xtask codegen` 从 manifest `domain` + `id` 派生；勿手改（golden 字节锁，INVARIANT
+/// CONTRACT-BINDING-FUNNEL-01）。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
 /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
@@ -944,6 +971,9 @@ mod tests {
     /// - `SubscriptionSpec` 定义在 `event/mod.rs`（子模块经 `super::` 引用，无重复定义）
     ///
     /// anti-vacuity：无 subscriptions 的 draft event 仍生成空 SUBSCRIPTIONS 切片 + CONTRACT_ID / TOPIC（正向对照）。
+    ///
+    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 —— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
+    /// 同源派生（domain 取自 manifest 而非 id 前缀；`from_static("_seed", "seed.happened")`），golden 锁。
     #[test]
     fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_glue");
@@ -963,6 +993,12 @@ mod tests {
         assert!(
             rendered.contains(r#"pub const TOPIC: &str = "seed.happened";"#),
             "缺 TOPIC 常量:\n{rendered}"
+        );
+        // CONTRACT binding（#1193）：domain + id 同源；domain "_seed" ≠ id 首段 "seed" ⇒ 证明 domain
+        // 取自 manifest domain 字段而非从 id 派生（rustfmt 可能换行，断言 from_static 调用子串）。
+        assert!(
+            rendered.contains(r#"::vocab::ContractBinding::from_static("_seed", "seed.happened")"#),
+            "缺 CONTRACT binding 常量:\n{rendered}"
         );
         // SUBSCRIPTIONS 切片含 consumer / group 字面量
         assert!(
@@ -987,6 +1023,8 @@ mod tests {
     }
 
     /// event 无 subscriptions（draft）→ SUBSCRIPTIONS 为空切片，CONTRACT_ID / TOPIC 仍存在（anti-vacuity）。
+    ///
+    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 —— draft event 亦发射 `CONTRACT` 绑定常量（正向对照）。
     #[test]
     fn event_glue_empty_subscriptions_draft() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_glue_empty");
@@ -1001,6 +1039,11 @@ mod tests {
         assert!(
             rendered.contains(r#"pub const CONTRACT_ID: &str = "seed.happened";"#),
             "缺 CONTRACT_ID:\n{rendered}"
+        );
+        // CONTRACT binding 仍发射（draft 亦有；domain "_seed" 取自 manifest，#1193）
+        assert!(
+            rendered.contains(r#"::vocab::ContractBinding::from_static("_seed", "seed.happened")"#),
+            "draft 缺 CONTRACT binding 常量:\n{rendered}"
         );
         // 空 subscriptions 切片
         assert!(
@@ -1034,6 +1077,28 @@ mod tests {
         let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
         let _ = std::fs::remove_dir_all(&root);
         assert!(result.is_err(), "domain 含 ../ 时 codegen 须防逃逸 bail");
+        Ok(())
+    }
+
+    /// review #271 F4（anti-vacuity）：`render_event_glue` 把 domain / id / topic 拼进生成字符串字面量
+    /// （`CONTRACT::from_static` / `CONTRACT_ID` / `TOPIC`）前经 `is_safe_codegen_ident` 自守。domain 含引号
+    /// （可破坏 `from_static("...")` 字面量）→ codegen bail，即使 validate 未先跑（codegen 自守）。
+    /// `is_unsafe_segment` 只拦路径分量（`/` `\` `..`）放行引号——故本红用例覆盖 path-traversal 测不到的注入面。
+    #[test]
+    fn event_glue_rejects_unsafe_domain() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_unsafe_dom");
+        let dir = root.join("contracts/event/_seed/v1");
+        std::fs::create_dir_all(&dir)?;
+        // domain 值含转义引号 `ev"il`——非路径逃逸（is_unsafe_segment 放行），但会破坏生成字面量。
+        std::fs::write(
+            dir.join("contract.toml"),
+            "id = \"seed.happened\"\nkind = \"event\"\ndomain = \"ev\\\"il\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"OutboxFact\"\nlifecycle = \"draft\"\n[schemas]\npayload = \"payload.schema.json\"\n",
+        )?;
+        let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"P\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        std::fs::write(dir.join("payload.schema.json"), schema)?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(result.is_err(), "domain 含引号时 codegen 须防注入 bail");
         Ok(())
     }
 

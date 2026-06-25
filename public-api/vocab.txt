@@ -116,6 +116,50 @@ pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::authz::Action
 pub fn vocab::authz::Action::from(T) -> T
 pub mod vocab::contract
+pub mod vocab::contract::binding
+pub struct vocab::contract::binding::ContractBinding
+impl vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str) -> Self
+impl core::clone::Clone for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::clone(&self) -> vocab::contract::binding::ContractBinding
+impl core::cmp::Eq for vocab::contract::binding::ContractBinding
+impl core::cmp::PartialEq for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::eq(&self, &vocab::contract::binding::ContractBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::ContractBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::ContractBinding
+impl core::marker::Freeze for vocab::contract::binding::ContractBinding
+impl core::marker::Send for vocab::contract::binding::ContractBinding
+impl core::marker::Sync for vocab::contract::binding::ContractBinding
+impl core::marker::Unpin for vocab::contract::binding::ContractBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::ContractBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ContractBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ContractBinding
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::ContractBinding where U: core::convert::From<T>
+pub fn vocab::contract::binding::ContractBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::ContractBinding where U: core::convert::Into<T>
+pub type vocab::contract::binding::ContractBinding::Error = core::convert::Infallible
+pub fn vocab::contract::binding::ContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::ContractBinding where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::ContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::ContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::ContractBinding where T: core::clone::Clone
+pub type vocab::contract::binding::ContractBinding::Owned = T
+pub fn vocab::contract::binding::ContractBinding::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::ContractBinding::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::ContractBinding where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::ContractBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::ContractBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::ContractBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::ContractBinding where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::ContractBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::from(T) -> T
 pub mod vocab::contract::owner
 #[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
 pub vocab::contract::owner::DomainNameError::Empty
@@ -1421,6 +1465,49 @@ impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone
 pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::authz::Action
 pub fn vocab::authz::Action::from(T) -> T
+pub struct vocab::ContractBinding
+impl vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str) -> Self
+impl core::clone::Clone for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::clone(&self) -> vocab::contract::binding::ContractBinding
+impl core::cmp::Eq for vocab::contract::binding::ContractBinding
+impl core::cmp::PartialEq for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::eq(&self, &vocab::contract::binding::ContractBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::ContractBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::ContractBinding
+impl core::marker::Freeze for vocab::contract::binding::ContractBinding
+impl core::marker::Send for vocab::contract::binding::ContractBinding
+impl core::marker::Sync for vocab::contract::binding::ContractBinding
+impl core::marker::Unpin for vocab::contract::binding::ContractBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::ContractBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ContractBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ContractBinding
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::ContractBinding where U: core::convert::From<T>
+pub fn vocab::contract::binding::ContractBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::ContractBinding where U: core::convert::Into<T>
+pub type vocab::contract::binding::ContractBinding::Error = core::convert::Infallible
+pub fn vocab::contract::binding::ContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::ContractBinding where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::ContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::ContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::ContractBinding where T: core::clone::Clone
+pub type vocab::contract::binding::ContractBinding::Owned = T
+pub fn vocab::contract::binding::ContractBinding::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::ContractBinding::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::ContractBinding where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::ContractBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::ContractBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::ContractBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::ContractBinding where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::ContractBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::ContractBinding
+pub fn vocab::contract::binding::ContractBinding::from(T) -> T
 pub struct vocab::ContractOwner(_)
 impl vocab::contract::owner::ContractOwner
 pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>

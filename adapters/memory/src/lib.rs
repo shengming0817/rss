@@ -820,11 +820,10 @@ mod tests {
             IdemKey::parse("evt-session-77").expect("idem"),
             b"payload".to_vec(),
         );
-        let env = OutboxEnvelopeParts {
-            domain: "identity".to_string(),
-            contract_id: TOPIC.to_string(),
-            subject_id: "subj-opaque".to_string(),
-        };
+        let env = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", TOPIC),
+            "subj-opaque",
+        );
         MemEmitter::new(bus.clone())
             .emit(entry, env)
             .await

@@ -340,12 +340,14 @@ impl ConfigUnitOfWork for PgConfigRepo {
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgSessionUnitOfWork）。
-        // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：
-        // settings 生产 outbox 路径补齐 occurred_at；漏接编译期不可表达）。
+        // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
+        // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
+        // occurred_at；漏接编译期不可表达）。
+        let (contract, subject_id) = envelope.into_parts();
         let env = OutboxEnvelope::new(
-            envelope.domain,
-            envelope.contract_id,
-            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(envelope.subject_id),
+            contract.domain().to_string(),
+            contract.contract_id().to_string(),
+            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(subject_id),
         );
         let tenant_uuid = tenant_param(tenant);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整

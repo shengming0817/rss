@@ -143,8 +143,15 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 trace、correlation、principal、occurred_at 等 reserved envelope 字段由 **adapter 在受控构造点经
 sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；同 crate 时间编码
 单源）。`consistency::Entry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
-在 `diport`，`consistency` 不可依赖之）。当前 `occurred_at` 已接线；trace / correlation / principal 为
-typed-but-empty 接缝（待 observ trace 提取 / authn principal 接线，#1296）。
+在 `diport`，`consistency` 不可依赖之）。当前 `occurred_at` 已接线；`trace` / `correlation` 的 **sealed 注入
+路径已建**（`OutboxMetadata::with_trace` / `with_correlation` funnel 特权 setter，#1193），但注入**源**
+（observ trace span / correlation 上下文）按 ADR-002 §D1 刻意不进 `runctx`，待 #1296 接线——故 setter 暂无
+生产 caller；principal 为 typed-but-empty 接缝（待 authn principal 接线，#1296）。
+
+envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed `vocab::ContractBinding`** 承载（#1193）：
+两字段同源一份 `contract.toml`，经 `cargo xtask codegen` 派生为 `generated::event::{domain}_v1::CONTRACT`
+（golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, subject)` 传入。domain + contract_id 收进
+**单一绑定值**，故二者之间无法漂移；`OutboxEnvelopeParts` 字段私有（input-struct-field-exclusion，Hard）。
 
 两类 Hard 保证：
 
@@ -152,7 +159,13 @@ typed-but-empty 接缝（待 observ trace 提取 / authn principal 接线，#129
   **必填位置参**承载——「无 occurred_at 的 outbox metadata」类型层不可表达，新增 outbox producer 必须从注入
   `Clock` 提供（缺失即编译错误）。三条生产构造点（`PgEmitter` / `PgSessionUnitOfWork` / `PgConfigRepo`）同源。
 - **业务不可伪造** reserved key：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
-  fail-closed 拒；reserved key 不经任何业务可见入口写入（INVARIANT OUTBOX-METADATA-FUNNEL-01）。
+  fail-closed 拒；reserved key（含 trace / correlation）只经 funnel 内 sealed setter 写入，不经任何业务可见
+  入口（INVARIANT OUTBOX-METADATA-FUNNEL-01）。
+
+契约归属（`CONTRACT-BINDING-FUNNEL-01`）是 **Medium，非 Hard**：golden 锁（`codegen --check`）只保证 generated
+`CONTRACT` 常量正确、不漂移；`vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务 crate **仍可裸构造**
+任意绑定（residual，跨 crate sealing 在 vocab 基础层不可 Hard 强制，同 `ContractOwner::of_domain` #1091）。「业务
+只用 generated `CONTRACT`、不伪造」当前靠约定 + golden；统一机器守卫见 **#1327**。
 
 ## Audit
 

@@ -982,16 +982,15 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     crate::PgEmitter::new(&store, fixed_clock())
         .emit(
             entry,
-            OutboxEnvelopeParts {
-                domain: "identity".to_string(),
-                contract_id: SESSION_CREATED_TOPIC.to_string(),
-                subject_id: "subj-opaque-77".to_string(),
-            },
+            OutboxEnvelopeParts::new(
+                vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                "subj-opaque-77",
+            ),
         )
         .await?;
 
-    let row: (String, String, String, String, String) = sqlx::query_as(
-        "SELECT event_id, domain, topic, status, metadata::text FROM outbox WHERE event_id = $1",
+    let row: (String, String, String, String, String, String) = sqlx::query_as(
+        "SELECT event_id, domain, topic, contract_id, status, metadata::text FROM outbox WHERE event_id = $1",
     )
     .bind(&event_id)
     .fetch_one(&store.pool)
@@ -999,25 +998,27 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     assert_eq!(row.0, event_id, "event_id = EventId");
     assert_eq!(row.1, "identity", "domain");
     assert_eq!(row.2, SESSION_CREATED_TOPIC, "topic");
-    assert_eq!(row.3, "pending", "新 entry pending 待 relay");
+    // contract_id 列 = ContractBinding.contract_id()（#1193 typed 绑定经 adapter 落库的 drift-lock）。
+    assert_eq!(row.3, "identity.session-created", "contract_id");
+    assert_eq!(row.4, "pending", "新 entry pending 待 relay");
     // metadata 含 opaque subjectId + sealed 注入的 reserved occurred_at（#1129）；无完整 PII（FR-020 funnel）。
     assert!(
-        row.4.contains("subjectId") && row.4.contains("subj-opaque-77"),
+        row.5.contains("subjectId") && row.5.contains("subj-opaque-77"),
         "metadata 应含 opaque subjectId: {}",
-        row.4
+        row.5
     );
     assert!(
-        row.4
+        row.5
             .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
-        row.4
+        row.5
     );
     // trace / correlation / principal 为后续 follow-up 空接缝，本 PR 不写。
     for reserved in ["trace", "correlation", "principal"] {
         assert!(
-            !row.4.contains(reserved),
+            !row.5.contains(reserved),
             "空接缝 reserved key {reserved} 本 PR 不应写入: {}",
-            row.4
+            row.5
         );
     }
 
@@ -1057,11 +1058,10 @@ fn session_entry(event_id: &str) -> Entry {
 
 /// 构造 session-created envelope（opaque subject）。
 fn session_envelope() -> OutboxEnvelopeParts {
-    OutboxEnvelopeParts {
-        domain: "identity".to_string(),
-        contract_id: SESSION_CREATED_TOPIC.to_string(),
-        subject_id: "subj-opaque-cotx".to_string(),
-    }
+    OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+        "subj-opaque-cotx",
+    )
 }
 
 /// t11：`persist_session_and_emit` commit → session 行 + outbox 行皆在，且 session tenant-correct。
@@ -1604,11 +1604,10 @@ fn config_outbox_entry(event_id: &str) -> Entry {
 
 /// 构造 config-version-changed envelope（opaque subject = 配置 key）。
 fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
-    OutboxEnvelopeParts {
-        domain: "settings".to_string(),
-        contract_id: CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-        subject_id: subject.to_string(),
-    }
+    OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
+        subject,
+    )
 }
 
 /// setup：应用 migration（含 config_entries 表），清空 config_entries（防测试间污染）。outbox 用唯一

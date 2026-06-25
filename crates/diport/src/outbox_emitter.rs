@@ -54,28 +54,58 @@ impl OutboxEmitError {
 
 /// outbox envelope 的 **opaque** 字段集（域传，adapter 组装成 provider 私有 envelope）。
 ///
-/// 仅承载非-reserved、可由业务安全提供的字段：`domain` / `contract_id` 是路由归属，`subject_id` 是
+/// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain + contract_id
+/// 同源契约归属，#1193——business 不再裸 string 分别 author，杜绝 domain/contract_id 漂移）、`subject_id` 是
 /// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）。reserved envelope key
 /// （trace / correlation / principal / occurred_at）**不在此**——由 adapter 在受控构造点注入（`occurred_at`
-/// 取注入 `Clock`，#1129；trace / correlation / principal 待 #1296）。
+/// 取注入 `Clock`，#1129；trace / correlation 为 adapter sealed setter 接缝，源待 #1296；principal 待 #1296）。
 ///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 —— `Debug` 仅输出路由元数据（`domain` / `contract_id`），
+/// 字段私有 + 构造器 [`OutboxEnvelopeParts::new`]（input-struct-field-exclusion，**Hard**）：business 不能绕过
+/// 构造器分别 set domain/contract_id 字段，只能给 `(contract, subject_id)`。`contract` 的**预期**来源是
+/// `generated::event::{domain}_v1::CONTRACT`（契约派生常量 + golden 锁，CONTRACT-BINDING-FUNNEL-01，**Medium**）——
+/// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
+/// 同 `ContractOwner::of_domain`，统一守卫见 #1327 / #1091）。
+///
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 —— `Debug` 仅输出路由元数据（`contract` 的 domain / contract_id），
 /// `subject_id` 固定渲染为 `<redacted>`，防主体标识经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
 #[derive(Clone)]
 pub struct OutboxEnvelopeParts {
-    /// 发布域（如 `"identity"`）。
-    pub domain: String,
-    /// 契约 ID（如 generated `CONTRACT_ID`）。
-    pub contract_id: String,
+    /// 契约绑定（domain + contract_id 同源；`generated::…::CONTRACT`）。
+    contract: vocab::ContractBinding,
     /// opaque 主体标识（无 PII）。
-    pub subject_id: String,
+    subject_id: String,
+}
+
+impl OutboxEnvelopeParts {
+    /// 构造 envelope parts——`contract` 经契约派生常量绑定（非裸 string），`subject_id` 是 opaque 主体标识。
+    pub fn new(contract: vocab::ContractBinding, subject_id: impl Into<String>) -> Self {
+        Self {
+            contract,
+            subject_id: subject_id.into(),
+        }
+    }
+
+    /// 借出契约绑定（adapter 取 `domain()` / `contract_id()` 路由列）。
+    pub fn contract(&self) -> &vocab::ContractBinding {
+        &self.contract
+    }
+
+    /// 借出 opaque 主体标识（无 PII；只读检视——生产组装走 [`OutboxEnvelopeParts::into_parts`]）。
+    pub fn subject_id(&self) -> &str {
+        &self.subject_id
+    }
+
+    /// 拆出 `(contract, subject_id)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
+    pub fn into_parts(self) -> (vocab::ContractBinding, String) {
+        (self.contract, self.subject_id)
+    }
 }
 
 impl std::fmt::Debug for OutboxEnvelopeParts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OutboxEnvelopeParts")
-            .field("domain", &self.domain)
-            .field("contract_id", &self.contract_id)
+            .field("domain", &self.contract.domain())
+            .field("contract_id", &self.contract.contract_id())
             .field("subject_id", &"<redacted>")
             .finish()
     }
@@ -112,11 +142,10 @@ mod pii_debug {
             format!("{:?}", "SECRET-SUBJECT").contains("SECRET-SUBJECT"),
             "前提失效：普通字符串 Debug 未携 marker"
         );
-        let parts = OutboxEnvelopeParts {
-            domain: "identity".to_string(),
-            contract_id: "identity.session-created".to_string(),
-            subject_id: "SECRET-SUBJECT".to_string(),
-        };
+        let parts = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            "SECRET-SUBJECT",
+        );
         let dbg = format!("{parts:?}");
         assert!(
             !dbg.contains("SECRET-SUBJECT"),
@@ -158,11 +187,10 @@ mod smoke {
             IdemKey::parse("evt-1").expect("idem"),
             b"payload".to_vec(),
         );
-        let env = OutboxEnvelopeParts {
-            domain: "identity".to_string(),
-            contract_id: "identity.session-created".to_string(),
-            subject_id: "subject-opaque".to_string(),
-        };
+        let env = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            "subject-opaque",
+        );
         (entry, env)
     }
 
