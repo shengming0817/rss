@@ -33,7 +33,8 @@ pub mod saga;
 
 pub use error::{EngineError, EngineErrorKind};
 pub use idempotency::{
-    ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, SeenState,
+    ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, LeaseOutcome,
+    LeaseToken, SeenState,
 };
 pub use outbox::{
     BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxRelay, OutboxSource,

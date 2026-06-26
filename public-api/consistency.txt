@@ -145,6 +145,47 @@ impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::IdemKeyError wh
 pub fn consistency::idempotency::IdemKeyError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKeyError
 pub fn consistency::idempotency::IdemKeyError::from(T) -> T
+#[non_exhaustive] pub enum consistency::idempotency::LeaseOutcome
+pub consistency::idempotency::LeaseOutcome::Held
+pub consistency::idempotency::LeaseOutcome::Lost
+impl core::clone::Clone for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::clone(&self) -> consistency::idempotency::LeaseOutcome
+impl core::cmp::Eq for consistency::idempotency::LeaseOutcome
+impl core::cmp::PartialEq for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::eq(&self, &consistency::idempotency::LeaseOutcome) -> bool
+impl core::fmt::Debug for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::idempotency::LeaseOutcome
+impl core::marker::StructuralPartialEq for consistency::idempotency::LeaseOutcome
+impl core::marker::Freeze for consistency::idempotency::LeaseOutcome
+impl core::marker::Send for consistency::idempotency::LeaseOutcome
+impl core::marker::Sync for consistency::idempotency::LeaseOutcome
+impl core::marker::Unpin for consistency::idempotency::LeaseOutcome
+impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseOutcome
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseOutcome
+impl<T, U> core::convert::Into<U> for consistency::idempotency::LeaseOutcome where U: core::convert::From<T>
+pub fn consistency::idempotency::LeaseOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::LeaseOutcome where U: core::convert::Into<T>
+pub type consistency::idempotency::LeaseOutcome::Error = core::convert::Infallible
+pub fn consistency::idempotency::LeaseOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::LeaseOutcome where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::LeaseOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::LeaseOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::idempotency::LeaseOutcome where T: core::clone::Clone
+pub type consistency::idempotency::LeaseOutcome::Owned = T
+pub fn consistency::idempotency::LeaseOutcome::clone_into(&self, &mut T)
+pub fn consistency::idempotency::LeaseOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::idempotency::LeaseOutcome where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::LeaseOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::LeaseOutcome where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::LeaseOutcome where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::idempotency::LeaseOutcome where T: core::clone::Clone
+pub unsafe fn consistency::idempotency::LeaseOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::from(T) -> T
 #[non_exhaustive] pub enum consistency::idempotency::SeenState
 pub consistency::idempotency::SeenState::Duplicate
 pub consistency::idempotency::SeenState::Fresh
@@ -272,10 +313,54 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::IdemKey where T
 pub unsafe fn consistency::idempotency::IdemKey::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKey
 pub fn consistency::idempotency::IdemKey::from(T) -> T
+pub struct consistency::idempotency::LeaseToken(_)
+impl consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::as_str(&self) -> &str
+pub fn consistency::idempotency::LeaseToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::clone(&self) -> consistency::idempotency::LeaseToken
+impl core::cmp::Eq for consistency::idempotency::LeaseToken
+impl core::cmp::PartialEq for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::eq(&self, &consistency::idempotency::LeaseToken) -> bool
+impl core::fmt::Debug for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::idempotency::LeaseToken
+impl core::marker::Freeze for consistency::idempotency::LeaseToken
+impl core::marker::Send for consistency::idempotency::LeaseToken
+impl core::marker::Sync for consistency::idempotency::LeaseToken
+impl core::marker::Unpin for consistency::idempotency::LeaseToken
+impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseToken
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseToken
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseToken
+impl<T, U> core::convert::Into<U> for consistency::idempotency::LeaseToken where U: core::convert::From<T>
+pub fn consistency::idempotency::LeaseToken::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::LeaseToken where U: core::convert::Into<T>
+pub type consistency::idempotency::LeaseToken::Error = core::convert::Infallible
+pub fn consistency::idempotency::LeaseToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::LeaseToken where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::LeaseToken::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::LeaseToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::idempotency::LeaseToken where T: core::clone::Clone
+pub type consistency::idempotency::LeaseToken::Owned = T
+pub fn consistency::idempotency::LeaseToken::clone_into(&self, &mut T)
+pub fn consistency::idempotency::LeaseToken::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::idempotency::LeaseToken where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::LeaseToken::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::LeaseToken where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseToken::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::LeaseToken where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseToken::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::idempotency::LeaseToken where T: core::clone::Clone
+pub unsafe fn consistency::idempotency::LeaseToken::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::from(T) -> T
 pub trait consistency::idempotency::IdempotencyStore
-pub async fn consistency::idempotency::IdempotencyStore::check(&self, &consistency::idempotency::IdemKey) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
-pub async fn consistency::idempotency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey) -> core::result::Result<(), consistency::error::EngineError>
-pub async fn consistency::idempotency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::idempotency::IdempotencyStore::check(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub async fn consistency::idempotency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::idempotency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::idempotency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -1278,6 +1363,47 @@ impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::IdemKeyError wh
 pub fn consistency::idempotency::IdemKeyError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKeyError
 pub fn consistency::idempotency::IdemKeyError::from(T) -> T
+#[non_exhaustive] pub enum consistency::LeaseOutcome
+pub consistency::LeaseOutcome::Held
+pub consistency::LeaseOutcome::Lost
+impl core::clone::Clone for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::clone(&self) -> consistency::idempotency::LeaseOutcome
+impl core::cmp::Eq for consistency::idempotency::LeaseOutcome
+impl core::cmp::PartialEq for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::eq(&self, &consistency::idempotency::LeaseOutcome) -> bool
+impl core::fmt::Debug for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::idempotency::LeaseOutcome
+impl core::marker::StructuralPartialEq for consistency::idempotency::LeaseOutcome
+impl core::marker::Freeze for consistency::idempotency::LeaseOutcome
+impl core::marker::Send for consistency::idempotency::LeaseOutcome
+impl core::marker::Sync for consistency::idempotency::LeaseOutcome
+impl core::marker::Unpin for consistency::idempotency::LeaseOutcome
+impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseOutcome
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseOutcome
+impl<T, U> core::convert::Into<U> for consistency::idempotency::LeaseOutcome where U: core::convert::From<T>
+pub fn consistency::idempotency::LeaseOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::LeaseOutcome where U: core::convert::Into<T>
+pub type consistency::idempotency::LeaseOutcome::Error = core::convert::Infallible
+pub fn consistency::idempotency::LeaseOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::LeaseOutcome where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::LeaseOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::LeaseOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::idempotency::LeaseOutcome where T: core::clone::Clone
+pub type consistency::idempotency::LeaseOutcome::Owned = T
+pub fn consistency::idempotency::LeaseOutcome::clone_into(&self, &mut T)
+pub fn consistency::idempotency::LeaseOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::idempotency::LeaseOutcome where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::LeaseOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::LeaseOutcome where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::LeaseOutcome where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::idempotency::LeaseOutcome where T: core::clone::Clone
+pub unsafe fn consistency::idempotency::LeaseOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::from(T) -> T
 #[non_exhaustive] pub enum consistency::PermanentErrorKind
 pub consistency::PermanentErrorKind::Invariant
 pub consistency::PermanentErrorKind::Permanent
@@ -1786,6 +1912,49 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::IdemKey where T
 pub unsafe fn consistency::idempotency::IdemKey::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKey
 pub fn consistency::idempotency::IdemKey::from(T) -> T
+pub struct consistency::LeaseToken(_)
+impl consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::as_str(&self) -> &str
+pub fn consistency::idempotency::LeaseToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::clone(&self) -> consistency::idempotency::LeaseToken
+impl core::cmp::Eq for consistency::idempotency::LeaseToken
+impl core::cmp::PartialEq for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::eq(&self, &consistency::idempotency::LeaseToken) -> bool
+impl core::fmt::Debug for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::idempotency::LeaseToken
+impl core::marker::Freeze for consistency::idempotency::LeaseToken
+impl core::marker::Send for consistency::idempotency::LeaseToken
+impl core::marker::Sync for consistency::idempotency::LeaseToken
+impl core::marker::Unpin for consistency::idempotency::LeaseToken
+impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseToken
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseToken
+impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseToken
+impl<T, U> core::convert::Into<U> for consistency::idempotency::LeaseToken where U: core::convert::From<T>
+pub fn consistency::idempotency::LeaseToken::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::idempotency::LeaseToken where U: core::convert::Into<T>
+pub type consistency::idempotency::LeaseToken::Error = core::convert::Infallible
+pub fn consistency::idempotency::LeaseToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::idempotency::LeaseToken where U: core::convert::TryFrom<T>
+pub type consistency::idempotency::LeaseToken::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::idempotency::LeaseToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::idempotency::LeaseToken where T: core::clone::Clone
+pub type consistency::idempotency::LeaseToken::Owned = T
+pub fn consistency::idempotency::LeaseToken::clone_into(&self, &mut T)
+pub fn consistency::idempotency::LeaseToken::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::idempotency::LeaseToken where T: 'static + ?core::marker::Sized
+pub fn consistency::idempotency::LeaseToken::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::idempotency::LeaseToken where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseToken::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::LeaseToken where T: ?core::marker::Sized
+pub fn consistency::idempotency::LeaseToken::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::idempotency::LeaseToken where T: core::clone::Clone
+pub unsafe fn consistency::idempotency::LeaseToken::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::idempotency::LeaseToken
+pub fn consistency::idempotency::LeaseToken::from(T) -> T
 pub struct consistency::Lsn(_)
 impl consistency::projection::Lsn
 pub fn consistency::projection::Lsn::get(&self) -> u64
@@ -2076,9 +2245,10 @@ pub unsafe fn consistency::outbox::Topic::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::Topic
 pub fn consistency::outbox::Topic::from(T) -> T
 pub trait consistency::IdempotencyStore
-pub async fn consistency::IdempotencyStore::check(&self, &consistency::idempotency::IdemKey) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
-pub async fn consistency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey) -> core::result::Result<(), consistency::error::EngineError>
-pub async fn consistency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::IdempotencyStore::check(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub async fn consistency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
 pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::OutboxRelay

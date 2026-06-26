@@ -31,7 +31,7 @@ use consistency::{ConsumerGroup, HandleResult};
 use diport::{
     AckableSubscriber, DynDeadLetterStore, Message, MessageId, PublishRequest, Publisher, Topic,
 };
-use eventexec::{ConsumerMeta, run_consumer_ackable};
+use eventexec::{ConsumerMeta, LeaseConfig, run_consumer_ackable};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use memory::{InMemClaimer, MemDeadLetterStore};
@@ -125,6 +125,8 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
             DynDeadLetterStore::new_box(MemDeadLetterStore::new()),
             meta,
             handler,
+            // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
+            LeaseConfig::from_ttl(std::time::Duration::from_secs(60)),
         ),
         drive,
     );

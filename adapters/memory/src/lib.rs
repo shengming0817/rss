@@ -13,11 +13,14 @@
 //! `take_until(token)` 替代 Go channel + `<-closing`。runtime-agnostic：用 `futures::channel::mpsc`
 //! （receiver 即 `Stream`），不绑 tokio runtime。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use consistency::{ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, Lsn, SeenState};
+use consistency::{
+    ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, LeaseOutcome,
+    LeaseToken as IdemLeaseToken, Lsn, SeenState,
+};
 
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, Checkpoint, CheckpointId, CheckpointOwner,
@@ -386,10 +389,25 @@ impl Clock for FixedClock {
 
 // ── InMemClaimer：进程内幂等去重替身（demo 拓扑）─────────────────────────────
 
-/// in-mem 幂等 claimer（impl [`consistency::IdempotencyStore`]）：以 `(group, key)` 记首见集合，
-/// 首见 `Fresh`、再见 `Duplicate`。demo / 单进程 / 测试用；生产走 redis/pg claimer。
+/// 单个 claim 行：租约令牌 + 是否已 done。
+///
+/// 三态：absent（map 中无键）/ claimed(token)（`done = false`）/ done(token)（`done = true`）。
+struct ClaimEntry {
+    token: String,
+    done: bool,
+}
+
+/// in-mem 幂等 claimer（impl [`consistency::IdempotencyStore`]）：以 `(group, key)` 为复合主键，
+/// 记 token-CAS 三态（absent / claimed(token) / done(token)），忠实实现 lease-CAS 围栏语义。
+/// demo / 单进程 / 测试用；生产走 redis/pg claimer。
+///
+/// TTL 重捞有意省略（无时间源）——crash-recovery + 重捞正确性由 PG adapter 集成测试守；
+/// in-mem 仅需忠实 token-CAS 语义，使 hard-fence 在 demo/test 中可行使。
+///
+/// INVARIANT: TOPO-INMEM-SEAL-01（拓扑封闭：生产 bin 经 cargo-deny 连 `memory` 都依赖不到 ⇒
+/// in-mem claimer 不可达生产；仅 demo/dev/journeys 组合根可构造）。
 pub struct InMemClaimer {
-    seen: Arc<Mutex<HashSet<(String, String)>>>,
+    seen: Arc<Mutex<HashMap<(String, String), ClaimEntry>>>,
     group: ConsumerGroup,
 }
 
@@ -402,43 +420,78 @@ impl InMemClaimer {
     /// 收束到已校验的拓扑决策（决策绑定纪律 Medium，review #274 F6/C6）；生产走 redis/pg claimer。
     pub fn new(group: ConsumerGroup) -> Self {
         Self {
-            seen: Arc::new(Mutex::new(HashSet::new())),
+            seen: Arc::new(Mutex::new(HashMap::new())),
             group,
         }
     }
 }
 
 impl IdempotencyStore for InMemClaimer {
-    async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
-        let fresh = self
-            .seen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert((self.group.as_str().to_string(), key.as_str().to_string()));
-        // reason: in-mem 集合插入不会失败，恒 Ok；首次插入=Fresh，已存在=Duplicate。
-        Ok(if fresh {
-            SeenState::Fresh
+    async fn check(&self, key: &IdemKey, lease: &IdemLeaseToken) -> Result<SeenState, EngineError> {
+        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        // reason: in-mem 操作恒成功，unwrap_or_else 处理 poisoned lock 后继续。
+        let map_key = (self.group.as_str().to_string(), key.as_str().to_string());
+        match map.entry(map_key) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(ClaimEntry {
+                    token: lease.as_str().to_string(),
+                    done: false,
+                });
+                Ok(SeenState::Fresh)
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                // 已 claimed/done（无 TTL 重捞）→ Duplicate。
+                // reason: TTL 重捞在此 in-mem demo 替身中有意省略——crash-recovery + 重捞正确性由
+                // PG adapter 集成测试守；in-mem 仅需忠实 token-CAS 语义，使 hard-fence 在 demo/test
+                // 中可行使。
+                Ok(SeenState::Duplicate)
+            }
+        }
+    }
+
+    async fn extend(
+        &self,
+        key: &IdemKey,
+        lease: &IdemLeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        // reason: in-mem 恒 Ok；仅 claimed 且 token 匹配 → Held，否则（absent / done / token 不符）→ Lost。
+        let map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let map_key = (self.group.as_str().to_string(), key.as_str().to_string());
+        let held = matches!(
+            map.get(&map_key),
+            Some(e) if !e.done && e.token == lease.as_str()
+        );
+        Ok(if held {
+            LeaseOutcome::Held
         } else {
-            SeenState::Duplicate
+            LeaseOutcome::Lost
         })
     }
 
-    /// claimed→done（幂等 no-op：in-mem HashSet 语义中 claimed/done 均视为"已见"，
-    /// commit 后 check 仍返 Duplicate，符合永久去重语义）。
-    async fn commit(&self, _key: &IdemKey) -> Result<(), EngineError> {
-        // reason: InMemClaimer 以 HashSet 记首见集合，absent/claimed/done 三态在此简化为
-        // absent / seen（seen 包含 claimed 与 done）。commit 不改集合内容（已 seen 保持 seen，
-        // 故 check 仍 Duplicate），满足「commit 后永久去重」不变式。demo/test 替身无需完整三态。
-        Ok(())
+    async fn commit(
+        &self,
+        key: &IdemKey,
+        lease: &IdemLeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        // reason: in-mem commit 恒 Ok；token 匹配 → done(Held)，不符/absent → Lost（hard-fence）。
+        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let map_key = (self.group.as_str().to_string(), key.as_str().to_string());
+        match map.get_mut(&map_key) {
+            Some(e) if e.token == lease.as_str() => {
+                e.done = true;
+                Ok(LeaseOutcome::Held)
+            }
+            _ => Ok(LeaseOutcome::Lost),
+        }
     }
 
-    /// claimed→absent（从 HashSet 删除，使后续 check 可重得 Fresh）。
-    async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
-        self.seen
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&(self.group.as_str().to_string(), key.as_str().to_string()));
-        // reason: in-mem 删除不会失败，恒 Ok；absent 时 remove 是幂等 no-op。
+    async fn release(&self, key: &IdemKey, lease: &IdemLeaseToken) -> Result<(), EngineError> {
+        // reason: in-mem release 恒 Ok；仅 token 匹配的 claimed 行删除（CAS），否则 no-op（不误删他人 claim）。
+        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let map_key = (self.group.as_str().to_string(), key.as_str().to_string());
+        if matches!(map.get(&map_key), Some(e) if !e.done && e.token == lease.as_str()) {
+            map.remove(&map_key);
+        }
         Ok(())
     }
 }
@@ -957,6 +1010,11 @@ mod tests {
 
     // ── InMemClaimer L0 表驱动测试 ───────────────────────────────────────────
 
+    /// 令牌测试 helper（`IdemLeaseToken` = `consistency::LeaseToken` 别名）。
+    fn tok(s: &str) -> IdemLeaseToken {
+        IdemLeaseToken::new(s)
+    }
+
     /// 同一 key 连续 check 3 次：第 1 次 Fresh，第 2、3 次 Duplicate。
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -968,11 +1026,12 @@ mod tests {
         let group = consistency::ConsumerGroup::parse("audit").expect("group");
         let claimer = InMemClaimer::new(group);
         let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
+        let t = tok("lease-1");
 
         let states: Vec<SeenState> = vec![
-            claimer.check(&key).await.expect("check 1"),
-            claimer.check(&key).await.expect("check 2"),
-            claimer.check(&key).await.expect("check 3"),
+            claimer.check(&key, &t).await.expect("check 1"),
+            claimer.check(&key, &t).await.expect("check 2"),
+            claimer.check(&key, &t).await.expect("check 3"),
         ];
 
         assert_eq!(states[0], SeenState::Fresh, "第 1 次应为 Fresh");
@@ -994,14 +1053,144 @@ mod tests {
         let claimer_b = InMemClaimer::new(group_b);
         let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
 
-        let state_a = claimer_a.check(&key).await.expect("check a");
-        let state_b = claimer_b.check(&key).await.expect("check b");
+        let state_a = claimer_a
+            .check(&key, &tok("lease-a"))
+            .await
+            .expect("check a");
+        let state_b = claimer_b
+            .check(&key, &tok("lease-b"))
+            .await
+            .expect("check b");
 
         assert_eq!(state_a, SeenState::Fresh, "group-a 首见应为 Fresh");
         assert_eq!(
             state_b,
             SeenState::Fresh,
             "group-b 独立首见应为 Fresh（组隔离）"
+        );
+    }
+
+    /// 续租：持有期间 extend = Held；token 不符 = Lost（他人令牌或已被重捞）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 token-CAS 续租语义断言——in-mem claimer 方法恒 Ok，item-level carve-out。
+    async fn claimer_extend_held_while_owned_lost_on_token_mismatch() {
+        use crate::InMemClaimer;
+        use consistency::IdemKey;
+
+        let group = consistency::ConsumerGroup::parse("audit").expect("group");
+        let claimer = InMemClaimer::new(group);
+        let key = IdemKey::parse("evt-extend-1").expect("key");
+        let mine = tok("lease-mine");
+        assert_eq!(
+            claimer.check(&key, &mine).await.expect("check"),
+            SeenState::Fresh
+        );
+        // 持有者续租成功
+        assert_eq!(
+            claimer.extend(&key, &mine).await.expect("extend"),
+            LeaseOutcome::Held
+        );
+        // 他人令牌续租 → Lost
+        assert_eq!(
+            claimer
+                .extend(&key, &tok("lease-other"))
+                .await
+                .expect("extend-other"),
+            LeaseOutcome::Lost
+        );
+    }
+
+    /// hard-fence：stale token commit = Lost；正确 token commit = Held。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 hard-fence 语义断言——in-mem claimer 方法恒 Ok，item-level carve-out。
+    async fn claimer_commit_with_stale_token_is_lost_hard_fence() {
+        use crate::InMemClaimer;
+        use consistency::IdemKey;
+
+        let group = consistency::ConsumerGroup::parse("audit").expect("group");
+        let claimer = InMemClaimer::new(group);
+        let key = IdemKey::parse("evt-fence-1").expect("key");
+        let mine = tok("lease-mine");
+        assert_eq!(
+            claimer.check(&key, &mine).await.expect("check"),
+            SeenState::Fresh
+        );
+        // stale holder（错误 token）commit → Lost（hard-fence：不可降级为 done）
+        assert_eq!(
+            claimer
+                .commit(&key, &tok("lease-stale"))
+                .await
+                .expect("commit-stale"),
+            LeaseOutcome::Lost
+        );
+        // 真持有者 commit → Held
+        assert_eq!(
+            claimer.commit(&key, &mine).await.expect("commit"),
+            LeaseOutcome::Held
+        );
+    }
+
+    /// commit 正确 token → Held；再 check → Duplicate（done 行永久去重）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 commit 后永久去重语义断言——in-mem claimer 方法恒 Ok，item-level carve-out。
+    async fn claimer_commit_correct_token_then_duplicate() {
+        use crate::InMemClaimer;
+        use consistency::IdemKey;
+
+        let group = consistency::ConsumerGroup::parse("audit").expect("group");
+        let claimer = InMemClaimer::new(group);
+        let key = IdemKey::parse("evt-commit-dup").expect("key");
+        let t = tok("lease-1");
+        assert_eq!(
+            claimer.check(&key, &t).await.expect("check"),
+            SeenState::Fresh
+        );
+        assert_eq!(
+            claimer.commit(&key, &t).await.expect("commit"),
+            LeaseOutcome::Held
+        );
+        assert_eq!(
+            claimer
+                .check(&key, &tok("lease-2"))
+                .await
+                .expect("re-check"),
+            SeenState::Duplicate,
+            "done 行永久 Duplicate"
+        );
+    }
+
+    /// release token CAS：他人 token release 为 no-op（不误删 claim，仍 Duplicate）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 release CAS no-op 语义断言——in-mem claimer 方法恒 Ok，item-level carve-out。
+    async fn claimer_release_with_stale_token_is_noop() {
+        use crate::InMemClaimer;
+        use consistency::IdemKey;
+
+        let group = consistency::ConsumerGroup::parse("audit").expect("group");
+        let claimer = InMemClaimer::new(group);
+        let key = IdemKey::parse("evt-release-cas").expect("key");
+        let mine = tok("lease-mine");
+        assert_eq!(
+            claimer.check(&key, &mine).await.expect("check"),
+            SeenState::Fresh
+        );
+        // stale token release → no-op（不误删他人 claim）
+        claimer
+            .release(&key, &tok("lease-stale"))
+            .await
+            .expect("release-stale");
+        // claim 仍在（未被误删）→ Duplicate
+        assert_eq!(
+            claimer
+                .check(&key, &tok("lease-x"))
+                .await
+                .expect("re-check"),
+            SeenState::Duplicate,
+            "stale token release 不误删 claim"
         );
     }
 

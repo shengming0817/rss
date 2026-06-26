@@ -62,7 +62,7 @@ use diport::{DeliveryStream, DynDeadLetterStore, Message, MessageStream};
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
-use crate::consumer::{ConsumerMeta, run_consumer, run_consumer_ackable};
+use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
 use crate::relay::WorkerHealth;
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
@@ -203,8 +203,8 @@ where
 ///
 /// 组合根先 `subscribe(topic, token)` 得 `stream`、再调本函数；worker 持同一 `token`，`shutdown` 取消即流终止。
 #[allow(clippy::too_many_arguments)]
-// reason: 8 参数是消费 worker spawn 的最小必要集（name/stream/idem/dlx/meta/handler/token/health 各自语义
-// 独立）；聚合 struct 增间接层且无复用，item-level carve-out（error-handling.md §Carve-out）。
+// reason: 9 参数是消费 worker spawn 的最小必要集（name/stream/idem/dlx/meta/handler/lease_cfg/token/health
+// 各自语义独立）；聚合 struct 增间接层且无复用，item-level carve-out（error-handling.md §Carve-out）。
 pub fn spawn_consumer<S, H>(
     name: String,
     stream: MessageStream,
@@ -212,6 +212,7 @@ pub fn spawn_consumer<S, H>(
     dlx: Box<DynDeadLetterStore<'static>>,
     meta: ConsumerMeta,
     handler: H,
+    lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
 ) -> ConsumerWorker
@@ -220,7 +221,7 @@ where
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
-        run_consumer(stream, idempotency, dlx, meta, handler).await;
+        run_consumer(stream, idempotency, dlx, meta, handler, lease_cfg).await;
     });
     ConsumerWorker::adopt(name, handle, health, token)
 }
@@ -231,7 +232,7 @@ where
 /// `Delivery { message, acker }` 终态恰 settle 一次（ack/requeue/reject）。崩溃窗口（settle 前线程退出）→
 /// channel close → broker requeue in-flight，经幂等去重 = at-least-once 不丢。
 #[allow(clippy::too_many_arguments)]
-// reason: 同 spawn_consumer——8 参数语义独立，item-level carve-out。
+// reason: 同 spawn_consumer——9 参数语义独立，item-level carve-out。
 pub fn spawn_consumer_ackable<S, H>(
     name: String,
     stream: DeliveryStream,
@@ -239,6 +240,7 @@ pub fn spawn_consumer_ackable<S, H>(
     dlx: Box<DynDeadLetterStore<'static>>,
     meta: ConsumerMeta,
     handler: H,
+    lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
 ) -> ConsumerWorker
@@ -247,7 +249,7 @@ where
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
-        run_consumer_ackable(stream, idempotency, dlx, meta, handler).await;
+        run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
     });
     ConsumerWorker::adopt(name, handle, health, token)
 }
@@ -257,7 +259,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use consistency::error::EngineError;
-    use consistency::idempotency::{IdemKey, SeenState};
+    use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
     use diport::dead_letter_store::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
     use diport::{AckAction, AckError, Acker, Delivery, DynAcker, ManagedResource};
     use futures::StreamExt;
@@ -265,9 +267,14 @@ mod tests {
 
     use super::{
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
-        DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, Message,
-        MessageStream, Mutex, WorkerHealth, spawn_consumer, spawn_consumer_ackable,
+        DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, LeaseConfig,
+        Message, MessageStream, Mutex, WorkerHealth, spawn_consumer, spawn_consumer_ackable,
     };
+
+    /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
+    fn lease_cfg() -> LeaseConfig {
+        LeaseConfig::from_ttl(std::time::Duration::from_secs(60))
+    }
 
     // ── fakes / stream factories ───────────────────────────────────────────────
 
@@ -333,14 +340,30 @@ mod tests {
         }
     }
     impl IdempotencyStore for FreshStore {
-        async fn check(&self, _key: &IdemKey) -> Result<SeenState, EngineError> {
+        async fn check(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<SeenState, EngineError> {
             Ok(SeenState::Fresh)
         }
-        async fn commit(&self, _key: &IdemKey) -> Result<(), EngineError> {
-            self.commits.fetch_add(1, Ordering::Release);
-            Ok(())
+        async fn extend(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, EngineError> {
+            // worker happy-path 测试不模拟租约丢失：恒 Held。
+            Ok(LeaseOutcome::Held)
         }
-        async fn release(&self, _key: &IdemKey) -> Result<(), EngineError> {
+        async fn commit(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, EngineError> {
+            self.commits.fetch_add(1, Ordering::Release);
+            Ok(LeaseOutcome::Held)
+        }
+        async fn release(&self, _key: &IdemKey, _lease: &LeaseToken) -> Result<(), EngineError> {
             Ok(())
         }
     }
@@ -403,6 +426,7 @@ mod tests {
             noop_dlx(),
             meta(),
             handler_ack(counter.clone()),
+            lease_cfg(),
             CancellationToken::new(),
             health(),
         );
@@ -427,6 +451,7 @@ mod tests {
             noop_dlx(),
             meta(),
             handler_ack(Arc::new(AtomicU32::new(0))),
+            lease_cfg(),
             token,
             health(),
         );
@@ -446,6 +471,7 @@ mod tests {
             noop_dlx(),
             meta(),
             handler_ack(Arc::new(AtomicU32::new(0))),
+            lease_cfg(),
             CancellationToken::new(),
             health(),
         );
@@ -469,6 +495,7 @@ mod tests {
             noop_dlx(),
             meta(),
             handler_panic(),
+            lease_cfg(),
             CancellationToken::new(),
             health(),
         );
@@ -495,6 +522,7 @@ mod tests {
             noop_dlx(),
             meta(),
             handler_ack(counter.clone()),
+            lease_cfg(),
             CancellationToken::new(),
             health(),
         );

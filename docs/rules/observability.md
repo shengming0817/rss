@@ -132,7 +132,7 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 `_runtime` 只用于框架级、无 domain 上下文的 shared-infra 原语。当前允许：
 
 - outbox 消费幂等 claimer（两阶段 lease/done）：`_runtime:{eventID}:lease|done`
-- 通用幂等 claimer（`consistency::IdempotencyStore`，`adapters/redis`）：`_runtime:idem:<idemKey>`——`SET NX PX` 单 key claim-or-skip；固定字面 `idem` 第二段与上下两条（第二段为 UUID 形 `{eventID}`/`<tenant>`）**结构互斥**，故 opaque `IdemKey`（caller 组装 `{event_id}:{group}`）直接拼接安全
+- 通用幂等 claimer（`consistency::IdempotencyStore`，`adapters/redis`）：`_runtime:idem:<glen>:<group>:<idemKey>`——claimed value=lease token（带 TTL）/ done value=哨兵（无 TTL，永久去重）；`SET NX PX` claim + Lua CAS extend/commit/release。固定字面 `idem` 第二段与上下两条（第二段为 UUID 形 `{eventID}`/`<tenant>`）**结构互斥**。`ConsumerGroup`/`IdemKey` 均 opaque（允许冒号），故 **group 段以字节长度 `<glen>` 前缀单射封边**——杜绝 `(group,key)` 裸冒号拼接碰撞（#279 review F3；旧 `<group>:<idemKey>` 直接拼接不安全）
 - HTTP 幂等 store：`_runtime:<tenant>:{key}:resp|lease|fp`
 
 新增 shared-infra 原语若使用 `_runtime`，key 格式必须与既有格式结构性互斥，并在本节登记。

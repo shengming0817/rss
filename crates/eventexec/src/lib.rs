@@ -9,7 +9,7 @@
 //!      serverlesstechnology/cqrs（背景 relay 解耦 + 取消安全两阶段关闭）
 
 pub mod consumer;
-pub use consumer::{ConsumerMeta, run_consumer, run_consumer_ackable};
+pub use consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
 
 pub mod consumer_worker;
 pub use consumer_worker::{

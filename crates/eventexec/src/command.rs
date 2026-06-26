@@ -26,7 +26,7 @@ use diport::{
     DynOutboxEmitter, Message, MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
 };
 
-use crate::consumer::{ConsumerMeta, run_consumer};
+use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
 
 /// 命令幂等 key（DispatchId）—— producer mint、consumer claim 同源。包私有 [`IdemKey`]；无 public 裸构造，
 /// 仅经 [`from_idempotency_key`](Self::from_idempotency_key) funnel（业务无法把任意裸 `IdemKey` 当 DispatchId
@@ -113,6 +113,9 @@ pub async fn emit_async(
 ///
 /// 组合根 registrar（impl `generated::command::CommandRegister`）经 spawn 调用本 async 驱动；generated
 /// `<cmd>::register_handler` wrapper 锁 typed `R` + baked CONTRACT_ID/TOPIC。
+#[allow(clippy::too_many_arguments)]
+// reason: 8 参数是命令消费注册的最小必要集（stream/idempotency/dlx/domain/contract_id/topic/handler/lease_cfg
+// 各自语义独立）；聚合 struct 增间接层且无复用，item-level carve-out（error-handling.md §Carve-out）。
 pub async fn register_command_handler<S, R, H, Fut>(
     stream: MessageStream,
     idempotency: Arc<S>,
@@ -121,6 +124,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     contract_id: impl Into<String>,
     topic: impl Into<String>,
     handler: H,
+    lease_cfg: LeaseConfig,
 ) where
     S: IdempotencyStore + Send + Sync + 'static,
     R: for<'de> serde::Deserialize<'de> + Send + 'static,
@@ -131,21 +135,28 @@ pub async fn register_command_handler<S, R, H, Fut>(
     let topic_s: Arc<str> = topic.into().into();
     let meta = ConsumerMeta::new(domain, &*contract_id_s, &*topic_s);
     let handler = Arc::new(handler);
-    run_consumer(stream, idempotency, dlx, meta, move |msg: Message| {
-        let handler = Arc::clone(&handler);
-        let contract_id_s = Arc::clone(&contract_id_s);
-        let topic_s = Arc::clone(&topic_s);
-        Box::pin(async move {
-            match serde_json::from_slice::<R>(&msg.payload) {
-                Ok(req) => handler(req).await,
-                Err(_) => {
-                    // 坏 wire = 永久 reject（不可恢复 → DLX）；warn 记录解码失败原因（无 payload 字节，PII 边界）。
-                    log_decode_failed(msg.id.as_str(), &contract_id_s, &topic_s);
-                    HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
+    run_consumer(
+        stream,
+        idempotency,
+        dlx,
+        meta,
+        move |msg: Message| {
+            let handler = Arc::clone(&handler);
+            let contract_id_s = Arc::clone(&contract_id_s);
+            let topic_s = Arc::clone(&topic_s);
+            Box::pin(async move {
+                match serde_json::from_slice::<R>(&msg.payload) {
+                    Ok(req) => handler(req).await,
+                    Err(_) => {
+                        // 坏 wire = 永久 reject（不可恢复 → DLX）；warn 记录解码失败原因（无 payload 字节，PII 边界）。
+                        log_decode_failed(msg.id.as_str(), &contract_id_s, &topic_s);
+                        HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
+                    }
                 }
-            }
-        })
-    })
+            })
+        },
+        lease_cfg,
+    )
     .await;
 }
 
@@ -165,14 +176,21 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use consistency::HandleResult;
-    use consistency::idempotency::{IdemKey, IdempotencyStore, SeenState};
+    use consistency::idempotency::{
+        IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
+    };
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{DynOutboxEmitter, Message, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 
-    use super::{DispatchId, emit_async, register_command_handler};
+    use super::{DispatchId, LeaseConfig, emit_async, register_command_handler};
     use crate::MAX_REDELIVERY;
+
+    /// 测试用 lease 配置（续租间隔大，命令消费测试中续租不触发）。
+    fn lease_cfg() -> LeaseConfig {
+        LeaseConfig::from_ttl(std::time::Duration::from_secs(60))
+    }
 
     // ── producer 侧 fake：捕获 emit 的 Entry topic/idem_key/payload + envelope ──────
 
@@ -321,17 +339,34 @@ mod tests {
         async fn check(
             &self,
             _key: &IdemKey,
+            _lease: &LeaseToken,
         ) -> Result<SeenState, consistency::error::EngineError> {
             match self.result {
                 CheckResult::Fresh => Ok(SeenState::Fresh),
                 CheckResult::Duplicate => Ok(SeenState::Duplicate),
             }
         }
-        async fn commit(&self, _key: &IdemKey) -> Result<(), consistency::error::EngineError> {
-            self.commit_count.fetch_add(1, Ordering::Release);
-            Ok(())
+        async fn extend(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            // 命令消费测试不模拟租约丢失：恒 Held。
+            Ok(LeaseOutcome::Held)
         }
-        async fn release(&self, _key: &IdemKey) -> Result<(), consistency::error::EngineError> {
+        async fn commit(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            self.commit_count.fetch_add(1, Ordering::Release);
+            Ok(LeaseOutcome::Held)
+        }
+        async fn release(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<(), consistency::error::EngineError> {
             Ok(())
         }
     }
@@ -420,6 +455,7 @@ mod tests {
                     HandleResult::ack()
                 }
             },
+            lease_cfg(),
         )
         .await;
         #[allow(clippy::unwrap_used)]
@@ -451,6 +487,7 @@ mod tests {
                     HandleResult::ack()
                 }
             },
+            lease_cfg(),
         )
         .await;
         assert_eq!(
@@ -474,6 +511,7 @@ mod tests {
             "seed.do-thing",
             "seed.commands.do-thing",
             move |_req: DoThing| async move { HandleResult::ack() },
+            lease_cfg(),
         )
         .await;
         assert_eq!(dlx.write_count(), 1, "坏 wire → 永久 reject → DLX");
@@ -541,6 +579,7 @@ mod tests {
                     ))
                 }
             },
+            lease_cfg(),
         )
         .await;
         assert_eq!(

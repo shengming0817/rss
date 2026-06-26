@@ -27,7 +27,7 @@ use diport::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynPublisher,
     Message, MessageId, PublishRequest, Publisher, Subscriber, Topic,
 };
-use eventexec::{ConsumerMeta, run_consumer};
+use eventexec::{ConsumerMeta, LeaseConfig, run_consumer};
 use futures::future::BoxFuture;
 use generated::event::identity_v1::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
@@ -219,6 +219,8 @@ async fn login_audit_durable_topology() -> Result<()> {
         DynDeadLetterStore::new_box(NoopDlx),
         meta,
         consumer_handler(binding.handler),
+        // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
+        LeaseConfig::from_ttl(claimer.lease_ttl()),
     );
 
     // 生产侧：login → PgSessionLifecycle **co-tx**（session 行 + outbox 行同事务）durable 落库；relay

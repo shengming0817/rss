@@ -55,6 +55,15 @@ impl RedisStore {
     }
 }
 
+#[cfg(feature = "backend")]
+impl RedisStore {
+    /// 供组合根派生 `eventexec::LeaseConfig::from_ttl(store.lease_ttl())`，使续租间隔与后端 claim TTL
+    /// 同源（杜绝 mismatch footgun，#1213 review #3）。
+    pub fn lease_ttl(&self) -> core::time::Duration {
+        self.ttl
+    }
+}
+
 impl ManagedResource for RedisStore {
     fn name(&self) -> &str {
         "redis"
@@ -73,19 +82,37 @@ impl consistency::IdempotencyStore for RedisStore {
     async fn check(
         &self,
         key: &consistency::IdemKey,
+        lease: &consistency::LeaseToken,
     ) -> Result<consistency::SeenState, consistency::EngineError> {
         // 逻辑拆出到 claimer::check_impl 控制认知复杂度。group 构造期绑定，纳入 claim key 组维度段。
-        claimer::check_impl(&self.pool, self.ttl, &self.group, key).await
+        claimer::check_impl(&self.pool, self.ttl, &self.group, key, lease).await
     }
 
-    async fn commit(&self, key: &consistency::IdemKey) -> Result<(), consistency::EngineError> {
+    async fn extend(
+        &self,
+        key: &consistency::IdemKey,
+        lease: &consistency::LeaseToken,
+    ) -> Result<consistency::LeaseOutcome, consistency::EngineError> {
+        // 逻辑拆出到 claimer::extend_impl 控制认知复杂度。
+        claimer::extend_impl(&self.pool, self.ttl, &self.group, key, lease).await
+    }
+
+    async fn commit(
+        &self,
+        key: &consistency::IdemKey,
+        lease: &consistency::LeaseToken,
+    ) -> Result<consistency::LeaseOutcome, consistency::EngineError> {
         // 逻辑拆出到 claimer::commit_impl 控制认知复杂度。
-        claimer::commit_impl(&self.pool, &self.group, key).await
+        claimer::commit_impl(&self.pool, &self.group, key, lease).await
     }
 
-    async fn release(&self, key: &consistency::IdemKey) -> Result<(), consistency::EngineError> {
+    async fn release(
+        &self,
+        key: &consistency::IdemKey,
+        lease: &consistency::LeaseToken,
+    ) -> Result<(), consistency::EngineError> {
         // 逻辑拆出到 claimer::release_impl 控制认知复杂度。
-        claimer::release_impl(&self.pool, &self.group, key).await
+        claimer::release_impl(&self.pool, &self.group, key, lease).await
     }
 }
 

@@ -8,11 +8,12 @@
 //!      watermill message/router/middleware/retry.go（重投预算 MaxRetries+1 次尝试）
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 
 use consistency::HandleResult;
-use consistency::idempotency::{IdemKey, SeenState};
+use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
 use diport::dead_letter_store::{
     DeadLetterRecord, DeadLetterStore as _, DeadLetterStoreError, DeadLetterSummary,
     DynDeadLetterStore,
@@ -20,6 +21,32 @@ use diport::dead_letter_store::{
 use diport::{Acker as _, Message, MessageStream};
 
 use crate::MAX_REDELIVERY;
+
+// ── LeaseConfig（消费侧租约续租配置，#1213）────────────────────────────────────
+
+/// 消费侧租约续租配置：续租间隔 = 后端 claim lease TTL / 3（对标 gocell ConsumerBase `LeaseTTL/3`）。
+///
+/// 组合根经 [`LeaseConfig::from_ttl`] 由**后端 claim TTL**（`PgInboxStore` 的 `INBOX_LEASE_TTL_SECONDS` /
+/// `RedisStore` 构造期 TTL）派生并注入 `run_consumer*` / `spawn_consumer*`——保证续租周期短于后端 TTL，
+/// 长 handler 的 claim 在过期重捞前被刷新（必填位置参，缺失即编译错误，不静默默认）。
+#[derive(Debug, Clone, Copy)]
+pub struct LeaseConfig {
+    renew_interval: Duration,
+}
+
+impl LeaseConfig {
+    /// 由后端 claim lease TTL 派生续租配置：续租间隔 = `ttl/3`（下限 1ms，避免 0 间隔忙轮询）。
+    pub fn from_ttl(ttl: Duration) -> Self {
+        Self {
+            renew_interval: (ttl / 3).max(Duration::from_millis(1)),
+        }
+    }
+
+    /// 续租间隔（后台每隔此时长调一次 [`consistency::IdempotencyStore::extend`]）。
+    pub fn renew_interval(&self) -> Duration {
+        self.renew_interval
+    }
+}
 
 // ── DLX 摘要 fallback 常量（仅 None 防御；正常路径走 HandleResult::error_summary，#1125）──────────
 
@@ -100,12 +127,13 @@ pub async fn run_consumer<S, H>(
     dlx: Box<DynDeadLetterStore<'static>>,
     meta: ConsumerMeta,
     handler: H,
+    lease_cfg: LeaseConfig,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     while let Some(msg) = stream.next().await {
-        consume_one(&idempotency, &dlx, &meta, &handler, msg, None).await;
+        consume_one(&idempotency, &dlx, &meta, &handler, msg, None, lease_cfg).await;
     }
 }
 
@@ -135,6 +163,7 @@ pub async fn run_consumer_ackable<S, H>(
     dlx: Box<DynDeadLetterStore<'static>>,
     meta: ConsumerMeta,
     handler: H,
+    lease_cfg: LeaseConfig,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
@@ -148,6 +177,7 @@ pub async fn run_consumer_ackable<S, H>(
             &handler,
             message,
             Some(acker.as_ref()),
+            lease_cfg,
         )
         .await;
     }
@@ -162,6 +192,7 @@ async fn consume_one<S, H>(
     handler: &H,
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
+    lease_cfg: LeaseConfig,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
@@ -183,8 +214,11 @@ async fn consume_one<S, H>(
         }
     };
 
+    // 本次 claim 的租约令牌（消费方铸，uuid v4）：check 在 claimed 行 stamp，extend/commit/release 凭它 CAS。
+    let lease = LeaseToken::new(uuid::Uuid::new_v4().to_string());
+
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs::dispatch_one 范式）。
-    match idempotency.check(&key).await {
+    match idempotency.check(&key, &lease).await {
         // 瞬态后端故障：结构化 warn，不 commit（下次重投）。
         Err(e) => {
             log_check_failed(&msg, &e);
@@ -209,7 +243,18 @@ async fn consume_one<S, H>(
             .await;
         }
         Ok(SeenState::Fresh) => {
-            handle_fresh(idempotency, dlx, meta, handler, msg, &key, acker).await;
+            handle_fresh(
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                msg,
+                &key,
+                &lease,
+                acker,
+                lease_cfg,
+            )
+            .await;
         }
         // reason: SeenState 是 #[non_exhaustive]，兜底臂保守丢弃（对齐 relay.rs 非 Ack 处置保守降级）。
         Ok(_) => {
@@ -226,8 +271,20 @@ async fn consume_one<S, H>(
     }
 }
 
-/// 首见消息：bounded 重投循环 → `Ack` commit / `Reject` dlx / `Requeue` 耗尽后 dlx。
-/// 从 `consume_one` 抽出，控制各自认知复杂度 ≤15（rust-standards §工程护栏）。
+/// 首见消息：后台续租 + bounded 重投**并发**驱动（#1213，对标 gocell ConsumerBase runWithRenewal）。
+///
+/// `select!` 同任务并发两条 future（**无 `tokio::spawn`**——consumer future 是 `!Send`、跑在专用 OS 线程的
+/// current-thread runtime，spawn 不可用；race-then-drop 即取消，契合 `!Send` 形态）：
+/// - [`run_handler_loop`]：handler bounded 重投 + 终态结算（Ack→commit / Reject·耗尽→DLX）。
+/// - [`renewal_loop`]：按 `lease_cfg.renew_interval` 调 `extend` 续租；租约丢失（`Lost`）即返回。
+///
+/// **leaseLost hard-fence**：续租侧先返回（claim 被他人 TTL 重捞）⇒ `select!` drop handler future（cancel 执行
+/// 上下文）⇒ 结算 `Requeue`、**不** commit（stale holder 不双写 done，对标 gocell leaseLost→Requeue）。handler
+/// 先完成 ⇒ renewal future 被 drop（停止续租）。commit 侧另有 CAS 兜底（[`commit_key`] 返 `Lost` 也降级 Requeue），
+/// 覆盖「续租未及时探测、但 commit 时租约已失」的竞态窗口。
+#[allow(clippy::too_many_arguments)]
+// reason: 9 参数是 fresh 处理的最小必要集（idempotency/dlx/meta/handler/msg/key/lease/acker/lease_cfg 各自语义
+// 独立）；聚合 struct 增间接层且不适用本模块借用生命周期，item-level carve-out。
 async fn handle_fresh<S, H>(
     idempotency: &Arc<S>,
     dlx: &DynDeadLetterStore<'static>,
@@ -235,6 +292,76 @@ async fn handle_fresh<S, H>(
     handler: &H,
     msg: Message,
     key: &IdemKey,
+    lease: &LeaseToken,
+    acker: Option<&diport::DynAcker<'static>>,
+    lease_cfg: LeaseConfig,
+) where
+    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+{
+    // owned message_id：run_handler_loop 取 msg 所有权，续租 / hard-fence 日志用 owned 串避免借用冲突。
+    let message_id = msg.id.as_str().to_owned();
+    tokio::select! {
+        // biased：双侧同时就绪时优先 handler 分支——handler 已完成（终态正确）时不误触 hard-fence；
+        // commit 侧 CAS 仍兜底「续租未及时探测、commit 时租约已失」的竞态（review #279 DX）。
+        biased;
+        // handler 先完成：终态已在 loop 内结算；renewal future 被 drop（停止续租）。
+        () = run_handler_loop(idempotency, dlx, meta, handler, msg, key, lease, acker) => {}
+        // 续租侧判租约丢失：handler future 被 drop（cancel 执行上下文），hard-fence 结算 Requeue、不 commit。
+        () = renewal_loop(idempotency, meta, key, lease, lease_cfg, &message_id) => {
+            log_lease_lost(meta, &message_id);
+            emit_lease_lost(meta.domain());
+            settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
+        }
+    }
+}
+
+/// 续租循环（#1213）：每 `lease_cfg.renew_interval` 调 [`consistency::IdempotencyStore::extend`]。
+///
+/// `Held`→继续持有（**不返回**，由 `select!` 在 handler 完成时 drop）；`Lost`→**返回**（claim 被他人重捞，触发
+/// [`handle_fresh`] 的 hard-fence 分支取消 handler）；`Err`（瞬态后端故障）→结构化 warn + 续命（不误判丢租，
+/// handler 完成时由 commit 侧 CAS 兜底判终态）。
+async fn renewal_loop<S>(
+    idempotency: &Arc<S>,
+    meta: &ConsumerMeta,
+    key: &IdemKey,
+    lease: &LeaseToken,
+    lease_cfg: LeaseConfig,
+    message_id: &str,
+) where
+    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+{
+    loop {
+        tokio::time::sleep(lease_cfg.renew_interval()).await;
+        match idempotency.extend(key, lease).await {
+            // 续租成功：继续持有租约。
+            Ok(LeaseOutcome::Held) => {}
+            // 租约丢失：返回 → select hard-fence 分支取消 handler。
+            Ok(LeaseOutcome::Lost) => return,
+            // 瞬态续租故障：续命重试（commit 侧 CAS 兜底，不误判丢租）。
+            Err(e) => log_extend_failed(meta, message_id, &e),
+            // reason: LeaseOutcome 是 #[non_exhaustive]；未知变体保守续命（同 Err 路径，commit 侧 CAS 兜底）+
+            // warn 可观测（与 SeenState 未知臂 log_unknown_seen_state 对齐，review #279 架构）。
+            Ok(_) => log_unknown_lease_outcome(meta, message_id),
+        }
+    }
+}
+
+/// handler bounded 重投 + 终态结算（原 `handle_fresh` 主体，#1213 抽出为 `select!` 一臂）。
+///
+/// bounded 重投：handler 至多 [`MAX_REDELIVERY`] 次；`Ack`→commit（CAS）成功才 broker Ack、否则 Requeue
+/// （守「ack only after durable commit」review #265 F1/C1，且 commit `Lost` 即 leaseLost hard-fence）；
+/// `Reject`→DLX；`Requeue` 耗尽→DLX。
+#[allow(clippy::too_many_arguments)]
+// reason: 8 参数语义独立（idempotency/dlx/meta/handler/msg/key/lease/acker），聚合 struct 增间接层，item-level carve-out。
+async fn run_handler_loop<S, H>(
+    idempotency: &Arc<S>,
+    dlx: &DynDeadLetterStore<'static>,
+    meta: &ConsumerMeta,
+    handler: &H,
+    msg: Message,
+    key: &IdemKey,
+    lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
@@ -247,9 +374,9 @@ async fn handle_fresh<S, H>(
         let result = handler(msg.clone()).await;
         match result.disposition() {
             consistency::outbox::Disposition::Ack => {
-                // 仅 commit（幂等 done 标记）成功才 broker Ack；commit 失败 → Requeue（不移除投递，
-                // 待 broker 重投后幂等去重收口），守「ack only after durable commit」（review #265 F1/C1）。
-                let action = if commit_key(idempotency, key, msg.id.as_str()).await {
+                // 仅 commit（幂等 done 标记，CAS 守租约）成功才 broker Ack；commit 失败 / 租约丢失 → Requeue
+                // （不移除投递，待 broker 重投后幂等去重收口），守「ack only after durable commit」（review #265 F1/C1）。
+                let action = if commit_key(idempotency, meta, key, lease, msg.id.as_str()).await {
                     diport::AckAction::Ack
                 } else {
                     diport::AckAction::Requeue
@@ -262,6 +389,7 @@ async fn handle_fresh<S, H>(
                     dlx,
                     idempotency,
                     key,
+                    lease,
                     meta,
                     &msg,
                     attempt,
@@ -290,6 +418,7 @@ async fn handle_fresh<S, H>(
         dlx,
         idempotency,
         key,
+        lease,
         meta,
         &msg,
         MAX_REDELIVERY,
@@ -301,37 +430,57 @@ async fn handle_fresh<S, H>(
     .await;
 }
 
-/// commit key（claimed→done）：返回 commit 是否成功。错误结构化 error 日志（不 panic）。
+/// commit key（claimed→done，token CAS）：返回 commit 是否成功（`true` 仅当 `LeaseOutcome::Held`）。
 ///
 /// 返回值 gate broker Ack 决策（review #265 F1/C1）：commit 失败**不可**移除 broker 投递——
-/// handler-Ack / DLX-写成功两条终态仅在 commit 成功后 broker `Ack`，失败转 `Requeue`
-/// （守「ack only after durable commit」：done 标记未持久时不出队，待 broker 重投经幂等去重收口）。
-async fn commit_key<S>(idempotency: &Arc<S>, key: &IdemKey, message_id: &str) -> bool
+/// handler-Ack / DLX-写成功两条终态仅在 commit `Held` 后 broker `Ack`，否则转 `Requeue`：
+/// - `Ok(Lost)`：**leaseLost hard-fence**——claim 已被他人 TTL 重捞（CAS 0 行），不双写 done，降级 Requeue（#1213）。
+/// - `Err`：瞬态后端故障——done 标记未持久，降级 Requeue，待 broker 重投经幂等去重收口。
+// 日志收口到 helper 控制 commit_key 认知复杂度 ≤15（tracing 宏展开计入复杂度，同 dead_letter 范式）。
+async fn commit_key<S>(
+    idempotency: &Arc<S>,
+    meta: &ConsumerMeta,
+    key: &IdemKey,
+    lease: &LeaseToken,
+    message_id: &str,
+) -> bool
 where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
-    match idempotency.commit(key).await {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::error!(
-                message_id,
-                error = %e,
-                "consumer: idempotency commit failed"
-            );
+    match idempotency.commit(key, lease).await {
+        Ok(LeaseOutcome::Held) => true,
+        // leaseLost hard-fence：commit 期租约已被重捞 → 不 Ack、降级 Requeue（stale holder 不双写 done）。
+        Ok(LeaseOutcome::Lost) => {
+            log_commit_lost(meta, message_id);
+            emit_lease_lost(meta.domain());
             false
         }
+        Err(e) => {
+            log_commit_failed(meta, message_id, &e);
+            false
+        }
+        // reason: LeaseOutcome 是 #[non_exhaustive]；未知变体保守降级 Requeue（不 Ack 未确认的 done）。
+        Ok(_) => false,
     }
 }
 
-/// release key（claimed→absent）：dlx 写失败时调用，使 broker 重投时 check 回 Fresh。
-/// 错误结构化 error 日志（不 panic）。
-async fn release_key<S>(idempotency: &Arc<S>, key: &IdemKey, message_id: &str)
-where
+/// release key（claimed→absent，token CAS）：dlx 写失败时调用，使 broker 重投时 check 回 Fresh。
+/// 令牌不符（claim 已被重捞）为 no-op（不误删他人 claim）。错误结构化 error 日志（不 panic）。
+async fn release_key<S>(
+    idempotency: &Arc<S>,
+    meta: &ConsumerMeta,
+    key: &IdemKey,
+    lease: &LeaseToken,
+    message_id: &str,
+) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
-    if let Err(e) = idempotency.release(key).await {
+    if let Err(e) = idempotency.release(key, lease).await {
         tracing::error!(
             message_id,
+            domain = meta.domain(),
+            contract_id = meta.contract_id(),
+            topic = meta.topic(),
             error = %e,
             "consumer: idempotency release failed after dlx write error"
         );
@@ -351,12 +500,13 @@ where
 /// `HandleResult::error_summary()` 流到此处，#1125），不含 handler error/payload 原文。PII-safe（const
 /// literal，无 runtime 数据），下游 `DeadLetterSummary::new` 仍强制 const 收口。
 #[allow(clippy::too_many_arguments)]
-// reason: 8 参数是 DLX 路径的最小必要集合（dlx/idempotency/key/meta/msg/attempts/summary/acker 各自语义独立）；
+// reason: 9 参数是 DLX 路径的最小必要集合（dlx/idempotency/key/lease/meta/msg/attempts/summary/acker 各自语义独立）；
 // 引入聚合 struct 会增加间接层且不适用于本模块的借用生命周期，item-level carve-out。
 async fn dead_letter<S>(
     dlx: &DynDeadLetterStore<'static>,
     idempotency: &Arc<S>,
     key: &IdemKey,
+    lease: &LeaseToken,
     meta: &ConsumerMeta,
     msg: &Message,
     num_attempts: u32,
@@ -385,7 +535,7 @@ async fn dead_letter<S>(
         Ok(()) => {
             // dlx 写成功 → commit（标记 done）。仅 commit 成功才 broker Ack；commit 失败 → Requeue
             // （DLX 已落但 done 标记未持久，重投经幂等 Duplicate 收口，守「ack only after durable commit」F1/C1）。
-            let action = if commit_key(idempotency, key, msg.id.as_str()).await {
+            let action = if commit_key(idempotency, meta, key, lease, msg.id.as_str()).await {
                 diport::AckAction::Ack
             } else {
                 diport::AckAction::Requeue
@@ -393,10 +543,10 @@ async fn dead_letter<S>(
             settle(acker, action, meta.domain(), msg.id.as_str()).await;
         }
         Err(e) => {
-            // dlx 写失败 → release（claimed→absent），使 broker 重投时 check 回 Fresh、
+            // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 check 回 Fresh、
             // 重新尝试 DLX，避免静默丢失（消息进 done + 死信未落 DB = 不可恢复审计盲点）。
             log_dlx_write_failed(meta, &e);
-            release_key(idempotency, key, msg.id.as_str()).await;
+            release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
             // broker Requeue：DLX 未落，原投递重投等待再次尝试。
             settle(
                 acker,
@@ -525,23 +675,120 @@ fn log_dlx_write_failed(meta: &ConsumerMeta, error: &DeadLetterStoreError) {
     );
 }
 
+/// leaseLost hard-fence（#1213）：续租侧探测租约被他人 TTL 重捞 → handler 被取消、结算降级 Requeue。
+fn log_lease_lost(meta: &ConsumerMeta, message_id: &str) {
+    tracing::warn!(
+        message_id,
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        "consumer: lease lost during handler, cancelled and requeued (hard-fence)"
+    );
+}
+
+/// 续租瞬态故障（#1213）：`extend` 返 `Err`（后端暂不可用）→ 续命重试（不误判丢租，commit 侧 CAS 兜底）。
+///
+/// `error = %error` 安全前提同 [`log_check_failed`]：`EngineError` 的 `Display` 恒为 const literal。
+fn log_extend_failed(
+    meta: &ConsumerMeta,
+    message_id: &str,
+    error: &consistency::error::EngineError,
+) {
+    tracing::warn!(
+        message_id,
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        error = %error,
+        "consumer: lease extend failed (transient), will retry next interval"
+    );
+}
+
+/// 续租返回未知 `LeaseOutcome` 变体（`#[non_exhaustive]` 兜底 warn，保守续命；commit 侧 CAS 判终态，#1213）。
+fn log_unknown_lease_outcome(meta: &ConsumerMeta, message_id: &str) {
+    tracing::warn!(
+        message_id,
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        "consumer: unknown LeaseOutcome variant in renewal, conservatively continuing (commit CAS backstops)"
+    );
+}
+
+/// commit 期租约丢失 warn（hard-fence → stale holder 不双写 done，降级 Requeue，#1213）。
+///
+/// `message_id` 无 PII（不携 payload）；收口到 helper 控制 [`commit_key`] 认知复杂度 ≤15。
+fn log_commit_lost(meta: &ConsumerMeta, message_id: &str) {
+    tracing::warn!(
+        message_id,
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        "consumer: idempotency commit lost lease (hard-fence → requeue)"
+    );
+}
+
+/// commit 瞬态后端故障 error（done 标记未持久 → 降级 Requeue，待 broker 重投经幂等去重收口）。
+///
+/// `error = %error` 安全前提同 [`log_check_failed`]：`EngineError` 的 `Display` 恒为 const literal。
+fn log_commit_failed(
+    meta: &ConsumerMeta,
+    message_id: &str,
+    error: &consistency::error::EngineError,
+) {
+    tracing::error!(
+        message_id,
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        error = %error,
+        "consumer: idempotency commit failed"
+    );
+}
+
+/// leaseLost 事件 counter（#1213，review #279 运维）：续租侧 + commit 侧 hard-fence 触发点均 +1，供独立
+/// 告警（与聚合的 `consumer_settle_total{action=requeue}` 区分——后者混合多种 requeue 原因）。
+///
+/// 闭值集 label：`domain` 由 [`ConsumerMeta`] 封边（发射处才降 owned String）。minimal 直发 `metrics` facade
+/// （无 recorder 即 no-op，同 `consumer_settle_total` 范式；注入式 port 随 consumer worker 生命周期 #1301）。
+fn emit_lease_lost(domain: &str) {
+    metrics::counter!(
+        "consumer_lease_lost_total",
+        "domain" => domain.to_owned(),
+    )
+    .increment(1);
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use consistency::HandleResult;
-    use consistency::idempotency::{IdemKey, IdempotencyStore, SeenState};
+    use consistency::idempotency::{
+        IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
+    };
     use diport::Message;
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{AckAction, Acker, DeliveryStream, DynAcker};
 
-    use super::{ConsumerMeta, run_consumer, run_consumer_ackable};
+    use super::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
     use crate::MAX_REDELIVERY;
+
+    /// 测试用 lease 配置：续租间隔大（60s/3=20s），普通快测中续租永不触发（不干扰原终态断言）。
+    fn lease_cfg_test() -> LeaseConfig {
+        LeaseConfig::from_ttl(Duration::from_secs(60))
+    }
+
+    /// 测试用 lease 配置（快续租）：续租间隔小，长 handler 测试中续租可在毫秒级触发。
+    fn lease_cfg_fast() -> LeaseConfig {
+        LeaseConfig::from_ttl(Duration::from_millis(15))
+    }
 
     // ── 工厂 helper ──────────────────────────────────────────────────────────
 
@@ -561,7 +808,8 @@ mod tests {
     // ── FakeIdempotencyStore ─────────────────────────────────────────────────
 
     /// 三态 fake store（Arc<Mutex> + Atomic，Send 友好，不跨 await 持锁——relay.rs FakeStore 范式）。
-    /// 可配 check 返 Fresh / Duplicate / Err；记录 commit / release / check 调用计数。
+    /// 可配 check 返 Fresh / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
+    /// 记录 check / commit / release / extend 调用计数。
     enum CheckResult {
         Fresh,
         Duplicate,
@@ -573,8 +821,15 @@ mod tests {
         check_count: AtomicU32,
         commit_count: AtomicU32,
         release_count: AtomicU32,
-        /// commit 恒失败（F1：测 commit 失败 → broker Requeue 不 Ack）。
+        extend_count: AtomicU32,
+        /// commit 恒失败 Err（F1：测 commit 瞬态失败 → broker Requeue 不 Ack）。
         commit_fails: bool,
+        /// commit 恒返 `LeaseOutcome::Lost`（#1213 commit 侧 hard-fence：租约丢失 → Requeue 不 Ack）。
+        commit_loses_lease: bool,
+        /// extend 在前 N 次返 `Held`、第 N+1 次起返 `Lost`（#1213 续租侧 hard-fence：模拟 handler 执行中租约被重捞）。
+        extend_lost_after: Option<u32>,
+        /// extend 前 N 次返 `Err`（瞬态后端故障，模拟续租抖动）；之后按 `extend_lost_after` 判定。
+        extend_errs_before: u32,
     }
 
     impl FakeIdempotencyStore {
@@ -584,7 +839,11 @@ mod tests {
                 check_count: AtomicU32::new(0),
                 commit_count: AtomicU32::new(0),
                 release_count: AtomicU32::new(0),
+                extend_count: AtomicU32::new(0),
                 commit_fails,
+                commit_loses_lease: false,
+                extend_lost_after: None,
+                extend_errs_before: 0,
             })
         }
 
@@ -600,13 +859,59 @@ mod tests {
             Self::with(CheckResult::Err, false)
         }
 
-        /// Fresh check + commit 恒失败（F1/C1：commit 失败终态须 broker Requeue、不可 Ack）。
+        /// Fresh check + commit 恒 Err（F1/C1：commit 瞬态失败终态须 broker Requeue、不可 Ack）。
         fn fresh_commit_fails() -> Arc<Self> {
             Self::with(CheckResult::Fresh, true)
         }
 
+        /// Fresh check + commit 恒 `Lost`（#1213：commit 侧 leaseLost hard-fence → Requeue 不 Ack）。
+        fn fresh_commit_loses_lease() -> Arc<Self> {
+            Arc::new(Self {
+                check_result: CheckResult::Fresh,
+                check_count: AtomicU32::new(0),
+                commit_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                extend_count: AtomicU32::new(0),
+                commit_fails: false,
+                commit_loses_lease: true,
+                extend_lost_after: None,
+                extend_errs_before: 0,
+            })
+        }
+
+        /// Fresh check + extend 第 `n+1` 次起返 `Lost`（#1213：续租侧 leaseLost hard-fence）。
+        fn fresh_lease_lost_after(n: u32) -> Arc<Self> {
+            Arc::new(Self {
+                check_result: CheckResult::Fresh,
+                check_count: AtomicU32::new(0),
+                commit_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                extend_count: AtomicU32::new(0),
+                commit_fails: false,
+                commit_loses_lease: false,
+                extend_lost_after: Some(n),
+                extend_errs_before: 0,
+            })
+        }
+
+        /// Fresh check + extend 前 `n` 次返 `Err`（瞬态续租故障），之后 `Held`（#1213：续租 Err 臂续命语义）。
+        fn fresh_extend_errs_then_held(n: u32) -> Arc<Self> {
+            Arc::new(Self {
+                check_result: CheckResult::Fresh,
+                check_count: AtomicU32::new(0),
+                commit_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                extend_count: AtomicU32::new(0),
+                commit_fails: false,
+                commit_loses_lease: false,
+                extend_lost_after: None,
+                extend_errs_before: n,
+            })
+        }
+
         #[allow(dead_code)]
-        // reason: check_count 供需断言 check 调用次数的测试预留；当前 TC6/TC7 只核 commit/release，item-level carve-out。
+        // reason: test helper 对称于 commit_count / release_count / extend_count；cfg(test) 内未用但保留
+        // 供后续 check 次数断言测试用。
         fn check_count(&self) -> u32 {
             self.check_count.load(Ordering::Acquire)
         }
@@ -618,12 +923,17 @@ mod tests {
         fn release_count(&self) -> u32 {
             self.release_count.load(Ordering::Acquire)
         }
+
+        fn extend_count(&self) -> u32 {
+            self.extend_count.load(Ordering::Acquire)
+        }
     }
 
     impl IdempotencyStore for FakeIdempotencyStore {
         async fn check(
             &self,
             _key: &IdemKey,
+            _lease: &LeaseToken,
         ) -> Result<SeenState, consistency::error::EngineError> {
             self.check_count.fetch_add(1, Ordering::Release);
             match self.check_result {
@@ -635,17 +945,48 @@ mod tests {
             }
         }
 
-        async fn commit(&self, _key: &IdemKey) -> Result<(), consistency::error::EngineError> {
+        async fn extend(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            let n = self.extend_count.fetch_add(1, Ordering::Release) + 1;
+            // 前 extend_errs_before 次返 Err（瞬态续租故障：不误判丢租，续命重试）。
+            if n <= self.extend_errs_before {
+                return Err(consistency::error::EngineError::new(
+                    consistency::error::EngineErrorKind::Transient,
+                ));
+            }
+            // 前 N 次 Held，第 N+1 次起 Lost（模拟 handler 执行中租约被他人 TTL 重捞）。
+            match self.extend_lost_after {
+                Some(threshold) if n > threshold => Ok(LeaseOutcome::Lost),
+                _ => Ok(LeaseOutcome::Held),
+            }
+        }
+
+        async fn commit(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, consistency::error::EngineError> {
             self.commit_count.fetch_add(1, Ordering::Release);
             if self.commit_fails {
                 return Err(consistency::error::EngineError::new(
                     consistency::error::EngineErrorKind::Transient,
                 ));
             }
-            Ok(())
+            // commit 侧 leaseLost hard-fence：租约已被重捞 → Lost（消费方降级 Requeue）。
+            if self.commit_loses_lease {
+                return Ok(LeaseOutcome::Lost);
+            }
+            Ok(LeaseOutcome::Held)
         }
 
-        async fn release(&self, _key: &IdemKey) -> Result<(), consistency::error::EngineError> {
+        async fn release(
+            &self,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<(), consistency::error::EngineError> {
             self.release_count.fetch_add(1, Ordering::Release);
             Ok(())
         }
@@ -898,6 +1239,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -926,6 +1268,7 @@ mod tests {
             dlx,
             meta(),
             handler_requeue(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -967,6 +1310,7 @@ mod tests {
             dlx,
             meta(),
             handler_reject(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1005,6 +1349,7 @@ mod tests {
             dlx,
             meta(),
             handler_reject_invariant(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1034,6 +1379,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1058,6 +1404,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1087,6 +1434,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1116,6 +1464,7 @@ mod tests {
             dlx,
             meta(),
             handler_reject(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1254,6 +1603,7 @@ mod tests {
                 dlx,
                 tc5_meta,
                 handler_reject(handler_count),
+                lease_cfg_test(),
             )
             .await;
         });
@@ -1314,6 +1664,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1346,6 +1697,7 @@ mod tests {
             dlx,
             meta(),
             handler_reject(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1378,6 +1730,7 @@ mod tests {
             dlx,
             meta(),
             handler_requeue(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1410,6 +1763,7 @@ mod tests {
             dlx,
             meta(),
             handler_reject(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1443,6 +1797,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1470,6 +1825,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1498,6 +1854,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1527,6 +1884,7 @@ mod tests {
             dlx,
             meta(),
             handler_ack(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1559,6 +1917,7 @@ mod tests {
             dlx,
             meta(),
             handler_reject(handler_count.clone()),
+            lease_cfg_test(),
         )
         .await;
 
@@ -1591,7 +1950,15 @@ mod tests {
                 let dlx = fake_dlx(FakeDeadLetterStore::new());
                 let handler_count = Arc::new(AtomicU32::new(0));
                 let (stream, _ackers) = delivery_stream_of(&[("m-metric", b"payload")]);
-                run_consumer_ackable(stream, idem, dlx, meta(), handler_ack(handler_count)).await;
+                run_consumer_ackable(
+                    stream,
+                    idem,
+                    dlx,
+                    meta(),
+                    handler_ack(handler_count),
+                    lease_cfg_test(),
+                )
+                .await;
             });
         });
         let rendered = handle.render();
@@ -1611,5 +1978,228 @@ mod tests {
             rendered.contains("outcome=\"ok\""),
             "缺 outcome=ok label: {rendered}"
         );
+    }
+
+    // ── 租约续租 + leaseLost hard-fence（#1213）─────────────────────────────────
+
+    /// 慢 handler：进入即 +started，sleep 后 +finished 再 Ack（验续租 / 取消语义）。
+    fn handler_slow_ack(
+        started: Arc<AtomicU32>,
+        finished: Arc<AtomicU32>,
+        sleep: Duration,
+    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+        move |_msg| {
+            let started = started.clone();
+            let finished = finished.clone();
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(sleep).await;
+                finished.fetch_add(1, Ordering::SeqCst);
+                HandleResult::ack()
+            })
+        }
+    }
+
+    /// LEASE-1：长 handler 执行期间后台续租（extend 被周期调用），handler 完成后正常 commit + settle Ack。
+    #[tokio::test]
+    async fn lease1_long_handler_renews_then_commits() {
+        let idem = FakeIdempotencyStore::fresh(); // extend 恒 Held
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let started = Arc::new(AtomicU32::new(0));
+        let finished = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-lease1", b"payload")]);
+
+        // handler 睡 50ms，续租间隔 5ms（lease_cfg_fast）→ 执行期间 extend 触发多次。
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_slow_ack(started.clone(), finished.clone(), Duration::from_millis(50)),
+            lease_cfg_fast(),
+        )
+        .await;
+
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "handler 应跑完（未被取消）"
+        );
+        // handler 睡 50ms / 续租 5ms ≈ 10 次续租，阈值 3 留足 CI 抖动余量（探测续租退化成单次的回归）。
+        assert!(idem.extend_count() >= 3, "执行期间应多次续租（>=3）");
+        assert_eq!(idem.commit_count(), 1, "完成后 commit 1 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Ack],
+            "续租保活 → 正常 settle [Ack]"
+        );
+    }
+
+    /// LEASE-2：handler 执行中租约被重捞（extend→Lost）→ handler 被取消（未跑完）、settle [Requeue]、commit 0
+    /// 次（续租侧 leaseLost hard-fence）。
+    #[tokio::test]
+    async fn lease2_lost_during_handler_cancels_and_requeues() {
+        let idem = FakeIdempotencyStore::fresh_lease_lost_after(0); // 首次 extend 即 Lost
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let started = Arc::new(AtomicU32::new(0));
+        let finished = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-lease2", b"payload")]);
+
+        // handler 睡 5s（远超续租间隔 5ms）：续租侧在 ~5ms 判 Lost → 取消 handler、hard-fence Requeue。
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_slow_ack(started.clone(), finished.clone(), Duration::from_secs(5)),
+            lease_cfg_fast(),
+        )
+        .await;
+
+        assert_eq!(started.load(Ordering::SeqCst), 1, "handler 已进入");
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            0,
+            "租约丢失 → handler 被取消（未跑完）"
+        );
+        assert_eq!(idem.commit_count(), 0, "hard-fence：不 commit");
+        assert_eq!(
+            dlx_store.write_count(),
+            0,
+            "hard-fence 不进 DLX（Requeue 重投）"
+        );
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "leaseLost hard-fence → settle [Requeue]"
+        );
+    }
+
+    /// LEASE-3：handler Ack 但 commit 期租约已丢（commit→Lost）→ settle [Requeue] 不 Ack（commit 侧 hard-fence）。
+    #[tokio::test]
+    async fn lease3_commit_lost_downgrades_ack_to_requeue() {
+        let idem = FakeIdempotencyStore::fresh_commit_loses_lease();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-lease3", b"payload")]);
+
+        // handler 即时 Ack；lease_cfg_test 续租间隔大（不触发续租）→ 仅 commit 侧 CAS 判 Lost。
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+            lease_cfg_test(),
+        )
+        .await;
+
+        assert_eq!(handler_count.load(Ordering::Relaxed), 1, "handler 调 1 次");
+        assert_eq!(idem.commit_count(), 1, "commit 被尝试 1 次（返 Lost）");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "commit 侧 leaseLost → 降级 settle [Requeue]"
+        );
+    }
+
+    /// LEASE-4：续租瞬态 Err（extend 前 2 次 Err，之后 Held）**不**误判丢租——handler 跑完后正常 commit + Ack
+    /// （续租 `Err` 臂续命语义，非 hard-fence）。
+    #[tokio::test]
+    async fn lease4_transient_extend_err_does_not_fence() {
+        let idem = FakeIdempotencyStore::fresh_extend_errs_then_held(2); // 前 2 次 extend Err，之后 Held
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let started = Arc::new(AtomicU32::new(0));
+        let finished = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-lease4", b"payload")]);
+
+        // handler 睡 100ms / 续租 5ms：前 2 次 extend Err（续命），后续 Held；handler 跑完 → 正常 commit Ack。
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_slow_ack(
+                started.clone(),
+                finished.clone(),
+                Duration::from_millis(100),
+            ),
+            lease_cfg_fast(),
+        )
+        .await;
+
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "瞬态续租 Err 不取消 handler（续命）"
+        );
+        assert!(
+            idem.extend_count() >= 3,
+            "extend 被多次调用（含 2 次 Err + 后续 Held）"
+        );
+        assert_eq!(idem.commit_count(), 1, "handler 跑完后 commit 1 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Ack],
+            "续租 Err 续命 → 终态正常 [Ack]（非 hard-fence）"
+        );
+    }
+
+    /// LEASE-5：handler Reject + DLX 写成功，但 commit 期租约已丢（commit→Lost）→ settle [Requeue] 不 Ack
+    /// （DLX 路径的 commit 侧 hard-fence；与 F1b 的 commit-Err 路径对偶）。
+    #[tokio::test]
+    async fn lease5_dlx_ok_commit_lost_requeues() {
+        let idem = FakeIdempotencyStore::fresh_commit_loses_lease();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-lease5", b"payload")]);
+
+        // handler Reject → dead_letter 写 DLX 成功 → commit_key 返 Lost → settle Requeue（不 Ack）。
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_reject(handler_count.clone()),
+            lease_cfg_test(),
+        )
+        .await;
+
+        assert_eq!(handler_count.load(Ordering::Relaxed), 1, "handler 调 1 次");
+        assert_eq!(dlx_store.write_count(), 1, "DLX 写成功 1 次");
+        assert_eq!(
+            idem.commit_count(),
+            1,
+            "DLX 后 commit 被尝试 1 次（返 Lost）"
+        );
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Requeue],
+            "DLX-ok + commit leaseLost → 降级 settle [Requeue]"
+        );
+    }
+
+    /// LeaseConfig::from_ttl 表驱动：续租间隔 = ttl/3，下限 1ms（避免 0 间隔忙轮询）。
+    #[test]
+    fn lease_config_from_ttl_derives_third_with_floor() {
+        let cases: &[(Duration, Duration)] = &[
+            // (输入 ttl, 期望 renew_interval)
+            (Duration::from_secs(60), Duration::from_secs(20)), // 60/3 = 20s
+            (Duration::from_millis(30), Duration::from_millis(10)), // 30/3 = 10ms
+            (Duration::from_millis(2), Duration::from_millis(1)), // 2/3 = 0 → clamp 1ms
+            (Duration::ZERO, Duration::from_millis(1)),         // 0/3 = 0 → clamp 1ms
+        ];
+        for (ttl, expected) in cases {
+            assert_eq!(
+                LeaseConfig::from_ttl(*ttl).renew_interval(),
+                *expected,
+                "ttl={ttl:?}"
+            );
+        }
     }
 }

@@ -11,20 +11,31 @@ use consistency::{ConsumerGroup, IdemKey, SeenState};
 /// （`_runtime:{eventID}:lease|done`、`_runtime:<tenant>:{key}:…`，二者第二段均为 UUID 形）
 /// 不可能相等，故整环 key 空间互斥。
 ///
-/// **组维度**（review #216 F5）：claim key 在 namespace 后**显式**带 `ConsumerGroup` 段——
-/// `_runtime:idem:<group>:<idem_key>`。group 是幂等去重 PK 第二维度（同一 key 在不同组各自首见），
-/// 由 `RedisStore` 构造期绑定（对标 `PgInboxStore` 的 `(event_id, consumer_group)` 双列 PK 与
-/// `InMemClaimer` 的 `(group, key)` 集合）；**不**靠调用方把 group 拼进 opaque `IdemKey`
-/// （`IdemKey` 仅承载稳定 message/event id）。
+/// **组维度**（review #216 F5）：claim key 在 namespace 后带 `ConsumerGroup` 段。group 是幂等去重 PK
+/// 第二维度（同一 key 在不同组各自首见），由 `RedisStore` 构造期绑定（对标 `PgInboxStore` 的
+/// `(event_id, consumer_group)` 双列 PK 与 `InMemClaimer` 的 `(group, key)` 集合）；**不**靠调用方把 group
+/// 拼进 opaque `IdemKey`（`IdemKey` 仅承载稳定 message/event id）。
+///
+/// **字段边界封闭**（#279 review F3）：`ConsumerGroup` / `IdemKey` 均 opaque（仅拒空、**允许冒号**），裸
+/// `<group>:<key>` 冒号拼接可碰撞——`(group="a", key="b:c")` 与 `(group="a:b", key="c")` 拼出同串 ⇒ 跨组误
+/// 去重。故 key 形如 `_runtime:idem:<glen>:<group>:<idem_key>`：**group 段前缀其字节长度**，使 group/key
+/// 边界单射（`len(group)` 不同 ⇒ 前缀段不同；相同 ⇒ group 占定长前缀位、`(group,key)` 一一对应），消除碰撞面。
 // reason: feature-off build 仅测试使用；feature-on 经 backend::check_impl 引用。
 #[cfg_attr(not(feature = "backend"), allow(dead_code))]
 pub(crate) const NAMESPACE: &str = "_runtime:idem";
 
-/// claim key = `_runtime:idem:<group>:<idem_key>`（group 段隔离消费组，见模块 §组维度）。
+/// claim key = `_runtime:idem:<glen>:<group>:<idem_key>`（`glen` = group 字节长度前缀，使 group/key 边界
+/// 单射，杜绝冒号拼接碰撞；见模块 §字段边界封闭）。
 // reason: feature-off build 仅测试使用；feature-on 经 backend::check_impl 引用。
 #[cfg_attr(not(feature = "backend"), allow(dead_code))]
 pub(crate) fn namespaced_key(group: &ConsumerGroup, key: &IdemKey) -> String {
-    format!("{NAMESPACE}:{}:{}", group.as_str(), key.as_str())
+    // group 段以字节长度前缀单射封边：len(group) 不同 ⇒ 整串不同；相同 ⇒ group 占定长位、(group,key) 一一对应。
+    format!(
+        "{NAMESPACE}:{}:{}:{}",
+        group.as_str().len(),
+        group.as_str(),
+        key.as_str()
+    )
 }
 
 /// `SET ... NX` 返回 `Some(...)`=首次写入(Fresh) / `None`(nil)=key 已存在(Duplicate)。
@@ -38,14 +49,53 @@ pub(crate) fn interpret_setnx(set: Option<String>) -> SeenState {
 }
 
 #[cfg(feature = "backend")]
-pub(crate) use backend::{check_impl, commit_impl, release_impl};
+pub(crate) use backend::{check_impl, commit_impl, extend_impl, release_impl};
 
 #[cfg(feature = "backend")]
 mod backend {
-    use consistency::{ConsumerGroup, EngineError, EngineErrorKind, IdemKey, SeenState};
+    use consistency::{
+        ConsumerGroup, EngineError, EngineErrorKind, IdemKey, LeaseOutcome, LeaseToken, SeenState,
+    };
     use deadpool_redis::{Pool, PoolError, redis::RedisError};
 
     use super::{interpret_setnx, namespaced_key};
+
+    // ─── 低基数诊断字段常量（resource = RESOURCE 出现 ≥ 3 次，抽 const 守去重规则）─────────
+    const RESOURCE: &str = "redis";
+    const POOL_ACQUIRE_FAILED: &str = "redis pool acquire failed";
+    // EVAL 命令名出现于 extend / commit / release 三处 CAS 调用，抽 const 守去重规则。
+    const REDIS_CMD_EVAL: &str = "EVAL";
+
+    /// done 状态哨兵值（commit 把 claimed value 从 `<token>` 改写成本哨兵，#279 review F1/F2）。
+    ///
+    /// **状态编码**：claimed 的 redis value = lease token（uuid v4 文本，带 TTL）；done 的 value = 本哨兵
+    /// （无 TTL，永久去重）。哨兵含下划线、**结构上不可能等于任何 uuid v4 token**，故 done 行对
+    /// `extend`/`release` 的 `GET == token` CAS 恒不命中——done key **不可**被同 token 再 `PEXPIRE` 续租
+    /// （否则 done 行重获 TTL 会过期 → 去重丢失，F1）或被 `DEL` 删除（F2）。对标 PG `status='claimed'` /
+    /// memory `!done` 的显式状态位（C1：Redis 之前缺状态位，claimed/done 同为 raw token 不可区分）。
+    const DONE_SENTINEL: &str = "__rss_idem_done__";
+
+    // ─── Lua CAS 脚本（每条仅使用一次，但为可审计性与常量化要求各定义为 const）──────────────
+
+    /// Lua CAS：令牌匹配（仅 claimed 行，value=token）则刷新 TTL（`PEXPIRE`），返回 1=Held / 0=Lost。
+    ///
+    /// `KEYS[1]` = claim key；`ARGV[1]` = lease token；`ARGV[2]` = ttl_millis。done 行 value=哨兵≠token → 0（不续租）。
+    const LUA_EXTEND_CAS: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('PEXPIRE', KEYS[1], ARGV[2]); return 1 else return 0 end";
+
+    /// Lua CAS：令牌匹配（claimed 行）则原子切 done——`SET key <done 哨兵>`（无 EX ⇒ 清 TTL ⇒ 永久去重），
+    /// 返回 1=Held / 0=Lost。
+    ///
+    /// `KEYS[1]` = claim key；`ARGV[1]` = lease token；`ARGV[2]` = done 哨兵。claimed→done 一步原子，
+    /// done value≠任何 token ⇒ 后续 extend/release CAS 不命中（F1/F2 修：旧实现 `PERSIST` 保留 token value，
+    /// done 行仍被同 token 续租/删除）。
+    const LUA_COMMIT_CAS: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2]); return 1 else return 0 end";
+
+    /// Lua CAS：令牌匹配（仅 claimed 行）则删除 claim（`DEL` = absent），不匹配 no-op；恒返回 0。
+    ///
+    /// `KEYS[1]` = claim key；`ARGV[1]` = lease token。令牌不符（含 done 行 value=哨兵）时原样返回 0，
+    /// 不删他人 claim、不删 done 去重记录（F2）。
+    const LUA_RELEASE_CAS: &str =
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end return 0";
 
     /// redis 错误 → 引擎错误种类。
     ///
@@ -70,109 +120,35 @@ mod backend {
         }
     }
 
-    /// claimed→done：`PERSIST key`（去除 TTL，使 key 永久存在代表 done）。
+    /// claim 并查询首见：`SET key <lease_token> NX PX <ttl_ms>`。
     ///
-    /// absent key 时 `PERSIST` 返回 0（key 不存在），幂等 no-op。
-    /// 后端错误 → `EngineErrorKind::Transient`；原始 redis 错误不进 Display（PII 边界）。
-    pub(crate) async fn commit_impl(
-        pool: &Pool,
-        group: &ConsumerGroup,
-        key: &IdemKey,
-    ) -> Result<(), EngineError> {
-        let mut conn = pool.get().await.map_err(|e| {
-            let kind = classify_pool_error(&e);
-            tracing::warn!(
-                resource = "redis",
-                operation = "idem-commit",
-                ?kind,
-                error = %secure::redact_error(&e),
-                "redis pool acquire failed"
-            );
-            EngineError::new(kind)
-        })?;
-        let k = super::namespaced_key(group, key);
-        // PERSIST 将 key 从有 TTL 改为永久；key 不存在时返回 0（幂等 no-op）。
-        let _: i64 = deadpool_redis::redis::cmd("PERSIST")
-            .arg(&k)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| {
-                let kind = classify_redis_error(&e);
-                tracing::warn!(
-                    resource = "redis",
-                    operation = "idem-commit",
-                    ?kind,
-                    error = %secure::redact_error(&e),
-                    "redis PERSIST failed"
-                );
-                consistency::EngineError::new(kind)
-            })?;
-        Ok(())
-    }
-
-    /// claimed→absent：`DEL key`（删除 claim，使后续重放可重新 Fresh）。
-    ///
-    /// absent key 时 `DEL` 返回 0，幂等 no-op。
-    /// 后端错误 → `EngineErrorKind::Transient`；原始 redis 错误不进 Display（PII 边界）。
-    pub(crate) async fn release_impl(
-        pool: &Pool,
-        group: &ConsumerGroup,
-        key: &IdemKey,
-    ) -> Result<(), EngineError> {
-        let mut conn = pool.get().await.map_err(|e| {
-            let kind = classify_pool_error(&e);
-            tracing::warn!(
-                resource = "redis",
-                operation = "idem-release",
-                ?kind,
-                error = %secure::redact_error(&e),
-                "redis pool acquire failed"
-            );
-            EngineError::new(kind)
-        })?;
-        let k = super::namespaced_key(group, key);
-        let _: i64 = deadpool_redis::redis::cmd("DEL")
-            .arg(&k)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| {
-                let kind = classify_redis_error(&e);
-                tracing::warn!(
-                    resource = "redis",
-                    operation = "idem-release",
-                    ?kind,
-                    error = %secure::redact_error(&e),
-                    "redis DEL failed"
-                );
-                consistency::EngineError::new(kind)
-            })?;
-        Ok(())
-    }
-
+    /// Token 作为 redis 值存入，供后续 `extend`/`commit`/`release` CAS 比对。
+    /// F3：低基数诊断字段 + redacted error（不记 key 原文，避免 PII / 高基数）。
     pub(crate) async fn check_impl(
         pool: &Pool,
         ttl: core::time::Duration,
         group: &ConsumerGroup,
         key: &IdemKey,
+        lease: &LeaseToken,
     ) -> Result<SeenState, EngineError> {
         let mut conn = pool.get().await.map_err(|e| {
-            // F3：低基数诊断字段 + redacted error（不记 key 原文，避免 PII / 高基数）。
             let kind = classify_pool_error(&e);
             tracing::warn!(
-                resource = "redis",
+                resource = RESOURCE,
                 operation = "idem-claim",
                 ?kind,
                 error = %secure::redact_error(&e),
-                "redis pool acquire failed"
+                "{}", POOL_ACQUIRE_FAILED
             );
             EngineError::new(kind)
         })?;
         let k = namespaced_key(group, key);
-        // F2：用 PX 毫秒精度（不截断），TTL 已由 `RedisStore::new` 构造期保证 ≥ 1ms（不静默钳制）。
+        // F2：用 PX 毫秒精度（不截断）；TTL 已由 `RedisStore::new` 构造期保证 ≥ 1ms（不静默钳制）。
         let ttl_millis = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        // SET key <lease_token> NX PX <ttl_millis>：token 作为值落库，后续 CAS 凭此比对。
         let set: Option<String> = deadpool_redis::redis::cmd("SET")
             .arg(&k)
-            .arg(1u8)
+            .arg(lease.as_str())
             .arg("NX")
             .arg("PX")
             .arg(ttl_millis)
@@ -181,7 +157,7 @@ mod backend {
             .map_err(|e| {
                 let kind = classify_redis_error(&e);
                 tracing::warn!(
-                    resource = "redis",
+                    resource = RESOURCE,
                     operation = "idem-claim",
                     ?kind,
                     error = %secure::redact_error(&e),
@@ -190,6 +166,144 @@ mod backend {
                 EngineError::new(kind)
             })?;
         Ok(interpret_setnx(set))
+    }
+
+    /// 续租：令牌 CAS 匹配则 `PEXPIRE`（刷新 TTL）→ `Held`；不符 → `Lost`（claim 已被重捞或不存在）。
+    pub(crate) async fn extend_impl(
+        pool: &Pool,
+        ttl: core::time::Duration,
+        group: &ConsumerGroup,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        let mut conn = pool.get().await.map_err(|e| {
+            let kind = classify_pool_error(&e);
+            tracing::warn!(
+                resource = RESOURCE,
+                operation = "idem-extend",
+                ?kind,
+                error = %secure::redact_error(&e),
+                "{}", POOL_ACQUIRE_FAILED
+            );
+            EngineError::new(kind)
+        })?;
+        let k = namespaced_key(group, key);
+        let ttl_millis = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        let result: i64 = deadpool_redis::redis::cmd(REDIS_CMD_EVAL)
+            .arg(LUA_EXTEND_CAS)
+            .arg(1)
+            .arg(&k)
+            .arg(lease.as_str())
+            .arg(ttl_millis)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| {
+                let kind = classify_redis_error(&e);
+                tracing::warn!(
+                    resource = RESOURCE,
+                    operation = "idem-extend",
+                    ?kind,
+                    error = %secure::redact_error(&e),
+                    "redis EVAL extend CAS failed"
+                );
+                EngineError::new(kind)
+            })?;
+        Ok(if result == 1 {
+            LeaseOutcome::Held
+        } else {
+            LeaseOutcome::Lost
+        })
+    }
+
+    /// claimed → done（CAS）：令牌匹配则原子 `SET key <done 哨兵>`（清 TTL，永久去重）→ `Held`；不符 → `Lost`
+    /// （hard-fence）。
+    ///
+    /// done value=哨兵≠任何 token ⇒ 后续 extend/release 不命中（F1/F2）。absent key 时 `GET` 返回 nil ≠ token
+    /// → `Lost`（消费方须降级 Requeue，不 Ack）。
+    pub(crate) async fn commit_impl(
+        pool: &Pool,
+        group: &ConsumerGroup,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        let mut conn = pool.get().await.map_err(|e| {
+            let kind = classify_pool_error(&e);
+            tracing::warn!(
+                resource = RESOURCE,
+                operation = "idem-commit",
+                ?kind,
+                error = %secure::redact_error(&e),
+                "{}", POOL_ACQUIRE_FAILED
+            );
+            EngineError::new(kind)
+        })?;
+        let k = namespaced_key(group, key);
+        let result: i64 = deadpool_redis::redis::cmd(REDIS_CMD_EVAL)
+            .arg(LUA_COMMIT_CAS)
+            .arg(1)
+            .arg(&k)
+            .arg(lease.as_str())
+            .arg(DONE_SENTINEL)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| {
+                let kind = classify_redis_error(&e);
+                tracing::warn!(
+                    resource = RESOURCE,
+                    operation = "idem-commit",
+                    ?kind,
+                    error = %secure::redact_error(&e),
+                    "redis EVAL commit CAS failed"
+                );
+                EngineError::new(kind)
+            })?;
+        Ok(if result == 1 {
+            LeaseOutcome::Held
+        } else {
+            LeaseOutcome::Lost
+        })
+    }
+
+    /// claimed → absent（CAS）：令牌匹配则 `DEL`；不匹配 no-op（不误删他人 claim）。
+    ///
+    /// Lua 脚本（[`LUA_RELEASE_CAS`]）恒返回 0；`Ok(())` 表示操作完成（含 no-op）。
+    pub(crate) async fn release_impl(
+        pool: &Pool,
+        group: &ConsumerGroup,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<(), EngineError> {
+        let mut conn = pool.get().await.map_err(|e| {
+            let kind = classify_pool_error(&e);
+            tracing::warn!(
+                resource = RESOURCE,
+                operation = "idem-release",
+                ?kind,
+                error = %secure::redact_error(&e),
+                "{}", POOL_ACQUIRE_FAILED
+            );
+            EngineError::new(kind)
+        })?;
+        let k = namespaced_key(group, key);
+        let _: i64 = deadpool_redis::redis::cmd(REDIS_CMD_EVAL)
+            .arg(LUA_RELEASE_CAS)
+            .arg(1)
+            .arg(&k)
+            .arg(lease.as_str())
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| {
+                let kind = classify_redis_error(&e);
+                tracing::warn!(
+                    resource = RESOURCE,
+                    operation = "idem-release",
+                    ?kind,
+                    error = %secure::redact_error(&e),
+                    "redis EVAL release CAS failed"
+                );
+                EngineError::new(kind)
+            })?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -245,16 +359,17 @@ mod tests {
         ConsumerGroup::parse(raw).unwrap()
     }
 
+    // group "grp" 字节长度 = 3，故 key 形如 `_runtime:idem:3:grp:<idem_key>`（glen 前缀单射封边，F3）。
     #[rstest]
-    #[case("a", "_runtime:idem:grp:a")]
-    #[case("some-key-123", "_runtime:idem:grp:some-key-123")]
+    #[case("a", "_runtime:idem:3:grp:a")]
+    #[case("some-key-123", "_runtime:idem:3:grp:some-key-123")]
     #[case(
         "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-        "_runtime:idem:grp:f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        "_runtime:idem:3:grp:f47ac10b-58cc-4372-a567-0e02b2c3d479"
     )]
     #[case(
         "session.created:tenant-42:evt-1",
-        "_runtime:idem:grp:session.created:tenant-42:evt-1"
+        "_runtime:idem:3:grp:session.created:tenant-42:evt-1"
     )]
     fn namespaced_key_has_idem_prefix(#[case] raw: &str, #[case] expected: &str) {
         #[allow(clippy::unwrap_used)]
@@ -266,7 +381,7 @@ mod tests {
     }
 
     // 结构互斥（review F1）：claimer key 的第二段恒为字面 `idem`，与 `_runtime:{eventID}:…` /
-    // `_runtime:<tenant>:…`（第二段为 UUID）不可能碰撞——group 段在 `idem` 之后（第三段），不影响互斥前提。
+    // `_runtime:<tenant>:…`（第二段为 UUID）不可能碰撞——glen/group 段在 `idem` 之后，不影响互斥前提。
     #[test]
     fn namespaced_key_second_segment_is_literal_idem() {
         #[allow(clippy::unwrap_used)]
@@ -291,8 +406,26 @@ mod tests {
         let ka = namespaced_key(&grp("audit"), &key);
         let kb = namespaced_key(&grp("settings"), &key);
         assert_ne!(ka, kb, "跨组同 key 须产生不同 claim key（组维度隔离）");
-        assert_eq!(ka, "_runtime:idem:audit:evt-shared");
-        assert_eq!(kb, "_runtime:idem:settings:evt-shared");
+        // glen 前缀：audit=5、settings=8。
+        assert_eq!(ka, "_runtime:idem:5:audit:evt-shared");
+        assert_eq!(kb, "_runtime:idem:8:settings:evt-shared");
+    }
+
+    // #279 review F3（字段边界碰撞回归）：`ConsumerGroup`/`IdemKey` 均 opaque（允许冒号），裸拼接下
+    // `(group="a", key="b:c")` 与 `(group="a:b", key="c")` 会碰撞；group 段长度前缀使二者单射可分。
+    #[test]
+    fn namespaced_key_length_prefix_prevents_group_key_collision() {
+        #[allow(clippy::unwrap_used)]
+        // reason: 非空 raw（含冒号合法，仅拒空），parse 必成功；item-level carve-out。
+        let key_bc = IdemKey::parse("b:c").unwrap();
+        #[allow(clippy::unwrap_used)]
+        // reason: 同上。
+        let key_c = IdemKey::parse("c").unwrap();
+        let k1 = namespaced_key(&grp("a"), &key_bc); // (group="a", key="b:c")
+        let k2 = namespaced_key(&grp("a:b"), &key_c); // (group="a:b", key="c")
+        assert_ne!(k1, k2, "长度前缀须使 (a,b:c) 与 (a:b,c) 产生不同 claim key");
+        assert_eq!(k1, "_runtime:idem:1:a:b:c");
+        assert_eq!(k2, "_runtime:idem:3:a:b:c");
     }
 
     #[rstest]

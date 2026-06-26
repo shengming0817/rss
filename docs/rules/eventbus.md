@@ -101,6 +101,23 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 （`&'static str` const，PII-safe）随结果流到 ConsumerBase 的 DLX funnel 落日志（#1125），不再在 HandleResult
 边界静默丢弃；更丰富的 per-delivery 扩展信息仍走 `DeliveryOutcome`，不污染业务结果。
 
+### 租约续租 + leaseLost hard-fence（#1213）
+
+claim 是**带 TTL 的租约**：`IdempotencyStore::check(key, lease)` 由消费方铸 `LeaseToken`（uuid v4）传入，
+claimed 行 stamp 该 token；**过期未续租**的 claim 可被新 token 重捞（修 crash-after-claim 时 key 永久
+`Duplicate` 的丢消息——硬崩溃下 `release` 走不到）。长 handler 由 ConsumerBase 后台按 **`lease_ttl/3`**
+（`LeaseConfig::from_ttl`，组合根由后端 claim TTL 派生注入）周期调 `extend(key, lease)` 续租，与 handler 执行
+**同任务并发 race**（消费驱动 future `!Send`、跑专用线程，**不** `tokio::spawn`）。续租 `LeaseOutcome::Lost`
+（claim 已被他人重捞）即 **cancel handler 执行上下文 + 终态降级 `Requeue`、不 commit**（**leaseLost hard-fence**，
+对标 gocell ConsumerBase runWithRenewal）。`commit(key, lease)` 自身 CAS 守租约：返 `Lost` 同样降级 `Requeue`
+（覆盖「续租未及时探测、commit 时租约已失」的竞态窗口）。token CAS 是唯一正确围栏——时间窗口判定有 TOCTOU 竞态。
+
+**并发安全要求**：在 claim TTL 到期与原消费者续租循环探测到 `Lost` 之间（窗口 ≤ `lease_ttl/3`），
+同一消息可被第二个消费者重捞并启动 handler，形成并发双执行窗口。commit-side CAS 保证幂等键
+`done` 标记仅写一次，但 handler 内**事务外的外部副作用**（邮件、外部 API 调用、DB 事务外的
+余额变更等）在该窗口内可能各执行一次。因此，handler 内所有外部副作用须设计为**幂等且允许并发
+重入**；不满足此要求的副作用在 TTL 窗口内存在双重执行风险，commit-side CAS 不提供此保证。
+
 ## Disposition
 
 | Disposition | 语义 | 行为 |
@@ -133,6 +150,7 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 | `Reject` / `Requeue` 耗尽 → DLX 写成功 | commit key | `Ack`（引擎自持 DLX，broker 移除） |
 | DLX 写失败 | release key | `Requeue`（broker 重投重试 DLX，防静默丢失） |
 | 幂等 `check` 瞬态 Err | 不 commit | `Requeue` |
+| 租约丢失（续租或 commit CAS 返 `LeaseOutcome::Lost`，#1213） | cancel handler / 不 commit（hard-fence） | `Requeue`（claim 已被他人重捞，不双写 done） |
 | `Duplicate` | 跳过（不调 handler/不 commit） | `Ack`（已处理，移除） |
 | `IdemKey` parse 失败（malformed） | 不 commit（无法去重） | `Reject`（→broker DLX 留证，不无限重投） |
 | 未知 `SeenState` | 不 commit/release（保守） | `Requeue` |
@@ -162,8 +180,10 @@ webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata�
 ## DLX 与幂等
 
 - 永久错误进入 DLX。
-- PG outbox claim 写入 lease/fencing token；所有状态回写以 lease 做 CAS。
-- handler 不接触 lease；relay 或 subscriber write-back 负责透传。
+- PG outbox relay claim **与** consumer inbox claim 均写入 lease/fencing token；所有状态回写（commit / extend /
+  release）以 lease 做 CAS。inbox lease 带 TTL，过期可重捞（crash-recovery），长 handler 经 `extend` 续租（#1213）。
+- crash-after-claim 后消息最多延迟 `INBOX_LEASE_TTL_SECONDS`（当前 60s）才被 TTL 重捞重跑（此前是永久静默丢失）；该上界当前不可按消费者配置，低延迟工作流需关注。
+- handler 不接触 lease；ConsumerBase 后台续租 + 终态 CAS 透传，relay / subscriber write-back 同理（handler 只返 `HandleResult`）。
 - consumer group 命名必须稳定，避免重放时变成新消费者。
 
 ## Command dispatch

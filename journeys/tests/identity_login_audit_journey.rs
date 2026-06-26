@@ -45,14 +45,14 @@ use bootstrap::{
     adapt_subscriber_handler,
 };
 use consistency::{
-    EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, PermanentError,
-    PermanentErrorKind, SeenState,
+    EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
+    PermanentError, PermanentErrorKind, SeenState,
 };
 use diport::{
     DynDeadLetterStore, DynManagedResource, Message, OutboxEmitter, OutboxEnvelopeParts,
     Subscriber, Topic,
 };
-use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, WorkerHealth, spawn_consumer};
+use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::ports::DynSessionLifecycle;
@@ -203,19 +203,22 @@ impl<S> RecordingClaimer<S> {
 }
 
 impl<S: IdempotencyStore + Send + Sync> IdempotencyStore for RecordingClaimer<S> {
-    async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
-        let state = self.inner.check(key).await?;
+    async fn check(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
+        let state = self.inner.check(key, lease).await?;
         self.check_count.fetch_add(1, Ordering::SeqCst);
         if matches!(state, SeenState::Duplicate) {
             self.duplicate_count.fetch_add(1, Ordering::SeqCst);
         }
         Ok(state)
     }
-    async fn commit(&self, key: &IdemKey) -> Result<(), EngineError> {
-        self.inner.commit(key).await
+    async fn extend(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError> {
+        self.inner.extend(key, lease).await
     }
-    async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
-        self.inner.release(key).await
+    async fn commit(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError> {
+        self.inner.commit(key, lease).await
+    }
+    async fn release(&self, key: &IdemKey, lease: &LeaseToken) -> Result<(), EngineError> {
+        self.inner.release(key, lease).await
     }
 }
 
@@ -251,6 +254,8 @@ where
     let meta = ConsumerMeta::new("audit", contract_id, topic);
     let health = Arc::new(WorkerHealth::healthy());
     let name = format!("{EVENT_CONSUMER_PROBE}:audit:{topic}");
+    // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
+    let lease_cfg = LeaseConfig::from_ttl(std::time::Duration::from_secs(60));
     let worker = spawn_consumer(
         name,
         stream,
@@ -258,6 +263,7 @@ where
         DynDeadLetterStore::new_box(dlx),
         meta,
         handler,
+        lease_cfg,
         token,
         health.clone(),
     );
