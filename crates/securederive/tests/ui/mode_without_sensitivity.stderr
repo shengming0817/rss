@@ -1,0 +1,5 @@
+error: 字段缺 sensitivity：须显式声明 public/internal/secret/pii 之一
+ --> tests/ui/mode_without_sensitivity.rs:7:5
+  |
+7 |     #[redact(mode = "fixed")]
+  |     ^

@@ -9,7 +9,7 @@ publish = false
 thiserror = { workspace = true }
 # 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐（OsRng）。
 argon2 = { workspace = true }
-# 字段级脱敏 derive（#[derive(Redactable)]，#1360）：intra-base DAG 前向边 secure → securederive（layers.rs）。
+# 字段级脱敏 derive（#[derive(Redact)]，#1360）：intra-base DAG 前向边 secure → securederive（layers.rs）。
 # proc-macro 生成 `::secure::…` 路径，secure 内自用经 lib.rs 的 `extern crate self as secure` 解析。
 securederive = { path = "../securederive" }
 # SHA-256：RedactionMode::Hash 的确定性不可逆 PII 关联摘要（#1360）+ secure::refresh token 不可逆持久化

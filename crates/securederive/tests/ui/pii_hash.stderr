@@ -1,0 +1,5 @@
+error: pii 不得与 mode = "hash" 同用（低熵 PII 不可用无盐 hash 脱敏）
+ --> tests/ui/pii_hash.rs:7:5
+  |
+7 |     #[redact(pii = "email", mode = "hash")]
+  |     ^

@@ -7,7 +7,7 @@ members = [
   # 基础（仅 std + 外部 crate，不依赖内部分组）
   "crates/vocab",
   "crates/ids",
-  # secure 的字段级脱敏 derive（#[derive(Redactable)]）proc-macro；intra-base DAG 低于 secure（secure → securederive 前向边）
+  # secure 的字段级脱敏 derive（#[derive(Redact)]）proc-macro；intra-base DAG 低于 secure（secure → securederive 前向边）
   "crates/securederive",
   "crates/secure",
   "crates/support",
@@ -80,6 +80,7 @@ libraries = [
   { path = "lints/rss_projection_append_only" },
   { path = "lints/rss_partition_serial_allowlist" },
   { path = "lints/rss_diport_envelope_reserved_writer" },
+  { path = "lints/rss_redact_debug_required" },
 ]
 
 [workspace.package]
@@ -237,7 +238,7 @@ typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
 prettyplease = "0.2"
 syn = { version = "2", features = ["full", "parsing"] }
-# securederive proc-macro（#[derive(Redactable)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
+# securederive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
 # 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。
 quote = "1"
 proc-macro2 = "1"

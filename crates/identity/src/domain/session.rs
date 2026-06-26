@@ -29,17 +29,11 @@ use vocab::TenantId;
 /// （funnel 边界 = `pub(crate)` `new`，crate 内信任，不变式同 [`super::RoleId::new`]）。当前无 wire 入口
 /// （无 logout / session-lookup handler）故不设 `parse`——按需后补（不预设未来需求）。
 ///
-/// **Debug 手写脱敏**：session id 是凭据级 bearer 标识（持有即可关联/冒充会话）——同 `application.rs` 的
-/// 「session_id 敏感、不得进 broker metadata/日志」约束，`Debug` 不得回显明文（同 [`super::AttributeValue`]
-/// / [`super::RoleBinding`] 的 redacted-Debug 范式，避免经 `{:?}` 泄漏至日志/断言）。
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct SessionId(String);
-
-impl std::fmt::Debug for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SessionId(<redacted>)")
-    }
-}
+/// **Debug 经 `secure::Redact` 字段级脱敏**：session id 是凭据级 bearer 标识（持有即可关联/冒充会话）——
+/// 同 `application.rs` 的「session_id 敏感、不得进 broker metadata/日志」约束，`Debug` 不得回显明文
+/// （同 [`super::AttributeValue`] / [`super::RoleBinding`] 的 redacted-Debug 范式，避免经 `{:?}` 泄漏至日志/断言）。
+#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+pub struct SessionId(#[redact(secret)] String);
 
 impl SessionId {
     /// 由已校验字符串构造（funnel 边界 = `pub(crate)`，crate 内信任）。
@@ -64,28 +58,22 @@ impl SessionId {
 ///
 /// `subject` 是会话主体标识，持久化为 opaque `String`。生产 login 路径写入的是 canonical actor subject
 /// （`ids::UserId` hyphenated UUID，经 `AuthOutcome::Authenticated`，#1277 F1——**非**登录标识 username）；
-/// 历史上曾为 email/UPN，故 Debug 仍手写脱敏（canonical UUID 非 PII，脱敏属防御性无害，同 [`super::RoleBinding`]）。
+/// 历史上曾为 email/UPN，故 Debug 仍经 `secure::Redact` 防御性脱敏
+/// （canonical UUID 非 PII，脱敏属防御性无害，同 [`super::RoleBinding`]）。
 /// 时间字段由注入 [`diport::Clock`] 派生（不取系统时钟，rust-standards §Clock）：`created_at` = 登录时刻，
 /// `expires_at` = 登录时刻 + session_ttl。
-#[derive(Clone)]
+#[derive(Clone, secure::Redact)]
 pub struct Session {
+    #[redact(secret)]
     id: SessionId,
+    #[redact(pii = "generic")]
     subject: String,
+    #[redact(public)]
     tenant: TenantId,
+    #[redact(public)]
     expires_at: SystemTime,
+    #[redact(public)]
     created_at: SystemTime,
-}
-
-impl std::fmt::Debug for Session {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("id", &self.id)
-            .field("subject", &"<redacted>") // 会话主体（生产为 canonical user id）；防御性脱敏（同 RoleBinding，#1277）
-            .field("tenant", &self.tenant)
-            .field("expires_at", &self.expires_at)
-            .field("created_at", &self.created_at)
-            .finish()
-    }
 }
 
 impl Session {

@@ -54,20 +54,20 @@ impl SecretResolverError {
 /// `ObjectKey` 同范式）。
 ///
 /// PII 边界（**类型层 Hard**）：`store_id` / `key` / `version` 可能内嵌租户 / 应用标识；经
-/// `#[derive(secure::Redactable)]` 字段级脱敏（每字段 `sensitivity = secret` → `Fixed`），派生 `Debug`
+/// `#[derive(secure::Redact)]` 字段级脱敏（每字段 `#[redact(secret)]` → `Fixed`），派生 `Debug`
 /// 渲染 `SecretCoordinate { store_id: <redacted>, key: <redacted>, version: <redacted> }`——使任意消费方的
 /// `{coord:?}` 不泄漏原文（#1360 替换手写 `Debug`）。
 ///
 /// `Clone`/`PartialEq`/`Eq`：坐标无状态、可安全复制 + 比较（不含材料，拷贝无 PII 泄漏风险）。
 ///
 /// INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01（回归见 `pii_debug::secret_coordinate_debug_redacts`）。
-#[derive(Clone, PartialEq, Eq, secure::Redactable)]
+#[derive(Clone, PartialEq, Eq, secure::Redact)]
 pub struct SecretCoordinate {
-    #[redact(sensitivity = secret)]
+    #[redact(secret)]
     store_id: String,
-    #[redact(sensitivity = secret)]
+    #[redact(secret)]
     key: String,
-    #[redact(sensitivity = secret)]
+    #[redact(secret)]
     version: Option<String>,
 }
 
@@ -107,13 +107,13 @@ impl SecretCoordinate {
 /// - `#[derive(zeroize::ZeroizeOnDrop)]`——drop 时自动清零，材料不在栈 / 堆上残留。
 /// - **不** derive `Clone`——无所有权逃逸路径，调用栈外不可持有副本。
 /// - **不** derive serde——永不序列化到 wire / 日志（`rss_domain_no_serialize` dylint 守护）。
-/// - **`#[derive(secure::Redactable)]`**（`sensitivity = secret` → `Fixed`）派生 `Debug` 渲染
+/// - **`#[derive(secure::Redact)]`**（`#[redact(secret)]` → `Fixed`）派生 `Debug` 渲染
 ///   `SecretMaterial(<redacted>)`——tracing / 日志采集不得经 `{:?}` 泄漏（#1360 替换手写 `Debug`）。
 /// - `expose(&self) -> &[u8]`——唯一受控借出路径，无 `into_vec` / `as_string` / `Display` owned 逃逸。
 ///
 /// INVARIANT: DIPORT-SECRETMATERIAL-PII-REDACT-01（回归见 `pii_debug::secret_material_debug_is_opaque`）。
-#[derive(zeroize::ZeroizeOnDrop, secure::Redactable)]
-pub struct SecretMaterial(#[redact(sensitivity = secret)] Vec<u8>);
+#[derive(zeroize::ZeroizeOnDrop, secure::Redact)]
+pub struct SecretMaterial(#[redact(secret)] Vec<u8>);
 
 impl SecretMaterial {
     /// 由字节构造 secret 材料（adapter 侧唯一入口）。
@@ -263,7 +263,7 @@ mod pii_debug {
     fn secret_coordinate_debug_redacts() {
         let coord = SecretCoordinate::new("vault-prod", "db/password", Some("v3".to_string()));
         let dbg = format!("{coord:?}");
-        // #[derive(Redactable)] 字段级渲染：字段名（非敏感）保留、每字段值 → <redacted>（Fixed，含 version
+        // #[derive(Redact)] 字段级渲染：字段名（非敏感）保留、每字段值 → <redacted>（Fixed，含 version
         // 不泄 Some/None）。脱敏边界不变（INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01）。
         assert_eq!(
             dbg,

@@ -5,8 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-# 字段级脱敏 derive（#[derive(Redactable)]，#1360）的 proc-macro 实现。
-# 编译期纯工具：从 `#[redact(...)]` 字段策略派生 `Redactable` + 安全 `Debug` impl，收口到
+# 字段级脱敏 derive（#[derive(Redact)]，#1360）的 proc-macro 实现。
+# 编译期纯工具：从 `#[redact(...)]` 字段策略派生 `Redact` + 安全 `Debug` impl，收口到
 # `secure` 的 `redact_struct` 公开 funnel（`Redacted::new` 仍 pub(crate) 封闭，外部不可伪造安全值）。
 # 不依赖 `secure` crate——只生成 `::secure::…` 绝对路径 token（无编译环；secure 内自用经
 # `extern crate self as secure` 解析）。intra-base DAG rank 低于 secure（layers.rs BASIS_CRATES）。

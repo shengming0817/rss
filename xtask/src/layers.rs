@@ -15,7 +15,7 @@
 /// （`vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，ADR-002 §D3 / §D1-bis）——见
 /// [`basis_intra_dag_allows`]。
 ///
-/// `securederive` 是 `secure` 的字段级脱敏 derive proc-macro（#[derive(Redactable)]，#1360）：rank 低于
+/// `securederive` 是 `secure` 的字段级脱敏 derive proc-macro（#[derive(Redact)]，#1360）：rank 低于
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
@@ -74,7 +74,7 @@ pub(crate) fn is_dev_adapter(name: &str) -> bool {
 
 /// 基础层中的 proc-macro 工具 crate（编译期纯工具，`[lib] proc-macro = true`）。归 [`BASIS_CRATES`] 供
 /// 分层分类 + intra-base DAG（`secure → securederive` 前向边），但**不是 SemVer 库 API 面**——其契约
-/// （`#[derive(Redactable)]` 的 `#[redact]` 属性 grammar + 生成 impl）由 codegen golden（trybuild
+/// （`#[derive(Redact)]` 的 `#[redact]` 属性 grammar + 生成 impl）由 codegen golden（trybuild
 /// compile-fail）守，非 `cargo public-api`。故 [`is_proc_macro`] 标记，让 `publicapi` baseline 目标排除。
 pub(crate) const PROC_MACRO_CRATES: &[&str] = &["securederive"];
 

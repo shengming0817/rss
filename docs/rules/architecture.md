@@ -53,8 +53,8 @@ rss/
 ├── crates/               # 全部库 crate，扁平（Rust 惯例，非分层目录）
 │   ├── vocab/            # error(thiserror) / authz / tenant / query（基础词汇）
 │   ├── ids/              # sealed newtype（私有字段 = 硬封）
-│   ├── securederive/    # proc-macro：#[derive(Redactable)] 字段级脱敏（intra-base DAG 低于 secure）
-│   ├── secure/           # redaction（字段级 Redactable 策略模型）/ aead / cookie / pathsafe
+│   ├── securederive/    # proc-macro：#[derive(Redact)] 字段级脱敏（intra-base DAG 低于 secure）
+│   ├── secure/           # redaction（字段级 Redact 策略模型）/ aead / cookie / pathsafe
 │   ├── support/          # http / pg / validation 杂项
 │   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
 │   ├── diagctx/          # 诊断信道 fail-open correlation（ADR-002 §D1-bis）
@@ -94,7 +94,7 @@ rss/
 
 ## 分层(crate 图 + deny.toml 编译期强制)
 
-- **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redactable)]` proc-macro,#1360；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
+- **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro,#1360；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
 - **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖 DI-infra/服务/域/adapters。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource…,签名只引基础/wire/自定义类型)+ dynosaur Dyn wrapper(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——
@@ -141,7 +141,7 @@ rss/
 | DB migration 命名空间 | `sqlx::migrate!` |
 | 依赖图导出 | `cargo tree` / `cargo-depgraph` |
 | mock(同模块)/ table-driven | `mockall` / `rstest` |
-| 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)。已落地：① `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01；完整域 crate 覆盖待 #1054)、② `rss_spawn_missing_scope`(`tokio::spawn`/`spawn_blocking` 子任务读 `runctx::try_*` 未在外层 `runctx::scope` 重绑，INVARIANT SPAWN-CTX-REBIND-01；#1031)、③ `rss_crosstenant_callsite`(`vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin` 仅 `authn` crate 可调用——跨租户 capability 签发 callsite-allowlist 下游约束,上游私有 `_seal` 字段在 vocab 为 Hard,INVARIANT TENANCY-CROSSTENANT-CAP-01；#1074)——符号/红例/盲区见各 `lints/<lint>/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（#1023 完成） |
+| 残留真要 AST 级的少数 funnel(某 callsite) | `dylint`(自写 clippy lint)。已落地：① `rss_domain_no_serialize`(domain 实体禁 derive serde `Serialize`/`Deserialize`，INVARIANT SERDE-DOMAIN-FREEZE-01；完整域 crate 覆盖待 #1054)、② `rss_spawn_missing_scope`(`tokio::spawn`/`spawn_blocking` 子任务读 `runctx::try_*` 未在外层 `runctx::scope` 重绑，INVARIANT SPAWN-CTX-REBIND-01；#1031)、③ `rss_crosstenant_callsite`(`vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin` 仅 `authn` crate 可调用——跨租户 capability 签发 callsite-allowlist 下游约束,上游私有 `_seal` 字段在 vocab 为 Hard,INVARIANT TENANCY-CROSSTENANT-CAP-01；#1074)、④ `rss_redact_debug_required`(issue #1359 高风险敏感 DTO 禁裸 `derive(Debug)`，要求 `#[derive(secure::Redact)]` 字段级脱敏，INVARIANT REDACT-DEBUG-REQUIRED-01)——符号/红例/盲区见各 `lints/<lint>/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed（#1023 完成） |
 | 治理脚本入口 | `cargo` + `xtask/` |
 | 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
 | DI port + dynosaur 收敛到定义点白名单 | `deny.toml` wrapper：`dynosaur`/`trait-variant` 只准 **DI port 定义点 crate** 依赖——白名单 = `diport`（provider-agnostic infra port）+ 定义自身 repo/service port 的域 crate（域形 port，ADR-005 Option 2，INVARIANT DIPORT-MACRO-CONFINE-01**′**；`layer-deps` `EXTERNAL_CONFINEMENT_WRAPPERS` 守白名单条目属 DiPort/Domain 层 + wrapper⟷源集合相等）。注：dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（实测，ADR-003 §8），无 forbid 例外、无 unsafe carve-out——本约束是「DI port 定义点集中」架构守卫，非 unsafe 收敛；ADR-005 把原 `-01`「单一依赖点」放宽为白名单（域形 repo port 必然多点定义，前提失效，零安全代价） |

@@ -139,24 +139,18 @@ impl Role {
 ///
 /// 多租隔离：binding 必须带 tenant（对应 casbin domain-aware RBAC）。
 ///
-/// Debug 手写 redacted：subject 可能是 email / username 等 PII，不得原文打印到日志；
+/// Debug 经 `secure::Redact` 字段级脱敏：subject 可能是 email / username 等 PII，不得原文打印到日志；
 /// role_id 和 tenant 非敏感，正常打印。
 // reason: 同 Permission（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
+#[derive(secure::Redact)]
 pub(crate) struct RoleBinding {
+    #[redact(pii = "generic")]
     subject: String,
+    #[redact(public)]
     role_id: RoleId,
+    #[redact(public)]
     tenant: vocab::TenantId,
-}
-
-impl std::fmt::Debug for RoleBinding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RoleBinding")
-            .field("subject", &"<redacted>")
-            .field("role_id", &self.role_id)
-            .field("tenant", &self.tenant)
-            .finish()
-    }
 }
 
 // reason: 同 Permission（生产调用方待 W；当前仅测试消费）。

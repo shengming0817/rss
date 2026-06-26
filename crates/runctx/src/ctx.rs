@@ -3,8 +3,6 @@
 //! 不可变快照，经 [`crate::local`] 的 `task_local!` 传播。私有字段 + 无 `Deserialize`
 //! ⇒ sealed 构造，从 request body 反序列化构造**不可表达**（ADR-002 §D5）。
 
-use std::fmt;
-
 /// 请求级授权快照——**只**装控制流值（tenant / principal），不装可观测 ID（见 crate 级文档）。
 ///
 /// 泛型 `T`（tenant）/ `P`（principal）把 runctx 对具体 payload 的耦合收敛到单一别名点：
@@ -17,11 +15,13 @@ use std::fmt;
 /// （[`PrincipalSlot`]）构造器为 `pub(crate)`，外部 crate 无法 mint principal ⇒ `AppCtx` 不可被下游伪造
 /// （ADR-002 §D5，Hard / crate 可见性；tenant 已是公有可解析的 `TenantId`，伪造门收敛到 principal 接缝）。
 ///
-/// **不 derive `Debug`**：tenant/principal 是授权 PII，手写 redacted `Debug` 只出占位，绝不打印
+/// **Debug 经 `secure::Redact` 字段级脱敏**：tenant/principal 是授权 PII，`Debug` 只出占位，绝不打印
 /// payload（ADR-002 §D1 / §威胁矩阵），杜绝 `?ctx` / 断言失败 / 临时日志泄露原值。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, secure::Redact)]
 pub struct RequestCtx<T, P> {
+    #[redact(internal)]
     tenant: T,
+    #[redact(internal)]
     principal: P,
 }
 
@@ -46,17 +46,6 @@ impl<T, P> RequestCtx<T, P> {
     }
 }
 
-// reason: 手写 redacted Debug，不打印 tenant/principal payload（授权 PII，ADR-002 §D1）；
-// 不要求 T/P: Debug，故 payload 在 Debug 通道上不可达。
-impl<T, P> fmt::Debug for RequestCtx<T, P> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RequestCtx")
-            .field("tenant", &"<redacted>")
-            .field("principal", &"<redacted>")
-            .finish()
-    }
-}
-
 /// 进程级实例化别名：`task_local!` 不能泛型，须钉死一组具体 payload 类型。
 ///
 /// tenant 已收敛为具体 [`vocab::tenant::TenantId`]（ADR-002 §D3 intra-base sub-DAG：sanctioned
@@ -68,8 +57,8 @@ pub type AppCtx = RequestCtx<vocab::tenant::TenantId, PrincipalSlot>;
 /// W 阶段由 authn 的 principal facet（trait 擦除）取代，runctx 不直接持有具体 `Principal`。
 // reason: 同上；构造 pub(crate) 收 forgeability，doc(hidden) 防误用。
 #[doc(hidden)]
-#[derive(Clone, PartialEq, Eq)]
-pub struct PrincipalSlot(String);
+#[derive(Clone, PartialEq, Eq, secure::Redact)]
+pub struct PrincipalSlot(#[redact(secret)] String);
 
 impl PrincipalSlot {
     /// 构造占位 principal（仅测试 / `test-support` feature；生产构建无构造路径 ⇒ `AppCtx`
@@ -93,12 +82,5 @@ pub mod test_support {
     /// 构造一个绑定 `tenant` 的 [`AppCtx`]，principal 槽填占位 `subject`（仅测试用）。
     pub fn app_ctx(tenant: TenantId, subject: impl Into<String>) -> AppCtx {
         RequestCtx::new(tenant, PrincipalSlot::new(subject))
-    }
-}
-
-// reason: 手写 redacted Debug —— assert_eq! 失败消息走 Debug，但 principal subject（凭据级 PII）不该裸打印。
-impl fmt::Debug for PrincipalSlot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PrincipalSlot(<redacted>)")
     }
 }

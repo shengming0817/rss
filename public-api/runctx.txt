@@ -8,6 +8,8 @@ pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
 impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
+impl<T, P> secure::redaction::Redact for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::redact(&self) -> alloc::string::String
 impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
@@ -42,6 +44,8 @@ impl<T> core::clone::CloneToUninit for runctx::ctx::RequestCtx<T, P> where T: co
 pub unsafe fn runctx::ctx::RequestCtx<T, P>::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::from(T) -> T
+impl<T> typenum::type_operators::Same for runctx::ctx::RequestCtx<T, P>
+pub type runctx::ctx::RequestCtx<T, P>::Output = T
 pub type runctx::ctx::AppCtx = runctx::ctx::RequestCtx<vocab::tenant::TenantId, PrincipalSlot>
 pub mod runctx::local
 pub struct runctx::local::MissingCtx
@@ -87,6 +91,8 @@ impl<T> core::clone::CloneToUninit for runctx::local::MissingCtx where T: core::
 pub unsafe fn runctx::local::MissingCtx::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for runctx::local::MissingCtx
 pub fn runctx::local::MissingCtx::from(T) -> T
+impl<T> typenum::type_operators::Same for runctx::local::MissingCtx
+pub type runctx::local::MissingCtx::Output = T
 pub fn runctx::local::scope<F>(runctx::ctx::AppCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
 pub fn runctx::local::try_current() -> core::result::Result<runctx::ctx::AppCtx, runctx::local::MissingCtx>
 pub fn runctx::local::try_with<R>(impl core::ops::function::FnOnce(&runctx::ctx::AppCtx) -> R) -> core::result::Result<R, runctx::local::MissingCtx>
@@ -133,6 +139,8 @@ impl<T> core::clone::CloneToUninit for runctx::local::MissingCtx where T: core::
 pub unsafe fn runctx::local::MissingCtx::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for runctx::local::MissingCtx
 pub fn runctx::local::MissingCtx::from(T) -> T
+impl<T> typenum::type_operators::Same for runctx::local::MissingCtx
+pub type runctx::local::MissingCtx::Output = T
 pub struct runctx::RequestCtx<T, P>
 impl<T, P> runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::new(T, P) -> Self
@@ -141,6 +149,8 @@ pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
 impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
+impl<T, P> secure::redaction::Redact for runctx::ctx::RequestCtx<T, P>
+pub fn runctx::ctx::RequestCtx<T, P>::redact(&self) -> alloc::string::String
 impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
@@ -175,6 +185,8 @@ impl<T> core::clone::CloneToUninit for runctx::ctx::RequestCtx<T, P> where T: co
 pub unsafe fn runctx::ctx::RequestCtx<T, P>::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::from(T) -> T
+impl<T> typenum::type_operators::Same for runctx::ctx::RequestCtx<T, P>
+pub type runctx::ctx::RequestCtx<T, P>::Output = T
 pub fn runctx::scope<F>(runctx::ctx::AppCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
 pub fn runctx::try_current() -> core::result::Result<runctx::ctx::AppCtx, runctx::local::MissingCtx>
 pub fn runctx::try_with<R>(impl core::ops::function::FnOnce(&runctx::ctx::AppCtx) -> R) -> core::result::Result<R, runctx::local::MissingCtx>

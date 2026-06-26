@@ -1,5 +1,5 @@
 pub mod secure
-pub use secure::Redactable
+pub use secure::Redact
 pub mod secure::aead
 #[non_exhaustive] pub enum secure::aead::AeadError
 pub secure::aead::AeadError::Open
@@ -48,7 +48,7 @@ pub fn secure::aead::Ciphertext::eq(&self, &secure::aead::Ciphertext) -> bool
 impl core::fmt::Debug for secure::aead::Ciphertext
 pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
-impl secure::redaction::Redactable for secure::aead::Ciphertext
+impl secure::redaction::Redact for secure::aead::Ciphertext
 pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
 impl core::marker::Freeze for secure::aead::Ciphertext
 impl core::marker::Send for secure::aead::Ciphertext
@@ -167,7 +167,7 @@ pub fn secure::cookie::CookieValue::eq(&self, &secure::cookie::CookieValue) -> b
 impl core::fmt::Debug for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::cookie::CookieValue
-impl secure::redaction::Redactable for secure::cookie::CookieValue
+impl secure::redaction::Redact for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
 impl core::marker::Freeze for secure::cookie::CookieValue
 impl core::marker::Send for secure::cookie::CookieValue
@@ -250,7 +250,7 @@ pub fn secure::password::PasswordHash::eq(&self, &secure::password::PasswordHash
 impl core::fmt::Debug for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::password::PasswordHash
-impl secure::redaction::Redactable for secure::password::PasswordHash
+impl secure::redaction::Redact for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
 impl core::marker::Freeze for secure::password::PasswordHash
 impl core::marker::Send for secure::password::PasswordHash
@@ -340,6 +340,7 @@ pub type secure::redaction::PiiKind::Output = T
 pub enum secure::redaction::RedactValue<'a>
 pub secure::redaction::RedactValue::Absent
 pub secure::redaction::RedactValue::Bytes(&'a [u8])
+pub secure::redaction::RedactValue::Debug(&'a dyn core::fmt::Debug)
 pub secure::redaction::RedactValue::Str(&'a str)
 impl<'a> core::clone::Clone for secure::redaction::RedactValue<'a>
 pub fn secure::redaction::RedactValue<'a>::clone(&self) -> secure::redaction::RedactValue<'a>
@@ -347,12 +348,12 @@ impl<'a> core::fmt::Debug for secure::redaction::RedactValue<'a>
 pub fn secure::redaction::RedactValue<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::Copy for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::Freeze for secure::redaction::RedactValue<'a>
-impl<'a> core::marker::Send for secure::redaction::RedactValue<'a>
-impl<'a> core::marker::Sync for secure::redaction::RedactValue<'a>
+impl<'a> !core::marker::Send for secure::redaction::RedactValue<'a>
+impl<'a> !core::marker::Sync for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::Unpin for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::RedactValue<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactValue<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactValue<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactValue<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactValue<'a>
 impl<T, U> core::convert::Into<U> for secure::redaction::RedactValue<'a> where U: core::convert::From<T>
 pub fn secure::redaction::RedactValue<'a>::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactValue<'a> where U: core::convert::Into<T>
@@ -484,12 +485,12 @@ impl<'a> core::fmt::Debug for secure::redaction::FieldRedaction<'a>
 pub fn secure::redaction::FieldRedaction<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::Copy for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::Freeze for secure::redaction::FieldRedaction<'a>
-impl<'a> core::marker::Send for secure::redaction::FieldRedaction<'a>
-impl<'a> core::marker::Sync for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::marker::Send for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::marker::Sync for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::Unpin for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::FieldRedaction<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::redaction::FieldRedaction<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::FieldRedaction<'a>
 impl<T, U> core::convert::Into<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::From<T>
 pub fn secure::redaction::FieldRedaction<'a>::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::Into<T>
@@ -606,6 +607,14 @@ impl<T> core::convert::From<T> for secure::redaction::RedactionCtx
 pub fn secure::redaction::RedactionCtx::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::RedactionCtx
 pub type secure::redaction::RedactionCtx::Output = T
+pub trait secure::redaction::Redact
+pub fn secure::redaction::Redact::redact(&self) -> alloc::string::String
+impl secure::redaction::Redact for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
+impl secure::redaction::Redact for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
+impl secure::redaction::Redact for secure::password::PasswordHash
+pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
 pub trait secure::redaction::RedactField
 pub fn secure::redaction::RedactField::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
 impl secure::redaction::RedactField for [u8]
@@ -618,14 +627,6 @@ impl secure::redaction::RedactField for str
 pub fn str::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
 impl<T: secure::redaction::RedactField> secure::redaction::RedactField for core::option::Option<T>
 pub fn core::option::Option<T>::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
-pub trait secure::redaction::Redactable
-pub fn secure::redaction::Redactable::redact(&self) -> alloc::string::String
-impl secure::redaction::Redactable for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
-impl secure::redaction::Redactable for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
-impl secure::redaction::Redactable for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
 pub trait secure::redaction::Redactor
 pub fn secure::redaction::Redactor::redact(&self, &str) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
@@ -855,6 +856,7 @@ pub type secure::redaction::PiiKind::Output = T
 pub enum secure::RedactValue<'a>
 pub secure::RedactValue::Absent
 pub secure::RedactValue::Bytes(&'a [u8])
+pub secure::RedactValue::Debug(&'a dyn core::fmt::Debug)
 pub secure::RedactValue::Str(&'a str)
 impl<'a> core::clone::Clone for secure::redaction::RedactValue<'a>
 pub fn secure::redaction::RedactValue<'a>::clone(&self) -> secure::redaction::RedactValue<'a>
@@ -862,12 +864,12 @@ impl<'a> core::fmt::Debug for secure::redaction::RedactValue<'a>
 pub fn secure::redaction::RedactValue<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::Copy for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::Freeze for secure::redaction::RedactValue<'a>
-impl<'a> core::marker::Send for secure::redaction::RedactValue<'a>
-impl<'a> core::marker::Sync for secure::redaction::RedactValue<'a>
+impl<'a> !core::marker::Send for secure::redaction::RedactValue<'a>
+impl<'a> !core::marker::Sync for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::Unpin for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::RedactValue<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactValue<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactValue<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactValue<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactValue<'a>
 impl<T, U> core::convert::Into<U> for secure::redaction::RedactValue<'a> where U: core::convert::From<T>
 pub fn secure::redaction::RedactValue<'a>::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactValue<'a> where U: core::convert::Into<T>
@@ -1001,7 +1003,7 @@ pub fn secure::aead::Ciphertext::eq(&self, &secure::aead::Ciphertext) -> bool
 impl core::fmt::Debug for secure::aead::Ciphertext
 pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
-impl secure::redaction::Redactable for secure::aead::Ciphertext
+impl secure::redaction::Redact for secure::aead::Ciphertext
 pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
 impl core::marker::Freeze for secure::aead::Ciphertext
 impl core::marker::Send for secure::aead::Ciphertext
@@ -1046,7 +1048,7 @@ pub fn secure::cookie::CookieValue::eq(&self, &secure::cookie::CookieValue) -> b
 impl core::fmt::Debug for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::cookie::CookieValue
-impl secure::redaction::Redactable for secure::cookie::CookieValue
+impl secure::redaction::Redact for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
 impl core::marker::Freeze for secure::cookie::CookieValue
 impl core::marker::Send for secure::cookie::CookieValue
@@ -1089,12 +1091,12 @@ impl<'a> core::fmt::Debug for secure::redaction::FieldRedaction<'a>
 pub fn secure::redaction::FieldRedaction<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::Copy for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::Freeze for secure::redaction::FieldRedaction<'a>
-impl<'a> core::marker::Send for secure::redaction::FieldRedaction<'a>
-impl<'a> core::marker::Sync for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::marker::Send for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::marker::Sync for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::Unpin for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::FieldRedaction<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::redaction::FieldRedaction<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::FieldRedaction<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::FieldRedaction<'a>
 impl<T, U> core::convert::Into<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::From<T>
 pub fn secure::redaction::FieldRedaction<'a>::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::Into<T>
@@ -1162,7 +1164,7 @@ pub fn secure::password::PasswordHash::eq(&self, &secure::password::PasswordHash
 impl core::fmt::Debug for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::password::PasswordHash
-impl secure::redaction::Redactable for secure::password::PasswordHash
+impl secure::redaction::Redact for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
 impl core::marker::Freeze for secure::password::PasswordHash
 impl core::marker::Send for secure::password::PasswordHash
@@ -1293,6 +1295,14 @@ pub fn secure::Aead::seal(&self, &[u8]) -> core::result::Result<secure::aead::Ci
 pub trait secure::CookieCodec
 pub fn secure::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
 pub fn secure::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
+pub trait secure::Redact
+pub fn secure::Redact::redact(&self) -> alloc::string::String
+impl secure::redaction::Redact for secure::aead::Ciphertext
+pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
+impl secure::redaction::Redact for secure::cookie::CookieValue
+pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
+impl secure::redaction::Redact for secure::password::PasswordHash
+pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
 pub trait secure::RedactField
 pub fn secure::RedactField::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
 impl secure::redaction::RedactField for [u8]
@@ -1305,14 +1315,6 @@ impl secure::redaction::RedactField for str
 pub fn str::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
 impl<T: secure::redaction::RedactField> secure::redaction::RedactField for core::option::Option<T>
 pub fn core::option::Option<T>::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
-pub trait secure::Redactable
-pub fn secure::Redactable::redact(&self) -> alloc::string::String
-impl secure::redaction::Redactable for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
-impl secure::redaction::Redactable for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
-impl secure::redaction::Redactable for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
 pub trait secure::Redactor
 pub fn secure::Redactor::redact(&self, &str) -> secure::redaction::Redacted
 pub fn secure::digest(&str) -> [u8; 32]

@@ -1,0 +1,5 @@
+error: 未知 pii kind `vip`：支持 generic / email / phone / name / address
+ --> tests/ui/unknown_pii_kind.rs:7:20
+  |
+7 |     #[redact(pii = "vip")]
+  |                    ^^^^^

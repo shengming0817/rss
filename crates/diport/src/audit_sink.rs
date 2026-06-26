@@ -57,65 +57,37 @@ pub enum AuditOutcome {
 /// `principal_id` / `resource_id` 待 typed id（W 阶段）。
 /// `correlation_id` 为跨服务关联 ID（由 outbox envelope correlation 注入），与 `request_id`（单次 HTTP
 /// 请求追踪）不同语义。
-#[derive(Clone)]
+#[derive(Clone, secure::Redact)]
 pub struct AuditEvent {
     /// 事件发生时刻（由注入 [`crate::Clock`] 取得，非本类型直取系统时钟）。
     /// Clock 纪律由 caller 侧 `clippy.toml` `disallowed-methods`（`SystemTime::now`）在调用点静态拦截
     /// （Medium）；DI-infra 本类型不带构造强制（pub 字段，typed ctor 留 W 阶段）。
+    #[redact(public)]
     pub occurred_at: std::time::SystemTime,
     /// 操作主体标识。待 typed id（W 阶段）。
+    #[redact(pii = "generic")]
     pub principal_id: String,
     /// 租户标识（非空 canonical UUID，tenancy.md fail-closed）。
+    #[redact(public)]
     pub tenant_id: vocab::TenantId,
     /// 资源类别（const literal）。
+    #[redact(public)]
     pub resource_kind: &'static str,
     /// 资源标识。待 typed id（W 阶段）。
+    #[redact(pii = "generic")]
     pub resource_id: String,
     /// 操作动作（const literal）。
+    #[redact(public)]
     pub action: &'static str,
     /// 操作结果。
+    #[redact(public)]
     pub outcome: AuditOutcome,
     /// 单次 HTTP 请求追踪 ID。
+    #[redact(internal)]
     pub request_id: Option<String>,
     /// 跨服务关联 ID，由 outbox envelope correlation 注入，与 request_id 不同语义。
+    #[redact(internal)]
     pub correlation_id: Option<String>,
-}
-
-/// PII 边界（类型层 Hard，对标 [`crate::RateLimitError`] / `identity::RoleBinding` / `audit::ResourceRef`）：
-/// 手写 `Debug` 对 PII / 不可信 runtime 字段输出 `<redacted>`，使 `{event:?}` / `?event`（tracing）不泄漏；
-/// 审计记录**落存储后**字段有合法用途——本脱敏只隔离 Debug / tracing 暴露路径，不影响 sink 持久化。
-///
-/// **脱敏字段**：
-/// - `principal_id`（subject = email / UPN / sub claim，PII）/ `resource_id`：固定 `<redacted>`；
-/// - `request_id` / `correlation_id`：值脱敏为 `<redacted>`、仅保留 `Some` / `None` 存在性。语义虽是不透明
-///   追踪 ID，但类型是公开裸 `Option<String>`（无 typed 构造 funnel，caller 可塞入 header / runtime 敏感
-///   值）——零信任下不信约定信类型，故 Debug 一律脱敏（typed opaque ID funnel 待 W 阶段 typed-id 兑现）。
-///
-/// **可观测字段**（经威胁模型判非个人 PII）：`tenant_id`（org 级 canonical UUID，多租户排障须知「哪个租户」，
-/// 对标 `RoleBinding` 仍显示 tenant）/ `resource_kind` / `action` / `outcome`（const literal / enum，无 runtime 数据）。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for AuditEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuditEvent")
-            .field("occurred_at", &self.occurred_at)
-            .field("principal_id", &"<redacted>")
-            .field("tenant_id", &self.tenant_id)
-            .field("resource_kind", &self.resource_kind)
-            .field("resource_id", &"<redacted>")
-            .field("action", &self.action)
-            .field("outcome", &self.outcome)
-            // 值脱敏、仅留 Some/None：裸 Option<String> 无 typed 保证不含敏感值（零信任）。
-            .field(
-                "request_id",
-                &self.request_id.as_deref().map(|_| "<redacted>"),
-            )
-            .field(
-                "correlation_id",
-                &self.correlation_id.as_deref().map(|_| "<redacted>"),
-            )
-            .finish()
-    }
 }
 
 /// 审计事件接收 provider DI port（async）。
@@ -231,7 +203,7 @@ mod smoke {
 mod pii_debug {
     //! `AuditEvent` Debug 脱敏回归：`principal_id`（subject=PII）/ `resource_id` + 裸 `Option<String>`
     //! 追踪 ID（`request_id` / `correlation_id`，无 typed funnel）不进 Debug/tracing。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（手写 Debug 脱敏 PII；对标 `RateLimitError` /
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（derive Redact 脱敏 PII；对标 `RateLimitError` /
     //! `identity::RoleBinding` / `audit::ResourceRef`）。
     use super::{AuditEvent, AuditOutcome};
 
@@ -267,8 +239,15 @@ mod pii_debug {
             "correlation_id 值泄漏: {dbg}"
         );
         assert!(dbg.contains("<redacted>"), "缺 <redacted> 占位: {dbg}");
-        // 仅保留 Some/None 存在性（值已脱敏）
-        assert!(dbg.contains("Some"), "应保留 request_id 存在性 Some: {dbg}");
+        // internal 字段固定脱敏，不暴露 Option 的 Some/None 存在性。
+        assert!(
+            dbg.contains("request_id: <redacted>"),
+            "request_id 应固定脱敏: {dbg}"
+        );
+        assert!(
+            dbg.contains("correlation_id: <redacted>"),
+            "correlation_id 应固定脱敏: {dbg}"
+        );
         // 非 PII 字段仍可观测（诊断价值）
         assert!(dbg.contains("login"), "action 应可见: {dbg}");
         assert!(dbg.contains("session"), "resource_kind 应可见: {dbg}");

@@ -38,7 +38,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 
 ### 依赖规则（crate 图 + deny.toml 编译期强制）
 
-- **基础**（`vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`）依赖 std + 外部 crate，不依赖引擎 / 服务 / 域 / adapters；基础层内部按 enumerated intra-base DAG 单向依赖（`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，右可依赖左 = 前向边均 sanctioned、反向禁止；`diagctx` 为独立根、不依赖其它基础 crate；`cargo xtask layer-deps` 机器守 BASE-INTRADAG-01），现有前向边 `runctx → vocab`（`AppCtx` tenant payload = `vocab::tenant::TenantId`，ADR-002 §D3 决策 #2）与 `secure → securederive`（字段级脱敏 `#[derive(Redactable)]` proc-macro，#1360）。
+- **基础**（`vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`）依赖 std + 外部 crate，不依赖引擎 / 服务 / 域 / adapters；基础层内部按 enumerated intra-base DAG 单向依赖（`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，右可依赖左 = 前向边均 sanctioned、反向禁止；`diagctx` 为独立根、不依赖其它基础 crate；`cargo xtask layer-deps` 机器守 BASE-INTRADAG-01），现有前向边 `runctx → vocab`（`AppCtx` tenant payload = `vocab::tenant::TenantId`，ADR-002 §D3 决策 #2）与 `secure → securederive`（字段级脱敏 `#[derive(Redact)]` proc-macro，#1359/#1360）。
 - **引擎/原语**（`consistency`/`primitives`）依赖基础；不依赖服务 / 域 / adapters。
 - **服务**（`httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`）依赖基础 + 引擎；不依赖域 / adapters。
 - **域**（`identity`/`settings`/…）依赖基础 + 引擎 + 服务 + `generated`；**互不依赖**（跨域只经 contract）；不依赖 adapters。

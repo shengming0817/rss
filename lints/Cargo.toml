@@ -16,4 +16,5 @@ members = [
   "rss_projection_append_only",
   "rss_partition_serial_allowlist",
   "rss_diport_envelope_reserved_writer",
+  "rss_redact_debug_required",
 ]

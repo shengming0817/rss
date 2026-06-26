@@ -25,14 +25,15 @@ trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redact
 - tracing subscriber 对敏感 field 做统一清洗。
 - `last_error` 持久化走同一 `secure` crate（redaction 模块）。
 
-**字段级脱敏策略模型（#1360）**：任意 struct 字段经 `#[derive(secure::Redactable)]` + 字段属性显式声明策略，
+**字段级脱敏策略模型（#1359/#1360）**：任意 struct 字段经 `#[derive(secure::Redact)]` + 字段属性显式声明策略，
 派生安全 `Debug`（替换各 crate 手写脱敏 `Debug`，从输入类型层声明而非仅输出边界清洗）：
 
-- `#[redact(mode = …)]`：模式集 `secure::RedactionMode` = `fixed`（`<redacted>`）/ `last4` / `email_mask` /
-  `hash`（确定性不可逆 `sha256:` 截断摘要，PII 可关联不可还原）/ `drop`（剔除字段）/ `show`（仅非敏感）。
-- `#[redact(sensitivity = public|internal|pii|secret)]`：声明敏感度，`sensitivity → mode` 默认映射单源在
-  `secure::Sensitivity::default_mode`（`internal`/`secret`/多数 `pii` → `fixed`，fail-closed）。
-- **fail-closed（Hard）**：字段缺 `#[redact]` 标注、或 `secret`/`pii` 误配 `mode = show` 均编译错误
+- 敏感度必须逐字段显式声明且只能声明一个：`#[redact(public)]` / `#[redact(internal)]` /
+  `#[redact(secret)]` / `#[redact(pii = "generic|email|phone|name|address")]`。
+- 可选 `mode = "show|fixed|last4|email_mask|hash|drop"`；`public` 默认 `show`，`internal`/`secret`
+  默认 `fixed`，`pii` 默认由 `secure::PiiKind::default_mode()` 决定。
+- **fail-closed（Hard）**：字段缺 `#[redact]` 标注、重复敏感度、未知 pii kind、未知 mode、或非 public
+  字段误配 `mode = "show"`、`pii` 误配 `mode = "hash"` 均编译错误；低熵 PII 不得用无盐 hash 脱敏
   （compile-fail golden 守，`crates/securederive/tests/ui/`）；`Redacted::new` 仍 `pub(crate)` 封闭，derive 经
   公开 funnel `secure::redact_struct` 产出，外部不可伪造安全值。
 

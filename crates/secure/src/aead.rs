@@ -8,10 +8,10 @@ pub trait Aead {
     fn open(&self, ciphertext: &Ciphertext) -> Result<Vec<u8>, AeadError>;
 }
 
-/// 密文容器（私有字段）。`Debug` 经 `#[derive(Redactable)]` 字段级脱敏（密文物料 → `<redacted>`，
+/// 密文容器（私有字段）。`Debug` 经 `#[derive(Redact)]` 字段级脱敏（密文物料 → `<redacted>`，
 /// 渲染 `Ciphertext(<redacted>)`），替换手写 impl（#1360）。
-#[derive(Clone, PartialEq, Eq, secure::Redactable)]
-pub struct Ciphertext(#[redact(sensitivity = secret)] Vec<u8>);
+#[derive(Clone, PartialEq, Eq, secure::Redact)]
+pub struct Ciphertext(#[redact(secret)] Vec<u8>);
 
 impl Ciphertext {
     /// 由密文字节构造（受控 funnel）。供 [`Aead`] 实现方（adapter）在 `seal` 中返回密文容器。

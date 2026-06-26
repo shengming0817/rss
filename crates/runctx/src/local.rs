@@ -194,7 +194,7 @@ mod tests {
 
     // principal slot 的 Debug 脱敏（assert_eq! 失败消息走 Debug，principal subject 是凭据级 PII，不裸打印）。
     // 注：`TenantId` Debug 为 derived（打印 UUID）——tenant id 是合法可观测标识（observ span 字段），非凭据，
-    // 有意不脱敏；RequestCtx 的手写 Debug 仍对 tenant/principal 统一出 `<redacted>`（见上 test）。
+    // 有意不脱敏；RequestCtx 的 `secure::Redact` 派生仍对 tenant/principal 统一出 `<redacted>`（见上 test）。
     #[test]
     fn principal_slot_debug_is_redacted() {
         assert!(!format!("{:?}", PrincipalSlot::new("SECRET")).contains("SECRET"));

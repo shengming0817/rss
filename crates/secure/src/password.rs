@@ -28,10 +28,10 @@ pub enum PasswordError {
 /// 字段私有 + `Debug` 脱敏 + **不 derive serde**：哈希物料是离线爆破目标，按敏感值收口。明文密码永不
 /// 进入此类型。[`as_str`](Self::as_str) 暴露 PHC 供持久化（adapter 存库 / [`parse`](Self::parse) 回读），
 /// 但 `Debug` 始终脱敏，杜绝随结构体打印泄漏。
-/// `Debug` 经 `#[derive(Redactable)]` 字段级脱敏（PHC 物料 → `<redacted>`，渲染 `PasswordHash(<redacted>)`），
+/// `Debug` 经 `#[derive(Redact)]` 字段级脱敏（PHC 物料 → `<redacted>`，渲染 `PasswordHash(<redacted>)`），
 /// 替换手写 impl（#1360）。
-#[derive(Clone, PartialEq, Eq, secure::Redactable)]
-pub struct PasswordHash(#[redact(sensitivity = secret)] String);
+#[derive(Clone, PartialEq, Eq, secure::Redact)]
+pub struct PasswordHash(#[redact(secret)] String);
 
 impl PasswordHash {
     /// 持久化 PHC 字符串（adapter 存库时读取——不含明文，含 argon2 摘要 + 参数 + 盐）。

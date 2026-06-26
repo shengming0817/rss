@@ -1,0 +1,67 @@
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:8:1
+   |
+LL | struct AuditEvent {
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = note: `#[warn(rss_redact_debug_required)]` on by default
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:13:1
+   |
+LL | struct RoleBinding {
+   | ^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:18:1
+   |
+LL | struct Session {
+   | ^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:23:1
+   |
+LL | struct SessionId(String);
+   | ^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:26:1
+   |
+LL | struct RequestCtx {
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:31:1
+   |
+LL | struct PrincipalSlot(String);
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:34:1
+   |
+LL | struct SecretMaterial(Vec<u8>);
+   | ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 高风险敏感 DTO 不得裸 derive(Debug)
+  --> $DIR/main.rs:37:1
+   |
+LL | struct SecretCoordinate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+
+warning: 8 warnings emitted
+

@@ -5,14 +5,14 @@
 //!   [`redact_url_credentials`]（剥 URL userinfo）——span error / tracing sink / last_error 一律经此收口
 //!   （`docs/rules/observability.md` §redaction），敏感 key 判定与 free-form scrub 不散落各 consumer。
 //! - **字段级策略模型**（#1360）：[`Sensitivity`] / [`PiiKind`] / [`RedactionMode`] / [`RedactionCtx`] /
-//!   [`Redactable`] + 公开 funnel [`redact_struct`]。配 `#[derive(Redactable)]`（securederive）让任意 struct
+//!   [`Redact`] + 公开 funnel [`redact_struct`]。配 `#[derive(Redact)]`（securederive）让任意 struct
 //!   字段**显式声明** public / internal / pii / secret 与脱敏模式，派生安全 `Debug`——替换各 crate 手写 `Debug`。
 //!
 //! `redact_field` 的 key 判敏感逻辑已**单源**进 [`Sensitivity::from_key`]，`Redacted::new` 仍 `pub(crate)`
 //! 封闭（外部只经公开 funnel 取 `Redacted`，不可伪造安全值）。
 
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
+use std::fmt::{Debug, Write as _};
 
 /// 敏感 key 关键字白名单（小写包含匹配）。由 [`Sensitivity::from_key`] 单源消费。
 const SENSITIVE_KEY_PATTERNS: &[&str] = &[
@@ -70,7 +70,7 @@ impl Redacted {
     /// [`redact_error`] / [`redact_field`] / [`redact_url_credentials`] 这些**固定语义** `pub` sink
     /// funnel 取得 `Redacted`——它们均**先施加脱敏**再 wrap，外部不可伪造任意「安全值」。
     ///
-    /// 注意 [`redact_struct`] / [`Redactable::redact`] / [`RedactionCtx::apply`] 返回**裸 `String`** 而非
+    /// 注意 [`redact_struct`] / [`Redact::redact`] / [`RedactionCtx::apply`] 返回**裸 `String`** 而非
     /// `Redacted`（#1360 F1）：它们的 mode 由调用方 / 类型作者选择（含 `Show`），不享「已脱敏安全值」语义，
     /// 故不经本封闭构造口——避免 `Show + 任意明文` 成外部 mint `Redacted` 的旁路。
     pub(crate) fn new(redacted: impl Into<String>) -> Self {
@@ -133,7 +133,7 @@ pub enum RedactionMode {
     ///
     /// **仅适用于高熵输入**（UUID / 随机 token / 高熵 secret）：48 bit 截断 SHA-256 **无盐**，对低熵 PII
     /// （手机号 / 邮编 / 短验证码）攻击者可预计算全空间反推，**禁用于低熵字段**——低熵 PII 用
-    /// [`Fixed`](Self::Fixed) / [`Last4`](Self::Last4)。`sensitivity` 默认映射从不选 Hash（须显式 `mode = hash`）。
+    /// [`Fixed`](Self::Fixed) / [`Last4`](Self::Last4)。`sensitivity` 默认映射从不选 Hash（须显式 `mode = "hash"`）。
     Hash,
     /// 从输出剔除该字段。
     Drop,
@@ -154,7 +154,7 @@ impl Sensitivity {
         }
     }
 
-    /// 该敏感度的默认脱敏 mode（`sensitivity → mode` 单源映射；`#[derive(Redactable)]` 对只给
+    /// 该敏感度的默认脱敏 mode（`sensitivity → mode` 单源映射；`#[derive(Redact)]` 对只给
     /// `sensitivity` 的字段经此解析最终 mode，不在宏内复制映射）。fail-closed：`Internal`/`Secret`/多数
     /// `Pii` → `Fixed`。
     pub const fn default_mode(self) -> RedactionMode {
@@ -185,11 +185,14 @@ pub enum RedactValue<'a> {
     Str(&'a str),
     /// 字节字段（如密钥物料 / 密文）。
     Bytes(&'a [u8]),
+    /// 仅供结构化 `Debug` 上下文的非敏感字段：按字段自身 `Debug` 渲染，避免给 public 字段新增
+    /// `RedactField` impl。
+    Debug(&'a dyn Debug),
     /// 缺省字段（`Option::None`）。
     Absent,
 }
 
-/// 把字段借出为 [`RedactValue`]。`#[derive(Redactable)]` 经此统一取字段原值，再由 mode 脱敏；
+/// 把字段借出为 [`RedactValue`]。`#[derive(Redact)]` 经此统一取字段原值，再由 mode 脱敏；
 /// 实现覆盖常见字段类型（`String` / `str` / `Vec<u8>` / `[u8]` / `Option<T>`）。
 pub trait RedactField {
     /// 借出本字段的脱敏输入视图。
@@ -249,8 +252,9 @@ fn mask_show(value: RedactValue<'_>) -> String {
         // 单值上下文（redact_field 非敏感原样）返回原值；结构化 Debug 上下文的转义由 redact_struct
         //（#1360 F3）按 mode 施加，不在此统一转义以免破坏 redact_field 的 verbatim 语义。
         RedactValue::Str(s) => s.to_string(),
-        // Bytes 即便声明 Show 也不回显原始字节（仅长度供诊断）；Absent → None。
+        // Bytes 即便声明 Show 也不回显原始字节（仅长度供诊断）；Debug 仅用于结构化上下文。
         RedactValue::Bytes(b) => format!("[{} bytes]", b.len()),
+        RedactValue::Debug(v) => format!("{v:?}"),
         RedactValue::Absent => "None".to_string(),
     }
 }
@@ -290,8 +294,8 @@ fn mask_hash(value: RedactValue<'_>) -> String {
     match value {
         RedactValue::Str(s) => hasher.update(s.as_bytes()),
         RedactValue::Bytes(b) => hasher.update(b),
-        // 无值可哈希 ⇒ fail-closed 固定占位（不回显 None 暴露缺省）。
-        RedactValue::Absent => return REDACTED_PLACEHOLDER.to_string(),
+        // 无值 / Debug-only 视图不可哈希 ⇒ fail-closed 固定占位。
+        RedactValue::Absent | RedactValue::Debug(_) => return REDACTED_PLACEHOLDER.to_string(),
     }
     let digest = hasher.finalize();
     // 截断 HASH_TRUNCATE_BYTES 字节（= 12 hex 字符）：足够关联、不可逆、不回显全摘要。
@@ -340,7 +344,7 @@ impl RedactionCtx {
     }
 }
 
-/// `#[derive(Redactable)]` 为每字段产出的脱敏描述符（字段名 + mode + 字段原值视图）。
+/// `#[derive(Redact)]` 为每字段产出的脱敏描述符（字段名 + mode + 字段原值视图）。
 #[derive(Debug, Clone, Copy)]
 pub struct FieldRedaction<'a> {
     /// `Some("name")`（named 字段）/ `None`（tuple 字段，位置式渲染）。
@@ -351,22 +355,22 @@ pub struct FieldRedaction<'a> {
     pub value: RedactValue<'a>,
 }
 
-/// 字段级脱敏上游模型：类型声明自身字段策略，产出已脱敏的 `Debug` 渲染 `String`。由 `#[derive(Redactable)]`
+/// 字段级脱敏上游模型：类型声明自身字段策略，产出已脱敏的 `Debug` 渲染 `String`。由 `#[derive(Redact)]`
 /// 实现（生成的 `Debug` 委托 `self.redact()`）。
 ///
 /// 返回 `String` 而非 [`Redacted`]（#1360 F1）：`redact` 是 `Debug` 渲染 helper，非「安全值」产出口——
 /// 字段 mode 由类型作者声明（含 `Show`），若返回 `Redacted` 则任意类型经 `Show` 字段即可 mint 可 Display
 /// 的 `Redacted`，绕开封闭面。`Redacted` 仅由固定语义 sink funnel 产出（见 [`RedactionCtx::apply`]）。
-pub trait Redactable {
+pub trait Redact {
     /// 按字段策略脱敏自身，返回 `Debug` 渲染片段。
     fn redact(&self) -> String;
 }
 
-/// 字段级脱敏渲染 funnel（`#[derive(Redactable)]` 调用）。对每字段 apply 声明的 mode、按 tuple / named
+/// 字段级脱敏渲染 funnel（`#[derive(Redact)]` 调用）。对每字段 apply 声明的 mode、按 tuple / named
 /// 形态渲染成已脱敏 `String`。`Drop` 字段从输出剔除。
 ///
 /// **返回 `String` 而非 [`Redacted`]（#1360 F1，封闭面收窄）**：本函数须 `pub`（derive 在 diport 等
-/// 外部 crate 生成的 `impl Redactable` 调它），且字段 mode 由调用方传入（含 `Show`+任意 `value`）；若返回
+/// 外部 crate 生成的 `impl Redact` 调它），且字段 mode 由调用方传入（含 `Show`+任意 `value`）；若返回
 /// `Redacted` 则成外部 mint「安全值」的旁路。`Redacted` 改由固定语义 sink funnel 经 `pub(crate)`
 /// [`Redacted::new`] 独家产出——类型层封闭，外部不可伪造。
 /// 结构化 Debug 上下文的单字段渲染：先按 mode 脱敏，再对 `Show` 字段 Debug-转义（#1360 F3）——
@@ -375,7 +379,11 @@ pub trait Redactable {
 fn render_field(mode: RedactionMode, value: RedactValue<'_>) -> String {
     let masked = mode.mask(value);
     if mode == RedactionMode::Show {
-        format!("{masked:?}")
+        if matches!(value, RedactValue::Debug(_)) {
+            masked
+        } else {
+            format!("{masked:?}")
+        }
     } else {
         masked
     }
@@ -823,37 +831,38 @@ mod tests {
         assert_eq!(r.as_str(), "T");
     }
 
-    // --- #[derive(Redactable)] 端到端（secure 内自用，验证派生 Debug + 多 mode 渲染）---
+    // --- #[derive(Redact)] 端到端（secure 内自用，验证派生 Debug + 多 mode 渲染）---
 
-    #[derive(secure::Redactable)]
-    struct DerivedNewtype(#[redact(sensitivity = secret)] Vec<u8>);
+    #[allow(dead_code)]
+    #[derive(secure::Redact)]
+    struct DerivedNewtype(#[redact(secret)] Vec<u8>);
 
-    #[derive(secure::Redactable)]
-    // `gone`（mode = drop）经 F2 后取 RedactValue::Absent、不被 redact 读取 ⇒ field never read。
+    #[derive(secure::Redact)]
+    // `gone`（mode = "drop"）经 F2 后取 RedactValue::Absent、不被 redact 读取 ⇒ field never read。
     #[allow(dead_code)]
     struct DerivedMixed {
-        #[redact(mode = show)]
+        #[redact(public, mode = "show")]
         visible: String,
-        #[redact(sensitivity = secret)]
+        #[redact(secret)]
         secret: String,
-        #[redact(mode = last4)]
+        #[redact(pii = "phone", mode = "last4")]
         card: String,
-        #[redact(mode = email_mask)]
+        #[redact(pii = "email", mode = "email_mask")]
         email: String,
-        #[redact(mode = drop)]
+        #[redact(secret, mode = "drop")]
         gone: String,
     }
 
-    // F2 回归（#1360）：自定义类型字段标显式 `mode = fixed`/`drop` **不要求** impl `RedactField`
+    // F2 回归（#1360）：自定义类型字段标显式 `mode = "fixed"`/`drop` **不要求** impl `RedactField`
     //（compile-pass 即证）——对标 serde `skip` 字段不走默认 Serialize bound。
     struct NotRedactField; // 故意不 impl RedactField
 
-    #[derive(secure::Redactable)]
+    #[derive(secure::Redact)]
     #[allow(dead_code)] // fixed/drop 字段取 Absent、不被读取
     struct CustomFixedDrop {
-        #[redact(mode = fixed)]
+        #[redact(secret, mode = "fixed")]
         a: NotRedactField,
-        #[redact(mode = drop)]
+        #[redact(secret, mode = "drop")]
         b: NotRedactField,
     }
 
@@ -894,10 +903,10 @@ mod tests {
     }
 
     #[test]
-    fn derive_impls_redactable_trait() {
-        // 派生同时实现 trait `Redactable`（Debug 委托它）；redact 返回脱敏 String（非 Redacted，#1360 F1）。
+    fn derive_impls_redact_trait() {
+        // 派生同时实现 trait `Redact`（Debug 委托它）；redact 返回脱敏 String（非 Redacted，#1360 F1）。
         let v = DerivedNewtype(vec![1]);
-        let r: String = secure::Redactable::redact(&v);
+        let r: String = secure::Redact::redact(&v);
         assert_eq!(r, "DerivedNewtype(<redacted>)");
     }
 
