@@ -50,12 +50,14 @@ pub mod error {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SeedThingHappenedPayload {
     #[serde(rename = "occurredCount")]
+    #[redact(public)]
     pub occurred_count: i64,
     #[serde(rename = "thingId")]
+    #[redact(public)]
     pub thing_id: ::std::string::String,
 }
 

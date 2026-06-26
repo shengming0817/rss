@@ -45,11 +45,13 @@ pub mod error {
 ///      "format": "int64"
 ///    },
 ///    "sessionId": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "secret"
 ///    },
 ///    "subject": {
 ///      "type": "string",
-///      "format": "uuid"
+///      "format": "uuid",
+///      "x-pii": "generic"
 ///    },
 ///    "tenantId": {
 ///      "type": "string"
@@ -59,15 +61,19 @@ pub mod error {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySessionCreatedPayload {
     #[serde(rename = "occurredAt")]
+    #[redact(public)]
     pub occurred_at: i64,
     #[serde(rename = "sessionId")]
+    #[redact(secret)]
     pub session_id: ::std::string::String,
+    #[redact(pii = "generic")]
     pub subject: ::uuid::Uuid,
     #[serde(rename = "tenantId")]
+    #[redact(public)]
     pub tenant_id: ::std::string::String,
 }
 

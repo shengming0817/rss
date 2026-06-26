@@ -39,7 +39,8 @@ pub mod error {
 ///  ],
 ///  "properties": {
 ///    "key": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "version": {
 ///      "type": "integer",
@@ -50,20 +51,22 @@ pub mod error {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsSecretPublishData {
+    #[redact(internal)]
     pub key: ::std::string::String,
+    #[redact(public)]
     pub version: i64,
 }
-///secret 引用坐标写入请求（无 secret 材料）。storeId/refKey/refVersion 是敏感 store 拓扑坐标——x-sensitive 标记驱动 codegen 去 Debug derive，防 {:?} 泄漏坐标（对齐手写 SecretRef/SecretCoordinate 的 redacted Debug）。
+///secret 引用坐标写入请求（无 secret 材料）。storeId/refKey/refVersion 是敏感 store 拓扑坐标——字段级 x-redaction 标记驱动 codegen 派生安全 Debug，防 {:?} 泄漏坐标（对齐手写 SecretRef/SecretCoordinate 的 redacted Debug）。
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
 ///  "title": "SettingsSecretPublishRequest",
-///  "description": "secret 引用坐标写入请求（无 secret 材料）。storeId/refKey/refVersion 是敏感 store 拓扑坐标——x-sensitive 标记驱动 codegen 去 Debug derive，防 {:?} 泄漏坐标（对齐手写 SecretRef/SecretCoordinate 的 redacted Debug）。",
+///  "description": "secret 引用坐标写入请求（无 secret 材料）。storeId/refKey/refVersion 是敏感 store 拓扑坐标——字段级 x-redaction 标记驱动 codegen 派生安全 Debug，防 {:?} 泄漏坐标（对齐手写 SecretRef/SecretCoordinate 的 redacted Debug）。",
 ///  "type": "object",
 ///  "required": [
 ///    "key",
@@ -73,33 +76,38 @@ pub struct SettingsSecretPublishData {
 ///  "properties": {
 ///    "key": {
 ///      "description": "settings secret key，格式 <namespace>.<key>（恰两段，各段非空 + 字符集 [a-zA-Z0-9_-]，总长 <=256）。权威校验在 domain SecretKey::parse（newtype funnel，Hard）。",
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "refKey": {
 ///      "description": "store 内 secret 路径（非空 + 无控制字符/空白 + 允许 '/' 分段，各 '/'-段非 '.'/'..'/空，长度 <=256）。权威校验在 domain SecretRef::parse；adapter 按 '/' 逐段解析为远端路径。",
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "refVersion": {
 ///      "description": "可选 secret 版本（Some=非空且 <=256；缺省=取最新版）。权威校验在 domain SecretRef::parse。",
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "storeId": {
 ///      "description": "外部 secret store 标识（单段非空 + 字符集 [a-zA-Z0-9_-]，长度 <=256）。权威校验在 domain StoreId::parse。",
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    }
 ///  },
-///  "additionalProperties": false,
-///  "x-sensitive": true
+///  "additionalProperties": false
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsSecretPublishRequest {
     ///settings secret key，格式 <namespace>.<key>（恰两段，各段非空 + 字符集 [a-zA-Z0-9_-]，总长 <=256）。权威校验在 domain SecretKey::parse（newtype funnel，Hard）。
+    #[redact(internal)]
     pub key: ::std::string::String,
     ///store 内 secret 路径（非空 + 无控制字符/空白 + 允许 '/' 分段，各 '/'-段非 '.'/'..'/空，长度 <=256）。权威校验在 domain SecretRef::parse；adapter 按 '/' 逐段解析为远端路径。
     #[serde(rename = "refKey")]
+    #[redact(internal)]
     pub ref_key: ::std::string::String,
     ///可选 secret 版本（Some=非空且 <=256；缺省=取最新版）。权威校验在 domain SecretRef::parse。
     #[serde(
@@ -107,9 +115,11 @@ pub struct SettingsSecretPublishRequest {
         default,
         skip_serializing_if = "::std::option::Option::is_none"
     )]
+    #[redact(internal)]
     pub ref_version: ::std::option::Option<::std::string::String>,
     ///外部 secret store 标识（单段非空 + 字符集 [a-zA-Z0-9_-]，长度 <=256）。权威校验在 domain StoreId::parse。
     #[serde(rename = "storeId")]
+    #[redact(internal)]
     pub store_id: ::std::string::String,
 }
 ///`SettingsSecretPublishResponse`
@@ -133,7 +143,8 @@ pub struct SettingsSecretPublishRequest {
 ///      ],
 ///      "properties": {
 ///        "key": {
-///          "type": "string"
+///          "type": "string",
+///          "x-redaction": "internal"
 ///        },
 ///        "version": {
 ///          "type": "integer",
@@ -147,8 +158,9 @@ pub struct SettingsSecretPublishRequest {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsSecretPublishResponse {
+    #[redact(public)]
     pub data: SettingsSecretPublishData,
 }

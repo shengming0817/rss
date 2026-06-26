@@ -38,7 +38,7 @@ contracts/{kind}/{domain}/{version}/
 | `[saga]` | saga 专属 block（TOML 键名 **camelCase**）：`steps`（`{ name, outputSchema }` 数组）+ `compensationOrder = "reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，非负由类型保证）。完整示例见 `xtask` 解析测试 `VALID_SAGA` | **kind=saga 必填（R10，无条件、不论 lifecycle）**；良构 R10 |
 | `[[subscriptions]]` | event 订阅声明（#1120，TOML 数组）：每项须含 `consumer`（消费者域 DomainId，如 `audit`）+ `group`（稳定 consumer group 名，如 `audit.session-created`，broker 消费位点唯一键）。未知子键由 `deny_unknown_fields` 拒。`#[serde(default)]` ⇒ 无此字段的既有契约仍解析（空数组）。codegen 由此派生 `SUBSCRIPTIONS: &[SubscriptionSpec]` 常量，bootstrap 消费接线。示例：`[[subscriptions]]\nconsumer="audit"\ngroup="audit.session-created"` | **`lifecycle=active && kind=event` 必须非空（R14，EVENT-ACTIVE-SUB-01）**；draft/deprecated 豁免 |
 
-校验规则（`cargo xtask contract validate`，R1–R14 ↔ `Rule` 枚举）：
+校验规则（`cargo xtask contract validate`，R1–R16 ↔ `Rule` 枚举）：
 
 | 编号 | Rule 枚举名 | 描述 |
 |------|-------------|------|
@@ -56,8 +56,10 @@ contracts/{kind}/{domain}/{version}/
 | R12 | `DuplicateId` | contract `id` 须跨**全部**契约全局唯一（跨契约扫描）；id 是契约注册标识，api-versioning.md 要求破坏式 wire 变更新建版本目录 **且** 新 contract ID。同根因只报 1 条（subject=该 id，detail 列冲突契约路径） |
 | R13 | `SchemaTitle` | 每个 declared schema（喂 codegen TypeSpace 的 `request`/`response`/`payload`，**不含** saga step `outputSchema`——后者不喂 typify）：root **必须有 string `title`**（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部（含嵌套对象）title 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）+ **契约内**唯一（title→typify Rust 类型名；数字可在非首位，如 `SeedEchoData`/`EchoV2`）。坏 JSON / 缺文件 skip（由 codegen parse 门 / R5 兜底） |
 | R14 | `ActiveSubscriber` | **`lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空**（EVENT-ACTIVE-SUB-01，Medium）；active event 无 subscriber 即死事件，视为错误配置。draft/deprecated 豁免 |
+| R15 | `CommandConsistency` | `kind=command` ⇒ `consistencyLevel=OutboxFact`（命令分发 = 本地事务 + outbox 发布，L2 语义） |
+| R16 | `SchemaRedaction` | declared schema property 上的 `x-pii` / `x-redaction` 字段级策略须合法且完整；拒遗留 `x-sensitive`、未知枚举、`x-pii + hash`、高风险字段未声明策略 |
 
-> 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs`）——`method`/`delivery`/`compensationOrder` 枚举解析拒非法 variant、`retryMillis`/`timeoutMillis` 用 `u64` 拒负、嵌套结构 `#[serde(deny_unknown_fields)]`。R8–R11 是依赖 lifecycle/kind/值 组合的条件化跨字段不变式，类型层无法免费表达，与 R1–R7 同属 Medium（CI 门 + synthetic red/anti-vacuity）。R12（跨契约 id 唯一）/ R13（schema title PascalCase + 契约内唯一）/ R14（active event 须有 subscriber，EVENT-ACTIVE-SUB-01）是跨/内契约内容扫描，类型层亦无法表达，同属 Medium；R13 契约内重复**未必**被 codegen typify 兜底（同 title 不同结构可能合并 / 产生类型歧义而非 compile error），本规则在 validate 阶段 fail-fast + 清晰诊断 + 守 PascalCase 形态（codegen 不拒非 PascalCase title）。
+> 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs`）——`method`/`delivery`/`compensationOrder` 枚举解析拒非法 variant、`retryMillis`/`timeoutMillis` 用 `u64` 拒负、嵌套结构 `#[serde(deny_unknown_fields)]`。R8–R11/R15 是依赖 lifecycle/kind/值 组合的条件化跨字段不变式，类型层无法免费表达，与 R1–R7 同属 Medium（CI 门 + synthetic red/anti-vacuity）。R12（跨契约 id 唯一）/ R13（schema title PascalCase + 契约内唯一）/ R14（active event 须有 subscriber，EVENT-ACTIVE-SUB-01）/ R16（字段级 redaction 策略）是跨/内契约内容扫描，类型层亦无法表达，同属 Medium；R13 契约内重复**未必**被 codegen typify 兜底（同 title 不同结构可能合并 / 类型歧义），R16 在 validate 阶段早于 codegen fail-fast，避免生成不安全 `Debug`。
 
 ## schema.json
 
@@ -66,6 +68,14 @@ contracts/{kind}/{domain}/{version}/
 - camelCase 属性名（如 `thingId`）由 typify 生成为 snake_case Rust 字段 + `#[serde(rename)]`（wire camelCase / Rust snake，符合 RSS 命名）。
 - `format: int64`/`format: int32` → typify 生成原生整数类型（`i64`/`i32`），无外部依赖，可用。
 - 种子契约避免 `format: uuid`（引入 `uuid` crate）和 `format: date-time`（引入 `chrono` crate）——防 `generated/` 引入超出 `serde` 的额外依赖。其他 `format` 按 typify 映射处理。
+- **字段级 redaction 策略（#1358）**：每个 property 可声明 `x-pii`（`generic|email|phone|name|address`）和 / 或
+  `x-redaction`（`public|internal|secret|fixed|last4|email_mask|drop|hash`）。未声明字段默认 `public`（安全
+  `Debug` 中按 `Debug` 明文显示）。`x-pii` 默认使用 `secure::PiiKind::default_mode()`；若与 `x-redaction`
+  同用，只允许 `fixed|last4|email_mask|drop` 作为 mode override，禁止 `hash`。不再使用 `x-sensitive`。
+- 高风险字段名必须显式声明 `x-pii` 或非 public 的 `x-redaction`：`password`/`passwd`/`secret`/`token`/
+  `credential`/`apikey`/`api_key`/`key`/`authorization`/`cookie`/`jwt`/`session`/`bearer`/`salt`/`private`
+  （包含匹配）以及 `subject`/`subjectId`/`principal`/`principalId`/`payload`/`metadata`/`actor`
+  （精确匹配，大小写按 schema 字段名折叠）。由 R16 机器校验。
 
 ## 派生（committed，一等审查材料）
 
@@ -76,7 +86,7 @@ contracts/{kind}/{domain}/{version}/
 
 ### wire 破坏式变更检测门（`contract breaking`，ADR-008）
 
-`cargo xtask contract breaking [--against <git-ref>] [--deny]`：对 `*.schema.json` 做 **base ref ↔ working-tree** 的跨版本 JSON-Schema 递归 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（R1–R15 = manifest 元数据 + schema 文件存在性 = **结构**）、`cargo public-api`（轴 A Rust 符号）互补无重叠——本门只校验 schema **内容跨版本 diff**（语义破坏）。规则与窗口分级单源见 `xtask/src/contract/breaking.rs`（INVARIANT WIRE-BREAKING-01 / WIRE-BREAKING-WINDOW-01）。
+`cargo xtask contract breaking [--against <git-ref>] [--deny]`：对 `*.schema.json` 做 **base ref ↔ working-tree** 的跨版本 JSON-Schema 递归 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（R1–R16 = manifest 元数据 + schema 文件存在性 + redaction 策略结构 = **结构**）、`cargo public-api`（轴 A Rust 符号）互补无重叠——本门只校验 schema **内容跨版本 diff**（语义破坏）。规则与窗口分级单源见 `xtask/src/contract/breaking.rs`（INVARIANT WIRE-BREAKING-01 / WIRE-BREAKING-WINDOW-01）。
 
 - **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。base ref 不可解析（未 fetch）按模式分级：**warn 模式跳过整门（退出码 0）**；**deny 模式 fail-closed（退出码 1，无法读基准即无法判定破坏）**——提示 `git fetch <remote> <branch>` 或换 `--against <本地 ref>`。
 - **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
@@ -88,12 +98,10 @@ per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`�
 
 **codegen 消费面（例外）**：多数 per-kind 字段 codegen **不**消费（只读 `*.schema.json`），故 `generated/` 不受影响——**但 command 的 `topic` 是 codegen 输入**：派生 `generated/src/command/{domain}_{version}.rs` 的 `pub const TOPIC`（broker routing key 烤入 wrapper），故改 command `topic` 必须跑 `cargo xtask codegen --check`（漂移门）并更新已提交 `generated/`。event 的 `topic`/`delivery` 等仍不入 codegen。
 
-### 敏感字段脱敏（codegen 单源，`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`）
+### 字段级脱敏派生（codegen 单源，`INVARIANT: CONTRACT-REDACTION-POLICY-01`）
 
-含**凭据级字段名**（字段名小写后 `contains` 命中约定集 `password` / `passwd` / `secret` / `token` / `credential`）的
-generated wire struct，codegen（`xtask/src/codegen.rs` 的 `strip_sensitive_debug`）**抑制其 `Debug` derive**——该类型
-从类型层即**不可** `{:?}` 格式化，杜绝 `{:?}` 或未 `skip` 的 `#[tracing::instrument]` 把明文凭据打进日志（如
-`IdentityLoginRequest { password, .. }`）。脱敏单源在 codegen，**勿手改 committed `generated/src/**`**；输出由
-`cargo xtask codegen --check` 漂移门 + synthetic 单测 `sensitive_field_struct_drops_debug_derive` 锁定（该单测以非敏感
-struct 保留 `Debug` 作 anti-vacuity 对照）。新增 / 调整敏感字段名约定须改 `strip_sensitive_debug` 的 `SENSITIVE` 常量集；
-域侧实体（非 generated）的脱敏另由手写 redacted `Debug` + `#[instrument(skip ...)]` 承载，不在本约定内。
+generated wire struct 统一由 codegen 派生 `#[derive(::secure::Redact)]`，并按 schema property 的
+`x-pii` / `x-redaction` 注入字段级 `#[redact(...)]`。因此 DTO 仍可 `{:?}` 格式化，但输出经
+`secure::redact_struct` 安全渲染；不再通过 `x-sensitive` 或“剥掉 Debug”表达隐私语义。脱敏单源在
+contract schema，**勿手改 committed `generated/src/**`**；输出由 `cargo xtask codegen --check` 漂移门、
+validate R16、breaking `REDACTION_POLICY_CHANGED` 与 generated `redaction_debug` 集成测试共同锁定。

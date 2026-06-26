@@ -40,6 +40,13 @@ trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redact
 `secure::redact_field` 的 key 判敏感逻辑已收口进 `secure::Sensitivity::from_key`，与上述模型同源（无双路径）。
 没有业务 opt-out。需要原始诊断时走受控服务端日志，不写入 trace 或 wire。
 
+**contract → generated 字段策略（#1358）**：跨边界 wire DTO 的 `Debug` 策略不在消费侧手写，也不再靠
+字段名剥 `Debug`。`contracts/**/*.schema.json` 的 property 通过 `x-pii`（`generic|email|phone|name|address`）
+与 `x-redaction`（`public|internal|secret|fixed|last4|email_mask|drop|hash`）声明字段策略，`cargo xtask
+codegen` 派生 `#[derive(secure::Redact)]` 和字段 `#[redact(...)]`。`cargo xtask contract validate` 对遗留
+`x-sensitive`、未知枚举、高风险字段未声明、`x-pii + hash` fail-closed；`contract breaking` 对既有字段策略漂移报
+`REDACTION_POLICY_CHANGED`。
+
 ## Readyz Probe
 
 - 依赖可用性 probe 用 `_ready` 后缀。

@@ -123,7 +123,8 @@ impl ::std::convert::TryFrom<::std::string::String> for SettingsConfigChangeKind
 ///      ]
 ///    },
 ///    "key": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "occurredAt": {
 ///      "type": "integer",
@@ -145,22 +146,28 @@ impl ::std::convert::TryFrom<::std::string::String> for SettingsConfigChangeKind
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigVersionChangedPayload {
     #[serde(rename = "changeKind")]
+    #[redact(public)]
     pub change_kind: SettingsConfigChangeKind,
+    #[redact(internal)]
     pub key: ::std::string::String,
     #[serde(rename = "occurredAt")]
+    #[redact(public)]
     pub occurred_at: i64,
     #[serde(
         rename = "sourceVersion",
         default,
         skip_serializing_if = "::std::option::Option::is_none"
     )]
+    #[redact(public)]
     pub source_version: ::std::option::Option<i64>,
     #[serde(rename = "tenantId")]
+    #[redact(public)]
     pub tenant_id: ::std::string::String,
+    #[redact(public)]
     pub version: i64,
 }
 

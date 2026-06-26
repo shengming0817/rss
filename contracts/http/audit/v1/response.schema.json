@@ -24,7 +24,7 @@
         "properties": {
           "seq": { "type": "integer", "format": "int64" },
           "tenantId": { "type": "string" },
-          "actor": { "type": "string" },
+          "actor": { "type": "string", "x-pii": "generic" },
           "actorKind": { "type": "string" },
           "action": { "type": "string" },
           "resourceKind": { "type": "string" },

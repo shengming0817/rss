@@ -43,19 +43,22 @@ pub mod error {
 ///      "format": "int64"
 ///    },
 ///    "sessionId": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "secret"
 ///    }
 ///  },
 ///  "additionalProperties": false
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityLoginData {
     #[serde(rename = "expiresAt")]
+    #[redact(public)]
     pub expires_at: i64,
     #[serde(rename = "sessionId")]
+    #[redact(secret)]
     pub session_id: ::std::string::String,
 }
 ///`IdentityLoginRequest`
@@ -72,7 +75,8 @@ pub struct IdentityLoginData {
 ///  ],
 ///  "properties": {
 ///    "password": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "secret"
 ///    },
 ///    "username": {
 ///      "type": "string"
@@ -82,10 +86,12 @@ pub struct IdentityLoginData {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityLoginRequest {
+    #[redact(secret)]
     pub password: ::std::string::String,
+    #[redact(public)]
     pub username: ::std::string::String,
 }
 ///`IdentityLoginResponse`
@@ -113,7 +119,8 @@ pub struct IdentityLoginRequest {
 ///          "format": "int64"
 ///        },
 ///        "sessionId": {
-///          "type": "string"
+///          "type": "string",
+///          "x-redaction": "secret"
 ///        }
 ///      },
 ///      "additionalProperties": false
@@ -123,8 +130,9 @@ pub struct IdentityLoginRequest {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityLoginResponse {
+    #[redact(public)]
     pub data: IdentityLoginData,
 }

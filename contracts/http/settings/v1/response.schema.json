@@ -9,7 +9,7 @@
       "type": "object",
       "required": ["key", "version"],
       "properties": {
-        "key": { "type": "string" },
+        "key": { "type": "string", "x-redaction": "internal" },
         "version": { "type": "integer", "format": "int64" }
       },
       "additionalProperties": false

@@ -39,7 +39,8 @@ pub mod error {
 ///  ],
 ///  "properties": {
 ///    "key": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "version": {
 ///      "type": "integer",
@@ -50,10 +51,12 @@ pub mod error {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigPublishData {
+    #[redact(internal)]
     pub key: ::std::string::String,
+    #[redact(public)]
     pub version: i64,
 }
 ///`SettingsConfigPublishRequest`
@@ -70,7 +73,8 @@ pub struct SettingsConfigPublishData {
 ///  ],
 ///  "properties": {
 ///    "key": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "internal"
 ///    },
 ///    "value": {
 ///      "type": "string"
@@ -80,10 +84,12 @@ pub struct SettingsConfigPublishData {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigPublishRequest {
+    #[redact(internal)]
     pub key: ::std::string::String,
+    #[redact(public)]
     pub value: ::std::string::String,
 }
 ///`SettingsConfigPublishResponse`
@@ -107,7 +113,8 @@ pub struct SettingsConfigPublishRequest {
 ///      ],
 ///      "properties": {
 ///        "key": {
-///          "type": "string"
+///          "type": "string",
+///          "x-redaction": "internal"
 ///        },
 ///        "version": {
 ///          "type": "integer",
@@ -121,8 +128,9 @@ pub struct SettingsConfigPublishRequest {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigPublishResponse {
+    #[redact(public)]
     pub data: SettingsConfigPublishData,
 }

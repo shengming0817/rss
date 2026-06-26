@@ -5,8 +5,8 @@
 //! `SecretRef::parse`，Hard funnel）权威守——不在 wire 层重复（schema 仅以 `description` 文档化约束）。
 //! 本测试只锁 wire **serde 形状**（generated 行为），与 codegen golden 互补。
 //!
-//! 注意：`SettingsSecretPublishRequest` 经 codegen `x-sensitive` 去 `Debug`（F6）——本测试不 `{:?}`
-//! 该类型，断言走具体字段（`String` 自带 `PartialEq`）。
+//! 注意：`SettingsSecretPublishRequest` 的 `Debug` 由 schema 字段级 `x-redaction` 派生成安全
+//! `secure::Redact`；脱敏断言见 `redaction_debug.rs`。
 
 use generated::http::settings_v2::{
     SettingsSecretPublishData, SettingsSecretPublishRequest, SettingsSecretPublishResponse,

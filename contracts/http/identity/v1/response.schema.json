@@ -9,7 +9,7 @@
       "type": "object",
       "required": ["sessionId", "expiresAt"],
       "properties": {
-        "sessionId": { "type": "string" },
+        "sessionId": { "type": "string", "x-redaction": "secret" },
         "expiresAt": { "type": "integer", "format": "int64" }
       },
       "additionalProperties": false

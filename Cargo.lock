@@ -1940,6 +1940,7 @@ dependencies = [
 name = "generated"
 version = "0.0.0"
 dependencies = [
+ "secure",
  "serde",
  "serde_json",
  "uuid",
@@ -6475,6 +6476,7 @@ dependencies = [
  "anyhow",
  "consistency",
  "prettyplease",
+ "proc-macro2",
  "rstest",
  "schemars 0.8.22",
  "semver",

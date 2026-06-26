@@ -19,6 +19,9 @@
 //! fail-closed）；本规则在 validate 阶段提供 fail-fast + 清晰诊断（早于 codegen）+ PascalCase 形态。
 //! INVARIANT: EVENT-ACTIVE-SUB-01 — `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
 //! active event 无 subscriber 即死事件，视为错误配置（#1120）。
+//! INVARIANT: CONTRACT-REDACTION-POLICY-01 — declared schema property 上的 `x-pii` / `x-redaction`
+//! 是 generated 安全 `Debug` 的单源（R16）。遗留 `x-sensitive`、未知枚举、高风险字段未标注、
+//! `x-pii + hash` 均 fail-closed。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -29,7 +32,7 @@
 //!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
 //!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
 //!   → R9 PerKindFieldScope → R10 SagaBlock → R11 ActiveDeliverySupported → R13 SchemaTitle
-//!   → R14 ActiveSubscriber
+//!   → R16 SchemaRedaction → R14 ActiveSubscriber
 //!   跨契约（validate_cross，需全局视图）：R12 DuplicateId
 
 use anyhow::Result;
@@ -41,6 +44,7 @@ use super::manifest::{
     FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, Lifecycle,
     SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
+use super::redaction;
 use super::{DiscoveredContract, discover};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
@@ -97,6 +101,11 @@ pub(crate) enum Rule {
     /// wire 语义（与 lifecycle 无关），R8 此前只校验 active command 的 `topic`、未机器锁一致性等级（#1124
     /// review F6）；本规则补足，防 command 契约误标 L0/L1/L3/L4 致 outbox 接线语义漂移。
     CommandConsistency,
+    /// R16：schema property 的 `x-pii` / `x-redaction` 字段级策略须合法且完整。
+    ///
+    /// INVARIANT: CONTRACT-REDACTION-POLICY-01 — generated wire DTO 的安全 `Debug` 从 contract JSON
+    /// Schema 单源派生。遗留 `x-sensitive`、未知枚举、PII hash、以及高风险字段未声明策略均拒绝。
+    SchemaRedaction,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -173,6 +182,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_saga_block(&c.manifest, &label));
     findings.extend(rule_active_delivery_supported(&c.manifest, &label));
     findings.extend(rule_schema_title(c, &label));
+    findings.extend(rule_schema_redaction(c, &label));
     findings.extend(rule_active_subscriber(&c.manifest, &label));
     findings
 }
@@ -729,6 +739,31 @@ fn collect_schema_titles(schema: &serde_json::Value, out: &mut Vec<String>) {
             recurse_subschemas(v, out);
         }
     }
+}
+
+/// R16：字段级 redaction 扩展校验。按 manifest 声明的完整 schema slot 扫描，
+/// 包含 request/response/payload 与 saga step output schema。
+fn rule_schema_redaction(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for file in c.manifest.declared_schema_files() {
+        if pathsafe::is_unsafe_segment(file) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(c.dir.join(file)) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        for violation in redaction::validate_schema(&value) {
+            out.push(finding(
+                Rule::SchemaRedaction,
+                label,
+                format!("{file} {}: {}", violation.pointer, violation.detail),
+            ));
+        }
+    }
+    out
 }
 
 /// 下钻一个 object-of-subschemas（如 `properties` / `$defs`）的各 value；非 object ⇒ no-op。
@@ -2279,6 +2314,134 @@ mod tests {
     #[case("", false)] // 空
     fn r13_is_pascal_case(#[case] s: &str, #[case] want: bool) {
         assert_eq!(is_pascal_case(s), want, "is_pascal_case({s:?})");
+    }
+
+    // ── R16 SchemaRedaction（contract → generated 安全 Debug 单源）────────
+
+    #[test]
+    fn r16_rejects_invalid_redaction_extensions() -> anyhow::Result<()> {
+        let dir = unique_tmp("validate");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{
+              "title":"RedactionReq",
+              "type":"object",
+              "x-sensitive": true,
+              "properties": {
+                "password": {"type":"string"},
+                "email": {"type":"string", "x-pii":"bogus"},
+                "phone": {"type":"string", "x-pii":"phone", "x-redaction":"hash"}
+              }
+            }"#,
+        )?;
+        let c = discovered(
+            manifest(
+                ContractKind::Http,
+                ConsistencyLevel::LocalOnly,
+                ContractOwner::Framework,
+                Schemas {
+                    request: Some("request.schema.json".to_string()),
+                    ..Schemas::default()
+                },
+            ),
+            dir.clone(),
+        );
+        let findings = rule_schema_redaction(&c, "http/_seed/v1");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SchemaRedaction && f.detail.contains("x-sensitive")),
+            "遗留 x-sensitive 须报错: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("password") && f.detail.contains("高风险字段")),
+            "高风险字段未声明须报错: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.detail.contains("bogus")),
+            "非法 x-pii 须报错: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.detail.contains("hash")),
+            "x-pii + hash 须报错: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r16_accepts_nested_field_policies() -> anyhow::Result<()> {
+        let dir = unique_tmp("validate");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{
+              "title":"RedactionReq",
+              "type":"object",
+              "properties": {
+                "username": {"type":"string"},
+                "password": {"type":"string", "x-redaction":"secret"},
+                "data": {
+                  "title":"RedactionData",
+                  "type":"object",
+                  "properties": {
+                    "subject": {"type":"string", "x-pii":"generic"}
+                  }
+                }
+              }
+            }"#,
+        )?;
+        let c = discovered(
+            manifest(
+                ContractKind::Http,
+                ConsistencyLevel::LocalOnly,
+                ContractOwner::Framework,
+                Schemas {
+                    request: Some("request.schema.json".to_string()),
+                    ..Schemas::default()
+                },
+            ),
+            dir.clone(),
+        );
+        let findings = rule_schema_redaction(&c, "http/_seed/v1");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r16_rejects_saga_step_output_schema_redaction_violations() -> anyhow::Result<()> {
+        let dir = unique_tmp("validate");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("payload.schema.json"),
+            r#"{"title":"SagaPayload","type":"object","properties":{}}"#,
+        )?;
+        std::fs::write(
+            dir.join("reserve.schema.json"),
+            r#"{
+              "title":"ReserveFundsOutput",
+              "type":"object",
+              "properties": {
+                "sessionId": {"type":"string"}
+              }
+            }"#,
+        )?;
+        let c = discovered(saga_manifest(Some(valid_saga_block())), dir.clone());
+        let findings = rule_schema_redaction(&c, "saga/_seed/v1");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::SchemaRedaction
+                    && f.detail.contains("reserve.schema.json")
+                    && f.detail.contains("sessionId")
+            }),
+            "saga step outputSchema redaction violations must be checked: {findings:?}"
+        );
+        Ok(())
     }
 
     #[test]

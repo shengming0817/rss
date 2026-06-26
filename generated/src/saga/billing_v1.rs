@@ -54,12 +54,15 @@ pub mod error {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct BillingCheckoutSagaPayload {
     #[serde(rename = "amountMinor")]
+    #[redact(public)]
     pub amount_minor: i64,
+    #[redact(public)]
     pub currency: ::std::string::String,
     #[serde(rename = "orderId")]
+    #[redact(public)]
     pub order_id: ::std::string::String,
 }

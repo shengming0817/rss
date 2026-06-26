@@ -4,8 +4,8 @@
   "type": "object",
   "required": ["sessionId", "subject", "tenantId", "occurredAt"],
   "properties": {
-    "sessionId": { "type": "string" },
-    "subject": { "type": "string", "format": "uuid" },
+    "sessionId": { "type": "string", "x-redaction": "secret" },
+    "subject": { "type": "string", "format": "uuid", "x-pii": "generic" },
     "tenantId": { "type": "string" },
     "occurredAt": { "type": "integer", "format": "int64" }
   },

@@ -50,10 +50,12 @@ pub mod error {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SeedEchoData {
+    #[redact(public)]
     pub echoed: ::std::string::String,
+    #[redact(public)]
     pub length: i64,
 }
 ///`SeedEchoRequest`
@@ -76,9 +78,10 @@ pub struct SeedEchoData {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SeedEchoRequest {
+    #[redact(public)]
     pub message: ::std::string::String,
 }
 ///`SeedEchoResponse`
@@ -116,8 +119,9 @@ pub struct SeedEchoRequest {
 ///}
 /// ```
 /// </details>
-#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SeedEchoResponse {
+    #[redact(public)]
     pub data: SeedEchoData,
 }

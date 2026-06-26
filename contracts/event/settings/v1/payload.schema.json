@@ -4,7 +4,7 @@
   "type": "object",
   "required": ["key", "tenantId", "version", "changeKind", "occurredAt"],
   "properties": {
-    "key": { "type": "string" },
+    "key": { "type": "string", "x-redaction": "internal" },
     "tenantId": { "type": "string" },
     "version": { "type": "integer", "format": "int64" },
     "changeKind": { "title": "SettingsConfigChangeKind", "type": "string", "enum": ["published", "rolledBack"] },

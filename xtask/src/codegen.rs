@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::ContractKind;
+use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
 use crate::contract::{DiscoveredContract, discover};
 use crate::pathsafe;
 
@@ -112,7 +113,7 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
         c.manifest.domain,
         c.manifest.version
     );
-    let mut sensitive_titles = BTreeSet::new();
+    let mut redaction_policies: StructPolicies = BTreeMap::new();
     for schema_file in c.manifest.schemas.declared_files() {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
@@ -120,11 +121,20 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
         let path = c.dir.join(schema_file);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读 schema {}", path.display()))?;
-        // 收集 `x-sensitive` 标记类型名（F6）：typify 不消费该扩展关键字，故另解析通用 Value 读取。
-        // 标记的 wire 类型由 strip_sensitive_debug 去 Debug derive（secret store 坐标单源在 schema）。
         let value: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("解析 schema {}", path.display()))?;
-        collect_sensitive_titles(&value, &mut sensitive_titles);
+        let schema_policies = redaction::collect_struct_policies(&value).map_err(|violations| {
+            anyhow::anyhow!(
+                "redaction policy invalid in {}: {}",
+                path.display(),
+                violations
+                    .iter()
+                    .map(|v| format!("{}: {}", v.pointer, v.detail))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+        redaction_policies.extend(schema_policies);
         let root: RootSchema = serde_json::from_str(&text)
             .with_context(|| format!("解析 schema {}", path.display()))?;
         space
@@ -133,7 +143,7 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     }
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
-    strip_sensitive_debug(&mut parsed, &sensitive_titles);
+    apply_redaction_policy(&mut parsed, &redaction_policies);
     allow_derivable_default_impls(&mut parsed);
     allow_unwrap_in_defaults_mod(&mut parsed);
     let payload = prettyplease::unparse(&parsed);
@@ -343,69 +353,100 @@ fn is_safe_codegen_ident(s: &str) -> bool {
         })
 }
 
-/// 递归收集 schema 中标 `"x-sensitive": true` 的类型名（取同一对象的 `title`，即 typify 生成的
-/// struct 名）。`x-sensitive` 是 codegen 私有扩展关键字（typify 不消费）：标记后该 wire 类型由
-/// [`strip_sensitive_debug`] 去 `Debug` derive——用于 secret store 坐标类（storeId/refKey/refVersion
-/// 属敏感拓扑，`{:?}` 泄漏等同路径泄漏，对齐手写 `diport::SecretCoordinate` / `settings::SecretRef`
-/// 的 redacted Debug）。redaction 单源在 schema（contract 单一事实源），非字段名启发式（F6）。
-fn collect_sensitive_titles(value: &serde_json::Value, out: &mut BTreeSet<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map.get("x-sensitive") == Some(&serde_json::Value::Bool(true))
-                && let Some(serde_json::Value::String(title)) = map.get("title")
-            {
-                out.insert(title.clone());
-            }
-            for v in map.values() {
-                collect_sensitive_titles(v, out);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_sensitive_titles(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// generated struct 去掉 `Debug` derive 的条件（命中即剥）：①任一字段名含凭据词
-/// （password/secret/token/credential，PR #186 F2），或 ②类型名经 schema `x-sensitive` 标记
-/// （secret store 坐标类，F6——见 [`collect_sensitive_titles`]）。杜绝 `{:?}` 把凭据 / 坐标拓扑打进
-/// 日志。sensitive redaction 单源在 codegen（不手改 committed generated）；去 Debug 后该类型从类型层
-/// **不可** Debug-format（Hard），输出由 golden 锁。`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`。
-fn strip_sensitive_debug(file: &mut syn::File, sensitive_titles: &BTreeSet<String>) {
-    const SENSITIVE: &[&str] = &["password", "passwd", "secret", "token", "credential"];
+/// generated struct 统一派生 `secure::Redact`，字段策略从 schema property 的 `x-pii` / `x-redaction`
+/// 注入为 `#[redact(...)]`。非敏感字段默认 `public`，使所有 generated DTO 都有安全 `Debug`，不再裸
+/// derive `Debug` 或把敏感类型去掉 `Debug`。
+fn apply_redaction_policy(file: &mut syn::File, policies: &StructPolicies) {
     for item in &mut file.items {
         let syn::Item::Struct(s) = item else {
             continue;
         };
-        let has_sensitive_field = s.fields.iter().any(|f| {
-            f.ident.as_ref().is_some_and(|id| {
-                let name = id.to_string().to_ascii_lowercase();
-                SENSITIVE.iter().any(|kw| name.contains(kw))
-            })
-        });
-        let is_marked_sensitive = sensitive_titles.contains(&s.ident.to_string());
-        if !has_sensitive_field && !is_marked_sensitive {
-            continue;
-        }
-        for attr in &mut s.attrs {
-            if !attr.path().is_ident("derive") {
-                continue;
-            }
-            let Ok(paths) = attr.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-            ) else {
+        rewrite_struct_derives(&mut s.attrs);
+        let struct_policies = policies.get(&s.ident.to_string());
+        for field in &mut s.fields {
+            let Some(ident) = &field.ident else {
                 continue;
             };
-            let kept: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> = paths
-                .into_iter()
-                .filter(|p| p.segments.last().is_none_or(|seg| seg.ident != "Debug"))
-                .collect();
-            attr.meta = syn::parse_quote!(derive(#kept));
+            let wire_name = serde_rename(field).unwrap_or_else(|| ident.to_string());
+            let policy = struct_policies
+                .and_then(|fields| fields.get(&wire_name))
+                .copied()
+                .unwrap_or_default();
+            field.attrs.push(redact_attr(policy));
         }
     }
+}
+
+fn rewrite_struct_derives(attrs: &mut Vec<syn::Attribute>) {
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let Ok(paths) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        let mut kept: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> = paths
+            .into_iter()
+            .filter(|p| p.segments.last().is_none_or(|seg| seg.ident != "Debug"))
+            .collect();
+        let has_redact = kept
+            .iter()
+            .any(|p| p.segments.last().is_some_and(|seg| seg.ident == "Redact"));
+        if !has_redact {
+            kept.push(syn::parse_quote!(::secure::Redact));
+        }
+        attr.meta = syn::parse_quote!(derive(#kept));
+    }
+}
+
+fn redact_attr(policy: FieldPolicy) -> syn::Attribute {
+    let mode = policy
+        .mode
+        .map(|mode| syn::LitStr::new(mode.as_wire(), proc_macro2::Span::call_site()));
+    match (policy.sensitivity, mode) {
+        (Sensitivity::Public, None) => syn::parse_quote!(#[redact(public)]),
+        (Sensitivity::Public, Some(mode)) => syn::parse_quote!(#[redact(public, mode = #mode)]),
+        (Sensitivity::Internal, None) => syn::parse_quote!(#[redact(internal)]),
+        (Sensitivity::Internal, Some(mode)) => {
+            syn::parse_quote!(#[redact(internal, mode = #mode)])
+        }
+        (Sensitivity::Secret, None) => syn::parse_quote!(#[redact(secret)]),
+        (Sensitivity::Secret, Some(mode)) => syn::parse_quote!(#[redact(secret, mode = #mode)]),
+        (Sensitivity::Pii(kind), None) => {
+            let kind = pii_lit(kind);
+            syn::parse_quote!(#[redact(pii = #kind)])
+        }
+        (Sensitivity::Pii(kind), Some(mode)) => {
+            let kind = pii_lit(kind);
+            syn::parse_quote!(#[redact(pii = #kind, mode = #mode)])
+        }
+    }
+}
+
+fn pii_lit(kind: PiiKind) -> syn::LitStr {
+    syn::LitStr::new(kind.as_wire(), proc_macro2::Span::call_site())
+}
+
+fn serde_rename(field: &syn::Field) -> Option<String> {
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let mut rename = None;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                let value: syn::LitStr = meta.value()?.parse()?;
+                rename = Some(value.value());
+            }
+            Ok(())
+        });
+        if rename.is_some() {
+            return rename;
+        }
+    }
+    None
 }
 
 /// typify 对**全 optional 字段** struct（如 GET 列表端点的纯分页 query）生成手写 `impl Default`——clippy
@@ -772,7 +813,7 @@ mod tests {
         )?;
         std::fs::write(
             dir.join("request.schema.json"),
-            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SensitiveSeedRequest\",\"type\":\"object\",\"required\":[\"password\",\"username\"],\"properties\":{\"password\":{\"type\":\"string\"},\"username\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SensitiveSeedRequest\",\"type\":\"object\",\"required\":[\"password\",\"username\"],\"properties\":{\"password\":{\"type\":\"string\",\"x-redaction\":\"secret\"},\"username\":{\"type\":\"string\"}},\"additionalProperties\":false}",
         )?;
         std::fs::write(
             dir.join("response.schema.json"),
@@ -781,9 +822,9 @@ mod tests {
         Ok(())
     }
 
-    /// 落一个 http 契约：request 标 `"x-sensitive": true` 但**无**凭据字段名（坐标类：storeId）——
-    /// 验 codegen 经 schema 标记（非字段名启发式）剥 `Debug`；response 无标记保留 `Debug`（F6）。
-    fn seed_http_x_sensitive(root: &Path) -> Result<()> {
+    /// 落一个 http 契约：request 字段声明 `x-redaction`（坐标类：storeId）——
+    /// 验 codegen 经 schema 字段策略注入 `#[redact]`；response 未标记字段默认 public。
+    fn seed_http_redaction_policy(root: &Path) -> Result<()> {
         let dir = root.join("contracts/http/_xsens/v1");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(
@@ -792,7 +833,7 @@ mod tests {
         )?;
         std::fs::write(
             dir.join("request.schema.json"),
-            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"XSensCoordRequest\",\"type\":\"object\",\"x-sensitive\":true,\"required\":[\"storeId\"],\"properties\":{\"storeId\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"XSensCoordRequest\",\"type\":\"object\",\"required\":[\"storeId\"],\"properties\":{\"storeId\":{\"type\":\"string\",\"x-redaction\":\"internal\"}},\"additionalProperties\":false}",
         )?;
         std::fs::write(
             dir.join("response.schema.json"),
@@ -801,8 +842,8 @@ mod tests {
         Ok(())
     }
 
-    /// 派生 .rs 中名为 `name` 的 struct 是否 derive `Debug`。
-    fn struct_derives_debug(file: &syn::File, name: &str) -> bool {
+    /// 派生 .rs 中名为 `name` 的 struct derive 列表里是否含末段 `derive_name`。
+    fn struct_derives(file: &syn::File, name: &str, derive_name: &str) -> bool {
         file.items.iter().any(|item| {
             let syn::Item::Struct(s) = item else {
                 return false;
@@ -819,20 +860,39 @@ mod tests {
                         .is_ok_and(|paths| {
                             paths
                                 .iter()
-                                .any(|p| p.segments.last().is_some_and(|seg| seg.ident == "Debug"))
+                                .any(|p| p.segments.last().is_some_and(|seg| seg.ident == derive_name))
                         })
             })
         })
     }
 
-    /// 含敏感字段（`password` 等）的 generated wire struct 须被 codegen 剥 `Debug` derive
-    /// （`strip_sensitive_debug`，`INVARIANT: CODEGEN-SENSITIVE-NODEBUG-01`）；非敏感 struct 保留 `Debug`
-    /// 作 anti-vacuity 对照——杜绝 `{:?}` 把凭据打进日志（#1096，PR #186 F2）。
-    ///
-    /// anti-vacuity（结构保证）：typify 默认给所有派生 struct 加 `Debug`；若 `strip_sensitive_debug`
-    /// 退化为 no-op，`SensitiveSeedRequest` 仍带 `Debug`，下方第一个 `assert!` 必失——守卫非恒真。
+    fn field_has_redact_attr(
+        file: &syn::File,
+        struct_name: &str,
+        field_name: &str,
+        needle: &str,
+    ) -> bool {
+        file.items.iter().any(|item| {
+            let syn::Item::Struct(s) = item else {
+                return false;
+            };
+            if s.ident != struct_name {
+                return false;
+            }
+            s.fields.iter().any(|field| {
+                field.ident.as_ref().is_some_and(|ident| ident == field_name)
+                    && field.attrs.iter().any(|attr| {
+                        attr.path().is_ident("redact")
+                            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string().contains(needle))
+                    })
+            })
+        })
+    }
+
+    /// generated wire struct 须统一 derive `secure::Redact` 并去掉裸 `Debug` derive；
+    /// 字段策略由 schema `x-redaction` 注入，未标记字段默认 public。
     #[test]
-    fn sensitive_field_struct_drops_debug_derive() -> anyhow::Result<()> {
+    fn generated_structs_derive_redact_and_inject_field_attrs() -> anyhow::Result<()> {
         let root = unique_tmp("codegen");
         seed_http_sensitive(&root)?;
         let contracts = root.join("contracts");
@@ -843,23 +903,33 @@ mod tests {
 
         let parsed = syn::parse_str::<syn::File>(&rendered).context("解析派生 .rs")?;
         assert!(
-            !struct_derives_debug(&parsed, "SensitiveSeedRequest"),
-            "含 password 的 struct 不应 derive Debug（防 {{:?}} 泄露凭据）:\n{rendered}"
+            struct_derives(&parsed, "SensitiveSeedRequest", "Redact"),
+            "request 应 derive secure::Redact:\n{rendered}"
         );
         assert!(
-            struct_derives_debug(&parsed, "SensitiveSeedResponse"),
-            "非敏感 struct 应保留 Debug（anti-vacuity 对照）:\n{rendered}"
+            !struct_derives(&parsed, "SensitiveSeedRequest", "Debug"),
+            "request 不应裸 derive Debug:\n{rendered}"
+        );
+        assert!(
+            field_has_redact_attr(&parsed, "SensitiveSeedRequest", "password", "secret"),
+            "password 应注入 #[redact(secret)]:\n{rendered}"
+        );
+        assert!(
+            field_has_redact_attr(&parsed, "SensitiveSeedRequest", "username", "public"),
+            "username 未标记字段应默认 public:\n{rendered}"
+        );
+        assert!(
+            struct_derives(&parsed, "SensitiveSeedResponse", "Redact"),
+            "非敏感 response 也应 derive Redact（全量安全 Debug）:\n{rendered}"
         );
         Ok(())
     }
 
-    /// schema `"x-sensitive": true` 标记的 wire struct（**无**凭据字段名）须被 codegen 剥 `Debug`
-    /// （`collect_sensitive_titles` → `strip_sensitive_debug`，F6，CODEGEN-SENSITIVE-NODEBUG-01）；
-    /// 未标记 struct 保留 `Debug`（anti-vacuity 对照）。证明 redaction 由 schema 标记驱动，非仅字段名启发式。
+    /// schema 字段级策略驱动 `#[redact]` 注入，非字段名启发式。
     #[test]
-    fn x_sensitive_marked_struct_drops_debug_derive() -> anyhow::Result<()> {
+    fn field_redaction_policy_drives_redact_attr() -> anyhow::Result<()> {
         let root = unique_tmp("codegen");
-        seed_http_x_sensitive(&root)?;
+        seed_http_redaction_policy(&root)?;
         let contracts = root.join("contracts");
         let gen_src = root.join("generated/src");
         generate(&contracts, &gen_src, false)?;
@@ -868,12 +938,30 @@ mod tests {
 
         let parsed = syn::parse_str::<syn::File>(&rendered).context("解析派生 .rs")?;
         assert!(
-            !struct_derives_debug(&parsed, "XSensCoordRequest"),
-            "x-sensitive 标记的 struct（即使无凭据字段名）不应 derive Debug:\n{rendered}"
+            field_has_redact_attr(&parsed, "XSensCoordRequest", "store_id", "internal"),
+            "storeId 应按 x-redaction=internal 注入字段策略:\n{rendered}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_invalid_redaction_policy_without_validate_first() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedEchoRequest\",\"type\":\"object\",\"required\":[\"apiKey\"],\"properties\":{\"apiKey\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        let err = match result {
+            Ok(()) => anyhow::bail!("codegen must fail closed on redaction policy violations"),
+            Err(err) => err,
+        };
+        let message = format!("{err:#}");
         assert!(
-            struct_derives_debug(&parsed, "XSensCoordResponse"),
-            "未标记 struct 应保留 Debug（anti-vacuity 对照）:\n{rendered}"
+            message.contains("redaction policy invalid") && message.contains("apiKey"),
+            "错误应指向 redaction policy 与字段名:\n{message}"
         );
         Ok(())
     }
