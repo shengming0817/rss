@@ -22,7 +22,10 @@ use consistency::{
     BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxRelay,
     OutboxSource, OutboxSweeper, Topic,
 };
-use diport::{DynPublisher, PublishRequest, Publisher, PublisherError};
+use diport::{
+    DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID, KEY_TRACE,
+    MetadataError, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
+};
 use sqlx::PgConnection;
 
 use crate::PgStore;
@@ -44,34 +47,10 @@ pub(crate) const STATUS_PUBLISHED: &str = "published";
 pub(crate) const STATUS_DLX: &str = "dlx";
 
 // ── OutboxMetadata（typed sealed funnel，F1）──────────────────────────────────
-
-/// envelope reserved key——调用方 metadata **不得**携带（由 envelope / 框架层注入，不容业务伪造）。
-const RESERVED_METADATA_KEYS: [&str; 4] = ["trace", "correlation", "principal", "occurred_at"];
-
-/// metadata 主体 id key（仅 opaque subject，不容完整 Principal / email / 姓名 / phone）。
-const METADATA_SUBJECT_KEY: &str = "subjectId";
-
-/// reserved envelope key `occurred_at`（由 [`OutboxMetadata::new`] **构造期必填**注入；属 [`RESERVED_METADATA_KEYS`]）。
-/// 注入集 ⊆ 拒绝集由单测 `occurred_at_key_is_reserved` drift-lock 守（**Medium**）；occurred_at「producer 不可漏接」
-/// 由 `new` 必填位置参承载（**Hard**：无 occurred_at 的 metadata 类型层不可表达）；「业务不可伪造」由
-/// [`OutboxMetadata::try_insert`] 对 free-form 路径 fail-closed 拒 reserved 承载（**Hard**）。两轴正交。
-const KEY_OCCURRED_AT: &str = "occurred_at";
-
-/// reserved envelope key `trace` / `correlation`（#1193）——只经 sealed setter [`OutboxMetadata::with_trace`]
-/// / [`OutboxMetadata::with_correlation`]（funnel 特权写）在 adapter 受控构造点注入；属 [`RESERVED_METADATA_KEYS`]，
-/// business free-form `try_insert` 路径 fail-closed 拒（**Hard**：业务不可伪造）。注入集 ⊆ 拒绝集由
-/// `reserved_setter_keys_are_reserved` drift-lock 守（**Medium**）。注入**源**（trace span / correlation 上下文）
-/// 按 ADR-002 §D1 不进 `runctx`，待 #1296 接线——本 PR 仅建 sealed 注入路径（setter）。
-const KEY_TRACE: &str = "trace";
-const KEY_CORRELATION: &str = "correlation";
-
-/// [`OutboxMetadata`] 构造错误（free-form key 命中 reserved 集）。
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub(crate) enum MetadataError {
-    /// 调用方试图写 reserved envelope key（fail-closed 拒）。
-    #[error("reserved outbox metadata key is not allowed")]
-    ReservedKey,
-}
+//
+// reserved key / subject key 常量已迁至 diport 单源（#1160 A4）：
+// `diport::{RESERVED_METADATA_KEYS, KEY_OCCURRED_AT, KEY_TRACE, KEY_CORRELATION,
+//           KEY_SUBJECT_ID}`。本 adapter funnel 逻辑不变，key 字面量引 diport 单源。
 
 /// Outbox envelope metadata——**sealed typed funnel**（私有内层 `Map`，仅经受控入口构造）。
 ///
@@ -95,9 +74,10 @@ impl OutboxMetadata {
     /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
-    /// `occurred_at` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace / correlation /
-    /// principal 为后续 follow-up（#1296）接线的空接缝，本 PR 不写。
+    /// `occurredAt` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace 待
+    /// #1076 OTel；correlation 已接线 #1160；principal 待 #1397。
     pub(crate) fn new(occurred_at_secs: i64) -> Self {
+        // KEY_OCCURRED_AT = diport 单源（#1160 A4）。
         let mut map = serde_json::Map::new();
         map.insert(
             KEY_OCCURRED_AT.to_string(),
@@ -108,9 +88,10 @@ impl OutboxMetadata {
 
     /// 设置 opaque 主体 id（唯一允许的 principal 形态——不容完整 Principal / PII）。
     /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts.subject_id` 组装（T008/#1100）。
+    /// KEY_SUBJECT_ID = diport 单源（#1160 A4）。
     pub(crate) fn with_subject_id(mut self, subject_id: impl Into<String>) -> Self {
         self.0.insert(
-            METADATA_SUBJECT_KEY.to_string(),
+            KEY_SUBJECT_ID.to_string(),
             serde_json::Value::String(subject_id.into()),
         );
         self
@@ -118,8 +99,9 @@ impl OutboxMetadata {
 
     /// 注入 reserved key `trace`（#1193）——**sealed setter**：funnel 内特权写 reserved key（business
     /// free-form [`OutboxMetadata::try_insert`] 仍 fail-closed 拒），承载「业务不可伪造 trace」（Hard）。
-    // reason(dead_code): 生产 caller 待 #1296（trace span 提取源）接线；本 PR 仅建 sealed 注入路径，正向单测
-    // `sealed_setters_write_reserved_keys` 行使写入、`reserved_setter_keys_are_reserved` 守注入集 ⊆ 拒绝集。
+    /// KEY_TRACE = diport 单源（#1160 A4）。
+    // reason(dead_code): 生产 caller 待 #1076（OTel trace span 提取源）接线；本 PR 仅建 sealed 注入路径，
+    // 正向单测 `sealed_setters_write_reserved_keys` 行使写入、`reserved_setter_keys_are_reserved` 守注入集 ⊆ 拒绝集。
     #[allow(dead_code)]
     pub(crate) fn with_trace(mut self, trace: impl Into<String>) -> Self {
         self.0.insert(
@@ -129,10 +111,10 @@ impl OutboxMetadata {
         self
     }
 
-    /// 注入 reserved key `correlation`（#1193）——**sealed setter**：funnel 内特权写 reserved key（同
-    /// [`OutboxMetadata::with_trace`]，业务侧 `try_insert` 仍拒），承载「业务不可伪造 correlation」（Hard）。
-    // reason(dead_code): 生产 caller 待 #1296（correlation 上下文源）接线；本 PR 仅建 sealed 注入路径。
-    #[allow(dead_code)]
+    /// 注入 reserved key `correlation`（#1193 / #1160 B3）——**sealed setter**：funnel 内特权写 reserved key
+    /// （同 [`OutboxMetadata::with_trace`]，业务侧 `try_insert` 仍拒），承载「业务不可伪造 correlation」（Hard）。
+    /// 生产 caller：[`metadata_with_ambient`]（从 `diagctx` ambient 读回 correlation，fail-open）。
+    /// KEY_CORRELATION = diport 单源（#1160 A4）。
     pub(crate) fn with_correlation(mut self, correlation: impl Into<String>) -> Self {
         self.0.insert(
             KEY_CORRELATION.to_string(),
@@ -142,7 +124,8 @@ impl OutboxMetadata {
     }
 
     /// 插入 free-form key（fail-closed 拒 reserved key）。
-    // reason(dead_code): 同 with_subject_id——生产 caller 在 T008/#1100 接入；负向单测行使 reserved 拒绝。
+    /// RESERVED_METADATA_KEYS = diport 单源（#1160 A4）。
+    // reason(dead_code): 生产 caller 在 T008/#1100 接入；负向单测行使 reserved 拒绝。
     #[allow(dead_code)]
     pub(crate) fn try_insert(
         &mut self,
@@ -183,6 +166,21 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
     t.duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+// ── metadata_with_ambient ─────────────────────────────────────────────────────
+
+/// occurred_at 构造期必填 + 有 ambient correlation 则盖章（fail-open：无 scope 省略）。
+///
+/// 三条生产 outbox 路径（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）统一经此 helper 构造
+/// envelope metadata，保证 correlation ambient 接线一致（#1160 B3）。
+/// 无 diagctx scope（worker 任务 / 批次未绑定 correlation）→ 仅含 occurred_at，不 panic（fail-open）。
+pub(crate) fn metadata_with_ambient(occurred_at_secs: i64) -> OutboxMetadata {
+    let mut m = OutboxMetadata::new(occurred_at_secs);
+    if let Some(c) = diagctx::correlation() {
+        m = m.with_correlation(c.as_str());
+    }
+    m
 }
 
 /// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`：[`unix_secs`] 的**解码对称**（编码 / 解码
@@ -359,7 +357,7 @@ impl OutboxRelay for PgOutbox {
         // 1. CAS acquire：把 pending（或 stale publishing）行翻转到 publishing，返 (retry_count, lease_token)。
         let maybe_lease = acquire_lease(&self.pool, event_id).await?;
 
-        let (retry_count, lease_token) = match maybe_lease {
+        let (retry_count, lease_token, metadata_json) = match maybe_lease {
             // 0 行：已被他人发或已 published → 幂等 Ack，禁二次 publish。
             None => return Ok(consistency::Disposition::Ack),
             Some(lease) => lease,
@@ -367,13 +365,17 @@ impl OutboxRelay for PgOutbox {
 
         // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
         //    （至少一次 + 幂等去重端到端，eventbus.md §DLX 与幂等）。
+        //    metadata_json 从 outbox.metadata 列 hydrate → EnvelopeMetadata（#1160 A4）。
         let publish_result = self
             .publisher
-            .publish(PublishRequest {
-                topic: diport::Topic::new(entry.topic().as_str()),
-                event_id: diport::MessageId::new(event_id),
-                payload: entry.payload().to_vec(),
-            })
+            .publish(
+                PublishRequest::new(
+                    diport::Topic::new(entry.topic().as_str()),
+                    diport::MessageId::new(event_id),
+                    entry.payload().to_vec(),
+                )
+                .with_metadata(hydrate_envelope_metadata(&metadata_json)),
+            )
             .await;
 
         match publish_result {
@@ -394,6 +396,29 @@ impl OutboxRelay for PgOutbox {
             }
         }
     }
+}
+
+/// outbox.metadata（jsonb→text）→ [`EnvelopeMetadata`]：逐 key-value 经 `insert_wire_pair` 透传。
+///
+/// string 值直接用；number / bool 等 stringify（occurred_at 在 DB 存 number → 十进制 string，
+/// [`EnvelopeMetadata::occurred_at_secs`] 再反解析）。
+// reason: fail-safe——非对象 JSON / 解析失败返 empty 而非 Err，不阻 relay；relay 核心语义是
+// at-least-once 投递，envelope 降级省略 metadata 比阻断投递更安全。
+fn hydrate_envelope_metadata(json: &str) -> EnvelopeMetadata {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
+        tracing::debug!(target: "postgres", json_len = json.len(), "outbox: hydrate_envelope_metadata: non-object/invalid json, proceeding without metadata");
+        return EnvelopeMetadata::empty();
+    };
+    let mut md = EnvelopeMetadata::empty();
+    for (k, v) in map {
+        let s = match v {
+            serde_json::Value::String(s) => s,
+            // number（如 occurred_at）→ 十进制 string（无 JSON 引号），boolean/null → compact form。
+            other => other.to_string(),
+        };
+        md.insert_wire_pair(k, s);
+    }
+    md
 }
 
 /// publish 失败处置（抽出控制 `relay` 认知复杂度 ≤15）：永久错误首投即 dlx、预算耗尽 → dlx；否则退避 retry
@@ -545,17 +570,19 @@ impl OutboxBacklog for PgOutbox {
 
 // ── relay 拆分 helper fn（认知复杂度 ≤ 15）────────────────────────────────────
 
-/// CAS acquire：把 pending（或 stale publishing）行置 publishing，返回 `(retry_count, lease_token)`。
+/// CAS acquire：把 pending（或 stale publishing）行置 publishing，返回 `(retry_count, lease_token, metadata_json)`。
 /// 返回 `None` 表示 0 行更新（已 published 或被他人占）。
 ///
 /// `lease_token::text` 文本往返（不给 sqlx 加 uuid feature）；`settle_*` 以此 token 比对，
 /// 防 stale 持租者把已被新租约结算的行误改（CAS fencing，spec data-model §outbox）。
+/// `metadata::text` 返回 jsonb 列的 JSON 字符串表示（NOT NULL DEFAULT '{}'，恒有值），
+/// relay 经 [`hydrate_envelope_metadata`] 重建为 [`EnvelopeMetadata`] 透传到 broker（#1160 A4）。
 /// `pub(crate)`：integration 测试做 lease fencing 断言。
 pub(crate) async fn acquire_lease(
     pool: &sqlx::PgPool,
     event_id: &str,
-) -> Result<Option<(i32, String)>, EngineError> {
-    let row: Option<(i32, String)> = sqlx::query_as(
+) -> Result<Option<(i32, String, String)>, EngineError> {
+    let row: Option<(i32, String, String)> = sqlx::query_as(
         r#"
         UPDATE outbox
         SET status = $3,
@@ -566,7 +593,7 @@ pub(crate) async fn acquire_lease(
                 status = $4
              OR (status = $5 AND updated_at <= now() - make_interval(secs => $2))
           )
-        RETURNING retry_count, lease_token::text
+        RETURNING retry_count, lease_token::text, metadata::text
         "#,
     )
     .bind(event_id)
@@ -734,10 +761,14 @@ pub(crate) fn backoff_seconds(retry_count: i32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    // reserved key / subject key 常量来自 diport 单源（#1160 A4）。
     use super::{
-        KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS,
-        MetadataError, OutboxMetadata, RESERVED_METADATA_KEYS, STATUS_DLX, STATUS_PENDING,
-        STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, dlx_decision, unix_secs,
+        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, STATUS_DLX,
+        STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, dlx_decision,
+        hydrate_envelope_metadata, metadata_with_ambient, unix_secs,
+    };
+    use diport::{
+        KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
     };
 
     // #1212 dlx 分流谓词表驱动：permanent 首投（new_count=1）即 dlx；transient 仅预算耗尽
@@ -772,26 +803,26 @@ mod tests {
         );
         assert_eq!(env.domain(), "identity");
         assert_eq!(env.contract_id(), "contract-1");
-        // serde_json::Map 默认 BTreeMap（键序字母）：occurred_at < subjectId。
+        // serde_json::Map 默认 BTreeMap（键序字母）：occurredAt < subjectId。
         assert_eq!(
             env.metadata_json(),
-            r#"{"occurred_at":1700000000,"subjectId":"tenant-42"}"#
+            r#"{"occurredAt":1700000000,"subjectId":"tenant-42"}"#
         );
     }
 
-    // #262 F1：occurred_at 构造期必填——`new(secs)` 仅 occurred_at（无 subject）即含该 reserved key。
+    // #262 F1：occurredAt 构造期必填——`new(secs)` 仅 occurredAt（无 subject）即含该 reserved key。
     #[test]
     fn metadata_new_always_carries_occurred_at() {
         use super::OutboxEnvelope;
         let env = OutboxEnvelope::new("d".to_string(), "c".to_string(), OutboxMetadata::new(0));
-        assert_eq!(env.metadata_json(), r#"{"occurred_at":0}"#);
+        assert_eq!(env.metadata_json(), r#"{"occurredAt":0}"#);
     }
 
     // F1 负向（anti-vacuity，INVARIANT OUTBOX-METADATA-FUNNEL-01）：reserved key 经 try_insert
-    // fail-closed 拒；非 reserved key 接受并经 funnel 序列化（occurred_at 由 new 构造期注入）。
+    // fail-closed 拒；非 reserved key 接受并经 funnel 序列化（occurredAt 由 new 构造期注入）。
     #[test]
     fn metadata_try_insert_rejects_reserved_key() {
-        for reserved in ["trace", "correlation", "principal", "occurred_at"] {
+        for reserved in ["trace", "correlation", "principal", "occurredAt"] {
             let mut m = OutboxMetadata::new(0);
             assert_eq!(
                 m.try_insert(reserved, serde_json::Value::Bool(true)),
@@ -805,15 +836,15 @@ mod tests {
                 .is_ok()
         );
         let env = super::OutboxEnvelope::new("d".to_string(), "c".to_string(), ok);
-        // 键序字母：occurred_at < tenantTier。
+        // 键序字母：occurredAt < tenantTier。
         assert_eq!(
             env.metadata_json(),
-            r#"{"occurred_at":0,"tenantTier":"gold"}"#
+            r#"{"occurredAt":0,"tenantTier":"gold"}"#
         );
     }
 
-    // #1129/#262 F1：new(secs) 构造期注入 reserved occurred_at（unix 秒 i64）；opaque subjectId 共存；
-    // 其余三个 reserved key（trace/correlation/principal）为空接缝、本 PR 不写（defer #1296）。
+    // #1129/#262 F1：new(secs) 构造期注入 reserved occurredAt（unix 秒 i64）；opaque subjectId 共存；
+    // trace 待 #1076（OTel），correlation 已接线 #1160，principal 待 #1397——本 PR 均不写进 envelope。
     #[test]
     fn metadata_new_writes_occurred_at_unix_secs() {
         let env = super::OutboxEnvelope::new(
@@ -823,8 +854,8 @@ mod tests {
         );
         let json = env.metadata_json();
         assert!(
-            json.contains(r#""occurred_at":1700000000"#),
-            "occurred_at 应以 unix 秒 i64 写入: {json}"
+            json.contains(r#""occurredAt":1700000000"#),
+            "occurredAt 应以 unix 秒 i64 写入: {json}"
         );
         assert!(
             json.contains(r#""subjectId":"subj-1""#),
@@ -845,7 +876,7 @@ mod tests {
         // 构造期注入成功。
         let sealed = OutboxMetadata::new(42);
         let env = super::OutboxEnvelope::new("d".to_string(), "c".to_string(), sealed);
-        assert!(env.metadata_json().contains(r#""occurred_at":42"#));
+        assert!(env.metadata_json().contains(r#""occurredAt":42"#));
         // 业务 free-form 路径仍拒同名 reserved key。
         let mut free = OutboxMetadata::new(0);
         assert_eq!(
@@ -879,7 +910,7 @@ mod tests {
         );
         let json = env.metadata_json();
         for kv in [
-            r#""occurred_at":1700000000"#,
+            r#""occurredAt":1700000000"#,
             r#""subjectId":"subj-1""#,
             r#""trace":"trace-abc""#,
             r#""correlation":"corr-xyz""#,
@@ -1011,5 +1042,111 @@ mod tests {
             assert!(cur <= 3600, "exceeds cap at retry_count={rc}");
             prev = cur;
         }
+    }
+
+    // ── hydrate_envelope_metadata 表驱动（#1160 A4）──────────────────────────
+
+    // occurredAt number → 十进制 string（occurred_at_secs() 可反解析）。
+    // subjectId string → 原值透传。
+    // correlation string → 原值透传。
+    // 空对象 → empty metadata。
+    // 无效 JSON → empty metadata（fail-safe，不阻 relay）。
+    // 多键确定性（BTreeMap 序）→ 全部可读取。
+    // boolean/null value → compact string（other.to_string() 分支）。
+    #[test]
+    fn hydrate_envelope_metadata_table() {
+        // occurredAt number → string（occurred_at_secs 解析为 i64）。
+        let md = hydrate_envelope_metadata(r#"{"occurredAt":1700000000}"#);
+        assert_eq!(
+            md.occurred_at_secs(),
+            Some(1_700_000_000),
+            "occurredAt number → parseable string"
+        );
+
+        // subjectId string → 直接透传。
+        let md = hydrate_envelope_metadata(r#"{"subjectId":"user-7"}"#);
+        assert_eq!(
+            md.get("subjectId"),
+            Some("user-7"),
+            "subjectId string passthrough"
+        );
+
+        // correlation string → 直接透传。
+        let md = hydrate_envelope_metadata(r#"{"correlation":"corr-1"}"#);
+        assert_eq!(
+            md.get("correlation"),
+            Some("corr-1"),
+            "correlation string passthrough"
+        );
+
+        // 空对象 → empty（is_empty 为真）。
+        let md = hydrate_envelope_metadata("{}");
+        assert!(md.is_empty(), "空对象 → empty metadata");
+
+        // 无效 JSON → fail-safe empty（不阻 relay）。
+        let md = hydrate_envelope_metadata("not-valid-json");
+        assert!(md.is_empty(), "invalid JSON → empty metadata (fail-safe)");
+
+        // 多键：全部可读。
+        let md =
+            hydrate_envelope_metadata(r#"{"correlation":"c","occurredAt":42,"subjectId":"u"}"#);
+        assert_eq!(md.occurred_at_secs(), Some(42), "multi-key occurredAt");
+        assert_eq!(md.get("subjectId"), Some("u"), "multi-key subjectId");
+        assert_eq!(md.get("correlation"), Some("c"), "multi-key correlation");
+
+        // boolean value → "true"（other.to_string() 分支，F4）。
+        let md = hydrate_envelope_metadata(r#"{"k":true}"#);
+        assert_eq!(md.get("k"), Some("true"), "boolean true → \"true\"");
+
+        // null value → "null"（other.to_string() 分支，F4）。
+        let md = hydrate_envelope_metadata(r#"{"k":null}"#);
+        assert_eq!(md.get("k"), Some("null"), "null → \"null\"");
+    }
+
+    // anti-vacuity（fail-safe）：有效 object 解析成功（上面测过）；这里再验 non-object 也走 empty 分支
+    // （JSON array 是合法 JSON 但不是 object）。
+    #[test]
+    fn hydrate_envelope_metadata_non_object_json_is_empty() {
+        let md = hydrate_envelope_metadata("[1,2,3]");
+        assert!(md.is_empty(), "JSON array 不是 object → empty");
+    }
+
+    // ── metadata_with_ambient 测试（#1160 B3）────────────────────────────────
+
+    // 有 diagctx scope → correlation 注入到 metadata（与 occurredAt 共存）。
+    #[tokio::test]
+    async fn metadata_with_ambient_injects_correlation_inside_scope() {
+        // reason: 测试 fixture，输入为合法 correlation id。
+        #[allow(clippy::unwrap_used)]
+        let ctx = diagctx::DiagnosticCtx::new(diagctx::CorrelationId::parse("corr-x").unwrap());
+        let json = diagctx::scope(ctx, async {
+            let m = metadata_with_ambient(42);
+            OutboxEnvelope::new("d".to_string(), "c".to_string(), m).metadata_json()
+        })
+        .await;
+        assert!(
+            json.contains(r#""correlation":"corr-x""#),
+            "scope 内应含 correlation: {json}"
+        );
+        assert!(
+            json.contains(r#""occurredAt":42"#),
+            "occurredAt 应存在: {json}"
+        );
+    }
+
+    // 无 scope → correlation 不注入（fail-open 省略），occurredAt 仍在。
+    // anti-vacuity：无 scope 不 panic、不 Err（fail-open 契约）。
+    #[tokio::test]
+    async fn metadata_with_ambient_omits_correlation_outside_scope() {
+        let m = metadata_with_ambient(42);
+        let json = OutboxEnvelope::new("d".to_string(), "c".to_string(), m).metadata_json();
+        assert!(
+            !json.contains("correlation"),
+            "无 scope 时不应含 correlation key: {json}"
+        );
+        assert!(
+            json.contains(r#""occurredAt":42"#),
+            "occurredAt 应存在: {json}"
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 use dynosaur::dynosaur;
 
+use crate::envelope::EnvelopeMetadata;
 use crate::redacted::RedactedSource;
 use crate::subscriber::MessageId;
 
@@ -96,25 +97,72 @@ impl Topic {
 }
 
 /// typed 事件发布请求：`topic` 经 [`Topic`] newtype 收口（不裸 `&str`），`payload` 为 provider-agnostic
-/// 字节。
+/// 字节，`metadata` 是统一 delivery envelope（[`EnvelopeMetadata`]，relay 从 `outbox.metadata` 列透传）。
 ///
-/// **租户 / correlation** 经 ambient [`runctx::RequestCtx`] 解析（请求级 context 值，非发布请求字段）。
+/// 字段私有 + 构造器 funnel（[`PublishRequest::new`] + [`PublishRequest::with_metadata`]）：业务 / relay
+/// 不能裸构造 metadata 字段，envelope 写面收口在 [`EnvelopeMetadata`] 两层入口（见其 rustdoc）。
+///
+/// **correlation** 经 ambient [`diagctx`] 诊断信道在 outbox emit 点注入 `outbox.metadata`（ADR-002 §D1-bis；
+/// **非** `runctx::RequestCtx`——后者只承载授权用 tenant / principal）；**租户**经 `runctx::RequestCtx` 解析。
 /// 跨域 wire 类型单源仍是 contract——`payload` 由 `eventexec`/outbox 层按 contract envelope 预编码后传入，
 /// DI-infra port **不**引 `generated`（ADR-003 §6 偏离 2）。字段集随消费域细化（pre-GA 可原地加 content-type 等）。
 #[derive(Clone)]
 pub struct PublishRequest {
+    topic: Topic,
+    event_id: MessageId,
+    payload: Vec<u8>,
+    metadata: EnvelopeMetadata,
+}
+
+impl PublishRequest {
+    /// 构造发布请求（metadata 默认空 bag）。topic / event_id / payload 必填位置参。
+    pub fn new(topic: Topic, event_id: MessageId, payload: Vec<u8>) -> Self {
+        Self {
+            topic,
+            event_id,
+            payload,
+            metadata: EnvelopeMetadata::empty(),
+        }
+    }
+
+    /// 携统一 delivery envelope metadata（relay 从 `outbox.metadata` 列 hydrate 后调用）。
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: EnvelopeMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     /// 目标 topic。
-    pub topic: Topic,
+    pub fn topic(&self) -> &Topic {
+        &self.topic
+    }
+
     /// 事件去重锚点（= outbox `event_id` / `Entry::idem_key`）。relay 据此盖章 broker `message_id`，
     /// 经订阅侧 `Message.id` 流回消费幂等键（`run_consumer` 的 `IdemKey`），实现「至少一次 + 幂等 =
     /// 有效一次」端到端去重（`docs/rules/eventbus.md` §DLX 与幂等）。路由元数据，非 PII。
-    pub event_id: MessageId,
+    pub fn event_id(&self) -> &MessageId {
+        &self.event_id
+    }
+
     /// provider-agnostic 事件字节（已按 contract envelope 编码）。
-    pub payload: Vec<u8>,
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// 统一 delivery envelope metadata（occurred_at / subjectId / correlation … → broker header）。
+    pub fn metadata(&self) -> &EnvelopeMetadata {
+        &self.metadata
+    }
+
+    /// move 出 payload（adapter publish 避 clone）。
+    pub fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
 }
 
 /// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（事件序列化体，可能含
-/// PII——如审计事件本身被编码进 payload）输出 `<redacted>`；`topic` / `event_id` 是路由元数据，可观测。
+/// PII——如审计事件本身被编码进 payload）输出 `<redacted>`；`topic` / `event_id` 是路由元数据，可观测；
+/// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 已脱敏）。
 ///
 /// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
 impl std::fmt::Debug for PublishRequest {
@@ -123,6 +171,7 @@ impl std::fmt::Debug for PublishRequest {
             .field("topic", &self.topic)
             .field("event_id", &self.event_id)
             .field("payload", &"<redacted>")
+            .field("metadata", &self.metadata)
             .finish()
     }
 }
@@ -215,11 +264,11 @@ mod smoke {
     }
 
     fn sample_request() -> PublishRequest {
-        PublishRequest {
-            topic: Topic::new("session.created"),
-            event_id: MessageId::new("evt-1"),
-            payload: b"evt".to_vec(),
-        }
+        PublishRequest::new(
+            Topic::new("session.created"),
+            MessageId::new("evt-1"),
+            b"evt".to_vec(),
+        )
     }
 
     struct NoopPublisher;
@@ -245,26 +294,60 @@ mod smoke {
 }
 
 #[cfg(test)]
+mod metadata_carry {
+    //! `PublishRequest` 携 [`EnvelopeMetadata`] 往返 + accessor。
+    use super::{MessageId, PublishRequest, Topic};
+    use crate::envelope::{EnvelopeMetadata, KEY_OCCURRED_AT, KEY_SUBJECT_ID};
+
+    #[test]
+    fn new_defaults_to_empty_metadata() {
+        let req = PublishRequest::new(Topic::new("t"), MessageId::new("e"), b"p".to_vec());
+        assert!(req.metadata().is_empty());
+        assert_eq!(req.topic().as_str(), "t");
+        assert_eq!(req.event_id().as_str(), "e");
+        assert_eq!(req.payload(), b"p");
+    }
+
+    #[test]
+    fn with_metadata_carries_envelope() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        md.insert_wire_pair(KEY_SUBJECT_ID, "user-7");
+        let req = PublishRequest::new(Topic::new("t"), MessageId::new("e"), b"p".to_vec())
+            .with_metadata(md);
+        assert_eq!(req.metadata().occurred_at_secs(), Some(1_700_000_000));
+        assert_eq!(req.metadata().get(KEY_SUBJECT_ID), Some("user-7"));
+        // into_payload move 出字节。
+        assert_eq!(req.into_payload(), b"p".to_vec());
+    }
+}
+
+#[cfg(test)]
 mod pii_debug {
     //! `PublishRequest.payload`（事件序列化体，可能含 PII）字节 Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
     use super::{MessageId, PublishRequest, Topic};
+    use crate::envelope::{EnvelopeMetadata, KEY_SUBJECT_ID};
 
     #[test]
-    fn publish_request_debug_redacts_payload() {
+    fn publish_request_debug_redacts_payload_and_subject() {
         // anti-vacuity：原始 Vec<u8> Debug 把 0xDE 渲染成 "222"，证明 "!contains(222)" 检测非空转。
         assert!(
             format!("{:?}", vec![0xDE_u8]).contains("222"),
             "前提失效：检测字节不在原始 Debug"
         );
-        let req = PublishRequest {
-            topic: Topic::new("session.created"),
-            event_id: MessageId::new("evt-routing-id"),
-            payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
-        };
+        let mut md = EnvelopeMetadata::empty();
+        let _ = md.try_insert(KEY_SUBJECT_ID, "SECRET_SUBJECT");
+        let req = PublishRequest::new(
+            Topic::new("session.created"),
+            MessageId::new("evt-routing-id"),
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+        )
+        .with_metadata(md);
         let dbg = format!("{req:?}");
         assert!(!dbg.contains("222"), "payload 字节泄漏(0xDE=222): {dbg}");
         assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
+        assert!(!dbg.contains("SECRET_SUBJECT"), "subjectId 值泄漏: {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains("session.created"), "topic 应可见: {dbg}");
         // event_id 是路由元数据（去重锚点），应可见——非 PII。

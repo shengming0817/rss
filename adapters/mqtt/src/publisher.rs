@@ -102,13 +102,17 @@ fn handle_pub_event(polled: &Result<Event, ConnectionError>, confirm: &Confirmat
 impl Publisher for MqttPublisher {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
         // event_id 盖进 v5 correlation_data（去重锚点）：经 broker 流到订阅侧 `Message.id`，实现跨进程
-        // 「至少一次 + 幂等去重」。MessageMetadata 冻结期无 setter ⇒ 不注入 user properties。
-        let correlation: Vec<u8> = request.event_id.as_str().as_bytes().to_vec();
+        // 「至少一次 + 幂等去重」。envelope metadata 全量透传进 user_properties（occurred_at 等 reserved key
+        // 与业务 free-form key 均作 user property pair 传递）。
+        let correlation: Vec<u8> = request.event_id().as_str().as_bytes().to_vec();
+        let topic = request.topic().as_str().to_string();
         let properties = PublishProperties {
             correlation_data: Some(correlation.into()),
+            user_properties: crate::envelope::to_user_properties(request.metadata()),
             ..Default::default()
         };
-        let topic = request.topic.as_str().to_string();
+        // into_payload()：move payload 出 request（event_id / topic / metadata 已借用完毕）。
+        let payload = request.into_payload();
         // submit：入队 + 等 broker PUBACK 才返回 Ok（QoS1 真 at-least-once；broker 拒绝/断连/超时 ⇒ Err，
         // 消费方据此可重试，不会把未确认 publish 当成功结算）。
         self.confirm
@@ -116,7 +120,7 @@ impl Publisher for MqttPublisher {
                 topic,
                 QoS::AtLeastOnce,
                 false,
-                request.payload,
+                payload,
                 properties,
             ))
             .await
@@ -144,6 +148,18 @@ fn classify_confirm(e: conn::ConfirmError) -> PublisherError {
     } else {
         // RejectedTransient / Disconnected / Timeout
         PublisherError::transient(e)
+    }
+}
+
+impl ManagedResource for MqttPublisher {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        // cancel driver token + await driver 退出（driver 自身优雅断连）；ShutdownStack 外层有超时。
+        conn::teardown(&self.name, &self.token, &self.driver).await;
+        Ok(())
     }
 }
 
@@ -183,17 +199,5 @@ mod classify_tests {
         for (err, want, label) in cases {
             assert_eq!(classify_confirm(err).kind(), want, "{label}");
         }
-    }
-}
-
-impl ManagedResource for MqttPublisher {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        // cancel driver token + await driver 退出（driver 自身优雅断连）；ShutdownStack 外层有超时。
-        conn::teardown(&self.name, &self.token, &self.driver).await;
-        Ok(())
     }
 }

@@ -19,7 +19,7 @@ use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox, unix_secs};
+use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
 
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
 ///
@@ -62,7 +62,7 @@ impl OutboxEmitter for PgEmitter {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(subject_id),
+            metadata_with_ambient(unix_secs(self.clock.now())).with_subject_id(subject_id),
         );
         // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut PgConnection` ⇒ 必在事务内）。与
         // `PgStore::run_in_transaction` 同形（PgEmitter 经 share-pool 注入持 pool、非 PgStore 方法，故此处

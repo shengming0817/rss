@@ -38,6 +38,8 @@
 //! 循环 eventloop.poll() 驱动 + client.publish / Packet::Publish 收取），与 `adapters/amqp` 的
 //! `take_until(token)` 流取消范式一致。
 
+mod envelope;
+
 #[cfg(feature = "integration")]
 mod conn;
 #[cfg(feature = "integration")]

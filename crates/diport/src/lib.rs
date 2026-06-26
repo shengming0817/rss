@@ -78,6 +78,7 @@ pub mod audit_sink;
 pub mod checkpoint_store;
 pub mod clock;
 pub mod dead_letter_store;
+pub mod envelope;
 pub mod fenced_writer;
 pub mod leader_elector;
 pub mod managed_resource;
@@ -109,6 +110,10 @@ pub use checkpoint_store::{
 pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+};
+pub use envelope::{
+    EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID, KEY_TRACE,
+    MetadataError, RESERVED_METADATA_KEYS,
 };
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
@@ -145,6 +150,6 @@ pub use secret_resolver::{
 };
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
 pub use subscriber::{
-    DynSubscriber, Message, MessageId, MessageMetadata, MessageStream, SubscribeInitError,
-    SubscribeInitializer, Subscriber, SubscriberError,
+    DynSubscriber, Message, MessageId, MessageStream, SubscribeInitError, SubscribeInitializer,
+    Subscriber, SubscriberError,
 };

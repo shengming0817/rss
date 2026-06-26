@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use amqp::{AmqpPublisher, AmqpSubscriber};
 use anyhow::anyhow;
-use diport::{AckAction, AckableSubscriber, Acker, MessageId, PublishRequest, Publisher, Topic};
+use diport::{
+    AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
+    KEY_SUBJECT_ID, MessageId, PublishRequest, Publisher, Topic,
+};
 use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
@@ -61,11 +64,11 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-pub").await?;
     publisher
-        .publish(PublishRequest {
+        .publish(PublishRequest::new(
             topic,
-            event_id: MessageId::new("evt-amqp-1"),
-            payload: b"hello-amqp".to_vec(),
-        })
+            MessageId::new("evt-amqp-1"),
+            b"hello-amqp".to_vec(),
+        ))
         .await?;
 
     // 有界等待，防 broker 异常时挂死。
@@ -97,11 +100,11 @@ async fn integration_publish_unroutable_is_transient() -> Result<(), FixtureErro
     // 不订阅 ⇒ 无 queue 绑定该 topic；mandatory=true ⇒ broker 退回（durable publish-ok 检测为失败）。
     let publisher = AmqpPublisher::connect(&url, "amqp-it-unroutable").await?;
     match publisher
-        .publish(PublishRequest {
-            topic: Topic::new("rss.it.no.queue.bound"),
-            event_id: MessageId::new("evt-unroutable-1"),
-            payload: b"orphan".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            Topic::new("rss.it.no.queue.bound"),
+            MessageId::new("evt-unroutable-1"),
+            b"orphan".to_vec(),
+        ))
         .await
     {
         Ok(()) => panic!("publish to unbound queue must fail (mandatory return)"),
@@ -133,11 +136,11 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: Topic::new("rss.it.iso-b"),
-            event_id: MessageId::new("evt-iso-b"),
-            payload: b"to-b".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            Topic::new("rss.it.iso-b"),
+            MessageId::new("evt-iso-b"),
+            b"to-b".to_vec(),
+        ))
         .await?;
 
     // 正向：B 收到该消息。
@@ -182,11 +185,11 @@ async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<()
     // A 取消后发到 B → B 仍能收到（B 的 channel/consumer 未被 A 的 cancel 连带关闭——回归守卫）。
     let publisher = AmqpPublisher::connect(&url, "amqp-it-persub-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: Topic::new("rss.it.persub-b"),
-            event_id: MessageId::new("evt-persub-b"),
-            payload: b"to-b-after-a-cancel".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            Topic::new("rss.it.persub-b"),
+            MessageId::new("evt-persub-b"),
+            b"to-b-after-a-cancel".to_vec(),
+        ))
         .await?;
     let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
         .await?
@@ -227,11 +230,11 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     // 发到 vhost-a。
     let pub_a = AmqpPublisher::connect(&url_a, "xvhost-pub-a").await?;
     pub_a
-        .publish(PublishRequest {
-            topic: topic.clone(),
-            event_id: MessageId::new("evt-xvhost-a"),
-            payload: b"only-a".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-xvhost-a"),
+            b"only-a".to_vec(),
+        ))
         .await?;
 
     // 正向：vhost-a 订阅者收到。
@@ -288,11 +291,11 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-ack-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: topic.clone(),
-            event_id: MessageId::new("evt-ack-a"),
-            payload: b"ack-payload".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-ack-a"),
+            b"ack-payload".to_vec(),
+        ))
         .await?;
 
     // 收到一条投递，ack 结算。
@@ -342,11 +345,11 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-rq-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: topic.clone(),
-            event_id: MessageId::new("evt-requeue-b"),
-            payload: b"requeue-payload".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-requeue-b"),
+            b"requeue-payload".to_vec(),
+        ))
         .await?;
 
     // 第一个 consumer 收到，nack(requeue=true)。
@@ -405,11 +408,11 @@ async fn integration_ackable_crash_without_settle_redelivers() -> Result<(), Fix
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-crash-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: topic.clone(),
-            event_id: MessageId::new("evt-crash-c"),
-            payload: b"crash-payload".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-crash-c"),
+            b"crash-payload".to_vec(),
+        ))
         .await?;
 
     // 收到投递，取出 acker（消费 struct），但**不 settle**（模拟在途崩溃）。
@@ -463,11 +466,11 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-cancel-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: topic.clone(),
-            event_id: MessageId::new("evt-cancel-d"),
-            payload: b"cancel-payload".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-cancel-d"),
+            b"cancel-payload".to_vec(),
+        ))
         .await?;
 
     // 收到投递但**不 settle**，然后仅 token cancel（不 shutdown）——触发 cancel_ackable_on_token 关 channel。
@@ -500,5 +503,71 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
     token2.cancel();
     AckableSubscriber::shutdown(&sub2).await?;
     Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// envelope header 双向贯通：publish 携 occurred_at + subjectId + correlation →
+/// subscriber 端 `Message.metadata` 保真（AMQP timestamp + FieldTable LongString 双通道透传验证）。
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_envelope_hdr").await?;
+    let topic = Topic::new("rss.it.envelope-header");
+    let token = CancellationToken::new();
+
+    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-env-sub").await?;
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
+
+    let publisher = AmqpPublisher::connect(&url, "amqp-it-env-pub").await?;
+
+    // 构造携 envelope metadata 的 PublishRequest。
+    let mut md = EnvelopeMetadata::empty();
+    md.insert_wire_pair(KEY_OCCURRED_AT, "1700000001");
+    md.insert_wire_pair(KEY_CORRELATION, "corr-42");
+    md.insert_wire_pair(KEY_SUBJECT_ID, "user-7");
+
+    publisher
+        .publish(
+            PublishRequest::new(
+                topic,
+                MessageId::new("evt-env-hdr-1"),
+                b"env-payload".to_vec(),
+            )
+            .with_metadata(md),
+        )
+        .await?;
+
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await?
+        .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
+
+    // metadata 保真验证。
+    assert_eq!(
+        delivery.message.metadata.occurred_at_secs(),
+        Some(1_700_000_001_i64),
+        "occurred_at 应经 AMQP timestamp 字段透传"
+    );
+    assert_eq!(
+        delivery.message.metadata.get(KEY_CORRELATION),
+        Some("corr-42"),
+        "correlation 应经 AMQP FieldTable LongString 透传"
+    );
+    assert_eq!(
+        delivery.message.metadata.get(KEY_SUBJECT_ID),
+        Some("user-7"),
+        "subjectId 应经 AMQP FieldTable LongString 透传"
+    );
+
+    delivery
+        .acker
+        .settle(AckAction::Ack)
+        .await
+        .map_err(|e| anyhow!("settle failed: {e}"))?;
+
+    token.cancel();
+    Publisher::shutdown(&publisher).await?;
+    AckableSubscriber::shutdown(&subscriber).await?;
     Ok(())
 }

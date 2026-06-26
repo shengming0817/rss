@@ -231,10 +231,10 @@ mod tests {
 
     #[test]
     fn target_crates_by_layer() {
-        assert_eq!(target_crates(Some(Layer::Basis)).len(), 5);
+        assert_eq!(target_crates(Some(Layer::Basis)).len(), 6);
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 2);
         // None = basis + engine 全集，无第三份硬编码列表。
-        assert_eq!(target_crates(None).len(), 7);
+        assert_eq!(target_crates(None).len(), 8);
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
     }

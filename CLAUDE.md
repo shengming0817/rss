@@ -38,7 +38,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 
 ### 依赖规则（crate 图 + deny.toml 编译期强制）
 
-- **基础**（`vocab`/`ids`/`secure`/`support`/`runctx`）依赖 std + 外部 crate，不依赖引擎 / 服务 / 域 / adapters；基础层内部按 enumerated intra-base DAG 单向依赖（`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，右可依赖左 = 前向边均 sanctioned、反向禁止；`cargo xtask layer-deps` 机器守 BASE-INTRADAG-01），当前唯一存在的前向边是 `runctx → vocab`（`AppCtx` tenant payload = `vocab::tenant::TenantId`，ADR-002 §D3 决策 #2）。
+- **基础**（`vocab`/`ids`/`secure`/`support`/`runctx`/`diagctx`）依赖 std + 外部 crate，不依赖引擎 / 服务 / 域 / adapters；基础层内部按 enumerated intra-base DAG 单向依赖（`diagctx（独立根）◁ vocab ◁ ids ◁ secure ◁ support ◁ runctx`，右可依赖左 = 前向边均 sanctioned、反向禁止；`diagctx` 为独立根、不依赖其它基础 crate；`cargo xtask layer-deps` 机器守 BASE-INTRADAG-01），当前唯一存在的前向边是 `runctx → vocab`（`AppCtx` tenant payload = `vocab::tenant::TenantId`，ADR-002 §D3 决策 #2）。
 - **引擎/原语**（`consistency`/`primitives`）依赖基础；不依赖服务 / 域 / adapters。
 - **服务**（`httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`）依赖基础 + 引擎；不依赖域 / adapters。
 - **域**（`identity`/`settings`/…）依赖基础 + 引擎 + 服务 + `generated`；**互不依赖**（跨域只经 contract）；不依赖 adapters。

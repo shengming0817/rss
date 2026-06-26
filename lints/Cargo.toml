@@ -14,4 +14,5 @@ members = [
   "rss_diport_error_debug_redacted",
   "rss_pdp_impl_adapter_only",
   "rss_projection_append_only",
+  "rss_diport_envelope_reserved_writer",
 ]

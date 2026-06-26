@@ -56,6 +56,7 @@ rss/
 │   ├── secure/           # redaction / aead / cookie / pathsafe
 │   ├── support/          # http / pg / validation 杂项
 │   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
+│   ├── diagctx/          # 诊断信道 fail-open correlation（ADR-002 §D1-bis）
 │   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
 │   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源（Clock / Signer / Publisher / Subscriber / AuditSink / ManagedResource…）+ dynosaur Dyn wrapper
@@ -92,7 +93,7 @@ rss/
 
 ## 分层(crate 图 + deny.toml 编译期强制)
 
-- **基础** `vocab`/`ids`/`secure`/`support`/`runctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`vocab ◁ ids ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)。当前实际存在的唯一前向边是 `runctx → vocab`——`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`(ADR-002 §D3,决策 #2)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
+- **基础** `vocab`/`ids`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。当前实际存在的唯一前向边是 `runctx → vocab`——`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`(ADR-002 §D3,决策 #2)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
 - **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖 DI-infra/服务/域/adapters。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource…,签名只引基础/wire/自定义类型)+ dynosaur Dyn wrapper(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——

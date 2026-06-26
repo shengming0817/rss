@@ -5,13 +5,13 @@
 //! 与 [`crate::Publisher`] 拥有 [`crate::PublishRequest`]/[`crate::Topic`] 对称（watermill `message` 包内聚）。
 //! ref: watermill message/message.go+pubsub.go@master
 
-use std::collections::HashMap;
 use std::pin::Pin;
 
 use dynosaur::dynosaur;
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
+use crate::envelope::EnvelopeMetadata;
 use crate::publisher::Topic;
 use crate::redacted::RedactedSource;
 
@@ -32,38 +32,24 @@ impl MessageId {
     }
 }
 
-/// 消息元数据（key-value 字符串映射，对齐 watermill Metadata）——只读访问。
-///
-/// **冻结期不开放公开写入口**：reserved envelope key（trace / correlation / principal / occurred_at）
-/// 由 adapter 在受控构造点经 sealed metadata funnel 注入（`occurred_at` 已接线 #1129，取注入 `Clock`；trace /
-/// correlation / principal 待 #1296），业务不得经 metadata 伪造（`docs/rules/observability.md` §Outbox Envelope）。
-/// 消费侧 free-form 非-reserved key 的受控写入路径（typed key funnel，排除 reserved key）与 emit 侧正交，待
-/// #1297 落地。冻结期无 `set` ⇒ 经 metadata bag 伪造任何 key（含 reserved）从 API 面即不可表达（Hard：无 setter）。
-#[derive(Debug, Clone, Default)]
-pub struct MessageMetadata(HashMap<String, String>);
-
-impl MessageMetadata {
-    /// 取元数据值（只读；写入路径见类型 rustdoc，冻结期未开放）。
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
-    }
-}
-
 /// 消息值类型（对齐 watermill Message UUID/Metadata/Payload）。
 ///
-/// 不暴露 Ack/Nack——由框架据 `eventexec::Disposition` 驱动。
+/// 不暴露 Ack/Nack——由框架据 `eventexec::Disposition` 驱动。`metadata` 是统一 delivery envelope
+/// （[`EnvelopeMetadata`]）：reserved key（trace / correlation / principal / occurred_at）由 adapter
+/// subscriber 从 broker header 经 [`EnvelopeMetadata::insert_wire_pair`] 透传（来源已 sealed），业务不得伪造
+/// （writer 两层强度见 [`EnvelopeMetadata`] rustdoc + dylint DIPORT-ENVELOPE-WIRE-WRITER-01）。
 #[derive(Clone)]
 pub struct Message {
     /// 消息唯一标识。
     pub id: MessageId,
-    /// 消息元数据。
-    pub metadata: MessageMetadata,
+    /// 统一 delivery envelope metadata（occurred_at / subjectId / correlation … 从 broker header 透传）。
+    pub metadata: EnvelopeMetadata,
     /// provider-agnostic 消息字节。
     pub payload: Vec<u8>,
 }
 
 /// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（消息体，可能含 PII）输出
-/// `<redacted>`；`id` / `metadata`（路由 header）可观测。
+/// `<redacted>`；`id`（路由）可观测；`metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
 ///
 /// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
 impl std::fmt::Debug for Message {
@@ -81,7 +67,20 @@ impl Message {
     pub fn new(id: impl Into<String>, payload: Vec<u8>) -> Self {
         Self {
             id: MessageId::new(id),
-            metadata: MessageMetadata::default(),
+            metadata: EnvelopeMetadata::empty(),
+            payload,
+        }
+    }
+
+    /// 由标识 + payload + 统一 delivery envelope metadata 构造（adapter subscriber 从 broker delivery 调用）。
+    pub fn new_with_metadata(
+        id: impl Into<String>,
+        payload: Vec<u8>,
+        metadata: EnvelopeMetadata,
+    ) -> Self {
+        Self {
+            id: MessageId::new(id),
+            metadata,
             payload,
         }
     }
@@ -243,9 +242,22 @@ mod smoke {
         _assert_send_sync::<Message>();
         let msg = Message::new("m-1", b"payload".to_vec());
         assert_eq!(msg.id.as_str(), "m-1");
-        // 无公开 setter ⇒ metadata bag 冻结期恒空，reserved key 经此路径不可伪造（observability.md §Outbox Envelope）。
+        // Message::new 默认空 envelope（无 metadata 路径）。
         assert_eq!(msg.metadata.get("trace"), None);
+        assert!(msg.metadata.is_empty());
         assert_eq!(msg.payload, b"payload".to_vec());
+    }
+
+    #[test]
+    fn message_with_metadata_carries_envelope() {
+        use crate::envelope::{EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT};
+        // adapter subscriber 从 broker header 透传 reserved key（来源已 sealed，走 insert_wire_pair）。
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        md.insert_wire_pair(KEY_CORRELATION, "corr-3");
+        let msg = Message::new_with_metadata("m-2", b"p".to_vec(), md);
+        assert_eq!(msg.metadata.occurred_at_secs(), Some(1_700_000_000));
+        assert_eq!(msg.metadata.get(KEY_CORRELATION), Some("corr-3"));
     }
 
     #[test]

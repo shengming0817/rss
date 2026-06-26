@@ -84,20 +84,24 @@ impl Publisher for MemPublisher {
         inner.seq += 1;
         // event_id（去重锚点 / EventId）作 Message.id，使消费侧 `run_consumer` 的幂等键与 durable
         // 路径一致（重投同一 EventId → Duplicate 短路）。event_id 空才回退单调 seq（保旧 demo 行为）。
-        let id = if request.event_id.as_str().is_empty() {
+        let id = if request.event_id().as_str().is_empty() {
             format!("mem-{}", inner.seq)
         } else {
-            request.event_id.as_str().to_string()
+            request.event_id().as_str().to_string()
         };
-        let payload = request.payload;
-        let senders = inner
-            .topics
-            .entry(request.topic.as_str().to_string())
-            .or_default();
+        let topic = request.topic().as_str().to_string();
+        // metadata clone：先借用完毕再 into_payload（消费 request 所有权）。
+        let metadata = request.metadata().clone();
+        let payload = request.into_payload();
+        let senders = inner.topics.entry(topic).or_default();
         // 投递 clone 给每个订阅者；receiver 已 drop（unbounded_send Err）则剔除（对标 gochannel 退订清理）。
         senders.retain(|tx| {
-            tx.unbounded_send(Message::new(id.clone(), payload.clone()))
-                .is_ok()
+            tx.unbounded_send(Message::new_with_metadata(
+                id.clone(),
+                payload.clone(),
+                metadata.clone(),
+            ))
+            .is_ok()
         });
         Ok(())
     }
@@ -165,11 +169,11 @@ impl OutboxEmitter for MemEmitter {
     ) -> Result<(), OutboxEmitError> {
         // reason: in-mem 替身无持久化载体，envelope（domain/contract_id/subject_id）无落库处——
         // 消费侧从 payload 解码 subject/tenant，故 demo 路径忽略 envelope（durable PgEmitter 才落 metadata）。
-        let request = PublishRequest {
-            topic: Topic::new(entry.topic().as_str()),
-            event_id: MessageId::new(entry.idem_key().as_str()),
-            payload: entry.payload().to_vec(),
-        };
+        let request = PublishRequest::new(
+            Topic::new(entry.topic().as_str()),
+            MessageId::new(entry.idem_key().as_str()),
+            entry.payload().to_vec(),
+        );
         self.bus
             .publisher()
             .publish(request)
@@ -225,11 +229,11 @@ impl SessionLifecycle for MemSessionLifecycle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(session.id().clone(), (session, false));
-        let request = PublishRequest {
-            topic: Topic::new(entry.topic().as_str()),
-            event_id: MessageId::new(entry.idem_key().as_str()),
-            payload: entry.payload().to_vec(),
-        };
+        let request = PublishRequest::new(
+            Topic::new(entry.topic().as_str()),
+            MessageId::new(entry.idem_key().as_str()),
+            entry.payload().to_vec(),
+        );
         self.bus
             .publisher()
             .publish(request)
@@ -879,11 +883,11 @@ mod tests {
             .await
             .expect("subscribe");
         bus.publisher()
-            .publish(PublishRequest {
-                topic: Topic::new(TOPIC),
-                event_id: MessageId::new("evt-roundtrip"),
-                payload: b"hello".to_vec(),
-            })
+            .publish(PublishRequest::new(
+                Topic::new(TOPIC),
+                MessageId::new("evt-roundtrip"),
+                b"hello".to_vec(),
+            ))
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
@@ -912,11 +916,11 @@ mod tests {
             .await
             .expect("subscribe b");
         bus.publisher()
-            .publish(PublishRequest {
-                topic: Topic::new(TOPIC),
-                event_id: MessageId::new("evt-fanout"),
-                payload: b"x".to_vec(),
-            })
+            .publish(PublishRequest::new(
+                Topic::new(TOPIC),
+                MessageId::new("evt-fanout"),
+                b"x".to_vec(),
+            ))
             .await
             .expect("publish");
         assert_eq!(a.next().await.expect("a msg").payload, b"x".to_vec());
@@ -934,11 +938,11 @@ mod tests {
             .await
             .expect("subscribe");
         bus.publisher()
-            .publish(PublishRequest {
-                topic: Topic::new(TOPIC),
-                event_id: MessageId::new("evt-other"),
-                payload: b"x".to_vec(),
-            })
+            .publish(PublishRequest::new(
+                Topic::new(TOPIC),
+                MessageId::new("evt-other"),
+                b"x".to_vec(),
+            ))
             .await
             .expect("publish");
         // 取消后流终止：不同 topic 无投递 ⇒ None。
@@ -988,6 +992,46 @@ mod tests {
             .expect("subscribe");
         token.cancel();
         assert!(stream.next().await.is_none());
+    }
+
+    /// metadata passthrough：publish 携 envelope metadata → subscriber 端 Message.metadata 保真。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn publish_metadata_propagates_to_subscriber() {
+        let bus = MemBus::new();
+        let token = CancellationToken::new();
+        let mut stream = bus
+            .subscriber()
+            .subscribe(Topic::new(TOPIC), token.clone())
+            .await
+            .expect("subscribe");
+        let mut md = diport::EnvelopeMetadata::empty();
+        md.insert_wire_pair(diport::KEY_OCCURRED_AT, "1700000003");
+        md.insert_wire_pair(diport::KEY_CORRELATION, "corr-mem-1");
+        bus.publisher()
+            .publish(
+                PublishRequest::new(
+                    Topic::new(TOPIC),
+                    MessageId::new("evt-meta"),
+                    b"with-meta".to_vec(),
+                )
+                .with_metadata(md),
+            )
+            .await
+            .expect("publish");
+        let msg = stream.next().await.expect("message delivered");
+        assert_eq!(msg.payload, b"with-meta".to_vec());
+        assert_eq!(
+            msg.metadata.occurred_at_secs(),
+            Some(1_700_000_003_i64),
+            "occurred_at 应透传到 Message.metadata"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_CORRELATION),
+            Some("corr-mem-1"),
+            "correlation 应透传到 Message.metadata"
+        );
+        token.cancel();
     }
 
     #[tokio::test]

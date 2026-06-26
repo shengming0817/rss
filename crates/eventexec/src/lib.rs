@@ -52,8 +52,10 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
-// 消息原语（Message / MessageId / MessageMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
+// 消息原语（Message / MessageId / EnvelopeMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
 // （issue #1075，ADR-003 DI port 收敛）；本 crate 经 `diport::Message` 消费（HandlerFn/ConsumerFn 入参）。
+// 统一 delivery envelope（#1160）：`Message.metadata: diport::EnvelopeMetadata` 从 broker header 透传，
+// handler 经 `msg.metadata.get(..)` / `.occurred_at_secs()` 读 occurred_at / subjectId / correlation。
 use diport::Message;
 
 // ── 处理结论 ─────────────────────────────────────────────────────────────────

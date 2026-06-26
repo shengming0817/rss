@@ -1,0 +1,267 @@
+pub mod diagctx
+pub mod diagctx::ctx
+pub enum diagctx::ctx::CorrelationIdError
+pub diagctx::ctx::CorrelationIdError::Empty
+pub diagctx::ctx::CorrelationIdError::InvalidChar
+pub diagctx::ctx::CorrelationIdError::TooLong
+impl core::clone::Clone for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::clone(&self) -> diagctx::ctx::CorrelationIdError
+impl core::cmp::Eq for diagctx::ctx::CorrelationIdError
+impl core::cmp::PartialEq for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::eq(&self, &diagctx::ctx::CorrelationIdError) -> bool
+impl core::error::Error for diagctx::ctx::CorrelationIdError
+impl core::fmt::Debug for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diagctx::ctx::CorrelationIdError
+impl core::marker::Freeze for diagctx::ctx::CorrelationIdError
+impl core::marker::Send for diagctx::ctx::CorrelationIdError
+impl core::marker::Sync for diagctx::ctx::CorrelationIdError
+impl core::marker::Unpin for diagctx::ctx::CorrelationIdError
+impl core::marker::UnsafeUnpin for diagctx::ctx::CorrelationIdError
+impl core::panic::unwind_safe::RefUnwindSafe for diagctx::ctx::CorrelationIdError
+impl core::panic::unwind_safe::UnwindSafe for diagctx::ctx::CorrelationIdError
+impl<T, U> core::convert::Into<U> for diagctx::ctx::CorrelationIdError where U: core::convert::From<T>
+pub fn diagctx::ctx::CorrelationIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diagctx::ctx::CorrelationIdError where U: core::convert::Into<T>
+pub type diagctx::ctx::CorrelationIdError::Error = core::convert::Infallible
+pub fn diagctx::ctx::CorrelationIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diagctx::ctx::CorrelationIdError where U: core::convert::TryFrom<T>
+pub type diagctx::ctx::CorrelationIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diagctx::ctx::CorrelationIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diagctx::ctx::CorrelationIdError where T: core::clone::Clone
+pub type diagctx::ctx::CorrelationIdError::Owned = T
+pub fn diagctx::ctx::CorrelationIdError::clone_into(&self, &mut T)
+pub fn diagctx::ctx::CorrelationIdError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diagctx::ctx::CorrelationIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diagctx::ctx::CorrelationIdError where T: 'static + ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diagctx::ctx::CorrelationIdError where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diagctx::ctx::CorrelationIdError where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diagctx::ctx::CorrelationIdError where T: core::clone::Clone
+pub unsafe fn diagctx::ctx::CorrelationIdError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::from(T) -> T
+pub struct diagctx::ctx::CorrelationId(_)
+impl diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::as_str(&self) -> &str
+pub fn diagctx::ctx::CorrelationId::parse(&str) -> core::result::Result<Self, diagctx::ctx::CorrelationIdError>
+impl core::clone::Clone for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::clone(&self) -> diagctx::ctx::CorrelationId
+impl core::cmp::Eq for diagctx::ctx::CorrelationId
+impl core::cmp::PartialEq for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::eq(&self, &diagctx::ctx::CorrelationId) -> bool
+impl core::fmt::Debug for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diagctx::ctx::CorrelationId
+impl core::marker::Freeze for diagctx::ctx::CorrelationId
+impl core::marker::Send for diagctx::ctx::CorrelationId
+impl core::marker::Sync for diagctx::ctx::CorrelationId
+impl core::marker::Unpin for diagctx::ctx::CorrelationId
+impl core::marker::UnsafeUnpin for diagctx::ctx::CorrelationId
+impl core::panic::unwind_safe::RefUnwindSafe for diagctx::ctx::CorrelationId
+impl core::panic::unwind_safe::UnwindSafe for diagctx::ctx::CorrelationId
+impl<T, U> core::convert::Into<U> for diagctx::ctx::CorrelationId where U: core::convert::From<T>
+pub fn diagctx::ctx::CorrelationId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diagctx::ctx::CorrelationId where U: core::convert::Into<T>
+pub type diagctx::ctx::CorrelationId::Error = core::convert::Infallible
+pub fn diagctx::ctx::CorrelationId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diagctx::ctx::CorrelationId where U: core::convert::TryFrom<T>
+pub type diagctx::ctx::CorrelationId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diagctx::ctx::CorrelationId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diagctx::ctx::CorrelationId where T: core::clone::Clone
+pub type diagctx::ctx::CorrelationId::Owned = T
+pub fn diagctx::ctx::CorrelationId::clone_into(&self, &mut T)
+pub fn diagctx::ctx::CorrelationId::to_owned(&self) -> T
+impl<T> core::any::Any for diagctx::ctx::CorrelationId where T: 'static + ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diagctx::ctx::CorrelationId where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diagctx::ctx::CorrelationId where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diagctx::ctx::CorrelationId where T: core::clone::Clone
+pub unsafe fn diagctx::ctx::CorrelationId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::from(T) -> T
+pub struct diagctx::ctx::DiagnosticCtx
+impl diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::correlation(&self) -> &diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::DiagnosticCtx::new(diagctx::ctx::CorrelationId) -> Self
+impl core::clone::Clone for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::clone(&self) -> diagctx::ctx::DiagnosticCtx
+impl core::cmp::Eq for diagctx::ctx::DiagnosticCtx
+impl core::cmp::PartialEq for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::eq(&self, &diagctx::ctx::DiagnosticCtx) -> bool
+impl core::fmt::Debug for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diagctx::ctx::DiagnosticCtx
+impl core::marker::Freeze for diagctx::ctx::DiagnosticCtx
+impl core::marker::Send for diagctx::ctx::DiagnosticCtx
+impl core::marker::Sync for diagctx::ctx::DiagnosticCtx
+impl core::marker::Unpin for diagctx::ctx::DiagnosticCtx
+impl core::marker::UnsafeUnpin for diagctx::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::RefUnwindSafe for diagctx::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::UnwindSafe for diagctx::ctx::DiagnosticCtx
+impl<T, U> core::convert::Into<U> for diagctx::ctx::DiagnosticCtx where U: core::convert::From<T>
+pub fn diagctx::ctx::DiagnosticCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diagctx::ctx::DiagnosticCtx where U: core::convert::Into<T>
+pub type diagctx::ctx::DiagnosticCtx::Error = core::convert::Infallible
+pub fn diagctx::ctx::DiagnosticCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diagctx::ctx::DiagnosticCtx where U: core::convert::TryFrom<T>
+pub type diagctx::ctx::DiagnosticCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diagctx::ctx::DiagnosticCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diagctx::ctx::DiagnosticCtx where T: core::clone::Clone
+pub type diagctx::ctx::DiagnosticCtx::Owned = T
+pub fn diagctx::ctx::DiagnosticCtx::clone_into(&self, &mut T)
+pub fn diagctx::ctx::DiagnosticCtx::to_owned(&self) -> T
+impl<T> core::any::Any for diagctx::ctx::DiagnosticCtx where T: 'static + ?core::marker::Sized
+pub fn diagctx::ctx::DiagnosticCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diagctx::ctx::DiagnosticCtx where T: ?core::marker::Sized
+pub fn diagctx::ctx::DiagnosticCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diagctx::ctx::DiagnosticCtx where T: ?core::marker::Sized
+pub fn diagctx::ctx::DiagnosticCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diagctx::ctx::DiagnosticCtx where T: core::clone::Clone
+pub unsafe fn diagctx::ctx::DiagnosticCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::from(T) -> T
+pub const diagctx::ctx::MAX_CORRELATION_ID_LEN: usize
+pub mod diagctx::local
+pub fn diagctx::local::correlation() -> core::option::Option<diagctx::ctx::CorrelationId>
+pub fn diagctx::local::current() -> core::option::Option<diagctx::ctx::DiagnosticCtx>
+pub fn diagctx::local::scope<F>(diagctx::ctx::DiagnosticCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
+pub enum diagctx::CorrelationIdError
+pub diagctx::CorrelationIdError::Empty
+pub diagctx::CorrelationIdError::InvalidChar
+pub diagctx::CorrelationIdError::TooLong
+impl core::clone::Clone for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::clone(&self) -> diagctx::ctx::CorrelationIdError
+impl core::cmp::Eq for diagctx::ctx::CorrelationIdError
+impl core::cmp::PartialEq for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::eq(&self, &diagctx::ctx::CorrelationIdError) -> bool
+impl core::error::Error for diagctx::ctx::CorrelationIdError
+impl core::fmt::Debug for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diagctx::ctx::CorrelationIdError
+impl core::marker::Freeze for diagctx::ctx::CorrelationIdError
+impl core::marker::Send for diagctx::ctx::CorrelationIdError
+impl core::marker::Sync for diagctx::ctx::CorrelationIdError
+impl core::marker::Unpin for diagctx::ctx::CorrelationIdError
+impl core::marker::UnsafeUnpin for diagctx::ctx::CorrelationIdError
+impl core::panic::unwind_safe::RefUnwindSafe for diagctx::ctx::CorrelationIdError
+impl core::panic::unwind_safe::UnwindSafe for diagctx::ctx::CorrelationIdError
+impl<T, U> core::convert::Into<U> for diagctx::ctx::CorrelationIdError where U: core::convert::From<T>
+pub fn diagctx::ctx::CorrelationIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diagctx::ctx::CorrelationIdError where U: core::convert::Into<T>
+pub type diagctx::ctx::CorrelationIdError::Error = core::convert::Infallible
+pub fn diagctx::ctx::CorrelationIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diagctx::ctx::CorrelationIdError where U: core::convert::TryFrom<T>
+pub type diagctx::ctx::CorrelationIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diagctx::ctx::CorrelationIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diagctx::ctx::CorrelationIdError where T: core::clone::Clone
+pub type diagctx::ctx::CorrelationIdError::Owned = T
+pub fn diagctx::ctx::CorrelationIdError::clone_into(&self, &mut T)
+pub fn diagctx::ctx::CorrelationIdError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diagctx::ctx::CorrelationIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diagctx::ctx::CorrelationIdError where T: 'static + ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diagctx::ctx::CorrelationIdError where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diagctx::ctx::CorrelationIdError where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diagctx::ctx::CorrelationIdError where T: core::clone::Clone
+pub unsafe fn diagctx::ctx::CorrelationIdError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diagctx::ctx::CorrelationIdError
+pub fn diagctx::ctx::CorrelationIdError::from(T) -> T
+pub struct diagctx::CorrelationId(_)
+impl diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::as_str(&self) -> &str
+pub fn diagctx::ctx::CorrelationId::parse(&str) -> core::result::Result<Self, diagctx::ctx::CorrelationIdError>
+impl core::clone::Clone for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::clone(&self) -> diagctx::ctx::CorrelationId
+impl core::cmp::Eq for diagctx::ctx::CorrelationId
+impl core::cmp::PartialEq for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::eq(&self, &diagctx::ctx::CorrelationId) -> bool
+impl core::fmt::Debug for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diagctx::ctx::CorrelationId
+impl core::marker::Freeze for diagctx::ctx::CorrelationId
+impl core::marker::Send for diagctx::ctx::CorrelationId
+impl core::marker::Sync for diagctx::ctx::CorrelationId
+impl core::marker::Unpin for diagctx::ctx::CorrelationId
+impl core::marker::UnsafeUnpin for diagctx::ctx::CorrelationId
+impl core::panic::unwind_safe::RefUnwindSafe for diagctx::ctx::CorrelationId
+impl core::panic::unwind_safe::UnwindSafe for diagctx::ctx::CorrelationId
+impl<T, U> core::convert::Into<U> for diagctx::ctx::CorrelationId where U: core::convert::From<T>
+pub fn diagctx::ctx::CorrelationId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diagctx::ctx::CorrelationId where U: core::convert::Into<T>
+pub type diagctx::ctx::CorrelationId::Error = core::convert::Infallible
+pub fn diagctx::ctx::CorrelationId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diagctx::ctx::CorrelationId where U: core::convert::TryFrom<T>
+pub type diagctx::ctx::CorrelationId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diagctx::ctx::CorrelationId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diagctx::ctx::CorrelationId where T: core::clone::Clone
+pub type diagctx::ctx::CorrelationId::Owned = T
+pub fn diagctx::ctx::CorrelationId::clone_into(&self, &mut T)
+pub fn diagctx::ctx::CorrelationId::to_owned(&self) -> T
+impl<T> core::any::Any for diagctx::ctx::CorrelationId where T: 'static + ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diagctx::ctx::CorrelationId where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diagctx::ctx::CorrelationId where T: ?core::marker::Sized
+pub fn diagctx::ctx::CorrelationId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diagctx::ctx::CorrelationId where T: core::clone::Clone
+pub unsafe fn diagctx::ctx::CorrelationId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::CorrelationId::from(T) -> T
+pub struct diagctx::DiagnosticCtx
+impl diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::correlation(&self) -> &diagctx::ctx::CorrelationId
+pub fn diagctx::ctx::DiagnosticCtx::new(diagctx::ctx::CorrelationId) -> Self
+impl core::clone::Clone for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::clone(&self) -> diagctx::ctx::DiagnosticCtx
+impl core::cmp::Eq for diagctx::ctx::DiagnosticCtx
+impl core::cmp::PartialEq for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::eq(&self, &diagctx::ctx::DiagnosticCtx) -> bool
+impl core::fmt::Debug for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diagctx::ctx::DiagnosticCtx
+impl core::marker::Freeze for diagctx::ctx::DiagnosticCtx
+impl core::marker::Send for diagctx::ctx::DiagnosticCtx
+impl core::marker::Sync for diagctx::ctx::DiagnosticCtx
+impl core::marker::Unpin for diagctx::ctx::DiagnosticCtx
+impl core::marker::UnsafeUnpin for diagctx::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::RefUnwindSafe for diagctx::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::UnwindSafe for diagctx::ctx::DiagnosticCtx
+impl<T, U> core::convert::Into<U> for diagctx::ctx::DiagnosticCtx where U: core::convert::From<T>
+pub fn diagctx::ctx::DiagnosticCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diagctx::ctx::DiagnosticCtx where U: core::convert::Into<T>
+pub type diagctx::ctx::DiagnosticCtx::Error = core::convert::Infallible
+pub fn diagctx::ctx::DiagnosticCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diagctx::ctx::DiagnosticCtx where U: core::convert::TryFrom<T>
+pub type diagctx::ctx::DiagnosticCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diagctx::ctx::DiagnosticCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diagctx::ctx::DiagnosticCtx where T: core::clone::Clone
+pub type diagctx::ctx::DiagnosticCtx::Owned = T
+pub fn diagctx::ctx::DiagnosticCtx::clone_into(&self, &mut T)
+pub fn diagctx::ctx::DiagnosticCtx::to_owned(&self) -> T
+impl<T> core::any::Any for diagctx::ctx::DiagnosticCtx where T: 'static + ?core::marker::Sized
+pub fn diagctx::ctx::DiagnosticCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diagctx::ctx::DiagnosticCtx where T: ?core::marker::Sized
+pub fn diagctx::ctx::DiagnosticCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diagctx::ctx::DiagnosticCtx where T: ?core::marker::Sized
+pub fn diagctx::ctx::DiagnosticCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diagctx::ctx::DiagnosticCtx where T: core::clone::Clone
+pub unsafe fn diagctx::ctx::DiagnosticCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diagctx::ctx::DiagnosticCtx
+pub fn diagctx::ctx::DiagnosticCtx::from(T) -> T
+pub const diagctx::MAX_CORRELATION_ID_LEN: usize
+pub fn diagctx::correlation() -> core::option::Option<diagctx::ctx::CorrelationId>
+pub fn diagctx::current() -> core::option::Option<diagctx::ctx::DiagnosticCtx>
+pub fn diagctx::scope<F>(diagctx::ctx::DiagnosticCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future

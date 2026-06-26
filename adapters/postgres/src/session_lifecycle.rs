@@ -37,7 +37,9 @@ use sqlx::{PgPool, Row};
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
-use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox, epoch_secs_to_time, unix_secs};
+use crate::outbox::{
+    OutboxEnvelope, append_outbox, epoch_secs_to_time, metadata_with_ambient, unix_secs,
+};
 
 /// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/revoke 均已交付，#1278）。
 ///
@@ -76,7 +78,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(subject_id),
+            metadata_with_ambient(unix_secs(self.clock.now())).with_subject_id(subject_id),
         );
         let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
         persist_and_emit_in_tx(tx, &session, &entry, &env).await

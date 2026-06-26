@@ -352,6 +352,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagctx"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -810,6 +818,7 @@ name = "httpserve"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "diagctx",
  "futures",
  "primitives",
  "serde",
@@ -1399,6 +1408,16 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "vocab",
+]
+
+[[package]]
+name = "rss_diport_envelope_reserved_writer"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "diport",
+ "dylint_linting",
+ "dylint_testing",
 ]
 
 [[package]]

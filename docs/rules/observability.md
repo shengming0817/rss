@@ -143,10 +143,26 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 trace、correlation、principal、occurred_at 等 reserved envelope 字段由 **adapter 在受控构造点经
 sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；同 crate 时间编码
 单源）。`consistency::Entry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
-在 `diport`，`consistency` 不可依赖之）。当前 `occurred_at` 已接线；`trace` / `correlation` 的 **sealed 注入
-路径已建**（`OutboxMetadata::with_trace` / `with_correlation` funnel 特权 setter，#1193），但注入**源**
-（observ trace span / correlation 上下文）按 ADR-002 §D1 刻意不进 `runctx`，待 #1296 接线——故 setter 暂无
-生产 caller；principal 为 typed-but-empty 接缝（待 authn principal 接线，#1296）。
+在 `diport`，`consistency` 不可依赖之）。注入源现状（#1296 分链）：
+
+- `occurred_at`：✅ 取注入 `Clock`（构造期必填，见下）。
+- `correlation`：✅ **源已接线**（#1160）——`diagctx` ambient 诊断信道（httpserve correlation middleware
+  解析 `X-Correlation-ID` → `diagctx::scope` 绑定；三条 outbox emit 构造点经 `diagctx::correlation()`
+  **fail-open** 读回 → `OutboxMetadata::with_correlation`）。按 ADR-002 §D1-bis 走独立可读诊断信道，**非**
+  `runctx::RequestCtx`（授权信道；correlation 不被任何授权闸门读取）。
+  **跨服务约定**：调用方如需贯通跨服务事件/审计关联链路，须在请求携带 `X-Correlation-ID`
+  （白名单 `[A-Za-z0-9._-]`、≤128）；缺失时服务自动生成 UUID 保底，但跨服务链路不贯通。
+- `trace`：sealed setter `OutboxMetadata::with_trace` 已建（#1193），源待 OTel 接线（**#1076**，`tracing`
+  无 span 字段读回 API）——本轮仅留 slot。
+- `principal`：typed-but-empty 接缝，待安全 / PII 决策（完整 principal 上 wire 安全决策，**#1397**）——本轮仅留 opaque `subjectId`。
+
+**统一 delivery envelope（#1160）**：envelope metadata 经统一 wire-faithful 类型 `diport::EnvelopeMetadata`
+（`string→string`，broker header 通用形态）从 **producer→broker→consumer 全程保真**。relay 经
+`acquire_lease` 的 `UPDATE…RETURNING metadata::text` 读 `outbox.metadata` 列（**不**扩 `consistency::Entry`、
+**不**动 `poll_pending`），`hydrate_envelope_metadata` 重建后携入 `PublishRequest`；adapter publisher 映射进
+broker header（AMQP `with_timestamp`(occurred_at) + `FieldTable` headers / MQTT v5 `user_properties` /
+memory 直传），subscriber 反向读回填 `Message.metadata`，handler 经 `msg.metadata.get(..)` 消费。
+ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、CloudEvents binary content-mode。
 
 envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed `vocab::ContractBinding`** 承载（#1193）：
 两字段同源一份 `contract.toml`，经 `cargo xtask codegen` 派生为 `generated::event::{domain}_v1::CONTRACT`
@@ -158,9 +174,15 @@ envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed 
 - **producer 不可漏接** `occurred_at`：由 metadata funnel 的构造器 `OutboxMetadata::new(occurred_at)`
   **必填位置参**承载——「无 occurred_at 的 outbox metadata」类型层不可表达，新增 outbox producer 必须从注入
   `Clock` 提供（缺失即编译错误）。三条生产构造点（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）同源。
-- **业务不可伪造** reserved key：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
-  fail-closed 拒；reserved key（含 trace / correlation）只经 funnel 内 sealed setter 写入，不经任何业务可见
-  入口（INVARIANT OUTBOX-METADATA-FUNNEL-01）。
+- **业务不可伪造** reserved key（producer + wire 两侧）：
+  - producer 侧（落库）：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
+    fail-closed 拒；reserved key（含 trace / correlation）只经 funnel 内 sealed setter 写入（INVARIANT
+    OUTBOX-METADATA-FUNNEL-01）。
+  - wire 侧（`diport::EnvelopeMetadata`，#1160）：业务 `try_insert` 同样 fail-closed 拒 reserved（Hard，
+    类型层）；reserved-capable 透传写面 `insert_wire_pair` 仅 relay / subscriber 从**已 sealed 来源**
+    （DB 列 / broker header）rehydrate 调用，由 dylint `rss_diport_envelope_reserved_writer` 限调用站点到
+    adapter / 组合根（Medium，INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01）。**真正 Hard 锚点在 emit 层**：域只
+    经 `OutboxEmitter::emit`（入参 `OutboxEnvelopeParts` 无 reserved 槽）发事件，永不构造 wire envelope。
 
 契约归属（`CONTRACT-BINDING-FUNNEL-01`）是 **Medium，非 Hard**：golden 锁（`codegen --check`）只保证 generated
 `CONTRACT` 常量正确、不漂移；`vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务 crate **仍可裸构造**

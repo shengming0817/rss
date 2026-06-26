@@ -12,7 +12,10 @@
 use std::time::Duration;
 
 use anyhow::anyhow;
-use diport::{MessageId, PublishRequest, Publisher, Subscriber, Topic};
+use diport::{
+    EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID, MessageId, PublishRequest,
+    Publisher, Subscriber, Topic,
+};
 use futures::StreamExt;
 use mqtt::{MqttPublisher, MqttSubscriber};
 use testkit::FixtureError;
@@ -75,11 +78,11 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
 
     let publisher = MqttPublisher::connect(url, "mqtt-it-pub").await?;
     publisher
-        .publish(PublishRequest {
+        .publish(PublishRequest::new(
             topic,
-            event_id: MessageId::new("evt-mqtt-1"),
-            payload: b"hello-mqtt".to_vec(),
-        })
+            MessageId::new("evt-mqtt-1"),
+            b"hello-mqtt".to_vec(),
+        ))
         .await?;
 
     // 有界等待，防 broker 异常时挂死。
@@ -116,11 +119,11 @@ async fn integration_topic_isolation_same_connection() -> Result<(), FixtureErro
 
     let publisher = MqttPublisher::connect(url, "mqtt-it-pub").await?;
     publisher
-        .publish(PublishRequest {
-            topic: Topic::new("rss/it/iso-b"),
-            event_id: MessageId::new("evt-iso-b"),
-            payload: b"to-b".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            Topic::new("rss/it/iso-b"),
+            MessageId::new("evt-iso-b"),
+            b"to-b".to_vec(),
+        ))
         .await?;
 
     // 正向：B 收到该消息。
@@ -154,6 +157,64 @@ async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
     token.cancel();
     let ended = tokio::time::timeout(Duration::from_secs(5), stream.next()).await?;
     assert!(ended.is_none(), "cancel 后流须在超时内终止（Ok(None)）");
+    subscriber.shutdown().await?;
+    Ok(())
+}
+
+/// envelope user_properties 双向贯通：publish 携 occurred_at + subjectId + correlation →
+/// subscriber 端 `Message.metadata` 保真（MQTT v5 user_properties 透传验证）。
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
+    let broker = testkit::env_or_mosquitto().await?;
+    let url = broker.url();
+    let topic = Topic::new("rss/it/envelope-user-props");
+    let token = CancellationToken::new();
+
+    let subscriber = MqttSubscriber::connect(url, "mqtt-it-env-sub").await?;
+    let mut stream = subscriber.subscribe(topic.clone(), token.clone()).await?;
+
+    let publisher = MqttPublisher::connect(url, "mqtt-it-env-pub").await?;
+
+    // 构造携 envelope metadata 的 PublishRequest。
+    let mut md = EnvelopeMetadata::empty();
+    md.insert_wire_pair(KEY_OCCURRED_AT, "1700000002");
+    md.insert_wire_pair(KEY_CORRELATION, "corr-mqtt-7");
+    md.insert_wire_pair(KEY_SUBJECT_ID, "user-mqtt-1");
+
+    publisher
+        .publish(
+            PublishRequest::new(
+                topic,
+                MessageId::new("evt-env-mqtt-1"),
+                b"mqtt-env-payload".to_vec(),
+            )
+            .with_metadata(md),
+        )
+        .await?;
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await?
+        .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
+
+    // metadata 保真验证。
+    assert_eq!(
+        msg.metadata.occurred_at_secs(),
+        Some(1_700_000_002_i64),
+        "occurred_at 应经 MQTT user_properties 透传"
+    );
+    assert_eq!(
+        msg.metadata.get(KEY_CORRELATION),
+        Some("corr-mqtt-7"),
+        "correlation 应经 MQTT user_properties 透传"
+    );
+    assert_eq!(
+        msg.metadata.get(KEY_SUBJECT_ID),
+        Some("user-mqtt-1"),
+        "subjectId 应经 MQTT user_properties 透传"
+    );
+
+    token.cancel();
+    publisher.shutdown().await?;
     subscriber.shutdown().await?;
     Ok(())
 }

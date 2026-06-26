@@ -46,11 +46,11 @@ async fn demo_resolver_yields_inprocess_bus_roundtrip() {
         .await
         .expect("subscribe");
     bus.publisher()
-        .publish(PublishRequest {
-            topic: Topic::new(TOPIC),
-            event_id: MessageId::new("evt-transport"),
-            payload: b"session-evt".to_vec(),
-        })
+        .publish(PublishRequest::new(
+            Topic::new(TOPIC),
+            MessageId::new("evt-transport"),
+            b"session-evt".to_vec(),
+        ))
         .await
         .expect("publish");
     let msg = stream

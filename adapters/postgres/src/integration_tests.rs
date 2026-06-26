@@ -982,7 +982,8 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 
     // A 取租约 → tokenA（行置 publishing）。
     let lease = crate::outbox::acquire_lease(&store.pool, &event_id).await?;
-    let (_rc, token_a) = lease.ok_or("acquire_lease should return a lease for pending row")?;
+    let (_rc, token_a, _metadata_json) =
+        lease.ok_or("acquire_lease should return a lease for pending row")?;
 
     // 模拟 B 重新 acquire：覆盖 lease_token = tokenB，A 的 tokenA 变 stale。
     sqlx::query("UPDATE outbox SET lease_token = gen_random_uuid() WHERE event_id = $1")
@@ -1087,7 +1088,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     );
     assert!(
         row.5
-            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+            .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
         row.5
     );
@@ -1195,7 +1196,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
         .await?;
     assert!(
         meta.0
-            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+            .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "co-tx outbox metadata 应含 sealed 注入的 occurred_at: {}",
         meta.0
     );
@@ -1317,7 +1318,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
         .await?;
     assert!(
         meta.0
-            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+            .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "幂等重写不应覆盖首次 occurred_at: {}",
         meta.0
     );
@@ -2026,7 +2027,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     assert!(
         cfg_meta
             .0
-            .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
+            .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "config co-tx outbox metadata 应含构造期注入的 occurred_at: {}",
         cfg_meta.0
     );

@@ -16,9 +16,10 @@ workspace = true
 test-util = []
 
 [dependencies]
-# 基础/引擎（仅用到的两个 path dep；ids/secure/support/runctx/consistency 未用 → 不声明，避免 cargo-udeps 多余依赖）
+# 基础/引擎（仅用到的 path dep；ids/secure/support/runctx/consistency 未用 → 不声明，避免 cargo-udeps 多余依赖）
 vocab = { path = "../vocab" }           # CoreError / CoreErrorKind / PublicDetail（wire error mapper 单源）
 primitives = { path = "../primitives" } # AuthPlan / resolve_requirement / HealthReport（健康聚合）
+diagctx = { path = "../diagctx" }       # correlation 诊断信道，service→base（ADR-002 §D1-bis）
 # HTTP runtime（生态对标 axum + tower，不自造中间件 trait）
 axum = { workspace = true }
 tower = { workspace = true }                             # EnforceLayer/EnforceService impl tower::Layer/Service（axum from_fn 不可用于 MethodRouter::layer）

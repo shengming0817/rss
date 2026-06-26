@@ -12,8 +12,16 @@
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
-/// （`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，ADR-002 §D3）——见 [`basis_intra_dag_allows`]。
-pub(crate) const BASIS_CRATES: &[&str] = &["vocab", "ids", "secure", "support", "runctx"];
+/// （`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，ADR-002 §D3 / §D1-bis）——见 [`basis_intra_dag_allows`]。
+/// `diagctx`（诊断 context 信道）是**独立根**：任何涉及 diagctx 的 base 内边（双向）均不 sanction，
+/// 由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz crate import diagctx）
+/// 见 follow-up #1400。
+pub(crate) const BASIS_CRATES: &[&str] =
+    &["diagctx", "vocab", "ids", "secure", "support", "runctx"];
+
+/// 独立根基础 crate：任何涉及这些 crate 的 intra-base 边（双向）均不 sanction。
+/// `diagctx` 是独立根——不应被任何 base crate 依赖，也不依赖任何 base crate。
+pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx"];
 /// 引擎 / 原语层（依赖基础）。
 pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives"];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
@@ -153,7 +161,14 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
 /// （前向边，如 sanctioned `runctx → vocab`），反向 / 同 crate / 任一端非基础边一律 `false`。这是
 /// [`allows`]「基础同层横向一律禁」的**唯一**例外；`layerdeps::check_layers` 在 `!allows(Basis,Basis)`
 /// 时叠加本判定。fail-closed：只放行 DAG 严格前向边。
+///
+/// [`ISOLATED_BASIS_CRATES`] 中的 crate（如 `diagctx`）是独立根：任何涉及它的 base 内边（双向）均
+/// 不 sanction，在 rank 比较之前优先拦截（防止 `X → diagctx` 被高 rank 误放行）。
 pub(crate) fn basis_intra_dag_allows(from_crate: &str, to_crate: &str) -> bool {
+    // 独立根：双向均不 sanction，优先于 rank 比较。
+    if ISOLATED_BASIS_CRATES.contains(&from_crate) || ISOLATED_BASIS_CRATES.contains(&to_crate) {
+        return false;
+    }
     let rank = |c: &str| BASIS_CRATES.iter().position(|&x| x == c);
     matches!((rank(from_crate), rank(to_crate)), (Some(f), Some(t)) if f > t)
 }
@@ -181,6 +196,7 @@ mod tests {
     #[rstest]
     #[case("vocab", "crates/vocab", Some(Layer::Basis))]
     #[case("runctx", "crates/runctx", Some(Layer::Basis))]
+    #[case("diagctx", "crates/diagctx", Some(Layer::Basis))]
     #[case("consistency", "crates/consistency", Some(Layer::Engine))]
     #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
@@ -250,6 +266,11 @@ mod tests {
     // 任一端非基础 crate：本例外不适用（false ⇒ 交回 allows 决策）。
     #[case("runctx", "consistency", false)]
     #[case("httpserve", "vocab", false)]
+    // diagctx 独立根：双向均不 sanction（anti-vacuity，证明 X→diagctx 不被高 rank 误放行）。
+    #[case("runctx", "diagctx", false)]
+    #[case("vocab", "diagctx", false)]
+    #[case("diagctx", "vocab", false)]
+    #[case("diagctx", "runctx", false)]
     fn basis_intra_dag_allows_forward_only(
         #[case] from: &str,
         #[case] to: &str,

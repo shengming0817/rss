@@ -1448,6 +1448,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagctx"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2365,6 +2373,7 @@ name = "httpserve"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "diagctx",
  "futures",
  "httpserve",
  "primitives",
@@ -2807,6 +2816,7 @@ dependencies = [
  "audit",
  "bootstrap",
  "consistency",
+ "diagctx",
  "diport",
  "eventexec",
  "futures",
@@ -3608,6 +3618,7 @@ name = "postgres"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diagctx",
  "diport",
  "futures",
  "identity",

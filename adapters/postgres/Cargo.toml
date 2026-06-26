@@ -16,6 +16,7 @@ ids = { path = "../../crates/ids" }
 secure = { path = "../../crates/secure" }
 support = { path = "../../crates/support" }
 runctx = { path = "../../crates/runctx" }
+diagctx = { path = "../../crates/diagctx" }
 consistency = { path = "../../crates/consistency" }
 primitives = { path = "../../crates/primitives" }
 # 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。

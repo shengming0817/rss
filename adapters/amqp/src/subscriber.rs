@@ -11,14 +11,15 @@ use std::sync::Arc;
 
 use diport::{
     AckAction, AckError, AckableSubscriber, Delivery as DiDelivery, DeliveryStream,
-    ManagedResource, Message, ShutdownError, SubscriberError, Topic,
+    EnvelopeMetadata, KEY_OCCURRED_AT, ManagedResource, Message, ShutdownError, SubscriberError,
+    Topic,
 };
 use futures::StreamExt;
 use lapin::message::Delivery;
 use lapin::options::{
     BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions, QueueDeclareOptions,
 };
-use lapin::types::FieldTable;
+use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
 use tokio_util::sync::CancellationToken;
 
@@ -105,7 +106,32 @@ impl ManagedResource for AmqpSubscriber {
     }
 }
 
-/// lapin `Delivery` → `diport::Delivery`（携 [`AmqpAcker`] 结算句柄）。
+/// AMQP [`lapin::BasicProperties`] → [`diport::EnvelopeMetadata`] rehydrate（adapter 透传路径）。
+/// - `timestamp` → `occurred_at`（unix 秒，十进制 string）。
+/// - `headers` LongString pair → metadata pair（LongString 以 utf8_lossy Display 转 string）。
+/// - 非 LongString header 值跳过（不是本 adapter `build_properties` 产出的；透传外部生产者时静默忽略）。
+///
+/// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
+fn extract_metadata(props: &lapin::BasicProperties) -> EnvelopeMetadata {
+    let mut md = EnvelopeMetadata::empty();
+    if let Some(ts) = props.timestamp() {
+        // reason: u64 unix secs 转 string；消费侧 occurred_at_secs() 再 parse 回 i64。
+        md.insert_wire_pair(KEY_OCCURRED_AT, ts.to_string());
+    }
+    if let Some(table) = props.headers() {
+        for (k, v) in table.inner() {
+            if let AMQPValue::LongString(ls) = v {
+                // reason: LongString Display 用 String::from_utf8_lossy——非 utf8 字节以 U+FFFD 替换，
+                // 不 panic。仅本 adapter build_properties 产出 LongString，外部生产者的非 LongString
+                // header 在此跳过（非本 adapter 控制路径，不可信 roundtrip）。
+                md.insert_wire_pair(k.as_str(), ls.to_string());
+            }
+        }
+    }
+    md
+}
+
+/// lapin `Delivery` → `diport::Delivery`（携 [`AmqpAcker`] 结算句柄 + envelope metadata）。
 /// 先取出 `acker`（lapin `Acker` 是 Arc handle，cheap clone）再 move `data`/`properties` 构造 Message，
 /// 避免借用冲突。clone 出的句柄随 `Delivery` owned 交给 driver——driver 须保证最终只一方 settle
 /// （settle-once；二次 settle 在 lapin 层返 Err、由 eventexec 的 settle 失败日志承接，不 panic）。
@@ -117,7 +143,8 @@ fn delivery_to_ackable(delivery: Delivery) -> DiDelivery {
         .as_ref()
         .map(ToString::to_string);
     let id = pick_message_id(producer_id.as_deref(), delivery.delivery_tag);
-    let message = Message::new(id, delivery.data);
+    let metadata = extract_metadata(&delivery.properties);
+    let message = Message::new_with_metadata(id, delivery.data, metadata);
     DiDelivery::new(
         message,
         diport::DynAcker::new_box(AmqpAcker { inner: acker }),
@@ -262,4 +289,65 @@ mod tests {
 
     // AckAction → broker 结算模式映射的表驱动测试迁至 feature-agnostic `crate::settle`（默认 build 可测、
     // 进 verify gate），不再绑 lapin / integration feature。
+}
+
+/// `extract_metadata` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
+#[cfg(test)]
+mod extract_metadata_tests {
+    use diport::KEY_CORRELATION;
+    use lapin::BasicProperties;
+    use lapin::types::{AMQPValue, FieldTable};
+
+    use super::extract_metadata;
+
+    #[test]
+    fn empty_properties_gives_empty_metadata() {
+        let props = BasicProperties::default();
+        let md = extract_metadata(&props);
+        assert!(md.is_empty());
+    }
+
+    #[test]
+    fn timestamp_maps_to_occurred_at() {
+        let props = BasicProperties::default().with_timestamp(1_700_000_000_u64);
+        let md = extract_metadata(&props);
+        assert_eq!(md.occurred_at_secs(), Some(1_700_000_000_i64));
+    }
+
+    #[test]
+    fn long_string_headers_transferred() {
+        let mut table = FieldTable::default();
+        table.insert(
+            KEY_CORRELATION.into(),
+            AMQPValue::LongString(b"corr-9".to_vec().into()),
+        );
+        let props = BasicProperties::default().with_headers(table);
+        let md = extract_metadata(&props);
+        assert_eq!(md.get(KEY_CORRELATION), Some("corr-9"));
+    }
+
+    #[test]
+    fn non_long_string_headers_skipped() {
+        // 非 LongString（非本 adapter 产出路径）应静默跳过，不 panic。
+        let mut table = FieldTable::default();
+        table.insert("bool-field".into(), AMQPValue::Boolean(true));
+        let props = BasicProperties::default().with_headers(table);
+        let md = extract_metadata(&props);
+        assert_eq!(md.get("bool-field"), None);
+    }
+
+    #[test]
+    fn full_roundtrip_timestamp_and_headers() {
+        let mut table = FieldTable::default();
+        table.insert(
+            KEY_CORRELATION.into(),
+            AMQPValue::LongString(b"corr-full".to_vec().into()),
+        );
+        let props = BasicProperties::default()
+            .with_timestamp(1_700_000_001_u64)
+            .with_headers(table);
+        let md = extract_metadata(&props);
+        assert_eq!(md.occurred_at_secs(), Some(1_700_000_001_i64));
+        assert_eq!(md.get(KEY_CORRELATION), Some("corr-full"));
+    }
 }

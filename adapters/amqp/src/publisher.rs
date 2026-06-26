@@ -4,12 +4,50 @@
 
 use std::sync::Arc;
 
-use diport::{ManagedResource, PublishRequest, Publisher, PublisherError, ShutdownError};
+use diport::{
+    EnvelopeMetadata, KEY_OCCURRED_AT, ManagedResource, PublishRequest, Publisher, PublisherError,
+    ShutdownError,
+};
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
+use lapin::types::{AMQPValue, FieldTable};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
 
 use crate::conn::{self, REPLY_SUCCESS};
+
+/// envelope metadata → [`BasicProperties`]：`event_id` 盖 `message_id`（去重锚点）；`occurred_at`
+/// 独占 AMQP typed `timestamp`（unix 秒 u64），不再重复进 headers；其余 pair 进 `FieldTable` LongString。
+///
+/// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
+fn build_properties(event_id: &str, md: &EnvelopeMetadata) -> BasicProperties {
+    let props = BasicProperties::default().with_message_id(event_id.into());
+    // occurred_at 用 AMQP 原生 timestamp 字段（u64），不重复进 headers（避免双写歧义）。
+    // wire metadata bag 是 public scalar——畸形负值（epoch 前，理论不可达但 bag 可携）经 `u64::try_from`
+    // fail-closed 跳过 timestamp，不 `as u64` wrap 成超大值（不依赖 producer 非负保证；F3 review）。
+    let props = match md
+        .occurred_at_secs()
+        .and_then(|secs| u64::try_from(secs).ok())
+    {
+        Some(ts) => props.with_timestamp(ts),
+        None => props,
+    };
+    let mut table = FieldTable::default();
+    for (k, v) in md.iter() {
+        if k == KEY_OCCURRED_AT {
+            // occurred_at 已进 timestamp 字段，不重复入 headers。
+            continue;
+        }
+        table.insert(
+            k.into(),
+            AMQPValue::LongString(v.as_bytes().to_vec().into()),
+        );
+    }
+    if table.inner().is_empty() {
+        props
+    } else {
+        props.with_headers(table)
+    }
+}
 
 /// publish 被 broker 拒绝（durable publish-ok 语义失败）。internal source（不进 Display 凭据边界）。
 #[derive(Debug, thiserror::Error)]
@@ -103,24 +141,27 @@ impl AmqpPublisher {
 impl Publisher for AmqpPublisher {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
         // 默认 exchange（""）+ routing key = topic：消息路由到同名 queue（consumer 声明）。
-        // per-domain 隔离经 vhost（连接 URL），非 exchange 命名。MessageMetadata 冻结期无 setter
-        // ⇒ 不注入 header（reserved key 由 outbox envelope 注入，业务不伪造，见 diport）。
+        // per-domain 隔离经 vhost（连接 URL），非 exchange 命名。
         // mandatory=true + publisher confirms：不可路由（无绑定 queue）消息被 broker **退回**而非静默丢弃，
         // 经 confirm 检测为失败——durable publish-ok 语义闭合（不再依赖「subscriber 先启动」运行顺序约定）。
         // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message.id`（subscriber 的
         // `pick_message_id` 优先读 message_id 再回退 delivery_tag），实现跨进程「至少一次 + 幂等去重」。
-        let properties =
-            BasicProperties::default().with_message_id(request.event_id.as_str().into());
+        // envelope metadata 透传：occurred_at → AMQP timestamp；其余 → FieldTable LongString headers。
+        let event_id = request.event_id().as_str().to_string();
+        let topic = request.topic().as_str().to_string();
+        let properties = build_properties(&event_id, request.metadata());
+        // into_payload()：move payload 出 request（event_id / topic / metadata 已借用完毕）。
+        let payload = request.into_payload();
         let confirmation = self
             .channel
             .basic_publish(
                 "".into(),
-                request.topic.as_str().into(),
+                topic.into(),
                 BasicPublishOptions {
                     mandatory: true,
                     ..Default::default()
                 },
-                &request.payload,
+                &payload,
                 properties,
             )
             .await
@@ -288,5 +329,122 @@ mod classify_tests {
     fn publish_rejected_dispositions() {
         assert!(diport::PublisherError::transient(PublishRejected::Nack).is_transient());
         assert!(diport::PublisherError::transient(PublishRejected::Unroutable).is_transient());
+    }
+}
+
+/// `build_properties` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
+/// 验证 occurred_at → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
+#[cfg(test)]
+mod build_properties_tests {
+    use diport::{EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID};
+    use lapin::types::AMQPValue;
+
+    use super::build_properties;
+
+    #[test]
+    fn empty_metadata_sets_only_message_id() {
+        let md = EnvelopeMetadata::empty();
+        let props = build_properties("evt-1", &md);
+        assert_eq!(
+            props.message_id().as_ref().map(|s| s.as_str()),
+            Some("evt-1")
+        );
+        assert!(
+            props.timestamp().is_none(),
+            "no timestamp for empty metadata"
+        );
+        assert!(props.headers().is_none(), "no headers for empty metadata");
+    }
+
+    #[test]
+    fn negative_occurred_at_skips_timestamp() {
+        // F3 review：wire bag 可携畸形负 occurred_at（epoch 前）；`u64::try_from` fail-closed 跳过
+        // timestamp，不 `as u64` wrap 成超大值。anti-vacuity：正值仍设 timestamp（见上一测试）。
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_OCCURRED_AT, "-5");
+        let props = build_properties("evt-neg", &md);
+        assert!(
+            props.timestamp().is_none(),
+            "负 occurred_at 不应 cast 成超大 timestamp，应跳过"
+        );
+    }
+
+    #[test]
+    fn occurred_at_goes_to_timestamp_not_headers() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        let props = build_properties("evt-2", &md);
+        assert_eq!(props.timestamp(), &Some(1_700_000_000_u64));
+        // occurred_at 不得出现在 headers。
+        if let Some(table) = props.headers() {
+            let has_occurred_at = table
+                .inner()
+                .iter()
+                .any(|(k, _)| k.as_str() == KEY_OCCURRED_AT);
+            assert!(
+                !has_occurred_at,
+                "occurred_at must not be duplicated in headers"
+            );
+        }
+    }
+
+    #[test]
+    // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
+    #[allow(clippy::expect_used)]
+    fn other_metadata_goes_to_headers_as_long_string() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_CORRELATION, "corr-9");
+        let _ = md.try_insert(KEY_SUBJECT_ID, "user-42");
+        let props = build_properties("evt-3", &md);
+        assert!(props.timestamp().is_none(), "no occurred_at → no timestamp");
+        let table = props.headers().as_ref().expect("headers should be set");
+        let get = |key: &str| {
+            table.inner().iter().find_map(|(k, v)| {
+                if k.as_str() == key {
+                    if let AMQPValue::LongString(ls) = v {
+                        Some(ls.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        };
+        assert_eq!(get(KEY_CORRELATION).as_deref(), Some("corr-9"));
+        assert_eq!(get(KEY_SUBJECT_ID).as_deref(), Some("user-42"));
+    }
+
+    #[test]
+    // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
+    #[allow(clippy::expect_used)]
+    fn full_roundtrip_occurred_at_and_other_fields() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000001");
+        md.insert_wire_pair(KEY_CORRELATION, "corr-full");
+        let props = build_properties("evt-full", &md);
+        // message_id = event_id。
+        assert_eq!(
+            props.message_id().as_ref().map(|s| s.as_str()),
+            Some("evt-full")
+        );
+        // occurred_at → timestamp（不进 headers）。
+        assert_eq!(props.timestamp(), &Some(1_700_000_001_u64));
+        let table = props.headers().as_ref().expect("headers set");
+        // correlation 在 headers。
+        let has_correlation = table
+            .inner()
+            .iter()
+            .any(|(k, _)| k.as_str() == KEY_CORRELATION);
+        assert!(has_correlation, "correlation should be in headers");
+        // occurred_at 不在 headers。
+        let has_occurred_at = table
+            .inner()
+            .iter()
+            .any(|(k, _)| k.as_str() == KEY_OCCURRED_AT);
+        assert!(
+            !has_occurred_at,
+            "occurred_at must not be duplicated in headers"
+        );
     }
 }

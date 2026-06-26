@@ -26,7 +26,7 @@ use sqlx::{Executor, PgConnection, Postgres, Row};
 
 use crate::PgStore;
 use crate::cotx::{co_tx_with_outbox, set_local_tenant, tenant_scoped_read};
-use crate::outbox::{OutboxEnvelope, OutboxMetadata, unix_secs};
+use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
 ///
@@ -347,7 +347,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(subject_id),
+            metadata_with_ambient(unix_secs(self.clock.now())).with_subject_id(subject_id),
         );
         let tenant_uuid = tenant_param(tenant);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整

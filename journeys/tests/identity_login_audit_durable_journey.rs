@@ -23,9 +23,11 @@ use anyhow::Result;
 use audit::AuditDomain;
 use bootstrap::SubscriberHandler;
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
+use diagctx::{CorrelationId, DiagnosticCtx};
 use diport::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynPublisher,
-    Message, MessageId, PublishRequest, Publisher, Subscriber, Topic,
+    EnvelopeMetadata, KEY_CORRELATION, KEY_SUBJECT_ID, Message, MessageId, PublishRequest,
+    Publisher, Subscriber, Topic,
 };
 use eventexec::{ConsumerMeta, LeaseConfig, run_consumer};
 use futures::future::BoxFuture;
@@ -51,6 +53,9 @@ const LOGIN_USERNAME: &str = "alice";
 const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
+/// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
+/// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
+const JOURNEY_CORR: &str = "journey-corr-1160";
 /// durable journey 审计链 HMAC key（固定 32B）。
 const AUDIT_KEY: [u8; 32] = [0x5a; 32];
 
@@ -156,13 +161,20 @@ fn single_subscription(
 }
 
 /// SubscriberHandler → run_consumer HandleResult handler（Ok→ack；Err→reject 永久）。
+/// `captured` 记录每条消费消息的 envelope metadata（#1160 端到端 occurred_at/subjectId/correlation 保真断言）。
 fn consumer_handler(
     handler: Box<dyn SubscriberHandler>,
+    captured: Arc<Mutex<Vec<EnvelopeMetadata>>>,
 ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
     let handler: Arc<dyn SubscriberHandler> = Arc::from(handler);
     move |message: Message| {
         let handler = handler.clone();
+        let captured = captured.clone();
         Box::pin(async move {
+            captured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(message.metadata.clone());
             match handler.handle(message).await {
                 Ok(()) => HandleResult::ack(),
                 Err(e) => {
@@ -213,12 +225,14 @@ async fn login_audit_durable_topology() -> Result<()> {
         .subscribe(Topic::new(binding.topic), token.clone())
         .await?;
     let meta = ConsumerMeta::new("audit", binding.contract_id, binding.topic);
+    // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。
+    let captured: Arc<Mutex<Vec<EnvelopeMetadata>>> = Arc::new(Mutex::new(Vec::new()));
     let consume = run_consumer(
         stream,
         claimer.clone(),
         DynDeadLetterStore::new_box(NoopDlx),
         meta,
-        consumer_handler(binding.handler),
+        consumer_handler(binding.handler, captured.clone()),
         // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
         LeaseConfig::from_ttl(claimer.lease_ttl()),
     );
@@ -242,15 +256,19 @@ async fn login_audit_durable_topology() -> Result<()> {
     let relay = PgOutbox::new(&store, DynPublisher::new_box(bus.publisher()));
 
     let drive = async {
-        let response = login
-            .login(
+        // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient
+        // 信道盖进 outbox.metadata 列（fail-open；scope 外则省略）。
+        let response = diagctx::scope(
+            DiagnosticCtx::new(CorrelationId::parse(JOURNEY_CORR)?),
+            login.login(
                 tenant,
                 IdentityLoginRequest {
                     username: LOGIN_USERNAME.to_string(),
                     password: PASSWORD.to_string(),
                 },
-            )
-            .await?;
+            ),
+        )
+        .await?;
         // F1 后：idem_key = 独立 EventId（非 session_id）；以 payload.sessionId 关联本轮 entry（F6）。
         let session_id = response.data.session_id.clone();
 
@@ -288,11 +306,11 @@ async fn login_audit_durable_topology() -> Result<()> {
 
         // 重投同一 EventId（模拟 broker 重投）→ PgInbox Duplicate → audit 不重复。
         bus.publisher()
-            .publish(PublishRequest {
-                topic: Topic::new(SESSION_CREATED_TOPIC),
-                event_id: MessageId::new(event_id.as_str()),
+            .publish(PublishRequest::new(
+                Topic::new(SESSION_CREATED_TOPIC),
+                MessageId::new(event_id.as_str()),
                 payload,
-            })
+            ))
             .await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         token.cancel();
@@ -306,6 +324,29 @@ async fn login_audit_durable_topology() -> Result<()> {
         audit.audited().len(),
         1,
         "durable：登录 emit + 重投同一 EventId → audit 链仅 append 一次（PgInbox 幂等）"
+    );
+
+    // #1160 端到端 envelope metadata 保真：取首条携 metadata 的消费消息（重投是 metadata 空的 PublishRequest），
+    // 断言 occurred_at / correlation / subjectId 经 emit→outbox.metadata 列→relay hydrate→MemBus→consumer 全链保真。
+    let seen = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let md = seen
+        .iter()
+        .find(|m| !m.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("consumer 未收到任何携 envelope metadata 的消息"))?;
+    assert_eq!(
+        md.occurred_at_secs(),
+        Some(NOW_SECS as i64),
+        "occurred_at（注入 Clock）应经 outbox.metadata→relay→broker→consumer 全链保真"
+    );
+    assert_eq!(
+        md.get(KEY_CORRELATION),
+        Some(JOURNEY_CORR),
+        "correlation 应经 diagctx ambient→emit→outbox.metadata→relay→broker→consumer 全链保真"
+    );
+    assert_eq!(
+        md.get(KEY_SUBJECT_ID),
+        Some(CANON_USER),
+        "subjectId 应贯通到消费侧（CANON_USER 经 login→envelope.subject_id→outbox.metadata→relay→broker→consumer 全链保真）"
     );
     Ok(())
 }

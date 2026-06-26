@@ -95,11 +95,11 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let drive = async {
         // 发布单条消息。
         publisher
-            .publish(PublishRequest {
-                topic: topic.clone(),
-                event_id: MessageId::new(EVENT_ID),
-                payload: b"alo-payload".to_vec(),
-            })
+            .publish(PublishRequest::new(
+                topic.clone(),
+                MessageId::new(EVENT_ID),
+                b"alo-payload".to_vec(),
+            ))
             .await?;
         // 等首条被 handler 消费（broker 投递 + run_consumer_ackable 驱动）。
         tokio::time::timeout(Duration::from_secs(10), async {

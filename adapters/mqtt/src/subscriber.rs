@@ -191,7 +191,8 @@ fn try_send_classify(
     }
 }
 
-/// incoming `Publish` → `diport::Message`：id 经 [`pick_message_id`]（correlation_data 优先，退 pkid）。
+/// incoming `Publish` → `diport::Message`：id 经 [`pick_message_id`]（correlation_data 优先，退 pkid）；
+/// metadata 经 [`crate::envelope::from_user_properties`] 从 v5 `user_properties` rehydrate。
 fn publish_to_message(publish: &Publish) -> Message {
     let correlation = publish
         .properties
@@ -199,7 +200,13 @@ fn publish_to_message(publish: &Publish) -> Message {
         .and_then(|p| p.correlation_data.as_ref())
         .map(|b| b.as_ref());
     let id = pick_message_id(correlation, &publish.pkid.to_string());
-    Message::new(id, publish.payload.to_vec())
+    let user_props = publish
+        .properties
+        .as_ref()
+        .map(|p| p.user_properties.as_slice())
+        .unwrap_or(&[]);
+    let metadata = crate::envelope::from_user_properties(user_props);
+    Message::new_with_metadata(id, publish.payload.to_vec(), metadata)
 }
 
 /// 派生 message id：优先 v5 correlation_data（非空白 utf8，= publisher 盖的 event_id），否则用 broker 的

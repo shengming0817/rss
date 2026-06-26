@@ -42,6 +42,25 @@ GoCell（Go）用单一 `context.Context` 同时承载两类语义完全不同�
 不替代持久审计」。即诊断载体在本仓本就**不可作授权 load-bearing**。span 字段可丢弃 / 可改写 / 字符串擦除，
 不配做 row-scope 闸门。
 
+### D1-bis — 可读诊断 context 信道（diagctx，#1160 amendment）
+
+§D1 把诊断 ID 路由进 `tracing` span 喂日志 / otel；但 `tracing` **无 span 字段读回 API**，而 outbox metadata
+需在 emit 点**读回** correlation 盖章（#1296）。故新增一条**与 span 平行的可读诊断信道** `diagctx`（base 层
+独立 crate）：
+
+- **归属与隔离**：`diagctx` 与 `runctx` **物理隔离**（不同 crate / 不同 task_local / 不同类型）。授权码
+  `use runctx`、诊断码 `use diagctx`，「诊断信道被误读为授权源」是一处可被 review 一眼抓的跨 import。
+  `diagctx` 刻意**不依赖 `tracing`**（不给 §D1 的 runctx↛tracing Hard 边界开口）、不依赖 `vocab` / `serde`。
+- **失败语义刻意相反**：`diagctx::correlation()` 缺失返回 `None`（**fail-open** 省略），与 §D6 `runctx` 的
+  fail-closed deny 相反——诊断信号丢失只损可观测关联，**不损正确性 / 安全**，**不被任何授权闸门读取**。
+- **写 / 读接缝**：httpserve correlation middleware 经 `CorrelationId::parse`（注入防护）解析入站
+  `X-Correlation-ID` → `diagctx::scope` 每请求绑定一次；outbox emit adapter 经 `diagctx::correlation()`
+  读回。span 字段仍是喂日志 / otel 的载体，diagctx 是「读回」载体，二者 **middleware 单源解析、双载体派生**。
+
+§D1 钉死的是「诊断信号**不得进授权用的** `RequestCtx`」+「runctx↛tracing 依赖图不可互通」——本决策**都不违反**：
+diagctx 是另一个 crate / 另一个 task_local，没有任何授权闸门读它，也没给 runctx 加任何边。§D1 未禁止「存在一条
+可读诊断信道」；D1-bis 是 §D1 二分在「诊断需读回」维度上的细化扩展。
+
 ### D2 — RequestCtx = 显式 sealed struct + task_local! 传播（混合范式）
 
 `RequestCtx` 是显式、不可变、sealed 的授权快照；经 `tokio::task_local!` 传播：
@@ -184,6 +203,9 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 | spawn / blocking 出的任务**运行时**丢 ctx → 子任务读到空 | 后台越权 / fail-open | 子任务无 ctx 即 `Err(MissingCtx)`，调用方 fail-closed | **Medium**（fail-closed 运行时行为 + 测试锁定 `tokio::spawn` / `spawn_blocking` 不继承） |
 | consumer **静态忘记**在子任务「捕获-重绑」ctx | 同上 | dylint `rss_spawn_missing_scope`（#1031 已落）：AST 级拦截 **自由函数 `tokio::spawn`/`tokio::task::spawn_blocking`** 子任务体内读 `runctx::try_*` 而未在外层 `runctx::scope(...)` 重绑的 callsite；经 `cargo xtask verify` 的 `DYLINT_RUSTFLAGS=-D warnings` fail-closed。符号/红例/盲区见 `lints/rss_spawn_missing_scope/` rustdoc（INVARIANT SPAWN-CTX-REBIND-01） | **Medium（仅覆盖入口）**：自由函数 `tokio::spawn`/`spawn_blocking` = dylint AST lint，CI fail-closed，其前置门已解除。**未覆盖入口仍 Soft**：方法形式（`JoinSet::spawn`/`spawn_on`、`LocalSet::spawn_local`）、`std::thread::spawn`、wrapper-fn 包装的 spawn lint 不报，承载 ctx 传播须人工 review gate（见 §后果 R2）。Hard 化须 `CtxBound` 类型（覆盖全部入口、侵入 consumer 签名，见 §6，未立项） |
 | `RowScope::All` 经非 super-admin 路径泄漏 | 全租户读 | runctx 不构造 RowScope；派生在 authn super-admin 路径 + 强制 audit ledger（`tenancy.md`） | 引用 `tenancy.md`（非本 ADR 新增） |
+| 诊断 `diagctx` correlation 被误当授权源（D1-bis，#1160） | 授权基于可丢弃 / 可改写诊断信号 | `diagctx` 独立 base crate（crate 图与 runctx 物理隔离，授权码 `use runctx`、诊断码 `use diagctx`）+ 失败语义 `Option`/省略（非 `Result`/deny）+ **无授权闸门读 diagctx**；correlation 不进 `RequestCtx`、不被 PDP / RLS 读 | **Medium**（crate 图分离 + review gate）。Hard 化路径：dylint 禁 authz crate（authn / PDP）import diagctx——登记 follow-up |
+| `diagctx` correlation 经 spawn 子任务丢失（D1-bis，#1160） | 该事件 `outbox.metadata` 缺 correlation | fail-open 省略（benign，**非安全面**——丢关联不越权）；`rss_spawn_missing_scope` lint 只覆盖 `runctx::try_*`、**不覆盖 diagctx**（无需覆盖） | benign（无 enforcement 需求；文档化 footgun） |
+| 业务伪造 reserved envelope key（含 correlation）进 outbox（#1160） | 伪造关联 / 注入诊断 | producer `OutboxMetadata::try_insert` + wire `EnvelopeMetadata::try_insert` 均 fail-closed 拒 reserved；reserved 只经 adapter sealed setter 注入；emit 层 `OutboxEnvelopeParts` 无 reserved 槽（域永不构造 wire envelope） | **Hard**（类型层 funnel，OUTBOX-METADATA-FUNNEL-01 + emit 层 input-struct-field-exclusion）+ Medium（wire `insert_wire_pair` 站点 dylint DIPORT-ENVELOPE-WIRE-WRITER-01） |
 
 ## 6. 备选方案（Alternatives Considered）
 
@@ -208,3 +230,12 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 > 接缝单点**，并新增 `TenantId::parse` fail-closed（拒空/nil/非 canonical）杜绝非法 tenant mint，整体仍 Hard；
 > ②「`?ctx` 泄露」行——`TenantId` 自身 `Debug` 改为有意可见（UUID 是可观测标识、非凭据），`RequestCtx`/`PrincipalSlot`
 > 仍 redacted，PII 泄露面不变。无新增越权面、无降档。principal 仍 trait/泛型擦除（`runctx → authn` 闭环禁止不变）。
+>
+> **Amendment（#1160，2026-06-26）**：新增 **§D1-bis 可读诊断 context 信道 `diagctx`**（correlation 经
+> 独立 fail-open ambient 信道在 outbox emit 点读回，#1296 一条源链路落地；trace 仍待 OTel #1076、principal 仍待
+> 安全决策）。已按 `ai-robust.md` §审查要求重评威胁矩阵，**新增三行**：①「诊断 correlation 被误当授权源」——缓解
+> = `diagctx` 独立 crate（图隔离）+ `Option`/fail-open（非 deny）+ 无授权闸门读取，**Medium**（Hard 化 = dylint 禁
+> authz crate import diagctx，已登记 follow-up）；②「correlation 经 spawn 丢失」——fail-open 省略，benign 非安全面
+> （`rss_spawn_missing_scope` 刻意不覆盖 diagctx）；③「业务伪造 reserved envelope key」——producer + wire 两侧
+> `try_insert` fail-closed 拒 + emit 层无 reserved 槽，维持 **Hard**（+ wire 站点 dylint Medium）。**§D1 的两条 Hard
+> 边界（诊断不进授权 `RequestCtx`、runctx↛tracing）原封不动，无降档、无新增越权面**；diagctx 不被任何授权闸门读取。

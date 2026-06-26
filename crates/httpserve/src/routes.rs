@@ -209,16 +209,26 @@ impl AuthenticatedRoutes {
         }
     }
 
-    /// 在唯一 bindable 出口封 `request_id` 中间件为**绝对最外层**（外于验签桥 #1109）。
+    /// 在唯一 bindable 出口封 `request_id`（绝对最外层）+ `correlation`（紧贴内侧）。
     ///
-    /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 —— request_id **不**在 [`finalize_auth`] 内挂（那会被组合根
-    /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 RequestId，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
-    /// bind 的 router 都带 request_id 且**不可遗漏**（can't-forget funnel）。生产出口
-    /// [`into_make_service`](Self::into_make_service) 与 test 出口 [`into_router_for_test`](Self::into_router_for_test)
-    /// 共用本 fn ⇒ 层序一致（test 不漂移）。层序（外→内）：`request_id` → 验签桥 → `trace` → `panic_recovery`
+    /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 —— `request_id` **不**在 [`finalize_auth`] 内挂（那会被组合根
+    /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 `RequestId`，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
+    /// bind 的 router 都带 request_id 且**不可遗漏**（can't-forget funnel）。
+    ///
+    /// INVARIANT: ROUTE-CORRELATION-INNER-REQUESTID-01 —— `correlation` 封在 `request_id` 内侧、验签桥外侧：
+    ///   · `request_id` 先行（外层）确保 `RequestId` extension 在场，`correlation` 可读回作回退值；
+    ///   · `diagctx::scope` 包住验签桥 + handler + application + adapter emit ⇒ outbox emit 可经
+    ///     [`diagctx::correlation`] 读回 correlation id（ADR-002 §D1-bis）；
+    ///   · 二者均由本出口封口 ⇒ 每个被 bind 的 router 都带 correlation 且不可遗漏（can't-forget funnel）。
+    ///
+    /// 生产出口 [`into_make_service`](Self::into_make_service) 与 test 出口
+    /// [`into_router_for_test`](Self::into_router_for_test) 共用本 fn ⇒ 层序一致（test 不漂移）。
+    /// 层序（外→内）：`request_id` → `correlation` → 验签桥 → `trace` → `panic_recovery`
     /// → `Extension(plan)` → enforce → handler。
     fn sealed_router(self) -> axum::Router {
+        // `.layer` 调用顺序 = 内→外；最后 `.layer(request_id)` 使其成为绝对最外层。
         self.router
+            .layer(axum::middleware::from_fn(crate::middleware::correlation))
             .layer(axum::middleware::from_fn(crate::middleware::request_id))
     }
 
@@ -243,10 +253,10 @@ impl AuthenticatedRoutes {
 /// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
-/// （request-aware panic → 500 envelope）→ `trace`（最外）。`request_id` **不**在此挂——它由唯一 bindable
-/// 出口 [`AuthenticatedRoutes::sealed_router`] 封为**绝对最外层**（外于组合根后叠的验签桥 #1109，使桥运行时
-/// 可读 RequestId，ROUTE-REQUESTID-OUTERMOST-01 / #1320）。完整请求流（外→内）：request_id → 验签桥 →
-/// trace → panic_recovery → Extension(plan) → 路由匹配 → EnforceService → handler。
+/// （request-aware panic → 500 envelope）→ `trace`（最外）。`request_id` / `correlation` **不**在此挂——
+/// 二者均由唯一 bindable 出口 [`AuthenticatedRoutes::sealed_router`] 封为最外两层（ROUTE-REQUESTID-OUTERMOST-01 /
+/// ROUTE-CORRELATION-INNER-REQUESTID-01 / #1320）。完整请求流（外→内）：`request_id` → `correlation` →
+/// 验签桥 → `trace` → `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService` → handler。
 ///
 /// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
 /// `EnforceService`），其注入的 [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位；request_id
@@ -488,6 +498,70 @@ mod tests {
             crate::request_id_str(&ext),
             Some("test-rid"),
             "在场 → Some(借出字符串)"
+        );
+    }
+
+    // ── correlation sealed_router 不变式测试 ──────────────────────────────────────────────────
+
+    /// ROUTE-CORRELATION-INNER-REQUESTID-01：`sealed_router` 封了 `correlation` ⇒ 响应带
+    /// `x-correlation-id`。NoAuth listener 取 200 路径（避免 enforce 401 干扰，纯验封口）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn correlation_sealed_at_bindable_exit() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        let router = finalize_auth(routes, plan)
+            .expect("finalize_auth")
+            .into_router_for_test();
+
+        let resp = oneshot_response(router, "/list").await;
+        assert_eq!(resp.status(), StatusCode::OK, "NoAuth matched → 200");
+        let cid = resp
+            .headers()
+            .get("x-correlation-id")
+            .expect("sealed_router 须封 correlation middleware ⇒ 响应须有 x-correlation-id");
+        assert!(!cid.is_empty(), "x-correlation-id 非空");
+    }
+
+    /// ROUTE-CORRELATION-INNER-REQUESTID-01：验签桥位（`AuthenticatedRoutes::layer`）运行时
+    /// `diagctx::correlation()` 须在场——`correlation` 在 `request_id` 内侧、验签桥外侧，
+    /// `diagctx::scope` 包住桥 + handler 全链。
+    ///
+    /// 用探针层模拟验签桥（经 `AuthenticatedRoutes::layer` 叠在 `finalize_auth` 外）：
+    /// 读 `diagctx::correlation()`，在场则回写 `x-saw-correlation: 1`。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn correlation_visible_to_outer_bridge_layer() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        // 探针层叠在验签桥位（correlation 内侧，sealed_router 封 correlation + request_id 后成为外侧）。
+        let probed =
+            finalize_auth(routes, plan)
+                .expect("finalize_auth")
+                .layer(axum::middleware::from_fn(
+                    |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                        let saw = diagctx::correlation().is_some();
+                        let mut resp = next.run(req).await;
+                        if saw {
+                            resp.headers_mut().insert(
+                                "x-saw-correlation",
+                                axum::http::HeaderValue::from_static("1"),
+                            );
+                        }
+                        resp
+                    },
+                ));
+        let resp = oneshot_response(probed.into_router_for_test(), "/list").await;
+        assert_eq!(
+            resp.headers()
+                .get("x-saw-correlation")
+                .map(|v| v.as_bytes()),
+            Some(&b"1"[..]),
+            "外层（验签桥位）中间件运行时 diagctx::correlation() 须在场（correlation sealed_router 先行运行）"
         );
     }
 }
