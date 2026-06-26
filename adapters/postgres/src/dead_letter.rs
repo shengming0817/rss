@@ -24,14 +24,16 @@ use crate::PgStore;
 /// PostgreSQL 死信写入 adapter。
 ///
 /// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
-/// 经 [`PgStore::dead_letter`] 构造。
+/// 经 [`crate::PgInfraDeps::dead_letter`] 构造（`PgStore::dead_letter` 为 `pub(crate)` funnel）。
 pub struct PgDeadLetterStore {
     pool: PgPool,
 }
 
 impl PgStore {
     /// 构造 [`PgDeadLetterStore`]（pool clone 自 `PgStore`，轻量）。
-    pub fn dead_letter(&self) -> PgDeadLetterStore {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::dead_letter`] 收口。
+    pub(crate) fn dead_letter(&self) -> PgDeadLetterStore {
         PgDeadLetterStore {
             pool: self.pool.clone(),
         }

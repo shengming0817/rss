@@ -39,7 +39,9 @@ impl PgEmitter {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     /// `clock` 为 `Box<dyn Clock>`（与全项目 clock 注入约定及 `diport::Clock` rustdoc 一致；adapter 独占其
     /// 时钟、不跨线程共享，无需 `Arc`）。
-    pub fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::emitter`] 收口（provider-agnostic 基建，非单域）。
+    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
             pool: store.pool.clone(),
             clock,

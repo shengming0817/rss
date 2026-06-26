@@ -55,7 +55,9 @@ pub struct PgSessionLifecycle {
 
 impl PgSessionLifecycle {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
-    pub fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::session_lifecycle` 收口。
+    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
             pool: store.pool.clone(),
             clock,

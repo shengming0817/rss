@@ -49,7 +49,9 @@ impl PgStore {
     /// 构造绑定指定消费者组的 [`PgInboxStore`]。
     ///
     /// `group` 是幂等 claim 的第二 PK 维度（`consumer_group` 列）——同一 `event_id` 在不同组各自首见。
-    pub fn inbox(&self, group: consistency::ConsumerGroup) -> PgInboxStore {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::inbox` 收口。
+    pub(crate) fn inbox(&self, group: consistency::ConsumerGroup) -> PgInboxStore {
         PgInboxStore {
             pool: self.pool.clone(),
             group,

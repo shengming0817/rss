@@ -36,7 +36,7 @@ use generated::http::identity_v1::IdentityLoginRequest;
 use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus};
-use postgres::{PgConfig, PgOutbox, PgPassword, PgSessionLifecycle, PgSslMode, PgStore};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -206,8 +206,9 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn login_audit_durable_topology() -> Result<()> {
     let pg = testkit::env_or_postgres().await?;
-    let store = PgStore::connect(&pg_config(pg.params())?).await?;
-    store.run_migrations().await?;
+    // postgres capability bundle（#1423）：`setup` 含 connect + run_migrations；identity 域受控句柄派发 repo。
+    let deps = PgRuntimeDeps::setup(&pg_config(pg.params())?).await?;
+    let id = deps.for_domain::<caps::Identity>();
 
     let bus = MemBus::new();
     let (audit_domain, audit) = audit_domain();
@@ -218,7 +219,7 @@ async fn login_audit_durable_topology() -> Result<()> {
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
 
     // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源）。
-    let claimer = Arc::new(store.inbox(binding.group.clone()));
+    let claimer = Arc::new(id.inbox(binding.group.clone()));
     let token = CancellationToken::new();
     let stream = bus
         .subscriber()
@@ -242,10 +243,9 @@ async fn login_audit_durable_topology() -> Result<()> {
     // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
     let tenant = TenantId::parse(CANON_TENANT)?;
     let login = LoginService::with_seed_credential(
-        DynSessionLifecycle::new_box(PgSessionLifecycle::new(
-            &store,
-            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        )),
+        DynSessionLifecycle::new_box(
+            id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+        ),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
@@ -253,7 +253,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         PASSWORD,
         tenant,
     )?;
-    let relay = PgOutbox::new(&store, DynPublisher::new_box(bus.publisher()));
+    let relay = id.outbox(DynPublisher::new_box(bus.publisher()));
 
     let drive = async {
         // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient

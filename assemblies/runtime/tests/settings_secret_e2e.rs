@@ -21,11 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use diport::{Clock, DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolverError};
-use postgres::{PgConfig, PgPassword, PgSslMode, PgStore};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use settings::SecretService;
 use settings::ports::{DynSecretRepo, SecretKey, SecretRef, StoreId, TenantId};
-
-use postgres::PgSecretRepo;
 
 // ── 测试用常量 ────────────────────────────────────────────────────────────────
 
@@ -114,9 +112,9 @@ fn make_ref(store_id: &str, ref_key: &str) -> SecretRef {
     SecretRef::parse(sid, ref_key, None).expect("valid secret ref")
 }
 
-/// testkit fixture + PgStore（含 run_migrations）。
+/// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations，#1423）。
 async fn connect_pg_and_setup()
--> Result<(testkit::PgFixture, PgStore), Box<dyn std::error::Error + Send + Sync>> {
+-> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let config = PgConfig::new(
@@ -128,15 +126,14 @@ async fn connect_pg_and_setup()
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
-    let store = PgStore::connect(&config).await?;
-    store.run_migrations().await?;
-    Ok((fixture, store))
+    let deps = PgRuntimeDeps::setup(&config).await?;
+    Ok((fixture, deps))
 }
 
-/// 构造 SecretService（真 PgSecretRepo + InlineMemResolver + FixedClock）。
-fn make_service(store: &PgStore, resolver: InlineMemResolver) -> SecretService {
+/// 构造 SecretService（真 PgSecretRepo via settings 域受控句柄 + InlineMemResolver + FixedClock）。
+fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretService {
     SecretService::with_postgres(
-        DynSecretRepo::new_box(PgSecretRepo::new(store)),
+        DynSecretRepo::new_box(deps.for_domain::<caps::Settings>().secret_repo()),
         DynSecretResolver::new_box(resolver),
         Box::new(FixedClock),
     )
@@ -149,9 +146,9 @@ fn make_service(store: &PgStore, resolver: InlineMemResolver) -> SecretService {
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
 async fn e2e_s1_publish_find_roundtrip() -> TestResult {
-    let (_pg, store) = connect_pg_and_setup().await?;
+    let (_pg, deps) = connect_pg_and_setup().await?;
     let resolver = InlineMemResolver::new();
-    let svc = make_service(&store, resolver);
+    let svc = make_service(&deps, resolver);
     let key = unique_key("s1-key");
     let ref_key = "myapp/db-password";
 
@@ -179,12 +176,12 @@ async fn e2e_s1_publish_find_roundtrip() -> TestResult {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn e2e_s2_resolve_secret_mem_hit() -> TestResult {
-    let (_pg, store) = connect_pg_and_setup().await?;
+    let (_pg, deps) = connect_pg_and_setup().await?;
     let resolver = InlineMemResolver::new();
     let ref_key = "myapp/api-key";
     // 预置材料（(tenant, store_id, ref_key) 命中路径）。
     resolver.insert(tenant(), STORE_ID, ref_key, b"secret-material-e2e".to_vec());
-    let svc = make_service(&store, resolver);
+    let svc = make_service(&deps, resolver);
     let key = unique_key("s2-key");
 
     svc.publish_secret(tenant(), key.clone(), make_ref(STORE_ID, ref_key))
@@ -200,9 +197,9 @@ async fn e2e_s2_resolve_secret_mem_hit() -> TestResult {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn e2e_s3_rollback_version_monotonic() -> TestResult {
-    let (_pg, store) = connect_pg_and_setup().await?;
+    let (_pg, deps) = connect_pg_and_setup().await?;
     let resolver = InlineMemResolver::new();
-    let svc = make_service(&store, resolver);
+    let svc = make_service(&deps, resolver);
     let key = unique_key("s3-key");
 
     svc.publish_secret(tenant(), key.clone(), make_ref(STORE_ID, "ref-v1"))
@@ -229,9 +226,9 @@ async fn e2e_s3_rollback_version_monotonic() -> TestResult {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn e2e_s4_resolve_not_found_when_no_ref() -> TestResult {
-    let (_pg, store) = connect_pg_and_setup().await?;
+    let (_pg, deps) = connect_pg_and_setup().await?;
     let resolver = InlineMemResolver::new();
-    let svc = make_service(&store, resolver);
+    let svc = make_service(&deps, resolver);
     let key = unique_key("s4-key");
 
     let err = svc

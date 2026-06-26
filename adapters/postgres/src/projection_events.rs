@@ -35,14 +35,16 @@ use crate::PgStore;
 /// PostgreSQL projection_events adapter（append-only changelog 源）。
 ///
 /// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
-/// 经 [`PgStore::projection_events`] 构造。
+/// 经 [`crate::PgInfraDeps::projection_events`] 构造（`PgStore::projection_events` 为 `pub(crate)` funnel）。
 pub struct PgProjectionEvents {
     pool: PgPool,
 }
 
 impl PgStore {
     /// 构造 [`PgProjectionEvents`]（pool clone 自 `PgStore`，轻量）。
-    pub fn projection_events(&self) -> PgProjectionEvents {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::projection_events`] 收口。
+    pub(crate) fn projection_events(&self) -> PgProjectionEvents {
         PgProjectionEvents {
             pool: self.pool.clone(),
         }

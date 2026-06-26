@@ -1,7 +1,8 @@
 //! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See docs/rules/architecture.md.
 //!
-//! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（[`PgStore::connect`]）、
-//! 事务运行器（[`PgStore::run_in_transaction`]）、Migrator（[`PgStore::run_migrations`]），并 impl
+//! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）、事务运行器
+//! （`run_in_transaction`）、Migrator（`run_migrations`）——均 `pub(crate)` funnel，外部经
+//! [`PgRuntimeDeps::setup`] 构造（#1423，PG-BUNDLE-FUNNEL-01）；并 impl
 //! `diport::ManagedResource`（关池接入 `bootstrap::ShutdownStack` 逆序编排）。
 //!
 //! port 来源两类：provider-agnostic 基建 port 来自 `diport`（`ManagedResource`…）；**域形** repo port 来自
@@ -15,6 +16,7 @@
 //! 编译证明（body `todo!()`）。同 DIP 内向边另由 [`PgCredentialRepo`]（impl `identity::ports::CredentialRepo`，
 //! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
 
+mod bundle;
 mod checkpoint;
 mod config_repo;
 mod cotx;
@@ -34,6 +36,8 @@ mod secret_repo;
 mod session_lifecycle;
 mod tx;
 
+// postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
+pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, caps};
 pub use checkpoint::PgCheckpointStore;
 pub use config_repo::PgConfigRepo;
 pub use credential_repo::PgCredentialRepo;
@@ -57,7 +61,9 @@ mod test_pg;
 
 pub use inbox::PgInboxStore;
 pub use pool::{PgConfig, PgError, PgPassword, PoolReadiness};
-pub use readiness::{PgDbReadiness, PgReadinessSampler, pg_readiness_sampling_loop};
+// `pg_readiness_sampling_loop` 降 `pub(crate)`（经 `PgRuntimeDeps::spawn_readiness_sampler` 收口，#1423），
+// 不再 re-export；类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / bundle 返回类型）。
+pub use readiness::{PgDbReadiness, PgReadinessSampler};
 // re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。
 pub use sqlx::postgres::PgSslMode;
 
@@ -70,7 +76,8 @@ use sqlx::PgPool;
 pub(crate) const PG_STORE_NAME: &str = "postgres";
 
 /// PostgreSQL 存储 adapter（sealed-marker）。持 `sqlx::PgPool`（`pub(crate)`，仅 crate 内 repo / tx /
-/// migrator impl 取用）；经 [`PgStore::connect`] 构造。
+/// migrator impl 取用）。外部经 [`PgRuntimeDeps::setup`](crate::PgRuntimeDeps::setup) 构造
+/// （PG-BUNDLE-FUNNEL-01）；`connect`/`run_migrations` 为 `pub(crate)`、不对外暴露。
 pub struct PgStore {
     pub(crate) pool: PgPool,
 }
@@ -102,7 +109,10 @@ pub struct PgStoreGuard(Arc<PgStore>);
 
 impl PgStoreGuard {
     /// 包装 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard。
-    pub fn new(store: Arc<PgStore>) -> Self {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅经 [`bundle::PgRuntimeDeps::store_guard`] 构造，
+    /// 组合根不直接持 `Arc<PgStore>`。
+    pub(crate) fn new(store: Arc<PgStore>) -> Self {
         Self(store)
     }
 }
@@ -130,8 +140,11 @@ mod smoke {
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
     //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
     //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）；去掉任一即编译失败（anti-vacuity）。
+    //! INVARIANT: PG-BUNDLE-DOMAIN-02 —— `caps::Settings` / `caps::Identity` 均满足 sealed `PgDomain`
+    //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
     use core::marker::PhantomData;
 
+    fn assert_pg_domain<D: super::PgDomain>(_: PhantomData<D>) {}
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
@@ -167,6 +180,9 @@ mod smoke {
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);
         // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
         assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
+        // PG-BUNDLE-DOMAIN-02：两个 per-domain marker 均满足 sealed `PgDomain`（去掉任一 impl 即编译失败）。
+        assert_pg_domain(PhantomData::<super::caps::Settings>);
+        assert_pg_domain(PhantomData::<super::caps::Identity>);
     }
 
     #[test]

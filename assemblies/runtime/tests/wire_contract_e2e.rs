@@ -12,17 +12,16 @@
 
 #![cfg(feature = "integration")]
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use postgres::{PgConfig, PgDbReadiness, PgPassword, PgSslMode, PgStore};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
 use runtime::{CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, wire_settings};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-/// testkit fixture + `Arc<PgStore>`（含 run_migrations）。
+/// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations）。
 async fn connect_pg()
--> Result<(testkit::PgFixture, Arc<PgStore>), Box<dyn std::error::Error + Send + Sync>> {
+-> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let config = PgConfig::new(
@@ -34,17 +33,15 @@ async fn connect_pg()
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
-    let store = PgStore::connect(&config).await?;
-    store.run_migrations().await?;
-    Ok((fixture, Arc::new(store)))
+    let deps = PgRuntimeDeps::setup(&config).await?;
+    Ok((fixture, deps))
 }
 
 /// `wire_settings` 在 vault env 缺失时 fail-closed；vault env 存在时产出恰一条 configs_ready 探针。
 #[tokio::test(flavor = "multi_thread")]
 async fn wire_settings_failcloses_without_vault_else_emits_configs_ready_probe() -> TestResult {
-    let (_fixture, store) = connect_pg().await?;
-    let readiness = Arc::new(PgDbReadiness::new());
-    let deps = SharedRuntimeDeps { store, readiness };
+    let (_fixture, pg) = connect_pg().await?;
+    let deps = SharedRuntimeDeps { pg };
 
     let vault_configured =
         std::env::var("RSS_VAULT_ADDR").is_ok() && std::env::var("RSS_VAULT_TOKEN").is_ok();

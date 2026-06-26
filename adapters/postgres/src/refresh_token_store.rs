@@ -42,7 +42,9 @@ pub struct PgRefreshTokenStore {
 
 impl PgRefreshTokenStore {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）。Clock 不注入（issued_at/expires_at 来自 record）。
-    pub fn new(store: &PgStore) -> Self {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::refresh_token_store` 收口。
+    pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
         }

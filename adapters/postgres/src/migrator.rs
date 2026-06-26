@@ -12,8 +12,10 @@ impl PgStore {
     /// migration 只增不改"（改了报 `VersionMismatch`）。幂等：已应用的迁移再跑为 no-op。
     ///
     /// 调用时机：组合根 / bootstrap 中、`Domain::init` **之前**（init 不做外部 I/O，`domain-patterns.md`
-    /// §Init fail-fast）。本基座 PR 只提供方法，接线到 bootstrap 属后续。
-    pub async fn run_migrations(&self) -> Result<(), PgError> {
+    /// §Init fail-fast）。
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：迁移收口进 [`crate::PgRuntimeDeps::setup`]（connect 后即跑）。
+    pub(crate) async fn run_migrations(&self) -> Result<(), PgError> {
         sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await

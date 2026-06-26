@@ -50,7 +50,9 @@ pub struct PgCredentialRepo {
 
 impl PgCredentialRepo {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）。
-    pub fn new(store: &PgStore) -> Self {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::credential_repo` 收口。
+    pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
         }

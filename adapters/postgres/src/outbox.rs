@@ -311,7 +311,9 @@ pub struct PgOutbox {
 impl PgOutbox {
     /// 由 [`PgStore`] + `Box<DynPublisher>` 构造（两者均必填）。
     /// pool 从 `PgStore.pool`（`pub(crate)`，同 crate 可取）clone；DynPublisher 转移所有权。
-    pub fn new(store: &PgStore, publisher: Box<DynPublisher<'static>>) -> Self {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::outbox` 收口。
+    pub(crate) fn new(store: &PgStore, publisher: Box<DynPublisher<'static>>) -> Self {
         Self {
             pool: store.pool.clone(),
             publisher,

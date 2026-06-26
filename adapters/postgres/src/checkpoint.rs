@@ -29,14 +29,16 @@ use crate::PgStore;
 /// PostgreSQL checkpoint store adapter（CAS 版本控制）。
 ///
 /// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
-/// 经 [`PgStore::checkpoint`] 构造。
+/// 经 [`crate::PgInfraDeps::checkpoint`] 构造（`PgStore::checkpoint` 为 `pub(crate)` funnel）。
 pub struct PgCheckpointStore {
     pool: PgPool,
 }
 
 impl PgStore {
     /// 构造 [`PgCheckpointStore`]（pool clone 自 `PgStore`，轻量）。
-    pub fn checkpoint(&self) -> PgCheckpointStore {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::checkpoint`] 收口。
+    pub(crate) fn checkpoint(&self) -> PgCheckpointStore {
         PgCheckpointStore {
             pool: self.pool.clone(),
         }

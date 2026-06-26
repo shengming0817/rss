@@ -3,11 +3,11 @@
 //! 覆盖路径：
 //! - **Down 路径**（fail-closed，不连 DB）：已迁至 `runtime::tests::configs_ready_initial_down_readyz_503`
 //!   （`#[cfg(test)]` in lib.rs），azure 非 integration 路径下即可运行。
-//! - **Ready 路径**：spawn `pg_readiness_sampling_loop`（短 period）→ 真实 DB tick 后 `PgDbReadiness` 被
-//!   标记 Ready → readyz 返 200，JSON body 含 `"overall":"healthy"` + `"name":"configs_ready"`。
+//! - **Ready 路径**：`PgRuntimeDeps::spawn_readiness_sampler`（短 period）→ 真实 DB tick 后 readiness handle
+//!   被标记 Ready → readyz 返 200，JSON body 含 `"overall":"healthy"` + `"name":"configs_ready"`。
 //!
 //! 区别于 lib 单测的 `HealthyProbe` 替身——此处验真实 `ConfigsReadyProbe.check()` 读 `PgDbReadiness::snapshot()`。
-//! `mark()` 是 `pub(crate)`（`postgres` crate 内可见），组合根不直接调——驱动方式为 `pg_readiness_sampling_loop`。
+//! 采样驱动经 bundle 的 `spawn_readiness_sampler`（spawn+adopt 收口，#1423）；`pg_readiness_sampling_loop` 已 `pub(crate)`。
 //!
 //! `integration` feature 门控；无 docker 时经 `testkit::env_or_postgres()` 取 env 外部 pg 或跳过。
 //! `cargo test -p runtime --features integration --no-run` 能编译即满足验收。
@@ -21,19 +21,16 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 // `ManagedResource` 提供 `PgReadinessSampler::shutdown`（trait 方法，须在 scope 内才可调）。
 use diport::ManagedResource as _;
-use postgres::{
-    PgConfig, PgDbReadiness, PgPassword, PgReadinessSampler, PgSslMode, PgStore,
-    pg_readiness_sampling_loop,
-};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
 use primitives::ProbeName;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-/// testkit fixture + PgStore（含 run_migrations）。
+/// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations，#1423）。
 async fn connect_pg()
--> Result<(testkit::PgFixture, Arc<PgStore>), Box<dyn std::error::Error + Send + Sync>> {
+-> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let config = PgConfig::new(
@@ -45,39 +42,26 @@ async fn connect_pg()
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
-    let store = PgStore::connect(&config).await?;
-    store.run_migrations().await?;
-    Ok((fixture, Arc::new(store)))
+    let deps = PgRuntimeDeps::setup(&config).await?;
+    Ok((fixture, deps))
 }
 
-/// Ready 路径：spawn `pg_readiness_sampling_loop`（短 period，真实 DB）→ readyz 200。
+/// Ready 路径：`spawn_readiness_sampler`（短 period，真实 DB）→ readyz 200。
 ///
-/// 流程：连真实 DB → 创 `PgDbReadiness`（初值 Down）→ spawn `pg_readiness_sampling_loop`（50ms period）
-/// → tokio sleep 200ms 等至少一轮采样 tick 完成 → cancel → readyz 200（采样已标 Ready）。
-/// `PgReadinessSampler::adopt` 持 handle 做 shutdown await 收敛。
+/// 流程：`setup` 连真实 DB（readiness handle 初值 Down）→ `spawn_readiness_sampler`（50ms period，spawn+adopt
+/// 收口进 bundle）→ tokio sleep 200ms 等至少一轮采样 tick 完成 → readyz 200（采样已标 Ready）→ `shutdown` 收敛。
 #[tokio::test(flavor = "multi_thread")]
 async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult {
-    let (_fixture, store) = connect_pg().await?;
+    let (_fixture, deps) = connect_pg().await?;
 
-    let health = Arc::new(PgDbReadiness::new());
-    let token = CancellationToken::new();
-
-    // 短 period（50ms）确保首 tick 快速到来。
-    let period = Duration::from_millis(50);
-    let handle = tokio::spawn(pg_readiness_sampling_loop(
-        Arc::clone(&store),
-        period,
-        token.clone(),
-        Arc::clone(&health),
-    ));
+    // 短 period（50ms）确保首 tick 快速到来；spawn+adopt 由 bundle 收口。
+    let sampler = deps.spawn_readiness_sampler(Duration::from_millis(50), CancellationToken::new());
+    let health = deps.readiness_handle();
 
     // 等待至少一轮采样（200ms >> 50ms period）。
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // cancel + adopt 做 shutdown await 收敛（测试结束时清理 task）。
-    let sampler = PgReadinessSampler::adopt(handle, Arc::clone(&health), token);
-
-    // 注册 probe（此时 health 已被 sampling_loop 标为 Ready）。
+    // 注册 probe（此时 health 已被采样 loop 标为 Ready）。
     // CONFIGS_READY_PROBE_NAME 常量单源：改名即编译期捕获（[D6/D7] #1309 review）。
     let mut reg = bootstrap::compose(&[])?;
     reg.probe(

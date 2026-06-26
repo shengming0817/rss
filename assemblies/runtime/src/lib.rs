@@ -37,10 +37,7 @@ use bootstrap::shutdown::ShutdownStack;
 use diport::{DynManagedResource, DynSecretResolver};
 use httpd::HttpServer;
 use oidc::OidcProvider;
-use postgres::{
-    PgConfig, PgDbReadiness, PgPassword, PgReadinessSampler, PgSecretRepo, PgStore, PgStoreGuard,
-    PoolReadiness, pg_readiness_sampling_loop,
-};
+use postgres::{PgConfig, PgDbReadiness, PgPassword, PgRuntimeDeps, PoolReadiness, caps};
 use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName, RequiredScheme,
 };
@@ -425,7 +422,8 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
 /// 接线 settings 域（[PERSIST-001] #1422）：构造 `SettingsService` + `SecretService`，产出
 /// `configs_ready` readiness 探针。
 ///
-/// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——`store` 供 repo、`readiness` 供探针读采样态。
+/// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——内部持 [`PgRuntimeDeps`] capability bundle；settings
+///   wiring 只拿 `PgDomainDeps<caps::Settings>`，拿不到 identity repo 或裸 pool。
 ///
 /// 产物经 [`DomainModuleResult`] 出向（result object），组合根 `merge` 聚合后排空到 sink；共享 infra 经
 /// [`SharedRuntimeDeps`] 入向。本函数不消费 / 不产出任何别域 value（禁跨 module handoff，签名 Hard）。
@@ -446,10 +444,11 @@ pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainMod
     let resolver = build_vault_resolver_from(|name| std::env::var(name).ok())
         .context("vault resolver config")?;
 
-    // PgConfigRepo / PgSecretRepo 持 pool clone（内部 Arc，轻量），接受 &PgStore。
-    let config_repo_r = postgres::PgConfigRepo::new(&deps.store, Box::new(SystemClock));
-    let config_repo_w = postgres::PgConfigRepo::new(&deps.store, Box::new(SystemClock));
-    let pg_secret_repo = PgSecretRepo::new(&deps.store);
+    let settings_pg = deps.pg.for_domain::<caps::Settings>();
+    // 受控能力句柄派发 repo（pool clone 在 bundle 内、不出 postgres crate）：读/写各一份 PgConfigRepo（同 pool）。
+    let config_repo_r = settings_pg.config_repo(Box::new(SystemClock));
+    let config_repo_w = settings_pg.config_repo(Box::new(SystemClock));
+    let pg_secret_repo = settings_pg.secret_repo();
 
     let settings_svc = SettingsService::with_postgres(
         DynConfigRepo::new_box(config_repo_r),
@@ -467,7 +466,7 @@ pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainMod
     drop(settings_svc);
     drop(secret_svc);
 
-    settings_module_result(deps.readiness.clone())
+    settings_module_result(deps.pg.readiness_handle())
 }
 
 /// settings 域 readiness 产物：`configs_ready` 探针（读共享 `PgDbReadiness`）。
@@ -742,7 +741,7 @@ pub fn init_tracing() {
 /// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
 /// = #1309 及后续域 PR；本 fn 仅打通 async runtime + ≥1 个 wire_X call-site + readiness probe。
 /// tracing subscriber 由 [`init_tracing`] 在 `main` 中先于本 fn 装配。
-// reason: 组合根入口顺序编排（pg connect → migrations → wire_settings → F8 probe → serve）
+// reason: 组合根入口顺序编排（pg setup〔connect+migrations〕 → wire_settings → F8 probe → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 pub async fn run() -> anyhow::Result<()> {
@@ -750,24 +749,14 @@ pub async fn run() -> anyhow::Result<()> {
     // settings domain 已注册（#1272/#1274）；后续域（identity/audit/…）随各自 wire_X PR 加入 compose 列表。
     let mut registry = bootstrap::compose(&[&SettingsDomain]).context("compose domains")?;
 
-    // postgres：connect + migrations（生产 fail-fast，缺配/连不上不静默 ready）。
-    let pg = Arc::new(
-        PgStore::connect(&build_pg_config()?)
-            .await
-            .context("connect postgres")?,
-    );
-    pg.run_migrations()
+    // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
+    // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
+    let pg = PgRuntimeDeps::setup(&build_pg_config()?)
         .await
-        .context("run postgres migrations")?;
-
-    // F8：readiness 采样 health（初值 Down，fail-closed）——settings configs_ready 探针读、框架 sampler 写。
-    let readiness = Arc::new(PgDbReadiness::new());
+        .context("setup postgres deps")?;
 
     // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
-    let deps = SharedRuntimeDeps {
-        store: pg.clone(),
-        readiness: readiness.clone(),
-    };
+    let deps = SharedRuntimeDeps { pg: pg.clone() };
 
     // 聚合各域 module result（今仅 settings；后续域只需多一行 module.merge(wire_X(&deps).await?)，run() 形态恒定）。
     let mut module = DomainModuleResult::default();
@@ -805,20 +794,12 @@ pub async fn run() -> anyhow::Result<()> {
 
     // LIFO 注册顺序：pool guard 先注册（最后关）→ sampler → 域 resources → 域 workers → listeners 最后注册
     // （最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources → sampler → pool guard。
-    let sampler_pg = pg.clone();
-    let sampler_health = readiness.clone();
     serve_until_signal(listeners, move |stack| {
         // 先注册框架 pg infra（非域产物）：pool guard（LIFO 最后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
-        stack.register_detached(DynManagedResource::new_box(PgStoreGuard::new(pg)));
-        // 再注册 sampler（child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
+        stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
+        // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
         stack.register_with_token(move |token| {
-            let handle = tokio::spawn(pg_readiness_sampling_loop(
-                sampler_pg,
-                period,
-                token.clone(),
-                sampler_health.clone(),
-            ));
-            DynManagedResource::new_box(PgReadinessSampler::adopt(handle, sampler_health, token))
+            DynManagedResource::new_box(pg.spawn_readiness_sampler(period, token))
         });
         // 域产物注册在框架 pg infra 之后 → LIFO 先于 pool 关闭排空（settings 今为空；后续域就位）。
         for r in domain_resources {

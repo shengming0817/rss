@@ -23,14 +23,16 @@ use crate::PgStore;
 /// PostgreSQL saga journal adapter（append-only）。
 ///
 /// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
-/// 经 [`PgStore::saga_journal`] 构造。
+/// 经 [`crate::PgInfraDeps::saga_journal`] 构造（`PgStore::saga_journal` 为 `pub(crate)` funnel）。
 pub struct PgSagaJournal {
     pool: PgPool,
 }
 
 impl PgStore {
     /// 构造 [`PgSagaJournal`]（pool clone 自 `PgStore`，轻量）。
-    pub fn saga_journal(&self) -> PgSagaJournal {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::saga_journal`] 收口。
+    pub(crate) fn saga_journal(&self) -> PgSagaJournal {
         PgSagaJournal {
             pool: self.pool.clone(),
         }

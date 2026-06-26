@@ -86,7 +86,8 @@ impl std::fmt::Debug for PgPassword {
 ///
 /// 连接参数（host / port / database / username / password）必填经 [`PgConfig::new`]；TLS 模式默认
 /// [`DEFAULT_SSL_MODE`]（`VerifyFull`，零信任）、池 tuning 取默认，均经 `with_*` 累加调整。最终由
-/// [`PgStore::connect`] 调 [`PgConfig::validate`] fail-fast 校验。
+/// `PgStore::connect`（`pub(crate)` funnel，经 [`crate::PgRuntimeDeps::setup`]）调 [`PgConfig::validate`]
+/// fail-fast 校验。
 #[derive(Clone, Debug)]
 pub struct PgConfig {
     host: String,
@@ -140,7 +141,7 @@ impl PgConfig {
         self
     }
 
-    /// 调整连接池上限（累加式 builder；最终由 [`PgStore::connect`] validate）。
+    /// 调整连接池上限（累加式 builder；最终由 `PgStore::connect`（`pub(crate)` funnel）validate）。
     #[must_use]
     pub fn with_max_connections(mut self, max: u32) -> Self {
         self.max_connections = max;
@@ -300,7 +301,10 @@ impl PgStore {
     /// 建池并连接 postgres：先 fail-fast 校验配置，再 `PgPoolOptions::connect_with`。
     ///
     /// `ref: sqlx sqlx-core/src/pool/options.rs@v0.8.6`。
-    pub async fn connect(config: &PgConfig) -> Result<Self, PgError> {
+    ///
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：唯一公开构造路径是 [`crate::PgRuntimeDeps::setup`]，
+    /// 外部不能直接 mint `PgStore`、故拿不到 `&PgStore` 散装构造 repo。
+    pub(crate) async fn connect(config: &PgConfig) -> Result<Self, PgError> {
         config.validate()?;
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)

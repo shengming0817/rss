@@ -1,9 +1,10 @@
 //! 运行时层共享基础设施依赖（[PERSIST-001] #1422，ADR-010 §2.6 step 2）。
 //!
-//! [`SharedRuntimeDeps`]（parameter object）把共享基础设施**流入**每个域 `wire_X`。它持 `Arc<PgStore>`
-//! （postgres 适配器）等 adapter 类型，故必须落组合根层（`assemblies/runtime`），不能进 `bootstrap`（服务层不依赖
-//! 适配器）。配对的产物出口 [`bootstrap::DomainModuleResult`]（probes / resources / workers 可聚合产物）按 ADR-010
-//! §2.2 归属 `bootstrap`，组合根经 `merge` 聚合后排空到 sink。
+//! [`SharedRuntimeDeps`]（parameter object）把共享基础设施**流入**每个域 `wire_X`。它持
+//! `PgRuntimeDeps`（postgres 适配器 capability bundle）等 adapter 类型，故必须落组合根层
+//! （`assemblies/runtime`），不能进 `bootstrap`（服务层不依赖适配器）。配对的产物出口
+//! [`bootstrap::DomainModuleResult`]（probes / resources / workers 可聚合产物）按 ADR-010 §2.2 归属
+//! `bootstrap`，组合根经 `merge` 聚合后排空到 sink。
 //!
 //! # 不变式
 //!
@@ -23,9 +24,7 @@
 //!
 //! ref: oxidecomputer/omicron nexus/src/context.rs@8eb92537bd12598dfd2c861f897a88962fabf684
 
-use std::sync::Arc;
-
-use postgres::{PgDbReadiness, PgStore};
+use postgres::PgRuntimeDeps;
 
 /// 共享基础设施依赖，流入每个域的 `wire_X`（parameter object，[`bootstrap::DomainModuleResult`] 的入向配对）。
 ///
@@ -37,11 +36,11 @@ use postgres::{PgDbReadiness, PgStore};
 /// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` 收口。
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
-    /// 共享 postgres store；各域 repo 取 `&PgStore` clone 内部 pool（轻量 `Arc`）。
-    pub store: Arc<PgStore>,
-    /// 共享 DB readiness handle：域 readiness 探针（如 settings `configs_ready`）**读**，框架 sampler worker
-    /// **写**。组合根建一次注入，保证读（探针）/ 写（sampler）观察同一原子态。
-    pub readiness: Arc<PgDbReadiness>,
+    /// 共享 postgres capability bundle；各域经 `for_domain::<caps::X>()` 投影受控 durable 能力句柄。
+    ///
+    /// 不暴露 `Arc<PgStore>` / `PgPool`，保持 PG-BUNDLE-FUNNEL-01/03：repo、readiness、sampler、pool guard
+    /// 均经 `PgRuntimeDeps` 方法派发。
+    pub pg: PgRuntimeDeps,
 }
 
 #[cfg(test)]
