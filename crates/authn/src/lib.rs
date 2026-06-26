@@ -37,11 +37,19 @@ use diport::Pdp as _;
 #[allow(dead_code)]
 const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requirement;
 
-// kind claim 字符串常量（同义字面量 ≥3 次，抽 const）。
+// JWT 签发（mint/sign）：组装 claims + 紧凑 JWS，签名委托注入的 `diport::Signer`（#1314）。验签侧对称物在
+// 本 crate 顶部 verify→mint bridge；mint 子模块复用下方 `KIND_*` claim 串单源（杜绝 round-trip 漂移）。
+mod mint;
+pub use mint::{JwtAlg, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
+
+// kind claim 字符串常量（单源：验签侧 `derive_from_claims` 读、mint 侧 `kind_claim` 写，同一组常量防漂移）。
 const KIND_USER: &str = "user";
 const KIND_DEVICE: &str = "device";
 const KIND_ADMIN: &str = "admin";
 const KIND_SUPER_ADMIN: &str = "superAdmin";
+// reason: service 主体（HS256 service-token）的 kind 串——本轮仅 mint 侧 `kind_claim` 用；与上列同址，
+// 保 kind claim 名单源（验签 service-token 路径经 `from_verified_service_token` 固定 Service、不读本串）。
+const KIND_SERVICE: &str = "service";
 
 // 主体类别 `PrincipalKind` 单一源已上移基础层 `vocab`（crates/vocab/src/principal.rs）：authn `Principal.kind` /
 // httpserve `Authenticated` 证据 / audit `actor_kind` 共用同一枚举，杜绝双源漂移。本 crate 经顶部
