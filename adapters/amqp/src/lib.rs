@@ -1,9 +1,9 @@
 //! amqp — RSS AMQP 事件传输 adapter（lapin）。
 //!
 //! impl `diport` 已冻 DI port：[`AmqpPublisher`]（`Publisher` + `ManagedResource`）+
-//! [`AmqpSubscriber`]（`Subscriber` + `AckableSubscriber` + `ManagedResource`）。
+//! [`AmqpSubscriber`]（`AckableSubscriber` + `ManagedResource`）。
 //! 生产事件主干——relay 经 `Publisher` 把已持久化 outbox entry 发到跨进程 broker；
-//! consumer 经 `Subscriber`（at-most-once）或 `AckableSubscriber`（at-least-once）收取。
+//! consumer 经 `AckableSubscriber`（at-least-once，manual-ack）收取。
 //!
 //! # per-domain vhost/credential 隔离
 //!
@@ -12,12 +12,9 @@
 //! 命名前缀（命名前缀会把域身份泄进 wire 且可绕过）。URL 由组合根经 `bootstrap::eventtransport` 决策
 //! 注入。凭据 non-leak：连接失败日志只经 `secure::redact_url_credentials` / `secure::redact_error`。
 //!
-//! # P7 传输边界（manual-ack + auto-ack 对偶）
+//! # P7 传输边界（manual-ack，at-least-once）
 //!
-//! [`AmqpSubscriber`] 同时实现两个 port，语义对偶：
-//!
-//! - **[`diport::Subscriber`]（auto-ack，`no_ack=true`，at-most-once）**：broker 投递即出队，
-//!   stream 产出无 ack 义务的 [`diport::Message`]。遗留/brokerless 对偶，保持原 P6 语义。
+//! [`AmqpSubscriber`] 仅实现 [`diport::AckableSubscriber`]（at-least-once）：
 //!
 //! - **[`diport::AckableSubscriber`]（manual-ack，`no_ack=false`，at-least-once）**：
 //!   每条 [`diport::Delivery`] 携 `AmqpAcker` 句柄，由 `eventexec::run_consumer_ackable` 据
@@ -25,6 +22,8 @@
 //!   `Reject`→basic_nack(requeue=false)）。在途消息于消费者崩溃窗口 broker 自动 requeue——
 //!   channel close 即重投，兑现 **at-least-once**。
 //!   prefetch=100（channel 级 unacked 上限，RabbitMQ 推荐 100–300）。
+//!
+//! at-most-once 仅 demo 拓扑的 MemBus（`diport::Subscriber`）；AMQP 不实现该 trait。
 //!
 //! # feature 门控
 //!
@@ -67,20 +66,18 @@ mod smoke {
     //! build smoke：编译期断言 adapter 已 impl 冻结的 diport DI port（PhantomData 绑定检查，不构造、
     //! 不执行 body）。两种 build 都过——默认 fallback（`todo!()`）/ `integration` 真实 lapin impl。
     //! INVARIANT: ADAPTER-PORT-FREEZE-01 —— [`AmqpPublisher`] impl `Publisher`+`ManagedResource`、
-    //! [`AmqpSubscriber`] impl `Subscriber`+`AckableSubscriber`+`ManagedResource`；去掉任一 impl 即编译
-    //! 失败（anti-vacuity）。
+    //! [`AmqpSubscriber`] impl `AckableSubscriber`+`ManagedResource`；去掉任一 impl 即编译失败（anti-vacuity）。
+    //! `AmqpSubscriber` 不再 impl `Subscriber`（at-most-once 仅 MemBus）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_publisher<T: diport::Publisher>(_: PhantomData<T>) {}
-    fn assert_subscriber<T: diport::Subscriber>(_: PhantomData<T>) {}
     fn assert_ackable_subscriber<T: diport::AckableSubscriber>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
         assert_publisher(PhantomData::<super::AmqpPublisher>);
         assert_managed_resource(PhantomData::<super::AmqpPublisher>);
-        assert_subscriber(PhantomData::<super::AmqpSubscriber>);
         assert_managed_resource(PhantomData::<super::AmqpSubscriber>);
         assert_ackable_subscriber(PhantomData::<super::AmqpSubscriber>);
     }

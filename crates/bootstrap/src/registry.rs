@@ -85,27 +85,121 @@ pub trait SubscriberHandler: Send + Sync {
     fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>>;
 }
 
-/// subscriber handler 处理失败。
+/// subscriber handler 失败的处置类别——决定 ConsumerBase 是有界重试还是直接 DLX。
+///
+/// 类型层杜绝「瞬态失败被永久 Reject、绕过 ConsumerBase requeue 预算」（review #274 F2/C2）：handler 须经
+/// [`SubscriberHandlerError::permanent`] / [`SubscriberHandlerError::transient`] 二选一显式声明失败语义，
+/// 由 [`adapt_subscriber_handler`] 穷尽 `match` 映射到 [`consistency::HandleResult`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriberErrorDisposition {
+    /// 永久失败（解码 / 校验非法等，重试无意义）→ 直接 DLX（`reject`）。
+    Permanent,
+    /// 瞬态失败（存储 / append 等可恢复）→ ConsumerBase 有界重试预算（`requeue`）。
+    Transient,
+}
+
+/// subscriber handler 处理失败（携 [`SubscriberErrorDisposition`] 决定重试 vs DLX）。
 ///
 /// PII 边界（与 `diport` 各 port error 同范式）：`Display` 仅安全摘要常量；原始错误经
-/// [`SubscriberHandlerError::new`] 包成 [`std::error::Error::source`] 内部保留，不进默认日志。
+/// [`SubscriberHandlerError::permanent`] / [`SubscriberHandlerError::transient`] 包成
+/// [`std::error::Error::source`] 内部保留，不进默认日志。
 #[derive(Debug, thiserror::Error)]
 #[error("subscriber handler failed")]
 pub struct SubscriberHandlerError {
+    disposition: SubscriberErrorDisposition,
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
 impl SubscriberHandlerError {
-    /// 把 handler 内部错误包成处理失败。原始错误仅作 internal source 保留（不进 `Display`）。
-    pub fn new<E>(source: E) -> Self
+    /// 永久失败（重试无意义，直接 DLX）。原始错误仅作 internal source 保留（不进 `Display`）。
+    pub fn permanent<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
+            disposition: SubscriberErrorDisposition::Permanent,
             source: Box::new(source),
         }
     }
+
+    /// 瞬态失败（可恢复，ConsumerBase 有界重试）。原始错误仅作 internal source 保留（不进 `Display`）。
+    pub fn transient<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            disposition: SubscriberErrorDisposition::Transient,
+            source: Box::new(source),
+        }
+    }
+
+    /// 失败处置类别（[`adapt_subscriber_handler`] 据此映射 disposition）。
+    pub fn disposition(&self) -> SubscriberErrorDisposition {
+        self.disposition
+    }
+}
+
+/// 已适配的 consumer handler：`run_consumer` / `run_consumer_ackable` 的 handler 形态
+/// （`Fn(Message) -> BoxFuture<'static, consistency::HandleResult>`）。
+///
+/// 由 [`adapt_subscriber_handler`] 从 bootstrap-local [`SubscriberHandler`] 适配产出，供组合根
+/// （`journeys` / `bins`）接 `eventexec` 消费驱动——既证 subscriber 声明流到分发闭环，又不在
+/// bootstrap↔eventexec 间建兄弟服务依赖（返回 `consistency::HandleResult`，非 `eventexec` 类型）。
+///
+/// `Box<dyn Fn>` 直接 impl `Fn`（std blanket impl），无需调用方桥接即可传给 `eventexec::spawn_consumer`
+/// 的 `H: Fn` 约束（`Arc<dyn Fn>` 不 impl `Fn`，需手写桥——Box 消除该桥）。
+pub type ConsumerHandlerFn =
+    Box<dyn Fn(Message) -> BoxFuture<'static, consistency::HandleResult> + Send + Sync>;
+
+/// 把 bootstrap-local [`SubscriberHandler`] 适配成 consumer 驱动的 [`ConsumerHandlerFn`]。
+///
+/// 映射（按 [`SubscriberErrorDisposition`] 穷尽分流，review #274 F2/C2）：
+/// - `Ok(())` → [`consistency::HandleResult::ack`]。
+/// - `Err(Transient)` → [`consistency::HandleResult::requeue`]——可恢复失败（存储 / append 等）走
+///   ConsumerBase 有界重试预算，**不**首投即 DLX。
+/// - `Err(Permanent)` → [`consistency::HandleResult::reject`]——解码 / 校验非法不可重试，由 ConsumerBase
+///   收口到 DLX。
+///
+/// 返回 `Box<dyn Fn>`，直接满足 `eventexec::spawn_consumer` / `spawn_consumer_ackable` 的
+/// `H: Fn` 约束，无需调用方额外桥接。
+///
+/// # 组合根接线示例（3 步）
+///
+/// ```ignore
+/// // 1. 先订阅得 stream（subscribe-at-callsite，保证先于发布）。
+/// let stream = bus.subscriber().subscribe(Topic::new(topic), token.clone()).await?;
+/// // 2. adapt handler。
+/// let handler_fn = bootstrap::adapt_subscriber_handler(binding.handler);
+/// // 3. spawn worker + 注册关闭。
+/// let worker = eventexec::spawn_consumer(name, stream, idem, dlx, meta, handler_fn, token, health);
+/// stack.register_detached(diport::DynManagedResource::new_box(worker));
+/// ```
+pub fn adapt_subscriber_handler(handler: Box<dyn SubscriberHandler>) -> ConsumerHandlerFn {
+    // 内层保留 Arc：闭包多次调用（Fn，非 FnOnce），每次需 clone handler 进 async block。
+    let handler: std::sync::Arc<dyn SubscriberHandler> = std::sync::Arc::from(handler);
+    Box::new(move |message: Message| {
+        let handler = handler.clone();
+        Box::pin(async move {
+            match handler.handle(message).await {
+                Ok(()) => consistency::HandleResult::ack(),
+                Err(e) => match e.disposition() {
+                    SubscriberErrorDisposition::Transient => {
+                        tracing::warn!(error = %e, "consumer: subscriber handler transient failure, requeueing");
+                        consistency::HandleResult::requeue(consistency::EngineError::new(
+                            consistency::EngineErrorKind::Transient,
+                        ))
+                    }
+                    SubscriberErrorDisposition::Permanent => {
+                        tracing::warn!(error = %e, "consumer: subscriber handler permanent failure, rejecting (DLX)");
+                        consistency::HandleResult::reject(consistency::PermanentError::new(
+                            consistency::PermanentErrorKind::Permanent,
+                        ))
+                    }
+                },
+            }
+        }) as BoxFuture<'static, consistency::HandleResult>
+    })
 }
 
 /// bootstrap-local 健康探针擦除接缝。
@@ -964,5 +1058,86 @@ mod finalize {
             .await
             .expect("oneshot ok");
         assert_eq!(leaked_internal.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod handler_adapt {
+    //! `adapt_subscriber_handler` 适配器：Ok→Ack / Err(Permanent)→Reject / Err(Transient)→Requeue 映射验证
+    //! （F2/C2：瞬态失败走 ConsumerBase 有界重试预算，不首投即 DLX）。
+    use super::{Message, SubscriberHandler, SubscriberHandlerError, adapt_subscriber_handler};
+    use futures::future::BoxFuture;
+
+    struct OkHandler;
+    impl SubscriberHandler for OkHandler {
+        fn handle(
+            &self,
+            _message: Message,
+        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct PermanentErrHandler;
+    impl SubscriberHandler for PermanentErrHandler {
+        fn handle(
+            &self,
+            _message: Message,
+        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+            Box::pin(async {
+                Err(SubscriberHandlerError::permanent(std::io::Error::other(
+                    "boom",
+                )))
+            })
+        }
+    }
+
+    struct TransientErrHandler;
+    impl SubscriberHandler for TransientErrHandler {
+        fn handle(
+            &self,
+            _message: Message,
+        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+            Box::pin(async {
+                Err(SubscriberHandlerError::transient(std::io::Error::other(
+                    "io",
+                )))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn adapt_maps_ok_to_ack() {
+        let handler_fn = adapt_subscriber_handler(Box::new(OkHandler));
+        let message = diport::Message::new("test-ok", vec![]);
+        let result = handler_fn(message).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
+        assert_eq!(result.error_summary(), None);
+    }
+
+    #[tokio::test]
+    async fn adapt_maps_permanent_to_reject() {
+        let handler_fn = adapt_subscriber_handler(Box::new(PermanentErrHandler));
+        let message = diport::Message::new("test-err", vec![]);
+        let result = handler_fn(message).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Reject);
+        // anti-vacuity：reject 携 permanent error 摘要，与 ack 的 None 不同。
+        assert_eq!(result.error_summary(), Some("permanent error"));
+        assert_ne!(result.error_summary(), None);
+    }
+
+    #[tokio::test]
+    async fn adapt_maps_transient_to_requeue() {
+        // F2/C2：瞬态失败 → Requeue（ConsumerBase 有界重试），**非** Reject（不首投即 DLX）。
+        let handler_fn = adapt_subscriber_handler(Box::new(TransientErrHandler));
+        let message = diport::Message::new("test-transient", vec![]);
+        let result = handler_fn(message).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Requeue);
+        assert_ne!(
+            result.disposition(),
+            consistency::Disposition::Reject,
+            "瞬态失败不得绕过 requeue 预算被永久 Reject"
+        );
+        assert_eq!(result.error_summary(), Some("transient engine error"));
     }
 }

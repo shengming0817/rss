@@ -21,12 +21,13 @@ use consistency::{ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, 
 
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, Checkpoint, CheckpointId, CheckpointOwner,
-    CheckpointStoreError, CheckpointVersion, Clock, FencedWriteKey, FencedWriteRequest,
-    FencedWriter, FencedWriterError, JournalEntry, LeaderElector, LeaderElectorError, LeaderId,
-    LeaseToken, Message, MessageId, MessageStream, OutboxEmitError, OutboxEmitter,
-    OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, SagaId,
-    SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate, SecretMaterial, SecretResolver,
-    SecretResolverError, Subscriber, SubscriberError, Topic, WriteOutcome,
+    CheckpointStoreError, CheckpointVersion, Clock, DeadLetterRecord, DeadLetterStore,
+    DeadLetterStoreError, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
+    JournalEntry, LeaderElector, LeaderElectorError, LeaderId, LeaseToken, Message, MessageId,
+    MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore,
+    PublishRequest, Publisher, PublisherError, SagaId, SagaJournal, SagaJournalError, SaveOutcome,
+    SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, Subscriber,
+    SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -304,6 +305,58 @@ impl AuditSink for MemAuditSink {
     }
 }
 
+// ── MemDeadLetterStore：累积 DeadLetterRecord 供 journey 断言 ─────────────────────────────
+
+/// in-mem 死信 sink（impl [`diport::DeadLetterStore`]）：把 [`diport::DeadLetterRecord`] 累积进 vec，
+/// 供 demo journey 断言 DLX 分支。生产走 postgres `PgDeadLetterStore`；本替身仅测试 / demo 用。
+#[derive(Clone, Default)]
+pub struct MemDeadLetterStore {
+    records: Arc<Mutex<Vec<DeadLetterRecord>>>,
+}
+
+impl MemDeadLetterStore {
+    /// 新建空 store。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 当前累积的死信记录快照（克隆）。
+    pub fn records(&self) -> Vec<DeadLetterRecord> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 已记录条数。
+    pub fn len(&self) -> usize {
+        self.records.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl DeadLetterStore for MemDeadLetterStore {
+    async fn write_dead_letter(
+        &self,
+        record: DeadLetterRecord,
+    ) -> Result<(), DeadLetterStoreError> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(record);
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
 // ── FixedClock：确定性测试时钟 ────────────────────────────────────────────────
 
 /// 固定时刻时钟（impl [`diport::Clock`]）：测试 / demo 确定性，不取系统时钟（不触 clippy disallowed-methods）。
@@ -343,13 +396,11 @@ pub struct InMemClaimer {
 impl InMemClaimer {
     /// 新建空 claimer，绑定消费者组。
     ///
-    /// 构造仅 crate 内可见（`pub(crate)`）——`InMemClaimer` 是 demo/test 替身，
-    /// 当前无已知跨 crate 消费方。跨 crate dev-root demo 装配（如 replaydeps 拓扑）
-    /// 随消费方落地时再经决策 token factory 暴露；勿现在引入该 factory。
-    #[allow(dead_code)]
-    // reason: InMemClaimer::new 当前仅在 #[cfg(test)] 中调用；非测试 lib 代码无消费方，
-    // 故 rustc dead_code lint 误报。待 replaydeps demo 消费方落地时一并去掉本 allow。
-    pub(crate) fn new(group: ConsumerGroup) -> Self {
+    /// `pub`：供 dev-root demo 组合根（`journeys` / `examples`）跨 crate 构造（生产 bin 经 cargo-deny 连
+    /// `memory` 都依赖不到 ⇒ in-mem 生产不可达，TOPO-INMEM-SEAL-01 主守卫 Hard）。dev root **须**经
+    /// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造、**不**直接 raw-new——把 in-mem 构造
+    /// 收束到已校验的拓扑决策（决策绑定纪律 Medium，review #274 F6/C6）；生产走 redis/pg claimer。
+    pub fn new(group: ConsumerGroup) -> Self {
         Self {
             seen: Arc::new(Mutex::new(HashSet::new())),
             group,
@@ -1223,6 +1274,39 @@ mod tests {
             .expect("checkpoint 应存在");
         assert_eq!(cp.offset, Lsn::new(20));
         assert_eq!(cp.version, CheckpointVersion::new(2));
+    }
+
+    // ── MemDeadLetterStore 测试 ────────────────────────────────────────────────
+
+    /// new→is_empty；write_dead_letter 一条→len==1，断言 domain/topic/num_attempts/error_summary。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path 断言，item-level carve-out（error-handling.md §Carve-out）。
+    async fn dead_letter_store_records_entry() {
+        use diport::DeadLetterSummary;
+
+        let store = MemDeadLetterStore::new();
+        assert!(store.is_empty());
+
+        let record = DeadLetterRecord::new(
+            "identity",
+            "contract-session",
+            "session.created",
+            b"payload".to_vec(),
+            DeadLetterSummary::new("max retries exhausted"),
+            3,
+        );
+        store
+            .write_dead_letter(record)
+            .await
+            .expect("write_dead_letter");
+
+        assert_eq!(store.len(), 1);
+        let records = store.records();
+        assert_eq!(records[0].domain(), "identity");
+        assert_eq!(records[0].topic(), "session.created");
+        assert_eq!(records[0].num_attempts(), 3);
+        assert_eq!(records[0].error_summary(), "max retries exhausted");
     }
 
     // ── MemSecretResolver smoke ───────────────────────────────────────────────

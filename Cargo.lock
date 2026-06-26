@@ -2789,6 +2789,7 @@ dependencies = [
 name = "journeys"
 version = "0.0.0"
 dependencies = [
+ "amqp",
  "anyhow",
  "audit",
  "bootstrap",

@@ -12,9 +12,7 @@ use std::time::Duration;
 
 use amqp::{AmqpPublisher, AmqpSubscriber};
 use anyhow::anyhow;
-use diport::{
-    AckAction, AckableSubscriber, Acker, MessageId, PublishRequest, Publisher, Subscriber, Topic,
-};
+use diport::{AckAction, AckableSubscriber, Acker, MessageId, PublishRequest, Publisher, Topic};
 use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +45,7 @@ async fn integration_connect_failure_returns_safe_error() {
 }
 
 /// publish → subscribe 闭环：同 vhost / 同 topic，subscriber 收到 publisher 发的 payload。
+/// 使用 `subscribe_ackable`（at-least-once）——AMQP 唯一投递路径（Durable 拓扑）。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
@@ -56,7 +55,9 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
 
     let subscriber = AmqpSubscriber::connect(&url, "amqp-it-sub").await?;
     // 订阅须先于发布（先声明 queue + consumer）。
-    let mut stream = subscriber.subscribe(topic.clone(), token.clone()).await?;
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-pub").await?;
     publisher
@@ -68,25 +69,26 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
         .await?;
 
     // 有界等待，防 broker 异常时挂死。
-    let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
-    assert_eq!(msg.payload, b"hello-amqp".to_vec());
+    assert_eq!(delivery.message.payload, b"hello-amqp".to_vec());
     // EventId 跨 broker 传播：message_id 经 envelope 流回 Message.id（消费侧幂等键源）。
     assert_eq!(
-        msg.id.as_str(),
+        delivery.message.id.as_str(),
         "evt-amqp-1",
         "event_id 应经 broker message_id 传播到 Message.id"
     );
 
     token.cancel();
     Publisher::shutdown(&publisher).await?;
-    Subscriber::shutdown(&subscriber).await?;
+    AckableSubscriber::shutdown(&subscriber).await?;
     Ok(())
 }
 
 /// 同-vhost topic 隔离：订 A + B 两条流，发到 B → **B 收到、A 在超时内无投递**（同 vhost 内 routing 隔离，
 /// review F8）。跨 **domain** 的硬隔离 seam 是 per-domain vhost——见 `integration_cross_vhost_isolation`。
+/// 使用 `subscribe_ackable`（at-least-once）——AMQP 唯一投递路径（Durable 拓扑）。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
@@ -94,10 +96,10 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     let token = CancellationToken::new();
     let subscriber = AmqpSubscriber::connect(&url, "amqp-it-sub").await?;
     let mut stream_a = subscriber
-        .subscribe(Topic::new("rss.it.iso-a"), token.clone())
+        .subscribe_ackable(Topic::new("rss.it.iso-a"), token.clone())
         .await?;
     let mut stream_b = subscriber
-        .subscribe(Topic::new("rss.it.iso-b"), token.clone())
+        .subscribe_ackable(Topic::new("rss.it.iso-b"), token.clone())
         .await?;
 
     let publisher = AmqpPublisher::connect(&url, "amqp-it-pub").await?;
@@ -110,10 +112,10 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
         .await?;
 
     // 正向：B 收到该消息。
-    let msg_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
+    let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
         .await?
         .ok_or_else(|| anyhow!("b stream closed without a message"))?;
-    assert_eq!(msg_b.payload, b"to-b".to_vec());
+    assert_eq!(delivery_b.message.payload, b"to-b".to_vec());
     // 负向：A 在短超时内无投递（隔离——B 的消息没串到 A）。timeout Err = 无消息。
     // 1s 余量（原 500ms 在 CI 高负载下偶发 flaky；正向已先成功，负向只需等隔离窗口）。
     let a_result = tokio::time::timeout(Duration::from_secs(1), stream_a.next()).await;
@@ -123,6 +125,53 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     );
 
     token.cancel();
+    Ok(())
+}
+
+/// (F4/C4) 每订阅独立 channel：同 subscriber 订 A(tokenA) + B(tokenB)，cancel **tokenA** → 流 A 终止，但
+/// 流 B **仍能收到**后续发到 B 的消息——取消单订阅只关本订阅 channel，不连带关闭共享 channel 停掉其它 topic
+/// consumer（review #274 F4：原 `self.channel` 共享，任一 cancel 关 channel 会连带终止同实例其它订阅）。
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_persub_cancel").await?;
+    let token_a = CancellationToken::new();
+    let token_b = CancellationToken::new();
+    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-persub").await?;
+    let mut stream_a = subscriber
+        .subscribe_ackable(Topic::new("rss.it.persub-a"), token_a.clone())
+        .await?;
+    let mut stream_b = subscriber
+        .subscribe_ackable(Topic::new("rss.it.persub-b"), token_b.clone())
+        .await?;
+
+    // 取消 A 的 token：仅关 A 的 channel。
+    token_a.cancel();
+    let ended_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next()).await?;
+    assert!(ended_a.is_none(), "A 流取消后须终止（Ok(None)）");
+
+    // A 取消后发到 B → B 仍能收到（B 的 channel/consumer 未被 A 的 cancel 连带关闭——回归守卫）。
+    let publisher = AmqpPublisher::connect(&url, "amqp-it-persub-pub").await?;
+    publisher
+        .publish(PublishRequest {
+            topic: Topic::new("rss.it.persub-b"),
+            event_id: MessageId::new("evt-persub-b"),
+            payload: b"to-b-after-a-cancel".to_vec(),
+        })
+        .await?;
+    let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
+        .await?
+        .ok_or_else(|| anyhow!("B 流在 A 取消后关闭（回归：共享 channel 被连带关闭）"))?;
+    assert_eq!(delivery_b.message.payload, b"to-b-after-a-cancel".to_vec());
+    delivery_b
+        .acker
+        .settle(AckAction::Ack)
+        .await
+        .map_err(|e| anyhow!("settle ack failed: {e}"))?;
+
+    token_b.cancel();
+    Publisher::shutdown(&publisher).await?;
+    AckableSubscriber::shutdown(&subscriber).await?;
     Ok(())
 }
 
@@ -136,11 +185,15 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     let topic = Topic::new("rss.it.crossvhost");
     let token = CancellationToken::new();
 
-    // 同 topic 名，分属两 vhost：vhost-a 订阅者 + vhost-b 订阅者。
+    // 同 topic 名，分属两 vhost：vhost-a 订阅者 + vhost-b 订阅者。使用 subscribe_ackable（at-least-once）。
     let sub_a = AmqpSubscriber::connect(&url_a, "xvhost-sub-a").await?;
-    let mut stream_a = sub_a.subscribe(topic.clone(), token.clone()).await?;
+    let mut stream_a = sub_a
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
     let sub_b = AmqpSubscriber::connect(&url_b, "xvhost-sub-b").await?;
-    let mut stream_b = sub_b.subscribe(topic.clone(), token.clone()).await?;
+    let mut stream_b = sub_b
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
 
     // 发到 vhost-a。
     let pub_a = AmqpPublisher::connect(&url_a, "xvhost-pub-a").await?;
@@ -153,10 +206,10 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
         .await?;
 
     // 正向：vhost-a 订阅者收到。
-    let msg_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next())
+    let delivery_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next())
         .await?
         .ok_or_else(|| anyhow!("vhost-a stream closed without a message"))?;
-    assert_eq!(msg_a.payload, b"only-a".to_vec());
+    assert_eq!(delivery_a.message.payload, b"only-a".to_vec());
     // 负向：vhost-b 订阅者超时内无投递（vhost 硬命名空间边界——跨 vhost 不路由）。
     // 1s 余量（原 500ms 在 CI 高负载下偶发 flaky；正向已先成功，负向只需等隔离窗口）。
     let b_result = tokio::time::timeout(Duration::from_secs(1), stream_b.next()).await;
@@ -169,8 +222,9 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     Ok(())
 }
 
-/// 取消即流终止（take_until token + basic_cancel）。
+/// 取消即流终止（take_until token + channel close）。
 /// cancel 后流须在超时内关闭（有界等待，防 broker 异常时挂死——对齐其他 broker 断言）。
+/// 使用 `subscribe_ackable`（at-least-once）——token cancel 触发 cancel_ackable_on_token 关 channel。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
@@ -178,7 +232,7 @@ async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
     let token = CancellationToken::new();
     let subscriber = AmqpSubscriber::connect(&url, "amqp-it-sub").await?;
     let mut stream = subscriber
-        .subscribe(Topic::new("rss.it.cancel"), token.clone())
+        .subscribe_ackable(Topic::new("rss.it.cancel"), token.clone())
         .await?;
     token.cancel();
     let ended = tokio::time::timeout(Duration::from_secs(5), stream.next()).await?;
