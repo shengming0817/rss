@@ -105,6 +105,19 @@ steps:
     displayName: 'cargo xtask ci（聚合全门：build/clippy/fmt/coverage〔绝对地板+diff增量〕/deny/audit/dylint/public-api/contract-validate/layer-deps/codegen）'
     condition: ne(variables['Build.Reason'], 'Schedule')
 
+  # 真集成测试 lane（issue #1145 第②项）：testcontainers self-provision PG/Redis/RabbitMQ/Mosquitto 跑
+  # `--features integration` 测试。ubuntu-latest agent 预装 docker ⇒ testkit 自provision（CI 不设 env URL ⇒ 走
+  # 容器路径；缺 docker 即 fail-closed）。**无需**内联 `services:`/`resources.containers`——provision 归 testkit，
+  # 门逻辑单源在 xtask（CI-PIPELINE-DELEGATE-01 同族，由 `azure_pipeline_has_integration_lane` 守）。PR/push 跑、
+  # 不入每日 Schedule（集成容器重，定时 lane 只查 advisory）。wall-clock 与 ci 串行；分片/矩阵化仍是 follow-up。
+  - script: |
+      set -euo pipefail
+      cargo run --locked -p xtask -- integration
+    displayName: 'cargo xtask integration（真集成 lane：testcontainers PG/Redis/RabbitMQ/Mosquitto 跑 --features integration）'
+    # `and(succeeded(), ...)`：显式 condition 顶替 Azure 默认隐式 succeeded() 前置——须显式带回，否则 `cargo xtask ci`
+    # 失败后集成步仍会跑（拉四容器、20+min），浪费已确定红的流水线时间并模糊根因（review #281 F-B1）。
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))
+
   # 每日定时刷新 lane（issue #1133）：advisory-scoped deny + cargo-audit，捕获「未变依赖」新披露 CVE。
   - script: |
       set -euo pipefail

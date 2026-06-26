@@ -27,7 +27,7 @@
 //!                                      真集成 lane（issue #1137，**opt-in**，不入 verify/ci）：testcontainers
 //!                                      self-provision postgres/redis/rabbitmq 跑 `--features integration` 测试。
 //!                                      **docker-gated**（fail-closed；env URL 全在则对接长存服务免 docker）。
-//!                                      azure-pipelines 接线待 #1145（需 docker agent）。详见 `verify.rs`。
+//!                                      **已接入 azure-pipelines PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
 mod cmd;
 mod codegen;
 mod command_symmetry;

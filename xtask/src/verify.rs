@@ -668,7 +668,8 @@ fn docker_available() -> bool {
 /// integration 入口（#1137 真集成 lane，opt-in）：docker 门把守后按 [`integration_plan`] 跑。
 /// **docker-gated（fail-closed，对齐 VERIFY-TOOL-GATE-01）**：三 env URL 全在 → 跳过 docker 探测（env 路径
 /// 不 self-provision）；否则探测 docker，缺 + 未宽限 → fail-closed（清晰指引），缺 + `--allow-missing-tools`
-/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；azure-pipelines 接线待 #1145（需 docker agent）。
+/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；**已接入 azure-pipelines PR/push lane**（#1145，
+/// CI-INTEGRATION-LANE-01；ubuntu-latest agent 预装 docker ⇒ testkit self-provision，由 `azure_pipeline_has_integration_lane` 守）。
 pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
@@ -682,16 +683,17 @@ pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
             ToolAction::SkipWarn => {
                 eprintln!(
                     "integration: [跳过] docker daemon 不可达（--allow-missing-tools 宽限）。\
-                     外部 PG 路径需：RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（5 元组）；\
-                     + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向长存 pg/redis/rabbitmq 可免 docker。"
+                     外部路径需四资源全在（与 all_integration_env_urls_present 逐项对齐）：\
+                     RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（PG 5 元组）；\
+                     + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 指向长存 pg/redis/rabbitmq/mosquitto 可免 docker。"
                 );
                 return Ok(());
             }
             ToolAction::Fail => bail!(
                 "integration: docker daemon 不可达（容器 self-provision 需 docker）。\
-                 启动 Docker，或同时设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + \
-                 PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（PG 5 元组）\
-                 + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向运行中的 pg/redis/rabbitmq；\
+                 启动 Docker，或同时设四资源 env（与 all_integration_env_urls_present 逐项对齐）：\
+                 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（PG 5 元组）\
+                 + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 指向运行中的 pg/redis/rabbitmq/mosquitto；\
                  确需跳过用 --allow-missing-tools。"
             ),
         }
@@ -1341,17 +1343,49 @@ mod tests {
             .collect()
     }
 
-    /// 某委托命令形是否出现在**真实 script 命令**里（而非注释 / displayName 等字符串字段）。命令形态：
-    /// `script: |` block 的命令体行（trimmed 以委托形起头），或 inline `- script: <cmd>`（`script:` 冒号后含委托形）。
-    /// displayName/name 行的引号内文本既不以委托形起头、也无 `script:` 前缀 ⇒ 被排除（结构绑定，非裸 `contains`）。
+    /// 单条已剥注释 / 去缩进的 code 行是否承载某委托命令形（**真实 script 命令**，非 displayName / name 等
+    /// 字符串字段）。命令形态：`script: |` block 的命令体行（trimmed 以委托形起头），或 inline `- script: <cmd>`
+    /// （`script:` 冒号后含委托形）。displayName/name 行的引号内文本既不以委托形起头、也无 `script:` 前缀 ⇒ 被
+    /// 排除（结构绑定，非裸 `contains`）。
+    fn line_bears_form(raw: &str, forms: &[&str]) -> bool {
+        let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
+        let is_script = line.starts_with("script:");
+        let cmd = line.strip_prefix("script:").map(str::trim).unwrap_or(line);
+        forms
+            .iter()
+            .any(|f| cmd.starts_with(f) || (is_script && cmd.contains(f)))
+    }
+
+    /// 某委托命令形是否出现在**真实 script 命令**里（而非注释 / displayName 等字符串字段）。
     fn form_in_script(yaml: &str, forms: &[&str]) -> bool {
-        yaml_code_lines(yaml).iter().any(|&raw| {
+        yaml_code_lines(yaml)
+            .iter()
+            .any(|&raw| line_bears_form(raw, forms))
+    }
+
+    /// 把去注释 / 去缩进的 code 行按 step 边界（`- ` 起头）切块——每块 = 一个 step 的全部字段行（首个 `- ` 前的
+    /// preamble 丢弃）。供「把 condition 等字段**绑定到承载某命令形的那个 step**」用（避免全文任意行匹配的假阳性，
+    /// review #281 F1）。
+    fn yaml_step_blocks(yaml: &str) -> Vec<Vec<&str>> {
+        let mut blocks: Vec<Vec<&str>> = Vec::new();
+        for line in yaml_code_lines(yaml) {
+            if line.starts_with("- ") {
+                blocks.push(Vec::new());
+            }
+            if let Some(block) = blocks.last_mut() {
+                block.push(line);
+            }
+        }
+        blocks
+    }
+
+    /// step 块内是否有**真实 `uses:` 键**引用某 action（行去 `- ` 前缀后须以 `uses:` 起头 + 含 action 路径）——
+    /// 排除 `name:` / `displayName:` 值、注释、`category:` 等字符串字段里的同名子串（结构绑定，非裸 `contains`，
+    /// review #281 F2）。
+    fn block_uses_action(block: &[&str], action: &str) -> bool {
+        block.iter().any(|raw| {
             let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
-            let is_script = line.starts_with("script:");
-            let cmd = line.strip_prefix("script:").map(str::trim).unwrap_or(line);
-            forms
-                .iter()
-                .any(|f| cmd.starts_with(f) || (is_script && cmd.contains(f)))
+            line.starts_with("uses:") && line.contains(action)
         })
     }
 
@@ -1522,6 +1556,222 @@ mod tests {
         assert!(
             pipeline_has_scheduled_audit_lane(&yaml),
             "azure-pipelines.yml 须含 `schedules:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
+        );
+        Ok(())
+    }
+
+    // ---- 集成测试 lane 守卫（issue #1145 第②项；INVARIANT CI-INTEGRATION-LANE-01）----
+
+    /// xtask integration 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形与 CI 锁定入口形。
+    const XTASK_INTEGRATION_FORMS: &[&str] = &[
+        "cargo xtask integration",
+        "cargo run --locked -p xtask -- integration",
+    ];
+
+    /// 集成 lane 谓词（**结构绑定 + step 级绑定**，fail-closed；同 audit lane 范式 + codex F1 加固）。YAML 须同时
+    /// 满足——① **同一 step 块**内既承载 integration 委托形（真实 script，非 displayName / 注释）**又**带
+    /// `condition: and(succeeded(), ...ne(...,'Schedule'))`（[`yaml_step_blocks`] 把字段绑定到承载命令形的那个
+    /// step；门逻辑单源在 xtask，CI-PIPELINE-DELEGATE-01 同族）——集成容器重，须 ① PR-gate 跑在 PR/push、不在每日
+    /// audit Schedule 跑（`ne(...)`），**且** ② ci 失败后不跑（`succeeded()`）；② 每个 `cargo <sub>` ∈ 委托白名单（不内联门）。
+    ///
+    /// **review #281 F1（轮1）**：旧实现的 `condition_has` 扫全文任意 `condition:` 行，ci 步的 `ne(...)` 会令
+    /// 「integration 步本身缺 condition」假阳性通过；改为 step 级绑定——只有承载 integration 形的那个 step 自带 PR-gate 才算数。
+    /// **review #281 F1（轮2）**：守卫须同锁 `succeeded()`——Azure 显式 `condition` 顶替默认隐式 `succeeded()`，缺它
+    /// 则 `cargo xtask ci` 失败后集成步仍拉容器跑（azure-pipelines.yml 已写 `and(succeeded(), ne(...))`，守卫须把这个
+    /// 不变式锁住，否则回归到裸 `ne(...)` 不被捕获）。
+    fn pipeline_has_integration_lane(yaml: &str) -> bool {
+        let pr_gated_integration_step = yaml_step_blocks(yaml).iter().any(|block| {
+            let bears_form = block
+                .iter()
+                .any(|&raw| line_bears_form(raw, XTASK_INTEGRATION_FORMS));
+            let pr_gated = block.iter().any(|l| {
+                l.starts_with("condition:")
+                    && l.contains("succeeded()")
+                    && l.contains("ne(variables['Build.Reason'], 'Schedule')")
+            });
+            bears_form && pr_gated
+        });
+        pr_gated_integration_step
+            && cargo_subcommands(yaml)
+                .iter()
+                .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
+    }
+
+    /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
+    #[test]
+    fn integration_lane_predicate_green_and_red() {
+        let green = "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n  - script: cargo run --locked -p xtask -- integration\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n";
+        assert!(pipeline_has_integration_lane(green), "完整集成 lane 应为真");
+        // 红：缺 integration 委托形（只剩 ci 步）。
+        assert!(
+            !pipeline_has_integration_lane(
+                "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n"
+            ),
+            "缺 integration 委托形"
+        );
+        // 红：缺 PR-gated ne 条件（集成步会在每日 Schedule 也跑）。
+        assert!(
+            !pipeline_has_integration_lane(
+                &green.replace("ne(variables['Build.Reason'], 'Schedule')", "always()")
+            ),
+            "缺 ne 分流条件"
+        );
+        // 红（codex review #281 第2轮 F1）：integration 步 condition 有 ne 但缺 `succeeded()`——显式 condition 顶替
+        // Azure 隐式 succeeded()，缺它则 ci 失败后集成步仍跑；守卫须锁 succeeded()（与 azure-pipelines.yml 一致）。
+        assert!(
+            !pipeline_has_integration_lane(
+                "steps:\n  - script: cargo run --locked -p xtask -- integration\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+            ),
+            "integration 步 condition 缺 succeeded()（ci 失败后仍会跑）"
+        );
+        // 红（review #281 F1 轮1）：integration 步有委托形但**本步**无 condition（ci 步仍有 condition）→ step 级绑定不满足
+        //（旧 condition_has 扫全文会被 ci 步的 ne 假阳性顶替）。
+        assert!(
+            !pipeline_has_integration_lane(
+                "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n  - script: cargo run --locked -p xtask -- integration\n"
+            ),
+            "integration 步缺自身 condition（ci 步的 condition 不应顶替）"
+        );
+        // 红（codex F1）：integration 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足。
+        assert!(
+            !pipeline_has_integration_lane(
+                "# cargo run --locked -p xtask -- integration\nsteps:\n  - script: cargo install cargo-binstall\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+            ),
+            "integration 形仅在注释不应满足守卫（fail-closed）"
+        );
+        // 红（codex F1）：integration 形仅在 **displayName**（字符串字段值）、无真实 script → 不满足。
+        assert!(
+            !pipeline_has_integration_lane(
+                "steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo run --locked -p xtask -- integration'\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+            ),
+            "integration 形仅在 displayName 不应满足守卫（fail-closed）"
+        );
+        // 红：内联集成门命令（`cargo nextest`，不委托 xtask）——门逻辑须单源在 xtask。
+        assert!(
+            !pipeline_has_integration_lane(&format!(
+                "{green}  - script: cargo nextest run --features integration\n"
+            )),
+            "内联 nextest 集成门命令"
+        );
+    }
+
+    /// 真实 committed 文件：azure-pipelines.yml 含集成测试 lane，经 `cargo xtask integration` 委托
+    /// （issue #1145 第②项：真集成测试入 PR lane；门逻辑单源在 xtask，不内联）。
+    #[test]
+    fn azure_pipeline_has_integration_lane() -> anyhow::Result<()> {
+        let path = workspace_root()?.join("azure-pipelines.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            pipeline_has_integration_lane(&yaml),
+            "azure-pipelines.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
+        );
+        Ok(())
+    }
+
+    // ---- SAST / CodeQL workflow 守卫（issue #1145 第⑤项；INVARIANT SAST-CODEQL-PRESENT-01）----
+
+    /// CodeQL workflow 必备要素（**结构绑定**，content-scan，Medium）。RSS 主 forge 为 Azure，仓库每日镜像同步到
+    /// GitHub，SAST 跑在 GitHub 侧——守卫须锁住「SAST 真的会随 push/定时跑 + 真的扫 Rust + 真的产 alert」整条不变式，
+    /// 而非仅找关键字子串（review #281 F2，对标 sibling azure 守卫的结构绑定）。经 [`yaml_code_lines`] 先剥 `#` 注释：
+    ///
+    /// - **① 触发器**：`push:` + `schedule:` 两结构键都在（行起头）——否则退化成仅 `workflow_dispatch`，SAST 不随
+    ///   镜像 push / 定时跑（静默失效）。
+    /// - **② init step**：某 step 块有**真实** `uses: github/codeql-action/init`（[`block_uses_action`]，非 name /
+    ///   注释值），**且同块**含 `languages: rust` + `build-mode: none`（Rust GA 免编译，绑定到该 init step 的 `with`）。
+    /// - **③ analyze step**：某 step 块有真实 `uses: github/codeql-action/analyze`（产 code-scanning alert）。
+    /// - **④ 写权限**：`security-events: write`（advanced setup 必需）。
+    ///
+    /// 任一不满足即 SAST 被静默削弱 / 禁用（关键字落注释 / name / 错 step、或退化触发器均 fail-closed）。
+    fn codeql_workflow_well_formed(yaml: &str) -> bool {
+        let code = yaml_code_lines(yaml);
+        let line_starts = |key: &str| code.iter().any(|l| l.starts_with(key));
+        let blocks = yaml_step_blocks(yaml);
+        let triggers = line_starts("push:") && line_starts("schedule:");
+        let init_bound = blocks.iter().any(|b| {
+            block_uses_action(b, "github/codeql-action/init")
+                && b.iter().any(|l| l.contains("languages: rust"))
+                && b.iter().any(|l| l.contains("build-mode: none"))
+        });
+        let analyze = blocks
+            .iter()
+            .any(|b| block_uses_action(b, "github/codeql-action/analyze"));
+        let perm = code.iter().any(|l| l.contains("security-events: write"));
+        triggers && init_bound && analyze && perm
+    }
+
+    /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需要素都使谓词变假（守卫非恒真）。
+    #[test]
+    fn codeql_workflow_predicate_green_and_red() {
+        let green = "on:\n  push:\n    branches: [develop]\n  schedule:\n    - cron: \"0 7 * * 1\"\n  workflow_dispatch:\npermissions:\n  security-events: write\njobs:\n  analyze:\n    steps:\n      - uses: github/codeql-action/init@v4\n        with:\n          languages: rust\n          build-mode: none\n      - uses: github/codeql-action/analyze@v4\n";
+        assert!(
+            codeql_workflow_well_formed(green),
+            "完整 CodeQL workflow 应为真"
+        );
+        // 红（review #281 F2）：触发器退化——缺 push（仅 schedule/workflow_dispatch）或缺 schedule。SAST 不随
+        // 镜像 push / 定时跑即静默失效。
+        assert!(
+            !codeql_workflow_well_formed(&green.replace("push:", "pull_request:")),
+            "缺 push 触发器（SAST 不随镜像 push 跑）"
+        );
+        assert!(
+            !codeql_workflow_well_formed(&green.replace("schedule:", "x_schedule:")),
+            "缺 schedule 触发器（无定时 backstop）"
+        );
+        // 红：缺真实 analyze step（不产 code-scanning alert）。
+        assert!(
+            !codeql_workflow_well_formed(
+                &green.replace("      - uses: github/codeql-action/analyze@v4\n", "")
+            ),
+            "缺 analyze step"
+        );
+        // 红：缺写权限。
+        assert!(
+            !codeql_workflow_well_formed(
+                &green.replace("security-events: write", "contents: read")
+            ),
+            "缺 security-events:write"
+        );
+        // 红（codex review #281 第2轮 F2）：init 关键字仅在 **name** 值里、无真实 `uses: …/init` step →
+        // [`block_uses_action`] 不认（displayName/name 假阳性 fail-closed）。
+        assert!(
+            !codeql_workflow_well_formed(
+                "on:\n  push:\n    branches: [develop]\n  schedule:\n    - cron: \"0 7 * * 1\"\npermissions:\n  security-events: write\njobs:\n  analyze:\n    steps:\n      - name: \"github/codeql-action/init languages: rust build-mode: none\"\n      - uses: github/codeql-action/analyze@v4\n"
+            ),
+            "init 关键字仅在 name 值、无真实 uses（fail-closed）"
+        );
+        // 红（codex review #281 第2轮 F2）：languages/build-mode 与 init `uses:` 不在**同一 step 块** →
+        // 同块绑定不满足（避免散落各处的关键字凑齐误判通过）。
+        assert!(
+            !codeql_workflow_well_formed(
+                "on:\n  push:\n    branches: [develop]\n  schedule:\n    - cron: \"0 7 * * 1\"\npermissions:\n  security-events: write\njobs:\n  analyze:\n    steps:\n      - uses: github/codeql-action/init@v4\n      - name: stray\n        languages: rust\n        build-mode: none\n      - uses: github/codeql-action/analyze@v4\n"
+            ),
+            "languages/build-mode 不在 init step 块内（同块绑定不满足）"
+        );
+        // 红：全部要素仅在**注释**里（每行前缀 `# `）→ 剥注释后不满足（fail-closed）。
+        let commented = green
+            .lines()
+            .map(|l| format!("# {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !codeql_workflow_well_formed(&commented),
+            "要素仅在注释里不应满足守卫（fail-closed）"
+        );
+    }
+
+    /// 真实 committed 文件：.github/workflows/codeql.yml 存在且形态良好（防 SAST workflow 被静默删除 / 禁用）。
+    #[test]
+    fn github_codeql_workflow_present() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("codeql.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            codeql_workflow_well_formed(&yaml),
+            ".github/workflows/codeql.yml 须声明 Rust + build-mode none + analyze + security-events:write"
         );
         Ok(())
     }
