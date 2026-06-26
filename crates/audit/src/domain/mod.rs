@@ -39,21 +39,21 @@ const MIN_KEY_LEN: usize = 32;
 ///
 /// `PartialEq`/`Eq` 是结构性相等；认证比较（链完整性/链接）一律经 [`primitives::constant_time_eq`]，勿用 `==`。
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EntryHash([u8; 32]);
+pub struct EntryHash([u8; 32]);
 
 impl EntryHash {
-    /// 由原始字节数组构造。
-    pub(crate) fn new(bytes: [u8; 32]) -> Self {
+    /// 由原始字节数组构造（adapter 从存储 `bytea` 列重建时经此 funnel）。
+    pub fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
     /// 取底层字节切片引用。
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// 链首前置哈希（全零）。
-    pub(crate) fn genesis() -> Self {
+    pub fn genesis() -> Self {
         Self(GENESIS_PREV)
     }
 }
@@ -73,7 +73,7 @@ impl std::fmt::Debug for EntryHash {
 /// `kind`/`id` 不约束非空：canonical 字节布局对二者长度前缀编码，空串无歧义且 tamper-evident；`panic=deny`
 /// 下不写 panic 校验，空值由上游（const `resource_kind` + 已解码 payload）保证。
 #[derive(Clone)]
-pub(crate) struct ResourceRef {
+pub struct ResourceRef {
     /// 资源类别（如 "user" / "device" / "session"）。
     kind: String,
     /// 资源标识（不约束格式，由 kind 上下文决定）。
@@ -90,8 +90,8 @@ impl std::fmt::Debug for ResourceRef {
 }
 
 impl ResourceRef {
-    /// 构造资源引用（位置参 funnel）。
-    pub(crate) fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
+    /// 构造资源引用（位置参 funnel；adapter 从存储 `resource_kind`/`resource_id` 列重建亦经此）。
+    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
             id: id.into(),
@@ -99,12 +99,12 @@ impl ResourceRef {
     }
 
     /// 取资源类别。
-    pub(crate) fn kind(&self) -> &str {
+    pub fn kind(&self) -> &str {
         &self.kind
     }
 
     /// 取资源标识。
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.id
     }
 }
@@ -119,13 +119,62 @@ impl ResourceRef {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub(crate) enum AuditOutcome {
+pub enum AuditOutcome {
     /// 操作成功完成。
     Success,
     /// 操作被访问控制拒绝。
     Denied,
     /// 操作因系统错误失败。
     Error,
+}
+
+impl AuditOutcome {
+    /// 闭值集 → DB 持久化文本（snake_case；存储/rehydrate 单源 funnel）。同 crate 穷尽 match ⇒ 新变体编译期强制补。
+    pub fn to_db(self) -> &'static str {
+        match self {
+            AuditOutcome::Success => "success",
+            AuditOutcome::Denied => "denied",
+            AuditOutcome::Error => "error",
+        }
+    }
+
+    /// DB 文本 → 闭值集（rehydrate）；未知文本 fail-closed → `None`（adapter 据此回 `Storage`/`ChainBroken`）。
+    pub fn from_db(raw: &str) -> Option<Self> {
+        match raw {
+            "success" => Some(AuditOutcome::Success),
+            "denied" => Some(AuditOutcome::Denied),
+            "error" => Some(AuditOutcome::Error),
+            _ => None,
+        }
+    }
+}
+
+/// `vocab::PrincipalKind` → DB 持久化文本（snake_case；存储/rehydrate 单源 funnel）。
+/// 跨 crate `#[non_exhaustive]` 无法穷尽，未知变体 fail-closed 落 "unknown"——DB CHECK 约束不含 "unknown"
+/// ⇒ 未知 kind 的 append 被 DB 拒（fail-closed，不静默落库）。已知 6 变体的 round-trip 全集性由测试守。
+pub fn actor_kind_to_db(kind: vocab::PrincipalKind) -> &'static str {
+    match kind {
+        vocab::PrincipalKind::User => "user",
+        vocab::PrincipalKind::Device => "device",
+        vocab::PrincipalKind::Admin => "admin",
+        vocab::PrincipalKind::SuperAdmin => "super_admin",
+        vocab::PrincipalKind::Service => "service",
+        vocab::PrincipalKind::Anonymous => "anonymous",
+        _ => "unknown",
+    }
+}
+
+/// DB 文本 → `vocab::PrincipalKind`（rehydrate）；未知文本 fail-closed → `None`。
+pub fn actor_kind_from_db(raw: &str) -> Option<vocab::PrincipalKind> {
+    match raw {
+        "user" => Some(vocab::PrincipalKind::User),
+        "device" => Some(vocab::PrincipalKind::Device),
+        "admin" => Some(vocab::PrincipalKind::Admin),
+        "super_admin" => Some(vocab::PrincipalKind::SuperAdmin),
+        "service" => Some(vocab::PrincipalKind::Service),
+        "anonymous" => Some(vocab::PrincipalKind::Anonymous),
+        _ => None,
+    }
 }
 
 /// `AuditOutcome` → 冻结 tag 字节（同 crate `#[non_exhaustive]` 可穷尽 match ⇒ 新变体编译期强制补 tag）。
@@ -162,7 +211,7 @@ fn principal_kind_tag(kind: vocab::PrincipalKind) -> u8 {
 /// `entry_hash` 是入参（由 appender 经 [`AuditChainHasher::link`] 预算后传入）——实体是 dumb data holder，
 /// key 不进实体 ⇒ 域逻辑可无 key 测试。
 #[derive(Clone)]
-pub(crate) struct AuditEntry {
+pub struct AuditEntry {
     /// 单调递增序列号（对标 rekor log_index）。
     seq: u64,
     /// 前一条目哈希（链首 seq=0 时为全零 hash）。
@@ -215,53 +264,86 @@ impl AuditEntry {
         }
     }
 
+    /// 从**可信存储**重建已封链条目（adapter `list`/`verify_tail` 读出行后 rehydrate；构造器 funnel `pub`，
+    /// 供独立 adapter crate 跨 crate 重建）。
+    ///
+    /// rehydrate 是 dumb data holder 重建，**不内验**——完整性由 repo 显式调 [`AuditChainHasher::verify_window`]
+    /// 检验（保持 entity=持有者 / hasher=验证者 分离，篡改在显式验证步 fail-closed）。
+    // reason: 同 `new`——链节点所有字段是完整性/取证必填参数，分组构造破坏原子性。
+    #[allow(clippy::too_many_arguments)]
+    pub fn hydrate(
+        seq: u64,
+        prev_hash: EntryHash,
+        entry_hash: EntryHash,
+        actor: ids::UserId,
+        actor_kind: vocab::PrincipalKind,
+        tenant: vocab::TenantId,
+        action: vocab::Action,
+        resource: ResourceRef,
+        outcome: AuditOutcome,
+        recorded_at: SystemTime,
+    ) -> Self {
+        Self::new(
+            seq,
+            prev_hash,
+            entry_hash,
+            actor,
+            actor_kind,
+            tenant,
+            action,
+            resource,
+            outcome,
+            recorded_at,
+        )
+    }
+
     /// 返回单调序列号。
-    pub(crate) fn seq(&self) -> u64 {
+    pub fn seq(&self) -> u64 {
         self.seq
     }
 
     /// 返回前一条目哈希。
-    pub(crate) fn prev_hash(&self) -> &EntryHash {
+    pub fn prev_hash(&self) -> &EntryHash {
         &self.prev_hash
     }
 
     /// 返回本条目哈希。
-    pub(crate) fn entry_hash(&self) -> &EntryHash {
+    pub fn entry_hash(&self) -> &EntryHash {
         &self.entry_hash
     }
 
     /// 返回操作者标识。
-    pub(crate) fn actor(&self) -> ids::UserId {
+    pub fn actor(&self) -> ids::UserId {
         self.actor
     }
 
     /// 返回操作者类别。
-    pub(crate) fn actor_kind(&self) -> vocab::PrincipalKind {
+    pub fn actor_kind(&self) -> vocab::PrincipalKind {
         self.actor_kind
     }
 
     /// 返回授权动作引用。
-    pub(crate) fn action(&self) -> &vocab::Action {
+    pub fn action(&self) -> &vocab::Action {
         &self.action
     }
 
     /// 返回资源引用。
-    pub(crate) fn resource(&self) -> &ResourceRef {
+    pub fn resource(&self) -> &ResourceRef {
         &self.resource
     }
 
     /// 返回审计结果。
-    pub(crate) fn outcome(&self) -> AuditOutcome {
+    pub fn outcome(&self) -> AuditOutcome {
         self.outcome
     }
 
     /// 返回记录时间。
-    pub(crate) fn recorded_at(&self) -> SystemTime {
+    pub fn recorded_at(&self) -> SystemTime {
         self.recorded_at
     }
 
     /// 返回租户标识（行级多租隔离）。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> vocab::TenantId {
         self.tenant
     }
 }
@@ -328,7 +410,7 @@ fn canonical_message(prev: &EntryHash, entry: &AuditEntry) -> Vec<u8> {
 ///
 /// key 是凭据：构造器必填 ⇒ 无 key 不可造 hasher（防篡改属性类型层成立）；`Debug` 脱敏不泄 key。
 /// `link`/`verify` 是 L0 纯计算（无 I/O、无时钟），确定性于 `(key, prev, entry_content)`。
-pub(crate) struct AuditChainHasher<M: MacVerifier> {
+pub struct AuditChainHasher<M: MacVerifier> {
     mac: M,
     key: MacKey,
 }
@@ -346,7 +428,7 @@ impl<M: MacVerifier> AuditChainHasher<M> {
     ///
     /// fail-closed：key 短于 [`MIN_KEY_LEN`]（链 key ≥32B，`docs/rules/audit-ledger.md`）即返回 `None`
     /// ——弱 key 不可造 hasher。此处是 key 强度的**单一收口**（任何构造路径均经此校验，非仅 callsite）。
-    pub(crate) fn new(mac: M, key: MacKey) -> Option<Self> {
+    pub fn new(mac: M, key: MacKey) -> Option<Self> {
         if key.as_bytes().len() < MIN_KEY_LEN {
             return None;
         }
@@ -354,7 +436,7 @@ impl<M: MacVerifier> AuditChainHasher<M> {
     }
 
     /// 计算链节点哈希 `HMAC-SHA256(key, prev ‖ canonical(entry))`。
-    pub(crate) fn link(&self, prev: &EntryHash, entry: &AuditEntry) -> EntryHash {
+    pub fn link(&self, prev: &EntryHash, entry: &AuditEntry) -> EntryHash {
         let message = canonical_message(prev, entry);
         let tag = self.mac.sign(&self.key, MacAlgorithm::HmacSha256, &message);
         // reason: HMAC-SHA256 输出恒 32B；非 32B 仅 buggy verifier，fail-closed 落 FAIL_HASH（全 0xFF，
@@ -363,20 +445,43 @@ impl<M: MacVerifier> AuditChainHasher<M> {
         EntryHash::new(bytes)
     }
 
-    /// 验证单租户、按 seq 升序、genesis 起链的审计链完整性。
+    /// 验证单租户、按 seq 升序、**genesis 起链**的审计链完整性（全链；委托 [`verify_window`](Self::verify_window)
+    /// 以 `predecessor = None` 锚定 genesis）。
     ///
     /// 逐条 fail-closed：(A) 同租户 (B) 序列单调（首=0、后续 +1） (C) prev_hash 链接 (D) entry_hash 重算一致。
     /// 调用方须先按租户分区并升序；(A) 是防御纵深（混租户 slice 视为结构破坏）。
-    pub(crate) fn verify(&self, entries: &[AuditEntry]) -> Result<(), AuditError> {
+    pub fn verify(&self, entries: &[AuditEntry]) -> Result<(), AuditError> {
+        self.verify_window(None, entries)
+    }
+
+    /// **增量窗口验证**（持久化 provider 读路径 + bootstrap tail-verify 用）：验证 `entries` 窗口自身链接 +
+    /// 逐条 integrity，并校验窗口首条接续给定 `predecessor`——**不全扫整条租户链**（postgres provider 只读
+    /// 窗口 + 1 前驱行，O(window) 而非 O(n)）。
+    ///
+    /// - `predecessor = None`：窗口首条按 **genesis** 锚定（seq=0、prev 全零）——等价全链 [`verify`](Self::verify)。
+    /// - `predecessor = Some(p)`：窗口首条须 `seq == p.seq + 1` 且 `prev_hash == p.entry_hash`（接续 p）。
+    ///
+    /// 逐条 fail-closed：(A) 同租户（锚定 `predecessor.tenant`，无则窗口首条 tenant） (B) 序列单调 (C) prev_hash
+    /// 链接 (D) entry_hash 重算一致。调用方须按 seq 升序传入窗口。
+    pub fn verify_window(
+        &self,
+        predecessor: Option<&AuditEntry>,
+        entries: &[AuditEntry],
+    ) -> Result<(), AuditError> {
         let Some(first) = entries.first() else {
             return Ok(());
         };
-        let tenant = first.tenant;
+        let tenant = predecessor.map_or(first.tenant, |p| p.tenant);
         for (i, entry) in entries.iter().enumerate() {
             if entry.tenant != tenant {
                 return Err(AuditError::ChainBroken);
             }
-            verify_links(i, entries)?;
+            let prev = if i == 0 {
+                predecessor
+            } else {
+                Some(&entries[i - 1])
+            };
+            verify_link(prev, entry)?;
             self.verify_integrity(entry)?;
         }
         Ok(())
@@ -393,10 +498,10 @@ impl<M: MacVerifier> AuditChainHasher<M> {
     }
 }
 
-/// (B)+(C) 序列单调 + prev_hash 链接（与 key 无关，独立纯函数）。
-fn verify_links(i: usize, entries: &[AuditEntry]) -> Result<(), AuditError> {
-    let entry = &entries[i];
-    match i.checked_sub(1) {
+/// (B)+(C) 序列单调 + prev_hash 链接（与 key 无关，独立纯函数）。`prev = None` ⇒ 窗口首条按 genesis 锚定；
+/// `prev = Some(p)` ⇒ 接续前驱 p（全链中 p 即 `entries[i-1]`，增量窗口中 p 是窗口外的存储前驱行）。
+fn verify_link(prev: Option<&AuditEntry>, entry: &AuditEntry) -> Result<(), AuditError> {
+    match prev {
         None => {
             // genesis：seq 必 0、prev 必全零。
             if entry.seq() != 0 {
@@ -406,8 +511,7 @@ fn verify_links(i: usize, entries: &[AuditEntry]) -> Result<(), AuditError> {
                 return Err(AuditError::ChainBroken);
             }
         }
-        Some(p) => {
-            let prev = &entries[p];
+        Some(prev) => {
             // gap 与 dup 都使 `seq != prev.seq + 1`；溢出（None）亦判 gap。
             if prev.seq().checked_add(1) != Some(entry.seq()) {
                 return Err(AuditError::SequenceGap);
@@ -424,10 +528,10 @@ fn verify_links(i: usize, entries: &[AuditEntry]) -> Result<(), AuditError> {
 // 错误枚举
 // ---------------------------------------------------------------------------
 
-/// 审计域错误（库枚举；`thiserror`；message 为 const 静态字面量）。
+/// 审计域错误（库枚举；`thiserror`；message 为 const 静态字面量，PII 边界——runtime 数据不进 `Display`）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum AuditError {
+pub enum AuditError {
     /// 哈希链在某条目处断裂（prev_hash 不匹配 / 跨租户 / genesis prev 非零）。
     #[error("audit chain is broken")]
     ChainBroken,
@@ -440,6 +544,20 @@ pub(crate) enum AuditError {
     /// 续页游标语义无效（base64url 合法但非有效页索引）——客户端错误，handler 映射 400。
     #[error("audit cursor is semantically invalid")]
     InvalidCursor,
+    /// 持久化层失败（adapter 桥接，如 sqlx / 连接错误）。`Display` 仅静态摘要常量（PII 边界）；
+    /// 原始错误经 `#[source]` 仅作 internal source 保留（服务端日志关联，不进 wire）。in-mem provider 永不产此。
+    #[error("audit storage failure")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl AuditError {
+    /// 把 adapter 内部错误（sqlx 等）包成 [`AuditError::Storage`]（原始错误仅作 internal source，不经 `Display` 暴露）。
+    pub fn storage<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        AuditError::Storage(Box::new(source))
+    }
 }
 
 /// 跨模块共享的确定性测试 verifier（domain / internal / application 单测复用；非加密，仅确定性 + key/msg 敏感）。
@@ -907,5 +1025,175 @@ mod tests {
         ocs.sort_unstable();
         ocs.dedup();
         assert_eq!(ocs.len(), oc.len(), "AuditOutcome tag 须唯一");
+    }
+
+    // 20 — verify_window(None, ..) 等价全链 verify（genesis 锚定）。
+    #[test]
+    fn verify_window_genesis_anchored_equals_full_verify() {
+        let h = hasher();
+        let c = chain(&h, 3);
+        assert!(h.verify_window(None, &c).is_ok());
+        // 与 verify 一致：篡改 genesis prev 非零 → ChainBroken。
+        let bad = seal(&h, raw_entry(0, EntryHash::new([1u8; 32]), TENANT_A));
+        assert!(matches!(
+            h.verify_window(None, &[bad]),
+            Err(AuditError::ChainBroken)
+        ));
+    }
+
+    // 21 — verify_window(Some(pred), window) happy：窗口接续存储前驱（增量验证，不全扫）。
+    #[test]
+    fn verify_window_with_predecessor_happy() {
+        let h = hasher();
+        let c = chain(&h, 5);
+        // 前驱 = c[1]，窗口 = c[2..5]（seq 2,3,4）。
+        let pred = &c[1];
+        let window = &c[2..5];
+        assert!(h.verify_window(Some(pred), window).is_ok());
+    }
+
+    // 22 — 窗口首条 seq 接续前驱、但 prev_hash 不接续（前驱 entry_hash 被改）→ ChainBroken。
+    #[test]
+    fn verify_window_broken_link_to_predecessor_is_chain_broken() {
+        let h = hasher();
+        let c = chain(&h, 4);
+        // 伪前驱：保留真前驱 c[1] 的 seq(1)，但 entry_hash 改掉 ⇒ 与 c[2].prev_hash（== 真 c[1].entry）不接续。
+        // seq 接续（1+1==2）通过，hash 链接失败 → ChainBroken（区别于 SequenceGap）。
+        let bad_pred = AuditEntry::hydrate(
+            c[1].seq(),
+            *c[1].prev_hash(),
+            EntryHash::new([0xCD; 32]),
+            c[1].actor(),
+            c[1].actor_kind(),
+            c[1].tenant(),
+            c[1].action().clone(),
+            ResourceRef::new(c[1].resource().kind(), c[1].resource().id()),
+            c[1].outcome(),
+            c[1].recorded_at(),
+        );
+        let window = &c[2..4];
+        assert!(matches!(
+            h.verify_window(Some(&bad_pred), window),
+            Err(AuditError::ChainBroken)
+        ));
+    }
+
+    // 23 — 窗口首条 seq 不接续前驱（off-by-one）→ SequenceGap。
+    #[test]
+    fn verify_window_sequence_break_to_predecessor_is_gap() {
+        let h = hasher();
+        let c = chain(&h, 4);
+        // 前驱 c[0]（seq 0），窗口首条 c[2]（seq 2 ≠ 0+1）→ gap。
+        let pred = &c[0];
+        let window = &c[2..4];
+        // 注：先命中 seq gap（在 link 检查里 seq 先于 hash）。
+        assert!(matches!(
+            h.verify_window(Some(pred), &window[..1]),
+            Err(AuditError::SequenceGap)
+        ));
+    }
+
+    // 24 — 窗口内某条内容篡改 → HashMismatch（增量验证仍逐条 integrity）。
+    #[test]
+    fn verify_window_content_tamper_is_hash_mismatch() {
+        let h = hasher();
+        let c = chain(&h, 4);
+        let pred = c[0].clone();
+        // 窗口 = c[1..3]；篡改窗口第二条（c[2]）内容但保留其 entry_hash。
+        let stale = *c[2].entry_hash();
+        let tampered = AuditEntry::new(
+            c[2].seq(),
+            *c[2].prev_hash(),
+            stale,
+            c[2].actor(),
+            vocab::PrincipalKind::Admin, // 改 actor_kind
+            c[2].tenant(),
+            c[2].action().clone(),
+            ResourceRef::new(c[2].resource().kind(), c[2].resource().id()),
+            c[2].outcome(),
+            c[2].recorded_at(),
+        );
+        let window = [c[1].clone(), tampered];
+        assert!(matches!(
+            h.verify_window(Some(&pred), &window),
+            Err(AuditError::HashMismatch)
+        ));
+    }
+
+    // 25 — hydrate round-trip：从字段重建条目，访问器全等（dumb 重建，不内验）。
+    #[test]
+    fn hydrate_round_trips_fields() {
+        let h = hasher();
+        let sealed = genesis_sealed(&h);
+        let rebuilt = AuditEntry::hydrate(
+            sealed.seq(),
+            *sealed.prev_hash(),
+            *sealed.entry_hash(),
+            sealed.actor(),
+            sealed.actor_kind(),
+            sealed.tenant(),
+            sealed.action().clone(),
+            ResourceRef::new(sealed.resource().kind(), sealed.resource().id()),
+            sealed.outcome(),
+            sealed.recorded_at(),
+        );
+        // 重建后链验证通过（与原条目同字节 ⇒ entry_hash 重算一致）。
+        assert!(h.verify(std::slice::from_ref(&rebuilt)).is_ok());
+        assert_eq!(rebuilt.seq(), sealed.seq());
+        assert_eq!(
+            rebuilt.entry_hash().as_bytes(),
+            sealed.entry_hash().as_bytes()
+        );
+    }
+
+    // 26 — verify_window(Some(predecessor), &[]) 空窗口 + 有前驱 → Ok（early None-arm 直接返回 Ok）。
+    #[test]
+    fn verify_window_empty_window_with_predecessor_is_ok() {
+        let h = hasher();
+        let c = chain(&h, 2);
+        // 传入 predecessor = c[1]，窗口为空 &[] → entries.first() 返回 None → 立即 Ok。
+        // 证明：空窗口时不验前驱接续（无条目无需检查接续关系），任意 predecessor 均可。
+        let result = h.verify_window(Some(&c[1]), &[]);
+        assert!(
+            result.is_ok(),
+            "verify_window(Some(pred), &[]) 空窗口 + 有前驱须返回 Ok（early-return）"
+        );
+    }
+
+    // 27 — AuditOutcome / actor_kind DB funnel round-trip 全集性。
+    #[test]
+    fn db_text_funnels_round_trip_for_all_known_variants() {
+        for oc in [
+            AuditOutcome::Success,
+            AuditOutcome::Denied,
+            AuditOutcome::Error,
+        ] {
+            assert_eq!(AuditOutcome::from_db(oc.to_db()), Some(oc));
+        }
+        assert_eq!(AuditOutcome::from_db("bogus"), None);
+        for kind in [
+            vocab::PrincipalKind::User,
+            vocab::PrincipalKind::Device,
+            vocab::PrincipalKind::Admin,
+            vocab::PrincipalKind::SuperAdmin,
+            vocab::PrincipalKind::Service,
+            vocab::PrincipalKind::Anonymous,
+        ] {
+            assert_eq!(actor_kind_from_db(actor_kind_to_db(kind)), Some(kind));
+        }
+        assert_eq!(actor_kind_from_db("unknown"), None);
+        assert_eq!(actor_kind_from_db("bogus"), None);
+    }
+
+    // 27 — AuditError::storage 包 source，Display PII-safe（仅静态摘要，不含原始错误）。
+    #[test]
+    fn audit_error_storage_redacts_display() {
+        let err = AuditError::storage(std::io::Error::other("leak-marker-db"));
+        assert_eq!(err.to_string(), "audit storage failure");
+        assert!(std::error::Error::source(&err).is_some(), "source 须保留");
+        assert!(
+            !err.to_string().contains("leak-marker-db"),
+            "Display 不得泄漏原始错误: {err}"
+        );
     }
 }

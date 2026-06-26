@@ -32,14 +32,12 @@ use generated::http::audit_v1::{
     AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
 };
 use httpserve::{Admin, Route};
-use primitives::{MacKey, MacVerifier};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
 
-use crate::domain::{AuditChainHasher, AuditEntry, AuditError, AuditOutcome, ResourceRef};
-use crate::internal::mem::InMemAuditRepo;
-use crate::internal::ports::{AuditListResult, AuditPage, AuditRecord};
+use crate::domain::{AuditEntry, AuditError, AuditOutcome, ResourceRef};
+use crate::ports::{AuditListResult, AuditPage, AuditRecord, AuditRepo, DynAuditRepo};
 
 /// 本域 DomainId（在 generated `SUBSCRIPTIONS` 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
 const AUDIT_DOMAIN: &str = "audit";
@@ -129,14 +127,11 @@ fn to_response(result: AuditListResult) -> AuditListEntriesResponse {
 }
 
 /// admin 读 handler：按已认证 ctx **租户**分页列出审计条目（跨租户 super-admin 读 = follow-up，见模块 rustdoc）。
-async fn list_entries<M>(
-    repo: Arc<InMemAuditRepo<M>>,
+async fn list_entries(
+    repo: Arc<DynAuditRepo<'static>>,
     request: AuditListEntriesRequest,
     request_id: String,
-) -> Response
-where
-    M: MacVerifier + Send + Sync + 'static,
-{
+) -> Response {
     // 租户 fail-closed：缺 ctx（未经认证通道）即 500，不静默落空租户。
     let Ok(tenant) = runctx::try_with(|ctx| *ctx.tenant()) else {
         return httpserve::error::internal_error(&request_id);
@@ -168,28 +163,22 @@ where
     }
 }
 
-/// session-created 订阅 handler：解码 payload → 构造 [`AuditRecord`] → [`InMemAuditRepo`] 原子封链 append。
+/// session-created 订阅 handler：解码 payload → 构造 [`AuditRecord`] → [`AuditRepo`] 原子封链 append。
 ///
-/// crate-local（私有 module 内，不外泄）；泛型于链 verifier `M`：`Arc<InMemAuditRepo<M>>` 可 clone 进
-/// `Send` future（被 eventexec 分发 / `tokio::spawn`；inherent append future 在 `M: Send + Sync` 下为 Send）。
-pub(crate) struct SessionCreatedAuditHandler<M: MacVerifier> {
-    repo: Arc<InMemAuditRepo<M>>,
+/// crate-local（私有 module 内，不外泄）；持 `Arc<DynAuditRepo>`（erased provider）：clone 进 `Send` future
+/// （被 eventexec 分发 / `tokio::spawn`；`AuditRepo` Send 变体 future + `DynAuditRepo: Send + Sync` ⇒ `Arc` 可跨 await 持有）。
+pub(crate) struct SessionCreatedAuditHandler {
+    repo: Arc<DynAuditRepo<'static>>,
 }
 
-impl<M> SessionCreatedAuditHandler<M>
-where
-    M: MacVerifier + Send + Sync + 'static,
-{
+impl SessionCreatedAuditHandler {
     /// 注入审计仓储构造。
-    pub(crate) fn new(repo: Arc<InMemAuditRepo<M>>) -> Self {
+    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
         Self { repo }
     }
 }
 
-impl<M> SubscriberHandler for SessionCreatedAuditHandler<M>
-where
-    M: MacVerifier + Send + Sync + 'static,
-{
+impl SubscriberHandler for SessionCreatedAuditHandler {
     fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
         let repo = self.repo.clone();
         Box::pin(async move {
@@ -198,9 +187,10 @@ where
             let msg_id = message.id.clone();
             let payload: IdentitySessionCreatedPayload = serde_json::from_slice(&message.payload)
                 .map_err(|e| {
+                // serde_json::Error Display 含 payload 值片段（PII 边界）；用 classify() 取无 PII 的错误类别。
                 tracing::error!(
                     message_id = msg_id.as_str(),
-                    error = %e,
+                    category = ?e.classify(),
                     "audit handler: session-created payload decode failed"
                 );
                 // 永久：malformed payload 重投无意义（F2/C2）。
@@ -243,9 +233,12 @@ where
             let record = AuditRecord {
                 tenant,
                 actor,
+                // reason: identity.session-created 仅在人类用户成功登录时触发（设备 / service principal
+                // 使用独立事件；登录失败不创建 session，无事件发布），故 actor_kind 恒为 User。
                 actor_kind: vocab::PrincipalKind::User,
                 action,
                 resource: ResourceRef::new(RESOURCE_KIND_SESSION, session.as_uuid().to_string()),
+                // reason: session-created 事件仅成功登录才发布——失败路径无 session，无 event；outcome 恒 Success。
                 outcome: AuditOutcome::Success,
                 recorded_at: from_unix_secs(payload.occurred_at),
             };
@@ -265,44 +258,23 @@ where
 
 /// audit 域 bootstrap 生命周期：声明 session-created 订阅 + admin 读路由组。
 ///
-/// 泛型于 [`MacVerifier`]（pub 引擎 trait）而非内部 `AuditRepo` port——本轮唯一 provider 是 in-mem，
-/// 组合根经 [`AuditDomain::new`] 注入 verifier + key，crate 内部建链 store。**不**暴露 `AuditRepo` /
-/// `InMemAuditRepo` / `AuditChainHasher`（保 `pub(crate)` Hard 封装）；升 `pub mod ports` + 泛型于 port +
-/// postgres provider 是 follow-up（ADR-005，见 `internal` rustdoc）。真实 `sha2`/`hmac` 的 `MacVerifier`
-/// adapter 亦 follow-up——本轮组合根接线未落（域 crate + in-mem + 测试自洽）。
-pub struct AuditDomain<M: MacVerifier> {
-    repo: Arc<InMemAuditRepo<M>>,
+/// 持 erased [`Arc<DynAuditRepo>`](crate::ports::DynAuditRepo)（ADR-005 Option 2 域形 repo port 注入；组合根选
+/// provider：prod postgres `PgAuditRepo` / demo in-mem [`crate::internal::mem::InMemAuditRepo`]）——订阅 handler +
+/// admin 读路由 clone 共享**同一链 store**（故 `Arc`，`DynAuditRepo: Send + Sync`）。链 HMAC key 强度 fail-fast
+/// 在组合根构造 [`AuditChainHasher`](crate::ports::AuditChainHasher) 时收口（`new` 返回 `Option`，弱 key → `None`），
+/// 不在本域——本域只消费已装配的 erased provider。
+pub struct AuditDomain {
+    repo: Arc<DynAuditRepo<'static>>,
 }
 
-/// audit 域构造错误（启动期前置条件——链 key 强度）。组合根 fail-fast 处理。
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum AuditDomainError {
-    /// 链 HMAC key 短于 32B（`docs/rules/audit-ledger.md` 声明链 key ≥32B）。
-    #[error("audit chain key must be at least 32 bytes")]
-    WeakKey,
-}
-
-impl<M> AuditDomain<M>
-where
-    M: MacVerifier + Send + Sync + 'static,
-{
-    /// 注入链 HMAC verifier + key 构造（key 是凭据，构造器必填）。crate 内部建 in-mem 链 store。
-    ///
-    /// fail-closed：key 短于 32B（链 key 强度，`docs/rules/audit-ledger.md`）返回
-    /// [`AuditDomainError::WeakKey`]——组合根 fail-fast，不静默用弱 key 建链。
-    pub fn new(verifier: M, key: MacKey) -> Result<Self, AuditDomainError> {
-        let hasher = AuditChainHasher::new(verifier, key).ok_or(AuditDomainError::WeakKey)?;
-        Ok(Self {
-            repo: Arc::new(InMemAuditRepo::new(hasher)),
-        })
+impl AuditDomain {
+    /// 注入 erased 审计仓储 provider 构造（组合根经 `Arc::from(DynAuditRepo::new_box(provider))` 装配后注入）。
+    pub fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
+        Self { repo }
     }
 }
 
-impl<M> Domain for AuditDomain<M>
-where
-    M: MacVerifier + Send + Sync + 'static,
-{
+impl Domain for AuditDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
         // 订阅元数据（contract_id / topic / group）单源自 generated `SUBSCRIPTIONS`（契约 codegen 派生）——
         // 不手维护平行 const，消除 contract↔consumer 漂移（AI-HARD：codegen funnel + golden）。缺失即 fail-fast。
@@ -373,8 +345,11 @@ mod tests {
     /// finalize 后真实挂载路径 + 直挂 handler-logic 测试路径。
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
 
-    fn repo() -> Arc<InMemAuditRepo<TestKeyedHasher>> {
-        Arc::new(InMemAuditRepo::new(keyed_hasher(0x5a)))
+    /// erased in-mem 审计仓储（订阅 + 路由共享形：`Arc<DynAuditRepo>`，同生产装配路径）。
+    fn repo() -> Arc<DynAuditRepo<'static>> {
+        Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(keyed_hasher(
+            0x5a,
+        ))))
     }
 
     #[allow(clippy::expect_used)]
@@ -509,29 +484,13 @@ mod tests {
         assert!(listed.entries.is_empty(), "非法 session_id 不得进链");
     }
 
-    /// F2：弱 key（<32B）构造 audit 域 fail-closed（key 强度收口在构造器）。
-    #[test]
-    fn audit_domain_rejects_weak_key() {
-        for len in [0usize, 16, 31] {
-            assert!(
-                matches!(
-                    AuditDomain::new(TestKeyedHasher, MacKey::from_bytes(vec![0x5a; len])),
-                    Err(AuditDomainError::WeakKey)
-                ),
-                "len={len} <32B key 须 fail-closed WeakKey"
-            );
-        }
-        assert!(
-            AuditDomain::new(TestKeyedHasher, MacKey::from_bytes(vec![0x5a; 32])).is_ok(),
-            "32B key 须可构造"
-        );
-    }
+    // 弱 key（<32B）fail-closed 已上移组合根：`AuditChainHasher::new` 返回 `None`（domain/mod.rs
+    // `hasher_construction_rejects_keys_shorter_than_32_bytes` 覆盖）；AuditDomain 只消费已装配 provider。
 
     #[test]
     #[allow(clippy::expect_used)]
     fn audit_domain_declares_subscriber_and_admin_route_group() {
-        let domain = AuditDomain::new(TestKeyedHasher, MacKey::from_bytes(vec![0x5a; 32]))
-            .expect("audit domain");
+        let domain = AuditDomain::new(repo());
         let reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert!(
@@ -552,10 +511,7 @@ mod tests {
 
     /// 在注入 ctx tenant 的 Router 上 oneshot 一个 GET（参数绑定 + 状态码 + 响应体）。
     #[allow(clippy::expect_used)]
-    async fn get_entries(
-        repo: Arc<InMemAuditRepo<TestKeyedHasher>>,
-        query: &str,
-    ) -> (StatusCode, Vec<u8>) {
+    async fn get_entries(repo: Arc<DynAuditRepo<'static>>, query: &str) -> (StatusCode, Vec<u8>) {
         let app = axum::Router::new().route(
             AUDIT_ENTRIES_PATH,
             axum::routing::get(
@@ -696,8 +652,7 @@ mod tests {
                 .status()
         }
 
-        let domain = AuditDomain::new(TestKeyedHasher, MacKey::from_bytes(vec![0x5a; 32]))
-            .expect("audit domain");
+        let domain = AuditDomain::new(repo());
         let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let routers = reg.finalize_routes().expect("finalize ok");
         let (_, admin) = routers
@@ -723,22 +678,35 @@ mod tests {
         );
     }
 
-    /// 链被篡改时 admin 读返回 500 + ERR_CORE_INTERNAL（链完整性 fail-close）。
+    /// 链完整性失败（repo.list → `Err(HashMismatch)`）时 admin 读 fail-closed 返回 500 + ERR_CORE_INTERNAL。
+    ///
+    /// 经 `FailingAuditRepo` 双 直接验 handler 的 `AuditError`→500 映射（repo 层篡改→`HashMismatch` 的实证由
+    /// `internal::mem` 的 `list_returns_error_when_chain_tampered` 覆盖；inherent `corrupt_first_entry_hash`
+    /// 在 erased `DynAuditRepo` 不可达，故此处用 typed 双更直接测 handler 行为）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn admin_read_fails_closed_when_chain_broken() {
-        let repo = repo();
-        // append 一条再篡改。
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
-                "m-1",
-                payload_bytes(CANON_SUBJECT, CANON_TENANT),
-            ))
-            .await
-            .expect("append");
-        repo.corrupt_first_entry_hash(vocab::TenantId::parse(CANON_TENANT).expect("tenant"));
-        // 此时 list 应 fail-close，admin 读返回 500。
+    async fn admin_read_fails_closed_when_list_errors() {
+        struct FailingAuditRepo;
+        impl AuditRepo for FailingAuditRepo {
+            async fn append(&self, _record: AuditRecord) -> Result<(), AuditError> {
+                Ok(())
+            }
+            async fn list(
+                &self,
+                _tenant: vocab::TenantId,
+                _page: AuditPage,
+            ) -> Result<AuditListResult, AuditError> {
+                Err(AuditError::HashMismatch)
+            }
+            async fn verify_tail(
+                &self,
+                _tenant: vocab::TenantId,
+                _limit: u32,
+            ) -> Result<(), AuditError> {
+                Err(AuditError::HashMismatch)
+            }
+        }
+        let repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(FailingAuditRepo));
         let (status, body) = get_entries(repo, "").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");

@@ -27,7 +27,11 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
 # seed-data feature 开：empty_flag_store（in-mem 空 flag store）可用——生产 flag store 待 #1120，
 # 当前空 store 满足 fail-closed 语义（未知 flag 返回 false）。
 settings = { path = "../../crates/settings", features = ["seed-data"] }
-# postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + 采样组件）。
+# audit 域（AuditDomain + AuditChainHasher/DynAuditRepo port；#1230 wire_audit）。
+audit = { path = "../../crates/audit" }
+# 生产 MacVerifier backend（RustCrypto hmac/sha2；audit keyed-HMAC 链 verifier，#1230）。
+crypto-adapter = { path = "../../adapters/crypto" }
+# postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + PgAuditRepo + 采样组件）。
 postgres = { path = "../../adapters/postgres" }
 # Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
 vault = { path = "../../adapters/vault", features = ["backend"] }

@@ -16,6 +16,7 @@
 //! 编译证明（body `todo!()`）。同 DIP 内向边另由 [`PgCredentialRepo`]（impl `identity::ports::CredentialRepo`，
 //! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
 
+mod audit_repo;
 mod bundle;
 mod checkpoint;
 mod config_repo;
@@ -36,6 +37,7 @@ mod secret_repo;
 mod session_lifecycle;
 mod tx;
 
+pub use audit_repo::PgAuditRepo;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, caps};
 pub use checkpoint::PgCheckpointStore;
@@ -139,8 +141,10 @@ mod smoke {
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
     //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
-    //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）；去掉任一即编译失败（anti-vacuity）。
-    //! INVARIANT: PG-BUNDLE-DOMAIN-02 —— `caps::Settings` / `caps::Identity` 均满足 sealed `PgDomain`
+    //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
+    //! AuditRepo on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）；
+    //! 去掉任一即编译失败（anti-vacuity）。
+    //! INVARIANT: PG-BUNDLE-DOMAIN-02 —— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
     //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
     use core::marker::PhantomData;
 
@@ -156,6 +160,7 @@ mod smoke {
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
     fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
+    fn assert_audit_repo<T: audit::ports::AuditRepo>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
@@ -180,9 +185,15 @@ mod smoke {
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);
         // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
         assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
-        // PG-BUNDLE-DOMAIN-02：两个 per-domain marker 均满足 sealed `PgDomain`（去掉任一 impl 即编译失败）。
+        // `PgAuditRepo<TestVerifier>: AuditRepo` 真实 impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。
+        // TestVerifier 是本地确定性 FNV-1a verifier（MacVerifier impl），足以证明 trait 满足；不执行 body。
+        assert_audit_repo(
+            PhantomData::<super::PgAuditRepo<super::audit_repo::test_support::TestVerifier>>,
+        );
+        // PG-BUNDLE-DOMAIN-02：三个 per-domain marker 均满足 sealed `PgDomain`（去掉任一 impl 即编译失败）。
         assert_pg_domain(PhantomData::<super::caps::Settings>);
         assert_pg_domain(PhantomData::<super::caps::Identity>);
+        assert_pg_domain(PhantomData::<super::caps::Audit>);
     }
 
     #[test]

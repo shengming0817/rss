@@ -1,0 +1,21 @@
+[package]
+name = "crypto-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# lib 名与 crates.io `crypto` 区分（package = `crypto-adapter`，避免 deny.toml ban 误伤同名 crate；
+# 同 redis-adapter / prometheus-adapter 范式）。
+[lib]
+name = "crypto"
+
+[lints]
+workspace = true
+
+[dependencies]
+# MacVerifier trait + MacKey/Mac/MacAlgorithm typed funnel + constant_time_eq（CRYPTO-CONST-TIME-01）。
+primitives = { path = "../../crates/primitives" }
+# 生产 HMAC backend（RustCrypto；audit keyed-HMAC 链 verifier 实现）。
+hmac = { workspace = true }
+sha2 = { workspace = true }

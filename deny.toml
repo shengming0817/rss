@@ -75,8 +75,8 @@ deny = [
   # port-trait impl-sealing（谁可 impl）：cargo-deny 限「依赖」非「impl」。diport impl-site allowlist 由
   #   dylint 自写 lint `rss_diport_impl_allowlist`（AST 级，Medium，INVARIANT DIPORT-IMPL-ALLOWLIST-01）
   #   承载；adapter→域 impl 域 repo port 经分层 wrapper（见下 identity 行加 postgres）+ source edge 校验放行。
-  { crate = "dynosaur", wrappers = ["diport", "identity", "settings"] },
-  { crate = "trait-variant", wrappers = ["diport", "identity", "settings"] },
+  { crate = "dynosaur", wrappers = ["diport", "identity", "settings", "audit"] },
+  { crate = "trait-variant", wrappers = ["diport", "identity", "settings", "audit"] },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖，
   # **外加**实现该域 repo/service port 的 adapter（adapter→域 = DIP 内向边，Option 2/ADR-005；如 identity
   # 的 RoleRepo 由 postgres impl）。覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
@@ -91,7 +91,8 @@ deny = [
   # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
   # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
   { crate = "settings", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "postgres"] },
-  { crate = "audit", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
+  # postgres impl AuditRepo（append-only per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
+  { crate = "audit", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "postgres"] },
   { crate = "contractreg", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
   { crate = "syshealth", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
   # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。ban 按 **package 名** 匹配——
@@ -111,6 +112,8 @@ deny = [
   { crate = "vault", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
   { crate = "softca", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
   { crate = "ratelimit", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
+  # MacVerifier 生产 backend（package = `crypto-adapter`，lib = `crypto`；#1230）：只被组合根注入。
+  { crate = "crypto-adapter", wrappers = ["server", "rss", "runtime", "xtask", "journeys"] },
   # in-mem DI port provider adapter（RW-G1 追踪弹）：dev/test-only——**禁生产 bin（server/rss）依赖**，
   # 只准验收 journey + tooling（DEV_ADAPTER_ROOTS）依赖。机器边界 = xtask layers.rs DEV_ADAPTERS +
   # layer-deps LAYER-DEPS-07（正向收窄 required + 反向排除生产 bin）。wrapper 须恰为 dev 组合根。

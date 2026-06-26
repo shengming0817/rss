@@ -17,6 +17,10 @@ primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 bootstrap = { path = "../bootstrap" }
 generated = { path = "../../generated" }
+# AuditRepo 域形 repo DI port（ADR-005 Option 2）：async dyn 派发 = trait_variant Send 变体 + dynosaur DynAuditRepo
+# （DIPORT-MACRO-CONFINE-01′ 白名单：定义自身 repo port 的域 crate 可依赖；deny.toml + xtask 两侧同步加 audit）。
+dynosaur = { workspace = true }
+trait-variant = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 # session-created 订阅 handler 入参：diport::Message（跨域事件信封）。

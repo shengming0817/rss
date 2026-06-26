@@ -16,12 +16,18 @@
 
 #![cfg(feature = "integration")]
 
+mod common;
+
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
-use audit::AuditDomain;
 use bootstrap::SubscriberHandler;
+use common::{
+    CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
+    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, single_subscription,
+};
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
 use diagctx::{CorrelationId, DiagnosticCtx};
 use diport::{
@@ -37,88 +43,13 @@ use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
-use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
-use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
-const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 const IDENTITY_DOMAIN: &str = "identity";
-const PASSWORD: &str = "correct-horse";
-/// 登录标识（`request.username`）——#1277 F1：可为任意非 uuid 用户名，仅作凭据查找键，不写 wire/audit。
-const LOGIN_USERNAME: &str = "alice";
-/// canonical actor subject（credential 携带的 `ids::UserId`）——登录成功后写 payload/envelope/session subject
-/// + 审计 actor（audit `ids::UserId::parse` 必通）。与登录标识解耦（#1277 F1）。
-const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
-const NOW_SECS: u64 = 1_000;
-const TTL_SECS: u64 = 3_600;
 /// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
-/// durable journey 审计链 HMAC key（固定 32B）。
-const AUDIT_KEY: [u8; 32] = [0x5a; 32];
-
-/// 审计链 HMAC 测试 verifier：捕获每次 `sign` 的 message（= 每次链 append）。W 阶段审计落域内哈希链
-/// （无外部 sink），journey 经注入此 verifier 端到端断言 audit append 次数。非加密——只需确定性 + 可计数。
-#[derive(Clone, Default)]
-struct CapturingVerifier {
-    messages: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl CapturingVerifier {
-    fn audited(&self) -> Vec<Vec<u8>> {
-        self.messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-    fn is_empty(&self) -> bool {
-        self.messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-    }
-}
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-impl MacVerifier for CapturingVerifier {
-    fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
-        self.messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(message.to_vec());
-        let mut acc = FNV_OFFSET;
-        for &b in key.as_bytes().iter().chain(message) {
-            acc ^= u64::from(b);
-            acc = acc.wrapping_mul(FNV_PRIME);
-        }
-        let mut out = [0u8; 32];
-        for chunk in out.chunks_mut(8) {
-            chunk.copy_from_slice(&acc.to_be_bytes());
-            acc = acc.wrapping_mul(FNV_PRIME);
-        }
-        Mac::from_bytes(out.to_vec())
-    }
-
-    fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
-        primitives::constant_time_eq(
-            self.sign(key, algorithm, message).as_bytes(),
-            tag.as_bytes(),
-        )
-    }
-}
-
-/// 构造 durable journey 用 audit 域 + 共享捕获句柄（固定 32B key）。
-#[allow(clippy::expect_used)]
-fn audit_domain() -> (AuditDomain<CapturingVerifier>, CapturingVerifier) {
-    let verifier = CapturingVerifier::default();
-    let domain = AuditDomain::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
-        .expect("audit domain: 32B key satisfies MIN_KEY_LEN");
-    (domain, verifier)
-}
 
 /// 由 testkit fixture 参数构造配置。
 /// 库名严格校验已由 `testkit::env_or_postgres` 单源执行（外部路径须 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`
@@ -151,17 +82,11 @@ impl DeadLetterStore for NoopDlx {
     }
 }
 
-/// 取唯一 session-created 订阅绑定（断言恰一个）。
-fn single_subscription(
-    registry: bootstrap::Registry,
-) -> anyhow::Result<bootstrap::SubscriberBinding> {
-    let mut subs = registry.into_subscribers();
-    anyhow::ensure!(subs.len() == 1, "恰一个 session-created 订阅");
-    subs.pop().ok_or_else(|| anyhow::anyhow!("订阅缺失"))
-}
-
 /// SubscriberHandler → run_consumer HandleResult handler（Ok→ack；Err→reject 永久）。
 /// `captured` 记录每条消费消息的 envelope metadata（#1160 端到端 occurred_at/subjectId/correlation 保真断言）。
+///
+/// 注：此 handler 刻意映射所有错误到永久 reject（而非区分 transient/permanent）并捕获 EnvelopeMetadata，
+/// 与 `bootstrap::adapt_subscriber_handler` 语义不同——故不替换为后者。
 fn consumer_handler(
     handler: Box<dyn SubscriberHandler>,
     captured: Arc<Mutex<Vec<EnvelopeMetadata>>>,

@@ -24,10 +24,14 @@
 /// facade re-export 暴露（domain-patterns.md §封装）。
 mod application;
 pub(crate) mod domain;
-/// 域内仓储 I/O 类型 + in-mem 实现（无 port trait，YAGNI；trait + `pub mod ports` 随 postgres adapter follow-up）。
+/// 域内 in-mem 仓储 provider（`AuditRepo` port 已升 `pub mod ports`）。
 pub(crate) mod internal;
+/// 审计仓储**域形** repo DI port（ADR-005 Option 2）+ I/O 类型 / 签名实体 façade（postgres adapter 跨 crate impl）。
+pub mod ports;
 
-pub use application::{AuditDomain, AuditDomainError};
+pub use application::AuditDomain;
+/// in-mem `AuditRepo` 参考 provider（demo / journeys / 测试；生产 durable = `adapters/postgres::PgAuditRepo`）。
+pub use internal::mem::InMemAuditRepo;
 
 // ---------------------------------------------------------------------------
 // smoke：域核心类型 Send 不变式（跨 await 传播；行为正确性由 domain / internal / application 真实测试覆盖）

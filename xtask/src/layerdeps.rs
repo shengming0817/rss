@@ -201,8 +201,11 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
 /// （DiPort/Domain），由 [`check_confinement_entry`] 守（防白名单本身越层 / typo）。新增 sanctioned 域 crate
 /// 时同步更新本白名单与 `deny.toml` 对应 ban 的 wrappers（二者集合相等，否则 lint 红）。
 const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
-    ("dynosaur", &["diport", "identity", "settings"]),
-    ("trait-variant", &["diport", "identity", "settings"]),
+    ("dynosaur", &["diport", "identity", "settings", "audit"]),
+    (
+        "trait-variant",
+        &["diport", "identity", "settings", "audit"],
+    ),
 ];
 
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
@@ -1037,6 +1040,7 @@ mod tests {
     fn confinement_fixture_members() -> Vec<Member> {
         let mut members = wrapper_fixture_members();
         members.push(m("settings", "crates/settings", Some(Layer::Domain)));
+        members.push(m("audit", "crates/audit", Some(Layer::Domain)));
         members
     }
 
@@ -1198,8 +1202,11 @@ mod tests {
     #[test]
     fn external_confinement_green() {
         let bans = vec![
-            ban("dynosaur", &["diport", "identity", "settings"]),
-            ban("trait-variant", &["diport", "identity", "settings"]),
+            ban("dynosaur", &["diport", "identity", "settings", "audit"]),
+            ban(
+                "trait-variant",
+                &["diport", "identity", "settings", "audit"],
+            ),
         ];
         assert!(check_external_confinement(&confinement_fixture_members(), &bans).is_empty());
     }
@@ -1208,8 +1215,11 @@ mod tests {
     #[test]
     fn external_confinement_green_order_insensitive() {
         let bans = vec![
-            ban("dynosaur", &["settings", "identity", "diport"]),
-            ban("trait-variant", &["identity", "settings", "diport"]),
+            ban("dynosaur", &["audit", "settings", "identity", "diport"]),
+            ban(
+                "trait-variant",
+                &["identity", "audit", "settings", "diport"],
+            ),
         ];
         assert!(check_external_confinement(&confinement_fixture_members(), &bans).is_empty());
     }
@@ -1217,7 +1227,10 @@ mod tests {
     #[test]
     fn external_confinement_red_ban_deleted() {
         // 删掉 dynosaur ban（保留 trait-variant）→ 正向覆盖报 dynosaur 缺失（防收敛静默失效，F4）。
-        let bans = vec![ban("trait-variant", &["diport", "identity", "settings"])];
+        let bans = vec![ban(
+            "trait-variant",
+            &["diport", "identity", "settings", "audit"],
+        )];
         let findings = check_external_confinement(&confinement_fixture_members(), &bans);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
@@ -1228,8 +1241,14 @@ mod tests {
     fn external_confinement_red_widened() {
         // 过覆盖（开洞）：wrappers 含白名单外的 crate（server[Root]），DI port 定义点集被破坏。
         let bans = vec![
-            ban("dynosaur", &["diport", "identity", "settings", "server"]),
-            ban("trait-variant", &["diport", "identity", "settings"]),
+            ban(
+                "dynosaur",
+                &["diport", "identity", "settings", "audit", "server"],
+            ),
+            ban(
+                "trait-variant",
+                &["diport", "identity", "settings", "audit"],
+            ),
         ];
         let findings = check_external_confinement(&confinement_fixture_members(), &bans);
         assert_eq!(findings.len(), 1);
@@ -1243,7 +1262,10 @@ mod tests {
         // 误拦。集合不等 → 报 dynosaur（防 deny.toml 与白名单漂移）。
         let bans = vec![
             ban("dynosaur", &["diport", "identity"]),
-            ban("trait-variant", &["diport", "identity", "settings"]),
+            ban(
+                "trait-variant",
+                &["diport", "identity", "settings", "audit"],
+            ),
         ];
         let findings = check_external_confinement(&confinement_fixture_members(), &bans);
         assert_eq!(findings.len(), 1);

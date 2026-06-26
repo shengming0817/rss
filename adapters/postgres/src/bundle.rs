@@ -42,10 +42,10 @@ use diport::{Clock, DynPublisher};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo, PgDbReadiness, PgDeadLetterStore,
-    PgEmitter, PgError, PgInboxStore, PgOutbox, PgProjectionEvents, PgReadinessSampler,
-    PgRefreshTokenStore, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore,
-    PgStoreGuard,
+    PgAuditRepo, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo, PgDbReadiness,
+    PgDeadLetterStore, PgEmitter, PgError, PgInboxStore, PgOutbox, PgProjectionEvents,
+    PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo, PgSagaJournal, PgSecretRepo,
+    PgSessionLifecycle, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -62,18 +62,22 @@ pub trait PgDomain: sealed::Sealed {}
 /// per-domain 能力 marker ZST。
 ///
 /// `caps` 命名避开 `rss_domain_no_serialize` 的 `domain` 模块启发式，且 `caps::Settings`/`caps::Identity`
-/// 不与同名域 crate 冲突。变体随各域 durable 接线切片增加（当前 Settings + Identity）。
+/// 不与同名域 crate 冲突。变体随各域 durable 接线切片增加（当前 Settings + Identity + Audit）。
 pub mod caps {
     /// settings 域能力 marker。
     pub struct Settings;
     /// identity 域能力 marker。
     pub struct Identity;
+    /// audit 域能力 marker。
+    pub struct Audit;
 }
 
 impl sealed::Sealed for caps::Settings {}
 impl PgDomain for caps::Settings {}
 impl sealed::Sealed for caps::Identity {}
 impl PgDomain for caps::Identity {}
+impl sealed::Sealed for caps::Audit {}
+impl PgDomain for caps::Audit {}
 
 /// 组合根级 postgres 能力包：集中 connect + migration + readiness handle，派发 per-domain 受控句柄，
 /// 并产出 shutdown 资源 / 采样 worker。
@@ -254,6 +258,19 @@ impl PgDomainDeps<caps::Identity> {
     #[must_use]
     pub fn refresh_token_store(&self) -> PgRefreshTokenStore {
         PgRefreshTokenStore::new(&self.store)
+    }
+}
+
+impl PgDomainDeps<caps::Audit> {
+    /// audit 审计链仓储（append-only per-tenant keyed-HMAC chain + RLS）。
+    ///
+    /// `hasher` 持 keyed-HMAC verifier + key（构造器必填，无 key 不可造 hasher）。
+    #[must_use]
+    pub fn audit_repo<M>(&self, hasher: audit::ports::AuditChainHasher<M>) -> PgAuditRepo<M>
+    where
+        M: primitives::MacVerifier + Send + Sync,
+    {
+        PgAuditRepo::new(&self.store, hasher)
     }
 }
 

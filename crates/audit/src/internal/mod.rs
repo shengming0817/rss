@@ -1,9 +1,7 @@
-//! audit::internal — 域内审计仓储端口 + in-mem 实现（domain-patterns.md §internal 模块）。
+//! audit::internal — 域内 in-mem 仓储实现（domain-patterns.md §internal 模块）。
 //!
-//! 本轮 `AuditRepo` 端口在 `internal/ports`（`pub(crate)`）：唯一实现是 in-crate in-mem，无外部 adapter
-//! 消费端口 ⇒ 不 premature 升 `pub mod ports` / 扩 public-api（优雅简洁 + 保 `pub(crate)` Hard 封装边界）。
-//! 升 `pub mod ports`（ADR-005）+ 端口实体集升 pub + 外部 adapter 从存储 rehydrate `AuditEntry` 的
-//! 构造器可见性，统一在 postgres adapter follow-up 解决（那是这些决策被 forced 的地方）。
+//! `AuditRepo` 域形 repo port + 其 I/O 类型已升 `pub mod ports`（ADR-005 Option 2，#1230）——postgres adapter
+//! 跨 crate impl 本 port，故 port 与签名实体须 `pub`（字段私有 + 受控 funnel，外部不可伪造）。本 module 只留
+//! in-mem provider（[`mem::InMemAuditRepo`]，单进程占位 / 测试自洽）；postgres provider 在 `adapters/postgres`。
 
 pub(crate) mod mem;
-pub(crate) mod ports;

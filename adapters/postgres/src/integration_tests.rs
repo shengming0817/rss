@@ -5819,3 +5819,574 @@ async fn t24_rls_refresh_tokens_enforces_tenant_isolation() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
+
+// ── audit_entries 集成测试 ────────────────────────────────────────────────────
+//
+// TA1:  genesis + 单调递增 seq
+// TA2:  prev_hash 链接前驱 entry_hash
+// TA3:  并发 append——no seq gap/dup（advisory lock 串行）
+// TA4:  租户隔离——两租户独立 genesis
+// TA5:  RLS 跨租读隔离（rss_app + tenant_b scope → 0 行）
+// TA6:  list 分页游标 + has_more（5 条 ÷ page=2 → 3 页）
+// TA7:  list InvalidCursor fail-closed（base64url 合法但语义无效）
+// TA8:  verify_tail 增量：小窗口不覆盖被篡改 genesis → Ok；大窗口 → HashMismatch
+// TA9:  recorded_at 非零 nanos 往返（regression for secs+nanos 两列设计）
+// TA10: append-only——rss_app DELETE/UPDATE 被 DB 权限拒绝
+// TA11: RLS NULL tenant fail-closed——未设 rss.tenant_id → 0 行
+// TA12: 空租户链 list + verify_tail 均 Ok
+
+// trait AuditRepo 须在 scope 才能调用 append / list / verify_tail 方法。
+use audit::ports::AuditRepo as _;
+// base64::Engine::encode 须在 scope（URL_SAFE_NO_PAD.encode(...)）。
+use base64::Engine as _;
+
+/// 构造审计仓储（共享 pool，固定 0x5a key hasher）。
+fn make_audit_repo(
+    store: &PgStore,
+) -> crate::PgAuditRepo<crate::audit_repo::test_support::TestVerifier> {
+    crate::PgAuditRepo::new(store, crate::audit_repo::test_support::test_hasher(0x5a))
+}
+
+/// 构造审计记录（nanos 可变，其余字段固定；actor UUID 硬编码确定性 ID）。
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 helper——固定格式 UUID / action parse 不失败；item-level carve-out。
+fn make_audit_record(tenant: vocab::TenantId, nanos: u32) -> audit::ports::AuditRecord {
+    use std::time::{Duration, UNIX_EPOCH};
+    audit::ports::AuditRecord {
+        tenant,
+        actor: ids::UserId::parse("11111111-2222-4333-8444-555555555555").unwrap(),
+        actor_kind: vocab::PrincipalKind::User,
+        action: vocab::Action::parse("audit:read").unwrap(),
+        resource: audit::ports::ResourceRef::new("session", "sess-1"),
+        outcome: audit::ports::AuditOutcome::Success,
+        recorded_at: UNIX_EPOCH + Duration::new(1_700_000_000, nanos),
+    }
+}
+
+/// 构造分页请求（limit ≤ 500 不失败）。
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 helper——limit 值由测试代码控制，均合法；item-level carve-out。
+fn audit_page(limit: u16, cursor: Option<vocab::Cursor>) -> audit::ports::AuditPage {
+    audit::ports::AuditPage {
+        limit: vocab::Limit::new(limit).unwrap(),
+        cursor,
+    }
+}
+
+/// TA1: genesis 条目 seq=0，连续 append seq 单调递增。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path——UUID v4 生成不失败；item-level carve-out。
+async fn ta1_audit_append_genesis_and_monotonic_seq() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    let result = repo.list(tenant, audit_page(500, None)).await?;
+    assert_eq!(result.entries.len(), 3, "TA1: 应恰有 3 条");
+    assert_eq!(result.entries[0].seq(), 0, "TA1: genesis seq=0");
+    assert_eq!(result.entries[1].seq(), 1, "TA1: seq 单调+1");
+    assert_eq!(result.entries[2].seq(), 2, "TA1: seq 单调+2");
+    assert!(!result.has_more);
+    assert!(result.next_cursor.is_none());
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA2: 每条 prev_hash == 前一条 entry_hash，genesis prev 全零。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta2_audit_prev_links_to_predecessor_entry_hash() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    for _ in 0..3 {
+        repo.append(make_audit_record(tenant, 0)).await?;
+    }
+
+    let result = repo.list(tenant, audit_page(500, None)).await?;
+    let e = &result.entries;
+
+    assert_eq!(
+        e[0].prev_hash().as_bytes(),
+        &[0u8; 32],
+        "TA2: genesis prev 须全零"
+    );
+    assert_eq!(
+        e[1].prev_hash().as_bytes(),
+        e[0].entry_hash().as_bytes(),
+        "TA2: e[1].prev_hash 须 == e[0].entry_hash"
+    );
+    assert_eq!(
+        e[2].prev_hash().as_bytes(),
+        e[1].entry_hash().as_bytes(),
+        "TA2: e[2].prev_hash 须 == e[1].entry_hash"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA3: 同租户并发 append（5 task）——advisory lock 保证 no seq gap / dup。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta3_audit_concurrent_appends_no_seq_gap() -> TestResult {
+    use std::sync::Arc;
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = Arc::new(make_audit_repo(&store));
+
+    const N: usize = 5;
+    let handles: Vec<_> = (0..N)
+        .map(|_| {
+            let r = Arc::clone(&repo);
+            tokio::spawn(async move { r.append(make_audit_record(tenant, 0)).await })
+        })
+        .collect();
+    for h in handles {
+        h.await.map_err(|e| format!("join error: {e}"))??;
+    }
+
+    let result = repo.list(tenant, audit_page(500, None)).await?;
+    assert_eq!(result.entries.len(), N, "TA3: 应恰有 {N} 条");
+    let mut seqs: Vec<u64> = result.entries.iter().map(|e| e.seq()).collect();
+    seqs.sort_unstable();
+    for (i, &s) in seqs.iter().enumerate() {
+        assert_eq!(s, i as u64, "TA3: seq 须连续无 gap，i={i} s={s}");
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA4: 两租户独立 genesis（seq 各从 0 起），互不干扰。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta4_audit_tenant_isolation_independent_genesis() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    repo.append(make_audit_record(tenant_a, 0)).await?;
+    repo.append(make_audit_record(tenant_a, 0)).await?;
+    repo.append(make_audit_record(tenant_b, 0)).await?;
+
+    let a = repo.list(tenant_a, audit_page(500, None)).await?;
+    let b = repo.list(tenant_b, audit_page(500, None)).await?;
+    assert_eq!(a.entries.len(), 2, "TA4: tenant_a 应有 2 条");
+    assert_eq!(b.entries.len(), 1, "TA4: tenant_b 应有 1 条");
+    assert_eq!(a.entries[0].seq(), 0, "TA4: tenant_a genesis seq=0");
+    assert_eq!(b.entries[0].seq(), 0, "TA4: tenant_b 独立 genesis seq=0");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA5: RLS 跨租读隔离——rss_app + tenant_b scope 下看不到 tenant_a 的审计行。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta5_audit_rls_cross_tenant_read_denied() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_a_str = uuid::Uuid::new_v4().to_string();
+    let tenant_a = vocab::TenantId::parse(&tenant_a_str).unwrap();
+    let tenant_b_str = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let repo = make_audit_repo(&store);
+    repo.append(make_audit_record(tenant_a, 0)).await?;
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b_str)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM audit_entries WHERE tenant_id = $1::uuid")
+                .bind(&tenant_a_str)
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "TA5: rss_app + tenant_b scope — tenant_a 行须不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA6: list 分页游标——5 条, page=2 → 3 页（2+2+1），has_more 正确，cursor 续页完整。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta6_audit_list_pagination_cursor_and_has_more() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    for _ in 0..5 {
+        repo.append(make_audit_record(tenant, 0)).await?;
+    }
+
+    let p1 = repo.list(tenant, audit_page(2, None)).await?;
+    assert_eq!(p1.entries.len(), 2, "TA6: p1 应有 2 条");
+    assert!(p1.has_more, "TA6: p1 has_more=true");
+    assert!(p1.next_cursor.is_some(), "TA6: p1 应有 next_cursor");
+    assert_eq!(p1.entries[0].seq(), 0);
+    assert_eq!(p1.entries[1].seq(), 1);
+
+    let p2 = repo.list(tenant, audit_page(2, p1.next_cursor)).await?;
+    assert_eq!(p2.entries.len(), 2, "TA6: p2 应有 2 条");
+    assert!(p2.has_more, "TA6: p2 has_more=true");
+    assert_eq!(p2.entries[0].seq(), 2);
+    assert_eq!(p2.entries[1].seq(), 3);
+
+    let p3 = repo.list(tenant, audit_page(2, p2.next_cursor)).await?;
+    assert_eq!(p3.entries.len(), 1, "TA6: p3 应有 1 条");
+    assert!(!p3.has_more, "TA6: p3 has_more=false");
+    assert!(p3.next_cursor.is_none(), "TA6: p3 无 next_cursor");
+    assert_eq!(p3.entries[0].seq(), 4);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA7: list 语义无效游标（base64url 合法但解码后非数字）→ InvalidCursor（fail-closed）。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta7_audit_list_invalid_cursor_fail_closed() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-a-number");
+    let cursor = vocab::Cursor::parse(&raw).unwrap();
+    let result = repo.list(tenant, audit_page(10, Some(cursor))).await;
+    assert!(
+        matches!(result, Err(audit::ports::AuditError::InvalidCursor)),
+        "TA7: 语义无效游标须返回 InvalidCursor"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA8: verify_tail 增量性——篡改 genesis 后，小窗口（不覆盖 seq=0）Ok；大窗口 → HashMismatch。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta8_audit_verify_tail_incremental_and_tamper_detection() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+
+    for _ in 0..5 {
+        repo.append(make_audit_record(tenant, 0)).await?;
+    }
+
+    // 干净链：verify_tail 均通过。
+    repo.verify_tail(tenant, 2).await?;
+    repo.verify_tail(tenant, 10).await?;
+
+    // 超级用户篡改 seq=0 的 entry_hash（rss_app 无 UPDATE 权）。
+    sqlx::query("UPDATE audit_entries SET entry_hash = $1 WHERE tenant_id = $2::uuid AND seq = 0")
+        .bind(vec![0xAAu8; 32])
+        .bind(&tenant_str)
+        .execute(&store.pool)
+        .await?;
+
+    // 小窗口（末 2 条 = seq 3,4 + 前驱 seq 2）：不覆盖被篡改 seq 0 → 增量验证仍 Ok。
+    let tail2 = repo.verify_tail(tenant, 2).await;
+    assert!(
+        tail2.is_ok(),
+        "TA8: 小窗口不覆盖被篡改 genesis → verify_tail(2) 须 Ok，got: {tail2:?}"
+    );
+
+    // 大窗口（全 5 条 seq 0-4）：覆盖被篡改 seq 0 → HashMismatch。
+    let tail10 = repo.verify_tail(tenant, 10).await;
+    assert!(
+        matches!(tail10, Err(audit::ports::AuditError::HashMismatch)),
+        "TA8: 大窗口覆盖被篡改 genesis → HashMismatch，got: {tail10:?}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA9: recorded_at 非零 nanos 往返——存储+读取后 nanos 精确保留，且链哈希仍验证通过。
+///
+/// Regression: 若用 timestamptz 存储则 nanos 被截断 → 重算 entry_hash 不匹配。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试——recorded_at 由 UNIX_EPOCH+Duration 构造，duration_since(UNIX_EPOCH) 不失败；item-level carve-out。
+async fn ta9_audit_recorded_at_nanos_roundtrip_and_chain_verifies() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    let nanos_input: u32 = 123_456_789;
+    repo.append(make_audit_record(tenant, nanos_input)).await?;
+
+    let result = repo.list(tenant, audit_page(10, None)).await?;
+    assert_eq!(result.entries.len(), 1, "TA9: 应恰有 1 条");
+
+    let e = &result.entries[0];
+    let since_epoch = e
+        .recorded_at()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("recorded_at >= UNIX_EPOCH");
+    assert_eq!(
+        since_epoch.subsec_nanos(),
+        nanos_input,
+        "TA9: nanos 须精确往返（secs+nanos 两列，非 timestamptz）"
+    );
+
+    // list 内置增量验证；额外 verify_tail 确认链完整。
+    repo.verify_tail(tenant, 10).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA10: append-only——rss_app 对 audit_entries 的 DELETE / UPDATE 被 DB 权限拒绝。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta10_audit_append_only_delete_update_rejected_for_rss_app() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    // rss_app DELETE → permission denied。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await?;
+        let del = sqlx::query("DELETE FROM audit_entries WHERE tenant_id = $1::uuid")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await;
+        assert!(
+            del.is_err(),
+            "TA10: rss_app 应无 DELETE 权限（append-only）"
+        );
+        tx.rollback().await?;
+    }
+
+    // rss_app UPDATE → permission denied。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await?;
+        let upd = sqlx::query(
+            "UPDATE audit_entries SET action = 'tampered:value' WHERE tenant_id = $1::uuid",
+        )
+        .bind(&tenant_str)
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            upd.is_err(),
+            "TA10: rss_app 应无 UPDATE 权限（append-only）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA11: RLS NULL tenant fail-closed——rss_app 未设 rss.tenant_id → current_setting NULL → 0 行。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta11_audit_rls_null_tenant_fail_closed() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        // 故意不设 rss.tenant_id → current_setting 返 NULL → RLS USING 全过滤。
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM audit_entries")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "TA11: rss_app + 未设 rss.tenant_id → NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA12: 空租户链 list → Ok（空结果），verify_tail → Ok（空链无前驱）。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta12_audit_empty_tenant_list_and_verify_tail_ok() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    let result = repo.list(tenant, audit_page(10, None)).await?;
+    assert!(result.entries.is_empty(), "TA12: 空租户 list 须空");
+    assert!(!result.has_more);
+
+    repo.verify_tail(tenant, 10).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── TA13–TA14: hydrate_row 错误臂覆盖 ─────────────────────────────────────────
+//
+// TA13: entry_hash 错误字节长度（bypasss CHECK 约束后注入短 bytea）→ list 返回 AuditError::Storage
+// TA14: 未知 actor_kind（bypass CHECK 约束后注入不在闭值集中的文本）→ list 返回 AuditError::Storage
+//
+// 以 superuser（store.pool 默认连接角色）DROP IF EXISTS 临时删除列级 CHECK 约束，UPDATE 注入非法值，
+// 再通过 repo.list 触发 hydrate_row 的错误臂——复用 TA8 的超级用户篡改模式（FORCE RLS 对 owner 也生效，
+// 但 store.pool 是 superuser，superuser 绕过 RLS、能执行 DDL）。
+// compile-check only（无 docker）：断言结构正确、类型正确；运行期约束名须与 PostgreSQL 自动生成名匹配。
+
+/// TA13: hydrate_row wrong-length entry_hash — 超级用户临时删 CHECK 约束后注入短 bytea，
+/// list 读取时 try_into 失败 → `Err(AuditError::Storage(...))`（bytea-length arm 覆盖）。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造——UUID v4 + audit_page 参数已知合法；item-level carve-out。
+async fn ta13_audit_hydrate_row_wrong_length_entry_hash_returns_storage() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    // 超级用户临时删 entry_hash 长度 CHECK 约束（PostgreSQL 自动命名 audit_entries_entry_hash_check），
+    // 注入错误长度 bytea（10B ≠ 32B）以覆盖 hydrate_row wrong-length arm。
+    sqlx::query(
+        "ALTER TABLE audit_entries DROP CONSTRAINT IF EXISTS audit_entries_entry_hash_check",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query("UPDATE audit_entries SET entry_hash = $1 WHERE tenant_id = $2::uuid AND seq = 0")
+        .bind(vec![0xBBu8; 10]) // 10B != 32B，触发 hydrate_row try_into 失败臂
+        .bind(&tenant_str)
+        .execute(&store.pool)
+        .await?;
+
+    let result = repo.list(tenant, audit_page(10, None)).await;
+    assert!(
+        matches!(result, Err(audit::ports::AuditError::Storage(_))),
+        "TA13: 错误长度 entry_hash 须返回 AuditError::Storage（实际为 Ok 或其它 Err 变体）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA14: hydrate_row unknown actor_kind — 超级用户临时删 CHECK 约束后注入闭值集外文本，
+/// list 读取时 actor_kind_from_db 返回 None → `Err(AuditError::Storage(...))`（unknown-enum arm 覆盖）。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造——UUID v4 + audit_page 参数已知合法；item-level carve-out。
+async fn ta14_audit_hydrate_row_unknown_actor_kind_returns_storage() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    // 超级用户临时删 actor_kind IN 值集 CHECK 约束（PostgreSQL 自动命名 audit_entries_actor_kind_check），
+    // 注入闭值集外的 actor_kind 文本以覆盖 hydrate_row actor_kind_from_db → None 的错误臂。
+    sqlx::query(
+        "ALTER TABLE audit_entries DROP CONSTRAINT IF EXISTS audit_entries_actor_kind_check",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE audit_entries SET actor_kind = 'robot' WHERE tenant_id = $1::uuid AND seq = 0",
+    )
+    .bind(&tenant_str)
+    .execute(&store.pool)
+    .await?;
+
+    let result = repo.list(tenant, audit_page(10, None)).await;
+    assert!(
+        matches!(result, Err(audit::ports::AuditError::Storage(_))),
+        "TA14: 未知 actor_kind 须返回 AuditError::Storage（实际为 Ok 或其它 Err 变体）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}

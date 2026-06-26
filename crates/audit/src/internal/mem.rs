@@ -11,7 +11,7 @@ use base64::Engine as _;
 use primitives::MacVerifier;
 
 use crate::domain::{AuditChainHasher, AuditEntry, AuditError, EntryHash};
-use crate::internal::ports::{AuditListResult, AuditPage, AuditRecord};
+use crate::ports::{AuditListResult, AuditPage, AuditRecord, AuditRepo};
 
 /// in-mem 状态：每租户 append-only 子链。
 #[derive(Default)]
@@ -19,15 +19,17 @@ struct State {
     chains: HashMap<vocab::TenantId, Vec<AuditEntry>>,
 }
 
-/// in-mem 审计仓储（持 hasher，`Mutex` 串行化 append）。
-pub(crate) struct InMemAuditRepo<M: MacVerifier> {
+/// in-mem 审计仓储（持 hasher，`Mutex` 串行化 append）——`AuditRepo` 的**in-mem 参考 provider**（demo /
+/// journeys / 域单测）。生产 durable provider 是 `adapters/postgres` 的 `PgAuditRepo`；组合根经
+/// `Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)))` 装配（与 Pg provider 同注入路径）。
+pub struct InMemAuditRepo<M: MacVerifier> {
     hasher: AuditChainHasher<M>,
     state: Mutex<State>,
 }
 
 impl<M: MacVerifier> InMemAuditRepo<M> {
-    /// 注入链 hasher 构造（hasher 持 verifier + key）。
-    pub(crate) fn new(hasher: AuditChainHasher<M>) -> Self {
+    /// 注入链 hasher 构造（hasher 持 verifier + key；key 强度在 [`AuditChainHasher::new`] 收口）。
+    pub fn new(hasher: AuditChainHasher<M>) -> Self {
         Self {
             hasher,
             state: Mutex::new(State::default()),
@@ -64,9 +66,15 @@ impl<M: MacVerifier> InMemAuditRepo<M> {
 }
 
 /// 把全局子链下标编码成不透明游标（base64url，对齐 [`vocab::Cursor`]）。
-fn encode_cursor(index: usize) -> Option<vocab::Cursor> {
+///
+/// # Errors
+/// base64url(十进制数字串) 始终满足 `Cursor::parse` 格式约束，`Err` 分支防御性 fail-closed（不可达）。
+// reason: base64url(decimal) 始终合法，Err 分支不可达；返回 Result 防止静默产出 next_cursor=None + has_more=true
+// 的矛盾分页响应（broken pagination fail-closed 优于 silent drop）。
+fn encode_cursor(index: usize) -> Result<vocab::Cursor, AuditError> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(index.to_string());
-    vocab::Cursor::parse(&raw).ok()
+    vocab::Cursor::parse(&raw)
+        .map_err(|_| AuditError::storage(std::io::Error::other("cursor encode failed")))
 }
 
 /// 解码游标回子链下标。
@@ -83,13 +91,13 @@ fn decode_cursor(cursor: &vocab::Cursor) -> Result<usize, AuditError> {
         .map_err(|_| AuditError::InvalidCursor)
 }
 
-// inherent async 方法（无 port trait——本轮单 provider，provider 抽象 trait 随 postgres adapter follow-up，
-// 见 internal/ports.rs）。futures 在 `M: Send + Sync` 下为 `Send`（被订阅 handler / axum handler 跨 await 持有）。
-impl<M> InMemAuditRepo<M>
+// `AuditRepo` 域形 repo port 实现（ADR-005 Option 2，#1230）。futures 在 `M: Send + Sync` 下为 `Send`
+// （trait_variant Send 变体；被订阅 handler / axum handler 跨 await 持有，经 `Arc<DynAuditRepo>` 共享）。
+impl<M> AuditRepo for InMemAuditRepo<M>
 where
     M: MacVerifier + Send + Sync,
 {
-    pub(crate) async fn append(&self, record: AuditRecord) -> Result<(), AuditError> {
+    async fn append(&self, record: AuditRecord) -> Result<(), AuditError> {
         let AuditRecord {
             tenant,
             actor,
@@ -141,8 +149,8 @@ where
     /// 分页列出某租户审计条目（读时全链完整性验证，篡改即 fail-closed 返回 Err）。
     ///
     /// **性能注意**：读时对整条租户链 O(n) 全扫验证是本 in-mem 实现的占位语义；
-    /// postgres provider 实现时应做增量尾部验证而非全扫（不应复制本实现的全扫逻辑）。
-    pub(crate) async fn list(
+    /// postgres provider 实现时应做增量尾部验证而非全扫（不应复制本实现的全扫逻辑，见 [`Self::verify_tail`]）。
+    async fn list(
         &self,
         tenant: vocab::TenantId,
         page: AuditPage,
@@ -161,12 +169,33 @@ where
         let end = start.saturating_add(limit).min(chain.len());
         let entries = chain.get(start..end).unwrap_or(&[]).to_vec();
         let has_more = end < chain.len();
-        let next_cursor = if has_more { encode_cursor(end) } else { None };
+        let next_cursor = if has_more {
+            Some(encode_cursor(end)?)
+        } else {
+            None
+        };
         Ok(AuditListResult {
             entries,
             next_cursor,
             has_more,
         })
+    }
+
+    /// 尾部增量验证：验末 `limit` 条 + 其前驱链接（[`AuditChainHasher::verify_window`]，非全扫整链）。
+    /// bootstrap 启动自检 / 运维巡检用——postgres provider 同语义（取末窗口 + 1 前驱行）。
+    async fn verify_tail(&self, tenant: vocab::TenantId, limit: u32) -> Result<(), AuditError> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let chain = state.chains.get(&tenant).map(Vec::as_slice).unwrap_or(&[]);
+        let n = chain.len();
+        let take = usize::try_from(limit).unwrap_or(usize::MAX).min(n);
+        let start = n - take;
+        // 前驱 = 窗口外紧邻一条（start>0 时存在），用于校验窗口首条接续；start==0 ⇒ 窗口含 genesis、前驱 None。
+        let predecessor = if start > 0 {
+            chain.get(start - 1)
+        } else {
+            None
+        };
+        self.hasher.verify_window(predecessor, &chain[start..])
     }
 }
 
@@ -345,6 +374,32 @@ mod tests {
         assert!(
             matches!(result, Err(AuditError::InvalidCursor)),
             "语义无效游标须 fail-closed 返回 InvalidCursor（不回退首页，防重复页）"
+        );
+    }
+
+    /// verify_tail 是增量窗口验证：篡改 genesis（seq 0）后，小窗口（不含 seq 0）仍 Ok，全窗口（含 seq 0）→ HashMismatch。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn verify_tail_is_incremental_window() {
+        let repo = repo();
+        for _ in 0..5 {
+            repo.append(record(TENANT_A)).await.expect("append");
+        }
+        let t = tenant(TENANT_A);
+        // 干净链：尾窗口 + 全窗口都通过。
+        assert!(repo.verify_tail(t, 2).await.is_ok());
+        assert!(repo.verify_tail(t, 10).await.is_ok());
+        // 篡改首条（seq 0）。
+        repo.corrupt_first_entry_hash(t);
+        // 尾 2 条（seq 3,4）+ 前驱 seq 2，不触 seq 0 ⇒ 仍 Ok（增量，不全扫）。
+        assert!(
+            repo.verify_tail(t, 2).await.is_ok(),
+            "尾窗口不含被篡改的 genesis ⇒ 增量验证须 Ok"
+        );
+        // 窗口覆盖全链（含被篡改 seq 0）⇒ HashMismatch。
+        assert!(
+            matches!(repo.verify_tail(t, 10).await, Err(AuditError::HashMismatch)),
+            "覆盖被篡改 genesis 的窗口须 fail-closed HashMismatch"
         );
     }
 }

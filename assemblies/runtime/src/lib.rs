@@ -31,15 +31,19 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
+use audit::AuditDomain;
+use audit::ports::{AuditChainHasher, DynAuditRepo};
 use axum::http::Method;
 use base64::Engine as _;
 use bootstrap::shutdown::ShutdownStack;
+use crypto::RustCryptoMacVerifier;
 use diport::{DynManagedResource, DynSecretResolver};
 use httpd::HttpServer;
 use oidc::OidcProvider;
 use postgres::{PgConfig, PgDbReadiness, PgPassword, PgRuntimeDeps, PoolReadiness, caps};
 use primitives::{
-    AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName, RequiredScheme,
+    AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
+    RequiredScheme,
 };
 use settings::{
     SecretService, SettingsDomain, SettingsService, empty_flag_store,
@@ -485,6 +489,46 @@ fn settings_module_result(readiness: Arc<PgDbReadiness>) -> anyhow::Result<Domai
     })
 }
 
+// ── audit wiring（#1230）────────────────────────────────────────────────────────────────────────
+
+/// 从 env 构造审计 keyed-HMAC 链 hasher（生产 [`RustCryptoMacVerifier`] backend；DI：注入读取器供测试，
+/// 无 env 副作用——workspace `forbid(unsafe)` 下测试不能 `set_var`）。
+///
+/// - `RSS_AUDIT_CHAIN_KEY_B64URL`：**必填**——审计链 HMAC key，base64url。缺失 fail-fast（生产审计链不可无 key）。
+///
+/// fail-fast：非 base64url → 错；解码后 <32B → 错（[`AuditChainHasher::new`] 返回 `None`，链 key 强度
+/// `docs/rules/audit-ledger.md`）。错误只含变量**名**，不含 key 值（无 secret 泄漏）。
+fn build_audit_hasher(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<AuditChainHasher<RustCryptoMacVerifier>> {
+    let b64 = get("RSS_AUDIT_CHAIN_KEY_B64URL")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_AUDIT_CHAIN_KEY_B64URL"))?;
+    let key_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&b64)
+        .context("RSS_AUDIT_CHAIN_KEY_B64URL not valid base64url")?;
+    AuditChainHasher::new(RustCryptoMacVerifier, MacKey::from_bytes(key_bytes)).ok_or_else(|| {
+        anyhow::anyhow!("audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)")
+    })
+}
+
+/// 接线 audit 域：env 链 key（fail-fast）→ [`RustCryptoMacVerifier`] hasher → [`PgAuditRepo`] durable provider
+/// → erased `Arc<DynAuditRepo>` → [`AuditDomain`]（组合根注入路径，与 in-mem 同形）。
+///
+/// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——内部持 [`PgRuntimeDeps`] capability bundle；audit
+///   wiring 只拿 `PgDomainDeps<caps::Audit>`，拿不到 settings/identity repo 或裸 pool。
+///
+/// **bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B**：跨租户枚举（`SELECT DISTINCT tenant_id`）
+/// 在 FORCE RLS 下需专用 `rss_audit_admin` 角色限定 permissive RLS 池（非 BYPASSRLS，见 `docs/rules/tenancy.md`）
+/// ——与跨租户 admin 读同一基础设施，统一随 Part B 落地。本 PR 的读路径完整性硬保证是 `list` 内增量
+/// [`AuditChainHasher::verify_window`]（篡改 fail-closed → 500，不下发脏数据）；per-tenant [`PgAuditRepo`] 的
+/// `verify_tail` 已就绪（集成测试覆盖），供 Part B boot sweep + 运维巡检调用。
+pub fn wire_audit(deps: &SharedRuntimeDeps) -> anyhow::Result<AuditDomain> {
+    let hasher = build_audit_hasher(|name| std::env::var(name).ok()).context("audit chain key")?;
+    let repo = deps.pg.for_domain::<caps::Audit>().audit_repo(hasher);
+    let dyn_repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(repo));
+    Ok(AuditDomain::new(dyn_repo))
+}
+
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
 
 /// Health listener 路由组前缀（liveness/readiness 在专用 listener 上；operator 配 k8s probe 路径指向此前缀下）。
@@ -746,8 +790,6 @@ pub fn init_tracing() {
 #[allow(clippy::cognitive_complexity)]
 pub async fn run() -> anyhow::Result<()> {
     let provider = Arc::new(build_provider()?);
-    // settings domain 已注册（#1272/#1274）；后续域（identity/audit/…）随各自 wire_X PR 加入 compose 列表。
-    let mut registry = bootstrap::compose(&[&SettingsDomain]).context("compose domains")?;
 
     // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
     // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
@@ -757,6 +799,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
     let deps = SharedRuntimeDeps { pg: pg.clone() };
+
+    // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
+    let audit_domain = wire_audit(&deps).context("wire audit")?;
+
+    // settings domain（#1272/#1274）+ audit domain（#1230）注册（声明 routes/subscribers）；后续域随各自
+    // wire_X PR 加入 compose 列表。
+    let mut registry =
+        bootstrap::compose(&[&SettingsDomain, &audit_domain]).context("compose domains")?;
 
     // 聚合各域 module result（今仅 settings；后续域只需多一行 module.merge(wire_X(&deps).await?)，run() 形态恒定）。
     let mut module = DomainModuleResult::default();
@@ -968,6 +1018,46 @@ mod tests {
             "有效 HS256 key + issuer/aud + trusted kind ⇒ 构造成功"
         );
         let _ = p.expect("ok");
+    }
+
+    // ── audit chain key wiring（#1230）─────────────────────────────────────────
+
+    #[test]
+    fn build_audit_hasher_missing_key_fails_fast() {
+        // 缺 RSS_AUDIT_CHAIN_KEY_B64URL → fail-fast（生产审计链不可无 key）；错误含变量名、不含值。
+        let result = build_audit_hasher(|_| None);
+        assert!(
+            matches!(&result, Err(e) if e.to_string().contains("RSS_AUDIT_CHAIN_KEY_B64URL")),
+            "缺 key env 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_audit_hasher_invalid_base64_fails_fast() {
+        let get = |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| "!!not-b64!!".to_string());
+        assert!(
+            build_audit_hasher(get).is_err(),
+            "非 base64url key 须 fail-fast"
+        );
+    }
+
+    #[test]
+    fn build_audit_hasher_weak_key_fails_fast() {
+        // 解码后 <32B → AuditChainHasher::new 返回 None → fail-fast（链 key 强度，audit-ledger.md）。
+        let short = B64.encode([0x5au8; 16]);
+        let get = move |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| short.clone());
+        assert!(
+            matches!(&build_audit_hasher(get), Err(e) if e.to_string().contains("at least 32 bytes")),
+            "弱 key（<32B）须 fail-fast"
+        );
+    }
+
+    #[test]
+    fn build_audit_hasher_valid_32b_key_ok() {
+        // 32B key（base64url）→ 构造成功（生产 RustCrypto hasher 装配路径）。
+        let key = B64.encode([0x42u8; 32]);
+        let get = move |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| key.clone());
+        assert!(build_audit_hasher(get).is_ok(), "有效 32B key 须构造成功");
     }
 
     #[test]

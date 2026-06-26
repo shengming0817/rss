@@ -306,6 +306,7 @@ dependencies = [
  "bootstrap",
  "consistency",
  "diport",
+ "dynosaur",
  "futures",
  "generated",
  "httpserve",
@@ -318,6 +319,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "trait-variant",
  "uuid",
  "vocab",
 ]
@@ -1269,6 +1271,15 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "crypto-adapter"
+version = "0.0.0"
+dependencies = [
+ "hmac 0.12.1",
+ "primitives",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "crypto-bigint"
@@ -3620,6 +3631,8 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 name = "postgres"
 version = "0.0.0"
 dependencies = [
+ "audit",
+ "base64",
  "consistency",
  "diagctx",
  "diport",
@@ -4244,10 +4257,12 @@ name = "runtime"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "audit",
  "authn",
  "axum",
  "base64",
  "bootstrap",
+ "crypto-adapter",
  "diport",
  "futures",
  "hmac 0.12.1",
