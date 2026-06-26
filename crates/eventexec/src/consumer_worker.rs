@@ -151,8 +151,20 @@ impl diport::ManagedResource for ConsumerWorker {
 
 // ── spawn（专用线程驱动 !Send 消费 future）─────────────────────────────────────
 
-/// 在专用 OS 线程建 current-thread runtime `block_on` 跑 `body`：无论正常返回（流终止）/ runtime 构建失败，
-/// loop 退出后 `health.mark_stopped()`（readyz Unhealthy）。
+/// 线程退出守卫：`Drop` 时 `mark_stopped`（readyz 翻 Unhealthy）。RAII 覆盖**所有**退出路径——正常返回
+/// （stream 终止）、runtime 构建失败 early-return、以及 handler future panic unwind——杜绝「panic 跳过
+/// mark_stopped、readyz 误报 Healthy 而 worker 已死」（review #274 F3/C3）。panic 仍照常 unwind 至
+/// [`std::thread::JoinHandle::join`] → `shutdown` 上抛 [`ConsumerThreadPanicked`]（守卫只标终态、不吞 panic）。
+struct StoppedOnExit(Arc<WorkerHealth>);
+
+impl Drop for StoppedOnExit {
+    fn drop(&mut self) {
+        self.0.mark_stopped();
+    }
+}
+
+/// 在专用 OS 线程建 current-thread runtime `block_on` 跑 `body`：线程退出（正常 / runtime 构建失败 /
+/// future panic）由 [`StoppedOnExit`] 守卫统一 `health.mark_stopped()`（readyz Unhealthy）。
 ///
 /// `worker_name` 用于 runtime 构建失败时的结构化日志归因（`worker = worker_name` 字段）。
 /// `make_body` **必须** `Send`（捕获值跨线程移入），其返回的 future **无需** `Send`（在线程内构建与轮询）。
@@ -167,6 +179,8 @@ where
 {
     let worker_name = worker_name.to_string();
     std::thread::spawn(move || {
+        // 退出守卫：正常返回 / runtime 构建失败 / future panic 三条路径均经 Drop 统一 mark_stopped（F3）。
+        let _stopped = StoppedOnExit(health);
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -178,13 +192,10 @@ where
                     error = %e,
                     "consumer: worker runtime build failed; worker unhealthy"
                 );
-                health.mark_stopped();
                 return;
             }
         };
         rt.block_on(make_body());
-        // loop 退出（stream 终止）→ Unhealthy（readyz 翻；运行期无 mark，故初始 Healthy 保持到此）。
-        health.mark_stopped();
     })
 }
 
@@ -446,9 +457,11 @@ mod tests {
         assert!(worker.shutdown().await.is_ok(), "二次 shutdown 幂等");
     }
 
-    /// worker 线程 panic（handler panic）→ shutdown join 返 Err（ShutdownError），不静默吞（relay F6 同款）。
+    /// worker 线程 panic（handler panic）→ shutdown join 返 Err（ShutdownError），不静默吞（relay F6 同款）；
+    /// 且 panic unwind 仍经 [`super::StoppedOnExit`] 守卫标 Unhealthy（F3：原 `mark_stopped` 在 `block_on`
+    /// 后，被 panic 跳过 → readyz 误报 Healthy；守卫修复后此断言成立）。
     #[tokio::test]
-    async fn worker_propagates_thread_panic_on_shutdown() {
+    async fn worker_panic_propagates_and_marks_stopped() {
         let worker = spawn_consumer(
             "event_consumer:audit:session.created".to_string(),
             finite_stream(&[("evt-1", b"a")]),
@@ -462,6 +475,11 @@ mod tests {
         assert!(
             worker.shutdown().await.is_err(),
             "worker 线程 panic 须经 join 上抛 ShutdownError"
+        );
+        assert_eq!(
+            worker.health().status(),
+            HealthStatus::Unhealthy,
+            "panic unwind 仍须经退出守卫标 Unhealthy（readyz 翻；F3）"
         );
     }
 

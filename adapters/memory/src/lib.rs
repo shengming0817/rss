@@ -361,8 +361,10 @@ pub struct InMemClaimer {
 impl InMemClaimer {
     /// 新建空 claimer，绑定消费者组。
     ///
-    /// `pub`：供 dev-root demo 组合根（`journeys`）为 demo 拓扑 consumer worker 注入幂等去重
-    /// 替身（#1171）。生产走 redis/pg claimer。
+    /// `pub`：供 dev-root demo 组合根（`journeys` / `examples`）跨 crate 构造（生产 bin 经 cargo-deny 连
+    /// `memory` 都依赖不到 ⇒ in-mem 生产不可达，TOPO-INMEM-SEAL-01 主守卫 Hard）。dev root **须**经
+    /// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造、**不**直接 raw-new——把 in-mem 构造
+    /// 收束到已校验的拓扑决策（决策绑定纪律 Medium，review #274 F6/C6）；生产走 redis/pg claimer。
     pub fn new(group: ConsumerGroup) -> Self {
         Self {
             seen: Arc::new(Mutex::new(HashSet::new())),

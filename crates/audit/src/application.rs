@@ -203,7 +203,8 @@ where
                     error = %e,
                     "audit handler: session-created payload decode failed"
                 );
-                SubscriberHandlerError::new(e)
+                // 永久：malformed payload 重投无意义（F2/C2）。
+                SubscriberHandlerError::permanent(e)
             })?;
             // tenant fail-closed：非 canonical UUID 即拒（tenancy.md），不静默落空租户。
             let tenant = vocab::TenantId::parse(&payload.tenant_id).map_err(|e| {
@@ -212,7 +213,8 @@ where
                     error = %e,
                     "audit handler: non-canonical tenant, refusing to audit"
                 );
-                SubscriberHandlerError::new(e)
+                // 永久：非 canonical 租户重投无意义（F2/C2）。
+                SubscriberHandlerError::permanent(e)
             })?;
             // actor：subject 是 typed `uuid::Uuid`（generated `format:uuid`，#1277 F1）——非 UUID 在 payload
             // decode 即 fail-closed（上方 `from_slice`，由 `rejects_non_canonical_subject` 守），此处直接
@@ -224,7 +226,8 @@ where
                     error = %e,
                     "audit handler: invalid audit action literal"
                 );
-                SubscriberHandlerError::new(e)
+                // 永久：action literal 非法是编程错误，重投无意义（F2/C2）。
+                SubscriberHandlerError::permanent(e)
             })?;
             // session_id fail-closed：非 canonical UUID 即拒（审计 resource id 是 typed `ids::SessionId`，
             // 不裸 String；canonical 化后写入，与 tenant/actor 同纪律，F3）。超长输入由 UUID 定长隐式排除。
@@ -234,7 +237,8 @@ where
                     error = %e,
                     "audit handler: non-canonical session_id, refusing to audit"
                 );
-                SubscriberHandlerError::new(e)
+                // 永久：非 canonical session_id 重投无意义（F2/C2）。
+                SubscriberHandlerError::permanent(e)
             })?;
             let record = AuditRecord {
                 tenant,
@@ -251,7 +255,8 @@ where
                     error = %e,
                     "audit handler: chain append failed"
                 );
-                SubscriberHandlerError::new(e)
+                // 瞬态：append/存储失败可恢复，走 ConsumerBase 有界重试预算，不首投即 DLX（F2/C2）。
+                SubscriberHandlerError::transient(e)
             })?;
             Ok(())
         })

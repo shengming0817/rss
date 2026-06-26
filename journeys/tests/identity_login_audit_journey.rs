@@ -37,9 +37,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use audit::AuditDomain;
+use bootstrap::replaydeps::resolve;
 use bootstrap::shutdown::ShutdownStack;
-use bootstrap::{SubscriberBinding, SubscriberHandler, adapt_subscriber_handler};
-use consistency::{Entry, HandleResult, IdemKey, PermanentError, PermanentErrorKind};
+use bootstrap::{
+    IdempotencyConfig, ResolvedIdempotency, SubscriberBinding, SubscriberHandler, Topology,
+    adapt_subscriber_handler,
+};
+use consistency::{
+    EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, PermanentError,
+    PermanentErrorKind, SeenState,
+};
 use diport::{
     DynDeadLetterStore, DynManagedResource, Message, OutboxEmitter, OutboxEnvelopeParts,
     Subscriber, Topic,
@@ -159,18 +166,71 @@ async fn wait_until(mut pred: impl FnMut() -> bool) -> Result<()> {
     Ok(())
 }
 
+/// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
+/// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造，**不**直接 raw-new——把 in-mem 构造收束到
+/// 已校验的拓扑决策（review #274 F6/C6：原 journey 直接 `InMemClaimer::new` 旁路了 resolve 决策绑定）。
+fn demo_claimer(group: consistency::ConsumerGroup) -> Result<InMemClaimer> {
+    match resolve(Topology::Demo, IdempotencyConfig::default())? {
+        ResolvedIdempotency::Demo => Ok(InMemClaimer::new(group)),
+        other => anyhow::bail!("demo journey 须解析为 Demo 幂等决策，实得 {other:?}"),
+    }
+}
+
+/// 记录型幂等 claimer（F5 可观测替身）：包内层 claimer，计 `check` 调用次数 + `Duplicate` 命中次数，
+/// 让重投测试可等待「第二条同 EventId 已被 consumer 读取并判 Duplicate」这一**中间事实**（check_count==2 &&
+/// duplicate_count==1），替代固定 sleep 的假阳性（review #274 F5/C5）。
+struct RecordingClaimer<S> {
+    inner: S,
+    check_count: Arc<AtomicU32>,
+    duplicate_count: Arc<AtomicU32>,
+}
+
+impl<S> RecordingClaimer<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            check_count: Arc::new(AtomicU32::new(0)),
+            duplicate_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+    fn check_count(&self) -> Arc<AtomicU32> {
+        self.check_count.clone()
+    }
+    fn duplicate_count(&self) -> Arc<AtomicU32> {
+        self.duplicate_count.clone()
+    }
+}
+
+impl<S: IdempotencyStore + Send + Sync> IdempotencyStore for RecordingClaimer<S> {
+    async fn check(&self, key: &IdemKey) -> Result<SeenState, EngineError> {
+        let state = self.inner.check(key).await?;
+        self.check_count.fetch_add(1, Ordering::SeqCst);
+        if matches!(state, SeenState::Duplicate) {
+            self.duplicate_count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(state)
+    }
+    async fn commit(&self, key: &IdemKey) -> Result<(), EngineError> {
+        self.inner.commit(key).await
+    }
+    async fn release(&self, key: &IdemKey) -> Result<(), EngineError> {
+        self.inner.release(key).await
+    }
+}
+
 /// Demo 拓扑 consumer worker 接线（#1171）：MemBus **先**订阅（先于发布，token 与 stream 同源）→ spawn
 /// `ConsumerWorker`（专用线程驱动 `run_consumer`）→ `register_detached` 进 `ShutdownStack`。返回 worker 的
-/// health 句柄供断言（worker 已 move 进 stack）。
+/// health 句柄供断言（worker 已 move 进 stack）。`claimer` 由调用方经 [`demo_claimer`] 决策绑定构造（F6），
+/// 重投测试可传 [`RecordingClaimer`] 观测幂等中间事实（F5）。
 ///
 /// `register_detached`（非 `register_with_token`）：subscribe 在 callsite 先于 spawn、token 须与 stream 同源，
 /// worker 后台线程监听自持 token、于 `ManagedResource::shutdown` 自取消（不依赖 stack 阶段 1 广播）。
 #[allow(clippy::too_many_arguments)]
-// reason: journey 接线 helper 的参数集（bus/group/contract_id/topic/dlx/handler/token/stack 各自语义独立）；
-// 聚合 struct 仅此 3 测试复用、收益低，item-level carve-out（error-handling.md §Carve-out）。
-async fn wire_demo_consumer<H>(
+// reason: journey 接线 helper 的参数集（bus/claimer/contract_id/topic/dlx/handler/token/stack 各自语义独立）；
+// 聚合 struct 仅此 4 测试复用、收益低，item-level carve-out（error-handling.md §Carve-out）。
+async fn wire_demo_consumer<H, S>(
     bus: &MemBus,
-    group: consistency::ConsumerGroup,
+    claimer: Arc<S>,
     contract_id: &'static str,
     topic: &'static str,
     dlx: MemDeadLetterStore,
@@ -180,8 +240,8 @@ async fn wire_demo_consumer<H>(
 ) -> Result<Arc<WorkerHealth>>
 where
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+    S: IdempotencyStore + Send + Sync + 'static,
 {
-    let claimer = Arc::new(InMemClaimer::new(group));
     // 订阅须先于发布（in-mem 无重放）：同步 subscribe 得 stream，再 spawn worker 驱动。
     let stream = bus
         .subscriber()
@@ -253,9 +313,10 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     } = binding;
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    let claimer = Arc::new(demo_claimer(group)?);
     let health = wire_demo_consumer(
         &bus,
-        group,
+        claimer,
         contract_id,
         topic,
         MemDeadLetterStore::new(),
@@ -363,9 +424,13 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    // F5：RecordingClaimer 包决策绑定的 demo claimer，暴露 check/duplicate 计数供可观测等待（去固定 sleep）。
+    let recording = Arc::new(RecordingClaimer::new(demo_claimer(group)?));
+    let check_count = recording.check_count();
+    let duplicate_count = recording.duplicate_count();
     wire_demo_consumer(
         &bus,
-        group,
+        recording,
         contract_id,
         topic,
         MemDeadLetterStore::new(),
@@ -401,10 +466,12 @@ async fn relay_redelivery_audits_once() -> Result<()> {
             .await
             .map_err(|_| anyhow::anyhow!("emit"))?;
     }
-    wait_until(|| !audit.is_empty()).await?;
-    // reason: MemBus 同进程投递极快，50ms 足够二次投递被消费+Duplicate 短路；非确定性 predicate
-    // （Duplicate 不增 handler 计数，无可 poll 信号），in-mem 路径 flaky 风险可忽略。
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // F5：等可观测中间事实——第二条同 EventId 已被 consumer 读取（check_count==2）且判 Duplicate
+    // （duplicate_count==1），证「第二条已消费并幂等短路」，替代固定 sleep 的假阳性（review #274 F5/C5）。
+    wait_until(|| {
+        check_count.load(Ordering::SeqCst) >= 2 && duplicate_count.load(Ordering::SeqCst) >= 1
+    })
+    .await?;
 
     let failures = stack.shutdown().await;
     assert!(
@@ -412,6 +479,16 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         "ShutdownStack 关闭无失败: {failures:?}"
     );
 
+    assert_eq!(
+        check_count.load(Ordering::SeqCst),
+        2,
+        "两条投递均被 consumer 读取（idempotency check 各一次）"
+    );
+    assert_eq!(
+        duplicate_count.load(Ordering::SeqCst),
+        1,
+        "第二条同 EventId 判 Duplicate 恰一次（幂等短路可观测证据，替代 sleep 假阳性，F5/C5）"
+    );
     assert_eq!(
         audit.audited().len(),
         1,
@@ -440,9 +517,10 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     } = single_subscription(registry)?;
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    let claimer = Arc::new(demo_claimer(group)?);
     wire_demo_consumer(
         &bus,
-        group,
+        claimer,
         contract_id,
         topic,
         MemDeadLetterStore::new(),
@@ -501,9 +579,10 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     let dlx = MemDeadLetterStore::new();
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    let claimer = Arc::new(demo_claimer(group)?);
     wire_demo_consumer(
         &bus,
-        group,
+        claimer,
         contract_id,
         topic,
         dlx.clone(),

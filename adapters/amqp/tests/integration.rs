@@ -128,6 +128,53 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     Ok(())
 }
 
+/// (F4/C4) 每订阅独立 channel：同 subscriber 订 A(tokenA) + B(tokenB)，cancel **tokenA** → 流 A 终止，但
+/// 流 B **仍能收到**后续发到 B 的消息——取消单订阅只关本订阅 channel，不连带关闭共享 channel 停掉其它 topic
+/// consumer（review #274 F4：原 `self.channel` 共享，任一 cancel 关 channel 会连带终止同实例其它订阅）。
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_persub_cancel").await?;
+    let token_a = CancellationToken::new();
+    let token_b = CancellationToken::new();
+    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-persub").await?;
+    let mut stream_a = subscriber
+        .subscribe_ackable(Topic::new("rss.it.persub-a"), token_a.clone())
+        .await?;
+    let mut stream_b = subscriber
+        .subscribe_ackable(Topic::new("rss.it.persub-b"), token_b.clone())
+        .await?;
+
+    // 取消 A 的 token：仅关 A 的 channel。
+    token_a.cancel();
+    let ended_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next()).await?;
+    assert!(ended_a.is_none(), "A 流取消后须终止（Ok(None)）");
+
+    // A 取消后发到 B → B 仍能收到（B 的 channel/consumer 未被 A 的 cancel 连带关闭——回归守卫）。
+    let publisher = AmqpPublisher::connect(&url, "amqp-it-persub-pub").await?;
+    publisher
+        .publish(PublishRequest {
+            topic: Topic::new("rss.it.persub-b"),
+            event_id: MessageId::new("evt-persub-b"),
+            payload: b"to-b-after-a-cancel".to_vec(),
+        })
+        .await?;
+    let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
+        .await?
+        .ok_or_else(|| anyhow!("B 流在 A 取消后关闭（回归：共享 channel 被连带关闭）"))?;
+    assert_eq!(delivery_b.message.payload, b"to-b-after-a-cancel".to_vec());
+    delivery_b
+        .acker
+        .settle(AckAction::Ack)
+        .await
+        .map_err(|e| anyhow!("settle ack failed: {e}"))?;
+
+    token_b.cancel();
+    Publisher::shutdown(&publisher).await?;
+    AckableSubscriber::shutdown(&subscriber).await?;
+    Ok(())
+}
+
 /// 跨-vhost 隔离（per-domain vhost 硬命名空间边界，#1137）：同容器建两个 vhost，发到 vhost-a → vhost-a
 /// 订阅者收到、vhost-b 订阅者在超时内无投递（vhost 是 AMQP 硬边界，跨 vhost 不路由）。这是跨域真隔离 seam。
 #[tokio::test(flavor = "multi_thread")]

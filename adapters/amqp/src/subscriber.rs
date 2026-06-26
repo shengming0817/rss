@@ -29,12 +29,14 @@ use crate::settle::{SettleMode, settle_mode};
 /// 取值依据：RabbitMQ 推荐 100–300（ref: rabbitmq docs/confirms §prefetch / consumer-prefetch）。
 const PREFETCH: u16 = 100;
 
-/// AMQP 事件订阅 adapter（lapin）。raw client（`Arc<Connection>` + `Channel`）**私有**——仅本 adapter
-/// 内部（subscribe_ackable / shutdown）使用，不向 crate 内其它模块暴露 raw 连接。
-/// impl `AckableSubscriber` + `ManagedResource`。
+/// AMQP 事件订阅 adapter（lapin）。raw `Arc<Connection>` **私有**——仅本 adapter 内部使用，不向 crate 内
+/// 其它模块暴露 raw 连接。impl `AckableSubscriber` + `ManagedResource`。
+///
+/// **每订阅独立 channel**（review #274 F4/C4）：`subscribe_ackable` 每次从 `conn` 新开一个 channel 承载该
+/// 订阅，token cancel 只关**本订阅** channel，不连带终止同实例其它 topic 的 consumer；subscriber 级 shutdown
+/// 关闭整个 `conn`（其下所有订阅 channel 随之关闭）。
 pub struct AmqpSubscriber {
     conn: Arc<Connection>,
-    channel: Channel,
     name: String,
 }
 
@@ -47,38 +49,36 @@ impl AmqpSubscriber {
     ) -> Result<Self, conn::AmqpConnectError> {
         let name = name.into();
         // confirm=false：subscriber 不需 publisher confirms。
-        let (conn, channel) = conn::connect(url, &name, false).await?;
-        Ok(Self {
-            conn,
-            channel,
-            name,
-        })
-    }
-
-    /// 声明 durable queue（与默认 exchange routing key=topic 对齐，见 publisher）。
-    /// `subscribe_ackable`（manual-ack）使用。
-    async fn declare_durable_queue(&self, topic_name: &str) -> Result<(), SubscriberError> {
-        self.channel
-            .queue_declare(
-                topic_name.into(),
-                QueueDeclareOptions {
-                    durable: true,
-                    ..Default::default()
-                },
-                FieldTable::default(),
-            )
-            .await
-            .map(|_| ())
-            .map_err(SubscriberError::new)
+        // reason: 订阅 channel 由 subscribe_ackable 按需 per-subscription 新开（F4）；connect 借
+        // conn::connect 拿连接 + redaction 日志，其返回的初始 channel 不用于订阅，drop 即可。
+        let (conn, _channel) = conn::connect(url, &name, false).await?;
+        Ok(Self { conn, name })
     }
 }
 
-/// at-least-once 取消（`AckableSubscriber::subscribe_ackable` 专用）：token cancel → **关闭 channel**。
+/// 在给定 channel 上声明 durable queue（与默认 exchange routing key=topic 对齐，见 publisher）。
+/// `subscribe_ackable`（manual-ack）在其 per-subscription channel 上调用。
+async fn declare_durable_queue(channel: &Channel, topic_name: &str) -> Result<(), SubscriberError> {
+    channel
+        .queue_declare(
+            topic_name.into(),
+            QueueDeclareOptions {
+                durable: true,
+                ..Default::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(SubscriberError::new)
+}
+
+/// at-least-once 取消（`AckableSubscriber::subscribe_ackable` 专用）：token cancel → **关闭本订阅 channel**。
 /// manual-ack（`no_ack=false`）下，已投递未 settle 的消息是 channel 上的 in-flight unacked；`basic_cancel`
 /// 仅停**新**投递、**不**动 in-flight，会致其滞留至 channel 关闭才重投。关 channel 令 broker 立即 requeue
 /// 该 channel 上全部 unacked 投递（RabbitMQ channel-close 语义），保证取消即可被其它 consumer 重收（review
-/// #265 F2/C2）。单 subscriber 单 channel（见 `AmqpSubscriber`）⇒ 关 channel 即终止本订阅，`shutdown` 二次
-/// 关闭幂等降级（warn）。`channel` 是 Clone（cheap handle）。
+/// #265 F2/C2）。**每订阅独立 channel**（review #274 F4/C4，见 `AmqpSubscriber`）⇒ 关的是**本订阅**的
+/// channel，不连带终止同 subscriber 其它 topic 的 consumer；`channel` 是 Clone（cheap handle）。
 async fn cancel_ackable_on_token(channel: Channel, token: CancellationToken) {
     token.cancelled().await;
     if let Err(error) = channel
@@ -174,14 +174,20 @@ impl AckableSubscriber for AmqpSubscriber {
         // 稳定 consumer tag（按 name+topic 派生）：重连/重订阅复用同一 tag，不变成新消费者
         // （eventbus.md §DLX「consumer group 命名稳定」）。
         let consumer_tag = format!("{}-ack-{}", self.name, topic_name);
+        // 每订阅独立 channel（review #274 F4/C4）：token cancel 关本 channel 不连带停掉同 subscriber 其它
+        // topic 的 consumer。channel 由本订阅的 consumer stream + cancel future 持有（owned），随流终止释放。
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
         // prefetch：限 channel 上 unacked 消息上限（P7 at-least-once 背压，RabbitMQ 推荐 100–300）。
-        self.channel
+        channel
             .basic_qos(PREFETCH, BasicQosOptions::default())
             .await
             .map_err(SubscriberError::new)?;
-        self.declare_durable_queue(topic_name).await?;
-        let consumer = self
-            .channel
+        declare_durable_queue(&channel, topic_name).await?;
+        let consumer = channel
             .basic_consume(
                 topic_name.into(),
                 consumer_tag.as_str().into(),
@@ -195,9 +201,9 @@ impl AckableSubscriber for AmqpSubscriber {
             .await
             .map_err(SubscriberError::new)?;
 
-        // Consumer → Delivery（携 acker）。取消经 take_until(cancel_ackable_on_token)：token cancel → 关 channel
-        // 令 broker requeue in-flight unacked（at-least-once 取消语义）。
-        // consumer_tag 已用于 basic_consume（稳定 tag）；关 channel 取消全 consumer，cancel future 不再需 tag。
+        // Consumer → Delivery（携 acker）。取消经 take_until(cancel_ackable_on_token)：token cancel → 关本订阅
+        // channel 令 broker requeue in-flight unacked（at-least-once 取消语义），不影响同 subscriber 其它订阅。
+        // consumer_tag 已用于 basic_consume（稳定 tag）；关 channel 取消该 channel 上 consumer，cancel future 不再需 tag。
         let stream = consumer
             .filter_map(|res| async move {
                 match res {
@@ -212,17 +218,19 @@ impl AckableSubscriber for AmqpSubscriber {
                     }
                 }
             })
-            .take_until(cancel_ackable_on_token(self.channel.clone(), token));
+            .take_until(cancel_ackable_on_token(channel.clone(), token));
         tracing::info!(target: "amqp", resource = %self.name, topic = topic_name, "amqp ackable subscribe started");
         Ok(Box::pin(stream))
     }
 
     async fn shutdown(&self) -> Result<(), SubscriberError> {
-        self.channel
+        // subscriber 级关闭：关整个 connection（其下所有 per-subscription channel 随之关闭 → broker requeue
+        // 各 channel 上 in-flight unacked）。每订阅 channel 已由各自 token cancel 独立关闭（F4/C4）。
+        self.conn
             .close(REPLY_SUCCESS, "ackable subscriber shutdown".into())
             .await
             .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(e), "amqp channel close error (ackable)");
+                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(e), "amqp connection close error (ackable)");
             })
             .map_err(SubscriberError::new)
     }
