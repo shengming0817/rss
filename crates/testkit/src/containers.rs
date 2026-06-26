@@ -22,6 +22,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use testcontainers::ContainerAsync;
+use testcontainers::ImageExt;
 use testcontainers::core::ExecCommand;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::mosquitto::Mosquitto;
@@ -155,10 +156,15 @@ pub async fn env_or_postgres() -> Result<PgFixture> {
         });
     }
     // 默认：self-provision 容器（fail-closed）。
+    // PG 镜像 tag 固定 16-alpine：迁移刻意要求 PG 13+ core（`0002_create_outbox.sql` 用 `gen_random_uuid()`
+    // 无 pgcrypto 扩展）；testcontainers-modules `Postgres::default()` 的默认 tag < 13 缺该内置函数，会令
+    // run_migrations 在 0002 处 42883 失败。固定 13+ 让容器与迁移的 PG 版本前提对齐（修 latent 测试 harness
+    // 漂移：集成 lane opt-in 不入 CI，此前未暴露）。
     let container = Postgres::default()
         .with_db_name(PG_DB)
         .with_user(PG_USER)
         .with_password(PG_PASSWORD)
+        .with_tag("16-alpine")
         .start()
         .await?;
     let host = container.get_host().await?.to_string();

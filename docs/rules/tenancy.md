@@ -66,6 +66,16 @@ policy 约束。业务池以 rss_app 连接的 dual-pool 接线是 follow-up（b
 注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
 生产 owner 须为非 superuser。
 
+outbox / saga_journal / projection_events 是**无 `tenant_id` 列的全局表**，不在 `schema-rls` 检查
+范围。这些表以其它机制保证数据隔离：saga_journal / projection_events 依赖 seq 全局顺序 + consumer
+group 隔离；outbox 依赖 partition_key routing。因此，outbox `partition_key` 若用于有序投递**必须自带
+tenant scope**（含 tenantId 或全局唯一如 sessionId），否则同 `(domain, partition_key)` 跨租户碰撞
+致 liveness DoS（队头阻塞传播到另一租户的投递队列）。架构强制（outbox 加 `tenant_id` 列 + RLS，或
+typed `PartitionKey::for_tenant(TenantId, ..)` 让 tenant scope 进类型层）见 issue **#1405**。
+
+> tenant-scoped key（如 `<tenantId>:<sessionId>`）可能含**凭据级** bearer 标识，故 `PartitionKey` 的 `Debug`
+> 脱敏（`<redacted>`），不以明文进日志（F3，#1211 review；同 `SessionId`）——见 `observability.md` §Outbox Envelope。
+
 ## ABAC authz 接线（permission-based）
 
 业务端点授权走 PDP 决策，不在 handler 硬编 role-name 字面量。

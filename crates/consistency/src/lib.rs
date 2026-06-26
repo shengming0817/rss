@@ -38,9 +38,12 @@ pub use idempotency::{
 };
 pub use outbox::{
     BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxRelay, OutboxSource,
-    OutboxSweeper, PermanentError, PermanentErrorKind, Topic, TopicError,
+    OutboxSweeper, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind, Topic,
+    TopicError,
 };
-pub use projection::{Lsn, ProjectionEvent, Projector};
+pub use projection::{
+    Lsn, PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrder, SerialInOrderGuarantor,
+};
 pub use reconcile::{
     Context, EntityId, EntityIdError, Outcome, ReconcileError, Reconciler, Request,
 };
@@ -54,7 +57,9 @@ mod static_dispatch_smoke {
 
     use super::idempotency::IdempotencyStore;
     use super::outbox::{OutboxBacklog, OutboxRelay, OutboxSource, OutboxSweeper};
-    use super::projection::{ProjectionEvent, Projector};
+    use super::projection::{
+        PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrderGuarantor,
+    };
     use super::reconcile::Reconciler;
     use super::saga::SagaStep;
 
@@ -79,4 +84,8 @@ mod static_dispatch_smoke {
     fn _drives_projector<P: Projector>(_p: &P) {}
     #[allow(dead_code)] // reason: 同上，证 ProjectionEvent sync trait 可泛型消费。
     fn _drives_projection_event<E: ProjectionEvent>(_e: &E) {}
+    #[allow(dead_code)] // reason: 同上，证串行有序 witness bound 可泛型消费（projection harness attach 门禁形）。
+    fn _drives_guarantor<G: SerialInOrderGuarantor>(_g: G) {}
+    #[allow(dead_code)] // reason: 同上，证 PartitionSerialDelivery 契约 trait 可泛型消费（witness 铸造侧）。
+    fn _drives_partition_serial<S: PartitionSerialDelivery>(_s: &S) {}
 }

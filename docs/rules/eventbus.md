@@ -128,6 +128,28 @@ claimed 行 stamp 该 token；**过期未续租**的 claim 可被新 token 重�
 
 `PermanentError` 只是错误分类，不自动把 Requeue 改成 Reject。
 
+## 投递顺序保证（seq + partition_key，#1211）
+
+outbox 行带 `seq BIGINT GENERATED ALWAYS AS IDENTITY`（表级单调序，应用不可写/伪造、隐式 NOT NULL、允许
+gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
+
+- **`partition_key IS NULL`（默认）= 无序并行**：不同 entry 投递顺序无保证，跨 worker 并行。消费方须幂等、
+  不依赖跨 entry 顺序（靠 inbox 去重 + 实体状态收敛）。emit 默认 `None`，行为同分区前。
+- **`partition_key` 设置 = 同 `(domain, partition_key)` 串行有序**：relay 经 `poll_pending` 的
+  **head-of-partition gating**——同 partition 仅放行 `min(seq)` 且尚未 `published` 的队头行（`NOT EXISTS`
+  更早未结清 sibling），即使多 worker + `SKIP LOCKED` 也**永不乱序、至多一条 in-flight**。`partition_key` 是
+  不透明聚合根路由键（= Debezium `aggregateid`），经 write 路径 `diport::OutboxEnvelopeParts::with_partition_key`
+  → adapter 落库，不进 `consistency::Entry`（relay 读侧无需透传，顺序由 SQL gating 承载）。
+
+**dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽）会**阻塞**该 partition 直到运维 re-drive
+（`UPDATE outbox SET status='pending', retry_count=0, retry_after=NULL WHERE event_id=…`）——这是与「串行有序」
+一致的唯一选择（放行后继破坏 in-order 不变式）。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+
+backlog `oldest_age` 增长。**已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
+聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 poll-only，
+被 gate 的后继仍计入 backlog depth（否则 stalled partition 对 SLO 失明）。INVARIANT: OUTBOX-PARTITION-ORDER-01。
+
+> 机制本 PR 交付；哪些域事件 opt-in 声明 `partition_key` 是应用层决策，独立推进（**#1404**）。
+
 ## Acker / 投递结算 seam（at-least-once）
 
 `Disposition` 表的「broker ack / nack」由 **ack seam** 落地（#1142）。纯逻辑驱动 `eventexec::run_consumer`
@@ -245,6 +267,14 @@ dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx
 projection consumer 必须 wire `bootstrap::with_consumer_base`。投影事件载体使用
 `consistency::ProjectionEvent` trait；outbox entry 与 saga journal event 都实现该 trait。
 retained journal、checkpoint、tailer 的完整约束以对应 rustdoc 和 ADR 为准。
+
+**串行有序门禁（fail-closed by absence，#1211）**：`ProjectionHarness::new` 必填一枚
+`consistency::SerialInOrderGuarantor` witness——非串行投递路径拿不到 witness ⇒ **编译期**挂不上 projection
+（投影 apply 须按序，乱序会损坏读模型）。witness 唯一经 `SerialInOrder::from_source(&S)` 铸造，`S` 须 impl
+`consistency::PartitionSerialDelivery`（声明其 read/poll 路径串行有序，如 `PgProjectionEvents` 的
+`ORDER BY id ASC`）。attach 门禁 + witness 类型封闭 = Hard（sealed）；witness 真实性（铸造源真串行）由 dylint
+`rss_partition_serial_allowlist` 守（仅 allowlist adapter/组合根可 impl `PartitionSerialDelivery`，Medium）。
+INVARIANT: PROJECTION-SERIAL-WITNESS-01 / PARTITION-SERIAL-IMPL-ALLOWLIST-01。
 
 outbox 派生投影的 durable journal（`projection_events`）由 emit 期同事务双写
 装饰器写入：append 收口单一 sanctioned 路径（sealed 写入入口），

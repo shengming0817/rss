@@ -26,7 +26,7 @@
 //!
 //! ref: adapters/postgres/src/saga_journal.rs（append-only adapter 范式）。
 
-use consistency::{Lsn, ProjectionEvent, Topic};
+use consistency::{Lsn, PartitionSerialDelivery, ProjectionEvent, Topic};
 use diport::RedactedSource;
 use sqlx::PgPool;
 
@@ -192,6 +192,13 @@ impl ProjectionEvent for PgProjectionRecord {
     }
 }
 
+/// `PgProjectionEvents` 是串行有序 source：`read_from` 以 `ORDER BY id ASC` 全局单调序逐行交付，
+/// 满足 [`PartitionSerialDelivery`] 契约（消费方按此 bound 铸造 `SerialInOrder` witness）。
+///
+/// INVARIANT: ADAPTER-PORT-FREEZE-14 —— PartitionSerialDelivery on PgProjectionEvents；
+/// 去掉 impl 或 read_from 改为非顺序查询即编译失败（smoke 测试 anti-vacuity）。
+impl PartitionSerialDelivery for PgProjectionEvents {}
+
 // ── 错误 ──────────────────────────────────────────────────────────────────────
 
 /// projection_events 操作失败（infra 故障）。
@@ -244,13 +251,22 @@ mod smoke {
 
     use core::marker::PhantomData;
 
-    use consistency::ProjectionEvent;
+    use consistency::{PartitionSerialDelivery, ProjectionEvent};
 
     fn assert_projection_event<T: ProjectionEvent>(_: PhantomData<T>) {}
 
     #[test]
     fn pg_projection_record_impl_frozen() {
         assert_projection_event(PhantomData::<super::PgProjectionRecord>);
+    }
+
+    /// INVARIANT: ADAPTER-PORT-FREEZE-14 —— PartitionSerialDelivery on PgProjectionEvents；
+    /// 去掉 impl 即编译失败（smoke anti-vacuity）。
+    fn _assert_partition_serial<T: PartitionSerialDelivery>() {}
+
+    #[test]
+    fn pg_projection_events_partition_serial_impl_frozen() {
+        _assert_partition_serial::<super::PgProjectionEvents>();
     }
 
     /// drift 测试：断言 0010 migration 含 append-only 强制（`REVOKE UPDATE, DELETE`）、

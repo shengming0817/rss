@@ -1450,6 +1450,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_partition_serial_allowlist"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "consistency",
+ "dylint_linting",
+ "dylint_testing",
+]
+
+[[package]]
 name = "rss_pdp_impl_adapter_only"
 version = "0.0.0"
 dependencies = [

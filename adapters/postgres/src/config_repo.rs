@@ -343,12 +343,13 @@ impl ConfigUnitOfWork for PgConfigRepo {
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
         // occurred_at；漏接编译期不可表达）。
-        let (contract, subject_id) = envelope.into_parts();
+        let (contract, subject_id, partition_key) = envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
             metadata_with_ambient(unix_secs(self.clock.now())).with_subject_id(subject_id),
-        );
+        )
+        .with_partition_key_opt(partition_key);
         let tenant_uuid = tenant_param(tenant);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。

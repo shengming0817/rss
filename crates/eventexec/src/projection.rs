@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use consistency::{EngineErrorKind, Lsn, ProjectionEvent, Projector};
+use consistency::{EngineErrorKind, Lsn, ProjectionEvent, Projector, SerialInOrderGuarantor};
 use diport::{CheckpointId, CheckpointOwner, CheckpointVersion, OwnerCheckpointStore, SaveOutcome};
 
 // ── 公开结果类型 ──────────────────────────────────────────────────────────────
@@ -58,6 +58,17 @@ pub enum ProjectionStop {
         /// 引擎错误种类。
         kind: EngineErrorKind,
     },
+    /// 事件 lsn 非升序——**release 也 fail-closed** 停批（`failed_at` = 首个乱序事件 lsn）。
+    ///
+    /// `SerialInOrderGuarantor` witness 只门禁 harness **构造**（编译期证上游声明串行）；运行期 batch
+    /// 的实际顺序由此守：遇到 `lsn < 前一已处理 lsn` 即停，乱序事件**不 apply、不推进 checkpoint**
+    /// 越过它（已成功前缀的 high-water 保留）。这把 witness 的「串行有序」声明从构造期延伸到 apply 期，
+    /// 使非串行 source（伪造 witness 或乱序拼 slice）无法静默乱序投影（F1，#1211 review）。
+    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01（运行期半段）。
+    OutOfOrder {
+        /// 首个乱序事件的 lsn。
+        failed_at: Lsn,
+    },
     /// checkpoint CAS `StaleVersion`——并发投影实例已推进，本实例被 fence，停批。
     Fenced,
     /// apply 生效但 checkpoint 写 infra 故障（幂等可重跑，不丢数据）。
@@ -88,11 +99,20 @@ where
     C: OwnerCheckpointStore + Send + Sync + 'static,
 {
     /// 构造投影 harness（必填参，缺失即编译错）。
+    ///
+    /// `_guarantor` 是串行有序 witness（[`consistency::SerialInOrderGuarantor`]）：非串行投递路径拿不到
+    /// 此 witness ⇒ **编译期**挂不上 projection（fail-closed by absence，
+    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01）。witness 是 ZST，不占运行期成本（不存入 struct 字段，
+    /// `run()` 签名不变）。唯一获取入口是 [`consistency::SerialInOrder::from_source`]，须传一个
+    /// [`consistency::PartitionSerialDelivery`] source——非串行投递路径无该 impl ⇒ 编译期拒绝。
+    ///
+    /// ref: serverlesstechnology/cqrs src/cqrs.rs（events applied in order）
     pub fn new(
         projector: Arc<P>,
         checkpoint: Arc<C>,
         owner: CheckpointOwner,
         projection_id: CheckpointId,
+        _guarantor: impl SerialInOrderGuarantor,
     ) -> Self {
         Self {
             projector,
@@ -125,7 +145,7 @@ where
         let result = ProjectionRun {
             applied: progress.applied,
             skipped: progress.skipped,
-            stop: stop_of(advance, progress.failure),
+            stop: stop_of(advance, progress.failure, progress.out_of_order),
         };
         // debug 级 run 完成摘要（生产默认关闭）。
         tracing::debug!(
@@ -161,9 +181,9 @@ where
         }
     }
 
-    /// apply 事件批：跳过 lsn ≤ baseline；遇第一个失败即 fail-closed 停批。
+    /// apply 事件批：乱序 / 跳过 lsn ≤ baseline / 遇第一个失败均 fail-closed 停批。
     ///
-    /// 前置条件：`events` 已按 lsn 升序排好（caller 保证，`debug_assert!` 防 footgun）。
+    /// 顺序由运行期 `lsn < prev` 检查守（**release 也生效**，F1 #1211 review）——非仅前置假设。
     async fn apply_batch<E: ProjectionEvent>(
         &self,
         events: &[E],
@@ -173,38 +193,49 @@ where
         let mut prev_lsn: Option<Lsn> = None;
         for event in events {
             let lsn = event.lsn();
-            // 单调递增 footgun 防护（仅 debug build；caller 语义前置保证）。
-            debug_assert!(
-                prev_lsn.is_none_or(|p| lsn >= p),
-                "projection: events must be in ascending lsn order"
-            );
+            // 单调递增 release fail-closed：witness 只证构造期串行，运行期顺序由此守（INVARIANT PROJECTION-SERIAL-WITNESS-01）。
+            if prev_lsn.is_some_and(|p| lsn < p) {
+                self.log_out_of_order(lsn);
+                progress.out_of_order = Some(lsn);
+                break;
+            }
             prev_lsn = Some(lsn);
             // 已在 baseline 以内的事件：已投过，跳过（断点续投语义）。
             if baseline.is_some_and(|b| lsn <= b) {
                 progress.skipped += 1;
                 continue;
             }
-            match self.projector.apply(event).await {
-                Ok(()) => {
-                    progress.applied += 1;
-                    progress.high_water = Some(lsn);
-                }
-                Err(e) => {
-                    // fail-closed：仅记元数据（绝不记 payload/PII），停批（不计入 applied）。
-                    tracing::warn!(
-                        owner = self.owner.as_str(),
-                        projection_id = self.projection_id.as_str(),
-                        lsn = lsn.get(),
-                        kind = ?e.kind(),
-                        topic = event.topic().as_str(),
-                        "projection: apply failed, stopping batch"
-                    );
-                    progress.failure = Some((lsn, e.kind()));
-                    break;
-                }
+            if let Err(e) = self.projector.apply(event).await {
+                self.log_apply_failed(lsn, e.kind(), event.topic().as_str());
+                progress.failure = Some((lsn, e.kind()));
+                break;
             }
+            progress.applied += 1;
+            progress.high_water = Some(lsn);
         }
         progress
+    }
+
+    /// 结构化 warn：乱序 lsn 致 fail-closed 停批（仅元数据，无 payload/PII）。
+    fn log_out_of_order(&self, lsn: Lsn) {
+        tracing::warn!(
+            owner = self.owner.as_str(),
+            projection_id = self.projection_id.as_str(),
+            lsn = lsn.get(),
+            "projection: out-of-order lsn, stopping batch fail-closed"
+        );
+    }
+
+    /// 结构化 warn：apply 失败致 fail-closed 停批（仅元数据，无 payload/PII）。
+    fn log_apply_failed(&self, lsn: Lsn, kind: EngineErrorKind, topic: &str) {
+        tracing::warn!(
+            owner = self.owner.as_str(),
+            projection_id = self.projection_id.as_str(),
+            lsn = lsn.get(),
+            kind = ?kind,
+            topic = topic,
+            "projection: apply failed, stopping batch"
+        );
     }
 
     /// CAS 推进 checkpoint 到 `hw`：`Saved` → Advanced；`StaleVersion` → warn + Fenced；
@@ -277,16 +308,24 @@ struct BatchProgress {
     high_water: Option<Lsn>,
     /// 第一个失败位点（lsn, kind）；None = 全批成功。
     failure: Option<(Lsn, EngineErrorKind)>,
+    /// 首个乱序事件 lsn（release fail-closed）；None = 顺序合法。与 `failure` 互斥（break 于首个命中）。
+    out_of_order: Option<Lsn>,
 }
 
-/// 把 advance 结论 + failure 组合成对外 `ProjectionStop`。
-fn stop_of(advance: Advance, failure: Option<(Lsn, EngineErrorKind)>) -> ProjectionStop {
+/// 把 advance 结论 + failure + 乱序停因组合成对外 `ProjectionStop`。
+fn stop_of(
+    advance: Advance,
+    failure: Option<(Lsn, EngineErrorKind)>,
+    out_of_order: Option<Lsn>,
+) -> ProjectionStop {
     match advance {
         Advance::Fenced => ProjectionStop::Fenced,
         Advance::Unsaved => ProjectionStop::CheckpointUnsaved,
-        Advance::Advanced | Advance::NoChange => match failure {
-            Some((failed_at, kind)) => ProjectionStop::ApplyFailed { failed_at, kind },
-            None => ProjectionStop::Completed,
+        // out_of_order 与 failure 互斥（apply_batch break 于首个命中）；乱序优先报 OutOfOrder。
+        Advance::Advanced | Advance::NoChange => match (out_of_order, failure) {
+            (Some(failed_at), _) => ProjectionStop::OutOfOrder { failed_at },
+            (None, Some((failed_at, kind))) => ProjectionStop::ApplyFailed { failed_at, kind },
+            (None, None) => ProjectionStop::Completed,
         },
     }
 }
@@ -303,6 +342,8 @@ mod tests {
         Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
         OwnerCheckpointStore, SaveOutcome,
     };
+
+    use consistency::PartitionSerialDelivery;
 
     use super::{ProjectionHarness, ProjectionRun, ProjectionStop};
 
@@ -524,6 +565,11 @@ mod tests {
         Arc<RecordingProjector>,
         Arc<FakeCheckpointStore>,
     ) {
+        // 测试 fake 串行 source（#[cfg(test)] 豁免 rss_partition_serial_allowlist dylint，
+        // `cargo dylint --all` 默认不扫 test targets）。
+        struct SerialFake;
+        impl PartitionSerialDelivery for SerialFake {}
+
         let p = Arc::new(projector);
         let c = Arc::new(store);
         let h = ProjectionHarness::new(
@@ -531,6 +577,7 @@ mod tests {
             Arc::clone(&c),
             CheckpointOwner::new("test-owner"),
             CheckpointId::new("test-proj"),
+            consistency::SerialInOrder::from_source(&SerialFake),
         );
         (h, p, c)
     }
@@ -807,17 +854,34 @@ mod tests {
         assert_eq!(p.applied_lsns(), vec![1u64, 2]);
     }
 
-    /// 15. 乱序事件在 debug build 触发 debug_assert!（单调递增 footgun 防护）。
+    /// 15. 乱序事件 **release 也 fail-closed**（F1，#1211 review）：不 panic、不静默 apply 越过。
     ///
-    /// 传入 [ev(5), ev(3)]：apply ev(5) 后 prev_lsn=5，ev(3) lsn < prev → panic。
-    /// 仅编译 debug_assertions 时触发（production release build 不影响）。
-    #[cfg(debug_assertions)]
+    /// 传入 [ev(1), ev(2), ev(5), ev(3)]：apply 1/2/5（high_water=5）后 ev(3) lsn < prev=5 →
+    /// 停批，ev(3) 不 apply；stop=OutOfOrder{failed_at=3}，checkpoint 推进到 5（已成功前缀），不越过乱序点。
+    // reason: 测试断言用 expect，checkpoint 必须存在（逻辑断言）。
+    #[allow(clippy::expect_used)]
     #[tokio::test]
-    #[should_panic(expected = "projection: events must be in ascending lsn order")]
-    async fn out_of_order_events_panic_in_debug() {
-        let (h, _p, _c) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
-        // ev(5) → ev(3) 乱序：prev_lsn=5, lsn=3 → debug_assert!(3 >= 5) 触发 panic。
-        let events = vec![ev(5), ev(3)];
-        h.run(&events).await;
+    async fn out_of_order_events_stop_fail_closed() {
+        let (h, p, c) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+        let events = vec![ev(1), ev(2), ev(5), ev(3)];
+        let result = h.run(&events).await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::OutOfOrder {
+                failed_at: Lsn::new(3)
+            },
+            "乱序 release 也 fail-closed 停批，报 OutOfOrder"
+        );
+        assert_eq!(result.applied, 3, "仅 lsn=1,2,5 已 apply（ev(3) 未 apply）");
+        assert_eq!(p.applied_lsns(), vec![1u64, 2, 5], "ev(3) 不被 apply");
+        // checkpoint 推进到已成功前缀 high-water=5，不越过乱序点。
+        let ckpt = c.current().expect("checkpoint should be saved");
+        assert_eq!(ckpt.offset, Lsn::new(5));
+        // anti-vacuity：合法升序批不触发 OutOfOrder（全 apply、Completed）。
+        let (h2, p2, _c2) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+        let ok = h2.run(&evs(1, 4)).await;
+        assert_eq!(ok.stop, ProjectionStop::Completed, "升序批正常完成");
+        assert_eq!(p2.applied_lsns(), vec![1u64, 2, 3, 4]);
     }
 }

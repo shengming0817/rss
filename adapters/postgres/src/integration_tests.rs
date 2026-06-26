@@ -1592,6 +1592,572 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     Ok(())
 }
 
+// ── t24-t29: outbox partition-key + seq 集成验证（#1211 Batch 2a）──────────────
+//
+// t24: seq 单调且应用不可伪造（GENERATED ALWAYS 拒绝显式写入）
+// t25: 同 partition 串行有序（head-of-partition gating：H→S2→S3 按序投递）
+// t26: 跨 partition 不互阻 + NULL-partition 无序并行路径不变
+// t27: dlx 队头阻塞 partition，re-drive 后恢复
+// t28: crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）
+// t29: sample_backlog 计入 gated 后继（backlog poll-only by design）
+
+use crate::outbox::{LEASE_TTL_SECONDS, STATUS_DLX};
+
+/// t24：append 3 行（同 domain，无 partition）→ SELECT seq 严格递增、互异、非空；
+/// 尝试 INSERT 显式写 seq 被 GENERATED ALWAYS 拒（应用不可伪造）。
+///
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t24");
+    let ids: Vec<_> = (0..3)
+        .map(|i| unique_event_id(&format!("t24-{i}")))
+        .collect();
+
+    // append 3 行，无 partition。
+    for eid in &ids {
+        let entry = make_entry(eid);
+        let env = make_test_env(&domain, "c");
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    // SELECT seq 并验证严格递增、互异、非空。
+    let seqs: Vec<i64> = sqlx::query_scalar(
+        "SELECT seq FROM outbox WHERE event_id = ANY($1::text[]) ORDER BY seq ASC",
+    )
+    .bind(ids.as_slice())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(seqs.len(), 3, "t24: 应有 3 行 seq");
+    for w in seqs.windows(2) {
+        assert!(
+            w[0] < w[1],
+            "t24: seq 应严格递增，实际 {} >= {}",
+            w[0],
+            w[1]
+        );
+    }
+
+    // GENERATED ALWAYS 拒绝应用显式写入 seq。
+    let fake_seq: i64 = 999_999_999;
+    let forge_id = unique_event_id("t24-forge");
+    let forge_result = sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status, seq) \
+         VALUES ($1, $2, 'test.event', 'c', $3, '{}'::jsonb, 'pending', $4)",
+    )
+    .bind(&forge_id)
+    .bind(&domain)
+    .bind(b"p".as_slice())
+    .bind(fake_seq)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        forge_result.is_err(),
+        "t24: GENERATED ALWAYS 应拒绝应用写入 seq（反真空：伪造尝试必须失败）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t25：同 (domain, 'p1') partition → `poll_pending` 仅返队头；relay → published → poll → 后继。
+///
+/// 反真空：S2/S3 在 H 未 published 前缺席（head-of-partition gating 生效）。
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t25_partition_serial_in_order() -> TestResult {
+    use consistency::PartitionKey;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t25");
+    let key = PartitionKey::parse("p1").unwrap();
+
+    let h_id = unique_event_id("t25-H");
+    let s2_id = unique_event_id("t25-S2");
+    let s3_id = unique_event_id("t25-S3");
+
+    // append H, S2, S3 同 (domain, 'p1')——顺序由 seq 的 IDENTITY 单调递增保证。
+    for eid in [&h_id, &s2_id, &s3_id] {
+        let entry = make_entry(eid);
+        let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    let (pub_ok, _) = RecordingPublisher::always_ok();
+    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_ok));
+
+    // poll → 仅 H（S2/S3 被 gate）。
+    let entries = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(entries.len(), 1, "t25: 首轮 poll 应仅返队头 H");
+    assert_eq!(
+        entries[0].idem_key().as_str(),
+        h_id,
+        "t25: 首轮 poll 必须是 H"
+    );
+    // 反真空：S2/S3 确实缺席。
+    assert!(
+        !entries.iter().any(|e| e.idem_key().as_str() == s2_id),
+        "t25: S2 不应出现（被 gate）"
+    );
+    assert!(
+        !entries.iter().any(|e| e.idem_key().as_str() == s3_id),
+        "t25: S3 不应出现（被 gate）"
+    );
+
+    // relay H → published。
+    let h_entry = entries.into_iter().next().unwrap();
+    let disp = outbox.relay(&h_entry).await?;
+    assert_eq!(disp, Disposition::Ack, "t25: relay H 应返 Ack");
+
+    // poll → S2（H 已 published，S2 现在是队头）。
+    let entries2 = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(entries2.len(), 1, "t25: 第二轮 poll 应仅返 S2");
+    assert_eq!(
+        entries2[0].idem_key().as_str(),
+        s2_id,
+        "t25: 第二轮 poll 必须是 S2"
+    );
+    // 反真空：S3 第二轮仍被 gate（与首轮 S3 缺席对称）。
+    assert!(
+        !entries2.iter().any(|e| e.idem_key().as_str() == s3_id),
+        "t25: S3 第二轮仍被 gate 不应出现"
+    );
+
+    // relay S2 → published。
+    let s2_entry = entries2.into_iter().next().unwrap();
+    outbox.relay(&s2_entry).await?;
+
+    // poll → S3。
+    let entries3 = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(entries3.len(), 1, "t25: 第三轮 poll 应仅返 S3");
+    assert_eq!(
+        entries3[0].idem_key().as_str(),
+        s3_id,
+        "t25: 第三轮 poll 必须是 S3"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t26：跨 partition 不互阻 + NULL-partition 无序并行路径不变。
+///
+/// 同 domain 下：p1-head + p2-head + 2 个 NULL-partition 行 → 一轮 poll 返 4 行。
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t26_cross_partition_and_null_parallel() -> TestResult {
+    use consistency::PartitionKey;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t26");
+
+    let p1_key = PartitionKey::parse("p1").unwrap();
+    let p2_key = PartitionKey::parse("p2").unwrap();
+
+    // p1-head, p2-head, null1, null2。
+    let p1_id = unique_event_id("t26-p1");
+    let p2_id = unique_event_id("t26-p2");
+    let n1_id = unique_event_id("t26-null1");
+    let n2_id = unique_event_id("t26-null2");
+
+    // p1-head
+    {
+        let entry = make_entry(&p1_id);
+        let env = make_test_env(&domain, "c").with_partition_key_opt(Some(p1_key));
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    // p2-head
+    {
+        let entry = make_entry(&p2_id);
+        let env = make_test_env(&domain, "c").with_partition_key_opt(Some(p2_key));
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    // null1, null2（无 partition）。
+    for nid in [&n1_id, &n2_id] {
+        let entry = make_entry(nid);
+        let env = make_test_env(&domain, "c");
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let entries = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(
+        entries.len(),
+        4,
+        "t26: p1-head + p2-head + null1 + null2 = 4 行（跨 partition 不互阻，NULL 不约束）"
+    );
+
+    // 验证四个预期 ID 都在返回集合中。
+    let ids_in: Vec<&str> = entries.iter().map(|e| e.idem_key().as_str()).collect();
+    for expected in [
+        p1_id.as_str(),
+        p2_id.as_str(),
+        n1_id.as_str(),
+        n2_id.as_str(),
+    ] {
+        assert!(
+            ids_in.contains(&expected),
+            "t26: {expected} 应在 poll 结果中"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t27：dlx 队头阻塞 partition，re-drive 后恢复。
+///
+/// append H, S2 同 partition；强制 H→dlx；poll 该 partition 空；
+/// re-drive H → relay → published → poll → S2。
+/// 反真空：NULL-partition dlx 行不阻塞任何东西。
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
+    use consistency::PartitionKey;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t27");
+    let key = PartitionKey::parse("part-dlx").unwrap();
+
+    let h_id = unique_event_id("t27-H");
+    let s2_id = unique_event_id("t27-S2");
+
+    // append H, S2 同 (domain, 'part-dlx')。
+    for eid in [&h_id, &s2_id] {
+        let entry = make_entry(eid);
+        let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    // 强制 H → dlx（直接 UPDATE status）。
+    sqlx::query("UPDATE outbox SET status = $1 WHERE event_id = $2")
+        .bind(STATUS_DLX)
+        .bind(&h_id)
+        .execute(&store.pool)
+        .await?;
+
+    // poll → 该 partition 空（H 在 dlx，S2 被 gate）。
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let blocked = outbox.poll_pending(&domain, 10).await?;
+    assert!(
+        blocked.is_empty(),
+        "t27: dlx 队头必须完全阻塞 partition（blocked={blocked:?}）"
+    );
+
+    // 反真空：NULL-partition dlx 行不阻塞任何东西。
+    let null_dlx_id = unique_event_id("t27-null-dlx");
+    let null_live_id = unique_event_id("t27-null-live");
+    for eid in [&null_dlx_id, &null_live_id] {
+        let entry = make_entry(eid);
+        let env = make_test_env(&domain, "c"); // no partition
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    sqlx::query("UPDATE outbox SET status = $1 WHERE event_id = $2")
+        .bind(STATUS_DLX)
+        .bind(&null_dlx_id)
+        .execute(&store.pool)
+        .await?;
+
+    let after_null_dlx = outbox.poll_pending(&domain, 10).await?;
+    assert!(
+        after_null_dlx
+            .iter()
+            .any(|e| e.idem_key().as_str() == null_live_id),
+        "t27: NULL-partition dlx 不阻塞 null_live 行（反真空）"
+    );
+
+    // re-drive H：把 H 从 dlx 重置回 pending。
+    sqlx::query(
+        "UPDATE outbox SET status = 'pending', retry_count = 0, retry_after = NULL WHERE event_id = $1",
+    )
+    .bind(&h_id)
+    .execute(&store.pool)
+    .await?;
+
+    // relay H → published。
+    let redriven = outbox.poll_pending(&domain, 10).await?;
+    let h_entry = redriven
+        .iter()
+        .find(|e| e.idem_key().as_str() == h_id)
+        .expect("t27: re-drive 后 H 应出现在 poll 结果中");
+    let disp = outbox.relay(h_entry).await?;
+    assert_eq!(disp, Disposition::Ack, "t27: relay H 应返 Ack");
+
+    // poll → S2 现在可见。
+    let unblocked = outbox.poll_pending(&domain, 10).await?;
+    assert!(
+        unblocked.iter().any(|e| e.idem_key().as_str() == s2_id),
+        "t27: H published 后 S2 应解除阻塞"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t28：crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）。
+///
+/// append H, S2 同 partition；置 H status='publishing', updated_at 很久之前（模拟崩溃）；
+/// poll → 仅 H（stale publishing 被重捞，S2 被 gate）；relay H→published → poll → S2。
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
+    use consistency::PartitionKey;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t28");
+    let key = PartitionKey::parse("part-crash").unwrap();
+
+    let h_id = unique_event_id("t28-H");
+    let s2_id = unique_event_id("t28-S2");
+
+    // append H, S2 同 partition。
+    for eid in [&h_id, &s2_id] {
+        let entry = make_entry(eid);
+        let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    // 模拟 H 崩溃：status=publishing, updated_at 回拨超 LEASE_TTL。
+    sqlx::query(
+        "UPDATE outbox SET status='publishing', updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+    )
+    .bind(LEASE_TTL_SECONDS + 10)
+    .bind(&h_id)
+    .execute(&store.pool)
+    .await?;
+
+    let (pub_ok, _) = RecordingPublisher::always_ok();
+    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_ok));
+
+    // poll → 仅 H（stale publishing 可捞，S2 被 gate）。
+    let entries = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(entries.len(), 1, "t28: crash recovery 仅应返回 H");
+    assert_eq!(entries[0].idem_key().as_str(), h_id, "t28: 返回的必须是 H");
+    assert!(
+        !entries.iter().any(|e| e.idem_key().as_str() == s2_id),
+        "t28: S2 被 stale-publishing H gate，不应出现"
+    );
+
+    // relay H → published。
+    let h_entry = entries.into_iter().next().unwrap();
+    let disp = outbox.relay(&h_entry).await?;
+    assert_eq!(disp, Disposition::Ack, "t28: relay H 应返 Ack");
+
+    // poll → S2（H published 后解锁）。
+    let entries2 = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(entries2.len(), 1, "t28: 第二轮 poll 应仅返 S2");
+    assert_eq!(
+        entries2[0].idem_key().as_str(),
+        s2_id,
+        "t28: 第二轮 poll 必须是 S2"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t29：sample_backlog 计入 gated 后继（backlog poll-only by design）。
+///
+/// H + 3 后继同 partition → `sample_backlog.depth()==4`（gate 不减 depth）；
+/// `poll_pending` 返 1（仅队头）。
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
+    use consistency::PartitionKey;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t29");
+    let key = PartitionKey::parse("part-backlog").unwrap();
+
+    // append H + 3 后继同 partition。
+    let ids: Vec<_> = (0..4)
+        .map(|i| unique_event_id(&format!("t29-{i}")))
+        .collect();
+    for eid in &ids {
+        let entry = make_entry(eid);
+        let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
+        store
+            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+
+    // sample_backlog depth = 4（全部计入，gate 不减少 backlog 深度）。
+    let sample = outbox.sample_backlog(&domain).await?;
+    assert_eq!(
+        sample.depth(),
+        4,
+        "t29: backlog depth 应计入所有 4 行（含 gated 后继），实际={}",
+        sample.depth()
+    );
+    assert_eq!(
+        sample.oldest_age_seconds(),
+        0,
+        "t29: fresh rows，gate 不扭曲 age（age 应为 0 秒），实际={}",
+        sample.oldest_age_seconds()
+    );
+
+    // poll_pending 仅返 1（队头）——反真空：gate 确实生效。
+    let polled = outbox.poll_pending(&domain, 10).await?;
+    assert_eq!(
+        polled.len(),
+        1,
+        "t29: poll_pending 应仅返队头（1 行），gate 生效"
+    );
+    assert_eq!(
+        polled[0].idem_key().as_str(),
+        ids[0],
+        "t29: poll_pending 返回的必须是 H（最小 seq 的队头）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t30：partition_key 经**真实 public port** `OutboxEnvelopeParts::with_partition_key` → `PgEmitter::emit`
+/// 落库（F5，#1211 review）。t24-t29 直调 adapter-private `OutboxEnvelope::with_partition_key_opt` 验 gating；
+/// 本用例补最易漏接的 **public port → adapter envelope 映射层**：经 `PgEmitter::emit` 写入后 `SELECT
+/// partition_key` 应等于传入 key（证 `into_parts` → `with_partition_key_opt` → INSERT $8 全链路透传）。
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试构造已知合法输入，item-level carve-out。
+async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
+    use consistency::PartitionKey;
+    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let event_id = unique_event_id("t30-pk-port");
+    let entry = Entry::new(
+        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+        IdemKey::parse(&event_id).unwrap(),
+        br#"{"sessionId":"s"}"#.to_vec(),
+    );
+    // tenant-scoped key（推荐形态 <tenantId>:<aggregateId>）经 public builder 传入。
+    let pk = "tenant-7:session-42";
+    crate::PgEmitter::new(&store, fixed_clock())
+        .emit(
+            entry,
+            OutboxEnvelopeParts::new(
+                vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                "subj-opaque-30",
+            )
+            .with_partition_key(PartitionKey::parse(pk).unwrap()),
+        )
+        .await?;
+
+    let row: (Option<String>,) =
+        sqlx::query_as("SELECT partition_key FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        row.0.as_deref(),
+        Some(pk),
+        "t30: public port with_partition_key 应经 into_parts → adapter envelope → INSERT 透传落库"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// t14：驱动**真实** `persist_session_and_emit` 的 rollback 分支——session INSERT 因 `to_timestamp` 溢出失败
 /// → co-tx 整体回滚 → session/outbox 两行皆无（OUTBOX-COTX-SESSION-01 负向 anti-vacuity，直测真实 method；
 /// review #1192 F1：补 t12 仅复刻 SQL 序列的盲区）。
@@ -2965,7 +3531,7 @@ async fn role_repo_tenant_row_isolation() -> TestResult {
 
 // 并发：同 (tenant,id) 并发 save → ON CONFLICT 收敛、全 Ok（无 PK 错逃逸）、终态单行；不同 id 并发 → 各自落库。
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 // reason: tokio::spawn join 必定成功（task 正常 Ok）；converged role 必定可查到；item-level carve-out（error-handling.md §Carve-out）。
 async fn role_repo_concurrent_save_converges() -> TestResult {
     use std::sync::Arc;

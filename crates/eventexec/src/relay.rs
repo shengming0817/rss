@@ -225,6 +225,13 @@ where
 /// 逐条中继一批 entry：发 `outbox_publish_total{status}`（含 Ack）+ 翻 [`TickOutcome`]（抽出控制
 /// [`relay_domain_once`] 认知复杂度 ≤15）。
 ///
+/// # INVARIANT: OUTBOX-RELAY-SERIAL-01
+///
+/// entries **顺序**投递（for 循环线性推进）；per-partition in-order 由 SQL head-of-partition gating
+/// （adapter `poll_pending` 只拿各 partition 最旧未投条目）+ CAS settle 承载，relay 本身不感知
+/// partition key。**禁止并行化** relay_batch——并行投递同 partition 多条会破坏顺序语义
+/// （outbox-seq-partition #1211，PROJECTION-SERIAL-WITNESS-01 的基础约束在 relay 侧的对应声明）。
+///
 /// 不在 relay 外套 select!：当前条 publish+CAS 跑完再退，在途写不丢；取消在下一轮 loop 顶部生效
 /// （单条有界，尊重 shutdown budget）。
 async fn relay_batch<A>(

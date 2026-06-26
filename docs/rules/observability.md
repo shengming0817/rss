@@ -169,6 +169,17 @@ envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed 
 （golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, subject)` 传入。domain + contract_id 收进
 **单一绑定值**，故二者之间无法漂移；`OutboxEnvelopeParts` 字段私有（input-struct-field-exclusion，Hard）。
 
+可选 `partition_key`（#1211）是 envelope 的有序投递路由列（不透明聚合根键，非 metadata、非 reserved
+funnel）：经 `OutboxEnvelopeParts::with_partition_key(key)`（未设即 `None`，无序并行）落 outbox 列，决定投递顺序分区（语义见
+`eventbus.md` §投递顺序保证）。`partition_key` **必须自带 tenant scope**（含 tenantId 或全局唯一如 sessionId）；
+outbox 表无 `tenant_id` 列、无 RLS，无 tenant scope 的 partition_key 同 `(domain, partition_key)` 跨租户碰撞
+致 liveness DoS——详见 `tenancy.md` §RLS 与全局表 + issue **#1405**。
+
+> **PII / 凭据边界**：推荐的 tenant-scoped key 可能含**凭据级** bearer 标识（sessionId 即 bearer token），故
+> `PartitionKey` / `OutboxEnvelopeParts` 的 `Debug` **脱敏**（值渲染 `<redacted>`，仅 presence 可见）——
+> **不以明文进结构化日志**（F3，#1211 review，同 `identity::SessionId` 范式）。定位 stalled partition 经受控
+> DB 查询（`SELECT partition_key FROM outbox WHERE event_id=…`），非日志明文；partition 级诊断信号见 issue #1406。
+
 两类 Hard 保证：
 
 - **producer 不可漏接** `occurred_at`：由 metadata funnel 的构造器 `OutboxMetadata::new(occurred_at)`

@@ -196,10 +196,13 @@ pub(crate) fn epoch_secs_to_time(secs: i64) -> SystemTime {
 ///
 /// `metadata` 经 [`OutboxMetadata`] sealed funnel 收口（拒 reserved key + 仅 opaque subject id，
 /// PII 边界；`observability.md` §outbox envelope）。
+/// `partition_key` 来自 [`diport::OutboxEnvelopeParts::partition_key`]，`None` = 无序并行（DB NULL）、
+/// `Some(s)` = 串行有序（head-of-partition gating，#1211）。
 pub(crate) struct OutboxEnvelope {
     domain: String,
     contract_id: String,
     metadata: OutboxMetadata,
+    partition_key: Option<String>,
 }
 
 impl OutboxEnvelope {
@@ -210,7 +213,14 @@ impl OutboxEnvelope {
             domain,
             contract_id,
             metadata,
+            partition_key: None,
         }
+    }
+
+    /// 设置可选分区键（builder；`None` = 无序并行，`Some(PartitionKey)` → adapter 内存 String，#1211）。
+    pub(crate) fn with_partition_key_opt(mut self, key: Option<consistency::PartitionKey>) -> Self {
+        self.partition_key = key.map(|k| k.as_str().to_string());
+        self
     }
 
     /// 借出 domain。
@@ -221,6 +231,11 @@ impl OutboxEnvelope {
     /// 借出 contract_id。
     pub(crate) fn contract_id(&self) -> &str {
         &self.contract_id
+    }
+
+    /// 借出可选分区键（`None` → DB NULL，无序并行；`Some(&str)` → 串行有序）。
+    pub(crate) fn partition_key(&self) -> Option<&str> {
+        self.partition_key.as_deref()
     }
 
     /// metadata 序列化为 JSON 字符串（绑 `$N::jsonb` 用）。
@@ -252,8 +267,8 @@ pub(crate) async fn append_outbox(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+        INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status, partition_key)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
         ON CONFLICT (event_id) DO NOTHING
         "#,
     )
@@ -264,6 +279,7 @@ pub(crate) async fn append_outbox(
     .bind(entry.payload())
     .bind(env.metadata_json())
     .bind(STATUS_PENDING)
+    .bind(env.partition_key())
     .execute(conn)
     .await?;
     Ok(())
@@ -301,22 +317,43 @@ impl PgOutbox {
 impl OutboxSource for PgOutbox {
     /// 扫描 `domain` 下至多 `limit` 条待发 entry（pending 且到期，或 lease 过期 stale publishing）。
     ///
-    /// `FOR UPDATE SKIP LOCKED` 尽力去重并发扫描（pool 直连下扫描锁随语句结束释放，**非**严格互斥）；
-    /// at-most-once 正确性由 `relay` 的 `acquire_lease` CAS + `settle_*` 的 lease_token 比对保证，不靠扫描锁。
+    /// **Head-of-partition gating（#1211）**：对 `partition_key IS NOT NULL` 的行，仅当同 (domain, partition_key)
+    /// 内所有 `seq < o.seq` 的行均已 `published` 时才放行，保证同 partition 内按 seq 顺序串行投递。
+    /// `partition_key IS NULL` 的行保持原语义——无序并行，不受 gate 约束。
+    ///
+    /// - **dlx fail-closed 语义**：队头进 dlx（`b.status <> 'published'`，dlx 计「未结清」）会**阻塞**该
+    ///   partition 直到运维 re-drive（`UPDATE outbox SET status='pending', retry_count=0, retry_after=NULL
+    ///   WHERE event_id=…`）——这是与「serial in order」一致的唯一选择。
+    /// - **已知前提**：`b.seq < o.seq` 队头判据假设同 partition 行按 seq 序提交，成立条件是同 partition 写入由
+    ///   聚合根并发控制（行锁/version CAS）串行化（partition = aggregate 标准契约）。
+    /// - **backlog 注意**：head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog
+    ///   depth（见 `sample_backlog` 注释），否则 stalled partition 对 SLO 失明。
+    ///
+    /// `FOR UPDATE OF o SKIP LOCKED` 尽力去重并发扫描；at-most-once 正确性由 `acquire_lease` CAS 保证。
     /// parse 失败（topic / idem_key 无效）→ `EngineErrorKind::Invariant`（我们写入的数据不该无效）。
+    ///
+    /// INVARIANT: OUTBOX-PARTITION-ORDER-01
     async fn poll_pending(&self, domain: &str, limit: usize) -> Result<Vec<Entry>, EngineError> {
         let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
             r#"
-            SELECT topic, event_id, payload
-            FROM outbox
-            WHERE domain = $1
+            SELECT o.topic, o.event_id, o.payload
+            FROM outbox o
+            WHERE o.domain = $1
               AND (
-                    (status = $4 AND (retry_after IS NULL OR retry_after <= now()))
-                 OR (status = $5 AND updated_at <= now() - make_interval(secs => $2))
+                    (o.status = $4 AND (o.retry_after IS NULL OR o.retry_after <= now()))
+                 OR (o.status = $5 AND o.updated_at <= now() - make_interval(secs => $2))
               )
-            ORDER BY retry_after NULLS FIRST, created_at
+              AND (o.partition_key IS NULL
+                OR NOT EXISTS (
+                    SELECT 1 FROM outbox b
+                    WHERE b.domain = o.domain
+                      AND b.partition_key = o.partition_key
+                      AND b.seq < o.seq
+                      AND b.status <> $6
+                ))
+            ORDER BY o.seq
             LIMIT $3
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF o SKIP LOCKED
             "#,
         )
         .bind(domain)
@@ -324,6 +361,7 @@ impl OutboxSource for PgOutbox {
         .bind(limit as i64)
         .bind(STATUS_PENDING)
         .bind(STATUS_PUBLISHING)
+        .bind(STATUS_PUBLISHED)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| {
@@ -470,6 +508,11 @@ fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &Publi
 }
 
 /// 进 dlx（运维须感知）。`permanent`：`true`=错误本身永久（首投即 DLX，跳过预算）；`false`=瞬态重试预算耗尽。
+///
+/// **排障路径**：relay 侧 Entry 不携 partition_key；dlx 冻结某 partition 时，运维可经
+/// `SELECT partition_key, domain FROM outbox WHERE event_id = $event_id` 定位被冻结的 partition，
+/// 再经 re-drive（`UPDATE outbox SET status='pending', retry_count=0, retry_after=NULL WHERE event_id=…`）
+/// 解冻队头并放行后继。主动 partition 级监控信号（batch dlx gauge）见 issue **#1406**（不在本 PR）。
 fn log_dlx(event_id: &str, attempts: i32, permanent: bool) {
     tracing::error!(target: "postgres", event_id, attempts, permanent, "outbox: publish failed, moved to dlx");
 }
@@ -530,6 +573,10 @@ impl OutboxBacklog for PgOutbox {
     /// SLO 对可恢复积压失明（relay 重捞但 gauge 报 0）。只排除 lease 仍有效的正常 in-flight。无可投递行 ⇒
     /// [`BacklogSample::empty`]。**不变式**：本谓词须随 `poll_pending` 同步改（集成测试 T16/T18 + stale-publishing
     /// 用例锁定漂移）。
+    ///
+    /// **head-of-partition gate 是 poll-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
+    /// partition 对 SLO 失明）。backlog 谓词刻意不含 head-of-partition gate（见 `poll_pending` INVARIANT:
+    /// OUTBOX-PARTITION-ORDER-01）。
     async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
         let row: (i64, i64) = sqlx::query_as(
             r#"

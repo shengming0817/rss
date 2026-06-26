@@ -56,7 +56,8 @@ impl OutboxEmitError {
 ///
 /// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain + contract_id
 /// 同源契约归属，#1193——business 不再裸 string 分别 author，杜绝 domain/contract_id 漂移）、`subject_id` 是
-/// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）。reserved envelope key
+/// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`partition_key` 是可选有序投递
+/// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`
 /// 取注入 `Clock`，#1129；trace 待 #1076 OTel；correlation 已接线 #1160；principal 待 #1397）。
 ///
@@ -66,23 +67,49 @@ impl OutboxEmitError {
 /// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
 /// 同 `ContractOwner::of_domain`，统一守卫见 #1327 / #1091）。
 ///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 —— `Debug` 仅输出路由元数据（`contract` 的 domain / contract_id），
-/// `subject_id` 固定渲染为 `<redacted>`，防主体标识经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 —— `Debug` 仅输出路由元数据（`contract` 的 domain / contract_id）；
+/// `subject_id` 固定渲染为 `<redacted>`；`partition_key` 只渲染 presence（Some/None），其值经 `PartitionKey`
+/// 脱敏 Debug 收口为 `<redacted>`（可能凭据级，如 tenant-scoped 含 sessionId，F3 #1211 review）。防主体标识 /
+/// 分区键经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
 #[derive(Clone)]
 pub struct OutboxEnvelopeParts {
     /// 契约绑定（domain + contract_id 同源；`generated::…::CONTRACT`）。
     contract: vocab::ContractBinding,
     /// opaque 主体标识（无 PII）。
     subject_id: String,
+    /// 可选有序投递分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。
+    partition_key: Option<consistency::PartitionKey>,
 }
 
 impl OutboxEnvelopeParts {
     /// 构造 envelope parts——`contract` 经契约派生常量绑定（非裸 string），`subject_id` 是 opaque 主体标识。
+    /// `partition_key` 默认 `None`（无序并行）；需有序投递时经 [`OutboxEnvelopeParts::with_partition_key`] 设置。
     pub fn new(contract: vocab::ContractBinding, subject_id: impl Into<String>) -> Self {
         Self {
             contract,
             subject_id: subject_id.into(),
+            partition_key: None,
         }
+    }
+
+    /// 设置有序投递分区键（builder，#1211）。
+    ///
+    /// 设置后同 `(domain, partition_key)` 的 outbox 行严格按 `seq` 顺序投递（head-of-partition gating）；
+    /// 未设（`None`）时与现有行为完全兼容——无序并行投递。
+    ///
+    /// **⚠ 必须 tenant-scoped**：`partition_key` **必须自带 tenant scope**（含 tenantId 或全局唯一如
+    /// sessionId）——outbox 表无 `tenant_id` 列、gating 仅按 `(domain, partition_key)`，无 tenant scope 的
+    /// 裸 aggregate id 跨租户碰撞会让租户 A 的队头阻塞租户 B（liveness DoS）。推荐 `<tenantId>:<aggregateId>`
+    /// 或显式全局唯一 key。类型层强制（`for_tenant`）/ outbox `tenant_id` 列见 issue #1405；语义见
+    /// `docs/rules/tenancy.md` + `eventbus.md §投递顺序保证`。
+    ///
+    /// **⚠ DLX 警示**：队头行一旦进入 DLX（永久错误或重试预算耗尽），会**阻塞该
+    /// `(domain, partition_key)` 的所有后继行**，直到运维 re-drive（`UPDATE outbox SET
+    /// status='pending', retry_count=0, retry_after=NULL WHERE event_id=…`）解冻队头。
+    #[must_use]
+    pub fn with_partition_key(mut self, key: consistency::PartitionKey) -> Self {
+        self.partition_key = Some(key);
+        self
     }
 
     /// 借出契约绑定（adapter 取 `domain()` / `contract_id()` 路由列）。
@@ -95,9 +122,17 @@ impl OutboxEnvelopeParts {
         &self.subject_id
     }
 
-    /// 拆出 `(contract, subject_id)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
-    pub fn into_parts(self) -> (vocab::ContractBinding, String) {
-        (self.contract, self.subject_id)
+    /// 拆出 `(contract, subject_id, partition_key)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
+    ///
+    /// `partition_key` 为 `None` 时 adapter 写 `NULL`（无序并行）；`Some(key)` 时写非空字符串（串行有序）。
+    pub fn into_parts(
+        self,
+    ) -> (
+        vocab::ContractBinding,
+        String,
+        Option<consistency::PartitionKey>,
+    ) {
+        (self.contract, self.subject_id, self.partition_key)
     }
 }
 
@@ -107,6 +142,9 @@ impl std::fmt::Debug for OutboxEnvelopeParts {
             .field("domain", &self.contract.domain())
             .field("contract_id", &self.contract.contract_id())
             .field("subject_id", &"<redacted>")
+            // partition_key 可能凭据级（推荐 tenant-scoped 含 sessionId）：仅渲染 presence（Some/None），
+            // 值经 `PartitionKey` 的脱敏 Debug 收口为 `<redacted>`，不泄漏明文（F3，#1211 review）。
+            .field("partition_key", &self.partition_key)
             .finish()
     }
 }
@@ -153,6 +191,73 @@ mod pii_debug {
         );
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains("identity"), "domain 应可见: {dbg}");
+    }
+
+    // partition_key Debug 脱敏：presence 可见（Some/None），值不泄漏（可能凭据级，F3 #1211 review）。
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试构造已知合法 PartitionKey，item-level carve-out。
+    #[test]
+    fn outbox_envelope_parts_debug_redacts_partition_key_value() {
+        use consistency::PartitionKey;
+
+        let parts = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            "subj",
+        )
+        .with_partition_key(PartitionKey::parse("tenant-7:session-secret").unwrap());
+        let dbg = format!("{parts:?}");
+        // presence 可见（Some），但明文值脱敏为 <redacted>。
+        assert!(dbg.contains("Some"), "partition_key presence 应可见: {dbg}");
+        assert!(dbg.contains("<redacted>"), "partition_key 值应脱敏: {dbg}");
+        assert!(
+            !dbg.contains("session-secret"),
+            "凭据级 partition_key 值不得泄漏至 Debug: {dbg}"
+        );
+
+        // None 路径。
+        let parts_none = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            "subj",
+        );
+        let dbg_none = format!("{parts_none:?}");
+        assert!(
+            dbg_none.contains("None"),
+            "未设 partition_key 时应渲染 None: {dbg_none}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod partition_key_tests {
+    //! `with_partition_key` builder + `into_parts` 透出 partition_key 回归。
+
+    use consistency::PartitionKey;
+
+    use super::OutboxEnvelopeParts;
+
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试构造已知合法 PartitionKey，item-level carve-out。
+    #[test]
+    fn with_partition_key_roundtrips_through_into_parts() {
+        let key = PartitionKey::parse("aggregate-123").unwrap();
+        let parts = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            "subj",
+        )
+        .with_partition_key(key);
+        let (_contract, _subject, pk) = parts.into_parts();
+        assert!(pk.is_some(), "with_partition_key 后 into_parts 应透出 Some");
+        assert_eq!(pk.unwrap().as_str(), "aggregate-123");
+    }
+
+    #[test]
+    fn without_partition_key_into_parts_gives_none() {
+        let parts = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            "subj",
+        );
+        let (_contract, _subject, pk) = parts.into_parts();
+        assert!(pk.is_none(), "未设 partition_key 时 into_parts 应透出 None");
     }
 }
 

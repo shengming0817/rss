@@ -185,6 +185,72 @@ fn is_canonical_dotted(s: &str) -> bool {
         })
 }
 
+/// 有序投递分区键 newtype（私有字段，构造经 fallible funnel）。
+///
+/// outbox 投递顺序保证的分区维度：设置时同 `(domain, partition_key)` 串行有序投递（head-of-partition
+/// gating，SQL 侧 `poll_pending` 收口——每 partition 仅放行 min(seq) 未投队头）；不设置（write 路径 `None`
+/// ⇒ DB NULL）= 无序要求，并行投递（行为同分区前）。等价 Debezium outbox 的 `aggregateid` / projection_events
+/// 的 `aggregate_id`——是**不透明聚合根路由键**，非 dotted topic，故只拒空（fail-closed），不施 dotted 文法。
+///
+/// **⚠ 安全约束：partition_key 必须自带 tenant scope**（含 tenantId 前缀，或全局唯一的标识如
+/// sessionId）。若裸用无 tenant scope 的 key，相同 `(domain, partition_key)` 可被不同租户写入 —— 导致
+/// 租户 A 的 dlx 队头阻塞租户 B 的后继行 = **跨租户 liveness DoS**。架构强制（outbox 加 tenant_id 列
+/// + RLS 隔离）见 issue **#1405**；在 #1405 落地前，producer 侧须手动保证 tenant 可区分。
+///
+/// 携带在 **write 路径**（`diport::OutboxEnvelopeParts` → adapter `OutboxEnvelope` → INSERT），**不**进
+/// [`Entry`]（与 `domain` 同——分区键是投递路由属性，relay 读侧无需透传：顺序由 SQL gating 承载）。
+///
+/// **PII / 凭据边界**：推荐的 tenant-scoped key（如 `<tenantId>:<sessionId>`）可能含**凭据级** bearer
+/// 标识（sessionId 即 bearer token），故 `PartitionKey` 的 `Debug` **脱敏为 `<redacted>`**（同
+/// `identity::SessionId` 范式），不以明文经 `{:?}` 泄漏至日志 / 断言（F3，#1211 review）。定位 stalled
+/// partition 经受控 DB 查询（`SELECT partition_key FROM outbox WHERE event_id=…`），非日志明文。
+///
+/// ref: debezium/debezium debezium-connect-plugins/src/main/java/io/debezium/transforms/outbox/EventRouterConfigDefinition.java
+///   （`aggregateid` → message key → per-aggregate 有序投递）。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PartitionKey(String);
+
+impl std::fmt::Debug for PartitionKey {
+    /// 脱敏 Debug：partition_key 可能凭据级（sessionId），明文经 `{:?}` 会泄漏至日志/断言（F3，#1211 review）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PartitionKey(<redacted>)")
+    }
+}
+
+/// `PartitionKey` 解析错误。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PartitionKeyError {
+    #[error("partition key is empty")]
+    Empty,
+    #[error("partition key exceeds 256 bytes")]
+    TooLong,
+}
+
+impl PartitionKey {
+    /// 解析有序投递分区键；拒绝空 key 及超过 256 字节的 key（fail-closed）。
+    ///
+    /// 空 key 非法：DB 侧 `partition_key IS NULL` 已表达「无序要求」，空字符串会与 NULL 语义混淆
+    /// 且让 head-of-partition gating 把所有空 key 行误并成一个 partition。故空经此 funnel 拒。
+    ///
+    /// 256 字节上限防止超长 key 膨胀 idx_outbox_partition_head 索引条目，同时与 DB `text` 列默认无限制
+    /// 之间设置应用层防护（安全/防膨胀）。
+    pub fn parse(raw: &str) -> Result<Self, PartitionKeyError> {
+        if raw.is_empty() {
+            return Err(PartitionKeyError::Empty);
+        }
+        if raw.len() > 256 {
+            return Err(PartitionKeyError::TooLong);
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// 借出底层字符串视图。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 持久化 outbox 条目（私有字段；payload 是已编码字节，由 emit 期写入 —— eventbus.md §命名与 payload）。
 ///
 /// engine 类型——**不** derive serde（ADR-004 C6）；wire 编解码在 generated/eventexec 边界完成。
@@ -245,6 +311,11 @@ pub trait OutboxRelay {
 pub trait OutboxSource {
     /// 扫描某 `domain` 至多 `limit` 条待发 entry（pending 且 `retry_after` 到期，或 lease 过期的 in-flight
     /// 可回收行）。返回已重建的引擎 [`Entry`]；空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
+    ///
+    /// 若 adapter 走分区串行投递，须在此实现 head-of-partition gating：同 `(domain, partition_key)` 仅放行
+    /// min(seq) 的队头行，确保同 partition 内严格按 seq 顺序投递。参见
+    /// `INVARIANT: OUTBOX-PARTITION-ORDER-01`（定义在 adapter impl，`adapters/postgres/src/outbox.rs`
+    /// `OutboxSource for PgOutbox`）。
     async fn poll_pending(
         &self,
         domain: &str,
@@ -321,6 +392,9 @@ pub trait OutboxBacklog {
     /// 的可重捞集合**同源**：`(pending 且到期) OR (stale publishing，lease 过期可被 relay 重捞)`——stale
     /// publishing 会被重投，属可恢复积压必须计入；只排除 lease 仍有效的正常 in-flight，避免把正常中继中的行
     /// 误计入。无可投递行 ⇒ [`BacklogSample::empty`]。`Transient` 错误 ⇒ 本轮跳过采样。
+    ///
+    /// head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
+    /// partition 对 SLO 失明），故 backlog 谓词刻意不含 head-of-partition gate（#1211）。
     async fn sample_backlog(
         &self,
         domain: &str,
@@ -330,8 +404,8 @@ pub trait OutboxBacklog {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogSample, Disposition, Entry, HandleResult, PermanentError, PermanentErrorKind, Topic,
-        TopicError,
+        BacklogSample, Disposition, Entry, HandleResult, PartitionKey, PartitionKeyError,
+        PermanentError, PermanentErrorKind, Topic, TopicError,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -534,5 +608,74 @@ mod tests {
         assert_eq!(empty, BacklogSample::new(0, 0));
         // anti-vacuity：非空样本不等于 empty（双向验证 PartialEq）。
         assert_ne!(empty, BacklogSample::new(1, 0));
+    }
+
+    // PartitionKey::parse 接受非空键并 as_str 往返（多值表驱动）。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 happy-path 断言已知非空输入的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    fn partition_key_parse_accepts_nonempty_and_round_trips() {
+        let cases = ["session-42", "device:abc-123", "聚合根", "a"];
+        for raw in cases {
+            let key = PartitionKey::parse(raw).unwrap();
+            assert_eq!(key.as_str(), raw, "round-trip raw={raw}");
+        }
+    }
+
+    // PartitionKey::parse 拒空键（fail-closed，避免与 DB NULL「无序」语义混淆）。
+    #[test]
+    fn partition_key_parse_rejects_empty() {
+        assert!(matches!(
+            PartitionKey::parse(""),
+            Err(PartitionKeyError::Empty)
+        ));
+    }
+
+    // PartitionKey::parse 拒超过 256 字节的 key（防索引膨胀；256 字节边界：257 拒、256 接受）。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 256 字节边界值的 happy-path，item-level carve-out（error-handling.md §Carve-out）。
+    fn partition_key_parse_rejects_overlong() {
+        // 257 字节 → TooLong。
+        let overlong = "a".repeat(257);
+        assert!(
+            matches!(
+                PartitionKey::parse(&overlong),
+                Err(PartitionKeyError::TooLong)
+            ),
+            "257 字节 key 应被拒（TooLong）"
+        );
+        // 256 字节边界 → 接受。
+        let exactly_256 = "a".repeat(256);
+        assert!(
+            PartitionKey::parse(&exactly_256).is_ok(),
+            "256 字节 key 应被接受"
+        );
+        let key = PartitionKey::parse(&exactly_256).unwrap();
+        assert_eq!(key.as_str().len(), 256, "as_str 长度应为 256");
+    }
+
+    // PartitionKey Eq/Hash：同值相等、异值不等（head-of-partition 同 partition 归并依赖值相等语义）。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 同上，测试已知非空输入。
+    fn partition_key_eq_distinguishes_values() {
+        let a1 = PartitionKey::parse("p1").unwrap();
+        let a2 = PartitionKey::parse("p1").unwrap();
+        let b = PartitionKey::parse("p2").unwrap();
+        assert_eq!(a1, a2);
+        assert_ne!(a1, b);
+    }
+
+    // PartitionKey Debug 脱敏：明文值不得经 {:?} 泄漏（F3，#1211 review；同 SessionId 范式）。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试已知非空输入。
+    fn partition_key_debug_redacts_value() {
+        let key = PartitionKey::parse("tenant-7:session-secret").unwrap();
+        let dbg = format!("{key:?}");
+        assert_eq!(dbg, "PartitionKey(<redacted>)");
+        // anti-vacuity：明文值不出现在 Debug 输出。
+        assert!(!dbg.contains("session-secret"), "凭据级值不得泄漏: {dbg}");
     }
 }
