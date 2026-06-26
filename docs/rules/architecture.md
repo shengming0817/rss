@@ -147,6 +147,7 @@ rss/
 | DI port + dynosaur 收敛到定义点白名单 | `deny.toml` wrapper：`dynosaur`/`trait-variant` 只准 **DI port 定义点 crate** 依赖——白名单 = `diport`（provider-agnostic infra port）+ 定义自身 repo/service port 的域 crate（域形 port，ADR-005 Option 2，INVARIANT DIPORT-MACRO-CONFINE-01**′**；`layer-deps` `EXTERNAL_CONFINEMENT_WRAPPERS` 守白名单条目属 DiPort/Domain 层 + wrapper⟷源集合相等）。注：dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（实测，ADR-003 §8），无 forbid 例外、无 unsafe carve-out——本约束是「DI port 定义点集中」架构守卫，非 unsafe 收敛；ADR-005 把原 `-01`「单一依赖点」放宽为白名单（域形 repo port 必然多点定义，前提失效，零安全代价） |
 | `adapter→域` DIP 内向边（impl 域形 repo port） | `xtask/src/layers.rs` `allows(Adapter,Domain)=true`（source-centric `layer-deps`，矩阵红/绿 case anti-vacuity；反向 `域→adapter` 仍 `false`）+ `deny.toml` 该域 ban 的 wrappers 加该 adapter（LAYER-DEPS-06 反向② 放行）。INVARIANT 随 `allows` 矩阵单源（LAYER-DEPS-00），ADR-005 |
 | 受控 `bootstrap → httpserve` 路由类型边（组合根 typed route funnel；服务→服务唯一例外） | `xtask/src/layers.rs` `route_funnel_allows`（**只**放行 `bootstrap → httpserve` 这一对有向边，`check_layers` 在 `!allows(Service,Service)` 时叠加；反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 仍禁；rstest + 端到端 `check_layers` 正反例 anti-vacuity）。INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009 |
+| defer/follow-up 结构化完整性（governed docs + 根 config） | governed scope（`docs/rules`/`docs/architecture`/`.claude/rules` + 根 `deny.toml`/`clippy.toml`/`CLAUDE.md`）内 `DEFER(#NNNN)` 标签须 `owner=`/`blocked-by=<#NNNN｜trigger:..>`/`closes-when=` 齐全 + 禁裸 TODO/FIXME/XXX/HACK 注解（注解位）；`cargo xtask defer-gate`（接 verify/ci no-compile meta 步，synthetic red + anti-vacuity green）。INVARIANT DEFER-GATE-01；符号/盲区/红例见 `xtask/src/defergate.rs` rustdoc + ADR-010；v1 守结构化标签 + 经典注解，自由词散文 + 代码注释扩域 = ratchet follow-up |
 
 ### 三档 · Cargo 替不了,框架自建(RSS 真差异化)
 
@@ -180,6 +181,10 @@ CVE(PR 门覆盖不到的时间维度,告警语义)。azure CI 启用前(`AZURE_
 - **组合根 / `module()`**:域 crate 暴露 `pub fn module() -> DomainModule`;adapter↔域绑定在 `bins/server` /
   assembly 用构造器注入完成(无独立组合层)。topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖)。
+- **持久化能力分层**:`DomainModuleResult`(域 `module()` 的标准装配出口,聚合 services/routes/probes/resources/workers) / Pg
+  capability bundle(`PgRuntimeDeps`·`PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
+  (`docs/architecture/202606270148-010-persistence-capability-layering.md`);执行体随 #1419(runtime base) / #1421(settings
+  闭环) / W 阶段落地,本处不复制未强制细节。
 - **Init fail-fast**:`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`;必填依赖走构造器必填参数
   (编译期);init 内不做 I/O、不 spawn task。
 - **Adapter sealed marker**:unit sealed-marker(`struct PgStore;`)以 native AFIT impl diport 已冻 DI port

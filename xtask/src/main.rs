@@ -38,6 +38,7 @@ mod codegen;
 mod command_symmetry;
 mod contract;
 mod coverage;
+mod defergate;
 mod diagnostic;
 mod diffcov;
 mod layerdeps;
@@ -94,6 +95,7 @@ enum Command {
         allow_missing_tools: bool,
     },
     SchemaRls,
+    DeferGate,
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -114,9 +116,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["audit", rest @ ..] => parse_audit(rest),
         ["integration", rest @ ..] => parse_integration(rest),
         ["schema-rls"] => Ok(Command::SchemaRls),
+        ["defer-gate"] => Ok(Command::DeferGate),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | schema-rls | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | schema-rls | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -293,6 +296,7 @@ fn dispatch(args: &[String]) -> Result<()> {
             allow_missing_tools,
         } => verify::run_integration(allow_missing_tools),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
+        Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
     }
 }
 
@@ -657,5 +661,18 @@ mod tests {
     fn parse_command_schema_rls_rejects_trailing_args() {
         assert!(parse_command(&s(&["schema-rls", "--bogus"])).is_err());
         assert!(parse_command(&s(&["schema-rls", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_defer_gate() -> anyhow::Result<()> {
+        assert_eq!(parse_command(&s(&["defer-gate"]))?, Command::DeferGate);
+        Ok(())
+    }
+
+    /// defer-gate fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_defer_gate_rejects_trailing_args() {
+        assert!(parse_command(&s(&["defer-gate", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["defer-gate", "extra"])).is_err());
     }
 }

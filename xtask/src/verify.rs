@@ -72,6 +72,9 @@ enum InternalCheck {
     SchemaRlsGuard,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
     CommandSymmetry,
+    /// governed scope（docs/rules + docs/architecture + .claude/rules + 根 config）结构化 defer 完整性 + 经典注解门
+    /// （DEFER-GATE-01；内容扫描 .md/.toml，no-compile）。
+    DeferGate,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
     /// ci 专用：`public-api --check`（basis+engine 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
@@ -201,6 +204,15 @@ fn step_command_symmetry() -> Step {
         label: "command-symmetry",
         args: &[],
         kind: StepKind::Internal(InternalCheck::CommandSymmetry),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_defer_gate() -> Step {
+    Step {
+        label: "defer-gate",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::DeferGate),
         env: &[],
         needs_compile: false,
     }
@@ -590,6 +602,7 @@ fn full_plan() -> Vec<Step> {
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
         step_command_symmetry(),
+        step_defer_gate(),
         step_build_workspace(),
         step_integration_compile(),
         step_clippy_workspace(),
@@ -616,6 +629,7 @@ fn ci_plan() -> Vec<Step> {
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
         step_command_symmetry(),
+        step_defer_gate(),
         step_build_all_features(),
         step_clippy_all_features(),
         step_coverage(),
@@ -837,6 +851,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
+        InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
@@ -930,6 +945,7 @@ mod tests {
                 "pdp-allow-guard",
                 "schema-rls",
                 "command-symmetry",
+                "defer-gate",
                 "build",
                 "integration-compile",
                 "clippy",
@@ -946,7 +962,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(8) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(9) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -962,6 +978,7 @@ mod tests {
                 "pdp-allow-guard",
                 "schema-rls",
                 "command-symmetry",
+                "defer-gate",
                 "deny"
             ]
         );
@@ -970,8 +987,8 @@ mod tests {
         }
     }
 
-    /// meta 八项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
-    /// pdp-allow-guard / schema-rls / command-symmetry）在两种模式恒在。
+    /// meta 九项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
+    /// pdp-allow-guard / schema-rls / command-symmetry / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -991,7 +1008,8 @@ mod tests {
                     "codegen-check",
                     "pdp-allow-guard",
                     "schema-rls",
-                    "command-symmetry"
+                    "command-symmetry",
+                    "defer-gate"
                 ],
                 "fast={fast}"
             );
@@ -1095,6 +1113,7 @@ mod tests {
                 "pdp-allow-guard",
                 "schema-rls",
                 "command-symmetry",
+                "defer-gate",
                 "build",
                 "clippy",
                 "coverage",
@@ -1177,7 +1196,9 @@ mod tests {
             "wsdeps-drift",
             "codegen-check",
             "pdp-allow-guard",
+            "schema-rls",
             "command-symmetry",
+            "defer-gate",
             "deny",
             "dylint",
         ] {
