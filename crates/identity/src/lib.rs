@@ -41,7 +41,7 @@ pub use application::{ChangePasswordError, IdentityDomain, LoginError, LoginServ
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///
 /// 下游 adapter crate（postgres）集成测试需构造 [`ports::Session`](crate::ports::Session) 驱动
-/// `ports::SessionUnitOfWork`，但 `Session::new` / `SessionId::new` 是 `pub(crate)` funnel（生产不可伪造）。
+/// `ports::SessionLifecycle`，但 `Session::new` / `SessionId::new` 是 `pub(crate)` funnel（生产不可伪造）。
 /// 本模块经 feature 门控暴露受控构造器——与 `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
 #[cfg(feature = "test-support")]
 pub mod test_support {

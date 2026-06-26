@@ -35,7 +35,8 @@ cargo nextest run -p server -p rss   # in-process oneshot e2e（无需 feature g
 
 预期（ADR-006 §8 ③）：
 - 带有效 JWT（真 OidcProvider 验签通过）请求 `Require(Jwt)` 路由 → 200，request extension 携 `httpserve::Authenticated`（`scheme=Jwt` + principal_kind facet）、enforce `scheme()` exact-match 放行；**本批不承诺 handler 读完整 `Principal`**（完整 Principal 传播属 W 后续，见 spec US3 / data-model F3）。
-- 无 Authorization 头 / 坏签名 / 过期 / 错 aud → 401/403（含 requestId），tracing 记 `authz.decision=deny` + `AuthnError` 变体（`TokenInvalid`/`TokenExpired` 两路；`PdpError` 三路分级须 authn 层让 `AuthnError` 携 `PdpError` 变体——follow-up #1275），日志无 token/subject。
+- **凭据存在但被拒**（坏签名 / 过期 / 错 aud-iss / 验签通过后缺 tenant 等）→ 401（含 requestId）；请求进 verify-bridge `verify_bridge` span，tracing 记 `authz.decision=deny` + 闭值 `authz.deny_reason` 告警分级（`signature_invalid`/`untrusted`/`expired`/`principal_invalid`——对应 PDP `InvalidSignature`/`Untrusted`/`Expired` 与**验签后** authn principal 派生失败；`From<PdpError>` 一一保真为 `AuthnError::TokenInvalid`/`TokenUntrusted`/`TokenExpired`、派生失败归 `PrincipalInvalid`，#1275 + review F1 已落地）+ `error=?err` 变体，日志无 token/subject。
+- **无 Authorization 头**（无凭据）→ **不进** verify-bridge（`Some(token)` 才进 span），由内层 enforce fail-closed 401（含 requestId），**无** bridge `authz.deny_reason` 日志（凭据缺失 ≠ 凭据被拒，二者拆分，review F3）。
 - 有效请求 → tracing 记 `authz.decision=allow` + `principal.kind`（无 PII）。
 
 ## ④ JWKS 轮转（PR-A2 / #1197 — 本地文件源 + 外部 agent 刷新）

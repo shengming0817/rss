@@ -40,6 +40,7 @@ mod layers;
 mod pathsafe;
 mod pdpallow;
 mod publicapi;
+mod schema_rls;
 mod src_scan;
 #[cfg(test)]
 mod testutil;
@@ -81,6 +82,7 @@ enum Command {
     Integration {
         allow_missing_tools: bool,
     },
+    SchemaRls,
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -100,9 +102,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["ci", rest @ ..] => parse_ci(rest),
         ["audit", rest @ ..] => parse_audit(rest),
         ["integration", rest @ ..] => parse_integration(rest),
+        ["schema-rls"] => Ok(Command::SchemaRls),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | wsdeps-drift | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | wsdeps-drift | schema-rls | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -233,6 +236,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Integration {
             allow_missing_tools,
         } => verify::run_integration(allow_missing_tools),
+        Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
     }
 }
 
@@ -531,5 +535,18 @@ mod tests {
         assert!(root.join("contracts").is_dir());
         assert!(root.join("generated").is_dir());
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_schema_rls() -> anyhow::Result<()> {
+        assert_eq!(parse_command(&s(&["schema-rls"]))?, Command::SchemaRls);
+        Ok(())
+    }
+
+    /// schema-rls fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_schema_rls_rejects_trailing_args() {
+        assert!(parse_command(&s(&["schema-rls", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["schema-rls", "extra"])).is_err());
     }
 }

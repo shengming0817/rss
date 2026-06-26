@@ -15,7 +15,8 @@
 //! 占位坐标列 store_id='', ref_key='', ref_version=NULL——不携带有效坐标，version 单调不重置。
 //!
 //! storage 错误经 `SecretRepoError::Storage(Box::new(sqlx_err))` 分层冒泡（保留 source；域 crate 不依赖 sqlx）。
-//! 读路径以显式 `WHERE tenant_id` 做租户 scope；写路径另经 `set_local_tenant` 事务内 SET LOCAL 锚点。
+//! 读路径经 [`tenant_scoped_read`]（cotx）注入 SET LOCAL，对齐 RLS policy current_setting（#1298）；
+//! 写路径另经 `set_local_tenant` 事务内 SET LOCAL 锚点。
 //!
 //! ref: adapters/postgres/src/config_repo.rs（版本历史 + CAS + tombstone + tenant_scoped 范式）
 
@@ -24,7 +25,7 @@ use settings::ports::{SecretEntry, SecretKey, SecretRepo, SecretRepoError, Store
 use sqlx::{Executor, PgConnection, Postgres, Row};
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::{set_local_tenant, tenant_scoped_read};
 
 /// settings secret 引用坐标仓储 PostgreSQL adapter。
 ///
@@ -187,19 +188,30 @@ impl SecretRepo for PgSecretRepo {
         tenant: TenantId,
         key: &SecretKey,
     ) -> Result<Option<SecretEntry>, SecretRepoError> {
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 活跃值 = 最高版本行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
-        let row = sqlx::query(
-            r#"
-            SELECT secret_key, store_id, ref_key, ref_version, version, deleted
-            FROM secret_refs
-            WHERE tenant_id = $1::uuid AND secret_key = $2
-            ORDER BY version DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(tenant_param(tenant))
-        .bind(key.as_str())
-        .fetch_optional(&self.pool)
+        // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned，不借连接）；hydrate_active 在 tx 外执行。
+        let tenant_uuid = tenant_param(tenant);
+        let key_str = key.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+
+        let row = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
+                    SELECT secret_key, store_id, ref_key, ref_version, version, deleted
+                    FROM secret_refs
+                    WHERE tenant_id = $1::uuid AND secret_key = $2
+                    ORDER BY version DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(tenant_uuid_q)
+                .bind(key_str)
+                .fetch_optional(&mut *conn)
+                .await
+            })
+        })
         .await
         .map_err(storage)?;
         hydrate_active(tenant, row)
@@ -211,17 +223,29 @@ impl SecretRepo for PgSecretRepo {
         key: &SecretKey,
         version: u64,
     ) -> Result<Option<SecretEntry>, SecretRepoError> {
-        let row = sqlx::query(
-            r#"
-            SELECT secret_key, store_id, ref_key, ref_version, version, deleted
-            FROM secret_refs
-            WHERE tenant_id = $1::uuid AND secret_key = $2 AND version = $3
-            "#,
-        )
-        .bind(tenant_param(tenant))
-        .bind(key.as_str())
-        .bind(version_param(version))
-        .fetch_optional(&self.pool)
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
+        // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned）；hydrate_active 在 tx 外执行。
+        let tenant_uuid = tenant_param(tenant);
+        let key_str = key.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+        let version_i = version_param(version);
+
+        let row = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
+                    SELECT secret_key, store_id, ref_key, ref_version, version, deleted
+                    FROM secret_refs
+                    WHERE tenant_id = $1::uuid AND secret_key = $2 AND version = $3
+                    "#,
+                )
+                .bind(tenant_uuid_q)
+                .bind(key_str)
+                .bind(version_i)
+                .fetch_optional(&mut *conn)
+                .await
+            })
+        })
         .await
         .map_err(storage)?;
         hydrate_active(tenant, row)
@@ -232,13 +256,29 @@ impl SecretRepo for PgSecretRepo {
         tenant: TenantId,
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError> {
+        // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
-        let (mv,): (Option<i64>,) = sqlx::query_as(
-            "SELECT max(version) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+        // rss_app 角色下 RLS 过滤后 max() 仅对当前 tenant 行计算（否则无 SET LOCAL 时 rss_app 下所有行不可见
+        // → max() 返 NULL，后续版本序列断裂）——此为 tenant_scoped_read 覆盖 latest_version 的关键理由。
+        let tenant_uuid = tenant_param(tenant);
+        let key_str = key.as_str().to_owned();
+        let tenant_uuid_q = tenant_uuid.clone();
+
+        let (mv,): (Option<i64>,) = tenant_scoped_read(
+            &self.pool,
+            &tenant_uuid,
+            move |conn| {
+                Box::pin(async move {
+                    sqlx::query_as(
+                        "SELECT max(version) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str)
+                    .fetch_one(&mut *conn)
+                    .await
+                })
+            },
         )
-        .bind(tenant_param(tenant))
-        .bind(key.as_str())
-        .fetch_one(&self.pool)
         .await
         .map_err(storage)?;
         Ok(mv.and_then(|v| u64::try_from(v).ok()))

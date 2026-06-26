@@ -57,6 +57,14 @@ const METADATA_SUBJECT_KEY: &str = "subjectId";
 /// [`OutboxMetadata::try_insert`] 对 free-form 路径 fail-closed 拒 reserved 承载（**Hard**）。两轴正交。
 const KEY_OCCURRED_AT: &str = "occurred_at";
 
+/// reserved envelope key `trace` / `correlation`（#1193）——只经 sealed setter [`OutboxMetadata::with_trace`]
+/// / [`OutboxMetadata::with_correlation`]（funnel 特权写）在 adapter 受控构造点注入；属 [`RESERVED_METADATA_KEYS`]，
+/// business free-form `try_insert` 路径 fail-closed 拒（**Hard**：业务不可伪造）。注入集 ⊆ 拒绝集由
+/// `reserved_setter_keys_are_reserved` drift-lock 守（**Medium**）。注入**源**（trace span / correlation 上下文）
+/// 按 ADR-002 §D1 不进 `runctx`，待 #1296 接线——本 PR 仅建 sealed 注入路径（setter）。
+const KEY_TRACE: &str = "trace";
+const KEY_CORRELATION: &str = "correlation";
+
 /// [`OutboxMetadata`] 构造错误（free-form key 命中 reserved 集）。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum MetadataError {
@@ -83,7 +91,7 @@ impl OutboxMetadata {
     /// （#1129/#262 F1）。
     ///
     /// occurred_at 注入折叠进构造器 ⇒「无 occurred_at 的 outbox metadata」**类型层不可表达**（Hard），杜绝
-    /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionUnitOfWork` / `PgConfigRepo`）各从注入 `Clock`
+    /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）各从注入 `Clock`
     /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
@@ -104,6 +112,31 @@ impl OutboxMetadata {
         self.0.insert(
             METADATA_SUBJECT_KEY.to_string(),
             serde_json::Value::String(subject_id.into()),
+        );
+        self
+    }
+
+    /// 注入 reserved key `trace`（#1193）——**sealed setter**：funnel 内特权写 reserved key（business
+    /// free-form [`OutboxMetadata::try_insert`] 仍 fail-closed 拒），承载「业务不可伪造 trace」（Hard）。
+    // reason(dead_code): 生产 caller 待 #1296（trace span 提取源）接线；本 PR 仅建 sealed 注入路径，正向单测
+    // `sealed_setters_write_reserved_keys` 行使写入、`reserved_setter_keys_are_reserved` 守注入集 ⊆ 拒绝集。
+    #[allow(dead_code)]
+    pub(crate) fn with_trace(mut self, trace: impl Into<String>) -> Self {
+        self.0.insert(
+            KEY_TRACE.to_string(),
+            serde_json::Value::String(trace.into()),
+        );
+        self
+    }
+
+    /// 注入 reserved key `correlation`（#1193）——**sealed setter**：funnel 内特权写 reserved key（同
+    /// [`OutboxMetadata::with_trace`]，业务侧 `try_insert` 仍拒），承载「业务不可伪造 correlation」（Hard）。
+    // reason(dead_code): 生产 caller 待 #1296（correlation 上下文源）接线；本 PR 仅建 sealed 注入路径。
+    #[allow(dead_code)]
+    pub(crate) fn with_correlation(mut self, correlation: impl Into<String>) -> Self {
+        self.0.insert(
+            KEY_CORRELATION.to_string(),
+            serde_json::Value::String(correlation.into()),
         );
         self
     }
@@ -136,13 +169,13 @@ impl OutboxMetadata {
 
 /// `SystemTime` → UNIX epoch 秒（i64）；负偏移收口 0、溢出收口 `i64::MAX`。
 ///
-/// 本 crate **时间编码单源**（#1129 合并）：emitter / session_uow 的 envelope `occurred_at` 与 session 行
+/// 本 crate **时间编码单源**（#1129 合并）：emitter / session_lifecycle 的 envelope `occurred_at` 与 session 行
 /// `expires_at` / `created_at` 共用，消除同 crate 内重复。timestamptz / 整数秒由 server-side `to_timestamp($N)`
 /// 或直绑生成（不给 sqlx 加 time feature）。负偏移 / 正常路径由 outbox 单测 `unix_secs_*` 守。
 ///
 /// 溢出分支（`as_secs > i64::MAX`，约年 ~2920 亿）为防御性收口：`i64::try_from(..).unwrap_or(i64::MAX)`
 /// **类型层静态保证不 panic**；该输入 `SystemTime` 不可移植构造（`UNIX_EPOCH + Duration::from_secs(u64::MAX)`
-/// 在 `SystemTime::add` 即 panic），故不写平台相关红 case（沿用合并前 session_uow 的既定理由）。
+/// 在 `SystemTime::add` 即 panic），故不写平台相关红 case（沿用合并前 session_lifecycle 的既定理由）。
 ///
 /// 跨 crate 另有 `identity::application::unix_secs` / `settings::application::unix_secs` 同名 helper（域 crate
 /// 不依赖本 adapter，故各自「独立维护、语义对齐」）；跨 crate 收敛为单源 + governance 守语义一致已登记 #1294。
@@ -682,9 +715,9 @@ pub(crate) fn backoff_seconds(retry_count: i32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEY_OCCURRED_AT, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, MetadataError, OutboxMetadata,
-        RESERVED_METADATA_KEYS, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING,
-        backoff_seconds, unix_secs,
+        KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS,
+        MetadataError, OutboxMetadata, RESERVED_METADATA_KEYS, STATUS_DLX, STATUS_PENDING,
+        STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, unix_secs,
     };
 
     // OutboxEnvelope 构造 + 字段访问（metadata 经 OutboxMetadata funnel，F1）。
@@ -790,7 +823,59 @@ mod tests {
         );
     }
 
-    // #1129 unix_secs 边界收口（从 session_uow 合并入本 crate 单源）：正常偏移直映。
+    // #1193 正向：sealed setter with_trace / with_correlation 写入对应 reserved key（funnel 特权），
+    // 与 occurred_at / subjectId 共存。键序 order-independent 断言——`serde_json::Map` 序列化次序随
+    // `preserve_order` feature 变（workspace 统一 on=插入序 / 隔离 off=字母序），故逐 key-value 子串校验。
+    #[test]
+    fn sealed_setters_write_reserved_keys() {
+        let env = super::OutboxEnvelope::new(
+            "identity".to_string(),
+            "identity.session-created".to_string(),
+            OutboxMetadata::new(1_700_000_000)
+                .with_subject_id("subj-1")
+                .with_trace("trace-abc")
+                .with_correlation("corr-xyz"),
+        );
+        let json = env.metadata_json();
+        for kv in [
+            r#""occurred_at":1700000000"#,
+            r#""subjectId":"subj-1""#,
+            r#""trace":"trace-abc""#,
+            r#""correlation":"corr-xyz""#,
+        ] {
+            assert!(
+                json.contains(kv),
+                "sealed setter metadata 应含 {kv}: {json}"
+            );
+        }
+    }
+
+    // #1193 anti-vacuity：sealed setter 注入成功，而业务 free-form try_insert 对同名 reserved key 仍
+    // fail-closed 拒——两路径互斥，业务侧不可伪造 trace / correlation。
+    #[test]
+    fn sealed_setter_keys_rejected_on_free_form() {
+        for reserved in [KEY_TRACE, KEY_CORRELATION] {
+            let mut free = OutboxMetadata::new(0);
+            assert_eq!(
+                free.try_insert(reserved, serde_json::Value::String("x".into())),
+                Err(MetadataError::ReservedKey),
+                "业务 free-form 路径不得写 reserved {reserved}"
+            );
+        }
+    }
+
+    // #1193 drift-lock：sealed setter 注入的 trace / correlation key 必属 reserved 集（注入集 ⊆ 拒绝集）。
+    #[test]
+    fn reserved_setter_keys_are_reserved() {
+        for key in [KEY_TRACE, KEY_CORRELATION] {
+            assert!(
+                RESERVED_METADATA_KEYS.contains(&key),
+                "sealed setter 写的 {key} 必须在 RESERVED_METADATA_KEYS 内"
+            );
+        }
+    }
+
+    // #1129 unix_secs 边界收口（从 session_lifecycle 合并入本 crate 单源）：正常偏移直映。
     #[test]
     fn unix_secs_maps_offset() {
         let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);

@@ -47,7 +47,7 @@ integration = ["testkit/containers"]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # 集成测试用唯一 event_id 法（inbox_dedup 去重隔离验证，避免跨轮次清理）。
 uuid = { workspace = true, features = ["v4"] }
-# co-tx 集成测试（session_uow t11-t14）构造 `ports::Session` 经 `identity::test_support::session`
+# 会话生命周期集成测试（co-tx t11-t14 + durable find/revoke t20-t22）构造 `ports::Session` 经 `identity::test_support::session`
 # （funnel `Session::new` 为 pub(crate)；test-support feature 仅 dev/test 生效，生产 seal 不变）。同范式见
 # identity 自身 dev-dep `authn = { features = ["test-support"] }`。
 identity = { path = "../../crates/identity", features = ["test-support"] }

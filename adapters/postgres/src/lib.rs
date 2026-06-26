@@ -26,7 +26,7 @@ mod pool;
 mod role_repo;
 mod saga_journal;
 mod secret_repo;
-mod session_uow;
+mod session_lifecycle;
 mod tx;
 
 pub use checkpoint::PgCheckpointStore;
@@ -37,7 +37,7 @@ pub use outbox::PgOutbox;
 pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
 pub use secret_repo::PgSecretRepo;
-pub use session_uow::PgSessionUnitOfWork;
+pub use session_lifecycle::PgSessionLifecycle;
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;
@@ -83,14 +83,14 @@ mod smoke {
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
     //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal +
-    //! OwnerCheckpointStore on PgCheckpointStore + SessionUnitOfWork on PgSessionUnitOfWork（真实 impl，#1083/#1192）+
+    //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）；去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
-    fn assert_session_uow<T: identity::ports::SessionUnitOfWork>(_: PhantomData<T>) {}
+    fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
@@ -103,8 +103,9 @@ mod smoke {
         assert_managed_resource(PhantomData::<super::PgStore>);
         // `PgRoleRepo: RoleRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
         assert_role_repo(PhantomData::<super::PgRoleRepo>);
-        // `PgSessionUnitOfWork: SessionUnitOfWork` 真实 impl（非 edge proof）——co-tx UoW（#1083/#1192）。
-        assert_session_uow(PhantomData::<super::PgSessionUnitOfWork>);
+        // `PgSessionLifecycle: SessionLifecycle` 完整 durable impl（非 edge proof）——co-tx 创建（#1083/#1192）
+        // + find/revoke（#1278，0009 revoked 列）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
+        assert_session_lifecycle(PhantomData::<super::PgSessionLifecycle>);
         // `PgInboxStore: IdempotencyStore` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_idempotency_store(PhantomData::<super::PgInboxStore>);
         // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。

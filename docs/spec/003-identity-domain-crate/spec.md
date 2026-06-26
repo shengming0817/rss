@@ -6,6 +6,8 @@
 
 **Status**: Draft
 
+> **[已超越 #1278]** 本 spec 文内 `SessionRepo`（`create`/`find`/`revoke`）+ `SessionUnitOfWork` 双端口为 PR4 设计快照；#1278 已合并为单一域形 port `SessionLifecycle`（create/find/revoke 同源），权威记录见 ADR-005 §10。本 spec 作历史规划留存，不随后续重构逐处更新。
+
 **Input**: User description: "identity 域 crate（身份/会话/RBAC/ABAC/密码变更 CAS）：在 #997 冻结签名内兑现 domain L0（RBAC/ABAC deny-overrides）+ application（真实登录/会话/密码 CAS/账户锁定/角色管理）+ ports（CredentialRepo/SessionRepo）+ 新事件契约 + handler + contract test。拆成 5 个 ≤2000 行可执行 PR，挂 Azure Boards #1012。"
 
 **Tracking**: Azure Boards Feature #1012（容器，跨 5 PR；子 PBI #1186–#1190）（`[RW-W-identity]`）· Epic #991（GoCell→Rust 迁移 · W 宽扇出阶段）· Blocked-by #999（G1 追踪弹，已闭环）

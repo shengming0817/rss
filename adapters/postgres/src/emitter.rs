@@ -8,7 +8,7 @@
 //!
 //! **单事实 emit 语义（#1100）**：本 adapter 将一条 [`consistency::Entry`] 原子落库（单事务），用于**无
 //! co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写（如 session 持久化）同事务的 **co-tx 原子性**
-//! （FR-003 完整 L2）**已交付**（#1083/#1192）：经 [`crate::PgSessionUnitOfWork`]（复用 `append_outbox` + 同
+//! （FR-003 完整 L2）**已交付**（#1083/#1192）：经 [`crate::PgSessionLifecycle`]（复用 `append_outbox` + 同
 //! 一事务写 session 行，INVARIANT OUTBOX-COTX-SESSION-01）承载，与本 emit-only adapter 语义正交。本 adapter
 //! 的单事实写语义不变。
 //!
@@ -53,18 +53,20 @@ impl OutboxEmitter for PgEmitter {
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
-        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。reserved key
-        // occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接编译期不可表达）；
-        // trace / correlation / principal 为后续 follow-up（#1296）接线的空接缝。reserved key 业务侧不可伪造：
-        // 构造期注入 + free-form `try_insert` fail-closed 拒（observability.md §Outbox Envelope）。
+        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。`contract` 是契约派生
+        // 绑定（#1193：domain + contract_id 同源、business 不可伪造），routing 列经 `domain()`/`contract_id()` 取。
+        // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接
+        // 编译期不可表达）；trace / correlation 经 sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
+        // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（observability.md §Outbox Envelope）。
+        let (contract, subject_id) = envelope.into_parts();
         let env = OutboxEnvelope::new(
-            envelope.domain,
-            envelope.contract_id,
-            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(envelope.subject_id),
+            contract.domain().to_string(),
+            contract.contract_id().to_string(),
+            OutboxMetadata::new(unix_secs(self.clock.now())).with_subject_id(subject_id),
         );
         // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut PgConnection` ⇒ 必在事务内）。与
         // `PgStore::run_in_transaction` 同形（PgEmitter 经 share-pool 注入持 pool、非 PgStore 方法，故此处
-        // 自持事务）。co-tx（session 写 + append 同事务）走 [`crate::PgSessionUnitOfWork`]，非本 emit-only 路径。
+        // 自持事务）。co-tx（session 写 + append 同事务）走 [`crate::PgSessionLifecycle`]，非本 emit-only 路径。
         let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
         emit_in_tx(tx, &entry, &env).await
     }

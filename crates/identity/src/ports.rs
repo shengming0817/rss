@@ -151,74 +151,73 @@ pub trait CredentialRepoLocal {
     ) -> Result<bool, IdentityError>;
 }
 
-/// 会话仓储 DI port（域形；provider 可换：prod postgres / test in-mem）。logout 软撤销 + 会话查询。
+/// 会话**生命周期** DI port（域形；provider 可换：prod postgres / demo in-mem）——会话**创建（co-tx，L2）**、
+/// **查询（L1）**、**软撤销（L1）**收敛为**单一 provider**，create / find / revoke 同源。
 ///
-/// 公开 [`SessionRepo`] 是 **Send 变体**（adapter `impl SessionRepo for ...`），[`DynSessionRepo`] 是其
-/// dyn-compatible wrapper（组合根经 `Box<DynSessionRepo>` 注入）。
+/// 公开 [`SessionLifecycle`] 是 **Send 变体**（adapter `impl SessionLifecycle for ...`），
+/// [`DynSessionLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Box<DynSessionLifecycle>` 注入）。
 ///
-/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：方法接收 typed `TenantId`，跨租 find→None /
-/// revoke→幂等 no-op。
+/// **为何单一 provider（合并原 `SessionUnitOfWork` + `SessionRepo`，#1278）**：会话「创建写」与「查询/撤销」
+/// 分属**两个未绑定的存储端口**时，组合根可注入分属不同底座的实例（persist 写 store A、find/revoke 查 store B）
+/// ——login 写入的会话无法被同一 service 的 logout 撤销，且类型系统无法阻止该 bug（PR #255 F3）。收敛为单一
+/// `SessionLifecycle` 后，**「两个未绑定 store」从类型层不可表达**：单一必填注入端口 ⇒ create / find / revoke 必
+/// 同源（AI-robust **Hard**：构造器必填参数 + typed function choice）。工业 Rust 一致采用单一会话存储接口
+/// （tower-sessions `SessionStore`：create+save+load+delete 同 trait；omicron `DataStore` console_session：
+/// session_create / lookup / hard_delete 同 impl）。
+/// ref: maxcountryman/tower-sessions tower-sessions-core/src/session_store.rs@main
+/// ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/console_session.rs@main
 ///
-/// 会话**创建**不在本 port——登录经 `SessionUnitOfWork` co-tx（L2，session 行+outbox 同一事务）创建；本 port 仅
-/// L1 查询/撤销（spec 003 data-model「SessionRepo::create 仅 L1 子步骤、不单独成契约边界」+ OUTBOX-COTX-SESSION-01）。
+/// **co-tx 原子性 INVARIANT OUTBOX-COTX-SESSION-01 不受合并影响**（L2 OutboxFact，FR-003）：原子性来自
+/// [`persist_session_and_emit`](SessionLifecycleLocal::persist_session_and_emit) 的**方法签名形状**
+/// （combined 单方法、域无半开事务句柄），**非** trait 边界——它与 `find` / `revoke` 并列于同一 trait 后仍是
+/// 唯一 session-写 API（无 `save` / `emit` 分调）。adapter 在其 impl body 内独占事务边界（begin → 写 session →
+/// append_outbox → 单 commit）；拆成 `SessionRepo::save` + `OutboxEmitter::emit` 两 provider-agnostic 调用，域
+/// 无法绑同一事务（端口签名不容 `&mut PgConnection`，否则 `ports`→adapter 反向耦合），closure-UoW 把事务句柄
+/// 回传给域同样泄漏 provider 类型并**重开 split-tx 洞**——故保留 combined 方法（co-tx 不可拆解在类型层成立，
+/// Hard）。adapter same-tx 接线由 postgres `PgSessionLifecycle` 的 **INVARIANT: OUTBOX-COTX-SESSION-01** +
+/// 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无）守。
 ///
-/// ref: oxidecomputer/omicron（域 trait + 组合根 DI）；Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
-#[trait_variant::make(SessionRepo: Send)]
-#[dynosaur(pub DynSessionRepo = dyn(box) SessionRepo, bridge(dyn))]
-#[allow(async_fn_in_trait)]
-// reason: 同 RoleRepo——base trait 非 Send native AFIT，Send 由 trait_variant `SessionRepo` 变体 + dynosaur 承载。
-pub trait SessionRepoLocal {
-    /// 按 id 查会话（不存在 / 已撤销 / 跨租 → Ok(None)，不泄露存在性）。
-    async fn find(
-        &self,
-        tenant: TenantId,
-        session_id: SessionId,
-    ) -> Result<Option<Session>, IdentityError>;
-    /// 域侧**软撤销**会话（logout；幂等——重复/未知/跨租均 Ok 且 no-op）。已颁 JWT 在 TTL 内仍有效（硬吊销延 #1003）。
-    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError>;
-}
-
-/// 会话 **co-tx** Unit-of-Work DI port（async；provider 可换：prod postgres / demo in-mem）。
+/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `revoke` 接收 typed `TenantId`，跨租
+/// find→None（不泄露存在性）/ revoke→幂等 no-op。失败通道：`persist_session_and_emit` 经 [`OutboxEmitError`]
+/// （diport infra 错误，source 已 PII-redacted）冒泡（co-tx 写失败任一步均不暴露原始错误明文，zero-trust；
+/// 复用 infra 错误因签名已桥接 [`Entry`] / [`OutboxEnvelopeParts`]、失败本质是持久化层错误）；`find` / `revoke`
+/// 经 [`IdentityError`] 冒泡。
 ///
-/// L2 OutboxFact 完整语义（FR-003）：一次登录的**业务写**（[`Session`] 持久化）与 **outbox append**
-/// （`identity.session-created` 事件行）必须落在**同一个本地事务**——both-or-neither。本 port 以**单个
-/// combined 方法**承载该原子性：域只调一次 [`persist_session_and_emit`](SessionUnitOfWorkLocal::persist_session_and_emit)，
-/// adapter 在其 impl body 内独占事务边界（begin → 写 session → append_outbox → 单 commit）。
-///
-/// **为何是 combined 方法、而非「`SessionRepo::save` + `OutboxEmitter::emit` 两调用」或 closure-UoW**：
-/// 拆成两个 provider-agnostic 端口调用，域无法把二者绑进同一事务（端口签名不容 `&mut PgConnection`，
-/// 否则 `ports`→adapter 反向耦合）；closure-UoW 把事务句柄回传给域，同样泄漏 provider 类型并**重开
-/// split-tx 洞**。combined 方法把事务边界完全收进 adapter，域**无 API 可半提交其一**——co-tx 不可拆解
-/// 在类型层成立（Hard）。adapter 侧 same-tx 接线由 postgres `PgSessionUnitOfWork` 的
-/// **INVARIANT: OUTBOX-COTX-SESSION-01** + 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无）守。
-///
-/// 失败经 [`OutboxEmitError`]（diport infra 错误，source 已 PII-redacted）冒泡——co-tx 写失败（session
-/// INSERT / outbox append / commit 任一步）均不暴露原始错误明文（zero-trust）。复用 `OutboxEmitError` 而非
-/// 新增域错误：本 port 签名已桥接 infra 类型（[`Entry`] / [`OutboxEnvelopeParts`]），失败本质是持久化层
-/// 错误而非域逻辑错误，语义一致。
-///
-/// 归属：域形 port（签名引用域内实体 [`Session`]）→ 本 crate `ports`，非 diport（ADR-005 category line，
-/// 同 [`RoleRepo`]）。
+/// 归属：域形 port（签名引用域内实体 [`Session`]）→ 本 crate `ports`，非 diport（ADR-005 category line，同
+/// [`RoleRepo`]）。durable `find` / `revoke` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE +
+/// `sessions.revoked` 列，#1278——补齐原 #1116 session durable 闭合，provider 无 `todo!()` 半实现）。
 ///
 /// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
 /// ref: MassTransit Bus Outbox（一应用方法 co-persist 实体 + outbox 经共享事务/scoped DbContext）
-#[trait_variant::make(SessionUnitOfWork: Send)]
-#[dynosaur(pub DynSessionUnitOfWork = dyn(box) SessionUnitOfWork, bridge(dyn))]
+/// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
+#[trait_variant::make(SessionLifecycle: Send)]
+#[dynosaur(pub DynSessionLifecycle = dyn(box) SessionLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SessionUnitOfWork` 变体 +
-// dynosaur `DynSessionUnitOfWork` 承载（DI 注入走 Send wrapper）。与 RoleRepo / diport DI port 同范式。
-pub trait SessionUnitOfWorkLocal {
-    /// 把 [`Session`] 行与 outbox(`identity.session-created`) 行**同一本地事务**原子写入（co-tx，FR-003）。
-    ///
-    /// 域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）与 `envelope`
-    /// （opaque envelope 字段），并提供 `session` 业务实体；adapter 在单事务内先注入 tenant scope
-    /// （SET LOCAL）、写 session、`append_outbox`，单 commit。任一步失败 → 整体 rollback（both-or-neither）。
+// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SessionLifecycle` 变体 +
+// dynosaur `DynSessionLifecycle` 承载（DI 注入走 Send wrapper）。与 RoleRepo / diport DI port 同范式。
+pub trait SessionLifecycleLocal {
+    /// **创建（co-tx，L2）**：把 [`Session`] 行与 outbox(`identity.session-created`) 行**同一本地事务**原子
+    /// 写入（FR-003）。域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）与 `envelope`
+    /// （opaque envelope 字段），并提供 `session` 业务实体；adapter 在单事务内先注入 tenant scope（SET LOCAL）、
+    /// 写 session、`append_outbox`，单 commit。任一步失败 → 整体 rollback（both-or-neither）。**唯一 session-写
+    /// API**（OUTBOX-COTX-SESSION-01：域无 `save`/`emit` 分调、无半开事务句柄）。
     async fn persist_session_and_emit(
         &self,
         session: Session,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError>;
+
+    /// **查询（L1）**：按 id 查会话（不存在 / 已撤销 / 跨租 → `Ok(None)`，不泄露存在性）。
+    async fn find(
+        &self,
+        tenant: TenantId,
+        session_id: SessionId,
+    ) -> Result<Option<Session>, IdentityError>;
+
+    /// **软撤销（L1，logout）**：域侧软撤销会话（幂等——重复 / 未知 / 跨租均 `Ok` 且 no-op）。已颁 JWT 在 TTL
+    /// 内仍有效（硬吊销延 #1003）。
+    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError>;
 }
 
 #[cfg(test)]
@@ -231,9 +230,9 @@ mod smoke {
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        DynRoleRepo, DynSessionRepo, DynSessionUnitOfWork, Entry, IdentityError, OutboxEmitError,
-        OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionRepo,
-        SessionUnitOfWork, TenantId,
+        DynRoleRepo, DynSessionLifecycle, Entry, IdentityError, OutboxEmitError,
+        OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionLifecycle,
+        TenantId,
     };
 
     struct NoopRoleRepo;
@@ -295,11 +294,13 @@ mod smoke {
         }
     }
 
-    // ── SessionUnitOfWork（co-tx 域形 port）PORT-SHAPE ────────────────────────────
-    // 与 RoleRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionUnitOfWork），但本 smoke 仍
-    // 只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop `todo!()`）；co-tx 行为由 adapter 集成测试守。
-    struct NoopSessionUoW;
-    impl SessionUnitOfWork for NoopSessionUoW {
+    // ── SessionLifecycle（co-tx 创建 + 查询 + 软撤销，单一域形 port，#1278）PORT-SHAPE ────────────
+    // 与 RoleRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionLifecycle 的 co-tx 创建；
+    // find/revoke 冻结 #1116），但本 smoke 仍只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop
+    // `todo!()`）；co-tx 行为由 adapter 集成测试守。三方法（create/find/revoke）同一 trait，证明合并后仍
+    // 经单一 `Box<DynSessionLifecycle>` 注入。
+    struct NoopSessionLifecycle;
+    impl SessionLifecycle for NoopSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
             _session: Session,
@@ -308,54 +309,6 @@ mod smoke {
         ) -> Result<(), OutboxEmitError> {
             todo!()
         }
-    }
-
-    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 `Send`。
-    #[test]
-    fn session_uow_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynSessionUnitOfWork> = DynSessionUnitOfWork::new_box(NoopSessionUoW);
-        assert_send(&from_impl);
-        let from_mock: Box<DynSessionUnitOfWork> =
-            DynSessionUnitOfWork::new_box(MockTestSessionUoW::new());
-        assert_send(&from_mock);
-    }
-
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——`Box<DynSessionUnitOfWork>` 作必填位置参（非 Option），
-    // 缺失即编译错误（ADR-004 C5；LoginService 即如此持有，见 application.rs）。
-    struct SessionService {
-        _uow: Box<DynSessionUnitOfWork<'static>>,
-    }
-    impl SessionService {
-        fn new(uow: Box<DynSessionUnitOfWork<'static>>) -> Self {
-            Self { _uow: uow }
-        }
-    }
-
-    #[test]
-    fn session_uow_is_required_ctor_injectable() {
-        let from_impl = SessionService::new(DynSessionUnitOfWork::new_box(NoopSessionUoW));
-        assert_send(&from_impl._uow);
-        let from_mock =
-            SessionService::new(DynSessionUnitOfWork::new_box(MockTestSessionUoW::new()));
-        assert_send(&from_mock._uow);
-    }
-
-    mockall::mock! {
-        TestSessionUoW {}
-        impl SessionUnitOfWork for TestSessionUoW {
-            async fn persist_session_and_emit(
-                &self,
-                session: Session,
-                entry: Entry,
-                envelope: OutboxEnvelopeParts,
-            ) -> Result<(), OutboxEmitError>;
-        }
-    }
-
-    // ── SessionRepo（域形会话仓储 port）PORT-SHAPE ────────────────────────────
-    // 软撤销（logout）+ 会话查询接缝。创建不在本 port（co-tx 由 SessionUnitOfWork 承载）。
-    struct NoopSessionRepo;
-    impl SessionRepo for NoopSessionRepo {
         async fn find(
             &self,
             _tenant: TenantId,
@@ -372,39 +325,48 @@ mod smoke {
         }
     }
 
-    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体
-    // `DynSessionRepo` 且 wrapper `Send`（可跨 spawn 注入）。不调用方法 → 不触 `todo!()`。
+    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 `Send`。
     #[test]
-    fn session_repo_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynSessionRepo> = DynSessionRepo::new_box(NoopSessionRepo);
+    fn session_lifecycle_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynSessionLifecycle> =
+            DynSessionLifecycle::new_box(NoopSessionLifecycle);
         assert_send(&from_impl);
-        let from_mock: Box<DynSessionRepo> = DynSessionRepo::new_box(MockTestSessionRepo::new());
+        let from_mock: Box<DynSessionLifecycle> =
+            DynSessionLifecycle::new_box(MockTestSessionLifecycle::new());
         assert_send(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynSessionRepo>` 作必填
-    // 位置参（非 Option），缺失即编译错误（ADR-004 C5）。
-    struct SessionQueryService {
-        _repo: Box<DynSessionRepo<'static>>,
+    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——`Box<DynSessionLifecycle>` 作必填位置参（非 Option），
+    // 缺失即编译错误（ADR-004 C5；LoginService 即如此持有单一 lifecycle，见 application.rs）。
+    struct SessionService {
+        _lifecycle: Box<DynSessionLifecycle<'static>>,
     }
-    impl SessionQueryService {
-        fn new(repo: Box<DynSessionRepo<'static>>) -> Self {
-            Self { _repo: repo }
+    impl SessionService {
+        fn new(lifecycle: Box<DynSessionLifecycle<'static>>) -> Self {
+            Self {
+                _lifecycle: lifecycle,
+            }
         }
     }
 
     #[test]
-    fn session_repo_is_required_ctor_injectable() {
-        let from_impl = SessionQueryService::new(DynSessionRepo::new_box(NoopSessionRepo));
-        assert_send(&from_impl._repo);
+    fn session_lifecycle_is_required_ctor_injectable() {
+        let from_impl = SessionService::new(DynSessionLifecycle::new_box(NoopSessionLifecycle));
+        assert_send(&from_impl._lifecycle);
         let from_mock =
-            SessionQueryService::new(DynSessionRepo::new_box(MockTestSessionRepo::new()));
-        assert_send(&from_mock._repo);
+            SessionService::new(DynSessionLifecycle::new_box(MockTestSessionLifecycle::new()));
+        assert_send(&from_mock._lifecycle);
     }
 
     mockall::mock! {
-        TestSessionRepo {}
-        impl SessionRepo for TestSessionRepo {
+        TestSessionLifecycle {}
+        impl SessionLifecycle for TestSessionLifecycle {
+            async fn persist_session_and_emit(
+                &self,
+                session: Session,
+                entry: Entry,
+                envelope: OutboxEnvelopeParts,
+            ) -> Result<(), OutboxEmitError>;
             async fn find(
                 &self,
                 tenant: TenantId,

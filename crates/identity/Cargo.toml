@@ -8,7 +8,7 @@ publish = false
 [lints]
 workspace = true
 
-# 种子登录（with_seed_credential：argon2 哈希凭据 + in-mem CredentialRepo/SessionRepo 替身）仅 test / demo 用——
+# 种子登录（with_seed_credential：argon2 哈希凭据 in-mem CredentialRepo 替身；会话生命周期 provider 由组合根注入）仅 test / demo 用——
 # 经 feature 门控做编译期边界：生产组合根不启用即不编译，防种子凭据路径误入生产（machine boundary）。
 [features]
 seed-login = []

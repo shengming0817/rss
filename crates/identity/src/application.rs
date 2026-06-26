@@ -3,9 +3,10 @@
 //! 登录路径（PR4 + #1277）：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate` → `AuthOutcome` 分流：
 //! 已知+错推进 lockout、未知不建锁、成功清零）→ mint 会话（subject = credential 携带的 canonical
 //! `ids::UserId`，**非** 登录标识，F1）→ **co-tx**（[`Session`] 持久化 + `identity.session-created` outbox
-//! append 同一事务，经 `ports::SessionUnitOfWork`）→ 返回 `IdentityLoginResponse`。
+//! append 同一事务，经 `ports::SessionLifecycle::persist_session_and_emit`）→ 返回 `IdentityLoginResponse`。
+//! logout 经同一 `ports::SessionLifecycle::revoke` 软撤销（create / find / revoke 同源，#1278）。
 //!
-//! 下游 audit 订阅消费该事件。co-tx 接缝由 postgres adapter `PgSessionUnitOfWork`
+//! 下游 audit 订阅消费该事件。co-tx 接缝由 postgres adapter `PgSessionLifecycle`
 //! （INVARIANT OUTBOX-COTX-SESSION-01）落地。
 //!
 //! ref: uber-go/fx lifecycle.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（Domain::init push 声明）
@@ -15,7 +16,7 @@ use std::time::{Duration, SystemTime};
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use generated::event::identity_v1::{CONTRACT_ID, IdentitySessionCreatedPayload, TOPIC};
+use generated::event::identity_v1::{CONTRACT, IdentitySessionCreatedPayload, TOPIC};
 use generated::http::identity_v1::{
     IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse,
 };
@@ -27,13 +28,11 @@ use uuid::Uuid;
 use vocab::TenantId;
 
 use crate::domain::{AuthOutcome, IdentityError, LoginIdentifier, Session, SessionId};
-use crate::ports::{
-    CredentialRepo, DynCredentialRepo, DynSessionRepo, DynSessionUnitOfWork, SessionRepo,
-    SessionUnitOfWork,
-};
+use crate::ports::{CredentialRepo, DynCredentialRepo, DynSessionLifecycle, SessionLifecycle};
 
-/// 发布域（outbox envelope `domain` 字段；= contract.toml `domain`）。
-const SESSION_DOMAIN: &str = "identity";
+/// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
+/// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
+const SESSION_DOMAIN: &str = CONTRACT.domain();
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
 
@@ -89,37 +88,39 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 }
 
 /// 登录应用服务。必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）。
+///
+/// 会话生命周期由**单一** [`DynSessionLifecycle`] provider 承载（合并原 `sessions` + `session_uow`，#1278）：
+/// login 经 `persist_session_and_emit` co-tx 创建、logout 经 `revoke` 软撤销、查询经 `find`——**同源**，
+/// 「创建写 与 撤销/查询落不同 store」从类型层不可表达（PR #255 F3 接缝闭合）。
 pub struct LoginService {
     credentials: Box<DynCredentialRepo<'static>>,
-    sessions: Box<DynSessionRepo<'static>>,
-    session_uow: Box<DynSessionUnitOfWork<'static>>,
+    lifecycle: Box<DynSessionLifecycle<'static>>,
     clock: Box<dyn Clock>,
     session_ttl: Duration,
 }
 
 impl LoginService {
-    /// 组合根构造：4 必填依赖位置参（缺失即编译错误）+ 会话 ttl。
+    /// 组合根构造：3 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
+    /// （create/find/revoke 同源，#1278）。
     pub fn new(
         credentials: Box<DynCredentialRepo<'static>>,
-        sessions: Box<DynSessionRepo<'static>>,
-        session_uow: Box<DynSessionUnitOfWork<'static>>,
+        lifecycle: Box<DynSessionLifecycle<'static>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
     ) -> Self {
         Self {
             credentials,
-            sessions,
-            session_uow,
+            lifecycle,
             clock,
             session_ttl,
         }
     }
 
-    /// 种子构造（test/seed-login 门控）：哈希凭据种子 + in-mem 会话仓储。
+    /// 种子构造（test/seed-login 门控）：哈希凭据种子 + 注入的会话生命周期 provider。
     /// 明文 `password` 仅入参，经 argon2 哈希入库，不存明文。
     #[cfg(any(test, feature = "seed-login"))]
     pub fn with_seed_credential(
-        session_uow: Box<DynSessionUnitOfWork<'static>>,
+        lifecycle: Box<DynSessionLifecycle<'static>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
         login: impl Into<String>,
@@ -130,11 +131,12 @@ impl LoginService {
         let creds = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
             login, user_id, password, tenant,
         )?;
-        let sessions = crate::internal::mem::InMemSessionRepo::new();
+        // 会话生命周期 provider 由组合根注入（journeys 注 MemSessionLifecycle / PgSessionLifecycle；单测注
+        // CapturingSessionLifecycle）——不再自建独立空 session store（原 InMemSessionRepo 与注入 UoW 异 store
+        // 即 #1278 F3 接缝根因）；单一 lifecycle ⇒ create/find/revoke 同源。
         Ok(Self::new(
             crate::ports::DynCredentialRepo::new_box(creds),
-            crate::ports::DynSessionRepo::new_box(sessions),
-            session_uow,
+            lifecycle,
             clock,
             session_ttl,
         ))
@@ -214,15 +216,12 @@ impl LoginService {
             IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
             bytes,
         );
-        let envelope = OutboxEnvelopeParts {
-            domain: SESSION_DOMAIN.to_string(),
-            contract_id: CONTRACT_ID.to_string(),
-            subject_id: subject.clone(),
-        };
+        // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；business 只给 opaque subject。
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, subject.clone());
 
         // 5. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
         let session = Session::new(session_id.clone(), subject, tenant, expires_at, now);
-        self.session_uow
+        self.lifecycle
             .persist_session_and_emit(session, entry, envelope)
             .await
             .map_err(LoginError::SessionWrite)?;
@@ -298,7 +297,7 @@ impl LoginService {
         tenant: TenantId,
         session_id: SessionId,
     ) -> Result<(), IdentityError> {
-        self.sessions.revoke(tenant, session_id).await
+        self.lifecycle.revoke(tenant, session_id).await
     }
 }
 
@@ -331,28 +330,50 @@ mod tests {
     // 未种子化的 canonical user id（change_password 未知主体 → NotFound，#1277 F2）。
     const GHOST_USER: &str = "99999999-8888-4777-8666-555544443333";
 
-    // 域单测不依赖 adapter crate（rust-standards.md §命名）：SessionUnitOfWork / Clock 替身在此手写。
-    // 捕获 co-tx 写入（Session 业务实体 + Entry + envelope），断言登录恰调一次、参数正确。
+    // 域单测不依赖 adapter crate（rust-standards.md §命名）：SessionLifecycle / Clock 替身在此手写。
+    // CapturingSessionLifecycle 双职能：① 捕获 co-tx 写入（Session + Entry + envelope）供 outbox 断言（test 1-5）；
+    // ② 复用 `InMemSessionLifecycle` 承载 session store（create 即写 → find/revoke 同源，不重写 HashMap/租户/
+    // 幂等逻辑）——证明 login→logout 经**同一 store** 闭合（#1278）。`Arc` 共享：clone 与 service 持有方共享
+    // `writes` + `inner` 两 store。
     #[derive(Clone, Default)]
-    struct CapturingSessionUoW {
+    struct CapturingSessionLifecycle {
         writes: Arc<Mutex<Vec<(Session, Entry, OutboxEnvelopeParts)>>>,
+        inner: crate::internal::mem::InMemSessionLifecycle,
     }
-    impl SessionUnitOfWork for CapturingSessionUoW {
+    impl SessionLifecycle for CapturingSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
             session: Session,
             entry: Entry,
             envelope: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
+            // 委托 inner 承载 store（创建即写 → 同源 find/revoke）；同时捕获写入供 outbox 断言。
+            self.inner
+                .persist_session_and_emit(session.clone(), entry.clone(), envelope.clone())
+                .await?;
             self.writes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push((session, entry, envelope));
             Ok(())
         }
+        async fn find(
+            &self,
+            tenant: TenantId,
+            session_id: SessionId,
+        ) -> Result<Option<Session>, IdentityError> {
+            self.inner.find(tenant, session_id).await
+        }
+        async fn revoke(
+            &self,
+            tenant: TenantId,
+            session_id: SessionId,
+        ) -> Result<(), IdentityError> {
+            self.inner.revoke(tenant, session_id).await
+        }
     }
 
-    impl CapturingSessionUoW {
+    impl CapturingSessionLifecycle {
         fn count(&self) -> usize {
             self.writes.lock().unwrap_or_else(|e| e.into_inner()).len()
         }
@@ -383,10 +404,14 @@ mod tests {
 
     /// 构造用 with_seed_credential 的 LoginService（默认 CANON_TENANT + 登录标识 alice / canonical
     /// CANON_USER / correct-horse）。
-    fn seed_service(capture: &CapturingSessionUoW, now_secs: u64, ttl_secs: u64) -> LoginService {
+    fn seed_service(
+        capture: &CapturingSessionLifecycle,
+        now_secs: u64,
+        ttl_secs: u64,
+    ) -> LoginService {
         #[allow(clippy::expect_used)]
         LoginService::with_seed_credential(
-            DynSessionUnitOfWork::new_box(capture.clone()),
+            DynSessionLifecycle::new_box(capture.clone()),
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
             "alice",
@@ -402,7 +427,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn login_success_persists_once_and_response_correct() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         let resp = svc
@@ -463,10 +488,10 @@ mod tests {
         assert_eq!(payload.session_id, resp.data.session_id);
         assert_eq!(payload.occurred_at, 1_000);
 
-        // envelope。subject_id = canonical user id（登录标识不进 broker metadata）。
-        assert_eq!(envelope.domain, SESSION_DOMAIN);
-        assert_eq!(envelope.contract_id, CONTRACT_ID);
-        assert_eq!(envelope.subject_id, CANON_USER);
+        // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id 同源，#1193）；
+        // subject_id = canonical user id（登录标识不进 broker metadata）。
+        assert_eq!(*envelope.contract(), CONTRACT);
+        assert_eq!(envelope.subject_id(), CANON_USER);
     }
 
     // ── 测试 2：login 密码错 ──────────────────────────────────────────────────
@@ -474,7 +499,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn login_wrong_password_returns_invalid_credentials_zero_writes() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         let err = svc
@@ -497,7 +522,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn login_unknown_subject_returns_invalid_credentials_zero_writes() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         let err = svc
@@ -520,7 +545,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn login_locked_account_rejected_before_verify_zero_writes() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         // 连续 5 次错密码触发锁定（窗口内 FixedClock 固定在 now_secs=1_000）。
@@ -559,7 +584,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn login_cross_tenant_returns_invalid_credentials_zero_writes() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         let err = svc
@@ -582,7 +607,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn change_password_success_rotates_credential() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         svc.change_password(
@@ -627,7 +652,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn change_password_wrong_current_password_rejected() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         let err = svc
@@ -659,7 +684,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn change_password_unknown_subject_returns_not_found() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         let err = svc
@@ -680,7 +705,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn change_password_cross_tenant_returns_not_found() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600); // 凭据在 CANON_TENANT
 
         let err = svc
@@ -714,7 +739,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn change_password_anchors_on_user_id_not_login() {
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
         let svc = seed_service(&capture, 1_000, 3_600);
 
         // ① 本人 canonical user_id（≠ 登录标识 "alice"）改密成功。
@@ -792,7 +817,7 @@ mod tests {
             }
         }
 
-        let capture = CapturingSessionUoW::default();
+        let capture = CapturingSessionLifecycle::default();
 
         // 构造一个种子凭据（通过 InMemCredentialRepo 得到一个有效的 Credential）。
         let cred_repo = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
@@ -817,11 +842,9 @@ mod tests {
         mock.expect_bump_version()
             .returning(|_expected, _next| Err(IdentityError::VersionConflict));
 
-        let sessions = crate::internal::mem::InMemSessionRepo::new();
         let svc = LoginService::new(
             DynCredentialRepo::new_box(mock),
-            crate::ports::DynSessionRepo::new_box(sessions),
-            DynSessionUnitOfWork::new_box(capture),
+            DynSessionLifecycle::new_box(capture),
             make_clock(1_000),
             Duration::from_secs(3_600),
         );
@@ -839,117 +862,85 @@ mod tests {
         assert!(matches!(err, ChangePasswordError::VersionConflict));
     }
 
-    // ── 测试 10：logout 撤销（经 service 观测共享存储效果）────────────────────
-    // sessions 经 Arc 共享：一个克隆注入 service、一个留作断言侧——验证 svc.logout 的软撤销
-    // **真实反映在存储上**（不退化成直测 InMemSessionRepo::revoke）。
-
+    // ── 测试 10：login → logout 全链回归（#1278 接缝闭合）─────────────────────────
+    // 经**单一** lifecycle：login 写入会话 → 同一 store find=Some → svc.logout 软撤销 → find=None。
+    // anti-vacuity：login 写入的会话**真实可读**（非两独立 store；合并前 login 写 UoW、logout 查 SessionRepo
+    // 异 store ⇒ find 永远 None，回归不可表达该 bug）——证明合并后 create / revoke / find 同源。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn logout_revokes_session() {
-        use crate::internal::mem::{InMemCredentialRepo, InMemSessionRepo};
-        use crate::ports::DynSessionRepo;
-
+    async fn login_then_logout_revokes_via_shared_lifecycle() {
+        let capture = CapturingSessionLifecycle::default();
+        let svc = seed_service(&capture, 1_000, 3_600);
         let ta = tid(CANON_TENANT);
-        let sid = SessionId::new("test-sid-logout");
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-        let sessions = InMemSessionRepo::new();
-        sessions.insert(Session::new(
-            sid.clone(),
-            CANON_USER, // canonical user id（与 F1 一致：session.subject 非登录标识）
-            ta,
-            now + Duration::from_secs(3_600),
-            now,
-        ));
-        // logout 前可查到。
+
+        // login：经 lifecycle.persist_session_and_emit 创建会话（co-tx 写恰一次）。
+        let resp = svc
+            .login(
+                ta,
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect("login ok");
+        let sid = SessionId::new(&resp.data.session_id);
+        assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
+
+        // login 写入的会话经同一 lifecycle 可查回（anti-vacuity：非空 store、非两独立面）。
         assert!(
-            sessions
+            capture
                 .find(ta, sid.clone())
                 .await
                 .expect("find before")
                 .is_some(),
-            "logout 前应能找到会话"
+            "login 后应能经同一 lifecycle 找到会话"
         );
 
-        let creds = InMemCredentialRepo::with_seed_credential(
-            "alice",
-            uid(CANON_USER),
-            "correct-horse",
-            ta,
-        )
-        .expect("seed creds");
-        let svc = LoginService::new(
-            DynCredentialRepo::new_box(creds),
-            DynSessionRepo::new_box(sessions.clone()), // service 持共享克隆
-            DynSessionUnitOfWork::new_box(CapturingSessionUoW::default()),
-            make_clock(1_000),
-            Duration::from_secs(3_600),
-        );
-
-        // 经 service logout，效果反映在共享 sessions 上：find → None。
+        // logout：软撤销反映在同一 store → find=None（接缝闭合）。
         svc.logout(ta, sid.clone()).await.expect("logout ok");
         assert!(
-            sessions.find(ta, sid).await.expect("find after").is_none(),
-            "经 service logout 后 find 应返回 None（软撤销）"
+            capture.find(ta, sid).await.expect("find after").is_none(),
+            "经 service logout 后 find 应返回 None（软撤销，同源 store）"
         );
     }
 
-    // ── 测试 11：logout 跨租 no-op + 幂等（经 service 观测共享存储）──────────────
+    // ── 测试 11：logout 跨租 no-op + 幂等（login 写入 + 同源 lifecycle 观测）──────────
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn logout_cross_tenant_noop_and_idempotent() {
-        use crate::internal::mem::{InMemCredentialRepo, InMemSessionRepo};
-        use crate::ports::DynSessionRepo;
-
+        let capture = CapturingSessionLifecycle::default();
+        let svc = seed_service(&capture, 1_000, 3_600);
         let ta = tid(CANON_TENANT);
         let tb = tid(OTHER_TENANT);
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-        let sid = SessionId::new("test-sid-cross");
-        let sessions = InMemSessionRepo::new();
-        sessions.insert(Session::new(
-            sid.clone(),
-            CANON_USER, // canonical user id（与 F1 一致：session.subject 非登录标识）
-            ta,
-            now + Duration::from_secs(3_600),
-            now,
-        ));
 
-        let creds = InMemCredentialRepo::with_seed_credential(
-            "alice",
-            uid(CANON_USER),
-            "correct-horse",
-            ta,
-        )
-        .expect("seed");
-        let svc = LoginService::new(
-            DynCredentialRepo::new_box(creds),
-            DynSessionRepo::new_box(sessions.clone()),
-            DynSessionUnitOfWork::new_box(CapturingSessionUoW::default()),
-            make_clock(1_000),
-            Duration::from_secs(3_600),
-        );
+        // login（CANON_TENANT，凭据所在租户）写入会话。
+        let resp = svc
+            .login(
+                ta,
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect("login ok");
+        let sid = SessionId::new(&resp.data.session_id);
 
         // 跨租 logout（tenant B）：no-op，tenant A 会话仍在。
         svc.logout(tb, sid.clone())
             .await
             .expect("cross-tenant logout ok");
         assert!(
-            sessions
-                .find(ta, sid.clone())
-                .await
-                .expect("find")
-                .is_some(),
+            capture.find(ta, sid.clone()).await.expect("find").is_some(),
             "跨租 logout 不应撤销 TENANT_A 的会话"
         );
 
         // tenant A logout：首次撤销，第二次幂等仍 Ok。
         svc.logout(ta, sid.clone()).await.expect("logout 1 ok");
         assert!(
-            sessions
-                .find(ta, sid.clone())
-                .await
-                .expect("find")
-                .is_none(),
+            capture.find(ta, sid.clone()).await.expect("find").is_none(),
             "TENANT_A logout 后会话应被撤销"
         );
         svc.logout(ta, sid).await.expect("logout 2 idempotent");

@@ -60,19 +60,22 @@ struct Claims {
 
 /// JWT 结构闸（不验签）：校验 3 段 + base64url payload + JSON + 非空 `sub`。
 ///
-/// 信任边界：只做**结构**校验，签名/exp 与身份 claims 由上游 verifier（`diport::Pdp`）负责。
+/// 信任边界：只做**结构**校验，签名/exp 与身份 claims 由上游 verifier（`diport::Pdp`）负责。本闸在 `verify_jwt`
+/// 中**验签通过后**运行（防 lenient adapter 误判畸形 token ok），故失败归 [`AuthnError::PrincipalInvalid`]
+/// （验签后失败），**非** `TokenInvalid`（专指 verifier 报告的签名失败，#1275 review F1）。
 fn decode_claims(raw: &str) -> Result<Claims, AuthnError> {
     let parts: Vec<&str> = raw.split('.').collect();
     if parts.len() != 3 {
-        return Err(AuthnError::TokenInvalid);
+        return Err(AuthnError::PrincipalInvalid);
     }
     let payload_b64 = parts[1];
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_b64)
-        .map_err(|_| AuthnError::TokenInvalid)?;
-    let claims: Claims = serde_json::from_slice(&bytes).map_err(|_| AuthnError::TokenInvalid)?;
+        .map_err(|_| AuthnError::PrincipalInvalid)?;
+    let claims: Claims =
+        serde_json::from_slice(&bytes).map_err(|_| AuthnError::PrincipalInvalid)?;
     if claims.sub.is_empty() {
-        return Err(AuthnError::TokenInvalid);
+        return Err(AuthnError::PrincipalInvalid);
     }
     Ok(claims)
 }
@@ -116,7 +119,8 @@ impl Principal {
     /// `kind`→[`PrincipalKind`] 策略 + subject 非空不变式**单源**：消费侧两条已验证入口共用本函数，杜绝
     /// 双份映射 / 双份校验漂移——[`Self::from_verified_jwt`] 与 verify→mint bridge [`verify_jwt`] 均读载体
     /// 内 [`diport::VerifiedClaims`]。service / anonymous 不经本 funnel；未知 / 缺失 kind、空 subject、
-    /// scoped 主体缺 tenant / tenant 非 canonical UUID → 一律 `TokenInvalid`（fail-closed）。
+    /// scoped 主体缺 tenant / tenant 非 canonical UUID → 一律 [`AuthnError::PrincipalInvalid`]（验签**通过后**的
+    /// principal 派生失败，fail-closed；**非** `TokenInvalid`——后者专指签名失败，#1275 review F1）。
     fn derive_from_claims(
         subject: &str,
         tenant: Option<&str>,
@@ -125,7 +129,7 @@ impl Principal {
         // 空 subject fail-closed（F2）：verifier 产物即便绕过旧 decode_claims 的非空检查，也不得 mint
         // 空主体 Principal。此为 Principal 派生单一漏斗，覆盖 from_verified_jwt + bridge 两路。
         if subject.is_empty() {
-            return Err(AuthnError::TokenInvalid);
+            return Err(AuthnError::PrincipalInvalid);
         }
         // 单点决策 kind + 是否需 tenant，避免二级 match-on-PrincipalKind 的不可达 `_` 臂
         // （新增 PrincipalKind 时须在此加 KIND_* 串臂并定其 tenant 要求，无静默兜底）。
@@ -135,12 +139,12 @@ impl Principal {
             Some(KIND_ADMIN) => (PrincipalKind::Admin, true),
             // 跨租户超管：无 tenant（忽略任何 tenant claim）。
             Some(KIND_SUPER_ADMIN) => (PrincipalKind::SuperAdmin, false),
-            // service/anonymous 不经 jwt funnel；未知/缺失 kind → TokenInvalid。
-            _ => return Err(AuthnError::TokenInvalid),
+            // service/anonymous 不经 jwt funnel；未知/缺失 kind → PrincipalInvalid（验签后派生失败）。
+            _ => return Err(AuthnError::PrincipalInvalid),
         };
         let tenant = if needs_tenant {
-            let raw = tenant.ok_or(AuthnError::TokenInvalid)?;
-            Some(TenantId::parse(raw).map_err(|_| AuthnError::TokenInvalid)?)
+            let raw = tenant.ok_or(AuthnError::PrincipalInvalid)?;
+            Some(TenantId::parse(raw).map_err(|_| AuthnError::PrincipalInvalid)?)
         } else {
             None
         };
@@ -153,12 +157,12 @@ impl Principal {
 
     /// 由已验证 service-token subject 派生（funnel 固定 `kind=Service`，跨租户 `tenant=None`）。
     ///
-    /// fail-closed：空 subject → `TokenInvalid`（F2，与 [`Self::derive_from_claims`] 同款非空不变式）。
-    /// 信任原点 = verifier：subject 取自验签产物 [`diport::VerifiedClaims::subject`]，service token 的
-    /// kind / tenant claim 不参与（service 主体恒跨租户）。
+    /// fail-closed：空 subject → [`AuthnError::PrincipalInvalid`]（验签后派生失败，F2 / #1275 review F1，与
+    /// [`Self::derive_from_claims`] 同款非空不变式）。信任原点 = verifier：subject 取自验签产物
+    /// [`diport::VerifiedClaims::subject`]，service token 的 kind / tenant claim 不参与（service 主体恒跨租户）。
     fn service_from_subject(subject: &str) -> Result<Self, AuthnError> {
         if subject.is_empty() {
-            return Err(AuthnError::TokenInvalid);
+            return Err(AuthnError::PrincipalInvalid);
         }
         Ok(Self {
             kind: PrincipalKind::Service,
@@ -737,12 +741,30 @@ impl Session {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AuthnError {
-    /// 结构化解码 / claims 映射失败（坏 base64url / 坏 JSON / 缺 sub / 未知 kind / 坏 tenant），
-    /// 或 verifier 报 [`diport::PdpError::InvalidSignature`]（签名 / MAC 校验失败）/
-    /// [`diport::PdpError::Untrusted`]（签发者 / key / audience 不受信）。verify 层只做认证（非授权），
-    /// 故凭据不可信 / 无效一律 401 invalid_token（RFC 6750 §3.1），403 留给 authz 层「已认证但无权」。
+    /// 凭据**签名 / MAC / 结构完整性**校验失败（verifier 报 [`diport::PdpError::InvalidSignature`]：签名 / MAC
+    /// 校验失败、token 段数畸形、alg 不白名单、payload JSON 坏）。verify 层只做认证（非授权），故凭据无效一律
+    /// 401 invalid_token（RFC 6750 §3.1），403 留给 authz 层「已认证但无权」。
+    ///
+    /// **本变体专指 verifier 报告的凭据签名失败**——验签**通过后**的 claims 结构闸 / principal 派生失败归
+    /// [`AuthnError::PrincipalInvalid`]，**不复用本变体**（#1275 review F1：避免 deny 路把良性 claims 失败误报成
+    /// `signature_invalid` 攻击信号）。
     #[error("token is invalid")]
     TokenInvalid,
+    /// 凭据经 verifier 验签**通过**（签名 / iss / aud / exp 均 OK），但 authn 无法据其 claims 派生有效
+    /// [`Principal`]：claims 结构畸形（防 lenient adapter 的结构闸）、未知 / 缺失 kind、scoped 主体缺 tenant /
+    /// tenant 非 canonical UUID、空 subject。
+    ///
+    /// **wire 语义与 [`AuthnError::TokenInvalid`] 相同**——同为 401 invalid_token（RFC 6750 §3.1，**非** 403）；
+    /// 独立变体使 deny 路 `authz.deny_reason` 区分**疑似攻击的签名失败**（`TokenInvalid`）vs **良性的 claims /
+    /// principal 派生失败**（本变体），不把后者误报成 `signature_invalid`（#1275 review F1）。
+    #[error("principal cannot be derived")]
+    PrincipalInvalid,
+    /// 凭据来源 / 路径不受信（verifier 报 [`diport::PdpError::Untrusted`]：iss / aud / key-path 不受信 / 未知 scheme）。
+    /// **wire 语义与 [`AuthnError::TokenInvalid`] 相同**——同为 401 invalid_token（RFC 6750 §3.1，**非** 403）；
+    /// 独立变体仅为 deny 路 tracing 告警分级（区分疑似配置错 `Untrusted` vs 疑似攻击 `InvalidSignature`，#1275 /
+    /// spec SC-006），不改 HTTP 状态。
+    #[error("token is untrusted")]
+    TokenUntrusted,
     /// 令牌过期（verifier 报 [`diport::PdpError::Expired`]，经 verify→mint bridge 的 `From<PdpError>` 产生）。
     #[error("token is expired")]
     TokenExpired,
@@ -750,13 +772,18 @@ pub enum AuthnError {
     #[error("session not found")]
     SessionNotFound,
     /// 主体已认证但无权（403 insufficient permission）。**本 crate 当前不可达**——由后续 authz / ABAC 层
-    /// 产生；verify→mint bridge **不**产此态（凭据不可信 / 无效归 [`AuthnError::TokenInvalid`]，RFC 6750 §3.1）。
+    /// 产生；verify→mint bridge **不**产此态（凭据不可信 / 无效归 401 拒绝态 `TokenInvalid` / `TokenUntrusted` /
+    /// `PrincipalInvalid` / `TokenExpired`，RFC 6750 §3.1）。
     #[error("principal not permitted")]
     Forbidden,
 }
 
 /// 验签 port 错误 → 认证错误映射（verify→mint bridge 经 `?` 使用，#1158）。fail-closed：所有 `PdpError`
 /// 变体均映射到**拒绝**态，绝不静默成功；`PdpError` 是 `#[non_exhaustive]`，未来变体默认落 `TokenInvalid`。
+///
+/// 三变体一一保真（#1275，spec SC-006/FR-009）：`Untrusted` 单列 [`AuthnError::TokenUntrusted`]、不与
+/// `InvalidSignature` 折叠成同一 `TokenInvalid`，使 deny 路告警可区分疑似配置错 vs 疑似攻击。三者 wire 语义不变
+/// （`TokenInvalid` / `TokenUntrusted` 同为 401 invalid_token，`TokenExpired` 亦 401），仅观测粒度提升。
 impl From<diport::PdpError> for AuthnError {
     fn from(e: diport::PdpError) -> Self {
         match e {
@@ -764,7 +791,7 @@ impl From<diport::PdpError> for AuthnError {
             diport::PdpError::Expired => AuthnError::TokenExpired,
             // verify 层纯认证：Untrusted（iss / key / aud 不受信 / 未知 alg / kid 无匹配）= 凭据无效 →
             // 401 invalid_token（RFC 6750 §3.1），非 403 Forbidden（后者留给 authz 层「已认证但无权」）。
-            diport::PdpError::Untrusted => AuthnError::TokenInvalid,
+            diport::PdpError::Untrusted => AuthnError::TokenUntrusted,
             // PdpError #[non_exhaustive]：未来变体 fail-closed 落 TokenInvalid（默认拒绝，无静默成功）。
             _ => AuthnError::TokenInvalid,
         }
@@ -1129,8 +1156,8 @@ mod jwt_parse_tests {
         ];
         for raw in &cases {
             assert!(
-                matches!(Jwt::parse(raw), Err(AuthnError::TokenInvalid)),
-                "必须 TokenInvalid: {raw}"
+                matches!(Jwt::parse(raw), Err(AuthnError::PrincipalInvalid)),
+                "结构闸（验签后）失败必须 PrincipalInvalid: {raw}"
             );
         }
     }
@@ -1188,9 +1215,9 @@ mod principal_derive_tests {
             assert!(
                 matches!(
                     Principal::from_verified_jwt(&vjwt("u", None, Some(kind))),
-                    Err(AuthnError::TokenInvalid)
+                    Err(AuthnError::PrincipalInvalid)
                 ),
-                "scoped kind 缺 tenant 必须 TokenInvalid: {kind}"
+                "scoped kind 缺 tenant 必须 PrincipalInvalid（验签后派生失败）: {kind}"
             );
         }
     }
@@ -1208,9 +1235,9 @@ mod principal_derive_tests {
             assert!(
                 matches!(
                     Principal::from_verified_jwt(&vjwt("x", tenant, kind)),
-                    Err(AuthnError::TokenInvalid)
+                    Err(AuthnError::PrincipalInvalid)
                 ),
-                "必须 TokenInvalid: tenant={tenant:?} kind={kind:?}"
+                "必须 PrincipalInvalid（验签后派生失败）: tenant={tenant:?} kind={kind:?}"
             );
         }
     }
@@ -1237,7 +1264,7 @@ mod principal_derive_tests {
         );
         assert!(matches!(
             Principal::from_verified_jwt(&empty_jwt),
-            Err(AuthnError::TokenInvalid)
+            Err(AuthnError::PrincipalInvalid)
         ));
         let empty_svc = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
@@ -1245,7 +1272,7 @@ mod principal_derive_tests {
         );
         assert!(matches!(
             Principal::from_verified_service_token(&empty_svc),
-            Err(AuthnError::TokenInvalid)
+            Err(AuthnError::PrincipalInvalid)
         ));
     }
 }
@@ -1382,8 +1409,9 @@ mod verify_bridge_tests {
         assert_eq!(principal.tenant(), None, "super-admin 跨租户 tenant=None");
     }
 
-    /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok`，never seal（verify 层纯认证，
-    /// Untrusted 与 InvalidSignature 同归 401 `TokenInvalid`，RFC 6750 §3.1）。
+    /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok`，never seal（verify 层纯认证）。
+    /// 三路一一保真（#1275，spec SC-006/FR-009）：`Untrusted` 单列 `TokenUntrusted`（与 `TokenInvalid` 同为
+    /// 401 invalid_token wire 语义，独立变体仅供 deny 路告警分级），不再与 `InvalidSignature` 折叠。
     #[tokio::test]
     async fn verify_jwt_pdp_failure_maps_error_and_never_mints() {
         let raw = test_jwt(
@@ -1392,7 +1420,7 @@ mod verify_bridge_tests {
         for (perr, want) in [
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
-            (PdpError::Untrusted, AuthnError::TokenInvalid),
+            (PdpError::Untrusted, AuthnError::TokenUntrusted),
         ] {
             let pdp = boxed(Err(perr.clone()));
             // matches! + discriminant 守卫：既断言是 Err（绝不 mint），又锁定映射变体。
@@ -1405,7 +1433,8 @@ mod verify_bridge_tests {
         }
     }
 
-    /// verify 先于 seal：`Pdp` ok 但 raw 结构坏 → `Jwt::parse` 报 `TokenInvalid`（非 seal），无产物。
+    /// verify 先于 seal：`Pdp` ok 但 raw 结构坏 → `Jwt::parse` 报 `PrincipalInvalid`（验签后结构闸失败，非
+    /// 签名失败、非 seal），无产物。#1275 review F1：此路不得记 `signature_invalid`。
     #[tokio::test]
     async fn verify_jwt_ok_but_malformed_raw_fails_at_parse() {
         let pdp = boxed(Ok(VerifiedClaims::new(
@@ -1415,7 +1444,7 @@ mod verify_bridge_tests {
         )));
         assert!(matches!(
             verify_jwt("only.two", &pdp).await,
-            Err(AuthnError::TokenInvalid)
+            Err(AuthnError::PrincipalInvalid)
         ));
     }
 
@@ -1437,13 +1466,13 @@ mod verify_bridge_tests {
     }
 
     /// fail-closed：三 `PdpError` 变体均映射到**拒绝**态，never `Ok` / seal（与 verify_jwt 路径对齐；
-    /// Untrusted 与 InvalidSignature 同归 401 `TokenInvalid`）。
+    /// 三路一一保真，`Untrusted`→`TokenUntrusted`，#1275）。
     #[tokio::test]
     async fn verify_service_token_pdp_failure_maps_error_and_never_mints() {
         for (perr, want) in [
             (PdpError::InvalidSignature, AuthnError::TokenInvalid),
             (PdpError::Expired, AuthnError::TokenExpired),
-            (PdpError::Untrusted, AuthnError::TokenInvalid),
+            (PdpError::Untrusted, AuthnError::TokenUntrusted),
         ] {
             let pdp = boxed(Err(perr.clone()));
             let result = verify_service_token("opaque-token", &pdp).await;
@@ -1454,7 +1483,8 @@ mod verify_bridge_tests {
         }
     }
 
-    /// F2（bridge 端到端）：verifier 验签 ok 但返回**空 subject** → fail-closed `TokenInvalid`，绝不 mint。
+    /// F2（bridge 端到端）：verifier 验签 ok 但返回**空 subject** → fail-closed `PrincipalInvalid`（验签后派生
+    /// 失败，非签名失败），绝不 mint。#1275 review F1：此路不得记 `signature_invalid`。
     #[tokio::test]
     async fn verify_rejects_empty_subject_from_verifier() {
         let raw = test_jwt(
@@ -1467,12 +1497,12 @@ mod verify_bridge_tests {
         )));
         assert!(matches!(
             verify_jwt(&raw, &pdp).await,
-            Err(AuthnError::TokenInvalid)
+            Err(AuthnError::PrincipalInvalid)
         ));
         let pdp_svc = boxed(Ok(VerifiedClaims::new("", None, None)));
         assert!(matches!(
             verify_service_token("opaque", &pdp_svc).await,
-            Err(AuthnError::TokenInvalid)
+            Err(AuthnError::PrincipalInvalid)
         ));
     }
 }
@@ -1546,6 +1576,8 @@ mod enum_exhaustiveness {
     fn authn_error_is_exhaustive_and_displays() {
         for e in [
             AuthnError::TokenInvalid,
+            AuthnError::TokenUntrusted,
+            AuthnError::PrincipalInvalid,
             AuthnError::TokenExpired,
             AuthnError::SessionNotFound,
             AuthnError::Forbidden,
@@ -1553,11 +1585,47 @@ mod enum_exhaustiveness {
             assert!(!e.to_string().is_empty(), "错误 message 非空");
             match e {
                 AuthnError::TokenInvalid
+                | AuthnError::TokenUntrusted
+                | AuthnError::PrincipalInvalid
                 | AuthnError::TokenExpired
                 | AuthnError::SessionNotFound
                 | AuthnError::Forbidden => {}
             }
         }
+    }
+
+    /// deny 分级（#1275 + review F1）：四个 deny 变体 Debug 互不相同（bridge 据变体记不同 `authz.deny_reason`
+    /// 闭值），Display 为 const literal，且 Debug/Display 均不含任何 runtime 数据（taxonomy 不携 PII）。
+    /// 重点：`PrincipalInvalid`（验签后良性失败）须与 `TokenInvalid`（签名失败）Debug 可区分，否则 bridge 无法
+    /// 避免把良性失败误报成 `signature_invalid`。
+    #[test]
+    fn deny_variants_are_distinct_and_pii_free() {
+        let debugs: Vec<String> = [
+            AuthnError::TokenInvalid,
+            AuthnError::TokenUntrusted,
+            AuthnError::PrincipalInvalid,
+            AuthnError::TokenExpired,
+        ]
+        .iter()
+        .map(|e| format!("{e:?}"))
+        .collect();
+        assert_eq!(
+            debugs,
+            [
+                "TokenInvalid",
+                "TokenUntrusted",
+                "PrincipalInvalid",
+                "TokenExpired"
+            ],
+            "Debug 为变体名"
+        );
+        let unique: std::collections::HashSet<&String> = debugs.iter().collect();
+        assert_eq!(unique.len(), debugs.len(), "四 deny 变体 Debug 须互不相同");
+        assert_eq!(
+            AuthnError::PrincipalInvalid.to_string(),
+            "principal cannot be derived",
+            "Display 为 const literal（无 runtime 数据 / PII）"
+        );
     }
 
     /// `CrossTenantError` 闭值集 + Display 非空 + Audit source 脱敏（消费方据 Display 映射状态码 / 日志）。

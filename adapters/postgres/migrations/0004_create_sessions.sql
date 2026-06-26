@@ -1,7 +1,7 @@
 -- 会话持久化表（identity session persistence；L2 OutboxFact co-tx，#1083 / #1192）。
 --
 -- co-tx 原子性（FR-003）：session 行与 outbox(`identity.session-created`) 行在**同一本地事务**写入，
--- 由 adapter `PgSessionUnitOfWork` 在 `PgStore::run_in_transaction` 闭包内先注入 tenant scope
+-- 由 adapter `PgSessionLifecycle` 在 `PgStore::run_in_transaction` 闭包内先注入 tenant scope
 -- （`set_config('rss.tenant_id', $1, true)` = SET LOCAL，tenancy.md §RLS 与 PG scope）后 INSERT，再
 -- `append_outbox`，单 commit（INVARIANT OUTBOX-COTX-SESSION-01；both-or-neither）。
 --

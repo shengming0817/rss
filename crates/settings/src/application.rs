@@ -21,7 +21,7 @@ use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
 use diport::{Clock, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
-    CONTRACT_ID, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
+    CONTRACT, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
     TOPIC as VERSION_CHANGED_TOPIC,
 };
 use generated::http::settings_v1::{
@@ -46,9 +46,6 @@ use crate::ports::{ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfW
 
 /// 配置路由组前缀（Primary listener，业务 API）。
 pub const SETTINGS_ROUTE_PREFIX: &str = "/api/v1/settings";
-
-/// outbox envelope 发布域（config-version-changed 由 settings 域发布）。
-const SETTINGS_DOMAIN: &str = "settings";
 
 /// settings 应用层错误。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射）。
 #[derive(Debug, thiserror::Error)]
@@ -239,11 +236,8 @@ impl SettingsService {
             IdemKey::parse(&event_id).map_err(|_| SettingsServiceError::EntryBuild)?,
             bytes,
         );
-        let envelope = OutboxEnvelopeParts {
-            domain: SETTINGS_DOMAIN.to_string(),
-            contract_id: CONTRACT_ID.to_string(),
-            subject_id: key.as_str().to_string(), // opaque 配置 key（无 PII / secret）
-        };
+        // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；subject = opaque 配置 key。
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, key.as_str().to_string());
         Ok((entry, envelope))
     }
 
@@ -468,9 +462,9 @@ mod tests {
             .map(|(entry, env)| EmittedFact {
                 topic: entry.topic().as_str().to_string(),
                 idem: entry.idem_key().as_str().to_string(),
-                domain: env.domain.clone(),
-                contract_id: env.contract_id.clone(),
-                subject_id: env.subject_id.clone(),
+                domain: env.contract().domain().to_string(),
+                contract_id: env.contract().contract_id().to_string(),
+                subject_id: env.subject_id().to_string(),
                 payload: serde_json::from_slice(entry.payload()).expect("decode payload"),
             })
             .collect()
@@ -501,9 +495,9 @@ mod tests {
         assert_eq!(facts.len(), 1, "L2：每次 publish 恰发射一条 outbox entry");
         let fact = &facts[0];
         assert_eq!(fact.topic, VERSION_CHANGED_TOPIC);
-        // envelope：域 / 契约 / opaque subject（config key）。
-        assert_eq!(fact.domain, SETTINGS_DOMAIN);
-        assert_eq!(fact.contract_id, CONTRACT_ID);
+        // envelope：域 / 契约 / opaque subject（config key）——域 + 契约同源 generated `CONTRACT`（#1193）。
+        assert_eq!(fact.domain, CONTRACT.domain());
+        assert_eq!(fact.contract_id, CONTRACT.contract_id());
         assert_eq!(fact.subject_id, "app.timeout");
         // payload。
         assert_eq!(fact.payload.key, "app.timeout");

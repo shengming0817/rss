@@ -268,7 +268,7 @@ fn make_entry(event_id: &str) -> Entry {
 
 /// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
 /// 的用例，不断言 occurred_at 值）。`occurred_at` 构造期必填（#262 F1），此处取占位 0；envelope occurred_at 的
-/// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgSessionUnitOfWork`）/ config co-tx 专门覆盖（#1129）。
+/// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgSessionLifecycle`）/ config co-tx 专门覆盖（#1129）。
 fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
@@ -982,16 +982,15 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     crate::PgEmitter::new(&store, fixed_clock())
         .emit(
             entry,
-            OutboxEnvelopeParts {
-                domain: "identity".to_string(),
-                contract_id: SESSION_CREATED_TOPIC.to_string(),
-                subject_id: "subj-opaque-77".to_string(),
-            },
+            OutboxEnvelopeParts::new(
+                vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                "subj-opaque-77",
+            ),
         )
         .await?;
 
-    let row: (String, String, String, String, String) = sqlx::query_as(
-        "SELECT event_id, domain, topic, status, metadata::text FROM outbox WHERE event_id = $1",
+    let row: (String, String, String, String, String, String) = sqlx::query_as(
+        "SELECT event_id, domain, topic, contract_id, status, metadata::text FROM outbox WHERE event_id = $1",
     )
     .bind(&event_id)
     .fetch_one(&store.pool)
@@ -999,25 +998,27 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     assert_eq!(row.0, event_id, "event_id = EventId");
     assert_eq!(row.1, "identity", "domain");
     assert_eq!(row.2, SESSION_CREATED_TOPIC, "topic");
-    assert_eq!(row.3, "pending", "新 entry pending 待 relay");
+    // contract_id 列 = ContractBinding.contract_id()（#1193 typed 绑定经 adapter 落库的 drift-lock）。
+    assert_eq!(row.3, "identity.session-created", "contract_id");
+    assert_eq!(row.4, "pending", "新 entry pending 待 relay");
     // metadata 含 opaque subjectId + sealed 注入的 reserved occurred_at（#1129）；无完整 PII（FR-020 funnel）。
     assert!(
-        row.4.contains("subjectId") && row.4.contains("subj-opaque-77"),
+        row.5.contains("subjectId") && row.5.contains("subj-opaque-77"),
         "metadata 应含 opaque subjectId: {}",
-        row.4
+        row.5
     );
     assert!(
-        row.4
+        row.5
             .contains(&format!(r#""occurred_at":{}"#, expected_occurred_at())),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
-        row.4
+        row.5
     );
     // trace / correlation / principal 为后续 follow-up 空接缝，本 PR 不写。
     for reserved in ["trace", "correlation", "principal"] {
         assert!(
-            !row.4.contains(reserved),
+            !row.5.contains(reserved),
             "空接缝 reserved key {reserved} 本 PR 不应写入: {}",
-            row.4
+            row.5
         );
     }
 
@@ -1025,7 +1026,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     Ok(())
 }
 
-// ── T11–T14: PgSessionUnitOfWork co-tx（session 持久化 + outbox append 同一事务，#1083/#1192）─────────
+// ── T11–T14: PgSessionLifecycle co-tx（session 持久化 + outbox append 同一事务，#1083/#1192）─────────
 //
 // OUTBOX-COTX-SESSION-01 anti-vacuity：t11 证真实 method commit 两行皆在（含 tenant-correct）、t13 证幂等
 // 重写各恰一行；负向 rollback 双覆盖——t12 在单事务内复刻 co-tx SQL 序列后强制 Err 证两写共回滚，**t14 驱动
@@ -1035,7 +1036,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
 use std::time::{Duration, SystemTime};
 
 use diport::OutboxEnvelopeParts;
-use identity::ports::{SessionUnitOfWork, TenantId};
+use identity::ports::{SessionLifecycle, TenantId};
 
 /// co-tx 测试用 canonical 租户 UUID。
 const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1057,11 +1058,10 @@ fn session_entry(event_id: &str) -> Entry {
 
 /// 构造 session-created envelope（opaque subject）。
 fn session_envelope() -> OutboxEnvelopeParts {
-    OutboxEnvelopeParts {
-        domain: "identity".to_string(),
-        contract_id: SESSION_CREATED_TOPIC.to_string(),
-        subject_id: "subj-opaque-cotx".to_string(),
-    }
+    OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+        "subj-opaque-cotx",
+    )
 }
 
 /// t11：`persist_session_and_emit` commit → session 行 + outbox 行皆在，且 session tenant-correct。
@@ -1080,7 +1080,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
-    crate::PgSessionUnitOfWork::new(&store, fixed_clock())
+    crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
         .await?;
 
@@ -1145,7 +1145,7 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let tenant = COTX_TENANT_A.to_string();
     let sid = session_id.clone();
 
-    // 同 PgSessionUnitOfWork 写序列（SET LOCAL + INSERT session + append_outbox）在单事务内执行后强制 Err →
+    // 同 PgSessionLifecycle 写序列（SET LOCAL + INSERT session + append_outbox）在单事务内执行后强制 Err →
     // run_in_transaction 回滚。证明两写**共**回滚（真实 method rollback 路径结构同源，见本节注释 + T10）。
     let rolled = store
         .run_in_transaction::<_, (), sqlx::Error>(move |c| {
@@ -1208,7 +1208,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
     let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let expires = created + Duration::from_secs(3_600);
-    let uow = crate::PgSessionUnitOfWork::new(&store, fixed_clock());
+    let uow = crate::PgSessionLifecycle::new(&store, fixed_clock());
 
     for _ in 0..2 {
         let session = identity::test_support::session(
@@ -1528,12 +1528,12 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
     let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     // expires_at 远超 Postgres timestamptz 上界（年 ~294277）：`to_timestamp(1e13 秒 ≈ 年 ~318850)` 溢出报错
-    // → session INSERT 失败，驱动真实 `PgSessionUnitOfWork` 的 `write_session_and_outbox`→Err→rollback 分支。
+    // → session INSERT 失败，驱动真实 `PgSessionLifecycle` 的 `write_session_and_outbox`→Err→rollback 分支。
     let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000_000);
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
-    let result = crate::PgSessionUnitOfWork::new(&store, fixed_clock())
+    let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
         .await;
     assert!(
@@ -1552,6 +1552,146 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 0, "真实 method 回滚后 outbox 行不应存在");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T20–T22: PgSessionLifecycle durable find/revoke（合并端口后完整生命周期，#1278；原 #1116）──────────
+//
+// 第二租户（跨租隔离 t22）——与 config/secret 测试 TENANT_B 同值。
+const COTX_TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
+
+/// t20：persist → `find` 命中，重建 session 字段（subject/tenant/时刻）与持久化一致。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t20_find_returns_persisted_session() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t15-sess");
+    let event_id = unique_event_id("t15-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-find", tenant, expires, created);
+    let sid = session.id().clone();
+
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+    lifecycle
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+
+    // find 命中：经 Session::hydrate 重建，字段（含 epoch 时刻 roundtrip）与持久化一致。
+    let s = lifecycle
+        .find(tenant, sid)
+        .await?
+        .expect("persisted session should be found");
+    assert_eq!(s.id().as_str(), session_id, "session_id roundtrip");
+    assert_eq!(s.subject(), "subj-find", "subject roundtrip");
+    assert_eq!(s.tenant(), tenant, "tenant roundtrip");
+    assert_eq!(s.expires_at(), expires, "expires_at epoch roundtrip");
+    assert_eq!(s.created_at(), created, "created_at epoch roundtrip");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t21：`revoke` → `find` 返回 None（软撤销）；重复 / 未知 sid revoke 仍 Ok（幂等）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t16-sess");
+    let event_id = unique_event_id("t16-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-revoke", tenant, expires, created);
+    let sid = session.id().clone();
+
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+    lifecycle
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+    assert!(
+        lifecycle.find(tenant, sid.clone()).await?.is_some(),
+        "revoke 前应能 find 到"
+    );
+
+    // 软撤销 → find None（行仍在、revoked=true）。
+    lifecycle.revoke(tenant, sid.clone()).await?;
+    assert!(
+        lifecycle.find(tenant, sid.clone()).await?.is_none(),
+        "revoke 后 find 应 None"
+    );
+    let row_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(row_cnt.0, 1, "软撤销不删行（行仍在、revoked=true）");
+
+    // 幂等：重复 revoke + 未知 sid revoke 均 Ok。
+    lifecycle.revoke(tenant, sid).await?;
+    let ghost = identity::test_support::session(
+        &unique_event_id("t16-ghost"),
+        "x",
+        tenant,
+        expires,
+        created,
+    );
+    lifecycle.revoke(tenant, ghost.id().clone()).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t22：跨租 revoke no-op（不撤销他租会话）+ 跨租 find None；同租 revoke 生效。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t17-sess");
+    let event_id = unique_event_id("t17-evt");
+    let tenant_a = TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = TenantId::parse(COTX_TENANT_B).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-iso", tenant_a, expires, created);
+    let sid = session.id().clone();
+
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+    lifecycle
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+
+    // 跨租 find（tenant B 查 tenant A sid）→ None（不泄露存在性）。
+    assert!(
+        lifecycle.find(tenant_b, sid.clone()).await?.is_none(),
+        "跨租 find 应 None"
+    );
+    // 跨租 revoke（tenant B）→ no-op：tenant A 会话仍 find 到。
+    lifecycle.revoke(tenant_b, sid.clone()).await?;
+    assert!(
+        lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+        "跨租 revoke 不应撤销 tenant A 的会话"
+    );
+    // 同租 revoke → find None（隔离正确、撤销生效）。
+    lifecycle.revoke(tenant_a, sid.clone()).await?;
+    assert!(
+        lifecycle.find(tenant_a, sid).await?.is_none(),
+        "同租 revoke 后 find 应 None"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -1604,11 +1744,10 @@ fn config_outbox_entry(event_id: &str) -> Entry {
 
 /// 构造 config-version-changed envelope（opaque subject = 配置 key）。
 fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
-    OutboxEnvelopeParts {
-        domain: "settings".to_string(),
-        contract_id: CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-        subject_id: subject.to_string(),
-    }
+    OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
+        subject,
+    )
 }
 
 /// setup：应用 migration（含 config_entries 表），清空 config_entries（防测试间污染）。outbox 用唯一
@@ -1963,8 +2102,9 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
 
 /// tc9：**跨租户隔离**——tenant A 的配置对 tenant B 不可见，独立版本空间，delete 互不影响。
 ///
-/// pre-GA 无 RLS policy，租户隔离完全依赖各查询的显式 `WHERE tenant_id = $1::uuid`——本例是该约束在真实
-/// postgres 路径下的**唯一自动化门**（in-mem 路径由 `application.rs::cross_tenant_isolation` 守，二者实现不同）。
+/// tc9 以 owner/superuser 连接（绕过 RLS）验证显式 `WHERE tenant_id` 子句隔离；0009 落地后
+/// config_entries 已有 RLS policy，DB 层 RLS 强制力由 t21（rss_app 角色）专门覆盖，二者互补
+/// （in-mem 路径由 `application.rs::cross_tenant_isolation` 守，实现不同）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn tc9_config_cross_tenant_isolation() -> TestResult {
@@ -2799,6 +2939,570 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(n2.0, 8, "8 个不同 id 各落一行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T20–T23: RLS 强制力证明（#1298）────────────────────────────────────────────
+//
+// 0009 迁移落地 ENABLE ROW LEVEL SECURITY + FORCE ROW LEVEL SECURITY + tenant_isolation policy（四表：
+// sessions / config_entries / roles / secret_refs）+ rss_app serving role；本组测试以 SET LOCAL ROLE
+// rss_app 切换到非 owner 角色，验证 RLS 对 rss_app 生效（superuser 永远绕过 RLS，不适合做验证角色）。
+//
+// 测试结构：
+//   • Tx1（rss_app + tenant_a scope）：INSERT tenant_a 行 → 成功（WITH CHECK pass）。
+//   • Tx2（rss_app + tenant_a scope）：SELECT → tenant_a 行可见（USING pass）。
+//   • Tx3（rss_app + tenant_b scope）：SELECT 同行 → 不可见（USING 过滤，跨租读被阻）。
+//   • Tx4（rss_app + tenant_a scope）：INSERT tenant_b 行 → 错误（WITH CHECK 拒绝，跨租写被阻）。
+//
+// 前置：`GRANT rss_app TO CURRENT_USER`——testcontainer 连接角色（superuser）需先 member of rss_app
+// 才能执行 `SET LOCAL ROLE rss_app`；幂等，不影响后续 superuser 权限。
+
+/// T20：RLS 强制力证明 — sessions 表（#1298）。
+///
+/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
+/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 和固定 UUID 格式化不会失败；函数级 item-level carve-out。
+async fn t20_rls_sessions_enforces_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    // 提权：superuser 需成为 rss_app member 才能 SET LOCAL ROLE；幂等（已是 member 则 no-op）。
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let session_a = uuid::Uuid::new_v4().to_string();
+
+    // Tx1：rss_app + tenant_a scope → INSERT tenant_a session → 成功（WITH CHECK pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
+             VALUES ($1, $2, $3::uuid, now() + interval '1 hour', now())",
+        )
+        .bind(&session_a)
+        .bind("rls-test-subject")
+        .bind(&tenant_a)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a session failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT session_a → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&session_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 1,
+            "t20: rss_app + tenant_a scope — session_a 应可见（USING policy pass）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT session_a → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&session_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t20: rss_app + tenant_b scope — session_a 应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b session → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
+             VALUES ($1, $2, $3::uuid, now() + interval '1 hour', now())",
+        )
+        .bind(&uuid::Uuid::new_v4().to_string())
+        .bind("rls-test-subject")
+        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t20: WITH CHECK 应拒绝 tenant_b 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT sessions → 0 行。
+    // current_setting('rss.tenant_id', true) 返 NULL → RLS USING 谓词 NULL → 所有行过滤，fail-closed。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        // 不调用 set_config('rss.tenant_id', ...) → current_setting 返 NULL → 行不可见。
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t20: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T21：RLS 强制力证明 — config_entries 表（#1298）。
+///
+/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
+/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
+async fn t21_rls_config_entries_enforces_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let cfg_key = format!("rls.test.key.{}", uuid::Uuid::new_v4());
+
+    // Tx1：rss_app + tenant_a scope → INSERT config_entry → 成功。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO config_entries (tenant_id, config_key, version, value) \
+             VALUES ($1::uuid, $2, 1, $3)",
+        )
+        .bind(&tenant_a)
+        .bind(&cfg_key)
+        .bind("rls-test-value")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a config failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+        )
+        .bind(&tenant_a)
+        .bind(&cfg_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 1,
+            "t21: rss_app + tenant_a scope — config_entry 应可见（USING policy pass）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT 同 key → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                .bind(&cfg_key)
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t21: rss_app + tenant_b scope — tenant_a config_entry 应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b config → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO config_entries (tenant_id, config_key, version, value) \
+             VALUES ($1::uuid, $2, 1, $3)",
+        )
+        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
+        .bind(format!("{cfg_key}.cross"))
+        .bind("cross-tenant-value")
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t21: WITH CHECK 应拒绝 tenant_b config 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT config_entries → 0 行。
+    // current_setting('rss.tenant_id', true) 返 NULL → RLS USING 谓词 NULL → 所有行过滤，fail-closed。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        // 不调用 set_config('rss.tenant_id', ...) → current_setting 返 NULL → 行不可见。
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                .bind(&cfg_key)
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t21: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T22：RLS 强制力证明 — roles 表（#1298）。
+///
+/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
+/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
+async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let role_id = format!("rls-role-{}", uuid::Uuid::new_v4());
+
+    // Tx1：rss_app + tenant_a scope → INSERT role → 成功。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO roles (tenant_id, id, name, permissions) \
+             VALUES ($1::uuid, $2, $3, $4)",
+        )
+        .bind(&tenant_a)
+        .bind(&role_id)
+        .bind("RlsTestRole")
+        .bind(vec!["docs:read".to_string()])
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a role failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM roles WHERE tenant_id = $1::uuid AND id = $2")
+                .bind(&tenant_a)
+                .bind(&role_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(
+            cnt.0, 1,
+            "t22: rss_app + tenant_a scope — role 应可见（USING policy pass）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT 同 role_id → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
+            .bind(&role_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t22: rss_app + tenant_b scope — tenant_a role 应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b role → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO roles (tenant_id, id, name, permissions) \
+             VALUES ($1::uuid, $2, $3, $4)",
+        )
+        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
+        .bind(format!("{role_id}-cross"))
+        .bind("CrossTenantRole")
+        .bind(vec!["docs:read".to_string()])
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t22: WITH CHECK 应拒绝 tenant_b role 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT roles → 0 行。
+    // current_setting('rss.tenant_id', true) 返 NULL → RLS USING 谓词 NULL → 所有行过滤，fail-closed。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        // 不调用 set_config('rss.tenant_id', ...) → current_setting 返 NULL → 行不可见。
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
+            .bind(&role_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t22: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T23：RLS 强制力证明 — secret_refs 表（#1298）。
+///
+/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
+/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝；未设 rss.tenant_id → fail-closed（0 行）。
+/// 同 config_entries t21 范式（secret_refs 版本历史模型同 config_entries 0005 范式，#1298）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
+async fn t23_secret_refs_rls_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    // 提权：superuser 需成为 rss_app member 才能 SET LOCAL ROLE；幂等（已是 member 则 no-op）。
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    // 唯一 secret_key（防并发测试污染）。
+    let secret_key = format!("rls.test.secret.{}", uuid::Uuid::new_v4());
+
+    // Tx1：rss_app + tenant_a scope → INSERT secret_refs 行 → 成功（WITH CHECK pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
+             VALUES ($1::uuid, $2, 1, $3, $4)",
+        )
+        .bind(&tenant_a)
+        .bind(&secret_key)
+        .bind("vault-a")
+        .bind("secret/rls-test")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a secret_ref failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+        )
+        .bind(&tenant_a)
+        .bind(&secret_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 1,
+            "t23: rss_app + tenant_a scope — secret_ref 应可见（USING policy pass）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT 同 key → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
+            .bind(&secret_key)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t23: rss_app + tenant_b scope — tenant_a secret_ref 应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b secret_ref → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
+             VALUES ($1::uuid, $2, 1, $3, $4)",
+        )
+        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
+        .bind(format!("{secret_key}.cross"))
+        .bind("vault-b")
+        .bind("secret/cross-tenant")
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t23: WITH CHECK 应拒绝 tenant_b secret_ref 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT secret_refs → 0 行。
+    // current_setting('rss.tenant_id', true) 返 NULL → RLS USING 谓词 NULL → 所有行过滤，fail-closed。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        // 不调用 set_config('rss.tenant_id', ...) → current_setting 返 NULL → 行不可见。
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
+            .bind(&secret_key)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t23: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
 
     store.shutdown().await?;
     Ok(())

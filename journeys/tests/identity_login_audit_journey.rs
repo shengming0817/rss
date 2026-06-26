@@ -5,7 +5,7 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
-//! - DI 注入：identity 经 `Box<DynSessionUnitOfWork>`（`MemSessionUnitOfWork`）co-tx 写 session + 发射 outbox
+//! - DI 注入：identity 经 `Box<DynSessionLifecycle>`（`MemSessionLifecycle`）co-tx 写 session + 发射 outbox
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
 //!   sink）；幂等 store 经 `memory::InMemClaimer` 注入、DLX 经 `memory::MemDeadLetterStore` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
@@ -20,9 +20,10 @@
 //! spawn `ConsumerWorker` 驱动该 stream（subscribe-at-callsite，token 与 stream 同源；worker 在
 //! `ManagedResource::shutdown` 自取消 token 终止流——经 `register_detached` 注册）。
 //!
-//! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（admin 读 handler 经 axum oneshot 单测覆盖）；
-//! envelope 的 trace/correlation reserved-key 注入留 W；audit domain 哈希链 #1014 已写实。durable（postgres/amqp）
-//! 拓扑闭环见 `identity_login_audit_durable_journey.rs`（`--features integration`，#1171 §6：ackable consumer 真 broker）。
+//! 边界（W）：服务层闭环——登录服务直接调用，不逐字节跑 axum（admin 读 handler 经 axum oneshot 单测覆盖，
+//! 见 audit crate）；envelope 的 trace/correlation reserved-key sealed setter 已建（#1193），但注入源留 W（待 #1296）；audit
+//! domain 哈希链 #1014 已写实——append 落每租户 keyed HMAC 链（journey 经捕获 verifier 端到端验链 append）。
+//! durable（postgres/amqp）拓扑闭环见 `identity_login_audit_durable_journey.rs`（`--features integration`，#1171 §6：ackable consumer 真 broker）。
 //!
 //! ref: watermill message/router/middleware/poison.go（ConsumerBase DLX）
 //! ref: uber-go/fx app.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（组合根装配 + lifecycle 关闭）
@@ -54,10 +55,10 @@ use diport::{
 use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
-use identity::ports::DynSessionUnitOfWork;
+use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};
 use memory::{
-    FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionUnitOfWork,
+    FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionLifecycle,
 };
 use primitives::healthz::HealthStatus;
 use primitives::{ListenerKind, Mac, MacAlgorithm, MacKey, MacVerifier};
@@ -264,11 +265,11 @@ where
     Ok(health)
 }
 
-/// 登录服务（注入 MemSessionUnitOfWork co-tx 替身 + 固定时钟 + 种子凭据）。
+/// 登录服务（注入 MemSessionLifecycle co-tx 替身 + 固定时钟 + 种子凭据）。
 #[allow(clippy::expect_used)]
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginService> {
     Ok(LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
+        DynSessionLifecycle::new_box(MemSessionLifecycle::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
@@ -457,11 +458,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         emitter
             .emit(
                 entry,
-                OutboxEnvelopeParts {
-                    domain: "identity".to_string(),
-                    contract_id: SESSION_CREATED_TOPIC.to_string(),
-                    subject_id: CANON_USER.to_string(),
-                },
+                OutboxEnvelopeParts::new(generated::event::identity_v1::CONTRACT, CANON_USER),
             )
             .await
             .map_err(|_| anyhow::anyhow!("emit"))?;
@@ -602,11 +599,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     MemEmitter::new(bus.clone())
         .emit(
             entry,
-            OutboxEnvelopeParts {
-                domain: "identity".to_string(),
-                contract_id: SESSION_CREATED_TOPIC.to_string(),
-                subject_id: CANON_USER.to_string(),
-            },
+            OutboxEnvelopeParts::new(generated::event::identity_v1::CONTRACT, CANON_USER),
         )
         .await
         .map_err(|_| anyhow::anyhow!("emit"))?;
