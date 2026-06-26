@@ -60,6 +60,9 @@ struct VerifyOpts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalCheck {
     ContractValidate,
+    /// wire JSON-Schema 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。窗口分级：默认 warn（退出码 0），
+    /// env `RSS_WIRE_BREAKING=deny` 对 active 契约破坏升 deny（退出码 1）；against = origin/develop。
+    ContractBreaking,
     LayerDeps,
     WsDepsDrift,
     CodegenCheck,
@@ -135,6 +138,15 @@ fn step_contract_validate() -> Step {
         label: "contract-validate",
         args: &[],
         kind: StepKind::Internal(InternalCheck::ContractValidate),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_contract_breaking() -> Step {
+    Step {
+        label: "contract-breaking",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ContractBreaking),
         env: &[],
         needs_compile: false,
     }
@@ -571,6 +583,7 @@ fn full_plan() -> Vec<Step> {
     let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
+        step_contract_breaking(),
         step_layer_deps(),
         step_wsdeps_drift(),
         step_codegen_check(),
@@ -596,6 +609,7 @@ fn ci_plan() -> Vec<Step> {
     let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
+        step_contract_breaking(),
         step_layer_deps(),
         step_wsdeps_drift(),
         step_codegen_check(),
@@ -812,6 +826,11 @@ fn run_tool_gated(
 fn run_internal(check: InternalCheck) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
+        // wire 破坏门：against=origin/develop，窗口分级经 env（默认 warn，退出码 0；deny 模式 active 破坏退出码 1）。
+        InternalCheck::ContractBreaking => contract::breaking::run(
+            contract::breaking::DEFAULT_AGAINST,
+            contract::breaking::EnforcementMode::from_env(),
+        ),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::CodegenCheck => codegen::run(true),
@@ -904,6 +923,7 @@ mod tests {
             vec![
                 "fmt",
                 "contract-validate",
+                "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
                 "codegen-check",
@@ -926,7 +946,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(7) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(8) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -935,6 +955,7 @@ mod tests {
             vec![
                 "fmt",
                 "contract-validate",
+                "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
                 "codegen-check",
@@ -949,8 +970,8 @@ mod tests {
         }
     }
 
-    /// meta 七项（contract validate / layer-deps / wsdeps-drift / codegen / pdp-allow-guard /
-    /// schema-rls / command-symmetry）在两种模式恒在。
+    /// meta 八项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
+    /// pdp-allow-guard / schema-rls / command-symmetry）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -964,6 +985,7 @@ mod tests {
                 internals,
                 vec![
                     "contract-validate",
+                    "contract-breaking",
                     "layer-deps",
                     "wsdeps-drift",
                     "codegen-check",
@@ -1066,6 +1088,7 @@ mod tests {
             vec![
                 "fmt",
                 "contract-validate",
+                "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
                 "codegen-check",
@@ -1149,6 +1172,7 @@ mod tests {
         for label in [
             "fmt",
             "contract-validate",
+            "contract-breaking",
             "layer-deps",
             "wsdeps-drift",
             "codegen-check",

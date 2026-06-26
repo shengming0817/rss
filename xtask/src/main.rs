@@ -3,6 +3,11 @@
 //! 子命令：
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
+//!   `cargo xtask contract breaking [--against <git-ref>] [--deny]`
+//!                                      wire JSON-Schema 跨版本破坏检测门（ADR-008，对标 Buf WIRE_JSON）：base ref
+//!                                      （默认 origin/develop）↔ working-tree schema 递归 diff；窗口分级默认 warn
+//!                                      （退出码 0），env `RSS_WIRE_BREAKING=deny` / `--deny` 升 deny（active 契约
+//!                                      破坏退出码 1）。详见 `contract::breaking`。
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
@@ -62,6 +67,12 @@ enum Command {
         check: bool,
     },
     ContractValidate,
+    ContractBreaking {
+        /// base git-ref（缺省 = `contract::breaking::DEFAULT_AGAINST`）。
+        against: Option<String>,
+        /// `--deny`：显式升 deny 模式（覆盖 env），供本地测试 fail-closed 路径。
+        deny: bool,
+    },
     LayerDeps,
     WsDepsDrift,
     Verify {
@@ -94,7 +105,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
     match argv.as_slice() {
         ["codegen"] => Ok(Command::Codegen { check: false }),
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
-        ["contract", "validate"] => Ok(Command::ContractValidate),
+        ["contract", rest @ ..] => parse_contract(rest),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["verify", rest @ ..] => parse_verify(rest),
@@ -105,10 +116,45 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["schema-rls"] => Ok(Command::SchemaRls),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract validate | layer-deps | wsdeps-drift | schema-rls | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | schema-rls | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
+}
+
+/// 解析 `contract <sub>` 子命令（fail-closed：未知子命令即 `Err`）。
+fn parse_contract(args: &[&str]) -> Result<Command> {
+    match args {
+        ["validate"] => Ok(Command::ContractValidate),
+        ["breaking", rest @ ..] => parse_contract_breaking(rest),
+        other => bail!(
+            "未知 contract 子命令: {other:?}；用法: cargo xtask contract <validate | breaking [--against <git-ref>] [--deny]>"
+        ),
+    }
+}
+
+/// 解析 `contract breaking` 的可选 flag（fail-closed：未知 flag / `--against` 缺值即 `Err`）。
+fn parse_contract_breaking(args: &[&str]) -> Result<Command> {
+    let mut against = None;
+    let mut deny = false;
+    let mut it = args.iter();
+    while let Some(&tok) = it.next() {
+        match tok {
+            "--deny" => deny = true,
+            "--against" => {
+                let val = it.next().ok_or_else(|| {
+                    anyhow::anyhow!("--against 缺少值；用法: --against <git-ref>")
+                })?;
+                against = Some((*val).to_string());
+            }
+            other => {
+                bail!(
+                    "contract breaking 未知参数: {other}；用法: --against <git-ref> | --deny（亦可 env RSS_WIRE_BREAKING=deny 升 deny 模式）"
+                )
+            }
+        }
+    }
+    Ok(Command::ContractBreaking { against, deny })
 }
 
 /// 解析 `verify` 的可选 flag（fail-closed：未知 flag 即 `Err`）。
@@ -216,6 +262,16 @@ fn dispatch(args: &[String]) -> Result<()> {
     match parse_command(args)? {
         Command::Codegen { check } => codegen::run(check),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
+        Command::ContractBreaking { against, deny } => {
+            let mode = if deny {
+                contract::breaking::EnforcementMode::Deny
+            } else {
+                contract::breaking::EnforcementMode::from_env()
+            };
+            let against =
+                against.unwrap_or_else(|| contract::breaking::DEFAULT_AGAINST.to_string());
+            contract::breaking::run(&against, mode)
+        }
         Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
         Command::WsDepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
         Command::Verify {
@@ -282,6 +338,59 @@ mod tests {
             Command::ContractValidate
         );
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_contract_breaking_bare() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["contract", "breaking"]))?,
+            Command::ContractBreaking {
+                against: None,
+                deny: false
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_contract_breaking_flags() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["contract", "breaking", "--against", "HEAD~1"]))?,
+            Command::ContractBreaking {
+                against: Some("HEAD~1".to_string()),
+                deny: false
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["contract", "breaking", "--deny"]))?,
+            Command::ContractBreaking {
+                against: None,
+                deny: true
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&[
+                "contract",
+                "breaking",
+                "--against",
+                "origin/develop",
+                "--deny"
+            ]))?,
+            Command::ContractBreaking {
+                against: Some("origin/develop".to_string()),
+                deny: true
+            }
+        );
+        Ok(())
+    }
+
+    /// contract 子命令 fail-closed：未知子命令 / 未知 flag / `--against` 缺值均 `Err`。
+    #[test]
+    fn parse_command_contract_rejects_bad() {
+        assert!(parse_command(&s(&["contract", "bogus"])).is_err());
+        assert!(parse_command(&s(&["contract", "validate", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["contract", "breaking", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["contract", "breaking", "--against"])).is_err()); // 缺值
     }
 
     #[test]

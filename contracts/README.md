@@ -72,7 +72,17 @@ contracts/{kind}/{domain}/{version}/
 `cargo xtask codegen` 经 typify+prettyplease 把 `*.schema.json` 派生进 `generated/` crate（committed `generated/src/{kind}/{domain}_{version}.rs`）；
 `cargo xtask codegen --check` 重生成并 diff 已提交文件，漂移即失败（CI 门）。**勿手改 `generated/src/**`**——派生 diff 是一等审查材料。
 
-`cargo xtask verify` 是本地全量治理门（门集**单一事实源** = `README.md` §构建与本地验证 / `xtask/src/verify.rs`）：除全 workspace 的 fmt / build / clippy / nextest / deny / dylint 外，**契约相关**的 `contract validate`（元数据校验）、`layer-deps`（分层依赖）、`codegen --check`（派生漂移门）也是其中的 in-process meta 步（亦含在 `--fast` 内），任一失败即停止。改契约后跑 `cargo xtask verify`（或 `--fast` 快检）即覆盖契约元数据 + 派生漂移校验；激活 forge=azure 无 CI ⇒ 此门是治理门的唯一实际 gate。
+`cargo xtask verify` 是本地全量治理门（门集**单一事实源** = `README.md` §构建与本地验证 / `xtask/src/verify.rs`）：除全 workspace 的 fmt / build / clippy / nextest / deny / dylint 外，**契约相关**的 `contract validate`（元数据校验）、`contract breaking`（wire 破坏检测，见下）、`layer-deps`（分层依赖）、`codegen --check`（派生漂移门）也是其中的 in-process meta 步（亦含在 `--fast` 内），任一失败即停止。改契约后跑 `cargo xtask verify`（或 `--fast` 快检）即覆盖契约元数据 + wire 破坏 + 派生漂移校验；激活 forge=azure 无 CI ⇒ 此门是治理门的唯一实际 gate。
+
+### wire 破坏式变更检测门（`contract breaking`，ADR-008）
+
+`cargo xtask contract breaking [--against <git-ref>] [--deny]`：对 `*.schema.json` 做 **base ref ↔ working-tree** 的跨版本 JSON-Schema 递归 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（R1–R15 = manifest 元数据 + schema 文件存在性 = **结构**）、`cargo public-api`（轴 A Rust 符号）互补无重叠——本门只校验 schema **内容跨版本 diff**（语义破坏）。规则与窗口分级单源见 `xtask/src/contract/breaking.rs`（INVARIANT WIRE-BREAKING-01 / WIRE-BREAKING-WINDOW-01）。
+
+- **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。base ref 不可解析（未 fetch）按模式分级：**warn 模式跳过整门（退出码 0）**；**deny 模式 fail-closed（退出码 1，无法读基准即无法判定破坏）**——提示 `git fetch <remote> <branch>` 或换 `--against <本地 ref>`。
+- **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
+- **首版 7 条规则**（schema 内字段）：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`。只报既有字段的删除 / 收紧；新增可选字段不报（向后兼容）。后 3 条 manifest 依赖规则（HTTP 状态码 / `auth.required` / 幂等）登记第三期（依赖扩 manifest schema）。
+- **lifecycle 范围**：只对 `active` + `deprecated` 契约 diff；`draft`（seed / 前瞻原地演进）跳过。
+- **窗口分级**（对齐 `api-versioning.md` §兼容窗口，**配置驱动、不读墙上时钟**）：默认 **warn**（pre-GA 至 2026-12-31，退出码 0，记录不阻断）；env `RSS_WIRE_BREAKING=deny` 或 `--deny` 升 **deny**——对 `active` 契约破坏 fail-closed（退出码 1），`deprecated` 恒 warn。窗口到期 / GA / 出现外部 wire 消费方时由人改 env/默认提前收紧。
 
 per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block、command 的 `topic`）已随 #1035 + #1124 落地（见上 §contract.toml 字段 + 校验规则 R8–R10 / R15）；属预期附加演进（新增 optional 字段不破坏既有契约解析），非破坏冻结。
 
