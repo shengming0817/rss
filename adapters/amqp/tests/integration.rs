@@ -86,6 +86,35 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
     Ok(())
 }
 
+/// review #278 F1：发布到**尚无绑定 queue** 的 topic（publish-before-subscribe / 队列声明竞态）→ broker
+/// `mandatory` 退回 unroutable → 分类为 **transient**（非 permanent）：outbox 可退避重试等订阅完成 / 拓扑收敛，
+/// 不首投即 DLX（保 L2 最终送达）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::panic)] // 集成测试断言：item-level carve-out（workspace lints 约定）
+async fn integration_publish_unroutable_is_transient() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_unroutable").await?;
+    // 不订阅 ⇒ 无 queue 绑定该 topic；mandatory=true ⇒ broker 退回（durable publish-ok 检测为失败）。
+    let publisher = AmqpPublisher::connect(&url, "amqp-it-unroutable").await?;
+    match publisher
+        .publish(PublishRequest {
+            topic: Topic::new("rss.it.no.queue.bound"),
+            event_id: MessageId::new("evt-unroutable-1"),
+            payload: b"orphan".to_vec(),
+        })
+        .await
+    {
+        Ok(()) => panic!("publish to unbound queue must fail (mandatory return)"),
+        Err(err) => assert!(
+            err.is_transient(),
+            "unroutable (no bound queue yet) must be transient for L2 retry, not permanent DLX"
+        ),
+    }
+
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
 /// 同-vhost topic 隔离：订 A + B 两条流，发到 B → **B 收到、A 在超时内无投递**（同 vhost 内 routing 隔离，
 /// review F8）。跨 **domain** 的硬隔离 seam 是 per-domain vhost——见 `integration_cross_vhost_isolation`。
 /// 使用 `subscribe_ackable`（at-least-once）——AMQP 唯一投递路径（Durable 拓扑）。

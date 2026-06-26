@@ -120,13 +120,69 @@ impl Publisher for MqttPublisher {
                 properties,
             ))
             .await
-            .map_err(PublisherError::new)
+            .map_err(classify_confirm)
     }
 
     async fn shutdown(&self) -> Result<(), PublisherError> {
         // port-local 与 ManagedResource 共用 teardown（幂等：driver 唯一执行优雅断连，两条路径不重复断连）。
         conn::teardown(&self.name, &self.token, &self.driver).await;
         Ok(())
+    }
+}
+
+/// broker ACK 失败 → [`PublisherError`]，按瞬态/永久分类（#1212：永久错误首投即 DLX，不熬满重试预算）。
+///
+/// - `Rejected`（broker 以**已知永久** PUBACK reason 拒绝：NotAuthorized / TopicNameInvalid /
+///   PayloadFormatInvalid，重试同一消息必然再失败）→ **permanent**：首投即 DLX。
+/// - `RejectedTransient`（QuotaExceeded 等资源压力 / broker 端未知错误）/ `Disconnected`（连接断开）/
+///   `Timeout`（ACK 超时）→ **transient**：退避重连重发，不过早 DLX（保 L2 最终送达）。
+///
+/// 永久/瞬态拒绝因的划分单源在 [`conn::puback_result`]（reason → `ConfirmError` 变体）。
+fn classify_confirm(e: conn::ConfirmError) -> PublisherError {
+    if matches!(e, conn::ConfirmError::Rejected) {
+        PublisherError::permanent(e)
+    } else {
+        // RejectedTransient / Disconnected / Timeout
+        PublisherError::transient(e)
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    //! #1212 ConfirmError 瞬态/永久分类表驱动（Rejected→permanent；RejectedTransient/Disconnected/
+    //! Timeout→transient）——覆盖 ConfirmError 全部 4 变体（closed enum）。
+    use diport::PublishErrorKind;
+
+    use super::classify_confirm;
+    use crate::conn::ConfirmError;
+
+    #[test]
+    fn classify_table() {
+        let cases: [(ConfirmError, PublishErrorKind, &str); 4] = [
+            (
+                ConfirmError::Disconnected,
+                PublishErrorKind::Transient,
+                "Disconnected→transient",
+            ),
+            (
+                ConfirmError::Timeout,
+                PublishErrorKind::Transient,
+                "Timeout→transient",
+            ),
+            (
+                ConfirmError::RejectedTransient,
+                PublishErrorKind::Transient,
+                "RejectedTransient→transient",
+            ),
+            (
+                ConfirmError::Rejected,
+                PublishErrorKind::Permanent,
+                "Rejected→permanent",
+            ),
+        ];
+        for (err, want, label) in cases {
+            assert_eq!(classify_confirm(err).kind(), want, "{label}");
+        }
     }
 }
 

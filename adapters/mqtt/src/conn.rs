@@ -266,9 +266,14 @@ fn take_driver(role: &str, driver: &Mutex<Option<JoinHandle<()>>>) -> Option<Joi
 /// broker ACK 失败成因（不暴露 broker 细节——PII / 安全边界，统一 redacted 摘要）。
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfirmError {
-    /// broker 以非成功 reason 拒绝（PUBACK reason / SUBACK return code 非 success）。
-    #[error("broker rejected the request")]
+    /// broker 以**永久** reason 拒绝（PUBACK NotAuthorized / TopicNameInvalid / PayloadFormatInvalid、
+    /// SUBACK 失败码等，重试无意义）→ [`classify_confirm`](crate::publisher) 判 permanent，首投即 DLX。
+    #[error("broker rejected the request (permanent)")]
     Rejected,
+    /// broker 以**瞬态** reason 拒绝（PUBACK QuotaExceeded 等资源压力 / broker 端未知错误，可退避重试）
+    /// → 判 transient，退避至预算耗尽（#1212：瞬态误判永久会破坏 L2 最终送达，故未知 reason 默认归此）。
+    #[error("broker rejected the request (transient)")]
+    RejectedTransient,
     /// 连接在 ACK 前断开（driver fail_all fanout）。
     #[error("connection lost before broker ack")]
     Disconnected,
@@ -280,11 +285,18 @@ pub(crate) enum ConfirmError {
 /// broker ACK 结果（`Ok` = broker 确认；`Err` = 拒绝 / 断连 / 超时）。
 pub(crate) type ConfirmResult = Result<(), ConfirmError>;
 
-/// PUBACK reason → 结果：`Success` / `NoMatchingSubscribers`（broker 已接收）视为成功，其余拒绝。
+/// PUBACK reason → 结果：`Success` / `NoMatchingSubscribers`（broker 已接收）视为成功；
+/// **已知永久**拒绝因（NotAuthorized / TopicNameInvalid / PayloadFormatInvalid，重试同一消息必然再失败）
+/// → [`ConfirmError::Rejected`]；其余（QuotaExceeded 等资源压力 / broker 端未知错误）默认
+/// [`ConfirmError::RejectedTransient`]（退避重试，不过早 DLX——瞬态误判永久比反向代价高，破坏 L2 最终送达，
+/// 与 amqp 侧 `can_be_recovered()` default-transient 对称，#1212）。
 pub(crate) fn puback_result(reason: &PubAckReason) -> ConfirmResult {
     match reason {
         PubAckReason::Success | PubAckReason::NoMatchingSubscribers => Ok(()),
-        _ => Err(ConfirmError::Rejected),
+        PubAckReason::NotAuthorized
+        | PubAckReason::TopicNameInvalid
+        | PubAckReason::PayloadFormatInvalid => Err(ConfirmError::Rejected),
+        _ => Err(ConfirmError::RejectedTransient),
     }
 }
 
@@ -406,7 +418,8 @@ mod tests {
     use rumqttc::v5::mqttbytes::v5::{PubAckReason, SubscribeReasonCode};
 
     use super::{
-        Confirmations, MqttEndpoint, MqttUrlError, parse_mqtt_url, puback_result, suback_result,
+        ConfirmError, Confirmations, MqttEndpoint, MqttUrlError, parse_mqtt_url, puback_result,
+        suback_result,
     };
 
     fn endpoint(host: &str, port: u16) -> MqttEndpoint {
@@ -468,12 +481,34 @@ mod tests {
         assert_eq!(parse_mqtt_url("mqtt://h:65536"), Err(MqttUrlError::Port));
     }
 
+    // #1212：PUBACK reason → 永久/瞬态分类。已知永久因（NotAuthorized 等）→ Rejected；资源压力
+    // （QuotaExceeded）+ broker 端未知错误 → RejectedTransient（退避重试，不过早 DLX）。
     #[test]
-    fn puback_success_reasons_ok_others_rejected() {
+    fn puback_success_reasons_ok_permanent_vs_transient_rejected() {
         assert!(puback_result(&PubAckReason::Success).is_ok());
         assert!(puback_result(&PubAckReason::NoMatchingSubscribers).is_ok());
-        assert!(puback_result(&PubAckReason::NotAuthorized).is_err());
-        assert!(puback_result(&PubAckReason::QuotaExceeded).is_err());
+        // 已知永久拒绝因 → Rejected。
+        for reason in [
+            PubAckReason::NotAuthorized,
+            PubAckReason::TopicNameInvalid,
+            PubAckReason::PayloadFormatInvalid,
+        ] {
+            assert!(
+                matches!(puback_result(&reason), Err(ConfirmError::Rejected)),
+                "{reason:?} should be permanent Rejected"
+            );
+        }
+        // 资源压力 / broker 端未知错误 → RejectedTransient（保 L2 最终送达）。
+        for reason in [
+            PubAckReason::QuotaExceeded,
+            PubAckReason::UnspecifiedError,
+            PubAckReason::ImplementationSpecificError,
+        ] {
+            assert!(
+                matches!(puback_result(&reason), Err(ConfirmError::RejectedTransient)),
+                "{reason:?} should be transient"
+            );
+        }
     }
 
     #[test]

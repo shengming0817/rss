@@ -5,27 +5,77 @@ use dynosaur::dynosaur;
 use crate::redacted::RedactedSource;
 use crate::subscriber::MessageId;
 
-/// 发布失败。
+/// 发布失败的处置类别——决定 relay 是有界退避重试还是首投即 DLX。
 ///
-/// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；source 经
-/// [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误
-/// 不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 闭合 2 值（非 `#[non_exhaustive]`，对齐 `bootstrap::SubscriberErrorDisposition`）：发布失败只有
+/// 「值得重试」与「重试无意义」两态；查询经 [`PublisherError::is_permanent`] / [`PublisherError::is_transient`]
+/// 全覆盖。语义对齐引擎层 [`consistency::EngineErrorKind`] 的 `Transient`/`Permanent`，但不引入对 publish
+/// disposition 无意义的 `Invariant` 臂。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishErrorKind {
+    /// 瞬态失败（连接闪断 / 通道丢失等可恢复）→ relay 退避重试至预算耗尽。
+    Transient,
+    /// 永久失败（序列化 / 路由 / 编码非法，重试无意义）→ relay 首投即 DLX（跳过重试预算）。
+    Permanent,
+}
+
+/// 发布失败（携 [`PublishErrorKind`] 决定 relay 重试 vs 首投 DLX）。
+///
+/// 分类范式镜像 `bootstrap::SubscriberHandlerError`（subscribe 侧的 transient/permanent 处置）：构造**必经**
+/// [`PublisherError::transient`] / [`PublisherError::permanent`] 二选一显式声明 disposition——类型层杜绝「构造
+/// 发布失败却不分类」（typed function choice，Hard）。
+///
+/// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
+/// 脱敏。注意主语——`PublisherError::source()` 因 `#[source]` 返回 `Some(&RedactedSource)`（非 `None`），而
+/// **`RedactedSource` 自身**的 `Debug`/`Display` 固定 `<redacted>`、`RedactedSource::source()` 恒 `None`：
+/// 通用 source 链遍历在 `RedactedSource` 处终止于 `<redacted>`，原始错误不经任何 `Error` 接口暴露
+/// （fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
 #[derive(Debug, thiserror::Error)]
 #[error("publish failed")]
 pub struct PublisherError {
+    kind: PublishErrorKind,
     #[source]
     source: RedactedSource,
 }
 
 impl PublisherError {
-    /// 把 adapter 内部错误包成发布失败。原始错误仅作 internal source 保留，不经 `Display` 暴露（PII 边界）。
-    pub fn new<E>(source: E) -> Self
+    /// 瞬态发布失败（连接闪断 / 通道丢失等可恢复）→ relay 退避重试至预算耗尽。原始错误仅作 internal source
+    /// 保留，不经 `Display` 暴露（PII 边界）。
+    pub fn transient<E>(source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
+            kind: PublishErrorKind::Transient,
             source: RedactedSource::new(source),
         }
+    }
+
+    /// 永久发布失败（序列化 / 路由 / 编码非法，重试无意义）→ relay 首投即 DLX。原始错误仅作 internal source
+    /// 保留，不经 `Display` 暴露（PII 边界）。
+    pub fn permanent<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind: PublishErrorKind::Permanent,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    /// 失败处置类别（relay settle 据此分流重试 vs DLX）。
+    pub fn kind(&self) -> PublishErrorKind {
+        self.kind
+    }
+
+    /// 是否瞬态（`Transient`）——relay 据此退避重试至预算耗尽。
+    pub fn is_transient(&self) -> bool {
+        self.kind == PublishErrorKind::Transient
+    }
+
+    /// 是否永久（`Permanent`）——relay 据此首投即 DLX，跳过重试预算。
+    pub fn is_permanent(&self) -> bool {
+        self.kind == PublishErrorKind::Permanent
     }
 }
 
@@ -98,11 +148,13 @@ pub trait PublisherLocal {
 #[cfg(test)]
 mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynPublisher>` 动态注入。
-    use super::{DynPublisher, MessageId, PublishRequest, Publisher, PublisherError, Topic};
+    use super::{
+        DynPublisher, MessageId, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,
+    };
 
     #[test]
     fn publisher_error_wraps_source() {
-        let err = PublisherError::new(std::io::Error::other("leak-marker-pub"));
+        let err = PublisherError::transient(std::io::Error::other("leak-marker-pub"));
         assert_eq!(err.to_string(), "publish failed");
         assert!(std::error::Error::source(&err).is_some());
         // 端到端：derive(Debug) 经 RedactedSource 脱敏、不展开内层 source（anti-vacuity 前置）。
@@ -113,6 +165,52 @@ mod smoke {
         assert!(
             !format!("{err:?}").contains("leak-marker-pub"),
             "wrapper Debug 泄漏 source: {err:?}"
+        );
+    }
+
+    // transient / permanent 构造器 → kind 往返 + is_transient/is_permanent 真值表
+    //（镜像 consistency::EngineError 真值表测试）。两 kind 的 source 均经 RedactedSource 脱敏、Display 同摘要。
+    #[test]
+    fn publisher_error_kind_classification() {
+        let cases: &[(PublisherError, PublishErrorKind, bool, bool)] = &[
+            (
+                PublisherError::transient(std::io::Error::other("conn-flap")),
+                PublishErrorKind::Transient,
+                true,
+                false,
+            ),
+            (
+                PublisherError::permanent(std::io::Error::other("bad-encoding")),
+                PublishErrorKind::Permanent,
+                false,
+                true,
+            ),
+        ];
+        for (err, kind, transient, permanent) in cases {
+            assert_eq!(err.kind(), *kind, "kind mismatch");
+            assert_eq!(err.is_transient(), *transient, "is_transient kind={kind:?}");
+            assert_eq!(err.is_permanent(), *permanent, "is_permanent kind={kind:?}");
+            // Display 与 source 脱敏不随 kind 改变（PII 边界恒定）。
+            assert_eq!(err.to_string(), "publish failed", "Display kind={kind:?}");
+            assert!(
+                std::error::Error::source(err).is_some(),
+                "source present kind={kind:?}"
+            );
+        }
+        assert_ne!(PublishErrorKind::Transient, PublishErrorKind::Permanent);
+    }
+
+    // permanent 路径同样经 RedactedSource 脱敏，不泄漏内层 source（与 transient 路径对称回归）。
+    #[test]
+    fn publisher_error_permanent_redacts_source() {
+        let err = PublisherError::permanent(std::io::Error::other("leak-marker-perm"));
+        assert!(
+            format!("{:?}", std::io::Error::other("leak-marker-perm")).contains("leak-marker-perm"),
+            "前提失效：内层 Debug 未携 marker"
+        );
+        assert!(
+            !format!("{err:?}").contains("leak-marker-perm"),
+            "permanent wrapper Debug 泄漏 source: {err:?}"
         );
     }
 

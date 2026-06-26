@@ -343,8 +343,9 @@ impl OutboxSource for PgOutbox {
 impl OutboxRelay for PgOutbox {
     /// CAS relay 单条 entry：acquire → publish → settle。
     ///
-    /// `PublisherError` 无 kind——瞬态/永久按重试预算耗尽区分（不按错误种类）。
-    /// DB/CAS 失败返 `Err(EngineError)`；publish 失败是**已处置**（返 `Ok(Disposition)`）。
+    /// `PublisherError` 携 kind（#1212）——`Permanent`（序列化 / 路由 / 编码非法）首投即 dlx（跳过重试预算）；
+    /// `Transient`（连接闪断等可恢复）退避重试至预算耗尽再 dlx。分流见 [`settle_publish_failure`] /
+    /// [`dlx_decision`]。DB/CAS 失败返 `Err(EngineError)`；publish 失败是**已处置**（返 `Ok(Disposition)`）。
     async fn relay(&self, entry: &Entry) -> Result<consistency::Disposition, EngineError> {
         let event_id = entry.idem_key().as_str();
 
@@ -388,7 +389,8 @@ impl OutboxRelay for PgOutbox {
     }
 }
 
-/// publish 失败处置（抽出控制 `relay` 认知复杂度 ≤15）：预算耗尽 → dlx；否则退避 retry。
+/// publish 失败处置（抽出控制 `relay` 认知复杂度 ≤15）：永久错误首投即 dlx、预算耗尽 → dlx；否则退避 retry
+/// （#1212，分流谓词见 [`dlx_decision`]）。
 ///
 /// settle CAS 命中 `LostLease`（0 行）⇒ 行已被新租约接管：本租约不拥有该行、不重复处置，记 lost-lease
 /// 后退化为 `Ack`（benign handoff，新持租者负责重投/退避），不误把 broker 失败上抛成本 worker 的降级（F3）。
@@ -401,11 +403,12 @@ async fn settle_publish_failure(
 ) -> Result<consistency::Disposition, EngineError> {
     let event_id = entry.idem_key().as_str();
     let new_count = retry_count + 1;
+    let permanent = err.is_permanent();
     log_publish_failed(event_id, entry.topic().as_str(), retry_count, err);
-    if new_count >= MAX_PUBLISH_ATTEMPTS {
+    if dlx_decision(permanent, new_count) {
         match settle_dlx(pool, event_id, new_count, lease_token).await? {
             SettleOutcome::Settled => {
-                log_dlx(event_id, new_count);
+                log_dlx(event_id, new_count, permanent);
                 Ok(consistency::Disposition::Reject)
             }
             SettleOutcome::LostLease => {
@@ -428,14 +431,15 @@ async fn settle_publish_failure(
 // ── 结构化日志 helper（抽出 tracing 宏展开，控制调用方认知复杂度 ≤15）。勿记 payload/PII。──
 
 /// publish 失败：退避/dlx 前结构化记录（带 `event_id` 关联键，F9）。
-/// `PublisherError::Display` 是受控安全摘要（diport PII 边界）。
+/// `PublisherError::Display` 是受控安全摘要（diport PII 边界）；`permanent` 字段（#1212）让单条日志即可
+/// 区分「瞬态退避重试」与「永久即将首投 DLX」，无需关联后续 `log_dlx`（便于 metric 聚合 / alert）。
 fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &PublisherError) {
-    tracing::warn!(target: "postgres", event_id, topic, retry_count, error = %err, "outbox: publish failed");
+    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent = err.is_permanent(), error = %err, "outbox: publish failed");
 }
 
-/// 预算耗尽进 dlx（永久失败，运维须感知）。
-fn log_dlx(event_id: &str, attempts: i32) {
-    tracing::error!(target: "postgres", event_id, attempts, "outbox: publish budget exhausted, moved to dlx");
+/// 进 dlx（运维须感知）。`permanent`：`true`=错误本身永久（首投即 DLX，跳过预算）；`false`=瞬态重试预算耗尽。
+fn log_dlx(event_id: &str, attempts: i32, permanent: bool) {
+    tracing::error!(target: "postgres", event_id, attempts, permanent, "outbox: publish failed, moved to dlx");
 }
 
 /// settle CAS 0 行（lost-lease fencing miss）：行已被新租约接管或已终结。结构化 warn（benign handoff，
@@ -693,6 +697,15 @@ async fn settle_retry(
 
 // ── 纯函数（单测覆盖）────────────────────────────────────────────────────────
 
+/// 该次 publish 失败是否应进 DLX（而非退避重试）——#1212 瞬态/永久分流谓词。
+///
+/// `is_permanent`（来自 [`PublisherError::is_permanent`]）为真 ⇒ 首投即 dlx（重试同一消息无意义，跳过预算）；
+/// 否则瞬态错误熬满重试预算（`new_count >= MAX_PUBLISH_ATTEMPTS`）才 dlx。`new_count` 是本次失败后的累计
+/// 重试次数（= UPDATE 前 `retry_count + 1`）。
+fn dlx_decision(is_permanent: bool, new_count: i32) -> bool {
+    is_permanent || new_count >= MAX_PUBLISH_ATTEMPTS
+}
+
 /// 指数退避（秒），上限 3600。`retry_count` 是当前已重试次数（0-based，即 UPDATE 前的值）。
 ///
 /// backoff = min(2^retry_count, 3600)。
@@ -717,8 +730,29 @@ mod tests {
     use super::{
         KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS,
         MetadataError, OutboxMetadata, RESERVED_METADATA_KEYS, STATUS_DLX, STATUS_PENDING,
-        STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, unix_secs,
+        STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, dlx_decision, unix_secs,
     };
+
+    // #1212 dlx 分流谓词表驱动：permanent 首投（new_count=1）即 dlx；transient 仅预算耗尽
+    // （new_count >= MAX_PUBLISH_ATTEMPTS）才 dlx。anti-vacuity：transient 未到预算返 false（仍退避）。
+    #[test]
+    fn dlx_decision_table() {
+        let cases: &[(bool, i32, bool)] = &[
+            (true, 1, true),                          // permanent 首投即 dlx
+            (true, MAX_PUBLISH_ATTEMPTS, true),       // permanent 任意次数仍 dlx
+            (false, 1, false),                        // transient 首投 → 退避（不 dlx）
+            (false, MAX_PUBLISH_ATTEMPTS - 1, false), // transient 预算未尽 → 退避
+            (false, MAX_PUBLISH_ATTEMPTS, true),      // transient 预算耗尽 → dlx
+            (false, MAX_PUBLISH_ATTEMPTS + 1, true),  // transient 超预算 → dlx
+        ];
+        for &(is_permanent, new_count, want) in cases {
+            assert_eq!(
+                dlx_decision(is_permanent, new_count),
+                want,
+                "dlx_decision(permanent={is_permanent}, new_count={new_count})"
+            );
+        }
+    }
 
     // OutboxEnvelope 构造 + 字段访问（metadata 经 OutboxMetadata funnel，F1）。
     #[test]

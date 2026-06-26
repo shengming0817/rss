@@ -126,7 +126,9 @@ pub use object_store::{
 };
 pub use outbox_emitter::{DynOutboxEmitter, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 pub use pdp::{CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
-pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
+pub use publisher::{
+    DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,
+};
 pub use rate_limiter::{
     DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
 };

@@ -304,13 +304,28 @@ impl RecordingPublisher {
         )
     }
 
-    fn always_err() -> (Self, Arc<Mutex<u32>>) {
+    fn always_transient() -> (Self, Arc<Mutex<u32>>) {
         let calls = Arc::new(Mutex::new(0u32));
         (
             Self {
                 result: || {
-                    Err(PublisherError::new(std::io::Error::other(
-                        "fake publish error",
+                    Err(PublisherError::transient(std::io::Error::other(
+                        "fake transient publish error",
+                    )))
+                },
+                calls: Arc::clone(&calls),
+            },
+            calls,
+        )
+    }
+
+    fn always_permanent() -> (Self, Arc<Mutex<u32>>) {
+        let calls = Arc::new(Mutex::new(0u32));
+        (
+            Self {
+                result: || {
+                    Err(PublisherError::permanent(std::io::Error::other(
+                        "fake permanent publish error",
                     )))
                 },
                 calls: Arc::clone(&calls),
@@ -510,7 +525,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
         })
         .await?;
 
-    let (pub_, _) = RecordingPublisher::always_err();
+    let (pub_, _) = RecordingPublisher::always_transient();
     let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
 
     let disposition = outbox.relay(&entry).await?;
@@ -588,7 +603,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
         .execute(&store.pool)
         .await?;
 
-    let (pub_, _) = RecordingPublisher::always_err();
+    let (pub_, _) = RecordingPublisher::always_transient();
     let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
 
     let disposition = outbox.relay(&entry).await?;
@@ -607,6 +622,66 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
         status.0, "dlx",
         "status should be dlx after budget exhaustion"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T5b: permanent 错误首投即 dlx（#1212：跳过重试预算）─────────────────────────
+
+/// #1212：permanent publish 错误在 retry_count=0（首投）即 → dlx（Reject），**不**熬满 MAX_PUBLISH_ATTEMPTS。
+/// 对照 T5（transient 需预算耗尽才 dlx）：本测试 entry 全新（retry_count=0）、publisher 仅调 1 次。
+#[tokio::test(flavor = "multi_thread")]
+async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_id = unique_event_id("t5b");
+    let entry = make_entry(&event_id);
+
+    // seed: 1 行 pending，retry_count 保持默认 0（首投）。
+    store
+        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = entry.clone();
+            let env = OutboxEnvelope::new(
+                "t5b-domain".to_string(),
+                "c".to_string(),
+                OutboxMetadata::new(0),
+            );
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let (pub_, calls) = RecordingPublisher::always_permanent();
+    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
+
+    let disposition = outbox.relay(&entry).await?;
+    assert_eq!(
+        disposition,
+        Disposition::Reject,
+        "permanent error should Reject (dlx) on first attempt"
+    );
+
+    // DB 状态 dlx，retry_count=1（首投失败累计，非耗尽到 MAX）。
+    let row: (String, i32) =
+        sqlx::query_as("SELECT status, retry_count FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(row.0, "dlx", "permanent error → dlx on first attempt");
+    assert_eq!(
+        row.1, 1,
+        "retry_count=1 (first attempt), not exhausted to MAX"
+    );
+
+    // anti-vacuity：permanent 首投即 DLX ⇒ publisher 仅调 1 次（未走退避重试预算）。
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试内部 Mutex 无 poisoning 来源，item-level carve-out（同 RecordingPublisher::publish）。
+    let call_count = *calls.lock().unwrap();
+    assert_eq!(call_count, 1, "publisher called exactly once (no retry)");
 
     store.shutdown().await?;
     Ok(())
