@@ -3654,3 +3654,831 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
     // 集成测试无需显式 shutdown Arc<PgStore>（与 Arc 所有权语义一致）。
     Ok(())
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// PgCredentialRepo（identity 凭据仓储）集成测试（#1316）：find/save/upsert · authenticate 三态（含成功清锁）·
+// 折叠锁定态原子 RMW（累计→锁→lazy-unlock 持久化）· bump_version CAS · 跨租 fail-closed · F2 未知主体不建行 ·
+// information_schema 明文列断言（DoD）。
+//
+// 构造 `Credential` 经 `Credential::hydrate`（pub funnel + `secure::hash_password`）；`LoginIdentifier` 经
+// `identity::test_support::login_identifier`（`pub(crate)` funnel 经 test-support feature 暴露，同
+// `test_support::session` 范式）。锁定策略阈值（5 次 / 15min 窗口 / 15min TTL）域 `AccountLockout` 单源，
+// adapter 仅 I/O；`now` 由测试直传（确定性，无需 Clock）。known/wrong/correct/lazy-unlock 行为镜像 in-mem
+// `InMemCredentialRepo` 单测（crates/identity/src/internal/mem.rs），此处证 postgres provider 行为等价 + durable。
+// ───────────────────────────────────────────────────────────────────────────
+
+use identity::ports::{AuthOutcome, Credential, CredentialRepo, IdentityError, LoginIdentifier};
+
+use crate::PgCredentialRepo;
+
+const CRED_TENANT_A: &str = "a1a2a3a4-b1b2-4c3c-8d4d-e1e2e3e4e5e6";
+const CRED_TENANT_B: &str = "b9b8b7b6-c5c4-4a3a-8f2f-d1d2d3d4d5d6";
+const CRED_USER_ALICE: &str = "11111111-2222-4333-8444-555555555555";
+const CRED_USER_BOB: &str = "22222222-3333-4444-8555-666666666666";
+// 锁定 TTL（域 AccountLockout 单源镜像；仅供测试时间步进推算，非生产复刻）。
+const LOCK_TTL_SECS: u64 = 15 * 60;
+// 测试基准时刻（well-after-epoch，避开 unix_secs 的 epoch 前钳零边界）。
+const CRED_BASE_SECS: u64 = 1_700_000_000;
+
+type CredHelperResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn cred_tenant(raw: &str) -> CredHelperResult<TenantId> {
+    Ok(TenantId::parse(raw)?)
+}
+
+fn cred_uid(raw: &str) -> CredHelperResult<ids::UserId> {
+    Ok(ids::UserId::parse(raw)?)
+}
+
+// 登录查找键（经 test-support funnel；known 主体亦可 `cred.login().clone()`，未知主体仅经此入口）。
+fn login_id(raw: &str) -> LoginIdentifier {
+    identity::test_support::login_identifier(raw)
+}
+
+fn make_cred(
+    login: &str,
+    user: &str,
+    password: &str,
+    version: u32,
+    tenant: TenantId,
+) -> CredHelperResult<Credential> {
+    let hash = secure::hash_password(password)?;
+    Ok(Credential::hydrate(
+        login,
+        cred_uid(user)?,
+        tenant,
+        hash,
+        version,
+    ))
+}
+
+fn cred_epoch(secs: u64) -> std::time::SystemTime {
+    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+// 直查持久化 failure_count（断言锁定态原子推进 / 清零）。
+async fn db_failure_count(store: &PgStore, tenant: &str, login: &str) -> CredHelperResult<i64> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT failure_count FROM credentials WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(tenant)
+    .bind(login)
+    .fetch_one(&store.pool)
+    .await?;
+    Ok(row.0)
+}
+
+// 直查持久化 locked_until epoch（NULL → None；断言 lazy-unlock 持久化解锁）。
+async fn db_locked_until(
+    store: &PgStore,
+    tenant: &str,
+    login: &str,
+) -> CredHelperResult<Option<i64>> {
+    let row: (Option<i64>,) = sqlx::query_as(
+        "SELECT extract(epoch from locked_until)::bigint \
+         FROM credentials WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(tenant)
+    .bind(login)
+    .fetch_one(&store.pool)
+    .await?;
+    Ok(row.0)
+}
+
+// CRUD：未存 → None；save → find_by_user_id 往返一致（user_id/login/version + PHC 列形态）；同 login 二次 save
+// → upsert 覆盖 version（非新增行）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+
+    // 未保存 → None（fail-closed 基线，anti-vacuity 负例）。
+    assert!(
+        repo.find_by_user_id(tenant, cred_uid(CRED_USER_ALICE)?)
+            .await?
+            .is_none(),
+        "未保存 → None"
+    );
+
+    // save → find_by_user_id 往返一致。
+    repo.save(make_cred("alice", CRED_USER_ALICE, "pw1", 1, tenant)?)
+        .await?;
+    let Some(got) = repo
+        .find_by_user_id(tenant, cred_uid(CRED_USER_ALICE)?)
+        .await?
+    else {
+        return Err("saved credential visible".into());
+    };
+    assert_eq!(
+        got.user_id(),
+        cred_uid(CRED_USER_ALICE)?,
+        "canonical subject 保真"
+    );
+    assert_eq!(got.login().as_str(), "alice", "login 查找键保真");
+    assert_eq!(got.version(), 1, "version 保真");
+    assert!(
+        got.password_hash().as_str().starts_with("$argon2"),
+        "回读 PHC 为 argon2 格式（明文永不落库）"
+    );
+
+    // 同 login 二次 save → upsert 覆盖 version（DO UPDATE，非新增行）。
+    repo.save(make_cred("alice", CRED_USER_ALICE, "pw2", 2, tenant)?)
+        .await?;
+    let Some(got2) = repo
+        .find_by_user_id(tenant, cred_uid(CRED_USER_ALICE)?)
+        .await?
+    else {
+        return Err("upserted credential visible".into());
+    };
+    assert_eq!(got2.version(), 2, "upsert 覆盖 version");
+    let n: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM credentials WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(CRED_TENANT_A)
+    .bind("alice")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(n.0, 1, "upsert 不新增行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// authenticate 三态：已知+正确 → Authenticated(canonical user_id)；已知+错 → InvalidKnownUser；
+// 查无凭据 → InvalidUnknown（恒定成本 KDF 仍跑，不 panic）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?)
+        .await?;
+    let now = cred_epoch(CRED_BASE_SECS);
+
+    assert_eq!(
+        repo.authenticate(tenant, login_id("alice"), "correct".to_string(), now)
+            .await?,
+        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
+        "已知+正确 → Authenticated(canonical user_id)"
+    );
+    assert_eq!(
+        repo.authenticate(tenant, login_id("alice"), "wrong".to_string(), now)
+            .await?,
+        AuthOutcome::InvalidKnownUser,
+        "已知+错 → InvalidKnownUser"
+    );
+    assert_eq!(
+        repo.authenticate(tenant, login_id("ghost"), "correct".to_string(), now)
+            .await?,
+        AuthOutcome::InvalidUnknown,
+        "查无凭据 → InvalidUnknown"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// F2：未知主体登录失败**不建行 / 不建锁**——不可经枚举撑大 credentials 表（折叠列 ⇒ 无行即无锁，结构层成立）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?)
+        .await?;
+    let now = cred_epoch(CRED_BASE_SECS);
+
+    for i in 0..20 {
+        assert_eq!(
+            repo.authenticate(
+                tenant,
+                login_id(&format!("ghost-{i}")),
+                "x".to_string(),
+                now
+            )
+            .await?,
+            AuthOutcome::InvalidUnknown
+        );
+    }
+    // 仅 alice 一行（未知主体未建任何行 ⇒ lockout 表不随枚举增长，F2）。
+    let n: (i64,) = sqlx::query_as("SELECT count(*) FROM credentials WHERE tenant_id = $1::uuid")
+        .bind(CRED_TENANT_A)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(n.0, 1, "未知主体不建行（F2：lockout 表不随枚举增长）");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// 跨租 fail-closed：A 种入 alice，B 视角 find → None / authenticate → InvalidUnknown / lockout_status → false
+// （即使 A 已锁定 alice）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    let b = cred_tenant(CRED_TENANT_B)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
+        .await?;
+    let now = cred_epoch(CRED_BASE_SECS);
+
+    // 跨租 find → None（不泄露存在性）。
+    assert!(
+        repo.find_by_user_id(b, cred_uid(CRED_USER_ALICE)?)
+            .await?
+            .is_none(),
+        "跨租 find → None"
+    );
+    // 跨租 authenticate → InvalidUnknown（跨租即未知）。
+    assert_eq!(
+        repo.authenticate(b, login_id("alice"), "correct".to_string(), now)
+            .await?,
+        AuthOutcome::InvalidUnknown,
+        "跨租 authenticate → InvalidUnknown"
+    );
+    // 在 A 锁定 alice（5 次错），B 视角 lockout_status 仍 false（隔离）。
+    for i in 1..=5 {
+        repo.authenticate(
+            a,
+            login_id("alice"),
+            "wrong".to_string(),
+            cred_epoch(CRED_BASE_SECS + i),
+        )
+        .await?;
+    }
+    assert!(
+        repo.lockout_status(a, login_id("alice"), cred_epoch(CRED_BASE_SECS + 5))
+            .await?,
+        "A 视角 alice 已锁"
+    );
+    assert!(
+        !repo
+            .lockout_status(b, login_id("alice"), cred_epoch(CRED_BASE_SECS + 5))
+            .await?,
+        "B 视角不受 A 锁定影响（跨租隔离）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// 原子推进：连续 authenticate(错) 经仓储持久化累计——未达阈值未锁，第 5 次（窗口内）达阈值锁定。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
+        .await?;
+
+    for i in 1..5 {
+        assert_eq!(
+            repo.authenticate(
+                a,
+                login_id("alice"),
+                "wrong".to_string(),
+                cred_epoch(CRED_BASE_SECS + i)
+            )
+            .await?,
+            AuthOutcome::InvalidKnownUser,
+            "第 {i} 次失败"
+        );
+        assert!(
+            !repo
+                .lockout_status(a, login_id("alice"), cred_epoch(CRED_BASE_SECS + i))
+                .await?,
+            "未达阈值仍未锁"
+        );
+    }
+    // 第 5 次（窗口内）→ 达阈值锁定（DB 持久化失败计数 = 5）。
+    repo.authenticate(
+        a,
+        login_id("alice"),
+        "wrong".to_string(),
+        cred_epoch(CRED_BASE_SECS + 5),
+    )
+    .await?;
+    assert!(
+        repo.lockout_status(a, login_id("alice"), cred_epoch(CRED_BASE_SECS + 5))
+            .await?,
+        "第 5 次达阈值锁定"
+    );
+    assert_eq!(
+        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
+        5,
+        "失败计数持久化推进至阈值"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// lazy-unlock：TTL 内仍锁；TTL 后 lockout_status 原子解锁（持久化清 locked_until）+ 计数从 1 重计。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
+        .await?;
+    for i in 1..=5 {
+        repo.authenticate(
+            a,
+            login_id("alice"),
+            "wrong".to_string(),
+            cred_epoch(CRED_BASE_SECS + i),
+        )
+        .await?;
+    }
+    let lock_at = CRED_BASE_SECS + 5;
+
+    // TTL 内仍锁。
+    assert!(
+        repo.lockout_status(
+            a,
+            login_id("alice"),
+            cred_epoch(lock_at + LOCK_TTL_SECS - 1)
+        )
+        .await?,
+        "TTL 内仍锁"
+    );
+    // TTL 后 lazy-unlock → false + 持久化清 locked_until。
+    assert!(
+        !repo
+            .lockout_status(
+                a,
+                login_id("alice"),
+                cred_epoch(lock_at + LOCK_TTL_SECS + 1)
+            )
+            .await?,
+        "TTL 后 lazy-unlock 解锁"
+    );
+    assert!(
+        db_locked_until(&store, CRED_TENANT_A, "alice")
+            .await?
+            .is_none(),
+        "lazy-unlock 持久化清 locked_until"
+    );
+    // 解锁后再失败从 1 重计（不沿用旧计数）→ InvalidKnownUser、未锁。
+    let after = lock_at + LOCK_TTL_SECS + 2;
+    assert_eq!(
+        repo.authenticate(a, login_id("alice"), "wrong".to_string(), cred_epoch(after))
+            .await?,
+        AuthOutcome::InvalidKnownUser
+    );
+    assert!(
+        !repo
+            .lockout_status(a, login_id("alice"), cred_epoch(after))
+            .await?,
+        "重计未达阈值未锁"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// 成功登录原子清零失败计数（authenticate 内折叠 clear——不需独立 clear 端口）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
+        .await?;
+
+    // 4 次错（未达阈值 5，未锁）→ 失败计数持久化 = 4。
+    for i in 1..=4 {
+        repo.authenticate(
+            a,
+            login_id("alice"),
+            "wrong".to_string(),
+            cred_epoch(CRED_BASE_SECS + i),
+        )
+        .await?;
+    }
+    assert_eq!(
+        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
+        4,
+        "失败累积 4"
+    );
+    // 正确密码 → Authenticated + 原子清零失败计数。
+    assert_eq!(
+        repo.authenticate(
+            a,
+            login_id("alice"),
+            "correct".to_string(),
+            cred_epoch(CRED_BASE_SECS + 5)
+        )
+        .await?,
+        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+    );
+    assert_eq!(
+        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
+        0,
+        "成功登录清零失败计数"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// bump_version CAS：期望不匹配 → VersionConflict；命中 → 替换 hash+version（authenticate 新密码真）；
+// 查无 → CredentialNotFound；跨租（next 在 B）→ CredentialNotFound 且不动 A。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_bump_version_cas() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    let b = cred_tenant(CRED_TENANT_B)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "pw1", 1, a)?)
+        .await?;
+    let now = cred_epoch(CRED_BASE_SECS);
+
+    // 期望版本不匹配 → VersionConflict。
+    assert!(
+        matches!(
+            repo.bump_version(99, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?)
+                .await,
+            Err(IdentityError::VersionConflict)
+        ),
+        "期望不匹配 → VersionConflict"
+    );
+    // 命中 → 替换 hash + version。
+    repo.bump_version(1, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?)
+        .await?;
+    let Some(got) = repo.find_by_user_id(a, cred_uid(CRED_USER_ALICE)?).await? else {
+        return Err("credential visible after CAS hit".into());
+    };
+    assert_eq!(got.version(), 2, "CAS 命中后 version = 2");
+    assert_eq!(
+        repo.authenticate(a, login_id("alice"), "pw2".to_string(), now)
+            .await?,
+        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
+        "新密码验签真"
+    );
+    // 查无凭据 → CredentialNotFound。
+    assert!(
+        matches!(
+            repo.bump_version(1, make_cred("ghost", CRED_USER_BOB, "x", 1, a)?)
+                .await,
+            Err(IdentityError::CredentialNotFound)
+        ),
+        "查无 → CredentialNotFound"
+    );
+    // 跨租 bump（next 在 B）→ CredentialNotFound（key 派生自 next，B 无行），不动 A。
+    assert!(
+        matches!(
+            repo.bump_version(2, make_cred("alice", CRED_USER_ALICE, "pw3", 3, b)?)
+                .await,
+            Err(IdentityError::CredentialNotFound)
+        ),
+        "跨租 bump → CredentialNotFound"
+    );
+    let Some(still_a) = repo.find_by_user_id(a, cred_uid(CRED_USER_ALICE)?).await? else {
+        return Err("tenant A credential still present after cross-tenant bump".into());
+    };
+    assert_eq!(still_a.version(), 2, "跨租 bump 不动 A（仍 v2）");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// material-never-persisted 断言（DoD review-critical）：`information_schema.columns` 校验 credentials 列集
+/// 恰为预期（含 `password_hash`，**无明文 `password` 列**）。
+#[tokio::test(flavor = "multi_thread")]
+async fn ts_credentials_no_plaintext_password_column() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_name = 'credentials' AND table_schema = 'public' \
+         ORDER BY column_name",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let cols: Vec<&str> = rows.iter().map(|(s,)| s.as_str()).collect();
+
+    let expected = [
+        "created_at",
+        "failure_count",
+        "locked_until",
+        "lockout_window_start",
+        "login",
+        "password_hash",
+        "tenant_id",
+        "user_id",
+        "version",
+    ];
+    assert_eq!(
+        cols, expected,
+        "credentials 列集应恰为预期（仅 PHC，无明文密码列），实际：{cols:?}"
+    );
+    // 显式守 DoD：无明文 password 列，仅 argon2 PHC。
+    assert!(
+        !cols.contains(&"password"),
+        "禁止明文 password 列（明文永不落库）"
+    );
+    assert!(cols.contains(&"password_hash"), "仅持久化 argon2 PHC 列");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// 已锁定（达阈值，locked_until 持久化非 NULL）→ 正确密码 authenticate → Authenticated + 原子清锁。
+// （authenticate 成功分支无视锁定态、只负责清锁；「已锁拒绝」由上层 lockout_status 门控承载，#1277）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
+        .await?;
+
+    // 5 次错 → 达阈值锁定（locked_until 持久化非 NULL）。
+    for i in 1..=5 {
+        repo.authenticate(
+            a,
+            login_id("alice"),
+            "wrong".to_string(),
+            cred_epoch(CRED_BASE_SECS + i),
+        )
+        .await?;
+    }
+    assert!(
+        db_locked_until(&store, CRED_TENANT_A, "alice")
+            .await?
+            .is_some(),
+        "达阈值后 locked_until 持久化"
+    );
+
+    // 正确密码 → Authenticated + 原子清锁（locked_until + failure_count 持久化清零）。
+    assert_eq!(
+        repo.authenticate(
+            a,
+            login_id("alice"),
+            "correct".to_string(),
+            cred_epoch(CRED_BASE_SECS + 6)
+        )
+        .await?,
+        AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?)
+    );
+    assert!(
+        db_locked_until(&store, CRED_TENANT_A, "alice")
+            .await?
+            .is_none(),
+        "成功登录清 locked_until（解锁持久化）"
+    );
+    assert_eq!(
+        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
+        0,
+        "成功登录清 failure_count"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T24：RLS 强制力证明 — credentials 表（#1316，与 T20–T23 同范式补 credentials 表 DB 层隔离）。
+///
+/// 以 `SET LOCAL ROLE rss_app`（非 owner，superuser 永远绕过 RLS 不适合验证）+ tenant scope 切换，验证
+/// `0012` 的 RLS policy 真实生效：tenant_a scope INSERT/SELECT 成功可见；切 tenant_b → 不可见（USING 过滤）；
+/// tenant_a scope 写 tenant_b 行 → WITH CHECK 拒绝。
+///
+/// 注：不含「未设 rss.tenant_id → 0 行」子用例——`set_config(..,is_local=true)` 在 pool 复用连接上 tx 末 revert
+/// 为 placeholder GUC 默认值 `''`（非 NULL），`''::uuid` 在 USING 谓词 raise（仍 fail-closed=不泄数据，但非「0 行」），
+/// 该 unset-scope 行为依赖连接是否曾被 set（pool 不可控）⇒ 不在本测试断言（T20–T23 的同款 null-scope 子用例有相同
+/// 连接态依赖，见 OOS issue）。核心 RLS 强制力由下列 4 步 USING/WITH CHECK 证明已足。
+#[tokio::test(flavor = "multi_thread")]
+async fn t24_rls_credentials_enforces_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    // 提权：superuser 需成为 rss_app member 才能 SET LOCAL ROLE；幂等。
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let user_a = uuid::Uuid::new_v4().to_string();
+
+    // Tx1：rss_app + tenant_a scope → INSERT tenant_a 凭据 → 成功（WITH CHECK pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
+             VALUES ($1::uuid, $2::uuid, 'rls-alice', 'phc-placeholder', 1)",
+        )
+        .bind(&tenant_a)
+        .bind(&user_a)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a credential failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM credentials WHERE login = 'rls-alice'")
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(cnt.0, 1, "t24: tenant_a scope — 凭据应可见（USING pass）");
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT 同行 → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM credentials WHERE login = 'rls-alice'")
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t24: tenant_b scope — 凭据应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b 凭据 → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
+             VALUES ($1::uuid, $2::uuid, 'rls-bob', 'phc-placeholder', 1)",
+        )
+        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t24: WITH CHECK 应拒绝 tenant_b 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// DB CHECK 约束红用例（#1316 review F2）：0012 的域不变式 CHECK 拒非法行——version/failure_count 越 u32 界、
+// 锁定态缺滑窗起点。证 domain `u32` 边界 + 锁定一致性已下沉为 DB 硬约束（坏迁移/外部直写不可绕）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_db_check_constraints_reject_invalid() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let t = CRED_TENANT_A;
+    let u = CRED_USER_ALICE;
+
+    // 正例基线（合法行 INSERT 成功 → 证下列拒绝非因其它列约束，anti-vacuity）。
+    sqlx::query(
+        "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, 'ok', 'phc', 1)",
+    )
+    .bind(t)
+    .bind(u)
+    .execute(&store.pool)
+    .await?;
+
+    // 非法：version < 0 → credentials_version_u32 拒。
+    let neg_ver = sqlx::query(
+        "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, 'bad1', 'phc', -1)",
+    )
+    .bind(t)
+    .bind(u)
+    .execute(&store.pool)
+    .await;
+    assert!(neg_ver.is_err(), "version < 0 应被 CHECK 拒");
+
+    // 非法：version > u32::MAX（4294967296）→ credentials_version_u32 拒。
+    let over_ver = sqlx::query(
+        "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version) \
+         VALUES ($1::uuid, $2::uuid, 'bad2', 'phc', 4294967296)",
+    )
+    .bind(t)
+    .bind(u)
+    .execute(&store.pool)
+    .await;
+    assert!(over_ver.is_err(), "version > u32::MAX 应被 CHECK 拒");
+
+    // 非法：failure_count < 0 → credentials_failure_count_u32 拒。
+    let neg_fc = sqlx::query(
+        "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version, failure_count) \
+         VALUES ($1::uuid, $2::uuid, 'bad3', 'phc', 1, -1)",
+    )
+    .bind(t)
+    .bind(u)
+    .execute(&store.pool)
+    .await;
+    assert!(neg_fc.is_err(), "failure_count < 0 应被 CHECK 拒");
+
+    // 非法：locked_until 非空但 lockout_window_start 为空 → credentials_lock_requires_window 拒。
+    let lock_no_window = sqlx::query(
+        "INSERT INTO credentials (tenant_id, user_id, login, password_hash, version, locked_until) \
+         VALUES ($1::uuid, $2::uuid, 'bad4', 'phc', 1, now())",
+    )
+    .bind(t)
+    .bind(u)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        lock_no_window.is_err(),
+        "locked_until 非空但 lockout_window_start 为空应被 CHECK 拒"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// 并发行锁 RMW 红用例（#1316 review F1）：同 (tenant, login) 5 路并发 wrong-password authenticate——
+// SELECT ... FOR UPDATE 串行化各事务 RMW，全部完成后失败计数恰 = 5（无丢更新）且达阈值锁定。
+// 对标 role_repo_concurrent_save_converges（Arc<repo> + tokio::spawn 竞争同行）。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = Arc::new(PgCredentialRepo::new(&store));
+    let a = cred_tenant(CRED_TENANT_A)?;
+    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
+        .await?;
+
+    // 5 路并发错密码（同一行）——同一 now，行锁强制串行 RMW（非各自读 stale 副本各 +1 丢更新）。
+    let now = cred_epoch(CRED_BASE_SECS);
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let repo = Arc::clone(&repo);
+        handles.push(tokio::spawn(async move {
+            repo.authenticate(a, login_id("alice"), "wrong".to_string(), now)
+                .await
+        }));
+    }
+    for h in handles {
+        // 每路均应返回 InvalidKnownUser（已知主体 + 错），无 task panic / Storage 错。
+        let outcome = h.await.map_err(|e| format!("join failed: {e}"))??;
+        assert_eq!(
+            outcome,
+            AuthOutcome::InvalidKnownUser,
+            "并发错密码各路 InvalidKnownUser"
+        );
+    }
+
+    // 行锁串行化 ⇒ 失败计数恰 5（无丢更新）+ 达阈值锁定。
+    assert_eq!(
+        db_failure_count(&store, CRED_TENANT_A, "alice").await?,
+        5,
+        "5 路并发错密码 → 失败计数恰 5（FOR UPDATE 无丢更新）"
+    );
+    assert!(
+        repo.lockout_status(a, login_id("alice"), now).await?,
+        "达阈值后锁定"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}

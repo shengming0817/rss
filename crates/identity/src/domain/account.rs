@@ -151,9 +151,9 @@ pub enum AuthOutcome {
 /// `Debug` 手写脱敏：`password_hash` 经 [`secure::PasswordHash`] 类型层已脱敏，`login`（[`LoginIdentifier`]）
 /// 亦脱敏（准 PII）。`tenant` / `user_id` 有意保留原值：均为 audit/tracing 合法可观测标识、非凭据
 /// （见 `vocab::tenant` rustdoc），脱敏反而损可观测。
-// reason: 类型作 ports 签名实体已被引用；pub(crate) 方法部分（verify_password/rotate/version）已被 PR4
-// LoginService::change_password 消费，其余（new/login/user_id/tenant/password_hash）待 postgres adapter W (#1258)。
-#[allow(dead_code)]
+// 类型作 ports 签名实体被独立 adapter crate 跨 crate 收发；数据访问器（login/user_id/tenant/password_hash/
+// version）+ hydrate 受控重建经 #1316 `PgCredentialRepo` 跨 crate 消费（pub，公共 API）。`new` /
+// verify_password / rotate 仍 `pub(crate)`（域内 seed-login / change_password 用，非 adapter 面）。
 #[derive(Clone)]
 pub struct Credential {
     login: LoginIdentifier,
@@ -175,8 +175,9 @@ impl std::fmt::Debug for Credential {
     }
 }
 
-// reason: verify_password/rotate/version 已被 PR4 LoginService::change_password 消费；
-// new/login/user_id/tenant/password_hash 待 postgres adapter W (#1258)；保留 allow 防 non-test dead_code。
+// reason: verify_password / rotate 已被 LoginService::change_password 消费（prod）；数据访问器 + hydrate
+// 升 `pub`（#1316 `PgCredentialRepo` 跨 crate 消费，公共 API）。仅 `new`（`pub(crate)`）非 test 构建无调用方
+// （seed-login 门控）⇒ 保留 impl 级 allow 防其 non-test dead_code。
 #[allow(dead_code)]
 impl Credential {
     /// 构造凭据（由已哈希密码；funnel 边界 = `pub(crate)`）。`login` = 登录查找键，`user_id` = canonical
@@ -190,6 +191,25 @@ impl Credential {
     ) -> Self {
         Self {
             login,
+            user_id,
+            tenant,
+            password_hash,
+            version,
+        }
+    }
+
+    /// 由持久化值受控重建凭据（adapter 读路径 funnel；对标 [`crate::ports::Role`]`::hydrate`）。`login` 为存储的
+    /// 登录查找键，`password_hash` 为 adapter 经 [`secure::PasswordHash::parse`] 校验回读的 PHC。字段私有不变
+    /// ⇒ 外部经本 `pub` 入口可重建但**不可伪造任意内部表示**（funnel，#1316 `PgCredentialRepo::find_by_user_id`）。
+    pub fn hydrate(
+        login: &str,
+        user_id: ids::UserId,
+        tenant: vocab::TenantId,
+        password_hash: secure::PasswordHash,
+        version: u32,
+    ) -> Credential {
+        Credential {
+            login: LoginIdentifier::new(login),
             user_id,
             tenant,
             password_hash,
@@ -213,28 +233,30 @@ impl Credential {
         }
     }
 
-    /// 登录标识（opaque 查找键；store key 派生用，FR-020 准 PII）。
-    pub(crate) fn login(&self) -> &LoginIdentifier {
+    /// 登录标识（opaque 查找键；store key 派生用，FR-020 准 PII）。`pub`（#1316 adapter 取 `(tenant, login)` PK）。
+    pub fn login(&self) -> &LoginIdentifier {
         &self.login
     }
 
     /// canonical actor subject（稳定 UUID；登录成功后写 payload/envelope/session subject，audit actor，#1277 F1）。
-    pub(crate) fn user_id(&self) -> ids::UserId {
+    /// `pub`（#1316 adapter 绑 `credentials.user_id` 列）。
+    pub fn user_id(&self) -> ids::UserId {
         self.user_id
     }
 
-    /// 租户（RLS scope）。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    /// 租户（RLS scope）。`pub`（#1316 adapter 绑 `credentials.tenant_id` 列）。
+    pub fn tenant(&self) -> vocab::TenantId {
         self.tenant
     }
 
-    /// 凭据版本（CAS pin）。
-    pub(crate) fn version(&self) -> u32 {
+    /// 凭据版本（CAS pin）。`pub`（#1316 adapter 绑 `credentials.version` 列）。
+    pub fn version(&self) -> u32 {
         self.version
     }
 
-    /// 密码哈希引用（adapter 持久化 PHC——经 [`secure::PasswordHash::as_str`]）。
-    pub(crate) fn password_hash(&self) -> &secure::PasswordHash {
+    /// 密码哈希引用（adapter 持久化 PHC——经 [`secure::PasswordHash::as_str`]）。`pub`（#1316 adapter 绑
+    /// `credentials.password_hash` 列）。
+    pub fn password_hash(&self) -> &secure::PasswordHash {
         &self.password_hash
     }
 }
@@ -244,23 +266,22 @@ impl Credential {
 // ---------------------------------------------------------------------------
 
 /// 连续失败阈值（达此次数触发锁定）。OWASP ASVS V2.2 节流方向；RSS 取 5（缺口 P1-12）。
-// reason: 锁定逻辑由 PR4 LoginService 经原子 port 方法（CredentialRepo）间接消费；域类型本身待 postgres
-// adapter W (#1258) 直接读取；当前仅 InMemCredentialRepo（test/seed-login 门控）直接使用（ADR-004 C8）。
-#[allow(dead_code)]
+/// 策略阈值域内单源——`record_failure` 据此判定锁定；adapter（#1316 `PgCredentialRepo`）仅持久化 I/O，
+/// 不复刻阈值（避免域逻辑外泄进 adapter）。
 const MAX_FAILURES: u32 = 5;
 /// 失败计数滑动窗口（窗口外失败 lazy-reset 计数）。NIST 800-63B §5.2.2 失败窗口方向；RSS 取 15min。
-// reason: 同 MAX_FAILURES（待 postgres adapter W #1258；PR4 login 经原子 port 间接消费）。
-#[allow(dead_code)]
 const WINDOW: Duration = Duration::from_secs(15 * 60);
 /// 锁定 TTL（达阈值后锁定时长，lazy-unlock，无后台 job）。RSS 取 15min。
-// reason: 同 MAX_FAILURES（待 postgres adapter W #1258；PR4 login 经原子 port 间接消费）。
-#[allow(dead_code)]
 const LOCK_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// 账户锁定态：失败计数 + 滑窗起点 + 锁定截止时刻。
 ///
-/// 域内纯逻辑值类型（`pub(crate)`，不在 port 签名——锁定推进经 `CredentialRepo::authenticate` 内部**原子**
-/// 承载，#1277 折叠后不再有独立 `record_failure`/`clear_lockout` port 方法，见 ports.rs）。窗口 / TTL 判定全经
+/// **adapter-facing 辅助类型**（`pub`，经 `ports` facade re-export，#1316）：**不在任何 port 方法签名**——锁定推进
+/// 经 `CredentialRepo::authenticate`/`lockout_status` 内部**原子**承载（#1277 折叠后无独立 `record_failure`/
+/// `clear_lockout` port 方法，见 ports.rs）。升 `pub` 是 ADR-005「最小实体集」之外的**必要扩展**（区别于 port 签名
+/// 实体 `Credential`/`LoginIdentifier`/`AuthOutcome`）：`PgCredentialRepo` 须在事务/行锁内 `from_parts` 重建 →
+/// `record_failure`/`try_lazy_unlock` 推进 → 访问器回写持久化三列，策略阈值仍域内单源、字段私有不可伪造，无法收敛。
+/// 窗口 / TTL 判定全经
 /// **调用方注入 `Clock` 读出的 `now: SystemTime`** 计算——域类型不持 `Clock`、不调 `SystemTime::now()`
 /// （rust-standards §工程护栏；`authenticate`/`lockout_status` 的 `now` 参亦经注入 `Clock`，调用方禁直调
 /// `SystemTime::now()`——clippy `disallowed-methods` 静态守）。
@@ -271,9 +292,10 @@ const LOCK_TTL: Duration = Duration::from_secs(15 * 60);
 /// 内部据 `AuthOutcome` 原子完成「已知+错推进失败计数（达阈值即锁）/ 已知+正确清零 / 未知不动」——验签与
 /// lockout 推进收进单一原子调用（不再外部分步 record/clear，#1277）。postgres adapter（W #1258）须在
 /// 事务/行锁内等价实现该原子性；缺失则多实例暴破防御静默失效。
-// reason: 类型 pub(crate)，PR4 LoginService 经 CredentialRepo 原子 port 间接消费；AccountLockout 自身
-// 仅 InMemCredentialRepo（test/seed-login 门控）直接使用，待 postgres adapter W (#1258) 直接读取。
-#[allow(dead_code)]
+// AccountLockout 升 `pub` 公共 API（经 ports facade re-export，#1316）：`PgCredentialRepo` 在事务内
+// `from_parts` 重建 → `record_failure`/`try_lazy_unlock` 推进 → 访问器回写三列；策略阈值（5/15min/15min）
+// 域内单源、adapter 仅 I/O。锁定推进不在 port 签名（折叠进 `authenticate`/`lockout_status` 内部承载），但
+// 类型本身跨 crate 收发。全方法 `pub` ⇒ 公共 API 可达，非 dead（无需 allow）。
 #[derive(Debug, Clone)]
 pub struct AccountLockout {
     failure_count: u32,
@@ -281,11 +303,9 @@ pub struct AccountLockout {
     locked_until: Option<SystemTime>,
 }
 
-// reason: 同 struct（PR4 经原子 port 间接消费；postgres adapter 直接消费待 W #1258）。
-#[allow(dead_code)]
 impl AccountLockout {
     /// 新建锁定态（零失败、未锁定；滑窗锚定 `now`）。`now` 由调用方注入 `Clock` 读出。
-    pub(crate) fn new(now: SystemTime) -> Self {
+    pub fn new(now: SystemTime) -> Self {
         Self {
             failure_count: 0,
             window_start: now,
@@ -293,8 +313,8 @@ impl AccountLockout {
         }
     }
 
-    /// 从持久化字段重建（adapter 加载锁定态时）。
-    pub(crate) fn from_parts(
+    /// 从持久化字段重建（adapter 加载锁定态时）。`pub`（#1316 `PgCredentialRepo` 在事务内由三列重建）。
+    pub fn from_parts(
         failure_count: u32,
         window_start: SystemTime,
         locked_until: Option<SystemTime>,
@@ -315,7 +335,7 @@ impl AccountLockout {
     ///
     /// **边界安全语义**：窗口重锚不放宽锁定判定——当次失败仍记入新窗口第 1 次，攻击者精准踩窗口边界
     /// **不能**额外获益（重锚后仍需累计 `MAX_FAILURES` 次才锁定，「免费重置」只把计数清零、不增可用尝试）。
-    pub(crate) fn record_failure(&mut self, now: SystemTime) -> AccountStatus {
+    pub fn record_failure(&mut self, now: SystemTime) -> AccountStatus {
         let window_expired = match now.duration_since(self.window_start) {
             Ok(elapsed) => elapsed >= WINDOW,
             // 时钟回拨：fail-safe 重锚滑窗（不沿用旧计数）。
@@ -336,7 +356,7 @@ impl AccountLockout {
 
     /// lazy-unlock：锁定 TTL 已过（`now ≥ locked_until`，含恰好到期）→ 清锁定 + 计数归零，返回 `true`；
     /// 未锁定 / 未到期 → `false`。无后台 job（OWASP/NIST lazy 模型）。
-    pub(crate) fn try_lazy_unlock(&mut self, now: SystemTime) -> bool {
+    pub fn try_lazy_unlock(&mut self, now: SystemTime) -> bool {
         match self.locked_until {
             // duration_since(until) 为 Ok ⇔ now ≥ until（含恰好到期）⇒ TTL 过期。
             Some(until) if now.duration_since(until).is_ok() => {
@@ -349,7 +369,7 @@ impl AccountLockout {
     }
 
     /// 当前是否仍锁定（`locked_until` 存在且 `now < locked_until`；恰好到期视为未锁定，与 lazy-unlock 一致）。
-    pub(crate) fn is_locked(&self, now: SystemTime) -> bool {
+    pub fn is_locked(&self, now: SystemTime) -> bool {
         match self.locked_until {
             // duration_since(until) 为 Err ⇔ now < until ⇒ 仍在锁定 TTL 内。
             Some(until) => now.duration_since(until).is_err(),
@@ -357,18 +377,18 @@ impl AccountLockout {
         }
     }
 
-    /// 当前失败计数（持久化 / 测试断言）。
-    pub(crate) fn failure_count(&self) -> u32 {
+    /// 当前失败计数（持久化 / 测试断言）。`pub`（#1316 adapter 回写 `credentials.failure_count`）。
+    pub fn failure_count(&self) -> u32 {
         self.failure_count
     }
 
-    /// 滑窗起点（持久化）。
-    pub(crate) fn window_start(&self) -> SystemTime {
+    /// 滑窗起点（持久化）。`pub`（#1316 adapter 回写 `credentials.lockout_window_start`）。
+    pub fn window_start(&self) -> SystemTime {
         self.window_start
     }
 
-    /// 锁定截止时刻（持久化；`None` = 未锁定）。
-    pub(crate) fn locked_until(&self) -> Option<SystemTime> {
+    /// 锁定截止时刻（持久化；`None` = 未锁定）。`pub`（#1316 adapter 回写 `credentials.locked_until`）。
+    pub fn locked_until(&self) -> Option<SystemTime> {
         self.locked_until
     }
 }
@@ -490,6 +510,22 @@ mod tests {
         );
         assert!(rotated.verify_password("new-pw"));
         assert!(!rotated.verify_password("old-pw"), "旧密码失效");
+    }
+
+    #[test]
+    fn credential_hydrate_roundtrips_persisted_fields() {
+        // adapter 读路径 funnel（#1316）：hydrate(已校验 PHC + 类型化字段) → 访问器回读一致 + 验签仍真。
+        let phc = secure::hash_password("rebuilt-pw").expect("hash ok");
+        let cred = Credential::hydrate("alice-login", uid(CANON_USER), tid(CANON_TENANT), phc, 7);
+        assert_eq!(cred.login().as_str(), "alice-login");
+        assert_eq!(cred.user_id(), uid(CANON_USER));
+        assert_eq!(cred.tenant(), tid(CANON_TENANT));
+        assert_eq!(cred.version(), 7, "version 随重建保真");
+        assert!(
+            cred.verify_password("rebuilt-pw"),
+            "hydrate 回读 PHC 验签真"
+        );
+        assert!(!cred.verify_password("wrong"));
     }
 
     // --- AccountLockout 计数 / 阈值 / 锁定 ---

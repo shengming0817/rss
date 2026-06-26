@@ -16,7 +16,7 @@
 //! ref: serverlesstechnology/cqrs `persistence/postgres-es/src/event_repository.rs@main`
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use consistency::{
     BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxRelay,
@@ -183,6 +183,13 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
     t.duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`：[`unix_secs`] 的**解码对称**（编码 / 解码
+/// 同源单向往返）。负值（早于 epoch，理论不可达）收口 epoch 0，不 panic。session / credential 等 adapter 读
+/// 路径共用此 decode 单源（避免各模块重复 decode helper；与 `unix_secs` encode 单源并列，#1316 review C-F1）。
+pub(crate) fn epoch_secs_to_time(secs: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
 
 // ── OutboxEnvelope ────────────────────────────────────────────────────────────

@@ -22,10 +22,12 @@ use dynosaur::dynosaur;
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 // reason: AccountStatus 自 #1277 起不再是任一 port 方法的入/出参（lockout 推进折叠进 `authenticate`，
 // 返回 AuthOutcome）；保留 `pub` 导出是为后续账户门控 handler（PR5/W）跨 crate 消费的账户状态闭值集，
-// 当前作 `AccountLockout::record_failure` 的域内推进结果类型。其余符号均为现役 port 签名实体。
+// 当前作 `AccountLockout::record_failure` 的域内推进结果类型。AccountLockout 亦非 port 方法入/出参，但 #1316
+// PgCredentialRepo 须在事务内对其 from_parts 重建 / record_failure 推进 / 访问器回写锁定三列 ⇒ 经本 facade
+// 跨 crate 暴露（策略阈值仍域内单源、字段私有不可伪造）。其余符号均为现役 port 签名实体。
 pub use crate::domain::{
-    AccountStatus, AuthOutcome, Credential, IdentityError, LoginIdentifier, Role, RoleId, Session,
-    SessionId,
+    AccountLockout, AccountStatus, AuthOutcome, Credential, IdentityError, LoginIdentifier, Role,
+    RoleId, Session, SessionId,
 };
 pub use vocab::TenantId;
 

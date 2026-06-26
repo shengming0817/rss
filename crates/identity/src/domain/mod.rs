@@ -45,12 +45,10 @@ pub(crate) use abac::{
 };
 // Credential（find/authenticate/save/bump 签名实体）/ LoginIdentifier（查找键签名实体）/ AuthOutcome
 // （authenticate 返回）/ AccountStatus 是 pub——经 ports facade 跨 crate 收发；字段私有 + 构造器 pub(crate)
-// funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 不在 port 签名（锁定推进由 authenticate /
-// lockout_status 内部管理，返回 AuthOutcome/bool）⇒ pub(crate)。
-pub use account::{AccountStatus, AuthOutcome, Credential, LoginIdentifier};
-// reason: in-mem 替身（mem.rs，test/seed-login 门控）内部消费；非 gated 构建链路无调用方（ADR-004 C8）。
-#[allow(unused_imports)]
-pub(crate) use account::AccountLockout;
+// funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 虽不在 port 签名（锁定推进折叠进 authenticate /
+// lockout_status 内部承载），但 #1316 PgCredentialRepo 须在事务内 from_parts 重建 / record_failure 推进 /
+// 访问器回写三列 ⇒ 升 pub（经 ports facade 跨 crate 收发；策略阈值仍域内单源、字段私有不可伪造）。
+pub use account::{AccountLockout, AccountStatus, AuthOutcome, Credential, LoginIdentifier};
 // reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
 #[allow(unused_imports)]
 pub(crate) use rbac::{Permission, RoleBinding, authorize_rbac};

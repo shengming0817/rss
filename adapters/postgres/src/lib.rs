@@ -12,11 +12,13 @@
 //! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleRepo`，经 deny.toml identity wrapper +
 //! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由生产 [`PgRoleRepo`]（impl
 //! `identity::ports::RoleRepo`，roles 表 + tenant scope，#1250）承载——替换原 `#[cfg(test)]` `RoleRepoEdgeProof`
-//! 编译证明（body `todo!()`）。
+//! 编译证明（body `todo!()`）。同 DIP 内向边另由 [`PgCredentialRepo`]（impl `identity::ports::CredentialRepo`，
+//! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
 
 mod checkpoint;
 mod config_repo;
 mod cotx;
+mod credential_repo;
 mod dead_letter;
 mod emitter;
 mod inbox;
@@ -33,6 +35,7 @@ mod tx;
 
 pub use checkpoint::PgCheckpointStore;
 pub use config_repo::PgConfigRepo;
+pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::PgDeadLetterStore;
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
@@ -122,11 +125,14 @@ mod smoke {
     //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
-    //! SecretRepo on PgSecretRepo（真实 impl，#1274）；去掉任一即编译失败（anti-vacuity）。
+    //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
+    //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）；
+    //! 去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
+    fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
@@ -140,6 +146,9 @@ mod smoke {
         assert_managed_resource(PhantomData::<super::PgStore>);
         // `PgRoleRepo: RoleRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
         assert_role_repo(PhantomData::<super::PgRoleRepo>);
+        // `PgCredentialRepo: CredentialRepo` 真实 impl（非 edge proof）——credentials 表 + 折叠锁定态 +
+        // SELECT FOR UPDATE 原子 RMW（#1316）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
+        assert_credential_repo(PhantomData::<super::PgCredentialRepo>);
         // `PgSessionLifecycle: SessionLifecycle` 完整 durable impl（非 edge proof）——co-tx 创建（#1083/#1192）
         // + find/revoke（#1278，0009 revoked 列）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
         assert_session_lifecycle(PhantomData::<super::PgSessionLifecycle>);

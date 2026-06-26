@@ -41,15 +41,17 @@ pub use application::{ChangePasswordError, IdentityDomain, LoginError, LoginServ
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///
 /// 下游 adapter crate（postgres）集成测试需构造 [`ports::Session`](crate::ports::Session) 驱动
-/// `ports::SessionLifecycle`，但 `Session::new` / `SessionId::new` 是 `pub(crate)` funnel（生产不可伪造）。
-/// 本模块经 feature 门控暴露受控构造器——与 `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
+/// `ports::SessionLifecycle`，及 [`ports::LoginIdentifier`](crate::ports::LoginIdentifier) 驱动
+/// `ports::CredentialRepo::{authenticate, lockout_status}`（#1316），但 `Session::new` / `SessionId::new` /
+/// `LoginIdentifier::new` 均为 `pub(crate)` funnel（生产不可伪造）。本模块经 feature 门控暴露受控构造器——与
+/// `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use std::time::SystemTime;
 
     use vocab::TenantId;
 
-    use crate::domain::{Session, SessionId};
+    use crate::domain::{LoginIdentifier, Session, SessionId};
 
     /// 构造测试用 [`Session`]（经域 funnel；仅 test/dev 构建）。
     pub fn session(
@@ -66,6 +68,13 @@ pub mod test_support {
             expires_at,
             created_at,
         )
+    }
+
+    /// 构造测试用 [`LoginIdentifier`]（登录查找键；经域 funnel；仅 test/dev 构建）。下游 adapter 集成测试需
+    /// 为任意 login（含未种子化的「未知主体」）构造查找键传入 `authenticate` / `lockout_status`——而 known
+    /// 主体可经 `credential.login().clone()` 取得，故本入口主要服务 unknown / 跨租 fail-closed 用例（#1316 F2）。
+    pub fn login_identifier(raw: &str) -> LoginIdentifier {
+        LoginIdentifier::new(raw)
     }
 }
 

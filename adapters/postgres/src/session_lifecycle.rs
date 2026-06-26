@@ -30,8 +30,6 @@
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 //! ref: MassTransit Bus Outbox（一应用方法 co-persist 实体 + outbox 经共享事务/scoped DbContext）
 
-use std::time::{Duration, SystemTime};
-
 use consistency::Entry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantId};
@@ -39,7 +37,7 @@ use sqlx::{PgPool, Row};
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
-use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox, unix_secs};
+use crate::outbox::{OutboxEnvelope, OutboxMetadata, append_outbox, epoch_secs_to_time, unix_secs};
 
 /// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/revoke 均已交付，#1278）。
 ///
@@ -171,12 +169,6 @@ impl SessionLifecycle for PgSessionLifecycle {
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。
 fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
-}
-
-/// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`（与写路径 `unix_secs` 编码对称；
-/// 负值——早于 epoch，理论不可达——收口为 epoch 0，不 panic）。
-fn epoch_secs_to_time(secs: i64) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
 
 /// co-tx 事务体：写两行（SET LOCAL + INSERT session + append_outbox）→ 单 commit；失败 rollback + warn
