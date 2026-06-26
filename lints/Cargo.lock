@@ -1440,6 +1440,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_projection_append_only"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+]
+
+[[package]]
 name = "rss_spawn_missing_scope"
 version = "0.0.0"
 dependencies = [

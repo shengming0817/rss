@@ -23,6 +23,7 @@ mod inbox;
 mod migrator;
 mod outbox;
 mod pool;
+mod projection_events;
 mod role_repo;
 mod saga_journal;
 mod secret_repo;
@@ -34,6 +35,9 @@ pub use config_repo::PgConfigRepo;
 pub use dead_letter::PgDeadLetterStore;
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
+// NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
+// sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径 read_from + PgProjectionRecord 公开。
+pub use projection_events::{PgProjectionEvents, PgProjectionRecord, ProjectionEventsError};
 pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
 pub use secret_repo::PgSecretRepo;

@@ -46,6 +46,16 @@ Medium）扫描 schema 快照，缺三件套即门红。
 非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS，仅三张 tenant 表的 DML grant）由 `0009`
 provision；生产 LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。
 
+## Append-only 表（REVOKE 强制）
+
+append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB
+引擎层不可绕的只追加约束（Hard 主守卫，INVARIANT PROJECTION-APPEND-ONLY-01）。
+forward-only 原则同样适用：`REVOKE` 不写 `.down.sql`，逆转须新前向迁移 `GRANT`，不改历史迁移文件。
+
+**Retention / 旧数据清理**：append-only 表（`projection_events` 等）的旧数据删除须经 DBA（表 owner 角色）
+或新前向迁移显式 `GRANT DELETE TO <清理角色>`，不可由应用 serving role（已 REVOKE DELETE）直接执行。
+forward-only 不写 `.down.sql`；当前 pre-GA 无自动 retention 策略或分区，表膨胀治理待后续规划。
+
 ## 新字段
 
 新增列必须有默认值或允许 `NULL`（避免对已有行的 `NOT NULL` 回填失败）。

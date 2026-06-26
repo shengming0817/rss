@@ -38,6 +38,9 @@ pub use reconcile::{
     Tenancy, Trigger, TriggerError,
 };
 
+pub mod projection;
+pub use projection::{ProjectionHarness, ProjectionRun, ProjectionStop};
+
 pub mod saga;
 pub use saga::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaExecStatus, SagaExecutor,

@@ -13,4 +13,5 @@ members = [
   "rss_authenticated_callsite",
   "rss_diport_error_debug_redacted",
   "rss_pdp_impl_adapter_only",
+  "rss_projection_append_only",
 ]
