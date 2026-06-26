@@ -1,6 +1,6 @@
 //! 运行时入口冒烟 e2e（#1320 DoD：绑真实 socket + serve + 优雅关停）。
 //!
-//! 经组合根真实 serve 路径——`rss::health_listener`（funnel → `finalize_auth` → `into_make_service`）
+//! 经组合根真实 serve 路径——`runtime::health_listener`（funnel → `finalize_auth` → `into_make_service`）
 //! 交 `httpd::HttpServer` bind **真实 ephemeral socket** + `axum::serve` ——发真 HTTP 请求验证：
 //! - readyz 反映探针聚合（Healthy 探针 → 200；空探针 → 503 fail-closed）；
 //! - liveness `/health/v1/healthz` 恒 200；
@@ -42,7 +42,7 @@ async fn serve_health(with_healthy_probe: bool) -> HttpServer {
         .expect("register probe");
     }
     let reporter = Arc::new(reg.take_health_reporter());
-    let (_listener, authed) = rss::health_listener(reporter).expect("health listener");
+    let (_listener, authed) = runtime::health_listener(reporter).expect("health listener");
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
     HttpServer::serve("http-health", addr, authed.into_make_service())
         .await
@@ -126,7 +126,7 @@ async fn serve_via_shutdownstack_funnel_path() {
     )
     .expect("register probe");
     let reporter = Arc::new(reg.take_health_reporter());
-    let (_listener, authed) = rss::health_listener(reporter).expect("health listener");
+    let (_listener, authed) = runtime::health_listener(reporter).expect("health listener");
     let svc = authed.into_make_service();
 
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");

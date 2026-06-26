@@ -1,8 +1,9 @@
-//! server — RSS 组合根 binary（薄 entry）。运行时入口（tokio 运行时 + bind + serve + 信号优雅关停 +
-//! wire_X call-site）在 lib crate `server::run`（#1320）。`#[tokio::main]` 起多线程运行时驱动 async 编排。
-//! `init_tracing` 在 `run` 前装配生产 tracing subscriber（否则 bind/serve/shutdown 日志全 no-op）。
+//! server — RSS 组合根 binary（薄 entry）。运行时编排在 `runtime::run`（#1309 抽 assemblies/runtime 去 bins 双写）。
+//!
+//! 当前两个 binary（`rss`/`server`）功能等价，均委托 `runtime::run()`；进程名不同供部署/监控区分。
+//! 勿误删其一——两个 binary 的差异在进程名，不在代码逻辑。
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    server::init_tracing();
-    server::run().await
+    runtime::init_tracing();
+    runtime::run().await
 }

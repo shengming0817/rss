@@ -310,7 +310,7 @@ fn step_integration_compile() -> Step {
             "-p",
             "journeys",
             "-p",
-            "rss",
+            "runtime",
             "--features",
             "integration",
             "--no-run",
@@ -344,7 +344,7 @@ fn step_integration_run() -> Step {
             "-p",
             "journeys",
             "-p",
-            "rss",
+            "runtime",
             "--features",
             "integration",
         ],
@@ -1182,7 +1182,7 @@ mod tests {
     }
 
     /// integration 实跑步：`--profile integration`（放宽 timeout）+ `--features integration` + 全包覆盖
-    /// （postgres/redis-adapter/amqp/mqtt/journeys + rss）；Tool gate probe `nextest`（缺工具 fail-closed）。
+    /// （postgres/redis-adapter/amqp/mqtt/journeys + runtime）；Tool gate probe `nextest`（缺工具 fail-closed）。
     #[test]
     fn integration_run_step_profile_feature_and_coverage() {
         let step = step_integration_run();
@@ -1208,14 +1208,14 @@ mod tests {
             "amqp",
             "mqtt",
             "journeys",
-            "rss",
+            "runtime",
         ] {
             assert!(step.args.contains(&p), "integration 实跑须覆盖 {p}");
         }
     }
 
     /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey
-    /// （F7 + #1137：原仅 postgres；#1010 加 mqtt；#1298 加 rss bins integration 测试）。
+    /// （F7 + #1137：原仅 postgres；#1010 加 mqtt；#1298 加 runtime assembly integration 测试）。
     #[test]
     fn integration_compile_covers_adapters_and_journeys_no_run() {
         let step = step_integration_compile();
@@ -1227,7 +1227,7 @@ mod tests {
             "amqp",
             "mqtt",
             "journeys",
-            "rss",
+            "runtime",
         ] {
             assert!(step.args.contains(&p), "integration-compile 须覆盖 {p}");
         }

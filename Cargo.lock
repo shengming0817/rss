@@ -3621,6 +3621,7 @@ dependencies = [
  "testkit",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
  "vocab",
@@ -4159,29 +4160,8 @@ name = "rss"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "authn",
- "axum",
- "base64",
- "bootstrap",
- "diport",
- "futures",
- "hmac 0.12.1",
- "httpd",
- "httpserve",
- "oidc",
- "p256",
- "postgres",
- "primitives",
- "reqwest",
- "settings",
- "sha2 0.10.9",
- "testkit",
+ "runtime",
  "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
- "vault",
 ]
 
 [[package]]
@@ -4239,6 +4219,36 @@ dependencies = [
  "tokio",
  "uuid",
  "vocab",
+]
+
+[[package]]
+name = "runtime"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "authn",
+ "axum",
+ "base64",
+ "bootstrap",
+ "diport",
+ "futures",
+ "hmac 0.12.1",
+ "httpd",
+ "httpserve",
+ "oidc",
+ "p256",
+ "postgres",
+ "primitives",
+ "reqwest",
+ "settings",
+ "sha2 0.10.9",
+ "testkit",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "vault",
 ]
 
 [[package]]
@@ -4636,28 +4646,8 @@ name = "server"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "authn",
- "axum",
- "base64",
- "bootstrap",
- "diport",
- "futures",
- "hmac 0.12.1",
- "httpd",
- "httpserve",
- "oidc",
- "p256",
- "postgres",
- "primitives",
- "reqwest",
- "settings",
- "sha2 0.10.9",
+ "runtime",
  "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
- "vault",
 ]
 
 [[package]]

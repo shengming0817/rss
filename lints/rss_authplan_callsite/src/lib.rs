@@ -43,9 +43,9 @@ use rustc_span::Span;
 /// 仅这些 crate 可调用 `AuthPlan::new` / `AuthPlan::none`——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）装配 AuthPlan 后经 bootstrap option 注入，是唯一合法构造点。
 /// 当前生产代码无 AuthPlan callsite（组合根未建 body），allowlist 为前瞻守卫。
-/// bins/server → package name "server"，bins/rss → package name "rss"（见根 Cargo.toml）。
+/// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// `primitives` 本身定义 `AuthPlan`，在 `none()` 内调 `Self::new()` 是内部实现，合法豁免。
-const ALLOWED_CALLER_CRATES: &[&str] = &["primitives", "server", "rss"];
+const ALLOWED_CALLER_CRATES: &[&str] = &["primitives", "runtime"];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -152,8 +152,8 @@ fn ui_disallowed() {
 }
 
 #[test]
-fn ui_rss_allowed() {
-    // example target 名 `rss`（= 生产 allowlist 项）⇒ crate_name(LOCAL_CRATE)=="rss" ⇒ 调 funnel 不触发，
-    // 验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/allowed.stderr 为空。
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "rss");
+fn ui_primitives_allowed() {
+    // example target 名 `primitives`（= allowlist 项，定义 crate 内部豁免）⇒ crate_name(LOCAL_CRATE)=="primitives"
+    // ⇒ 调 funnel 不触发，验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/primitives.stderr 为空。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "primitives");
 }

@@ -12,17 +12,16 @@ crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_
 # `new` 是极常见名，必须额外校验 self-ty=Authenticated；UI fixture 验证 specificity。
 # UI fixture 编译为单一 example crate、crate 名 = example target 名，故须两个 example target：
 #   - authenticated_callsite_ui（crate 名非 allowlist）→ 红例：调 Authenticated::new 触发；
-#   - server（crate 名 = 生产 allowlist 项之一）→ 绿例：调 funnel 不触发（anti-vacuity，验 allowlist 分支非恒报）。
-# golden 随源文件名（ui/disallowed.stderr / ui/server.stderr）。
-# 绿例用 allowlist 项 "server"（非 "rss"）：共享 lints workspace 中 example target 名全局唯一，
-# "rss" 已被 rss_authplan_callsite 占用，复用会撞 target 名（target/debug/examples/rss 冲突）。
+#   - runtime（crate 名 = 唯一合法组合根）→ 绿例：调 funnel 不触发（anti-vacuity，验 allowlist 分支非恒报）。
+# golden 随源文件名（ui/disallowed.stderr / ui/runtime.stderr）。
+# 绿例用 "runtime"：不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
 [[example]]
 name = "authenticated_callsite_ui"
 path = "ui/disallowed.rs"
 
 [[example]]
-name = "server"
-path = "ui/server.rs"
+name = "runtime"
+path = "ui/runtime.rs"
 
 [dependencies]
 # clippy_utils rev 与 lints/rust-toolchain.toml 的 nightly 配对（dylint v6.0.1 模板），勿单独升级其一。

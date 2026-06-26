@@ -21,7 +21,8 @@
 //!   失败记 `authz.decision=deny` + 闭值 `authz.deny_reason`（三路告警分级，见 [`deny_reason`]）+ `AuthnError`
 //!   变体；**绝不**记 token / subject / claims。
 //!
-//! `Authenticated::new` callsite 由 `rss_authenticated_callsite` dylint 限组合根（`server`/`rss` 在 allowlist）。
+//! `Authenticated::new` callsite 由 `rss_authenticated_callsite` dylint 限组合根
+//! （`server`/`rss`/`runtime` 在 allowlist；runtime = assemblies/runtime 组合根）。
 //!
 //! ref: tower-rs/tower-http tower-http/src/auth/async_require_authorization.rs@main
 //!   （`AsyncAuthorizeRequest::authorize` → `request.extensions_mut().insert(principal)` 后透传 next 的范式）。

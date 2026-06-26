@@ -3507,3 +3507,72 @@ async fn t23_secret_refs_rls_isolation() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
+
+// ── F8：真实 DB liveness 采样集成验证 ─────────────────────────────────────────
+
+/// t50：真实 DB 连接下 `probe_db_liveness` 返回 Ready。
+///
+/// 验证：`SELECT 1` 成功 → `PoolReadiness::Ready`（端到端 DB 可达性真实探针）。
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_db_liveness_returns_ready_with_live_db() -> TestResult {
+    use crate::pool::PoolReadiness;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let result = store.probe_db_liveness().await;
+    assert_eq!(
+        result,
+        PoolReadiness::Ready,
+        "t50: 真实 DB 连接下 probe_db_liveness 应返回 Ready"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t51：起 sampling loop 推进一 tick → health 反映 Ready。
+///
+/// 验证：`pg_readiness_sampling_loop` 在真实 DB 下一轮 tick 后
+/// `PgDbReadiness::snapshot()` 返回 `PoolReadiness::Ready`。
+#[tokio::test(flavor = "multi_thread")]
+async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio_util::sync::CancellationToken;
+
+    use crate::pool::PoolReadiness;
+    use crate::readiness::{PgDbReadiness, pg_readiness_sampling_loop};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let store = Arc::new(store);
+    let health = Arc::new(PgDbReadiness::new());
+    let token = CancellationToken::new();
+
+    // 短 period 确保首 tick 快速到来（集成测试真实时间，不 pause）。
+    let handle = tokio::spawn(pg_readiness_sampling_loop(
+        Arc::clone(&store),
+        Duration::from_millis(50),
+        token.clone(),
+        Arc::clone(&health),
+    ));
+
+    // 等待至少一轮 tick 完成（period=50ms，sleep 300ms 留足余量）。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        health.snapshot(),
+        PoolReadiness::Ready,
+        "t51: 真实 DB 一 tick 后 health 应为 Ready"
+    );
+
+    token.cancel();
+    assert!(handle.await.is_ok(), "sampling loop 应正常退出");
+
+    // reason: Arc<PgStore> 在此作用域末尾 drop；pool 关闭由 Arc drop 时触发，
+    // 集成测试无需显式 shutdown Arc<PgStore>（与 Arc 所有权语义一致）。
+    Ok(())
+}

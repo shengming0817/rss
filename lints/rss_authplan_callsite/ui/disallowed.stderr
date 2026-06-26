@@ -24,3 +24,4 @@ LL |     let _plan3 = AuthPlan::none(ListenerKind::Primary);
    = help: 在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
 
 warning: 3 warnings emitted
+

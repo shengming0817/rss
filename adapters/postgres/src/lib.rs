@@ -24,6 +24,7 @@ mod migrator;
 mod outbox;
 mod pool;
 mod projection_events;
+mod readiness;
 mod role_repo;
 mod saga_journal;
 mod secret_repo;
@@ -51,8 +52,11 @@ mod test_pg;
 
 pub use inbox::PgInboxStore;
 pub use pool::{PgConfig, PgError, PgPassword, PoolReadiness};
+pub use readiness::{PgDbReadiness, PgReadinessSampler, pg_readiness_sampling_loop};
 // re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。
 pub use sqlx::postgres::PgSslMode;
+
+use std::sync::Arc;
 
 use diport::{ManagedResource, ShutdownError};
 use sqlx::PgPool;
@@ -76,6 +80,35 @@ impl ManagedResource for PgStore {
         self.pool.close().await;
         tracing::info!(target: "postgres", name = PG_STORE_NAME, "postgres pool closed");
         Ok(())
+    }
+}
+
+/// `Arc<PgStore>` 的 `ManagedResource` 适配——关停末阶段 `pool.close()`。
+///
+/// `Arc` 非 fundamental ⇒ 不能直接 `impl ManagedResource for Arc<PgStore>`（孤儿规则），
+/// 故用 newtype 包装绕孤儿规则。
+///
+/// # 注册顺序
+///
+/// 经组合根 [`bootstrap::ShutdownStack::register_detached`] 注入 `ShutdownStack`；注册顺序须在
+/// listener/sampler **之前**——LIFO 下 pool 最后关（listener drain → sampler 停 → pool close，
+/// 确保 sampler 不会在已关闭的 pool 上发起 probe）。
+pub struct PgStoreGuard(Arc<PgStore>);
+
+impl PgStoreGuard {
+    /// 包装 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard。
+    pub fn new(store: Arc<PgStore>) -> Self {
+        Self(store)
+    }
+}
+
+impl ManagedResource for PgStoreGuard {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.0.shutdown().await
     }
 }
 
@@ -125,5 +158,36 @@ mod smoke {
     #[test]
     fn store_name_is_stable() {
         assert_eq!(super::PG_STORE_NAME, "postgres");
+    }
+
+    /// `PgStoreGuard::shutdown()` 对 lazy pool 返 Ok（pool.close 幂等）。
+    ///
+    /// `connect_lazy_with` 不发真实连接；`close()` 幂等 → `PgStore::shutdown` 恒 Ok
+    /// → `PgStoreGuard::shutdown` 代理调用亦恒 Ok（#1309 review A1 单测）。
+    #[tokio::test]
+    async fn pg_store_guard_shutdown_lazy_pool_ok() {
+        use diport::ManagedResource as _;
+        use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+        use std::sync::Arc;
+        let opts = PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(5999)
+            .database("rss_test")
+            .username("u")
+            .password("p");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(opts);
+        let store = Arc::new(super::PgStore { pool });
+        let guard = super::PgStoreGuard::new(Arc::clone(&store));
+        assert_eq!(
+            guard.name(),
+            "postgres",
+            "PgStoreGuard::name 委托 PgStore::name"
+        );
+        assert!(
+            guard.shutdown().await.is_ok(),
+            "lazy pool close 幂等 → shutdown Ok"
+        );
     }
 }

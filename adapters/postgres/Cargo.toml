@@ -37,6 +37,10 @@ thiserror = { workspace = true }
 # outbox envelope metadata 序列化（OutboxEnvelope.metadata: serde_json::Value）；
 # 绑 jsonb 时 serde_json::to_string → $N::jsonb（不给 sqlx 加 uuid/json/time feature，全 server-side）。
 serde_json = { workspace = true }
+# 后台周期 DB liveness 采样 loop（pg_readiness_sampling_loop + PgReadinessSampler worker）。
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+# CancellationToken（tokio_util::sync::CancellationToken）——adopt 式 worker 两阶段关闭。
+tokio-util = { workspace = true }
 
 [features]
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
@@ -44,7 +48,8 @@ serde_json = { workspace = true }
 integration = ["testkit/containers"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["test-util"] }
+# test-util 提供 tokio::time::advance / start_paused（采样 loop 时间控制单元测试）。
 # 集成测试用唯一 event_id 法（inbox_dedup 去重隔离验证，避免跨轮次清理）。
 uuid = { workspace = true, features = ["v4"] }
 # 会话生命周期集成测试（co-tx t11-t14 + durable find/revoke t20-t22）构造 `ports::Session` 经 `identity::test_support::session`

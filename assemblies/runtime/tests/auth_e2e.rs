@@ -8,7 +8,7 @@
 //!
 //! 本批不断言 handler 读完整 `Principal`（属 W，评审 F3）——只断言证据注入放行（200）。
 //!
-//! NOTE: 与姊妹 bin（server/rss）的同名文件内容同步（仅 crate 名 / use 路径不同，tasks.md T004.2）。
+//! NOTE: `bins/rss` 与 `bins/server` 已成薄壳（#1309）；验签桥逻辑现集中在 `assemblies/runtime`。
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,8 +22,8 @@ use futures::FutureExt as _;
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
-use rss::auth_bridge::apply_verify_bridge;
-use rss::provider_from_b64;
+use runtime::auth_bridge::apply_verify_bridge;
+use runtime::provider_from_b64;
 use tower::ServiceExt as _;
 
 /// 合法测试租户（`user` kind 需 tenant；canonical UUID）。

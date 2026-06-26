@@ -8,70 +8,11 @@ publish = false
 [lints]
 workspace = true
 
-# 组合根（Root 层）：唯一能同时依赖 httpserve + authn + oidc 启用生产认证（CLAUDE.md §分层：bins 可依赖所有库 crate）。
-# lib + bin 双形态：组合根接线逻辑落 lib（`tests/` 集成测试可达 `server::*`），`main.rs` 为薄 entry。
-[lib]
-name = "rss"
-path = "src/lib.rs"
-
 [[bin]]
 name = "rss"
 path = "src/main.rs"
 
 [dependencies]
-bootstrap = { path = "../../crates/bootstrap" }
-httpserve = { path = "../../crates/httpserve" }
-authn = { path = "../../crates/authn" }
-primitives = { path = "../../crates/primitives" }
-diport = { path = "../../crates/diport" }
-# 生产验签 provider（真 RustCrypto ES256/HS256；backend feature 开 impl diport::Pdp）。安全同批门：依赖图引真
-# verifier、不引 stub（memory adapter 经 deny.toml 禁 server/rss）。
-oidc = { path = "../../adapters/oidc", features = ["backend"] }
-# settings 域（SecretService + SettingsService + empty_flag_store 工厂）。
-# seed-data feature 开：empty_flag_store（in-mem 空 flag store）可用——生产 flag store 待 #1120，
-# 当前空 store 满足 fail-closed 语义（未知 flag 返回 false）。
-settings = { path = "../../crates/settings", features = ["seed-data"] }
-# postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo）。
-postgres = { path = "../../adapters/postgres" }
-# Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
-vault = { path = "../../adapters/vault", features = ["backend"] }
-# VaultSecretResolver 构造：reqwest::Client（TLS-agnostic；组合根构造并注入）。
-# 后续 TLS 切片：配置 TLS provider（rustls+ring，对齐 sqlx）—— 当前组合根传 Client::new()（pre-GA，非 #1320 范围）。
-reqwest = { workspace = true }
-axum = { workspace = true }
-tracing = { workspace = true }
+runtime = { path = "../../assemblies/runtime" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 anyhow = { workspace = true }
-# verify_jwt(&DynPdp) future 为 !Send（DynPdp !Sync，DIPORT-ASYNC-ARC-SEND-01）；OidcProvider::verify 纯 CPU 无真
-# await ⇒ future 首 poll 即 ready。验签桥经 now_or_never() 同步驱动该 ready future，使中间件 future 保持 Send。
-futures = { workspace = true }
-# 从配置（env）解 ES256 SEC1 公钥（base64url）。
-base64 = { workspace = true }
-# 运行时入口（#1320）：tokio 多线程运行时（#[tokio::main]）+ net（PgStore/serve）+ signal（SIGTERM/SIGINT 优雅关停）
-# + time（ShutdownStack 超时）+ macros（测试）+ rt-multi-thread。
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
-# 关闭取消广播（ShutdownStack root token + httpd serve graceful shutdown）。
-tokio-util = { workspace = true }
-# HTTP 传输 adapter：HttpServer bind + axum::serve + ManagedResource（经 ShutdownStack 托管）。
-httpd = { path = "../../adapters/httpd" }
-# 生产 tracing subscriber（init_tracing：fmt + RUST_LOG env filter）——否则运行时入口日志全 no-op。
-# 同时供 dev e2e 捕获 tracing 输出断言（auth_e2e 埋点）。
-tracing-subscriber = { workspace = true }
-
-[features]
-# 需要真实 postgres 的集成测试（无 docker 时只需能编译；不运行），经 testkit/containers 激活 testcontainers。
-integration = ["testkit/containers"]
-
-[dev-dependencies]
-# tokio 已是生产 dep（#1320 `#[tokio::main]`）——其 macros + rt-multi-thread feature 同时供 `#[tokio::test]`，不再单列 dev-dep。
-# oneshot 驱动已组装 router（health/auth e2e 单元级断言；真实 socket serve 由 httpd + 冒烟 e2e 覆盖）。
-tower = { workspace = true, features = ["util"] }
-# e2e 铸 ES256/HS256 测试 JWT（dev-only；生产依赖图无签发能力）。
-p256 = { workspace = true, features = ["ecdsa"] }
-hmac = { workspace = true, features = ["std"] }
-sha2 = { workspace = true }
-# 集成测试 postgres fixture（testcontainers，仅 integration feature 激活）。
-# deny.toml memory wrapper 不含 rss，故 MemSecretResolver 在 e2e 中用 inline 结构代替（无需 memory dep）。
-testkit = { path = "../../crates/testkit" }
-# auth_e2e 经 httpserve test-util 构造 funnel 输入（`routes::unfinalized_for_test`）+ 取回裸 Router
-# （`AuthenticatedRoutes::into_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
-httpserve = { path = "../../crates/httpserve", features = ["test-util"] }

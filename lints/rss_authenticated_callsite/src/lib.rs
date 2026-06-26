@@ -41,9 +41,9 @@ use rustc_span::Span;
 /// 仅这些 crate 可调用 `Authenticated::new`——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）的验签桥在凭据校验通过后构造 `Authenticated` 并经外层 `.layer()` 注入，是唯一合法构造点。
 /// 当前生产代码无 `Authenticated` callsite（验签桥 = #1109 后续），allowlist 为前瞻守卫。
-/// bins/server → package name "server"，bins/rss → package name "rss"（见根 Cargo.toml）。
+/// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
 /// 定义 crate `httpserve` 不入 allowlist：其生产代码不构造 `Authenticated`（仅 `#[cfg(test)]` 调，不被扫）。
-const ALLOWED_CALLER_CRATES: &[&str] = &["server", "rss"];
+const ALLOWED_CALLER_CRATES: &[&str] = &["runtime"];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -147,9 +147,9 @@ fn ui_disallowed() {
 }
 
 #[test]
-fn ui_server_allowed() {
-    // example target 名 `server`（= 生产 allowlist 项）⇒ crate_name(LOCAL_CRATE)=="server" ⇒ 调 funnel 不触发，
-    // 验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/server.stderr 为空。
-    // 用 "server"（非 "rss"）避与 rss_authplan_callsite 的 example "rss" 在共享 lints workspace 撞 target 名。
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "server");
+fn ui_runtime_allowed() {
+    // example target 名 `runtime`（= 唯一合法组合根 crate）⇒ crate_name(LOCAL_CRATE)=="runtime" ⇒ 调 funnel 不触发，
+    // 验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/runtime.stderr 为空。
+    // "runtime" 不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
 }

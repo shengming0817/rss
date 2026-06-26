@@ -1,21 +1,23 @@
-//! server — RSS 组合根（Root 层）：从配置构造生产验签 provider，按 listener 装配
+//! runtime — RSS 生产组合根（Root 层，#1309 抽离自 bins 双写）：从配置构造生产验签 provider，按 listener 装配
 //! `finalize_routes → finalize_auth → .layer(verify_bridge)` 的认证接线接缝，并驱动运行时入口
 //! （tokio 运行时 + per-listener socket bind + `axum::serve` + 信号优雅关停 + wire_X call-site，#1320）。
 //!
 //! 运行时入口（[`run`]，#1320 Join）：`compose` 域 → `PgStore::connect` + migrations → `wire_settings`
-//! （注册 `configs_ready` probe）→ `assemble_authed_routers` → 组合根挂 Health listener（healthz/readyz）→
-//! 逐 listener bind socket + serve（经 `httpd::HttpServer` + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT
-//! 优雅 drain。各域业务 handler ↔ service 接线 = #1309 及后续域 PR（本 PR 仅打通 async runtime、wire_X
-//! call-site 与 readiness probe）。live JWKS 远程拉取 + 轮转 = **T003/#1197**（本 PR 用 `StaticKeySource`
-//! 构造期注入 key，构造器签名已为其留稳）。listener / pg / vault 传输层 TLS（rustls+ring）= 后续 TLS 切片。
+//! → F8 接线（`PgDbReadiness` 采样 worker + `configs_ready` probe 注册）→ `assemble_authed_routers`
+//! → 组合根挂 Health listener（healthz/readyz）→ 逐 listener bind socket + serve（经 `httpd::HttpServer`
+//! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。各域业务 handler ↔ service 接线 = #1309
+//!   及后续域 PR（本 PR 仅打通 async runtime、wire_X call-site 与 readiness probe）。live JWKS 远程拉取
+//! + 轮转 = **T003/#1197**（本 PR 用 `StaticKeySource` 构造期注入 key，构造器签名已为其留稳）。
+//!   listener / pg / vault 传输层 TLS（rustls+ring）= 后续 TLS 切片。
 //!
 //! 安全同批门（ADR-006 §5）：依赖图引真 verifier（`oidc` backend）、不引 stub Pdp（`memory` 经 deny.toml 禁
-//! server/rss；bins 生产 `src/` 无内联 `impl diport::Pdp`，`rss_pdp_impl_adapter_only` dylint 守 +
+//! server/rss/runtime；bins 生产 `src/` 无内联 `impl diport::Pdp`，`rss_pdp_impl_adapter_only` dylint 守 +
 //! `cargo xtask verify` 的 pdp-allow 计数门守逃生门用量）。`OidcProvider` 必填 `VerifierConfig` + `Box<dyn Clock>`
 //! ⇒ 无 key/clock 不可构造（编译期守）。
 //!
-//! NOTE: `bins/server` 与 `bins/rss` 的 `auth_bridge.rs` / `lib.rs` / `tests/auth_e2e.rs` **字节级同步**
-//! （仅 crate 名不同，tasks.md T004.2 既定 duplicate-now）；改一处须同步另一处；逻辑增长时提取 `assemblies/authwire` 再删副本。
+//! INVARIANT: BINS-AUTH-SYNC-01 (Hard, #1309) — `bins/rss` + `bins/server` 均仅 `main.rs` 调
+//! `runtime::run()`，组合根逻辑单一副本；auth wiring 一致性由「单一 `run()` 源」编译期保证，
+//! 原 xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
 
@@ -30,7 +32,10 @@ use bootstrap::shutdown::ShutdownStack;
 use diport::{DynManagedResource, DynSecretResolver};
 use httpd::HttpServer;
 use oidc::OidcProvider;
-use postgres::{PgConfig, PgPassword, PgSecretRepo, PgStore, PoolReadiness};
+use postgres::{
+    PgConfig, PgDbReadiness, PgPassword, PgReadinessSampler, PgSecretRepo, PgStore, PgStoreGuard,
+    PoolReadiness, pg_readiness_sampling_loop,
+};
 use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName, RequiredScheme,
 };
@@ -264,6 +269,42 @@ pub fn build_pg_config() -> anyhow::Result<PgConfig> {
     build_pg_config_from(|name| std::env::var(name).ok())
 }
 
+// ── DB readiness 采样周期 helper ───────────────────────────────────────────────────────────────
+
+/// 默认 DB readiness 采样周期（5 秒）。
+const DEFAULT_READINESS_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 采样间隔上限（秒）：限制 DB 失联后维持旧 Ready 状态的最长时间。
+const MAX_READINESS_INTERVAL_SECS: u64 = 300;
+
+/// configs_ready DB 采样周期（env `RSS_PG_READINESS_SAMPLE_INTERVAL_SECS`）。
+///
+/// - 未配置 → 静默取默认 5s。
+/// - 显式配置但解析失败 / 为 0 / 超出上限（300s）→ `tracing::warn!` + 默认 5s。
+///
+/// 间隔是探针新鲜度 hint 非强依赖，故显式误配 fail-soft（warn+默认）而非 fail-fast。
+pub(crate) fn build_readiness_interval_from(get: impl Fn(&str) -> Option<String>) -> Duration {
+    match get("RSS_PG_READINESS_SAMPLE_INTERVAL_SECS") {
+        None => DEFAULT_READINESS_INTERVAL,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(n) if (1..=MAX_READINESS_INTERVAL_SECS).contains(&n) => Duration::from_secs(n),
+            _ => {
+                tracing::warn!(
+                    env = "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
+                    raw = %raw,
+                    max_secs = MAX_READINESS_INTERVAL_SECS,
+                    "invalid readiness sample interval (need 1..=300s); using default 5s"
+                );
+                DEFAULT_READINESS_INTERVAL
+            }
+        },
+    }
+}
+
+fn build_readiness_interval() -> Duration {
+    build_readiness_interval_from(|n| std::env::var(n).ok())
+}
+
 // ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
 
 /// 默认 Vault 请求超时（pre-GA 合理值；生产可经 env 覆盖，待后续 Vault 配置切片——非 #1320 范围）。
@@ -275,8 +316,8 @@ const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 #[allow(clippy::cognitive_complexity)]
 fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
     tracing::warn!(
-        reason = "system-default-tls",
-        "vault client using system-default TLS; production must configure rustls+ring (后续 TLS 切片)"
+        reason = "no-tls-backend",
+        "no TLS backend configured (reqwest default-features=false); add rustls-tls before enabling vault allowlist"
     );
     if stores.is_empty() {
         tracing::warn!(
@@ -320,36 +361,43 @@ pub(crate) fn build_vault_resolver_from(
 // ── ConfigsReadyProbe ─────────────────────────────────────────────────────────────────────────
 
 /// probe 探针稳定名（`ProbeName::parse` 校验合法字符；underscore_case，与 prometheus metric 约定一致）。
-const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
-
-/// postgres 连接池 readiness 探针——报告配置存储（postgres pool）当前状态。
 ///
-/// `check`（sync，non-blocking）：读 `PgStore::pool_readiness()` 原子计数器，无 I/O：
+/// `pub const`：e2e 测试（`configs_ready_e2e.rs`）经 `runtime::CONFIGS_READY_PROBE_NAME` 引用，
+/// 避免硬编码字符串——改名即编译期捕获（[D6] #1309 review）。
+pub const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
+
+/// DB readiness 采样探针——读 [`PgDbReadiness`] 采样状态，非 pool 计数器。
+///
+/// `check`（sync，non-blocking）：读 `PgDbReadiness::snapshot()` 原子状态，无 I/O：
 /// - `PoolReadiness::Ready` → `Healthy`（`detail = "ready"`）
-/// - `PoolReadiness::Saturated` → `Degraded`（`detail = "saturated"`）
 /// - `PoolReadiness::Down` → `Unhealthy`（`detail = "down"`）
 ///
 /// `detail` 固定 `&'static str` const（`HealthCheck::detail` 类型约束，禁夹带 runtime PII）。
 pub struct ConfigsReadyProbe {
-    store: Arc<PgStore>,
+    health: Arc<PgDbReadiness>,
     /// 探针自报名（重建 `HealthCheck` 时 registry 使用声明名权威，此字段保留供 debug inspect）。
     name: ProbeName,
 }
 
 impl ConfigsReadyProbe {
-    /// 构造 `ConfigsReadyProbe`。
+    /// 构造 `ConfigsReadyProbe`（读 `PgDbReadiness` 采样状态，非 pool 计数器）。
     ///
     /// `name` 应使用 [`CONFIGS_READY_PROBE_NAME`] 常量以确保与 registry 声明名一致。
     #[allow(clippy::expect_used)]
-    pub fn new(store: Arc<PgStore>) -> Self {
+    pub fn new(health: Arc<PgDbReadiness>) -> Self {
         // reason: CONFIGS_READY_PROBE_NAME 是 kebab-case const literal，ProbeName::parse 仅失败于
         // 非法字符；const 已手工验证，expect 是构造期 programmer error（此处不可恢复）。
         let name = ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
-        Self { store, name }
+        Self { health, name }
     }
 }
 
 /// `PoolReadiness` → `(HealthStatus, detail)`（纯函数，可独立测试）。
+///
+/// - `Ready` → `Healthy`/"ready"（HTTP 200）
+/// - `Saturated` → `Degraded`/"saturated"（HTTP 200；池饱和可服务，编排器不摘流）
+/// - `Down` → `Unhealthy`/"down"（HTTP 503）
+/// - 未知（non_exhaustive）→ `Unhealthy`/"unknown"（fail-closed）
 fn readiness_to_health(r: PoolReadiness) -> (HealthStatus, &'static str) {
     match r {
         PoolReadiness::Ready => (HealthStatus::Healthy, "ready"),
@@ -362,20 +410,20 @@ fn readiness_to_health(r: PoolReadiness) -> (HealthStatus, &'static str) {
 
 impl bootstrap::HealthProbe for ConfigsReadyProbe {
     fn check(&self) -> HealthCheck {
-        let (status, detail) = readiness_to_health(self.store.pool_readiness());
+        let (status, detail) = readiness_to_health(self.health.snapshot());
         HealthCheck::new(self.name.clone(), status, detail)
     }
 }
 
 // ── settings + secret wiring ─────────────────────────────────────────────────────────────────
 
-/// 接线 settings 域：构造 `SettingsService` + `SecretService`，注册 `ConfigsReadyProbe`。
+/// 接线 settings 域：构造 `SettingsService` + `SecretService`。
 ///
-/// - `store`：已建 `PgStore`（`Arc` 共享给 probe + repo）。
-/// - `registry`：bootstrap registry，用于注册 `ConfigsReadyProbe`（`probe` 方法）。
+/// - `store`：已建 `PgStore`（`Arc` 共享给 repo）。
 ///
 /// 返回 `(SettingsService, SecretService)` 供组合根继续组装（业务 handler ↔ service 接线 = #1309 及后续
-/// 域 PR；本 PR #1320 仅打通 async runtime + wire_X call-site + `configs_ready` probe 注册）。
+/// 域 PR；本 PR #1320 仅打通 async runtime + wire_X call-site）。
+/// `configs_ready` probe 注册已移至 [`run`]（保证读的是被 F8 采样驱动的 `PgDbReadiness` handle）。
 ///
 /// # 注意
 ///
@@ -383,15 +431,7 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
 /// 生产 flag store 待 #1120。
 pub async fn wire_settings(
     store: Arc<PgStore>,
-    registry: &mut bootstrap::Registry,
 ) -> anyhow::Result<(SettingsService, SecretService)> {
-    // 注册 configs_ready probe（bootstrap 声明名权威，重建 HealthCheck 时用声明名）。
-    let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
-        .context("configs_ready probe name is invalid")?;
-    registry
-        .probe(probe_name, Box::new(ConfigsReadyProbe::new(store.clone())))
-        .context("register configs_ready probe")?;
-
     // 构造 vault resolver（pre-GA 空 allowlist → 所有 resolve fail-closed Forbidden）。
     let resolver = build_vault_resolver_from(|name| std::env::var(name).ok())
         .context("vault resolver config")?;
@@ -523,19 +563,32 @@ fn listener_addr(listener: ListenerKind) -> anyhow::Result<SocketAddr> {
 
 /// 逐 listener bind socket + serve，经 `ShutdownStack` 托管；SIGTERM/SIGINT → LIFO 优雅 drain。
 ///
+/// `register_background`：在 bind 循环前注册后台 worker（如 readiness 采样 task）进同一 `ShutdownStack`——
+/// LIFO 下后台 worker 在所有 listener drain 后最后停（注册顺序决定停止顺序逆序）。
+///
 /// 每 listener：解析 bind 地址（fail-fast）→ `HttpServer::bind`（async fail-fast，注册前暴露端口冲突）→
 /// 经 `ShutdownStack::register_with_token` 在同步 funnel 闭包内 `bound.serve(svc, token)` spawn serve task
 /// （SHUTDOWN-TOKEN-FUNNEL-01）。信号到达 → `stack.shutdown()` 阶段 1 广播 cancel 触发各 serve graceful
 /// drain、阶段 2 LIFO await 收敛。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
 async fn serve_until_signal(
     listeners: Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>,
+    register_background: impl FnOnce(&mut ShutdownStack),
 ) -> anyhow::Result<()> {
     // 生产装配：真实 env 地址解析 + 真实信号 future（薄壳，委托可测核心 [`serve_until`]）。
-    serve_until(listeners, listener_addr, wait_for_shutdown_signal()).await
+    serve_until(
+        listeners,
+        register_background,
+        listener_addr,
+        wait_for_shutdown_signal(),
+    )
+    .await
 }
 
 /// 可测核心：注入 `addr_resolver`（listener→bind 地址）与 `shutdown` future（关停触发），驱动 bind 各
 /// listener socket → 经 `ShutdownStack` 托管 serve → `shutdown` resolve 后 LIFO 优雅 drain。
+///
+/// `register_background`：bind 循环前注册后台 worker 进 `ShutdownStack`（LIFO：先注册先停——sampler 先注册
+/// 则最后停，确保 listener drain 后 sampler 才停）。
 ///
 /// 生产经 [`serve_until_signal`] 注入真实 env 解析 + 信号 future；测试注入 `|_| Ok(127.0.0.1:0)` + 立即
 /// resolve 的 future，覆盖 bind 循环 + 多 listener + ensure-非空 + drain 聚合（serve_until_signal 本身依赖
@@ -543,12 +596,14 @@ async fn serve_until_signal(
 // reason: bind 循环 + 启动就绪 / drain 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点；
 // 实际控制流是「bind 各 listener → 等关停 → shutdown」三段——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
-async fn serve_until<R, S>(
+async fn serve_until<B, R, S>(
     listeners: Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>,
+    register_background: B,
     addr_resolver: R,
     shutdown: S,
 ) -> anyhow::Result<()>
 where
+    B: FnOnce(&mut ShutdownStack),
     R: Fn(ListenerKind) -> anyhow::Result<SocketAddr>,
     S: std::future::Future<Output = anyhow::Result<()>>,
 {
@@ -558,6 +613,8 @@ where
     );
     let listener_count = listeners.len();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    // 先注册后台 worker（LIFO：listener 后注册先 drain，sampler 先注册后停——确保 listener drain 后采样停）。
+    register_background(&mut stack);
     for (listener, routes) in listeners {
         bind_and_register(&mut stack, listener, routes, &addr_resolver).await?;
     }
@@ -650,11 +707,15 @@ pub fn init_tracing() {
 }
 
 /// 生产组合根入口（运行时入口 Join #1320）：compose 域 → connect pg + migrations → wire_settings
-/// （注册 `configs_ready` probe）→ 装配认证接线 → 挂 Health listener → bind + serve + 信号优雅关停。
+/// → F8 接线（`PgDbReadiness` 采样 worker + `configs_ready` probe）→ 装配认证接线 → 挂 Health listener
+/// → bind + serve + 信号优雅关停。
 ///
 /// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
 /// = #1309 及后续域 PR；本 fn 仅打通 async runtime + ≥1 个 wire_X call-site + readiness probe。
 /// tracing subscriber 由 [`init_tracing`] 在 `main` 中先于本 fn 装配。
+// reason: 组合根入口顺序编排（pg connect → migrations → wire_settings → F8 probe → serve）
+// 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
+#[allow(clippy::cognitive_complexity)]
 pub async fn run() -> anyhow::Result<()> {
     let provider = Arc::new(build_provider()?);
     // settings domain 已注册（#1272/#1274）；后续域（identity/audit/…）随各自 wire_X PR 加入 compose 列表。
@@ -670,13 +731,32 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .context("run postgres migrations")?;
 
-    // wire_settings（≥1 个 wire_X call-site，#1320 DoD）：注册 configs_ready probe + 造 settings/secret service。
-    let (settings_svc, secret_svc) = wire_settings(pg.clone(), &mut registry)
-        .await
-        .context("wire settings")?;
-    // reason: 业务 handler ↔ service 接线属 #1309（本 PR 仅打通 runtime + wire_X call-site + probe）；service
-    //   暂不接 handler，configs_ready probe 已注册并持 `Arc<PgStore>`（pg Arc 亦存活）⇒ readyz 仍生效。
-    let _ = (settings_svc, secret_svc);
+    // wire_settings（≥1 个 wire_X call-site，#1320 DoD）：造 settings/secret service。
+    let (settings_svc, secret_svc) = wire_settings(pg.clone()).await.context("wire settings")?;
+    // reason: 业务 handler ↔ service 接线属后续域 PR；本 PR 仅打通 runtime + wire_X call-site + probe。
+    drop(settings_svc);
+    drop(secret_svc);
+    tracing::warn!(
+        stage = "scaffold",
+        "business API routes not yet wired; only /health/v1/* served \
+        (settings/secret handler↔service 接线属后续域 PR)"
+    );
+
+    // F8：readiness 采样 health（初值 Down，fail-closed）+ 注册 configs_ready probe（读采样状态）。
+    let readiness = Arc::new(PgDbReadiness::new());
+    let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
+        .context("configs_ready probe name is invalid")?;
+    registry
+        .probe(
+            probe_name,
+            Box::new(ConfigsReadyProbe::new(readiness.clone())),
+        )
+        .context("register configs_ready probe")?;
+    let period = build_readiness_interval();
+    tracing::info!(
+        sample_interval_secs = period.as_secs(),
+        "pg readiness sampler interval configured"
+    );
 
     // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
     let mut listeners =
@@ -687,8 +767,24 @@ pub async fn run() -> anyhow::Result<()> {
     let reporter = Arc::new(registry.take_health_reporter());
     listeners.push(health_listener(reporter).context("build health listener")?);
 
-    // bind 各 listener socket + serve + 信号优雅关停。
-    serve_until_signal(listeners).await
+    // LIFO 注册顺序：pool guard 先注册（最后关）→ sampler 再注册（pool 关前停）→ listeners 最后注册（最先 drain）。
+    let sampler_pg = pg.clone();
+    let sampler_health = readiness.clone();
+    serve_until_signal(listeners, move |stack| {
+        // 先注册 pool guard（LIFO 最后关——在 sampler 停止后再关池，避免 sampler 在已关闭 pool 上发 probe）。
+        stack.register_detached(DynManagedResource::new_box(PgStoreGuard::new(pg)));
+        // 再注册 sampler（child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
+        stack.register_with_token(move |token| {
+            let handle = tokio::spawn(pg_readiness_sampling_loop(
+                sampler_pg,
+                period,
+                token.clone(),
+                sampler_health.clone(),
+            ));
+            DynManagedResource::new_box(PgReadinessSampler::adopt(handle, sampler_health, token))
+        });
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -959,20 +1055,20 @@ mod tests {
         assert_eq!(detail, "ready");
     }
 
+    /// `PoolReadiness::Saturated` → `(Degraded, "saturated")`（池饱和降级，HTTP 200 不摘流）。
+    #[test]
+    fn configs_ready_maps_saturated_to_degraded() {
+        let (status, detail) = readiness_to_health(PoolReadiness::Saturated);
+        assert_eq!(status, HealthStatus::Degraded);
+        assert_eq!(detail, "saturated");
+    }
+
     /// `PoolReadiness::Down` → `(Unhealthy, "down")`。
     #[test]
     fn configs_ready_maps_down_to_unhealthy() {
         let (status, detail) = readiness_to_health(PoolReadiness::Down);
         assert_eq!(status, HealthStatus::Unhealthy);
         assert_eq!(detail, "down");
-    }
-
-    /// `PoolReadiness::Saturated` → `(Degraded, "saturated")`。
-    #[test]
-    fn configs_ready_maps_saturated_to_degraded() {
-        let (status, detail) = readiness_to_health(PoolReadiness::Saturated);
-        assert_eq!(status, HealthStatus::Degraded);
-        assert_eq!(detail, "saturated");
     }
 
     /// detail 是 `&'static str`（编译期类型约束；类型已由 HealthCheck::detail() -> &'static str 守）。
@@ -1014,6 +1110,64 @@ mod tests {
         // 重复注册同名 probe → Err（bootstrap registry 守唯一性）。
         let result = registry.probe(probe_name_b, Box::new(NullProbe));
         assert!(result.is_err(), "duplicate probe name should be rejected");
+    }
+
+    // ── build_readiness_interval_from 测试 ────────────────────────────────────────────────
+
+    /// 未配置 → 静默取默认 5s（非显式误配，不 warn）。
+    #[test]
+    fn build_readiness_interval_default_when_missing() {
+        let d = build_readiness_interval_from(|_| None);
+        assert_eq!(d, DEFAULT_READINESS_INTERVAL, "缺省 → 5s");
+    }
+
+    /// 合法正整数（在 1..=300 范围内）→ 对应秒数。
+    #[test]
+    fn build_readiness_interval_custom_value() {
+        let d = build_readiness_interval_from(|n| {
+            (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "10".to_string())
+        });
+        assert_eq!(d, Duration::from_secs(10));
+    }
+
+    /// 显式非法（非数字 / 0）→ warn + 默认 5s（fail-soft；间隔是 hint 非强依赖）。
+    #[test]
+    fn build_readiness_interval_invalid_falls_back() {
+        let d1 = build_readiness_interval_from(|n| {
+            (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "not-a-number".to_string())
+        });
+        assert_eq!(d1, DEFAULT_READINESS_INTERVAL, "非数字 → warn + 默认");
+        let d2 = build_readiness_interval_from(|n| {
+            (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "0".to_string())
+        });
+        assert_eq!(d2, DEFAULT_READINESS_INTERVAL, "0 → warn + 默认");
+    }
+
+    /// 越界（> MAX_READINESS_INTERVAL_SECS=300）→ warn + 默认 5s。
+    #[test]
+    fn build_readiness_interval_above_max_warns_and_defaults() {
+        let d = build_readiness_interval_from(|n| {
+            (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "999".to_string())
+        });
+        assert_eq!(d, DEFAULT_READINESS_INTERVAL, "999 > 300 → warn + 默认 5s");
+    }
+
+    /// 下边界 1s → 对应（合法最小值）。
+    #[test]
+    fn build_readiness_interval_boundary_min() {
+        let d = build_readiness_interval_from(|n| {
+            (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "1".to_string())
+        });
+        assert_eq!(d, Duration::from_secs(1), "1 → 1s（合法下边界）");
+    }
+
+    /// 上边界 300s → 对应（合法最大值）。
+    #[test]
+    fn build_readiness_interval_boundary_max() {
+        let d = build_readiness_interval_from(|n| {
+            (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
+        });
+        assert_eq!(d, Duration::from_secs(300), "300 → 300s（合法上边界）");
     }
 
     // ── listener bind 地址解析（fail-fast）─────────────────────────────────────────────
@@ -1127,6 +1281,7 @@ mod tests {
         ];
         serve_until(
             listeners,
+            |_stack| {}, // 无后台 worker（测 serve 循环本身）
             ephemeral_addr,
             std::future::ready(anyhow::Ok(())),
         )
@@ -1140,6 +1295,7 @@ mod tests {
     async fn serve_until_empty_listeners_errs() {
         let err = serve_until(
             Vec::new(),
+            |_stack| {}, // 无后台 worker（测 serve 循环本身）
             ephemeral_addr,
             std::future::ready(anyhow::Ok(())),
         )
@@ -1158,6 +1314,7 @@ mod tests {
         let listeners = vec![health_listener(test_reporter()).expect("health")];
         let err = serve_until(
             listeners,
+            |_stack| {}, // 无后台 worker（测 serve 循环本身）
             |_| anyhow::bail!("no addr configured for listener"),
             std::future::ready(anyhow::Ok(())),
         )
@@ -1228,6 +1385,46 @@ mod tests {
             .await
             .expect("oneshot");
         assert_eq!(resp.status(), StatusCode::OK, "Healthy 探针 → readyz 200");
+    }
+
+    /// Down 路径（fail-closed，不连 DB）：新建 `PgDbReadiness`（初值 Down）→ readyz 503。
+    ///
+    /// 验证在未经任何采样 tick 前，`ConfigsReadyProbe` 报 Down → overall unhealthy → 503。
+    /// 迁自 `tests/configs_ready_e2e.rs`（原在 integration feature 门控下，azure 不跑）——
+    /// 此测试无需真实 DB，应在非 integration 路径下运行（[T2] #1309 review）。
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn configs_ready_initial_down_readyz_503() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        // 初值 Down（fail-closed，不连 DB）。
+        let health = Arc::new(PgDbReadiness::new());
+        let mut reg = bootstrap::compose(&[]).expect("compose");
+        reg.probe(
+            ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name"),
+            Box::new(ConfigsReadyProbe::new(Arc::clone(&health))),
+        )
+        .expect("register probe");
+        let reporter = Arc::new(reg.take_health_reporter());
+
+        let (_listener, authed) = health_listener(reporter).expect("health listener");
+        let resp = authed
+            .into_router_for_test()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/v1/readyz")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "初值 Down（未采样）→ readyz fail-closed 503"
+        );
     }
 
     /// Health listener liveness 端点 `/health/v1/healthz` 恒 200（存活即活）。
