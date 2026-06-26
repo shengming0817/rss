@@ -9,9 +9,18 @@ publish = false
 thiserror = { workspace = true }
 # 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐（OsRng）。
 argon2 = { workspace = true }
-# refresh token 原语（secure::refresh，#1325）：SHA-256 摘要（不可逆持久化查找键）+ base64url 编码不透明 secret。
+# 字段级脱敏 derive（#[derive(Redactable)]，#1360）：intra-base DAG 前向边 secure → securederive（layers.rs）。
+# proc-macro 生成 `::secure::…` 路径，secure 内自用经 lib.rs 的 `extern crate self as secure` 解析。
+securederive = { path = "../securederive" }
+# SHA-256：RedactionMode::Hash 的确定性不可逆 PII 关联摘要（#1360）+ secure::refresh token 不可逆持久化
+# 查找键（#1325）。default-features=false（无 std oid 等额外面）；与 password(argon2) / authn(hmac) 同源。
 sha2 = { workspace = true }
+# secure::refresh（#1325）：base64url 编码不透明 secret。
 base64 = { workspace = true }
+
+[dev-dependencies]
+# 表驱动单测（脱敏模式 / key 判敏感 / URL 凭据剥离参数化，#1360）。
+rstest = { workspace = true }
 
 [lints]
 workspace = true

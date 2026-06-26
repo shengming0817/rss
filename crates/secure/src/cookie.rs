@@ -8,15 +8,10 @@ pub trait CookieCodec {
     fn decode(&self, raw: &str) -> Result<CookieValue, CookieError>;
 }
 
-/// Cookie 值（私有字段）。
-#[derive(Clone, PartialEq, Eq)]
-pub struct CookieValue(String);
-
-impl std::fmt::Debug for CookieValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CookieValue(<redacted>)")
-    }
-}
+/// Cookie 值（私有字段）。`Debug` 经 `#[derive(Redactable)]` 字段级脱敏（渲染 `CookieValue(<redacted>)`），
+/// 替换手写 impl（#1360）。
+#[derive(Clone, PartialEq, Eq, secure::Redactable)]
+pub struct CookieValue(#[redact(sensitivity = secret)] String);
 
 impl CookieValue {
     /// 解析 cookie 值；拒绝空值 / 非法字符。
@@ -57,6 +52,19 @@ mod tests {
     fn accepts_valid_value() {
         let v = CookieValue::parse("session_abc123").expect("valid");
         assert_eq!(v.as_str(), "session_abc123");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn debug_redacts_content() {
+        // #[derive(Redactable)] 派生 Debug 脱敏（#1360）：原值不经 `{:?}` 泄漏。
+        let v = CookieValue::parse("session_abc123").expect("valid");
+        let dbg = format!("{v:?}");
+        assert_eq!(dbg, "CookieValue(<redacted>)");
+        assert!(
+            !dbg.contains("session_abc123"),
+            "Debug 泄漏 cookie 值: {dbg}"
+        );
     }
 
     #[allow(clippy::expect_used)]

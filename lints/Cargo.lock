@@ -384,6 +384,7 @@ dependencies = [
  "dynosaur",
  "futures",
  "ids",
+ "secure",
  "thiserror 2.0.18",
  "tokio-util",
  "trait-variant",
@@ -1551,8 +1552,18 @@ version = "0.0.0"
 dependencies = [
  "argon2",
  "base64",
+ "securederive",
  "sha2",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "securederive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

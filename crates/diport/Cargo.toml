@@ -21,6 +21,9 @@ dynosaur = { workspace = true }
 # Send 的 Dyn wrapper（ShutdownStack 经 tokio::spawn 做 panic 隔离需要 Send future）。
 trait-variant = { workspace = true }
 thiserror = { workspace = true }
+# SecretMaterial / SecretCoordinate 的字段级脱敏 Debug：#[derive(secure::Redactable)]（#1360）。
+# secure 是基础层 L0（人人可依赖）；DiPort 依赖基础合规（layers.rs DiPort=>Basis）。
+secure = { path = "../secure" }
 # AuditEvent.tenant_id: vocab::TenantId（基础层强类型租户标识，fail-closed）。DiPort 依赖基础合规。
 vocab = { path = "../vocab" }
 # CertScope.device: ids::DeviceId（基础层强类型设备标识，RevocationStore scope 隔离）。DiPort 依赖基础合规。

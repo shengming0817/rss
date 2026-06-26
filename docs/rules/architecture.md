@@ -53,7 +53,8 @@ rss/
 ├── crates/               # 全部库 crate，扁平（Rust 惯例，非分层目录）
 │   ├── vocab/            # error(thiserror) / authz / tenant / query（基础词汇）
 │   ├── ids/              # sealed newtype（私有字段 = 硬封）
-│   ├── secure/           # redaction / aead / cookie / pathsafe
+│   ├── securederive/    # proc-macro：#[derive(Redactable)] 字段级脱敏（intra-base DAG 低于 secure）
+│   ├── secure/           # redaction（字段级 Redactable 策略模型）/ aead / cookie / pathsafe
 │   ├── support/          # http / pg / validation 杂项
 │   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
 │   ├── diagctx/          # 诊断信道 fail-open correlation（ADR-002 §D1-bis）
@@ -93,7 +94,7 @@ rss/
 
 ## 分层(crate 图 + deny.toml 编译期强制)
 
-- **基础** `vocab`/`ids`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。当前实际存在的唯一前向边是 `runctx → vocab`——`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`(ADR-002 §D3,决策 #2)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
+- **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redactable)]` proc-macro,#1360；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
 - **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖 DI-infra/服务/域/adapters。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource…,签名只引基础/wire/自定义类型)+ dynosaur Dyn wrapper(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——

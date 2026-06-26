@@ -1494,6 +1494,7 @@ dependencies = [
  "futures",
  "ids",
  "mockall",
+ "secure",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -4462,8 +4463,20 @@ version = "0.0.0"
 dependencies = [
  "argon2",
  "base64",
+ "rstest",
+ "securederive",
  "sha2 0.10.9",
  "thiserror",
+]
+
+[[package]]
+name = "securederive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trybuild",
 ]
 
 [[package]]

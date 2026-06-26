@@ -8,15 +8,10 @@ pub trait Aead {
     fn open(&self, ciphertext: &Ciphertext) -> Result<Vec<u8>, AeadError>;
 }
 
-/// 密文容器（私有字段）。
-#[derive(Clone, PartialEq, Eq)]
-pub struct Ciphertext(Vec<u8>);
-
-impl std::fmt::Debug for Ciphertext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Ciphertext(<redacted>)")
-    }
-}
+/// 密文容器（私有字段）。`Debug` 经 `#[derive(Redactable)]` 字段级脱敏（密文物料 → `<redacted>`，
+/// 渲染 `Ciphertext(<redacted>)`），替换手写 impl（#1360）。
+#[derive(Clone, PartialEq, Eq, secure::Redactable)]
+pub struct Ciphertext(#[redact(sensitivity = secret)] Vec<u8>);
 
 impl Ciphertext {
     /// 由密文字节构造（受控 funnel）。供 [`Aead`] 实现方（adapter）在 `seal` 中返回密文容器。
@@ -48,8 +43,12 @@ mod tests {
 
     #[test]
     fn debug_redacts_content() {
+        // anti-vacuity：原始 Vec<u8> Debug 把 42 渲染成 "42"，证明 "!contains(42)" 非空转。
+        assert!(format!("{:?}", vec![42u8]).contains("42"));
         let ct = Ciphertext::from_bytes(vec![42, 43]);
-        assert_eq!(format!("{ct:?}"), "Ciphertext(<redacted>)");
+        let dbg = format!("{ct:?}");
+        assert_eq!(dbg, "Ciphertext(<redacted>)");
+        assert!(!dbg.contains("42"), "Debug 泄漏密文字节: {dbg}");
     }
 }
 

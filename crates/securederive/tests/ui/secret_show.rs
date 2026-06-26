@@ -1,0 +1,11 @@
+#![allow(dead_code)]
+//! 防误标：`sensitivity = secret` 与 `mode = show` 同用 ⇒ 编译错误（敏感字段不可声明明文输出）。
+use securederive::Redactable;
+
+#[derive(Redactable)]
+struct Bad {
+    #[redact(sensitivity = secret, mode = show)]
+    leaky: String,
+}
+
+fn main() {}

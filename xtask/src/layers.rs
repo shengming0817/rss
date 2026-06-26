@@ -12,12 +12,25 @@
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
-/// （`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，ADR-002 §D3 / §D1-bis）——见 [`basis_intra_dag_allows`]。
-/// `diagctx`（诊断 context 信道）是**独立根**：任何涉及 diagctx 的 base 内边（双向）均不 sanction，
-/// 由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz crate import diagctx）
-/// 见 follow-up #1400。
-pub(crate) const BASIS_CRATES: &[&str] =
-    &["diagctx", "vocab", "ids", "secure", "support", "runctx"];
+/// （`vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，ADR-002 §D3 / §D1-bis）——见
+/// [`basis_intra_dag_allows`]。
+///
+/// `securederive` 是 `secure` 的字段级脱敏 derive proc-macro（#[derive(Redactable)]，#1360）：rank 低于
+/// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
+/// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
+///
+/// `diagctx`（诊断 context 信道）是**独立根**（[`ISOLATED_BASIS_CRATES`]）：任何涉及 diagctx 的 base 内边
+/// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
+/// crate import diagctx）见 follow-up #1400。
+pub(crate) const BASIS_CRATES: &[&str] = &[
+    "diagctx",
+    "vocab",
+    "ids",
+    "securederive",
+    "secure",
+    "support",
+    "runctx",
+];
 
 /// 独立根基础 crate：任何涉及这些 crate 的 intra-base 边（双向）均不 sanction。
 /// `diagctx` 是独立根——不应被任何 base crate 依赖，也不依赖任何 base crate。
@@ -57,6 +70,17 @@ pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["journeys", "xtask"];
 /// 该 adapter 是否 dev/test-only（demo provider）。
 pub(crate) fn is_dev_adapter(name: &str) -> bool {
     DEV_ADAPTERS.contains(&name)
+}
+
+/// 基础层中的 proc-macro 工具 crate（编译期纯工具，`[lib] proc-macro = true`）。归 [`BASIS_CRATES`] 供
+/// 分层分类 + intra-base DAG（`secure → securederive` 前向边），但**不是 SemVer 库 API 面**——其契约
+/// （`#[derive(Redactable)]` 的 `#[redact]` 属性 grammar + 生成 impl）由 codegen golden（trybuild
+/// compile-fail）守，非 `cargo public-api`。故 [`is_proc_macro`] 标记，让 `publicapi` baseline 目标排除。
+pub(crate) const PROC_MACRO_CRATES: &[&str] = &["securederive"];
+
+/// 该 crate 是否 proc-macro 工具 crate（不入 `cargo public-api` baseline，见 [`PROC_MACRO_CRATES`]）。
+pub(crate) fn is_proc_macro(name: &str) -> bool {
+    PROC_MACRO_CRATES.contains(&name)
 }
 
 /// test-support 库（HTTP 契约测试 harness 等，如 `testkit`）：归 Service 层供 classify，但**只准经
@@ -258,6 +282,10 @@ mod tests {
     #[case("runctx", "vocab", true)]
     #[case("support", "secure", true)]
     #[case("ids", "vocab", true)]
+    // sanctioned 前向边 `secure → securederive`（#1360 字段级脱敏 derive proc-macro）。
+    #[case("secure", "securederive", true)]
+    // 反向 `securederive → secure`：禁（proc-macro 不依赖 secure，只生成 `::secure::…` 路径）。
+    #[case("securederive", "secure", false)]
     // 反向边：禁（防成环 / 倒挂）。
     #[case("vocab", "runctx", false)]
     #[case("vocab", "support", false)]

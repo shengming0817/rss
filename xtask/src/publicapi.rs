@@ -55,12 +55,18 @@ pub(crate) enum Layer {
 }
 
 /// 解析 layer → 目标 crate 集。`None` = basis + engine（不另列第三份 ALL，避免漂移）。
+/// 排除 proc-macro 工具 crate（[`crate::layers::is_proc_macro`]）——其契约由 codegen golden 守，
+/// 非 SemVer 库 API 面，不入 public-api baseline。
 fn target_crates(layer: Option<Layer>) -> Vec<&'static str> {
-    match layer {
+    let select: Vec<&'static str> = match layer {
         Some(Layer::Basis) => BASIS_CRATES.to_vec(),
         Some(Layer::Engine) => ENGINE_CRATES.to_vec(),
         None => BASIS_CRATES.iter().chain(ENGINE_CRATES).copied().collect(),
-    }
+    };
+    select
+        .into_iter()
+        .filter(|c| !crate::layers::is_proc_macro(c))
+        .collect()
 }
 
 /// 生成（`check=false`）或校验（`check=true`）目标层封装面 baseline。
@@ -231,12 +237,15 @@ mod tests {
 
     #[test]
     fn target_crates_by_layer() {
+        // basis = diagctx/vocab/ids/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
         assert_eq!(target_crates(Some(Layer::Basis)).len(), 6);
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 2);
         // None = basis + engine 全集，无第三份硬编码列表。
         assert_eq!(target_crates(None).len(), 8);
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
+        // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
+        assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
     }
 
     #[test]

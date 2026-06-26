@@ -25,6 +25,18 @@ trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redact
 - tracing subscriber 对敏感 field 做统一清洗。
 - `last_error` 持久化走同一 `secure` crate（redaction 模块）。
 
+**字段级脱敏策略模型（#1360）**：任意 struct 字段经 `#[derive(secure::Redactable)]` + 字段属性显式声明策略，
+派生安全 `Debug`（替换各 crate 手写脱敏 `Debug`，从输入类型层声明而非仅输出边界清洗）：
+
+- `#[redact(mode = …)]`：模式集 `secure::RedactionMode` = `fixed`（`<redacted>`）/ `last4` / `email_mask` /
+  `hash`（确定性不可逆 `sha256:` 截断摘要，PII 可关联不可还原）/ `drop`（剔除字段）/ `show`（仅非敏感）。
+- `#[redact(sensitivity = public|internal|pii|secret)]`：声明敏感度，`sensitivity → mode` 默认映射单源在
+  `secure::Sensitivity::default_mode`（`internal`/`secret`/多数 `pii` → `fixed`，fail-closed）。
+- **fail-closed（Hard）**：字段缺 `#[redact]` 标注、或 `secret`/`pii` 误配 `mode = show` 均编译错误
+  （compile-fail golden 守，`crates/securederive/tests/ui/`）；`Redacted::new` 仍 `pub(crate)` 封闭，derive 经
+  公开 funnel `secure::redact_struct` 产出，外部不可伪造安全值。
+
+`secure::redact_field` 的 key 判敏感逻辑已收口进 `secure::Sensitivity::from_key`，与上述模型同源（无双路径）。
 没有业务 opt-out。需要原始诊断时走受控服务端日志，不写入 trace 或 wire。
 
 ## Readyz Probe

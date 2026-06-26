@@ -53,24 +53,22 @@ impl SecretResolverError {
 /// **不含 secret 材料**——只是指向材料的指针坐标（对标 external-secrets `SecretReference`、
 /// `ObjectKey` 同范式）。
 ///
-/// PII 边界（**类型层 Hard**）：`store_id` / `key` 可能内嵌租户 / 应用标识；**手写 `Debug`**
-/// 只输出 `SecretCoordinate(<redacted>)`，使任意消费方的 `{coord:?}` 不泄漏原文。
+/// PII 边界（**类型层 Hard**）：`store_id` / `key` / `version` 可能内嵌租户 / 应用标识；经
+/// `#[derive(secure::Redactable)]` 字段级脱敏（每字段 `sensitivity = secret` → `Fixed`），派生 `Debug`
+/// 渲染 `SecretCoordinate { store_id: <redacted>, key: <redacted>, version: <redacted> }`——使任意消费方的
+/// `{coord:?}` 不泄漏原文（#1360 替换手写 `Debug`）。
 ///
 /// `Clone`/`PartialEq`/`Eq`：坐标无状态、可安全复制 + 比较（不含材料，拷贝无 PII 泄漏风险）。
 ///
 /// INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01（回归见 `pii_debug::secret_coordinate_debug_redacts`）。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, secure::Redactable)]
 pub struct SecretCoordinate {
+    #[redact(sensitivity = secret)]
     store_id: String,
+    #[redact(sensitivity = secret)]
     key: String,
+    #[redact(sensitivity = secret)]
     version: Option<String>,
-}
-
-impl std::fmt::Debug for SecretCoordinate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // PII 边界（Hard）：store_id / key 可能含租户 / 应用标识 ⇒ 只输出固定占位，原文不经 Debug 泄漏。
-        f.write_str("SecretCoordinate(<redacted>)")
-    }
 }
 
 impl SecretCoordinate {
@@ -109,19 +107,13 @@ impl SecretCoordinate {
 /// - `#[derive(zeroize::ZeroizeOnDrop)]`——drop 时自动清零，材料不在栈 / 堆上残留。
 /// - **不** derive `Clone`——无所有权逃逸路径，调用栈外不可持有副本。
 /// - **不** derive serde——永不序列化到 wire / 日志（`rss_domain_no_serialize` dylint 守护）。
-/// - **手写 `Debug`** 只输出 `SecretMaterial(<redacted>)`——tracing / 日志采集不得经 `{:?}` 泄漏。
+/// - **`#[derive(secure::Redactable)]`**（`sensitivity = secret` → `Fixed`）派生 `Debug` 渲染
+///   `SecretMaterial(<redacted>)`——tracing / 日志采集不得经 `{:?}` 泄漏（#1360 替换手写 `Debug`）。
 /// - `expose(&self) -> &[u8]`——唯一受控借出路径，无 `into_vec` / `as_string` / `Display` owned 逃逸。
 ///
 /// INVARIANT: DIPORT-SECRETMATERIAL-PII-REDACT-01（回归见 `pii_debug::secret_material_debug_is_opaque`）。
-#[derive(zeroize::ZeroizeOnDrop)]
-pub struct SecretMaterial(Vec<u8>);
-
-impl std::fmt::Debug for SecretMaterial {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // PII 边界（Hard）：材料字节（密钥 / 密码 / token 等）不输出原始内容。
-        f.write_str("SecretMaterial(<redacted>)")
-    }
-}
+#[derive(zeroize::ZeroizeOnDrop, secure::Redactable)]
+pub struct SecretMaterial(#[redact(sensitivity = secret)] Vec<u8>);
 
 impl SecretMaterial {
     /// 由字节构造 secret 材料（adapter 侧唯一入口）。
@@ -271,10 +263,26 @@ mod pii_debug {
     fn secret_coordinate_debug_redacts() {
         let coord = SecretCoordinate::new("vault-prod", "db/password", Some("v3".to_string()));
         let dbg = format!("{coord:?}");
-        assert_eq!(dbg, "SecretCoordinate(<redacted>)");
-        // anti-vacuity：store_id / key 明文本不在 Debug 输出中。
+        // #[derive(Redactable)] 字段级渲染：字段名（非敏感）保留、每字段值 → <redacted>（Fixed，含 version
+        // 不泄 Some/None）。脱敏边界不变（INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01）。
+        assert_eq!(
+            dbg,
+            "SecretCoordinate { store_id: <redacted>, key: <redacted>, version: <redacted> }"
+        );
+        // anti-vacuity：store_id / key / version 明文本不在 Debug 输出中。
         assert!(!dbg.contains("vault-prod"), "store_id 泄漏: {dbg}");
         assert!(!dbg.contains("db/password"), "key 泄漏: {dbg}");
+        assert!(!dbg.contains("v3"), "version 泄漏: {dbg}");
+    }
+
+    #[test]
+    fn secret_coordinate_debug_redacts_absent_version() {
+        // version = None：Fixed mode 不读值，仍渲染 `version: <redacted>`——不泄 Some/None 区分。
+        let coord = SecretCoordinate::new("vault-prod", "db/password", None);
+        assert_eq!(
+            format!("{coord:?}"),
+            "SecretCoordinate { store_id: <redacted>, key: <redacted>, version: <redacted> }"
+        );
     }
 
     // 编译期证明 SecretMaterial 实现 ZeroizeOnDrop（类型约束不满足 → 编译失败）。
