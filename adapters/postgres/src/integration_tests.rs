@@ -155,26 +155,26 @@ async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
     let key = IdemKey::parse(&evt).unwrap();
 
     // 断言 1：同组同 key 首见 → Fresh。
-    let lease_a = LeaseToken::new(uuid::Uuid::new_v4().to_string());
+    let lease_a = LeaseToken::mint();
     assert_eq!(
-        s_a.check(&key, &lease_a).await?,
+        s_a.try_claim(&key, &lease_a).await?,
         SeenState::Fresh,
         "首次 claim 应返回 Fresh"
     );
 
     // 断言 2：同组同 key 再见 → Duplicate（claimed_at 仍在 TTL 内，DO UPDATE WHERE false）。
-    let lease_a2 = LeaseToken::new(uuid::Uuid::new_v4().to_string());
+    let lease_a2 = LeaseToken::mint();
     assert_eq!(
-        s_a.check(&key, &lease_a2).await?,
+        s_a.try_claim(&key, &lease_a2).await?,
         SeenState::Duplicate,
         "同 key 再见应返回 Duplicate"
     );
 
     // 断言 3：不同消费者组同 key → Fresh（PK = (event_id, consumer_group)，组间去重独立）。
     let s_b = store.inbox(ConsumerGroup::parse("test-grp-b").unwrap());
-    let lease_b = LeaseToken::new(uuid::Uuid::new_v4().to_string());
+    let lease_b = LeaseToken::mint();
     assert_eq!(
-        s_b.check(&key, &lease_b).await?,
+        s_b.try_claim(&key, &lease_b).await?,
         SeenState::Fresh,
         "不同组同 key 应返回 Fresh（group drift 隔离）"
     );

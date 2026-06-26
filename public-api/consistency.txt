@@ -316,7 +316,7 @@ pub fn consistency::idempotency::IdemKey::from(T) -> T
 pub struct consistency::idempotency::LeaseToken(_)
 impl consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::as_str(&self) -> &str
-pub fn consistency::idempotency::LeaseToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn consistency::idempotency::LeaseToken::mint() -> Self
 impl core::clone::Clone for consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::clone(&self) -> consistency::idempotency::LeaseToken
 impl core::cmp::Eq for consistency::idempotency::LeaseToken
@@ -357,10 +357,10 @@ pub unsafe fn consistency::idempotency::LeaseToken::clone_to_uninit(&self, *mut 
 impl<T> core::convert::From<T> for consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::from(T) -> T
 pub trait consistency::idempotency::IdempotencyStore
-pub async fn consistency::idempotency::IdempotencyStore::check(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub async fn consistency::idempotency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::idempotency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::idempotency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::idempotency::IdempotencyStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -1915,7 +1915,7 @@ pub fn consistency::idempotency::IdemKey::from(T) -> T
 pub struct consistency::LeaseToken(_)
 impl consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::as_str(&self) -> &str
-pub fn consistency::idempotency::LeaseToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn consistency::idempotency::LeaseToken::mint() -> Self
 impl core::clone::Clone for consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::clone(&self) -> consistency::idempotency::LeaseToken
 impl core::cmp::Eq for consistency::idempotency::LeaseToken
@@ -2245,10 +2245,10 @@ pub unsafe fn consistency::outbox::Topic::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::Topic
 pub fn consistency::outbox::Topic::from(T) -> T
 pub trait consistency::IdempotencyStore
-pub async fn consistency::IdempotencyStore::check(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub async fn consistency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::IdempotencyStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
 pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::OutboxRelay

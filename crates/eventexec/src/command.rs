@@ -6,7 +6,7 @@
 //! COMMAND-SYMMETRY-01 Medium 守）。consistencyLevel = OutboxFact（emit-only 单事实，无 co-tx）。
 //!
 //! **consumer**：[`register_command_handler`] 复用 [`run_consumer`] + [`IdempotencyStore`] claimer 两阶段
-//! 去重（同 DispatchId 二次投递 → `Message.id` 同键 → `check` 返 `Duplicate` → handler 不调、幂等短路 =
+//! 去重（同 DispatchId 二次投递 → `Message.id` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
 //! claimer 拒）；零新去重原语。
 //!
 //! INVARIANT: COMMAND-DISPATCHID-SEAL-01 —— [`DispatchId`] 包私有 [`IdemKey`]、无 public 裸构造（仅
@@ -44,7 +44,7 @@ impl DispatchId {
             .map_err(|_| CommandEmitError::DispatchId)
     }
 
-    /// 解封到底层 outbox 幂等 key（仅 runtime funnel 可达；consumer 侧 claimer 以同一 `IdemKey` check）。
+    /// 解封到底层 outbox 幂等 key（仅 runtime funnel 可达；consumer 侧 claimer 以同一 `IdemKey` try_claim）。
     ///
     /// INVARIANT: COMMAND-DISPATCHID-SEAL-01 —— 此方法 `pub(crate)` 封闭，外部 crate 无法取得裸
     /// `IdemKey`（只有 [`emit_async`] funnel 可调用）；与 struct / module 级声明同源。
@@ -103,7 +103,7 @@ pub async fn emit_async(
 ///
 /// 消息 `payload` 经 `serde_json` 解码为 typed `R` 后交 `handler`；解码失败 = 永久 `reject`（坏 wire 不可
 /// 恢复 → DLX，不 Requeue 无限重投）。同 DispatchId（`Message.id` = dispatch key）二次投递 → claimer
-/// `check` 返 `Duplicate` → handler 不调、幂等短路（= claimer 拒）。claim→handle→commit/dlx 全复用
+/// `try_claim` 返 `Duplicate` → handler 不调、幂等短路（= claimer 拒）。claim→handle→commit/dlx 全复用
 /// `run_consumer`，零新去重原语。
 ///
 /// **生命周期接线（调用方必须遵守）**：本函数 `.await` 后进入无限消费循环（持续驱动 `stream`）；
@@ -336,7 +336,7 @@ mod tests {
     }
 
     impl IdempotencyStore for FakeStore {
-        async fn check(
+        async fn try_claim(
             &self,
             _key: &IdemKey,
             _lease: &LeaseToken,

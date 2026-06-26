@@ -340,7 +340,7 @@ mod tests {
         }
     }
     impl IdempotencyStore for FreshStore {
-        async fn check(
+        async fn try_claim(
             &self,
             _key: &IdemKey,
             _lease: &LeaseToken,

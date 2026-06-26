@@ -1,7 +1,7 @@
 //! 幂等 claimer 逻辑 helper（L0 纯计算 + backend 异步 impl）。
 //!
 //! feature 无关的 helper（`namespaced_key` / `interpret_setnx`）始终编译，
-//! `backend` feature 门控的异步 `check_impl` 引入 deadpool-redis 类型。
+//! `backend` feature 门控的异步 `try_claim_impl` 引入 deadpool-redis 类型。
 
 use consistency::{ConsumerGroup, IdemKey, SeenState};
 
@@ -20,13 +20,13 @@ use consistency::{ConsumerGroup, IdemKey, SeenState};
 /// `<group>:<key>` 冒号拼接可碰撞——`(group="a", key="b:c")` 与 `(group="a:b", key="c")` 拼出同串 ⇒ 跨组误
 /// 去重。故 key 形如 `_runtime:idem:<glen>:<group>:<idem_key>`：**group 段前缀其字节长度**，使 group/key
 /// 边界单射（`len(group)` 不同 ⇒ 前缀段不同；相同 ⇒ group 占定长前缀位、`(group,key)` 一一对应），消除碰撞面。
-// reason: feature-off build 仅测试使用；feature-on 经 backend::check_impl 引用。
+// reason: feature-off build 仅测试使用；feature-on 经 backend::try_claim_impl 引用。
 #[cfg_attr(not(feature = "backend"), allow(dead_code))]
 pub(crate) const NAMESPACE: &str = "_runtime:idem";
 
 /// claim key = `_runtime:idem:<glen>:<group>:<idem_key>`（`glen` = group 字节长度前缀，使 group/key 边界
 /// 单射，杜绝冒号拼接碰撞；见模块 §字段边界封闭）。
-// reason: feature-off build 仅测试使用；feature-on 经 backend::check_impl 引用。
+// reason: feature-off build 仅测试使用；feature-on 经 backend::try_claim_impl 引用。
 #[cfg_attr(not(feature = "backend"), allow(dead_code))]
 pub(crate) fn namespaced_key(group: &ConsumerGroup, key: &IdemKey) -> String {
     // group 段以字节长度前缀单射封边：len(group) 不同 ⇒ 整串不同；相同 ⇒ group 占定长位、(group,key) 一一对应。
@@ -39,7 +39,7 @@ pub(crate) fn namespaced_key(group: &ConsumerGroup, key: &IdemKey) -> String {
 }
 
 /// `SET ... NX` 返回 `Some(...)`=首次写入(Fresh) / `None`(nil)=key 已存在(Duplicate)。
-// reason: feature-off build 仅测试使用；feature-on 经 backend::check_impl 引用。
+// reason: feature-off build 仅测试使用；feature-on 经 backend::try_claim_impl 引用。
 #[cfg_attr(not(feature = "backend"), allow(dead_code))]
 pub(crate) fn interpret_setnx(set: Option<String>) -> SeenState {
     match set {
@@ -49,7 +49,7 @@ pub(crate) fn interpret_setnx(set: Option<String>) -> SeenState {
 }
 
 #[cfg(feature = "backend")]
-pub(crate) use backend::{check_impl, commit_impl, extend_impl, release_impl};
+pub(crate) use backend::{commit_impl, extend_impl, release_impl, try_claim_impl};
 
 #[cfg(feature = "backend")]
 mod backend {
@@ -124,7 +124,7 @@ mod backend {
     ///
     /// Token 作为 redis 值存入，供后续 `extend`/`commit`/`release` CAS 比对。
     /// F3：低基数诊断字段 + redacted error（不记 key 原文，避免 PII / 高基数）。
-    pub(crate) async fn check_impl(
+    pub(crate) async fn try_claim_impl(
         pool: &Pool,
         ttl: core::time::Duration,
         group: &ConsumerGroup,

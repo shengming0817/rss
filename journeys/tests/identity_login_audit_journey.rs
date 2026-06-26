@@ -177,12 +177,12 @@ fn demo_claimer(group: consistency::ConsumerGroup) -> Result<InMemClaimer> {
     }
 }
 
-/// 记录型幂等 claimer（F5 可观测替身）：包内层 claimer，计 `check` 调用次数 + `Duplicate` 命中次数，
-/// 让重投测试可等待「第二条同 EventId 已被 consumer 读取并判 Duplicate」这一**中间事实**（check_count==2 &&
+/// 记录型幂等 claimer（F5 可观测替身）：包内层 claimer，计 `try_claim` 调用次数 + `Duplicate` 命中次数，
+/// 让重投测试可等待「第二条同 EventId 已被 consumer 读取并判 Duplicate」这一**中间事实**（claim_count==2 &&
 /// duplicate_count==1），替代固定 sleep 的假阳性（review #274 F5/C5）。
 struct RecordingClaimer<S> {
     inner: S,
-    check_count: Arc<AtomicU32>,
+    claim_count: Arc<AtomicU32>,
     duplicate_count: Arc<AtomicU32>,
 }
 
@@ -190,12 +190,12 @@ impl<S> RecordingClaimer<S> {
     fn new(inner: S) -> Self {
         Self {
             inner,
-            check_count: Arc::new(AtomicU32::new(0)),
+            claim_count: Arc::new(AtomicU32::new(0)),
             duplicate_count: Arc::new(AtomicU32::new(0)),
         }
     }
-    fn check_count(&self) -> Arc<AtomicU32> {
-        self.check_count.clone()
+    fn claim_count(&self) -> Arc<AtomicU32> {
+        self.claim_count.clone()
     }
     fn duplicate_count(&self) -> Arc<AtomicU32> {
         self.duplicate_count.clone()
@@ -203,9 +203,9 @@ impl<S> RecordingClaimer<S> {
 }
 
 impl<S: IdempotencyStore + Send + Sync> IdempotencyStore for RecordingClaimer<S> {
-    async fn check(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
-        let state = self.inner.check(key, lease).await?;
-        self.check_count.fetch_add(1, Ordering::SeqCst);
+    async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
+        let state = self.inner.try_claim(key, lease).await?;
+        self.claim_count.fetch_add(1, Ordering::SeqCst);
         if matches!(state, SeenState::Duplicate) {
             self.duplicate_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -431,9 +431,9 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
-    // F5：RecordingClaimer 包决策绑定的 demo claimer，暴露 check/duplicate 计数供可观测等待（去固定 sleep）。
+    // F5：RecordingClaimer 包决策绑定的 demo claimer，暴露 try_claim/duplicate 计数供可观测等待（去固定 sleep）。
     let recording = Arc::new(RecordingClaimer::new(demo_claimer(group)?));
-    let check_count = recording.check_count();
+    let claim_count = recording.claim_count();
     let duplicate_count = recording.duplicate_count();
     wire_demo_consumer(
         &bus,
@@ -469,10 +469,10 @@ async fn relay_redelivery_audits_once() -> Result<()> {
             .await
             .map_err(|_| anyhow::anyhow!("emit"))?;
     }
-    // F5：等可观测中间事实——第二条同 EventId 已被 consumer 读取（check_count==2）且判 Duplicate
+    // F5：等可观测中间事实——第二条同 EventId 已被 consumer 读取（claim_count==2）且判 Duplicate
     // （duplicate_count==1），证「第二条已消费并幂等短路」，替代固定 sleep 的假阳性（review #274 F5/C5）。
     wait_until(|| {
-        check_count.load(Ordering::SeqCst) >= 2 && duplicate_count.load(Ordering::SeqCst) >= 1
+        claim_count.load(Ordering::SeqCst) >= 2 && duplicate_count.load(Ordering::SeqCst) >= 1
     })
     .await?;
 
@@ -483,9 +483,9 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     );
 
     assert_eq!(
-        check_count.load(Ordering::SeqCst),
+        claim_count.load(Ordering::SeqCst),
         2,
-        "两条投递均被 consumer 读取（idempotency check 各一次）"
+        "两条投递均被 consumer 读取（idempotency try_claim 各一次）"
     );
     assert_eq!(
         duplicate_count.load(Ordering::SeqCst),

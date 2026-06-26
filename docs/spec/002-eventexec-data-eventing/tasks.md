@@ -93,7 +93,7 @@
 
 - [ ] T008.1 [US6] 先写测试：会话创建+outbox 同事务原子性；relay 重投 session.created→audit 仅 append 一次（幂等）；replay+投影重建；journey demo+durable 双拓扑 —— FAIL
 - [ ] T008.2 [US6] 重写 `LoginService::login`：直接 publish → 构造 `outbox::Entry`（envelope 注入）+ 事务内 append durable outbox
-- [ ] T008.3 [US6] `audit` 消费侧以 EventId `IdempotencyStore::check` 幂等去重后 append
+- [ ] T008.3 [US6] `audit` 消费侧以 EventId `IdempotencyStore::try_claim` 幂等去重后 append
 - [ ] T008.4 [US6] journey 升级（in-mem 替身 → 可选 durable 拓扑）；contract lifecycle draft→active（subscriber+route group 经 bootstrap 验证）
 - [ ] T008.5 [US6] L2 原子性+幂等治理 #[test]；扇出闭环（contract→generated→metadata→journey→docs）；clippy/fmt 绿
 

@@ -296,6 +296,7 @@ dependencies = [
  "secure",
  "support",
  "thiserror 2.0.18",
+ "uuid",
  "vocab",
 ]
 

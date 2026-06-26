@@ -79,13 +79,13 @@ impl ManagedResource for RedisStore {
 
 #[cfg(feature = "backend")]
 impl consistency::IdempotencyStore for RedisStore {
-    async fn check(
+    async fn try_claim(
         &self,
         key: &consistency::IdemKey,
         lease: &consistency::LeaseToken,
     ) -> Result<consistency::SeenState, consistency::EngineError> {
-        // 逻辑拆出到 claimer::check_impl 控制认知复杂度。group 构造期绑定，纳入 claim key 组维度段。
-        claimer::check_impl(&self.pool, self.ttl, &self.group, key, lease).await
+        // 逻辑拆出到 claimer::try_claim_impl 控制认知复杂度。group 构造期绑定，纳入 claim key 组维度段。
+        claimer::try_claim_impl(&self.pool, self.ttl, &self.group, key, lease).await
     }
 
     async fn extend(

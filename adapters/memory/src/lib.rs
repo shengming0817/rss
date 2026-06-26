@@ -427,7 +427,11 @@ impl InMemClaimer {
 }
 
 impl IdempotencyStore for InMemClaimer {
-    async fn check(&self, key: &IdemKey, lease: &IdemLeaseToken) -> Result<SeenState, EngineError> {
+    async fn try_claim(
+        &self,
+        key: &IdemKey,
+        lease: &IdemLeaseToken,
+    ) -> Result<SeenState, EngineError> {
         let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         // reason: in-mem 操作恒成功，unwrap_or_else 处理 poisoned lock 后继续。
         let map_key = (self.group.as_str().to_string(), key.as_str().to_string());
@@ -1011,14 +1015,14 @@ mod tests {
     // ── InMemClaimer L0 表驱动测试 ───────────────────────────────────────────
 
     /// 令牌测试 helper（`IdemLeaseToken` = `consistency::LeaseToken` 别名）。
-    fn tok(s: &str) -> IdemLeaseToken {
-        IdemLeaseToken::new(s)
+    fn tok() -> IdemLeaseToken {
+        IdemLeaseToken::mint()
     }
 
-    /// 同一 key 连续 check 3 次：第 1 次 Fresh，第 2、3 次 Duplicate。
+    /// 同一 key 连续 try_claim 3 次：第 1 次 Fresh，第 2、3 次 Duplicate。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 check，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out（error-handling.md §Carve-out）。
     async fn claimer_first_fresh_then_duplicate() {
         use crate::InMemClaimer;
         use consistency::IdemKey;
@@ -1026,12 +1030,12 @@ mod tests {
         let group = consistency::ConsumerGroup::parse("audit").expect("group");
         let claimer = InMemClaimer::new(group);
         let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
-        let t = tok("lease-1");
+        let t = tok();
 
         let states: Vec<SeenState> = vec![
-            claimer.check(&key, &t).await.expect("check 1"),
-            claimer.check(&key, &t).await.expect("check 2"),
-            claimer.check(&key, &t).await.expect("check 3"),
+            claimer.try_claim(&key, &t).await.expect("try_claim 1"),
+            claimer.try_claim(&key, &t).await.expect("try_claim 2"),
+            claimer.try_claim(&key, &t).await.expect("try_claim 3"),
         ];
 
         assert_eq!(states[0], SeenState::Fresh, "第 1 次应为 Fresh");
@@ -1042,7 +1046,7 @@ mod tests {
     /// 两个不同 group 的 claimer，同一 key 各自 Fresh——证明去重按组隔离，组漂移→去重失效。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 check，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out（error-handling.md §Carve-out）。
     async fn consumer_group_drift_breaks_dedup() {
         use crate::InMemClaimer;
         use consistency::IdemKey;
@@ -1054,13 +1058,13 @@ mod tests {
         let key = IdemKey::parse("session.created:tenant-1:evt-1").expect("key");
 
         let state_a = claimer_a
-            .check(&key, &tok("lease-a"))
+            .try_claim(&key, &tok())
             .await
-            .expect("check a");
+            .expect("try_claim a");
         let state_b = claimer_b
-            .check(&key, &tok("lease-b"))
+            .try_claim(&key, &tok())
             .await
-            .expect("check b");
+            .expect("try_claim b");
 
         assert_eq!(state_a, SeenState::Fresh, "group-a 首见应为 Fresh");
         assert_eq!(
@@ -1081,9 +1085,9 @@ mod tests {
         let group = consistency::ConsumerGroup::parse("audit").expect("group");
         let claimer = InMemClaimer::new(group);
         let key = IdemKey::parse("evt-extend-1").expect("key");
-        let mine = tok("lease-mine");
+        let mine = tok();
         assert_eq!(
-            claimer.check(&key, &mine).await.expect("check"),
+            claimer.try_claim(&key, &mine).await.expect("try_claim"),
             SeenState::Fresh
         );
         // 持有者续租成功
@@ -1093,10 +1097,7 @@ mod tests {
         );
         // 他人令牌续租 → Lost
         assert_eq!(
-            claimer
-                .extend(&key, &tok("lease-other"))
-                .await
-                .expect("extend-other"),
+            claimer.extend(&key, &tok()).await.expect("extend-other"),
             LeaseOutcome::Lost
         );
     }
@@ -1112,17 +1113,14 @@ mod tests {
         let group = consistency::ConsumerGroup::parse("audit").expect("group");
         let claimer = InMemClaimer::new(group);
         let key = IdemKey::parse("evt-fence-1").expect("key");
-        let mine = tok("lease-mine");
+        let mine = tok();
         assert_eq!(
-            claimer.check(&key, &mine).await.expect("check"),
+            claimer.try_claim(&key, &mine).await.expect("try_claim"),
             SeenState::Fresh
         );
         // stale holder（错误 token）commit → Lost（hard-fence：不可降级为 done）
         assert_eq!(
-            claimer
-                .commit(&key, &tok("lease-stale"))
-                .await
-                .expect("commit-stale"),
+            claimer.commit(&key, &tok()).await.expect("commit-stale"),
             LeaseOutcome::Lost
         );
         // 真持有者 commit → Held
@@ -1132,7 +1130,7 @@ mod tests {
         );
     }
 
-    /// commit 正确 token → Held；再 check → Duplicate（done 行永久去重）。
+    /// commit 正确 token → Held；再 try_claim → Duplicate（done 行永久去重）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     // reason: 测试 commit 后永久去重语义断言——in-mem claimer 方法恒 Ok，item-level carve-out。
@@ -1143,9 +1141,9 @@ mod tests {
         let group = consistency::ConsumerGroup::parse("audit").expect("group");
         let claimer = InMemClaimer::new(group);
         let key = IdemKey::parse("evt-commit-dup").expect("key");
-        let t = tok("lease-1");
+        let t = tok();
         assert_eq!(
-            claimer.check(&key, &t).await.expect("check"),
+            claimer.try_claim(&key, &t).await.expect("try_claim"),
             SeenState::Fresh
         );
         assert_eq!(
@@ -1153,10 +1151,7 @@ mod tests {
             LeaseOutcome::Held
         );
         assert_eq!(
-            claimer
-                .check(&key, &tok("lease-2"))
-                .await
-                .expect("re-check"),
+            claimer.try_claim(&key, &tok()).await.expect("re-try_claim"),
             SeenState::Duplicate,
             "done 行永久 Duplicate"
         );
@@ -1173,22 +1168,16 @@ mod tests {
         let group = consistency::ConsumerGroup::parse("audit").expect("group");
         let claimer = InMemClaimer::new(group);
         let key = IdemKey::parse("evt-release-cas").expect("key");
-        let mine = tok("lease-mine");
+        let mine = tok();
         assert_eq!(
-            claimer.check(&key, &mine).await.expect("check"),
+            claimer.try_claim(&key, &mine).await.expect("try_claim"),
             SeenState::Fresh
         );
         // stale token release → no-op（不误删他人 claim）
-        claimer
-            .release(&key, &tok("lease-stale"))
-            .await
-            .expect("release-stale");
+        claimer.release(&key, &tok()).await.expect("release-stale");
         // claim 仍在（未被误删）→ Duplicate
         assert_eq!(
-            claimer
-                .check(&key, &tok("lease-x"))
-                .await
-                .expect("re-check"),
+            claimer.try_claim(&key, &tok()).await.expect("re-try_claim"),
             SeenState::Duplicate,
             "stale token release 不误删 claim"
         );

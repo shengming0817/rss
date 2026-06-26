@@ -5,7 +5,7 @@
 //!
 //! # 状态机：absent → claimed(lease_token) → done
 //!
-//! - **`check`（claim-or-reclaim-or-skip）**：
+//! - **`try_claim`（claim-or-reclaim-or-skip）**：
 //!   `INSERT ... ON CONFLICT DO UPDATE ... WHERE status='claimed' AND claimed_at <= now()-TTL`
 //!   \+ `RETURNING`：
 //!   - RETURNING 行存在（`Some`）→ [`SeenState::Fresh`]：首次插入，或 TTL 过期的 claimed 行被新 token 接管
@@ -72,7 +72,7 @@ impl IdempotencyStore for PgInboxStore {
     /// 无行 → `Duplicate`（他人持有有效 claim 或已 done，幂等短路）。
     ///
     /// 后端暂不可用 → `EngineErrorKind::Transient`；原始 sqlx 错误不进 Display（PII 边界）。
-    async fn check(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
+    async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
         let row: Option<(String,)> = sqlx::query_as(
             r#"
             INSERT INTO inbox_dedup (event_id, consumer_group, lease_token)
@@ -91,7 +91,7 @@ impl IdempotencyStore for PgInboxStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| {
-            tracing::warn!(target: "postgres", operation = "inbox_check", error = %secure::redact_error(&e), "inbox: check db error");
+            tracing::warn!(target: "postgres", operation = "inbox_try_claim", error = %secure::redact_error(&e), "inbox: try_claim db error");
             EngineError::new(EngineErrorKind::Transient)
         })?;
 
@@ -219,10 +219,17 @@ mod tests {
 
         /// 铸出唯一租约 token（uuid v4）。
         fn lease() -> LeaseToken {
-            LeaseToken::new(uuid::Uuid::new_v4().to_string())
+            LeaseToken::mint()
         }
 
-        /// claim → commit → check = Duplicate（done 永久去重，PG 往返）。
+        /// 铸出 per-run 唯一 inbox key（`{prefix}-{uuid v4}`）——集成测试可复用长存外部 PG，固定
+        /// event_id 一旦被 `commit` 标成永久 `done`，下一轮同 key 首次 claim 会退化成 `Duplicate`；
+        /// 经此 funnel 让每次运行用全新 key，杜绝跨运行持久状态污染（亦消除散落的 `format!(uuid)` 重复）。
+        fn uk(prefix: &str) -> IdemKey {
+            k(&format!("{prefix}-{}", uuid::Uuid::new_v4()))
+        }
+
+        /// claim → commit → try_claim = Duplicate（done 永久去重，PG 往返）。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
         // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
@@ -230,22 +237,25 @@ mod tests {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
             let inbox = store.inbox(g("test-group"));
-            let key = k("pg-commit-evt-1");
+            let key = uk("pg-commit-evt");
             let lease_a = lease();
-            assert_eq!(inbox.check(&key, &lease_a).await.unwrap(), SeenState::Fresh);
+            assert_eq!(
+                inbox.try_claim(&key, &lease_a).await.unwrap(),
+                SeenState::Fresh
+            );
             assert_eq!(
                 inbox.commit(&key, &lease_a).await.unwrap(),
                 LeaseOutcome::Held
             );
-            // done 行：任意新 token check → Duplicate（DO UPDATE WHERE status='claimed' 为 false）。
+            // done 行：任意新 token try_claim → Duplicate（DO UPDATE WHERE status='claimed' 为 false）。
             assert_eq!(
-                inbox.check(&key, &lease()).await.unwrap(),
+                inbox.try_claim(&key, &lease()).await.unwrap(),
                 SeenState::Duplicate
             );
             Ok(())
         }
 
-        /// claim → release(CAS) → 再 check = Fresh（释放后可重领，PG 往返）。
+        /// claim → release(CAS) → 再 try_claim = Fresh（释放后可重领，PG 往返）。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
         // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
@@ -253,12 +263,18 @@ mod tests {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
             let inbox = store.inbox(g("test-group"));
-            let key = k("pg-release-evt-1");
+            let key = uk("pg-release-evt");
             let lease_a = lease();
-            assert_eq!(inbox.check(&key, &lease_a).await.unwrap(), SeenState::Fresh);
+            assert_eq!(
+                inbox.try_claim(&key, &lease_a).await.unwrap(),
+                SeenState::Fresh
+            );
             inbox.release(&key, &lease_a).await.unwrap();
-            // absent 行：新 token check → Fresh。
-            assert_eq!(inbox.check(&key, &lease()).await.unwrap(), SeenState::Fresh);
+            // absent 行：新 token try_claim → Fresh。
+            assert_eq!(
+                inbox.try_claim(&key, &lease()).await.unwrap(),
+                SeenState::Fresh
+            );
             Ok(())
         }
 
@@ -268,7 +284,7 @@ mod tests {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
             let inbox = store.inbox(g("test-group"));
-            let key = k("pg-absent-commit");
+            let key = uk("pg-absent-commit");
             assert_eq!(inbox.commit(&key, &lease()).await?, LeaseOutcome::Lost);
             Ok(())
         }
@@ -279,7 +295,7 @@ mod tests {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
             let inbox = store.inbox(g("test-group"));
-            let key = k("pg-absent-release");
+            let key = uk("pg-absent-release");
             assert!(inbox.release(&key, &lease()).await.is_ok());
             Ok(())
         }
@@ -294,11 +310,14 @@ mod tests {
             store.run_migrations().await?;
             let grp = "extend-takeover-grp";
             let inbox = store.inbox(g(grp));
-            let key = k(&format!("pg-extend-takeover-{}", uuid::Uuid::new_v4()));
+            let key = uk("pg-extend-takeover");
             let lease_a = lease();
 
             // claim。
-            assert_eq!(inbox.check(&key, &lease_a).await.unwrap(), SeenState::Fresh);
+            assert_eq!(
+                inbox.try_claim(&key, &lease_a).await.unwrap(),
+                SeenState::Fresh
+            );
 
             // 持有期间续租 → Held。
             assert_eq!(
@@ -335,12 +354,15 @@ mod tests {
             store.run_migrations().await?;
             let grp = "ttl-reclaim-grp";
             let inbox = store.inbox(g(grp));
-            let key = k(&format!("pg-ttl-reclaim-{}", uuid::Uuid::new_v4()));
+            let key = uk("pg-ttl-reclaim");
             let lease_a = lease();
             let ttl = super::super::INBOX_LEASE_TTL_SECONDS;
 
             // token A claim。
-            assert_eq!(inbox.check(&key, &lease_a).await.unwrap(), SeenState::Fresh);
+            assert_eq!(
+                inbox.try_claim(&key, &lease_a).await.unwrap(),
+                SeenState::Fresh
+            );
 
             // 回拨 claimed_at 超过 TTL（模拟 crash-after-claim，lease 过期）。
             sqlx::query(
@@ -354,9 +376,12 @@ mod tests {
             .execute(&store.pool)
             .await?;
 
-            // token B check → Fresh（TTL 重捞，stale claimed 行被新 token 接管）。
+            // token B try_claim → Fresh（TTL 重捞，stale claimed 行被新 token 接管）。
             let lease_b = lease();
-            assert_eq!(inbox.check(&key, &lease_b).await.unwrap(), SeenState::Fresh);
+            assert_eq!(
+                inbox.try_claim(&key, &lease_b).await.unwrap(),
+                SeenState::Fresh
+            );
 
             // token A commit → Lost（已被 B 接管，CAS 不命中；hard-fence）。
             assert_eq!(
@@ -384,12 +409,12 @@ mod tests {
             let inbox = store.inbox(g(grp));
 
             // ── commit wrong token ──────────────────────────────────────────────
-            let key_c = k(&format!("pg-commit-fence-{}", uuid::Uuid::new_v4()));
+            let key_c = uk("pg-commit-fence");
             let lease_mine = lease();
             let lease_wrong = lease();
 
             assert_eq!(
-                inbox.check(&key_c, &lease_mine).await.unwrap(),
+                inbox.try_claim(&key_c, &lease_mine).await.unwrap(),
                 SeenState::Fresh
             );
 
@@ -405,12 +430,12 @@ mod tests {
             );
 
             // ── release wrong token ─────────────────────────────────────────────
-            let key_r = k(&format!("pg-release-fence-{}", uuid::Uuid::new_v4()));
+            let key_r = uk("pg-release-fence");
             let lease_mine2 = lease();
             let lease_wrong2 = lease();
 
             assert_eq!(
-                inbox.check(&key_r, &lease_mine2).await.unwrap(),
+                inbox.try_claim(&key_r, &lease_mine2).await.unwrap(),
                 SeenState::Fresh
             );
 
@@ -419,7 +444,7 @@ mod tests {
 
             // 行仍被 mine2 持有 → Duplicate（DO UPDATE WHERE claimed_at 仍在 TTL 内）。
             assert_eq!(
-                inbox.check(&key_r, &lease()).await.unwrap(),
+                inbox.try_claim(&key_r, &lease()).await.unwrap(),
                 SeenState::Duplicate
             );
             Ok(())

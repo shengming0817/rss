@@ -76,25 +76,36 @@ pub enum SeenState {
     Duplicate,
 }
 
-/// 租约令牌（opaque newtype，私有字段 + funnel 构造，#1213）。
+/// 租约令牌（uuid v4 newtype，私有字段 + 唯一构造入口 [`LeaseToken::mint`]，#1213 / #1354 F4）。
 ///
-/// 消费方每次 claim 前铸出（uuid v4 文本），随 [`IdempotencyStore::check`] 传入；store 在 claimed 行
-/// stamp 此 token。后续 `extend`/`commit`/`release` 凭它做 **CAS 围栏**——令牌不符即判
-/// [`LeaseOutcome::Lost`]（claim 已被 TTL 重捞、他人接管），触发 hard-fence。
+/// 消费方每次 claim 前 [`mint`](LeaseToken::mint) 一枚（内部铸 uuid v4 文本），随
+/// [`IdempotencyStore::try_claim`] 传入；store 在 claimed 行 stamp 此 token。后续
+/// `extend`/`commit`/`release` 凭它做 **CAS 围栏**——令牌不符即判 [`LeaseOutcome::Lost`]
+/// （claim 已被 TTL 重捞、他人接管），触发 hard-fence。
 ///
 /// # Enforcement 分级
 ///
-/// - **调用方无法在 call-site 传裸 `String`**（须经 `LeaseToken::new` 构造后才符合
-///   `check`/`extend`/`commit`/`release` 形参类型）——类型系统强制（**Hard**）。
-/// - **不同消费者持有不同 token 而无法冒用**——依赖 uuid v4 熵与 token 不跨消费者传输的协议约定
-///   （**Medium**），非类型封闭；类型层不阻止同一进程构造任意 `LeaseToken`。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// - **token 必为 uuid v4**——唯一构造入口 `mint()` 内铸 `uuid::Uuid::new_v4()`，类型层**无**裸 `String`
+///   入口（已删 `new(raw)`，#1354 F4）；调用方无法构造非-uuid-v4 / 低熵 token——类型系统强制（**Hard**）。
+/// - **不同消费者持有不同 token 而无法冒用**——`mint()` 每次铸全新随机 uuid v4 + token 不跨消费者传输的
+///   协议约定（**Medium**）：类型层不阻止同进程再 `mint()` 别的 token，但无法**选定**特定值冒用他人持有的 token。
+///
+/// `Debug` 脱敏：token 是 lease TTL 窗口内的 CAS 围栏令牌，泄漏即可被 stale holder 冒用劫持 fence；
+/// 照 codebase 敏感 token 惯例（如 `VaultToken`）`Debug` 固定 `<redacted>`，不随结构化日志外泄。
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct LeaseToken(String);
 
+impl std::fmt::Debug for LeaseToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // reason: 围栏令牌脱敏，杜绝 `{:?}` 误入日志泄漏可劫持 CAS 的 token 文本。
+        f.write_str("LeaseToken(<redacted>)")
+    }
+}
+
 impl LeaseToken {
-    /// 由调用方铸出的不透明令牌构造（消费方传 uuid v4 文本）。
-    pub fn new(raw: impl Into<String>) -> Self {
-        Self(raw.into())
+    /// 铸一枚新租约令牌（内部 `uuid::Uuid::new_v4()`）——唯一构造入口，uuid v4 由此构造保证（#1354 F4）。
+    pub fn mint() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
     }
 
     /// 借出底层字符串视图（adapter 绑定到后端 CAS 谓词）。
@@ -121,7 +132,7 @@ pub enum LeaseOutcome {
 ///
 /// # 状态机（absent → claimed(token) → done）
 ///
-/// - `check`：absent / **TTL 过期的 claimed** → claimed(传入 token)（`Fresh`）；fresh-claimed / done →
+/// - `try_claim`：absent / **TTL 过期的 claimed** → claimed(传入 token)（`Fresh`）；fresh-claimed / done →
 ///   `Duplicate`。过期 claim 经 TTL 重捞（claimed 超 `lease_ttl` 未续租即可被新 token 接管），修
 ///   crash-after-claim 时 key 永久 `Duplicate` 的丢消息风险（硬崩溃下 `release` 走不到，#1213）。
 /// - `extend`：claimed(token) 续租（刷新 lease 到期点）；token 匹配 → `Held`，不符 → `Lost`（已被重捞）。
@@ -133,16 +144,16 @@ pub enum LeaseOutcome {
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait IdempotencyStore {
-    /// 铸 claim 并查询首见（claim-or-skip + TTL 重捞）。`lease` 是本次 claim 的令牌（消费方铸，uuid v4）。
+    /// 铸 claim 并查询首见（claim-or-skip + TTL 重捞）。`lease` 由 [`LeaseToken::mint`] 铸出（uuid v4）。
     ///
-    /// **写副作用（`Fresh` 路径）**：`check` 在 `Fresh` 路径上执行 `INSERT ... ON CONFLICT` / `SET NX`
-    /// 原子操作，将 `lease` token stamp 到后端——**不是只读谓词**（后续 issue 跟踪重命名为 `try_claim`）。
+    /// **写副作用（`Fresh` 路径）**：`try_claim` 在 `Fresh` 路径上执行 `INSERT ... ON CONFLICT` / `SET NX`
+    /// 原子操作，将 `lease` token stamp 到后端——**不是只读谓词**；方法名 `try_claim` 即点明 claim 写语义（#1354）。
     ///
     /// `Fresh` ⇒ 本消费者持有以 `lease` 标记的 claim，应执行副作用；`Duplicate` ⇒ 幂等短路（他人持有或已 done）。
     ///
     /// **`Duplicate` 路径**：传入的 `lease` **不会**写入后端——claim-or-reclaim 是单一原子操作，token 必须
     /// 在调用前铸出；若返回 `Duplicate`，调用方可丢弃该 token。
-    async fn check(
+    async fn try_claim(
         &self,
         key: &IdemKey,
         lease: &LeaseToken,
@@ -210,7 +221,11 @@ mod tests {
     }
 
     impl IdempotencyStore for FakeStore {
-        async fn check(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
+        async fn try_claim(
+            &self,
+            key: &IdemKey,
+            lease: &LeaseToken,
+        ) -> Result<SeenState, EngineError> {
             let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
             // reason: in-mem 操作恒成功，unwrap_or_else 处理 poisoned lock 后继续。
             if map.contains_key(key.as_str()) {
@@ -280,44 +295,44 @@ mod tests {
         IdemKey::parse(raw).unwrap()
     }
 
-    /// 测试令牌 helper。
-    fn tok(raw: &str) -> LeaseToken {
-        LeaseToken::new(raw)
+    /// 测试令牌 helper：每次铸一枚新 uuid v4（绑定变量复用同 token；内联调用得不同 token）。
+    fn tok() -> LeaseToken {
+        LeaseToken::mint()
     }
 
-    /// claim → commit(Held) → 再 check = Duplicate（done 永久去重）。
+    /// claim → commit(Held) → 再 try_claim = Duplicate（done 永久去重）。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    // reason: 状态机断言测试——store.check/commit 在 in-mem 实现中恒 Ok，item-level carve-out。
+    // reason: 状态机断言测试——store.try_claim/commit 在 in-mem 实现中恒 Ok，item-level carve-out。
     async fn state_machine_claim_commit_then_duplicate() {
         let store = FakeStore::new();
         let key = k("evt-commit-1");
-        let t = tok("lease-1");
-        assert_eq!(store.check(&key, &t).await.unwrap(), SeenState::Fresh);
+        let t = tok();
+        assert_eq!(store.try_claim(&key, &t).await.unwrap(), SeenState::Fresh);
         assert_eq!(store.commit(&key, &t).await.unwrap(), LeaseOutcome::Held);
         assert_eq!(
-            store.check(&key, &tok("lease-2")).await.unwrap(),
+            store.try_claim(&key, &tok()).await.unwrap(),
             SeenState::Duplicate
         );
     }
 
-    /// claim → release(CAS) → 再 check = Fresh（释放后可重领）。
+    /// claim → release(CAS) → 再 try_claim = Fresh（释放后可重领）。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
     async fn state_machine_claim_release_then_fresh() {
         let store = FakeStore::new();
         let key = k("evt-release-1");
-        let t = tok("lease-1");
-        assert_eq!(store.check(&key, &t).await.unwrap(), SeenState::Fresh);
+        let t = tok();
+        assert_eq!(store.try_claim(&key, &t).await.unwrap(), SeenState::Fresh);
         store.release(&key, &t).await.unwrap();
         assert_eq!(
-            store.check(&key, &tok("lease-2")).await.unwrap(),
+            store.try_claim(&key, &tok()).await.unwrap(),
             SeenState::Fresh
         );
     }
 
-    /// commit 对 absent key 返 Lost（hard-fence；不创建行，check 仍 Fresh）。
+    /// commit 对 absent key 返 Lost（hard-fence；不创建行，try_claim 仍 Fresh）。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     // reason: 状态机断言测试——store 方法在 in-mem 实现中恒 Ok，item-level carve-out。
@@ -326,12 +341,12 @@ mod tests {
         let key = k("evt-absent-commit");
         // 直接 commit，未 claim → Lost（无匹配 CAS）
         assert_eq!(
-            store.commit(&key, &tok("lease-1")).await.unwrap(),
+            store.commit(&key, &tok()).await.unwrap(),
             LeaseOutcome::Lost
         );
-        // 之后 check 仍可 Fresh（absent 状态未被写入 done）
+        // 之后 try_claim 仍可 Fresh（absent 状态未被写入 done）
         assert_eq!(
-            store.check(&key, &tok("lease-2")).await.unwrap(),
+            store.try_claim(&key, &tok()).await.unwrap(),
             SeenState::Fresh
         );
     }
@@ -344,10 +359,10 @@ mod tests {
         let store = FakeStore::new();
         let key = k("evt-absent-release");
         // 直接 release，未 claim
-        assert!(store.release(&key, &tok("lease-1")).await.is_ok());
-        // 之后 check 仍可 Fresh
+        assert!(store.release(&key, &tok()).await.is_ok());
+        // 之后 try_claim 仍可 Fresh
         assert_eq!(
-            store.check(&key, &tok("lease-2")).await.unwrap(),
+            store.try_claim(&key, &tok()).await.unwrap(),
             SeenState::Fresh
         );
     }
@@ -359,13 +374,16 @@ mod tests {
     async fn extend_held_while_owned_lost_on_token_mismatch() {
         let store = FakeStore::new();
         let key = k("evt-extend-1");
-        let mine = tok("lease-mine");
-        assert_eq!(store.check(&key, &mine).await.unwrap(), SeenState::Fresh);
+        let mine = tok();
+        assert_eq!(
+            store.try_claim(&key, &mine).await.unwrap(),
+            SeenState::Fresh
+        );
         // 持有者续租成功
         assert_eq!(store.extend(&key, &mine).await.unwrap(), LeaseOutcome::Held);
         // 他人令牌续租 → Lost
         assert_eq!(
-            store.extend(&key, &tok("lease-other")).await.unwrap(),
+            store.extend(&key, &tok()).await.unwrap(),
             LeaseOutcome::Lost
         );
     }
@@ -377,11 +395,14 @@ mod tests {
     async fn commit_with_stale_token_is_lost_hard_fence() {
         let store = FakeStore::new();
         let key = k("evt-fence-1");
-        let mine = tok("lease-mine");
-        assert_eq!(store.check(&key, &mine).await.unwrap(), SeenState::Fresh);
+        let mine = tok();
+        assert_eq!(
+            store.try_claim(&key, &mine).await.unwrap(),
+            SeenState::Fresh
+        );
         // stale holder（错误 token）commit → Lost（不可降级为 done）
         assert_eq!(
-            store.commit(&key, &tok("lease-stale")).await.unwrap(),
+            store.commit(&key, &tok()).await.unwrap(),
             LeaseOutcome::Lost
         );
         // 真持有者 commit → Held
@@ -395,8 +416,8 @@ mod tests {
     async fn extend_after_commit_is_lost() {
         let store = FakeStore::new();
         let key = k("evt-extend-done");
-        let t = tok("lease-1");
-        assert_eq!(store.check(&key, &t).await.unwrap(), SeenState::Fresh);
+        let t = tok();
+        assert_eq!(store.try_claim(&key, &t).await.unwrap(), SeenState::Fresh);
         assert_eq!(store.commit(&key, &t).await.unwrap(), LeaseOutcome::Held);
         assert_eq!(store.extend(&key, &t).await.unwrap(), LeaseOutcome::Lost);
     }
@@ -408,13 +429,16 @@ mod tests {
     async fn release_with_stale_token_is_noop() {
         let store = FakeStore::new();
         let key = k("evt-release-cas");
-        let mine = tok("lease-mine");
-        assert_eq!(store.check(&key, &mine).await.unwrap(), SeenState::Fresh);
+        let mine = tok();
+        assert_eq!(
+            store.try_claim(&key, &mine).await.unwrap(),
+            SeenState::Fresh
+        );
         // stale token release → no-op
-        store.release(&key, &tok("lease-stale")).await.unwrap();
+        store.release(&key, &tok()).await.unwrap();
         // claim 仍在（未被误删）→ Duplicate
         assert_eq!(
-            store.check(&key, &tok("lease-x")).await.unwrap(),
+            store.try_claim(&key, &tok()).await.unwrap(),
             SeenState::Duplicate
         );
     }
@@ -426,11 +450,11 @@ mod tests {
     async fn multiple_keys_independent_state_machines() {
         let store = FakeStore::new();
         let keys: &[&str] = &["evt-A", "evt-B", "evt-C"];
-        let t = tok("lease-shared");
+        let t = tok();
         // 全部 claim
         for &raw in keys {
             assert_eq!(
-                store.check(&k(raw), &t).await.unwrap(),
+                store.try_claim(&k(raw), &t).await.unwrap(),
                 SeenState::Fresh,
                 "raw={raw}"
             );
@@ -443,19 +467,41 @@ mod tests {
         store.release(&k("evt-B"), &t).await.unwrap();
         // A：done → Duplicate
         assert_eq!(
-            store.check(&k("evt-A"), &t).await.unwrap(),
+            store.try_claim(&k("evt-A"), &t).await.unwrap(),
             SeenState::Duplicate
         );
         // B：absent → Fresh
         assert_eq!(
-            store.check(&k("evt-B"), &t).await.unwrap(),
+            store.try_claim(&k("evt-B"), &t).await.unwrap(),
             SeenState::Fresh
         );
         // C：still claimed → Duplicate
         assert_eq!(
-            store.check(&k("evt-C"), &t).await.unwrap(),
+            store.try_claim(&k("evt-C"), &t).await.unwrap(),
             SeenState::Duplicate
         );
+    }
+
+    // ─── LeaseToken mint 硬化（F4：uuid v4 由构造保证，非协议约定）──────────────────
+
+    /// mint() 产出合法 uuid v4（version == Random）——uuid v4 从「协议约定」上移为「构造保证」。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 断言已知由 mint 铸出的 uuid 文本可解析，item-level carve-out（error-handling.md §Carve-out）。
+    fn mint_produces_valid_uuid_v4() {
+        let token = LeaseToken::mint();
+        let parsed = uuid::Uuid::parse_str(token.as_str()).unwrap();
+        assert_eq!(
+            parsed.get_version(),
+            Some(uuid::Version::Random),
+            "token={token:?}"
+        );
+    }
+
+    /// 两次 mint() 产出不同 token（uuid v4 熵——token CAS 围栏依赖唯一性）。
+    #[test]
+    fn two_mints_are_distinct() {
+        assert_ne!(LeaseToken::mint(), LeaseToken::mint());
     }
 
     // ─── IdemKey / ConsumerGroup 原有测试（保留）────────────────────────────────

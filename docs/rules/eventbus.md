@@ -103,7 +103,7 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 
 ### 租约续租 + leaseLost hard-fence（#1213）
 
-claim 是**带 TTL 的租约**：`IdempotencyStore::check(key, lease)` 由消费方铸 `LeaseToken`（uuid v4）传入，
+claim 是**带 TTL 的租约**：`IdempotencyStore::try_claim(key, lease)` 由消费方经 `LeaseToken::mint()` 铸 uuid v4 token 传入，
 claimed 行 stamp 该 token；**过期未续租**的 claim 可被新 token 重捞（修 crash-after-claim 时 key 永久
 `Duplicate` 的丢消息——硬崩溃下 `release` 走不到）。长 handler 由 ConsumerBase 后台按 **`lease_ttl/3`**
 （`LeaseConfig::from_ttl`，组合根由后端 claim TTL 派生注入）周期调 `extend(key, lease)` 续租，与 handler 执行
@@ -149,14 +149,15 @@ claimed 行 stamp 该 token；**过期未续租**的 claim 可被新 token 重�
 | handler `Ack` | commit key | `Ack` |
 | `Reject` / `Requeue` 耗尽 → DLX 写成功 | commit key | `Ack`（引擎自持 DLX，broker 移除） |
 | DLX 写失败 | release key | `Requeue`（broker 重投重试 DLX，防静默丢失） |
-| 幂等 `check` 瞬态 Err | 不 commit | `Requeue` |
+| 幂等 `try_claim` 瞬态 Err（`Transient`） | 不 commit | `Requeue`（退避重投） |
+| 幂等 `try_claim` 永久 Err（`Permanent`/`Invariant`，如鉴权/协议配置错） | 不 commit | `Reject`（→DLX，不无限重投，#1354） |
 | 租约丢失（续租或 commit CAS 返 `LeaseOutcome::Lost`，#1213） | cancel handler / 不 commit（hard-fence） | `Requeue`（claim 已被他人重捞，不双写 done） |
 | `Duplicate` | 跳过（不调 handler/不 commit） | `Ack`（已处理，移除） |
 | `IdemKey` parse 失败（malformed） | 不 commit（无法去重） | `Reject`（→broker DLX 留证，不无限重投） |
 | 未知 `SeenState` | 不 commit/release（保守） | `Requeue` |
 
 崩溃安全：消费者在 settle 前崩溃 / channel 关闭 → broker 自动 requeue 未 ack 投递（RabbitMQ channel close
-语义）→ 重投经 idempotency `check` 去重，达成 at-least-once。
+语义）→ 重投经 idempotency `try_claim` 去重，达成 at-least-once。
 
 **双端口拆分**：`Subscriber`+`MessageStream`（at-most-once：in-mem / MQTT QoS auto-ack / `run_dispatch`）与
 `AckableSubscriber`+`DeliveryStream`（at-least-once：AMQP / `run_consumer_ackable`）按投递保证并存。MQTT

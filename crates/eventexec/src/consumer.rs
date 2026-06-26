@@ -1,6 +1,6 @@
 //! ConsumerBase —— 幂等消费驱动（claim→handle→commit/dlx）。
 //!
-//! 单消息流程：`IdemKey::parse` → `idempotency.check` → handler bounded 重投 →
+//! 单消息流程：`IdemKey::parse` → `idempotency.try_claim` → handler bounded 重投 →
 //! `Ack` commit / `Reject` dlx / `Requeue` 预算耗尽后 dlx。
 //! DLX 路径对标 watermill PoisonQueue：原消息 ack 收口，死信另写持久化。
 //!
@@ -102,14 +102,14 @@ impl ConsumerMeta {
 /// 消费驱动：逐条 claim→handle→commit/dlx（bounded 重投，幂等去重）。
 ///
 /// `group` 参数仅用于结构化日志归因（`IdempotencyStore` 实现在构造时已绑 group，
-/// check/commit/release 以 `IdemKey` 为维度；group 重复传参会破坏简洁，故此处仅日志用）。
+/// try_claim/commit/release 以 `IdemKey` 为维度；group 重复传参会破坏简洁，故此处仅日志用）。
 /// 下游事件经 handler 自持 Publisher 发，不经本驱动中转（对齐 RSS DI port 隔离）。
 ///
 /// **重投次数**：handler 最多被调用 [`MAX_REDELIVERY`] 次（含首投），耗尽后消息进 DLX
 /// 而非再次 Requeue，防无限重投。
 ///
 /// **类型形态差异**：
-/// - `idempotency: Arc<S>`：check/commit/release 可被多次调用（bounded 循环），
+/// - `idempotency: Arc<S>`：try_claim/commit/release 可被多次调用（bounded 循环），
 ///   `Arc` 允许跨 spawn 共享同一 store 实例。
 /// - `dlx: Box<DynDeadLetterStore>`：每条消息至多调用一次 write_dead_letter，
 ///   one-shot 写入语义不需要共享，owned 注入更自然（类型层明确消费权）。
@@ -145,13 +145,13 @@ pub async fn run_consumer<S, H>(
 ///
 /// **终态→AckAction 映射**（见 `consume_one`/`handle_fresh`/`dead_letter` 的 acker 传递）：
 /// - handler Ack / DLX 写成功 → broker `Ack`
-/// - DLX 写失败 / check 返 Err / unknown SeenState → broker `Requeue`
+/// - DLX 写失败 / try_claim 返 Err / unknown SeenState → broker `Requeue`
 /// - Duplicate → broker `Ack`（幂等短路，已处理）
 /// - IdemKey parse 失败 → broker `Reject`（malformed，不重投）
 ///
 /// **settle 失败语义（不丢失）**：`settle` 失败仅结构化 error 日志、**不中断**消费循环。终态 `Ack` 走
 /// commit→settle 顺序（handler 副作用在 `handler()` 内已持久 + 幂等键已 `commit` 标记 done **先于** broker
-/// ack）；故 `settle(Ack)` 失败时，消息在 broker channel close 后被自动重投、再经幂等 `check` 去重
+/// ack）；故 `settle(Ack)` 失败时，消息在 broker channel close 后被自动重投、再经幂等 `try_claim` 去重
 /// （`Duplicate`→`Ack`）——副作用恰一次、消息不丢失（最坏仅滞留队列直至 ack 成功）。broker channel 错误致
 /// stream 终止后的**有监督重启**（+ settle 失败 metric）属 consumer worker 生命周期 follow-up（#1142 派生）。
 ///
@@ -183,7 +183,7 @@ pub async fn run_consumer_ackable<S, H>(
     }
 }
 
-/// 处理单条消息：parse key → check → handle_fresh 或幂等短路。
+/// 处理单条消息：parse key → try_claim → handle_fresh 或幂等短路。
 /// 从 `run_consumer` 抽出，控制各自认知复杂度 ≤15（rust-standards §工程护栏）。
 async fn consume_one<S, H>(
     idempotency: &Arc<S>,
@@ -214,18 +214,17 @@ async fn consume_one<S, H>(
         }
     };
 
-    // 本次 claim 的租约令牌（消费方铸，uuid v4）：check 在 claimed 行 stamp，extend/commit/release 凭它 CAS。
-    let lease = LeaseToken::new(uuid::Uuid::new_v4().to_string());
+    // 本次 claim 的租约令牌（消费方铸，uuid v4 内置于 mint）：try_claim 在 claimed 行 stamp，extend/commit/release 凭它 CAS。
+    let lease = LeaseToken::mint();
 
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs::dispatch_one 范式）。
-    match idempotency.check(&key, &lease).await {
-        // 瞬态后端故障：结构化 warn，不 commit（下次重投）。
+    match idempotency.try_claim(&key, &lease).await {
+        // 后端故障：结构化 warn，不 commit；disposition 按 EngineErrorKind 分流（见 try_claim_err_action）。
         Err(e) => {
-            log_check_failed(&msg, &e);
-            // 瞬态故障：broker Requeue（等下次重投）。
+            log_try_claim_failed(&msg, &e);
             settle(
                 acker,
-                diport::AckAction::Requeue,
+                try_claim_err_action(&e),
                 meta.domain(),
                 msg.id.as_str(),
             )
@@ -464,7 +463,7 @@ where
     }
 }
 
-/// release key（claimed→absent，token CAS）：dlx 写失败时调用，使 broker 重投时 check 回 Fresh。
+/// release key（claimed→absent，token CAS）：dlx 写失败时调用，使 broker 重投时 try_claim 回 Fresh。
 /// 令牌不符（claim 已被重捞）为 no-op（不误删他人 claim）。错误结构化 error 日志（不 panic）。
 async fn release_key<S>(
     idempotency: &Arc<S>,
@@ -491,7 +490,7 @@ async fn release_key<S>(
 /// 1. 结构化 `error!`（T007.5：domain/contract_id/topic/num_attempts/error_summary 五字段，含 message_id）。
 /// 2. `dlx.write_dead_letter(record)`。
 /// 3. dlx **写成功** → `idempotency.commit(key)`（标记 done，终态收口）+ broker `Ack`；
-///    dlx **写失败** → `idempotency.release(key)`（claimed→absent，使 broker 重投时 check 回 Fresh）
+///    dlx **写失败** → `idempotency.release(key)`（claimed→absent，使 broker 重投时 try_claim 回 Fresh）
 ///    + broker `Requeue`，避免静默丢失（消息永久消失 + 死信未落 DB）。
 ///
 /// 各步错误结构化 error 日志（不 panic）。
@@ -543,7 +542,7 @@ async fn dead_letter<S>(
             settle(acker, action, meta.domain(), msg.id.as_str()).await;
         }
         Err(e) => {
-            // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 check 回 Fresh、
+            // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 try_claim 回 Fresh、
             // 重新尝试 DLX，避免静默丢失（消息进 done + 死信未落 DB = 不可恢复审计盲点）。
             log_dlx_write_failed(meta, &e);
             release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
@@ -612,17 +611,29 @@ fn log_parse_failed(msg: &Message) {
     );
 }
 
-/// 幂等 check 瞬态后端故障（不 commit，下次重投）。
+/// 幂等 try_claim 后端故障（不 commit；disposition 由 [`try_claim_err_action`] 按 kind 决定）。
 ///
 /// `error = %error` 安全前提：`consistency::EngineError` 的 `Display` 实现恒为 const literal
 /// （不携 runtime 数据，见 `consistency::error` invariant）。若未来 `EngineError` 新增携
 /// runtime 数据的变体，此处须改走 `secure::redact_error` funnel。
-fn log_check_failed(msg: &Message, error: &consistency::error::EngineError) {
+fn log_try_claim_failed(msg: &Message, error: &consistency::error::EngineError) {
     tracing::warn!(
         message_id = msg.id.as_str(),
         error = %error,
-        "consumer: idempotency check failed, will retry on next delivery"
+        "consumer: idempotency try_claim failed"
     );
+}
+
+/// try_claim 后端故障 → broker 结算动作：`Transient` 重投（`Requeue`），其余（`Permanent`/`Invariant`）
+/// hard-fence 到 DLX（`Reject`）。避免永久错误（如 redis 鉴权/协议配置错，`classify_redis_error` 归
+/// `Permanent`）无限重投不收敛（#1354 review F2）。`is_transient` 是「可重试」单一判据
+/// （`consistency::error`），非-Transient 一律 fail-closed 到 `Reject`。
+fn try_claim_err_action(error: &consistency::error::EngineError) -> diport::AckAction {
+    if error.is_transient() {
+        diport::AckAction::Requeue
+    } else {
+        diport::AckAction::Reject
+    }
 }
 
 /// 幂等短路（已见，跳过）。
@@ -688,7 +699,7 @@ fn log_lease_lost(meta: &ConsumerMeta, message_id: &str) {
 
 /// 续租瞬态故障（#1213）：`extend` 返 `Err`（后端暂不可用）→ 续命重试（不误判丢租，commit 侧 CAS 兜底）。
 ///
-/// `error = %error` 安全前提同 [`log_check_failed`]：`EngineError` 的 `Display` 恒为 const literal。
+/// `error = %error` 安全前提同 [`log_try_claim_failed`]：`EngineError` 的 `Display` 恒为 const literal。
 fn log_extend_failed(
     meta: &ConsumerMeta,
     message_id: &str,
@@ -730,7 +741,7 @@ fn log_commit_lost(meta: &ConsumerMeta, message_id: &str) {
 
 /// commit 瞬态后端故障 error（done 标记未持久 → 降级 Requeue，待 broker 重投经幂等去重收口）。
 ///
-/// `error = %error` 安全前提同 [`log_check_failed`]：`EngineError` 的 `Display` 恒为 const literal。
+/// `error = %error` 安全前提同 [`log_try_claim_failed`]：`EngineError` 的 `Display` 恒为 const literal。
 fn log_commit_failed(
     meta: &ConsumerMeta,
     message_id: &str,
@@ -808,17 +819,18 @@ mod tests {
     // ── FakeIdempotencyStore ─────────────────────────────────────────────────
 
     /// 三态 fake store（Arc<Mutex> + Atomic，Send 友好，不跨 await 持锁——relay.rs FakeStore 范式）。
-    /// 可配 check 返 Fresh / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
-    /// 记录 check / commit / release / extend 调用计数。
+    /// 可配 try_claim 返 Fresh / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
+    /// 记录 try_claim / commit / release / extend 调用计数。
+    #[derive(Clone, Copy)]
     enum CheckResult {
         Fresh,
         Duplicate,
-        Err,
+        Err(consistency::error::EngineErrorKind),
     }
 
     struct FakeIdempotencyStore {
         check_result: CheckResult,
-        check_count: AtomicU32,
+        claim_count: AtomicU32,
         commit_count: AtomicU32,
         release_count: AtomicU32,
         extend_count: AtomicU32,
@@ -836,7 +848,7 @@ mod tests {
         fn with(check_result: CheckResult, commit_fails: bool) -> Arc<Self> {
             Arc::new(Self {
                 check_result,
-                check_count: AtomicU32::new(0),
+                claim_count: AtomicU32::new(0),
                 commit_count: AtomicU32::new(0),
                 release_count: AtomicU32::new(0),
                 extend_count: AtomicU32::new(0),
@@ -856,19 +868,31 @@ mod tests {
         }
 
         fn err() -> Arc<Self> {
-            Self::with(CheckResult::Err, false)
+            Self::with(
+                CheckResult::Err(consistency::error::EngineErrorKind::Transient),
+                false,
+            )
         }
 
-        /// Fresh check + commit 恒 Err（F1/C1：commit 瞬态失败终态须 broker Requeue、不可 Ack）。
+        /// try_claim 返**永久** Err（Permanent，如 redis 鉴权/协议错误经 `classify_redis_error`）——
+        /// 验消费侧按 `EngineError::is_transient` 分流到 `Reject`（→DLX，不无限重投），C2/#1354 review F2。
+        fn err_permanent() -> Arc<Self> {
+            Self::with(
+                CheckResult::Err(consistency::error::EngineErrorKind::Permanent),
+                false,
+            )
+        }
+
+        /// Fresh try_claim + commit 恒 Err（F1/C1：commit 瞬态失败终态须 broker Requeue、不可 Ack）。
         fn fresh_commit_fails() -> Arc<Self> {
             Self::with(CheckResult::Fresh, true)
         }
 
-        /// Fresh check + commit 恒 `Lost`（#1213：commit 侧 leaseLost hard-fence → Requeue 不 Ack）。
+        /// Fresh try_claim + commit 恒 `Lost`（#1213：commit 侧 leaseLost hard-fence → Requeue 不 Ack）。
         fn fresh_commit_loses_lease() -> Arc<Self> {
             Arc::new(Self {
                 check_result: CheckResult::Fresh,
-                check_count: AtomicU32::new(0),
+                claim_count: AtomicU32::new(0),
                 commit_count: AtomicU32::new(0),
                 release_count: AtomicU32::new(0),
                 extend_count: AtomicU32::new(0),
@@ -879,11 +903,11 @@ mod tests {
             })
         }
 
-        /// Fresh check + extend 第 `n+1` 次起返 `Lost`（#1213：续租侧 leaseLost hard-fence）。
+        /// Fresh try_claim + extend 第 `n+1` 次起返 `Lost`（#1213：续租侧 leaseLost hard-fence）。
         fn fresh_lease_lost_after(n: u32) -> Arc<Self> {
             Arc::new(Self {
                 check_result: CheckResult::Fresh,
-                check_count: AtomicU32::new(0),
+                claim_count: AtomicU32::new(0),
                 commit_count: AtomicU32::new(0),
                 release_count: AtomicU32::new(0),
                 extend_count: AtomicU32::new(0),
@@ -894,11 +918,11 @@ mod tests {
             })
         }
 
-        /// Fresh check + extend 前 `n` 次返 `Err`（瞬态续租故障），之后 `Held`（#1213：续租 Err 臂续命语义）。
+        /// Fresh try_claim + extend 前 `n` 次返 `Err`（瞬态续租故障），之后 `Held`（#1213：续租 Err 臂续命语义）。
         fn fresh_extend_errs_then_held(n: u32) -> Arc<Self> {
             Arc::new(Self {
                 check_result: CheckResult::Fresh,
-                check_count: AtomicU32::new(0),
+                claim_count: AtomicU32::new(0),
                 commit_count: AtomicU32::new(0),
                 release_count: AtomicU32::new(0),
                 extend_count: AtomicU32::new(0),
@@ -911,9 +935,9 @@ mod tests {
 
         #[allow(dead_code)]
         // reason: test helper 对称于 commit_count / release_count / extend_count；cfg(test) 内未用但保留
-        // 供后续 check 次数断言测试用。
-        fn check_count(&self) -> u32 {
-            self.check_count.load(Ordering::Acquire)
+        // 供后续 try_claim 次数断言测试用。
+        fn claim_count(&self) -> u32 {
+            self.claim_count.load(Ordering::Acquire)
         }
 
         fn commit_count(&self) -> u32 {
@@ -930,18 +954,16 @@ mod tests {
     }
 
     impl IdempotencyStore for FakeIdempotencyStore {
-        async fn check(
+        async fn try_claim(
             &self,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<SeenState, consistency::error::EngineError> {
-            self.check_count.fetch_add(1, Ordering::Release);
+            self.claim_count.fetch_add(1, Ordering::Release);
             match self.check_result {
                 CheckResult::Fresh => Ok(SeenState::Fresh),
                 CheckResult::Duplicate => Ok(SeenState::Duplicate),
-                CheckResult::Err => Err(consistency::error::EngineError::new(
-                    consistency::error::EngineErrorKind::Transient,
-                )),
+                CheckResult::Err(kind) => Err(consistency::error::EngineError::new(kind)),
             }
         }
 
@@ -1363,9 +1385,9 @@ mod tests {
         );
     }
 
-    // ── TC4：check 返 Duplicate ──────────────────────────────────────────────
+    // ── TC4：try_claim 返 Duplicate ──────────────────────────────────────────────
 
-    /// TC4：check 返 Duplicate → handler 0 次、commit 0 次、dlx 0 次。
+    /// TC4：try_claim 返 Duplicate → handler 0 次、commit 0 次、dlx 0 次。
     #[tokio::test]
     async fn tc4_duplicate_skips_handler_and_commit() {
         let idem = FakeIdempotencyStore::duplicate();
@@ -1388,9 +1410,9 @@ mod tests {
         assert_eq!(dlx_store.write_count(), 0, "dlx 应 0 次");
     }
 
-    // ── TC6：check 返 Err ────────────────────────────────────────────────────
+    // ── TC6：try_claim 返 Err ────────────────────────────────────────────────────
 
-    /// TC6：check 返 Err（瞬态后端故障）→ handler 0 次、commit 0 次、dlx 0 次（不做任何终态动作）。
+    /// TC6：try_claim 返 Err（瞬态后端故障）→ handler 0 次、commit 0 次、dlx 0 次（不做任何终态动作）。
     #[tokio::test]
     async fn tc6_check_err_skips_handler_and_commit() {
         let idem = FakeIdempotencyStore::err();
@@ -1399,7 +1421,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
 
         run_consumer(
-            stream_of(&[("msg-check-err", b"payload")]),
+            stream_of(&[("msg-try_claim-err", b"payload")]),
             idem.clone(),
             dlx,
             meta(),
@@ -1411,10 +1433,10 @@ mod tests {
         assert_eq!(
             handler_count.load(Ordering::Relaxed),
             0,
-            "check Err 时 handler 应 0 次"
+            "try_claim Err 时 handler 应 0 次"
         );
-        assert_eq!(idem.commit_count(), 0, "check Err 时 commit 应 0 次");
-        assert_eq!(dlx_store.write_count(), 0, "check Err 时 dlx 应 0 次");
+        assert_eq!(idem.commit_count(), 0, "try_claim Err 时 commit 应 0 次");
+        assert_eq!(dlx_store.write_count(), 0, "try_claim Err 时 dlx 应 0 次");
     }
 
     // ── TC7：IdemKey parse 失败 ──────────────────────────────────────────────
@@ -1782,7 +1804,7 @@ mod tests {
         );
     }
 
-    /// ACK-5：幂等 check 返 Err → settle=[Requeue]，handler 0，commit 0。
+    /// ACK-5：幂等 try_claim 返 Err → settle=[Requeue]，handler 0，commit 0。
     #[tokio::test]
     async fn ack5_check_err_settles_requeue() {
         let idem = FakeIdempotencyStore::err();
@@ -1806,11 +1828,41 @@ mod tests {
         assert_eq!(
             ackers[0].settled_actions(),
             vec![AckAction::Requeue],
-            "check Err 后 settle 应为 [Requeue]"
+            "try_claim Err 后 settle 应为 [Requeue]"
         );
     }
 
-    /// ACK-6：check 返 Duplicate → settle=[Ack]，handler 0，commit 0。
+    /// ACK-5b：幂等 try_claim 返**永久** Err（Permanent）→ settle=[Reject]（→DLX，不无限重投），handler 0，commit 0。
+    /// C2/#1354 review F2：permanent claim 错误（如 redis 鉴权/协议，`classify_redis_error`）须 hard-fence 到
+    /// DLX，区别于 `Transient` 的 Requeue——否则配置/协议错误下消息无限重投不收敛。
+    #[tokio::test]
+    async fn ack5b_permanent_check_err_settles_reject() {
+        let idem = FakeIdempotencyStore::err_permanent();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack5b", b"payload")]);
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_ack(handler_count.clone()),
+            lease_cfg_test(),
+        )
+        .await;
+
+        assert_eq!(handler_count.load(Ordering::Relaxed), 0, "handler 应 0 次");
+        assert_eq!(idem.commit_count(), 0, "commit 应 0");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Reject],
+            "永久 try_claim Err 应 hard-fence 到 [Reject]（→DLX，不无限重投）"
+        );
+    }
+
+    /// ACK-6：try_claim 返 Duplicate → settle=[Ack]，handler 0，commit 0。
     #[tokio::test]
     async fn ack6_duplicate_settles_ack() {
         let idem = FakeIdempotencyStore::duplicate();

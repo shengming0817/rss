@@ -67,11 +67,11 @@
 
 **Why this priority**: at-least-once 投递必然有重投；没有消费幂等，relay/saga/projection/command 的重投会产生重复副作用。是所有消费链的正确性前提。
 
-**Independent Test**: 表驱动覆盖 `Fresh`/`Duplicate` 状态转移；同一 key 连续 check 3 次仅首次 `Fresh`；consumer group 名变更后去重失效（负向断言）；resolver 在缺 redis 配置的多副本拓扑下 fail-closed。
+**Independent Test**: 表驱动覆盖 `Fresh`/`Duplicate` 状态转移；同一 key 连续 try_claim 3 次仅首次 `Fresh`；consumer group 名变更后去重失效（负向断言）；resolver 在缺 redis 配置的多副本拓扑下 fail-closed。
 
 **Acceptance Scenarios**:
 
-1. **Given** 一个全新 idem key，**When** 首次 `check`，**Then** 返回 `Fresh`；同 key 再次 `check` 返回 `Duplicate`。
+1. **Given** 一个全新 idem key，**When** 首次 `try_claim`，**Then** 返回 `Fresh`；同 key 再次 `try_claim` 返回 `Duplicate`。
 2. **Given** demo 拓扑，**When** resolver 解析 claimer，**Then** 得 in-mem claimer（sealed，仅 resolver 可达）。
 3. **Given** 多副本拓扑但缺 redis 配置，**When** 启动解析 claimer，**Then** 启动期报错 fail-closed，不回落 in-mem。
 
