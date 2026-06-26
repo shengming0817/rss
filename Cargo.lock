@@ -4450,6 +4450,8 @@ name = "secure"
 version = "0.0.0"
 dependencies = [
  "argon2",
+ "base64",
+ "sha2 0.10.9",
  "thiserror",
 ]
 

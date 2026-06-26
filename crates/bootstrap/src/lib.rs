@@ -22,8 +22,12 @@
 //! - [`replaydeps`]：topology-gated 幂等 claimer 选型——demo 拓扑用 in-mem claimer，
 //!   durable 拓扑用 Redis claimer；[`replaydeps::resolve`] 是纯策略函数，不构造 adapter。
 //!
+//! - [`refreshstoredeps`]：topology-gated refresh token store 选型——demo 拓扑用 in-mem 替身，
+//!   durable 拓扑用 postgres；[`refreshstoredeps::resolve`] 是纯策略函数，不构造 adapter。
+//!   本轮无 bin 消费方（live consumer = #1017 login 接线）。
+//!
 //! - [`topology`]：部署拓扑词汇单源（[`Topology`] 枚举），被 replaydeps / eventtransport /
-//!   sagaprojectiondeps 等 resolver 共用。
+//!   sagaprojectiondeps / refreshstoredeps 等 resolver 共用。
 //!
 //! [`Domain::init`]: domain::Domain::init
 //! [`Registry::readyz_report`]: registry::Registry::readyz_report
@@ -32,6 +36,7 @@
 pub mod domain;
 pub mod eventtransport;
 pub mod module;
+pub mod refreshstoredeps;
 pub mod registry;
 pub mod replaydeps;
 pub mod sagaprojectiondeps;
@@ -41,6 +46,7 @@ pub mod topology;
 pub use domain::{Domain, KernelError, compose};
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use module::{DomainModule, ModuleFactory};
+pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
 pub use registry::{
     ConsumerHandlerFn, HealthProbe, HealthReporter, Registry, SubscriberBinding,
     SubscriberErrorDisposition, SubscriberHandler, SubscriberHandlerError,

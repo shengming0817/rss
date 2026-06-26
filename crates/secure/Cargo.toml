@@ -9,6 +9,9 @@ publish = false
 thiserror = { workspace = true }
 # 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐（OsRng）。
 argon2 = { workspace = true }
+# refresh token 原语（secure::refresh，#1325）：SHA-256 摘要（不可逆持久化查找键）+ base64url 编码不透明 secret。
+sha2 = { workspace = true }
+base64 = { workspace = true }
 
 [lints]
 workspace = true

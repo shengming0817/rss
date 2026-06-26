@@ -26,8 +26,9 @@ use dynosaur::dynosaur;
 // PgCredentialRepo 须在事务内对其 from_parts 重建 / record_failure 推进 / 访问器回写锁定三列 ⇒ 经本 facade
 // 跨 crate 暴露（策略阈值仍域内单源、字段私有不可伪造）。其余符号均为现役 port 签名实体。
 pub use crate::domain::{
-    AccountLockout, AccountStatus, AuthOutcome, Credential, IdentityError, LoginIdentifier, Role,
-    RoleId, Session, SessionId,
+    AccountLockout, AccountStatus, AuthOutcome, Credential, IdentityError, LoginIdentifier,
+    RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, Role,
+    RoleId, Session, SessionId, kind_from_db, kind_to_db,
 };
 pub use vocab::TenantId;
 
@@ -220,6 +221,68 @@ pub trait SessionLifecycleLocal {
     /// **软撤销（L1，logout）**：域侧软撤销会话（幂等——重复 / 未知 / 跨租均 `Ok` 且 no-op）。已颁 JWT 在 TTL
     /// 内仍有效（硬吊销延 #1003）。
     async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError>;
+}
+
+/// refresh token 持久化 store DI port（域形；provider 可换：prod postgres / test in-mem）——#1325。
+///
+/// 公开 [`RefreshTokenStore`] 是 **Send 变体**（adapter `impl RefreshTokenStore for ...`），
+/// [`DynRefreshTokenStore`] 是其 dyn-compatible wrapper（组合根经 `Box<DynRefreshTokenStore>` 注入，ADR-004 C1/C5）。
+/// 归属为域形 port（签名引用 [`RefreshTokenRecord`]/[`RefreshTokenId`]/[`RefreshTokenHash`]）→ 本域 crate
+/// `ports`，非 diport（ADR-005 category line，同 [`SessionLifecycle`]）。
+///
+/// **哈希存储（不存明文）**：store 只持 secret 的 SHA-256 摘要（[`RefreshTokenHash`]）——攻陷 store 不泄露可用
+/// refresh token（摘要不可逆）。secret 生成 / 摘要计算在 `secure::refresh`（base 层 crypto），编排在
+/// `application::RefreshService`（域 / store 不做 crypto）。
+///
+/// **租户隔离由签名承载（fail-closed，同 `CredentialRepo`/`SessionLifecycle`）**：所有方法接 typed
+/// [`TenantId`] 位参做 store scope；跨租 `find_by_hash`→`None`（不泄露存在性）、`rotate`→CAS miss、
+/// `revoke`/`revoke_lineage`→幂等 no-op。
+///
+/// **reuse-detection（旧 refresh 一次性 + 失窃检测）**：rotation 经 [`rotate`](RefreshTokenStoreLocal::rotate)
+/// 的**原子 CAS** 保证旧 token 一次性消费；命中已消费 / 已撤销 token（重放）由 application 经
+/// [`revoke_lineage`](RefreshTokenStoreLocal::revoke_lineage) 级联撤销整条谱系（OAuth refresh rotation 标准）。
+///
+/// ref: ory/fosite handler/oauth2/flow_refresh.go@master（refresh rotation + graceful reuse-detection，概念谱系）
+/// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
+#[trait_variant::make(RefreshTokenStore: Send)]
+#[dynosaur(pub DynRefreshTokenStore = dyn(box) RefreshTokenStore, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RefreshTokenStore` 变体 +
+// dynosaur `DynRefreshTokenStore` 承载（DI 注入走 Send wrapper）。与 SessionLifecycle / diport DI port 同范式。
+pub trait RefreshTokenStoreLocal {
+    /// 持久化新签发记录（`status = Active`；签发链根 `lineage_id == id`）。
+    async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+
+    /// 按 secret 摘要查找（不存在 / 跨租 → `Ok(None)`，不泄露存在性）。返回的记录含 status——application 据此
+    /// 判活跃 / 重放（命中非 Active = 重放）。
+    async fn find_by_hash(
+        &self,
+        tenant: TenantId,
+        hash: RefreshTokenHash,
+    ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+
+    /// **原子 CAS 轮换**：仅当 `rotation.old_id()` 当前 `status == Active` 时，**同一事务**内标其 `Consumed`
+    /// + 插入 `rotation.new_record()`。
+    ///
+    /// 入参是 sealed [`RefreshRotation`] 命令（由源 record `begin_rotation` 派生）——tenant / parent / lineage
+    /// 已从源 record 派生，错位组合类型层不可表达（REFRESH-ROTATE-LINEAGE-01，#284 F2）。store 据
+    /// `rotation.new_record().tenant()` 注入 scope（无独立 `tenant` 入参可错位）。
+    ///
+    /// 返回 `Ok(true)` = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；`Ok(false)` = old 已非 Active
+    /// （并发轮换 / 重放胜出者已消费它）——**不写 new**，由 application 据此触发 reuse-detection 级联撤销。
+    /// 旧 refresh 一次性失效在类型层 + 事务 CAS 双重保证（杜绝 TOCTOU 双换）。
+    async fn rotate(&self, rotation: RefreshRotation) -> Result<bool, IdentityError>;
+
+    /// **级联撤销整条谱系**（reuse-detection + logout）：把 `lineage_id` 家族全部记录置 `Revoked`。幂等
+    /// （未知 / 跨租 / 已撤销均 `Ok` 且 no-op）。
+    ///
+    /// logout 与 reuse-detection 共用谱系级撤销——logout 须使活跃 token 及其整条轮换链失效（否则已轮换出的
+    /// 子 token 仍可用），故无独立单条 `revoke(id)`（YAGNI：单条撤销无消费方）。
+    async fn revoke_lineage(
+        &self,
+        tenant: TenantId,
+        lineage_id: RefreshTokenId,
+    ) -> Result<(), IdentityError>;
 }
 
 #[cfg(test)]
@@ -471,6 +534,86 @@ mod smoke_credential {
             async fn save(&self, credential: Credential) -> Result<(), IdentityError>;
             async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError>;
             async fn lockout_status(&self, tenant: TenantId, login: LoginIdentifier, now: SystemTime) -> Result<bool, IdentityError>;
+        }
+    }
+}
+
+#[cfg(test)]
+mod smoke_refresh {
+    //! build smoke：`RefreshTokenStore` 域形 async port 同范式（PORT-SHAPE-01/02，#1325）——native-AFIT impl +
+    //! mockall mock 均经 `Box<DynRefreshTokenStore>` 装入 + `Send`。`NoopRefreshTokenStore` body `todo!()`，
+    //! 故只构造 Dyn wrapper + 断言 `Send`，**不 `.await`**（真实行为由 `internal::mem::InMemRefreshTokenStore`
+    //! + `application::RefreshService` 集成测试覆盖）。
+    use super::{
+        DynRefreshTokenStore, IdentityError, RefreshRotation, RefreshTokenHash, RefreshTokenId,
+        RefreshTokenRecord, RefreshTokenStore, TenantId,
+    };
+
+    struct NoopRefreshTokenStore;
+    impl RefreshTokenStore for NoopRefreshTokenStore {
+        async fn insert(&self, _record: RefreshTokenRecord) -> Result<(), IdentityError> {
+            todo!()
+        }
+        async fn find_by_hash(
+            &self,
+            _tenant: TenantId,
+            _hash: RefreshTokenHash,
+        ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+            todo!()
+        }
+        async fn rotate(&self, _rotation: RefreshRotation) -> Result<bool, IdentityError> {
+            todo!()
+        }
+        async fn revoke_lineage(
+            &self,
+            _tenant: TenantId,
+            _lineage_id: RefreshTokenId,
+        ) -> Result<(), IdentityError> {
+            todo!()
+        }
+    }
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 `Send`。
+    #[test]
+    fn refresh_store_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynRefreshTokenStore> =
+            DynRefreshTokenStore::new_box(NoopRefreshTokenStore);
+        assert_send(&from_impl);
+        let from_mock: Box<DynRefreshTokenStore> =
+            DynRefreshTokenStore::new_box(MockTestRefreshTokenStore::new());
+        assert_send(&from_mock);
+    }
+
+    // PORT-SHAPE-02：消费侧构造器必填位置参注入（`Box<DynRefreshTokenStore>` 非 Option，缺失即编译错误）。
+    struct RefreshStoreService {
+        _store: Box<DynRefreshTokenStore<'static>>,
+    }
+    impl RefreshStoreService {
+        fn new(store: Box<DynRefreshTokenStore<'static>>) -> Self {
+            Self { _store: store }
+        }
+    }
+
+    #[test]
+    fn refresh_store_is_required_ctor_injectable() {
+        let from_impl =
+            RefreshStoreService::new(DynRefreshTokenStore::new_box(NoopRefreshTokenStore));
+        assert_send(&from_impl._store);
+        let from_mock = RefreshStoreService::new(DynRefreshTokenStore::new_box(
+            MockTestRefreshTokenStore::new(),
+        ));
+        assert_send(&from_mock._store);
+    }
+
+    mockall::mock! {
+        TestRefreshTokenStore {}
+        impl RefreshTokenStore for TestRefreshTokenStore {
+            async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+            async fn find_by_hash(&self, tenant: TenantId, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+            async fn rotate(&self, rotation: RefreshRotation) -> Result<bool, IdentityError>;
+            async fn revoke_lineage(&self, tenant: TenantId, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;
         }
     }
 }

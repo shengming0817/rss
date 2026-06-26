@@ -2873,6 +2873,8 @@ fn role_tenant(raw: &str) -> Result<TenantId, Box<dyn std::error::Error + Send +
 
 // CRUD：save 新角色 → find 往返一致；同 id 二次 save → upsert 覆盖 name+permissions（非新增行）；查无 → None。
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used)]
+// reason: 已保存/upserted role 必定可查到；集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
 async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -2929,6 +2931,8 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
 
 // tenant 行级隔离：A 保存的角色 B 查不到（负例）；A 自己可见（正例 anti-vacuity）。
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used)]
+// reason: 同租 find 必定可见（anti-vacuity 正例）；item-level carve-out（error-handling.md §Carve-out）。
 async fn role_repo_tenant_row_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -2960,6 +2964,8 @@ async fn role_repo_tenant_row_isolation() -> TestResult {
 
 // 并发：同 (tenant,id) 并发 save → ON CONFLICT 收敛、全 Ok（无 PK 错逃逸）、终态单行；不同 id 并发 → 各自落库。
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used)]
+// reason: tokio::spawn join 必定成功（task 正常 Ok）；converged role 必定可查到；item-level carve-out（error-handling.md §Carve-out）。
 async fn role_repo_concurrent_save_converges() -> TestResult {
     use std::sync::Arc;
 
@@ -3136,7 +3142,7 @@ async fn t20_rls_sessions_enforces_tenant_isolation() -> TestResult {
             "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
              VALUES ($1, $2, $3::uuid, now() + interval '1 hour', now())",
         )
-        .bind(&uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind("rls-test-subject")
         .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
         .execute(&mut *tx)
@@ -3581,6 +3587,612 @@ async fn t23_secret_refs_rls_isolation() -> TestResult {
         );
         tx.rollback().await?;
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── RT: PgRefreshTokenStore 集成验证（#1325）────────────────────────────────────
+//
+// 覆盖：insert→find_by_hash 往返；rotate CAS（Active→true, 再次 rotate same old→false）；
+// rotate 后 old 变 consumed（find 仍可查到，status=consumed）；revoke_lineage 整条谱系变 revoked；
+// 跨租隔离（tenant B 查 tenant A 的 hash → None）。
+
+use identity::ports::{RefreshTokenStore, TenantId as RtTenantId};
+use vocab::PrincipalKind;
+
+use crate::PgRefreshTokenStore;
+
+/// 构造测试用固定 hash（32 字节全 0xAB 填充，可识别但不冲突）。
+fn test_hash_for(suffix: u8) -> [u8; 32] {
+    [suffix; 32]
+}
+
+/// RT-1：insert → find_by_hash 往返——record 各字段正确重建。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: uuid / TenantId parse 是已知合法值；find_by_hash 结果必定 Some；集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
+async fn rt1_insert_then_find_by_hash_roundtrip() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = RtTenantId::parse(&tenant_str).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let lineage = id.clone(); // 签发根：lineage_id == id
+    let hash_bytes = test_hash_for(0xA1);
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = issued + Duration::from_secs(3_600);
+
+    let record = RefreshTokenRecord::hydrate(
+        id.clone(),
+        tenant,
+        "alice-subject",
+        PrincipalKind::User,
+        hash_bytes,
+        None, // 签发根 parent_id = None
+        lineage.clone(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    // RefreshTokenHash::new は pub(crate)——hydrate した record から clone して取り出す（外部 crate 直接构造不可）。
+    let hash_to_find = record.token_hash().clone();
+
+    let rt_store = PgRefreshTokenStore::new(&store);
+    rt_store.insert(record).await?;
+
+    let found = rt_store.find_by_hash(tenant, hash_to_find).await?;
+    let found = found.expect("rt1: 应能按 hash 找到刚写入的 record");
+
+    assert_eq!(found.id().as_str(), id, "rt1: id 往返");
+    assert_eq!(found.subject(), "alice-subject", "rt1: subject 往返");
+    assert_eq!(found.kind(), PrincipalKind::User, "rt1: kind 往返");
+    assert_eq!(found.status(), RefreshStatus::Active, "rt1: status=active");
+    assert!(found.parent_id().is_none(), "rt1: 签发根 parent_id=None");
+    assert_eq!(found.lineage_id().as_str(), lineage, "rt1: lineage_id 往返");
+    // 时间精度：epoch 秒往返，millisecond sub-second 被截断，断言到秒粒度。
+    assert_eq!(
+        found
+            .issued_at()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        issued
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "rt1: issued_at 往返"
+    );
+    assert_eq!(
+        found
+            .expires_at()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expires
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "rt1: expires_at 往返"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-2：rotate CAS（Active → consumed + new 写入）返 true；再次 rotate 同 old → false（already consumed）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: uuid / TenantId parse 已知合法值；old/new record 必定可查到；集成测试 happy-path；item-level carve-out。
+async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = RtTenantId::parse(&tenant_str).unwrap();
+    let old_id_str = uuid::Uuid::new_v4().to_string();
+    let lineage_str = old_id_str.clone();
+    let hash_old = test_hash_for(0xB1);
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_100_000);
+    let expires = issued + Duration::from_secs(3_600);
+
+    // 写入 old（Active）——clone id 和 hash 供后续调用（RefreshTokenId::new / RefreshTokenHash::new 是 pub(crate)）。
+    let old_record = RefreshTokenRecord::hydrate(
+        old_id_str.clone(),
+        tenant,
+        "bob",
+        PrincipalKind::User,
+        hash_old,
+        None,
+        lineage_str.clone(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let hash_old_typed = old_record.token_hash().clone();
+    // sealed command: clone 源 record 供 begin_rotation（移动前保留引用，rotate 不再接受裸 id/record）。
+    let old_for_rotate = old_record.clone();
+    let rt_store = PgRefreshTokenStore::new(&store);
+    rt_store.insert(old_record).await?;
+
+    // 构造 new record（rotation 子节点），clone hash 供后续 find 使用。
+    let new_id_str = uuid::Uuid::new_v4().to_string();
+    let hash_new = test_hash_for(0xB2);
+    let new_record = RefreshTokenRecord::hydrate(
+        new_id_str.clone(),
+        tenant,
+        "bob",
+        PrincipalKind::User,
+        hash_new,
+        Some(old_id_str.clone()),
+        lineage_str.clone(),
+        RefreshStatus::Active,
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let hash_new_typed = new_record.token_hash().clone();
+
+    // 首次 rotate：old Active → CAS 命中 → true，new 已写入。
+    // begin_rotation 从 old_for_rotate（同一 tenant）派生 sealed 命令（REFRESH-ROTATE-LINEAGE-01）。
+    let rotation1 = old_for_rotate.begin_rotation(
+        new_record.id().clone(),
+        new_record.token_hash().clone(),
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let result = rt_store.rotate(rotation1).await?;
+    assert!(result, "rt2: 首次 rotate 应返回 true（CAS 命中）");
+
+    // 验证 old 变 consumed。
+    let old_found = rt_store
+        .find_by_hash(tenant, hash_old_typed)
+        .await?
+        .expect("rt2: old 仍可查到");
+    assert_eq!(
+        old_found.status(),
+        RefreshStatus::Consumed,
+        "rt2: old 应为 consumed"
+    );
+
+    // 验证 new 可查到且为 Active。
+    let new_found = rt_store
+        .find_by_hash(tenant, hash_new_typed)
+        .await?
+        .expect("rt2: new 应可查到");
+    assert_eq!(
+        new_found.status(),
+        RefreshStatus::Active,
+        "rt2: new 应为 active"
+    );
+
+    // 再次 rotate 同 old（已 consumed）→ CAS miss → false，new2 不写入。
+    let new2_record = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "bob",
+        PrincipalKind::User,
+        test_hash_for(0xB3),
+        Some(old_id_str.clone()),
+        lineage_str.clone(),
+        RefreshStatus::Active,
+        issued + Duration::from_secs(2),
+        expires + Duration::from_secs(2),
+    );
+    let hash_new2_typed = new2_record.token_hash().clone();
+    let rotation2 = old_for_rotate.begin_rotation(
+        new2_record.id().clone(),
+        new2_record.token_hash().clone(),
+        issued + Duration::from_secs(2),
+        expires + Duration::from_secs(2),
+    );
+    let result2 = rt_store.rotate(rotation2).await?;
+    assert!(
+        !result2,
+        "rt2: 再次 rotate consumed old 应返回 false（CAS miss）"
+    );
+
+    // new2 不应被写入。
+    let new2_found = rt_store.find_by_hash(tenant, hash_new2_typed).await?;
+    assert!(new2_found.is_none(), "rt2: CAS miss 时 new2 不应写入");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-3：revoke_lineage 把整条谱系（multiple records）全部置 Revoked；幂等（再次调用也 Ok）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: uuid / TenantId parse 已知合法值；revoked records 仍可按 hash 查到；集成测试 happy-path；item-level carve-out。
+async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = RtTenantId::parse(&tenant_str).unwrap();
+    let lineage_str = uuid::Uuid::new_v4().to_string();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_200_000);
+    let expires = issued + Duration::from_secs(3_600);
+    let rt_store = PgRefreshTokenStore::new(&store);
+
+    // 插入同一 lineage 的两条记录（root + child）——clone 类型值供后续 revoke/find 使用。
+    // RefreshTokenId::new / RefreshTokenHash::new 是 pub(crate)，从 hydrate 后的 record clone 取出。
+    let root_id = uuid::Uuid::new_v4().to_string();
+    let root_record = RefreshTokenRecord::hydrate(
+        root_id.clone(),
+        tenant,
+        "carol",
+        PrincipalKind::Admin,
+        test_hash_for(0xC1),
+        None,
+        lineage_str.clone(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let lineage_id = root_record.lineage_id().clone();
+    let hash_root_typed = root_record.token_hash().clone();
+    rt_store.insert(root_record).await?;
+
+    let child_record = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "carol",
+        PrincipalKind::Admin,
+        test_hash_for(0xC2),
+        Some(root_id.clone()),
+        lineage_str.clone(),
+        RefreshStatus::Consumed,
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let hash_child_typed = child_record.token_hash().clone();
+    rt_store.insert(child_record).await?;
+
+    // revoke_lineage → 整条谱系置 Revoked。
+    rt_store.revoke_lineage(tenant, lineage_id.clone()).await?;
+
+    // root 变 revoked。
+    let root_found = rt_store
+        .find_by_hash(tenant, hash_root_typed)
+        .await?
+        .expect("rt3: root 仍可查到");
+    assert_eq!(
+        root_found.status(),
+        RefreshStatus::Revoked,
+        "rt3: root 应为 revoked"
+    );
+
+    // child 变 revoked。
+    let child_found = rt_store
+        .find_by_hash(tenant, hash_child_typed)
+        .await?
+        .expect("rt3: child 仍可查到");
+    assert_eq!(
+        child_found.status(),
+        RefreshStatus::Revoked,
+        "rt3: child 应为 revoked"
+    );
+
+    // 幂等：再次 revoke_lineage 也 Ok（0 行 UPDATE）。
+    rt_store.revoke_lineage(tenant, lineage_id).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-4：跨租隔离——tenant B 查 tenant A 的 hash → None（不泄露存在性）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid / TenantId parse 已知合法值；集成测试 happy-path；item-level carve-out。
+async fn rt4_cross_tenant_isolation() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_a_str = uuid::Uuid::new_v4().to_string();
+    let tenant_b_str = uuid::Uuid::new_v4().to_string();
+    let tenant_a = RtTenantId::parse(&tenant_a_str).unwrap();
+    let tenant_b = RtTenantId::parse(&tenant_b_str).unwrap();
+
+    let id_a = uuid::Uuid::new_v4().to_string();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_300_000);
+    let expires = issued + Duration::from_secs(3_600);
+
+    // tenant A 写入一条 record，clone hash 供后续 find 使用（RefreshTokenHash::new 是 pub(crate)）。
+    let record_a = RefreshTokenRecord::hydrate(
+        id_a.clone(),
+        tenant_a,
+        "dave",
+        PrincipalKind::User,
+        test_hash_for(0xD1),
+        None,
+        id_a.clone(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let hash_a_typed = record_a.token_hash().clone();
+
+    let rt_store = PgRefreshTokenStore::new(&store);
+    rt_store.insert(record_a).await?;
+
+    // tenant A 查自己 hash → 可以找到（anti-vacuity：record 确实存在）。
+    let found_a = rt_store
+        .find_by_hash(tenant_a, hash_a_typed.clone())
+        .await?;
+    assert!(found_a.is_some(), "rt4: tenant A 应能查到自己的 record");
+
+    // tenant B 查 tenant A 的 hash → None（跨租 WHERE tenant_id 隔离，fail-closed）。
+    let found_b = rt_store.find_by_hash(tenant_b, hash_a_typed).await?;
+    assert!(
+        found_b.is_none(),
+        "rt4: tenant B 不应查到 tenant A 的 record（跨租隔离）"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-5：nonexistent old_id → rotate CAS miss → Ok(false)，new 不写入。
+///
+/// sealed [`RefreshRotation`] 命令（`begin_rotation` 从源 record 派生）使跨租 rotate 在类型层不可表达
+/// （REFRESH-ROTATE-LINEAGE-01）——直接 rotate 未入库的"幽灵" old_id 是 DB 层 CAS miss 的正规路径。
+/// 验证：`do_rotate_tx` 在找不到匹配的 `(tenant_id, old_id, status=active)` 行时正确返回 false。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid / TenantId parse 是已知合法值；集成测试 happy-path；item-level carve-out。
+async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = RtTenantId::parse(&tenant_str).unwrap();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_500_000);
+    let expires = issued + Duration::from_secs(3_600);
+
+    // 构造"幽灵"源 record（从未入库）——begin_rotation 仍可调用，old_id 在 DB 中不存在。
+    let phantom = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "ghost-subj",
+        PrincipalKind::User,
+        test_hash_for(0xE1),
+        None,
+        uuid::Uuid::new_v4().to_string(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    // 新 record 用于提取 RefreshTokenId / RefreshTokenHash 类型值（pub(crate) ctor 不可直接用）。
+    let new_seed = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "ghost-subj",
+        PrincipalKind::User,
+        test_hash_for(0xE2),
+        None,
+        uuid::Uuid::new_v4().to_string(),
+        RefreshStatus::Active,
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let new_hash_typed = new_seed.token_hash().clone();
+
+    // phantom 未插入 DB → CAS UPDATE 0 行 → rotate 返 false，new_seed 不写入。
+    let rotation = phantom.begin_rotation(
+        new_seed.id().clone(),
+        new_seed.token_hash().clone(),
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let rt_store = PgRefreshTokenStore::new(&store);
+    let result = rt_store.rotate(rotation).await?;
+    assert!(
+        !result,
+        "rt5: 未入库 old_id → CAS miss → rotate 应返回 false"
+    );
+
+    // new_seed 也未被写入（CAS miss 不写 new）。
+    let new_found = rt_store.find_by_hash(tenant, new_hash_typed).await?;
+    assert!(new_found.is_none(), "rt5: CAS miss 时 new 不应写入");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-6：跨租 revoke_lineage no-op——tenant B 调用 → tenant A 的记录不被撤销。
+///
+/// 验证 `revoke_lineage` 的 SQL WHERE `tenant_id = $1` 保证跨租级联撤销为空操作（0 行受影响，仍 Ok）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: uuid / TenantId parse 是已知合法值；集成测试 happy-path；item-level carve-out。
+async fn rt6_revoke_lineage_cross_tenant_noop() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_a_str = uuid::Uuid::new_v4().to_string();
+    let tenant_b_str = uuid::Uuid::new_v4().to_string();
+    let tenant_a = RtTenantId::parse(&tenant_a_str).unwrap();
+    let tenant_b = RtTenantId::parse(&tenant_b_str).unwrap();
+
+    let id_str = uuid::Uuid::new_v4().to_string();
+    let lineage = id_str.clone();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_600_000);
+    let expires = issued + Duration::from_secs(3_600);
+
+    let record_a = RefreshTokenRecord::hydrate(
+        id_str.clone(),
+        tenant_a,
+        "revoke-subj",
+        PrincipalKind::User,
+        test_hash_for(0xF1),
+        None,
+        lineage.clone(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let hash_a_typed = record_a.token_hash().clone();
+    let lineage_id_typed = record_a.lineage_id().clone();
+
+    let rt_store = PgRefreshTokenStore::new(&store);
+    rt_store.insert(record_a).await?;
+
+    // tenant B 用 tenant A 的 lineage_id 调 revoke_lineage → WHERE tenant_id = B 不匹配 → no-op（0 行）
+    rt_store.revoke_lineage(tenant_b, lineage_id_typed).await?;
+
+    // tenant A 的记录仍 Active（未被跨租撤销）
+    let found_a = rt_store
+        .find_by_hash(tenant_a, hash_a_typed)
+        .await?
+        .expect("rt6: tenant A record 仍可查到");
+    assert_eq!(
+        found_a.status(),
+        RefreshStatus::Active,
+        "rt6: 跨租 revoke_lineage no-op，tenant A 记录仍 Active"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-7：并发 rotate CAS fencing——两个 `PgRefreshTokenStore` 实例 `tokio::join!` 并发 rotate 同一 Active 记录。
+///
+/// 验证：恰一个 rotate 返回 `true`（CAS 命中），一个返回 `false`（miss）；
+/// old 变 Consumed，new 恰一条（CAS miss 的 rotate 不写 new）。
+/// INVARIANT：`UPDATE ... WHERE ... AND status = $4`（CAS）保证行级互斥（同 fosite `flow_refresh.go`）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: uuid / TenantId parse 是已知合法值；集成测试并发验证；item-level carve-out。
+async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = RtTenantId::parse(&tenant_str).unwrap();
+
+    let old_id_str = uuid::Uuid::new_v4().to_string();
+    let lineage = old_id_str.clone();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_700_000);
+    let expires = issued + Duration::from_secs(3_600);
+
+    // 插入一条 Active 记录
+    let old_record = RefreshTokenRecord::hydrate(
+        old_id_str.clone(),
+        tenant,
+        "concurrent-subj",
+        PrincipalKind::User,
+        test_hash_for(0xA7),
+        None,
+        lineage.clone(),
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let old_hash_typed = old_record.token_hash().clone();
+    // sealed command: clone 源 record 供 begin_rotation（两次并发各构造独立 RefreshRotation）。
+    let old_for_rotate = old_record.clone();
+
+    let rt_store1 = PgRefreshTokenStore::new(&store);
+    rt_store1.insert(old_record).await?;
+
+    // 两个不同 new record（不同 id + hash 避免 PK / unique 冲突；只有 CAS 命中的会被写入）
+    let new_record_1 = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "concurrent-subj",
+        PrincipalKind::User,
+        test_hash_for(0xB7),
+        Some(old_id_str.clone()),
+        lineage.clone(),
+        RefreshStatus::Active,
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let hash_new1 = new_record_1.token_hash().clone();
+
+    let new_record_2 = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "concurrent-subj",
+        PrincipalKind::User,
+        test_hash_for(0xC7),
+        Some(old_id_str.clone()),
+        lineage.clone(),
+        RefreshStatus::Active,
+        issued + Duration::from_secs(2),
+        expires + Duration::from_secs(2),
+    );
+    let hash_new2 = new_record_2.token_hash().clone();
+
+    // 各自构造 RefreshRotation（begin_rotation 从同一源 record 派生，CAS key = old_for_rotate.id）。
+    let rotation1 = old_for_rotate.begin_rotation(
+        new_record_1.id().clone(),
+        new_record_1.token_hash().clone(),
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let rotation2 = old_for_rotate.begin_rotation(
+        new_record_2.id().clone(),
+        new_record_2.token_hash().clone(),
+        issued + Duration::from_secs(2),
+        expires + Duration::from_secs(2),
+    );
+
+    // 共享 pool 的两个独立 store 实例：并发 rotate 同一 old_id
+    let rt_store2 = PgRefreshTokenStore::new(&store);
+    let (r1, r2) = tokio::join!(rt_store1.rotate(rotation1), rt_store2.rotate(rotation2),);
+
+    let r1 = r1?;
+    let r2 = r2?;
+
+    // 恰一个 true（CAS 命中），一个 false（CAS miss）
+    assert!(r1 || r2, "rt7: 至少一个 rotate 应成功（CAS 命中）");
+    assert!(
+        !(r1 && r2),
+        "rt7: 两个 rotate 不能都成功（CAS fencing：同一 old_id 只能消费一次）"
+    );
+
+    // old 应已变 Consumed
+    let old_found = rt_store1
+        .find_by_hash(tenant, old_hash_typed)
+        .await?
+        .expect("rt7: old 仍可查到（status = consumed）");
+    assert_eq!(
+        old_found.status(),
+        RefreshStatus::Consumed,
+        "rt7: 并发 rotate CAS 命中后 old 应为 Consumed"
+    );
+
+    // new 恰一条（CAS miss 的 rotate 不写 new）
+    let new1_found = rt_store1.find_by_hash(tenant, hash_new1).await?;
+    let new2_found = rt_store1.find_by_hash(tenant, hash_new2).await?;
+    let new_count = u32::from(new1_found.is_some()) + u32::from(new2_found.is_some());
+    assert_eq!(
+        new_count, 1,
+        "rt7: new 应恰一条（CAS miss 的 rotate 不写 new）"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -4478,6 +5090,164 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
         repo.lockout_status(a, login_id("alice"), now).await?,
         "达阈值后锁定"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T24: RLS 强制力证明 — refresh_tokens 表（#1325 review #284 F5）──────────────────
+//
+// 0013 迁移落地 ENABLE + FORCE ROW LEVEL SECURITY + tenant_isolation policy（同 0009 范式）。
+// 本测试以 SET LOCAL ROLE rss_app 切换到非 owner 角色，验证 RLS 对 refresh_tokens 生效。
+//
+// 测试结构（同 T20–T23 范式）：
+//   • Tx1（rss_app + tenant_a scope）：INSERT tenant_a refresh_token → 成功（WITH CHECK pass）。
+//   • Tx2（rss_app + tenant_a scope）：SELECT → tenant_a 行可见（USING pass）。
+//   • Tx3（rss_app + tenant_b scope）：SELECT 同行 → 不可见（USING 过滤，跨租读被阻）。
+//   • Tx4（rss_app + tenant_a scope）：INSERT tenant_b 行 → 错误（WITH CHECK 拒绝，跨租写被阻）。
+//   • Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → 行不可见（fail-closed）。
+
+/// T24：RLS 强制力证明 — refresh_tokens 表（#1325 review #284 F5）。
+///
+/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
+/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝；未设 rss.tenant_id → fail-closed（0 行）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
+async fn t24_rls_refresh_tokens_enforces_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    // 提权：superuser 需成为 rss_app member 才能 SET LOCAL ROLE；幂等（已是 member 则 no-op）。
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let token_id_a = uuid::Uuid::new_v4().to_string();
+    let lineage_id_a = uuid::Uuid::new_v4().to_string();
+    // SHA-256 固定 32 字节（满足 CHECK octet_length = 32）。
+    let hash_a = vec![0xABu8; 32];
+
+    // Tx1：rss_app + tenant_a scope → INSERT refresh_token → 成功（WITH CHECK pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO refresh_tokens \
+             (id, tenant_id, subject, kind, token_hash, lineage_id, status, issued_at, expires_at) \
+             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, 'active', now(), now() + interval '1 hour')",
+        )
+        .bind(&token_id_a)
+        .bind(&tenant_a)
+        .bind("rls-test-subject")
+        .bind("user")
+        .bind(&hash_a)
+        .bind(&lineage_id_a)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a refresh_token failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT token_id_a → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM refresh_tokens WHERE id = $1::uuid")
+            .bind(&token_id_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 1,
+            "t24: rss_app + tenant_a scope — refresh_token 应可见（USING policy pass）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT token_id_a → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM refresh_tokens WHERE id = $1::uuid")
+            .bind(&token_id_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t24: rss_app + tenant_b scope — tenant_a refresh_token 应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b refresh_token → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cross_hash = vec![0xCDu8; 32];
+        let result = sqlx::query(
+            "INSERT INTO refresh_tokens \
+             (id, tenant_id, subject, kind, token_hash, lineage_id, status, issued_at, expires_at) \
+             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, 'active', now(), now() + interval '1 hour')",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
+        .bind("rls-test-subject")
+        .bind("user")
+        .bind(&cross_hash)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t24: WITH CHECK 应拒绝 tenant_b refresh_token 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT refresh_tokens → 0 行。
+    // current_setting('rss.tenant_id', true) 返 NULL → RLS USING 谓词 NULL → 所有行过滤，fail-closed。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        // 不调用 set_config('rss.tenant_id', ...) → current_setting 返 NULL → 行不可见。
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM refresh_tokens WHERE id = $1::uuid")
+            .bind(&token_id_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t24: rss_app + 未設 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
 
     store.shutdown().await?;
     Ok(())

@@ -26,6 +26,12 @@ use diport::{OutboxEmitError, OutboxEnvelopeParts};
 #[cfg(test)]
 use std::sync::Arc;
 
+// RefreshTokenStore in-mem 替身（`#[cfg(test)]` 门控，同 InMemSessionLifecycle）。
+#[cfg(test)]
+use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord};
+#[cfg(test)]
+use crate::ports::RefreshTokenStore;
+
 // ---------------------------------------------------------------------------
 // InMemCredentialRepo — CredentialRepo 域形 DI port 的 in-mem 替身（PR3）
 // ---------------------------------------------------------------------------
@@ -238,6 +244,97 @@ impl SessionLifecycle for InMemSessionLifecycle {
             && entry.0.tenant() == tenant
         {
             entry.1 = true; // 跨租 no-op；幂等
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InMemRefreshTokenStore — RefreshTokenStore 域形 DI port 的 in-mem 替身（#1325）
+// ---------------------------------------------------------------------------
+
+/// `RefreshTokenStore` 的 in-memory 替身：`Arc<Mutex<HashMap<RefreshTokenId, RefreshTokenRecord>>>`。
+///
+/// - `insert`：按 `record.id()` 插入。
+/// - `find_by_hash`：线性扫描，匹配 `token_hash == hash && tenant == 入参 tenant`（跨租 fail-closed）。
+/// - `rotate`（原子 CAS）：锁内查 `old_id`；若存在且 `status==Active && tenant` 匹配 ⇒ 标 `Consumed` + 插入
+///   `new`，返回 `Ok(true)`；否则 `Ok(false)`（不写 new）。
+/// - `revoke_lineage`：锁内把所有 `lineage_id()==入参 && tenant` 匹配的记录置 `Revoked`（幂等）。
+///
+/// 内部 `Arc<Mutex<..>>`（`&self` + 内部可变；锁仅同步持有、**不跨 `.await`** ⇒ future 仍 `Send`）；
+/// `Arc` ⇒ clone 共享同一 store（`RefreshService` 测试中两个 service 实例共享）。
+///
+/// **`#[cfg(test)]`**：生产 postgres adapter 落地后无 seed 消费者——仅本 crate 单测使用（防 dead_code）。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct InMemRefreshTokenStore {
+    records: Arc<Mutex<std::collections::HashMap<RefreshTokenId, RefreshTokenRecord>>>,
+}
+
+#[cfg(test)]
+impl InMemRefreshTokenStore {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(test)]
+impl RefreshTokenStore for InMemRefreshTokenStore {
+    async fn insert(&self, record: RefreshTokenRecord) -> Result<(), crate::domain::IdentityError> {
+        recover(&self.records).insert(record.id().clone(), record);
+        Ok(())
+    }
+
+    async fn find_by_hash(
+        &self,
+        tenant: vocab::TenantId,
+        hash: RefreshTokenHash,
+    ) -> Result<Option<RefreshTokenRecord>, crate::domain::IdentityError> {
+        // reason: in-mem 替身（test 门控）规模小，O(n) 扫可接受；生产 postgres adapter 须 btree 索引。
+        Ok(recover(&self.records)
+            .values()
+            .find(|r| r.tenant() == tenant && r.token_hash() == &hash)
+            .cloned())
+    }
+
+    async fn rotate(
+        &self,
+        rotation: crate::ports::RefreshRotation,
+    ) -> Result<bool, crate::domain::IdentityError> {
+        // sealed 命令：tenant 从 new record 派生（= 源 record tenant），无独立 tenant 入参可错位（#284 F2）。
+        let old_id = rotation.old_id().clone();
+        let new = rotation.new_record().clone();
+        let tenant = new.tenant();
+        let mut guard = recover(&self.records);
+        // CAS：找 old_id，若 Active + tenant 匹配 ⇒ 消费 + 写 new；否则 false（不写 new）。
+        match guard.get(&old_id) {
+            Some(rec) if rec.status() == RefreshStatus::Active && rec.tenant() == tenant => {
+                let consumed = rec.with_status(RefreshStatus::Consumed);
+                guard.insert(old_id, consumed);
+                guard.insert(new.id().clone(), new);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn revoke_lineage(
+        &self,
+        tenant: vocab::TenantId,
+        lineage_id: RefreshTokenId,
+    ) -> Result<(), crate::domain::IdentityError> {
+        // 幂等：锁内把所有同 lineage_id + tenant 的记录置 Revoked。
+        let mut guard = recover(&self.records);
+        let to_revoke: Vec<RefreshTokenId> = guard
+            .values()
+            .filter(|r| r.lineage_id() == &lineage_id && r.tenant() == tenant)
+            .map(|r| r.id().clone())
+            .collect();
+        for id in to_revoke {
+            if let Some(rec) = guard.get(&id) {
+                let revoked = rec.with_status(RefreshStatus::Revoked);
+                guard.insert(id, revoked);
+            }
         }
         Ok(())
     }
@@ -749,5 +846,216 @@ mod tests {
             .await
             .expect("find ok");
         assert!(found.is_some(), "TENANT_A 的会话不应被 TENANT_B 撤销");
+    }
+
+    // ---------------------------------------------------------------------------
+    // InMemRefreshTokenStore 直接单测（F6）
+    // ---------------------------------------------------------------------------
+
+    use super::InMemRefreshTokenStore;
+    use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord};
+    use crate::ports::RefreshTokenStore;
+
+    /// 构造用于 InMemRefreshTokenStore 测试的辅助记录（hydrate 公开接口）。
+    fn make_rt_record(
+        id: &str,
+        tenant: TenantId,
+        hash: [u8; 32],
+        lineage_id: &str,
+        status: RefreshStatus,
+    ) -> RefreshTokenRecord {
+        let issued = epoch(1_700_000_000);
+        RefreshTokenRecord::hydrate(
+            id,
+            tenant,
+            "rt-subj",
+            vocab::PrincipalKind::User,
+            hash,
+            None,
+            lineage_id,
+            status,
+            issued,
+            issued + Duration::from_secs(3_600),
+        )
+    }
+
+    // ── RT M1：rotate CAS miss — old 状态非 Active → Ok(false)，new 不写入 ──────────
+
+    #[tokio::test]
+    async fn in_mem_rotate_cas_miss_consumed_status_returns_false_no_write() {
+        let store = InMemRefreshTokenStore::new();
+        let ta = tid(TENANT_A);
+        let old_hash = [0x11u8; 32];
+        let new_hash = [0x12u8; 32];
+        let old_id = "aaaaaaaa-0011-4000-8000-000000000011";
+        let lineage = old_id;
+
+        // 插入 Consumed 记录（非 Active）
+        let old_rec = make_rt_record(old_id, ta, old_hash, lineage, RefreshStatus::Consumed);
+        store.insert(old_rec).await.expect("insert ok");
+
+        // CAS：old status = Consumed → miss → false，new 不写入。
+        // sealed 命令由源 record 派生（#284 F2）：源（Consumed）的 begin_rotation 生成新 hash 的子 record。
+        let issued = epoch(1_700_000_000);
+        let rotation = make_rt_record(old_id, ta, old_hash, lineage, RefreshStatus::Consumed)
+            .begin_rotation(
+                RefreshTokenId::new("aaaaaaaa-0012-4000-8000-000000000012"),
+                RefreshTokenHash::new(new_hash),
+                issued,
+                issued + Duration::from_secs(3_600),
+            );
+        let result = store.rotate(rotation).await.expect("rotate ok");
+        assert!(!result, "Consumed 状态 CAS miss 应返回 false");
+
+        // new 不应写入
+        let new_found = store
+            .find_by_hash(ta, RefreshTokenHash::new(new_hash))
+            .await
+            .expect("find ok");
+        assert!(new_found.is_none(), "CAS miss 时 new 不应写入");
+
+        // old 仍 Consumed（不变）
+        let old_found = store
+            .find_by_hash(ta, RefreshTokenHash::new(old_hash))
+            .await
+            .expect("find ok");
+        assert_eq!(
+            old_found.expect("old exists").status(),
+            RefreshStatus::Consumed,
+            "old 状态不变"
+        );
+    }
+
+    // ── RT M2：rotate 一次性 CAS — 同一 Active old 连 rotate 两次 → 首次 true、二次 false ──
+    //
+    // 注：sealed RefreshRotation（#284 F2）由源 record 派生 tenant，故「跨租 rotate」类型层不可表达
+    // （rotation.new.tenant 恒 = 源 tenant）——跨租隔离已由 find_by_hash 跨租→None（见 in_mem_find...）+
+    // 服务级 R6 覆盖。本测试改测 store 层一次性 CAS（首次消费旧 token 后二次必 miss）。
+
+    #[tokio::test]
+    async fn in_mem_rotate_is_one_time_second_rotate_misses() {
+        let store = InMemRefreshTokenStore::new();
+        let ta = tid(TENANT_A);
+        let old_hash = [0x13u8; 32];
+        let new_hash = [0x14u8; 32];
+        let old_id = "aaaaaaaa-0013-4000-8000-000000000013";
+        let lineage = old_id;
+        let issued = epoch(1_700_000_000);
+
+        let old_rec = make_rt_record(old_id, ta, old_hash, lineage, RefreshStatus::Active);
+        store.insert(old_rec.clone()).await.expect("insert ok");
+
+        // 首次 rotate：源 Active → CAS 命中 → true（old→Consumed，new 写入）
+        let rotation1 = old_rec.begin_rotation(
+            RefreshTokenId::new("aaaaaaaa-0014-4000-8000-000000000014"),
+            RefreshTokenHash::new(new_hash),
+            issued,
+            issued + Duration::from_secs(3_600),
+        );
+        assert!(
+            store.rotate(rotation1).await.expect("rotate ok"),
+            "首次 rotate 应命中 CAS"
+        );
+
+        // 二次 rotate 同一 old（现已 Consumed）→ CAS miss → false（一次性）
+        let rotation2 = old_rec.begin_rotation(
+            RefreshTokenId::new("aaaaaaaa-0015-4000-8000-000000000015"),
+            RefreshTokenHash::new([0x15u8; 32]),
+            issued,
+            issued + Duration::from_secs(3_600),
+        );
+        assert!(
+            !store.rotate(rotation2).await.expect("rotate ok"),
+            "二次 rotate 同一 old 应 miss（一次性）"
+        );
+
+        // old 现为 Consumed；二次的 new（0x15）未写入
+        let old_found = store
+            .find_by_hash(ta, RefreshTokenHash::new(old_hash))
+            .await
+            .expect("find ok");
+        assert_eq!(
+            old_found.expect("old exists").status(),
+            RefreshStatus::Consumed,
+            "首次 rotate 后 old 应 Consumed"
+        );
+        let third_found = store
+            .find_by_hash(ta, RefreshTokenHash::new([0x15u8; 32]))
+            .await
+            .expect("find ok");
+        assert!(third_found.is_none(), "二次 CAS miss 时 new 不应写入");
+    }
+
+    // ── RT M3：revoke_lineage 跨租 no-op — tenant B 调用 → tenant A 记录不变 ─────
+
+    #[tokio::test]
+    async fn in_mem_revoke_lineage_cross_tenant_noop() {
+        let store = InMemRefreshTokenStore::new();
+        let ta = tid(TENANT_A);
+        let tb = tid(TENANT_B);
+        let hash_a = [0x15u8; 32];
+        let lineage_str = "aaaaaaaa-0015-4000-8000-000000000015";
+
+        let rec_a = make_rt_record(
+            "aaaaaaaa-0015-4000-8000-000000000015",
+            ta,
+            hash_a,
+            lineage_str,
+            RefreshStatus::Active,
+        );
+        store.insert(rec_a).await.expect("insert ok");
+
+        // tenant B 用相同 lineage_id 调 revoke_lineage → WHERE tenant 不匹配 → no-op
+        store
+            .revoke_lineage(tb, RefreshTokenId::new(lineage_str))
+            .await
+            .expect("revoke_lineage ok");
+
+        // tenant A 的记录仍 Active（未受影响）
+        let found = store
+            .find_by_hash(ta, RefreshTokenHash::new(hash_a))
+            .await
+            .expect("find ok");
+        assert_eq!(
+            found.expect("A exists").status(),
+            RefreshStatus::Active,
+            "跨租 revoke_lineage 不影响 tenant A 的记录"
+        );
+    }
+
+    // ── RT M4：find_by_hash 跨租 → None（anti-vacuity：同租 → Some）────────────────
+
+    #[tokio::test]
+    async fn in_mem_find_by_hash_cross_tenant_returns_none() {
+        let store = InMemRefreshTokenStore::new();
+        let ta = tid(TENANT_A);
+        let tb = tid(TENANT_B);
+        let hash_a = [0x16u8; 32];
+
+        let rec_a = make_rt_record(
+            "aaaaaaaa-0016-4000-8000-000000000016",
+            ta,
+            hash_a,
+            "aaaaaaaa-0016-4000-8000-000000000016",
+            RefreshStatus::Active,
+        );
+        store.insert(rec_a).await.expect("insert ok");
+
+        // anti-vacuity：tenant A 自查 → Some
+        let found_a = store
+            .find_by_hash(ta, RefreshTokenHash::new(hash_a))
+            .await
+            .expect("find ok");
+        assert!(
+            found_a.is_some(),
+            "tenant A 应能查到自己的记录（anti-vacuity）"
+        );
+
+        // 跨租：tenant B 查 → None
+        let found_b = store
+            .find_by_hash(tb, RefreshTokenHash::new(hash_a))
+            .await
+            .expect("find ok");
+        assert!(found_b.is_none(), "跨租 find_by_hash 应返回 None");
     }
 }

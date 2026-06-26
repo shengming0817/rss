@@ -27,8 +27,13 @@ use primitives::ListenerKind;
 use uuid::Uuid;
 use vocab::TenantId;
 
-use crate::domain::{AuthOutcome, IdentityError, LoginIdentifier, Session, SessionId};
-use crate::ports::{CredentialRepo, DynCredentialRepo, DynSessionLifecycle, SessionLifecycle};
+use crate::domain::{
+    AuthOutcome, IdentityError, LoginIdentifier, RefreshStatus, RefreshTokenHash, RefreshTokenId,
+    RefreshTokenRecord, Session, SessionId,
+};
+use crate::ports::{
+    CredentialRepo, DynCredentialRepo, DynSessionLifecycle, RefreshTokenStore, SessionLifecycle,
+};
 
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
 /// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
@@ -298,6 +303,227 @@ impl LoginService {
         session_id: SessionId,
     ) -> Result<(), IdentityError> {
         self.lifecycle.revoke(tenant, session_id).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RefreshError / RefreshBundle / RefreshService
+// ---------------------------------------------------------------------------
+
+/// refresh token 操作失败（库枚举；thiserror；message 为 `&'static str` const literal，token 永不进 message）。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RefreshError {
+    /// 呈递的 refresh token 未找到（未知 / 跨租）。
+    #[error("refresh token is invalid")]
+    Invalid,
+    /// refresh token 已被消费过（重放检测触发级联撤销）。
+    #[error("refresh token was replayed")]
+    Replayed,
+    /// refresh token 已过期。
+    #[error("refresh token is expired")]
+    Expired,
+    /// refresh token store 操作失败。
+    #[error("refresh token store error")]
+    Store(#[source] crate::domain::IdentityError),
+    /// access token 签发失败。
+    #[error("access token mint failed")]
+    Mint(#[source] authn::JwtIssueError),
+}
+
+/// rotate 成功后的返回对象（access JWT + 新 refresh token）。不 derive Serialize（非 wire DTO）。
+#[derive(Debug)]
+pub struct RefreshBundle {
+    /// 新签发的 access JWT。
+    pub access: authn::MintedJwt,
+    /// 轮换后的新 refresh token（bearer secret，仅本次传递给客户端）。
+    pub refresh: authn::RefreshToken,
+}
+
+/// Refresh token 应用服务：签发 / 轮换 / 撤销。必填依赖走构造器位置参（缺失即编译错误）。
+///
+/// ## rotate 设计决策：mint 先于 CAS（#284 F1）
+///
+/// `rotate` 先 mint access JWT，**成功后才**执行 `store.rotate`（CAS 原子消费旧 token + 写新 token）。
+/// 顺序的关键在于**失败语义可恢复**：mint 是可失败步骤（signer 瞬时故障），CAS 提交是不可回滚的副作用。
+/// 若先提交 CAS 再 mint，mint 失败时旧 refresh 已被消费、而新 refresh secret 在错误路径被丢弃——客户端
+/// 既无可用旧 token 也拿不到新 token，被瞬时 mint 故障**永久锁死**。先 mint：mint 失败 ⇒ 旧 refresh 未消费、
+/// 仍 Active，客户端原样重试即可（无锁死、无重放窗口——失败的 mint 未签发任何 access token）。
+/// CAS 在 mint 之后，故「旧 refresh 一次性」仍由 CAS 原子性 + 重放级联撤销保证。
+/// ref: ory/fosite handler/oauth2/flow_refresh.go@master（先生成 token 再事务内 Rotate/Create）。
+pub struct RefreshService<S> {
+    store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+    issuer: std::sync::Arc<authn::JwtIssuer<S>>,
+    clock: Box<dyn diport::Clock>,
+    refresh_ttl: Duration,
+}
+
+impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
+    /// 组合根构造：4 必填依赖位置参（缺失即编译错误）。
+    pub fn new(
+        store: Box<crate::ports::DynRefreshTokenStore<'static>>,
+        issuer: std::sync::Arc<authn::JwtIssuer<S>>,
+        clock: Box<dyn diport::Clock>,
+        refresh_ttl: Duration,
+    ) -> Self {
+        Self {
+            store,
+            issuer,
+            clock,
+            refresh_ttl,
+        }
+    }
+
+    /// 签发新 refresh token（CSPRNG secret，存摘要）。返回 bearer secret（仅此时暴露一次）。
+    ///
+    /// `tenant` / `subject` / `kind` 作为 rotation 重签 access JWT 的 claim 源持久化至 store。
+    /// `skip_all`：secret / subject 不入 span（零信任；subject 可含 PII，observability.md §redaction）。
+    #[tracing::instrument(
+        skip_all,
+        fields(domain = SESSION_DOMAIN, operation = "refresh_issue", tenant_id = %tenant),
+        err
+    )]
+    pub async fn issue(
+        &self,
+        tenant: vocab::TenantId,
+        subject: &str,
+        kind: vocab::PrincipalKind,
+    ) -> Result<authn::RefreshToken, RefreshError> {
+        let secret = secure::OpaqueToken::generate();
+        let hash = RefreshTokenHash::new(secure::digest(secret.expose()));
+        let now = self.clock.now();
+        let id = RefreshTokenId::generate();
+        let record = RefreshTokenRecord::new(
+            id.clone(),
+            tenant,
+            subject,
+            kind,
+            hash,
+            None,
+            id,
+            RefreshStatus::Active,
+            now,
+            now + self.refresh_ttl,
+        );
+        self.store
+            .insert(record)
+            .await
+            .map_err(RefreshError::Store)?;
+        Ok(authn::RefreshToken::new(secret.expose()))
+    }
+
+    /// 轮换 refresh token（reuse-detection + 新 access JWT + 新 refresh token）。
+    ///
+    /// ## 步骤顺序（参见 struct 级 rustdoc 关于「mint 先于 CAS」的说明）
+    ///
+    /// 1. 重算呈递串摘要 → `find_by_hash`（查无 → Invalid）
+    /// 2. 若 status != Active → 重放检测：级联撤销整条谱系 → Replayed
+    /// 3. 若 is_expired → Expired
+    /// 4. 由源 record `begin_rotation` 派生 sealed [`RefreshRotation`]（tenant/parent/lineage 类型层 Hard 派生）
+    /// 5. mint access JWT（先于 CAS——失败则旧 refresh 未消费、客户端可重试，#284 F1）
+    /// 6. 原子 CAS（store.rotate(rotation)）：若未命中 → 并发双换 / 重放：级联撤销 → Replayed
+    /// 7. 返回 RefreshBundle
+    ///
+    /// `skip_all`：presented bearer secret 不入 span（PII，observability.md §redaction）。
+    #[tracing::instrument(
+        skip_all,
+        fields(domain = SESSION_DOMAIN, operation = "refresh_rotate", tenant_id = %tenant),
+        err
+    )]
+    pub async fn rotate(
+        &self,
+        tenant: vocab::TenantId,
+        presented: &authn::RefreshToken,
+    ) -> Result<RefreshBundle, RefreshError> {
+        // 1. 查找
+        let hash = RefreshTokenHash::new(secure::digest(presented.as_str()));
+        let rec = self
+            .store
+            .find_by_hash(tenant, hash)
+            .await
+            .map_err(RefreshError::Store)?
+            .ok_or(RefreshError::Invalid)?;
+
+        // 2. 重放检测：status != Active ⇒ 级联撤销 + Replayed
+        if rec.status() != RefreshStatus::Active {
+            self.store
+                .revoke_lineage(tenant, rec.lineage_id().clone())
+                .await
+                .map_err(RefreshError::Store)?;
+            return Err(RefreshError::Replayed);
+        }
+
+        // 3. 过期检测
+        let now = self.clock.now();
+        if rec.is_expired(now) {
+            return Err(RefreshError::Expired);
+        }
+
+        // 4. 由源 record 派生 sealed 轮换命令（tenant/parent/lineage 从源派生，错位类型层不可表达，#284 F2）
+        let new_secret = secure::OpaqueToken::generate();
+        let new_hash = RefreshTokenHash::new(secure::digest(new_secret.expose()));
+        let rotation = rec.begin_rotation(
+            RefreshTokenId::generate(),
+            new_hash,
+            now,
+            now + self.refresh_ttl,
+        );
+
+        // 5. mint access JWT（先于 CAS，#284 F1）：mint 失败 ⇒ 旧 refresh 未消费、客户端可重试、无锁死
+        let access = self
+            .issuer
+            .issue(rec.subject(), Some(tenant), rec.kind())
+            .await
+            .map_err(RefreshError::Mint)?;
+
+        // 6. 原子 CAS：旧 token 一次性失效（mint 成功后才提交不可回滚的消费）
+        let applied = self
+            .store
+            .rotate(rotation)
+            .await
+            .map_err(RefreshError::Store)?;
+        if !applied {
+            // 并发双换 / CAS miss ⇒ 重放处理：级联撤销 + Replayed（已 mint 的 access 丢弃，无害——未交付客户端）
+            self.store
+                .revoke_lineage(tenant, rec.lineage_id().clone())
+                .await
+                .map_err(RefreshError::Store)?;
+            return Err(RefreshError::Replayed);
+        }
+
+        Ok(RefreshBundle {
+            access,
+            refresh: authn::RefreshToken::new(new_secret.expose()),
+        })
+    }
+
+    /// 撤销（logout）：撤销整条谱系。查无 token 时幂等 Ok（防止信息泄露）。
+    ///
+    /// `skip_all`：presented bearer secret 不入 span（PII，observability.md §redaction）。
+    #[tracing::instrument(
+        skip_all,
+        fields(domain = SESSION_DOMAIN, operation = "refresh_revoke", tenant_id = %tenant),
+        err
+    )]
+    pub async fn revoke(
+        &self,
+        tenant: vocab::TenantId,
+        presented: &authn::RefreshToken,
+    ) -> Result<(), RefreshError> {
+        let hash = RefreshTokenHash::new(secure::digest(presented.as_str()));
+        if let Some(rec) = self
+            .store
+            .find_by_hash(tenant, hash)
+            .await
+            .map_err(RefreshError::Store)?
+        {
+            self.store
+                .revoke_lineage(tenant, rec.lineage_id().clone())
+                .await
+                .map_err(RefreshError::Store)?;
+        }
+        // reason: 查无 token 时幂等 Ok（logout 不泄露 token 存在性，同 SessionLifecycle::revoke）。
+        Ok(())
     }
 }
 
@@ -956,5 +1182,407 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, LOGIN_ROUTE_PREFIX);
+    }
+
+    // ── RefreshService 集成测试 ────────────────────────────────────────────────
+    //
+    // TestSigner：`diport::Signer` 的最小替身（固定字节签名；shutdown Ok）。
+    // 不依赖 adapter crate（rust-standards.md §命名：域 crate 单测不依赖平台 adapter）。
+
+    #[derive(Clone)]
+    struct TestSigner;
+    impl diport::Signer for TestSigner {
+        async fn sign(
+            &self,
+            _req: diport::SignRequest,
+        ) -> Result<diport::Signature, diport::SignerError> {
+            Ok(diport::Signature::new(
+                b"test-sig-bytes-for-refresh".to_vec(),
+            ))
+        }
+        async fn shutdown(&self) -> Result<(), diport::SignerError> {
+            Ok(())
+        }
+    }
+
+    /// 构造用于 RefreshService 测试的 JwtIssuer（ES256，User kind）。
+    #[allow(clippy::expect_used)]
+    fn make_jwt_issuer(clock: Box<dyn diport::Clock>) -> authn::JwtIssuer<TestSigner> {
+        authn::JwtIssuer::new(
+            std::sync::Arc::new(TestSigner),
+            clock,
+            authn::JwtIssuerConfig {
+                key: diport::KeyId::new("test-key"),
+                alg: authn::JwtAlg::Es256,
+                purpose: diport::SigningPurpose::new("auth.jwt.access"),
+                issuer: "https://test.example".to_string(),
+                audience: "test-audience".to_string(),
+                ttl: Duration::from_secs(900),
+            },
+        )
+        .expect("valid jwt issuer config")
+    }
+
+    /// 构造 RefreshService（共享 in-mem store；clock 由调用方注入）。
+    fn make_refresh_svc(
+        store: crate::internal::mem::InMemRefreshTokenStore,
+        clock: Box<dyn diport::Clock>,
+        refresh_ttl: Duration,
+    ) -> RefreshService<TestSigner> {
+        let issuer = make_jwt_issuer(make_clock(1_700_000_000));
+        RefreshService::new(
+            crate::ports::DynRefreshTokenStore::new_box(store),
+            std::sync::Arc::new(issuer),
+            clock,
+            refresh_ttl,
+        )
+    }
+
+    // ── 测试 R1：happy rotation — issue → rotate 成功（返回 access JWT 非空 + 新 refresh ≠ 旧）
+    //             旧 refresh 再 rotate ⇒ Replayed 且原 lineage 全部不再可用 ─────────────
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_happy_rotation_and_replay_detection() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+
+        // issue → rotate 成功
+        let old_rf = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+        let bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
+        assert!(
+            !bundle.access.as_str().is_empty(),
+            "access JWT must be non-empty"
+        );
+        assert_ne!(
+            bundle.refresh.as_str(),
+            old_rf.as_str(),
+            "新 refresh ≠ 旧 refresh"
+        );
+
+        // 旧 refresh 再 rotate ⇒ Replayed（重放检测）
+        let err = svc
+            .rotate(ta, &old_rf)
+            .await
+            .expect_err("旧 refresh 已消费，应 Replayed");
+        assert!(matches!(err, RefreshError::Replayed), "old rotate: {err:?}");
+
+        // 级联撤销后新 refresh 也不可用
+        let err2 = svc
+            .rotate(ta, &bundle.refresh)
+            .await
+            .expect_err("级联撤销后新 refresh 也应 Replayed");
+        assert!(
+            matches!(err2, RefreshError::Replayed),
+            "cascaded new: {err2:?}"
+        );
+    }
+
+    // ── 测试 R2：重放拒绝 + 级联撤销 — A→B rotate，再用 A ⇒ Replayed，且 B 也 ⇒ Replayed ──
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_replay_triggers_cascade_revoke() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+
+        let token_a = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+        let bundle_b = svc.rotate(ta, &token_a).await.expect("A→B ok");
+
+        // 用 A 重放 ⇒ Replayed（A 已 Consumed）+ 级联 Revoke 整条 lineage
+        let err = svc.rotate(ta, &token_a).await.expect_err("replayed A");
+        assert!(matches!(err, RefreshError::Replayed));
+
+        // B 也已被级联撤销 ⇒ Replayed
+        let err2 = svc
+            .rotate(ta, &bundle_b.refresh)
+            .await
+            .expect_err("cascaded B");
+        assert!(matches!(err2, RefreshError::Replayed));
+    }
+
+    // ── 测试 R3：旧 refresh 一次性 — rotate 后旧 token 不可再用 ────────────────
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_old_token_is_one_shot_after_rotate() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+
+        let old_rf = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+        let _bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
+
+        // 旧 refresh 已 Consumed，不可再轮换
+        let err = svc.rotate(ta, &old_rf).await.expect_err("old one-shot");
+        assert!(matches!(err, RefreshError::Replayed));
+    }
+
+    // ── 测试 R4：撤销幂等 — revoke 两次均 Ok；revoke 后 rotate ⇒ Replayed ──────
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_revoke_idempotent_and_blocks_rotate() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+
+        let rf = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+
+        // 第一次 revoke Ok
+        svc.revoke(ta, &rf).await.expect("revoke 1 ok");
+        // 第二次 revoke 幂等 Ok
+        svc.revoke(ta, &rf).await.expect("revoke 2 idempotent");
+
+        // revoke 后 rotate ⇒ Replayed（token 已 Revoked）
+        let err = svc.rotate(ta, &rf).await.expect_err("revoked rotate");
+        assert!(matches!(err, RefreshError::Replayed));
+    }
+
+    // ── 测试 R5：过期边界 — refresh_ttl 很短 + clock 推进 → rotate ⇒ Expired ──
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_expired_token_returns_expired() {
+        // 共享 in-mem store：issue_svc 签发（now=T），expire_svc 用 T+ttl+1 的 clock rotate。
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+
+        // 签发服务：clock = T=1000，ttl = 1s（token 于 T+1 过期）
+        let issue_svc = make_refresh_svc(store.clone(), make_clock(1_000), Duration::from_secs(1));
+        let ta = tid(CANON_TENANT);
+        let rf = issue_svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+
+        // 轮换服务：clock = T+10（token 已过期），ttl 无关（不会到达写新 record 步骤）
+        let expire_svc = make_refresh_svc(store, make_clock(1_010), Duration::from_secs(3_600));
+        let err = expire_svc.rotate(ta, &rf).await.expect_err("expired");
+        assert!(matches!(err, RefreshError::Expired), "{err:?}");
+    }
+
+    // ── 测试 R6：跨租 fail-closed — tenant B 用 tenant A 的 token rotate ⇒ Invalid ─
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_cross_tenant_fail_closed() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+        let tb = tid(OTHER_TENANT);
+
+        let rf = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+
+        // tenant B 用 tenant A 的 token ⇒ find_by_hash 跨租 → None → Invalid
+        let err = svc.rotate(tb, &rf).await.expect_err("cross-tenant");
+        assert!(matches!(err, RefreshError::Invalid), "{err:?}");
+
+        // tenant A 的 token 未被影响（仍可 rotate）
+        svc.rotate(ta, &rf).await.expect("tenant A token intact");
+    }
+
+    // ── 测试 R7：Invalid — 未知 token rotate ⇒ Invalid ──────────────────────────
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_unknown_token_is_invalid() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+
+        let unknown = authn::RefreshToken::new("this-token-was-never-issued");
+        let err = svc.rotate(ta, &unknown).await.expect_err("unknown token");
+        assert!(matches!(err, RefreshError::Invalid), "{err:?}");
+    }
+
+    // ── 测试 R8：revoke 未知 token 幂等 Ok ───────────────────────────────────────
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_revoke_unknown_token_is_idempotent() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let ta = tid(CANON_TENANT);
+
+        let unknown = authn::RefreshToken::new("this-token-was-never-issued");
+        svc.revoke(ta, &unknown)
+            .await
+            .expect("revoke unknown is idempotent");
+    }
+
+    // ── 测试 R9：CAS-miss 分支 — store.rotate 返回 Ok(false) → revoke_lineage 被调用一次 + Replayed ──
+    //
+    // 验证 `rotate` 的步骤 5 if !applied 分支：
+    // ①  `revoke_lineage` 以正确 lineage_id 被调用恰一次；
+    // ②  rotate 返回 `Err(RefreshError::Replayed)`。
+    // 用 mockall 控制 store 行为（`find_by_hash` 返回 Active 记录，`rotate` 返回 Ok(false)）。
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_rotate_cas_miss_revokes_lineage_and_returns_replayed() {
+        use crate::ports::DynRefreshTokenStore;
+
+        mockall::mock! {
+            CasMissStore {}
+            impl RefreshTokenStore for CasMissStore {
+                async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn find_by_hash(
+                    &self,
+                    tenant: TenantId,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+                async fn rotate(
+                    &self,
+                    rotation: crate::ports::RefreshRotation,
+                ) -> Result<bool, IdentityError>;
+                async fn revoke_lineage(
+                    &self,
+                    tenant: TenantId,
+                    lineage_id: RefreshTokenId,
+                ) -> Result<(), IdentityError>;
+            }
+        }
+
+        let ta = tid(CANON_TENANT);
+        let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        // 根 token：id == lineage_id（固定 UUID 串便于 withf 捕获）。
+        let lineage_str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+        let active_rec = RefreshTokenRecord::hydrate(
+            lineage_str, // id
+            ta,
+            "alice-subj",
+            vocab::PrincipalKind::User,
+            [0xAA; 32],
+            None,        // parent_id = None（根 token）
+            lineage_str, // lineage_id = id（根 token）
+            RefreshStatus::Active,
+            issued,
+            issued + Duration::from_secs(3_600),
+        );
+
+        let mut mock = MockCasMissStore::new();
+
+        // find_by_hash → Active 记录（步骤 1）
+        mock.expect_find_by_hash()
+            .returning(move |_t, _h| Ok(Some(active_rec.clone())));
+
+        // rotate → Ok(false)（CAS miss，步骤 6）
+        mock.expect_rotate().returning(|_rotation| Ok(false));
+
+        // revoke_lineage 须以正确 lineage_id 被调用恰一次（步骤 5 if !applied 分支）
+        mock.expect_revoke_lineage()
+            .withf(move |_t, lid| lid.as_str() == lineage_str)
+            .times(1)
+            .returning(|_t, _lid| Ok(()));
+
+        let svc = RefreshService::new(
+            DynRefreshTokenStore::new_box(mock),
+            std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
+
+        let fake_token = authn::RefreshToken::new("this-causes-cas-miss");
+        let err = svc
+            .rotate(ta, &fake_token)
+            .await
+            .expect_err("CAS miss 应返回 Replayed");
+        assert!(matches!(err, RefreshError::Replayed), "CAS miss: {err:?}");
+    }
+
+    // ── 测试 R10：mint 先于 CAS（#284 F1）— signer 失败时旧 refresh 未被消费、仍 Active ──
+    //
+    // 验证 rotate 步骤 5（mint）先于步骤 6（CAS 提交）：mint 失败 ⇒ 返回 Mint 错误、CAS 从未执行 ⇒
+    // 旧 refresh 仍 Active（客户端可重试，无锁死）。反证「CAS 先于 mint」的锁死缺陷。
+
+    /// 永远签名失败的 Signer（diport::SignerError 已脱敏 source）。
+    struct FailingSigner;
+    impl diport::Signer for FailingSigner {
+        async fn sign(
+            &self,
+            _req: diport::SignRequest,
+        ) -> Result<diport::Signature, diport::SignerError> {
+            Err(diport::SignerError::new(std::io::Error::other(
+                "test-mint-fail",
+            )))
+        }
+        async fn shutdown(&self) -> Result<(), diport::SignerError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_rotate_mint_failure_does_not_consume_old() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let probe = store.clone(); // Arc 共享视图：rotate 后查旧 token 状态
+        let ta = tid(CANON_TENANT);
+
+        let issuer = authn::JwtIssuer::new(
+            std::sync::Arc::new(FailingSigner),
+            make_clock(1_700_000_000),
+            authn::JwtIssuerConfig {
+                key: diport::KeyId::new("test-key"),
+                alg: authn::JwtAlg::Es256,
+                purpose: diport::SigningPurpose::new("auth.jwt.access"),
+                issuer: "https://test.example".to_string(),
+                audience: "test-audience".to_string(),
+                ttl: Duration::from_secs(900),
+            },
+        )
+        .expect("valid jwt issuer config");
+        let svc = RefreshService::new(
+            crate::ports::DynRefreshTokenStore::new_box(store),
+            std::sync::Arc::new(issuer),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
+
+        // issue 不 mint（仅 insert）⇒ 成功签发旧 refresh
+        let old_rf = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+
+        // rotate ⇒ mint 失败（FailingSigner）⇒ Err(Mint)，CAS 从未执行
+        let err = svc
+            .rotate(ta, &old_rf)
+            .await
+            .expect_err("mint 失败应返回 Mint 错误");
+        assert!(
+            matches!(err, RefreshError::Mint(_)),
+            "应为 Mint 错误: {err:?}"
+        );
+
+        // 关键断言：旧 refresh 未被消费、仍 Active（CAS 先于 mint 会让此处 Consumed → 锁死）
+        let old_hash = crate::domain::RefreshTokenHash::new(secure::digest(old_rf.as_str()));
+        let found = probe
+            .find_by_hash(ta, old_hash)
+            .await
+            .expect("find ok")
+            .expect("旧 refresh 仍在 store");
+        assert_eq!(
+            found.status(),
+            RefreshStatus::Active,
+            "mint 失败不得消费旧 refresh（#284 F1：mint 先于 CAS）"
+        );
     }
 }

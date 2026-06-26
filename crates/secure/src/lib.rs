@@ -7,6 +7,7 @@ pub mod cookie;
 pub mod password;
 pub mod pathsafe;
 pub mod redaction;
+pub mod refresh;
 
 pub use aead::{Aead, AeadError, Ciphertext};
 pub use cookie::{CookieCodec, CookieError, CookieValue, CookieValueError};
@@ -15,3 +16,4 @@ pub use password::{
 };
 pub use pathsafe::is_safe_segment;
 pub use redaction::{Redacted, Redactor, redact_error, redact_field, redact_url_credentials};
+pub use refresh::{OpaqueToken, digest};

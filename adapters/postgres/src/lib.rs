@@ -27,6 +27,7 @@ mod outbox;
 mod pool;
 mod projection_events;
 mod readiness;
+mod refresh_token_store;
 mod role_repo;
 mod saga_journal;
 mod secret_repo;
@@ -42,6 +43,7 @@ pub use outbox::PgOutbox;
 // NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
 // sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径 read_from + PgProjectionRecord 公开。
 pub use projection_events::{PgProjectionEvents, PgProjectionRecord, ProjectionEventsError};
+pub use refresh_token_store::PgRefreshTokenStore;
 pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
 pub use secret_repo::PgSecretRepo;
@@ -126,8 +128,8 @@ mod smoke {
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
-    //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）；
-    //! 去掉任一即编译失败（anti-vacuity）。
+    //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
+    //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）；去掉任一即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
@@ -140,6 +142,7 @@ mod smoke {
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
+    fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
@@ -162,6 +165,8 @@ mod smoke {
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
         // `PgSecretRepo: SecretRepo` 真实 impl（非 edge proof）——secret 引用坐标仓储（#1274）。
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);
+        // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
+        assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
     }
 
     #[test]
