@@ -140,8 +140,8 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
 
     // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
     // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
-    // command kind：追加 CONTRACT_ID/TOPIC + typed emit/register wrapper（triple funnel 顶层；泛型收口到
-    // command/mod.rs 的 CommandEmit/CommandRegister seam，generated 仍仅依赖 serde）。
+    // command kind：追加 CONTRACT/CONTRACT_ID/TOPIC + typed emit/register wrapper（triple funnel 顶层；
+    // 泛型收口到 command/mod.rs 的 CommandEmit/CommandRegister seam）。
     match c.manifest.kind {
         ContractKind::Event => {
             let glue = render_event_glue(c)?;
@@ -157,13 +157,14 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     }
 }
 
-/// command kind 派生 glue：CONTRACT_ID / TOPIC 常量 + per-command typed `emit_async` / `register_handler`
+/// command kind 派生 glue：CONTRACT / CONTRACT_ID / TOPIC 常量 + per-command typed `emit_async` / `register_handler`
 /// wrapper（triple funnel 顶层）。wrapper 泛型收口到 `command/mod.rs` 的 `CommandEmit` / `CommandRegister`
-/// seam——generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层），故经 seam 注入。
+/// seam——generated 不命名 runtime（`eventexec` Service 层），故经 seam 注入。
 ///
 /// typed `Request` 类型名 = request schema 的 `title`（typify 用作根类型名）；拼进生成源前经
 /// `syn::Ident` 收口（防注入非法标识符）。CONTRACT_ID/TOPIC 由 manifest 派生（draft 无 topic 回退用 id）。
 fn render_command_glue(c: &DiscoveredContract) -> Result<String> {
+    let domain = &c.manifest.domain;
     let contract_id = &c.manifest.id;
     let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
     let request_ty = command_request_type_name(c)?;
@@ -172,12 +173,16 @@ fn render_command_glue(c: &DiscoveredContract) -> Result<String> {
 /// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "{contract_id}";
 
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
+
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "{topic}";
 
 /// Producer wrapper（triple funnel 顶层）：把 typed [`{request_ty}`] 经注入的 [`super::CommandEmit`] 落
-/// durable outbox。baked `CONTRACT_ID` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
+/// durable outbox。baked `CONTRACT` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
 /// `subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
 /// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
 /// 由 `cargo xtask codegen` 派生；勿手改。
@@ -188,7 +193,7 @@ pub async fn emit_async<E: super::CommandEmit>(
     idempotency_key: ::core::option::Option<::std::string::String>,
 ) -> ::core::result::Result<(), E::Error> {{
     emitter
-        .emit(CONTRACT_ID, TOPIC, &request, &subject_id, idempotency_key.as_deref())
+        .emit(CONTRACT, TOPIC, &request, &subject_id, idempotency_key.as_deref())
         .await
 }}
 
@@ -500,7 +505,7 @@ const COMMAND_SEAM_DEF: &str = r#"
 pub trait CommandEmit {
     /// emit 失败类型（实现绑定，如 `eventexec::command::CommandEmitError`）。
     type Error;
-    /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract_id` / `topic` 是 generated
+    /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract` / `topic` 是 generated
     /// wrapper 注入的 baked 常量；`request` 是 typed payload（实现侧 `serde_json` 编码）；`subject_id` 是
     /// **runtime 必填**的不透明主体标识（落 outbox envelope.subject，如设备 / 会话 ID）；`idempotency_key`
     /// 是**可选**业务幂等键——`Some` ⇒ 经它 mint 稳定 `DispatchId`（同键二次 emit 被 claimer 拒），`None`
@@ -515,12 +520,12 @@ pub trait CommandEmit {
     ///    `eventexec::command::DispatchId::from_idempotency_key(k)?`（稳定业务幂等键）；为 `None` ⇒
     ///    `eventexec::command::DispatchId::from_idempotency_key(&Uuid::new_v4().to_string())?`（随机）。
     /// 3. **透传 subject_id**：直接转发本参数（runtime 写入 outbox envelope.subject，不再由 bridge 编造）。
-    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract_id, bytes, subject_id.to_owned()).await`
+    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract, bytes, subject_id.to_owned()).await`
     ///
     /// 组合根 bridge 是唯一 sanctioned 实现者；域 crate 不得直接 impl 本 trait（机器守 `COMMAND-IMPL-ALLOWLIST-01`）。
     fn emit<R: ::serde::Serialize + ::core::marker::Send + ::core::marker::Sync>(
         &self,
-        contract_id: &'static str,
+        contract: ::vocab::ContractBinding,
         topic: &'static str,
         request: &R,
         subject_id: &str,

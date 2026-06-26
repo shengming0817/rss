@@ -1,8 +1,8 @@
 # ADR-005：域 repo / 领域服务 DI port 归属（Option 2：域内 port + DIP 内向实现）
 
-- **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）；**§9 amended by #1192**（co-tx Unit-of-Work seam 交付 #1083 session 接缝，威胁矩阵重评见 §9.3）
-- **日期**：2026-06-23（§9 amendment：2026-06-25）
-- **关联**：issue #1083 [RW-G0.2] · #1192（§9 co-tx UoW amendment）· epic #991 · spike 来源 PR #1051(PR-4) / #1049(PR-diport) · 解锁 W 阶段（#1000–#1016）repo 接缝单元
+- **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）；**§9 amended by #1192**（co-tx Unit-of-Work seam 交付 #1083 session 接缝，威胁矩阵重评见 §9.3）；**§10 amended by #1278**（`SessionUnitOfWork` + `SessionRepo` 合并为单一 `SessionLifecycle`，威胁矩阵重评见 §10.3）
+- **日期**：2026-06-23（§9 amendment：2026-06-25；§10 amendment：2026-06-26）
+- **关联**：issue #1083 [RW-G0.2] · #1192（§9 co-tx UoW amendment）· #1278（§10 SessionLifecycle 合并 amendment）· epic #991 · spike 来源 PR #1051(PR-4) / #1049(PR-diport) · 解锁 W 阶段（#1000–#1016）repo 接缝单元
 - **依赖 ADR**：**ADR-003**（DI async+dyn 派发 = dynosaur，本 ADR 复用其派发范式不变）· **ADR-004**（签名约定单源）
 - **归属**：framework（分层 / DI 接缝归属约定，provider-agnostic 基础设施治理）
 - **AI-robust 评级**：见 §6（逐条 Hard/Medium，Soft 禁止立项）
@@ -173,6 +173,8 @@ Option 2 不 foreclose Option 3（per-域 `{domain}-model` crate）。任一条�
 
 ## 9. Amendment（#1192）：L2 OutboxFact co-tx Unit-of-Work seam（#1083 session 接缝交付）
 
+> **后续合并（#1278，见 §10）**：本 §9 描述的独立 `SessionUnitOfWork`（postgres `PgSessionUnitOfWork`）已与 `SessionRepo` 合并为单一 `SessionLifecycle`（postgres `PgSessionLifecycle`）。下文为 #1192 当时的历史记录，symbol 名以 §10 为准。
+
 **触发**：#1192（PR #219 codex F2 defer）落地 identity session 持久化（#1083 核心）+ OutboxFact L2 完整 co-tx 接缝。`SessionUnitOfWork`（`identity::ports`）是 Option 2 范式下**第一个真实写实**（非 `todo!()` 冻结）的域形 port——postgres `PgSessionUnitOfWork` 把 session 行与 `identity.session-created` outbox 行**同一本地事务**原子写入。
 
 ### 9.1 是同一 Option 2 范式的细化，非新架构轴
@@ -191,7 +193,27 @@ identity 在 RoleRepo 落地时已完成 §8.1 步骤 2/4/5（dynosaur/trait-var
 |--------|------------|------------------|
 | UoW impl 把业务写与 outbox append 拆进**不同事务**（两次 `run_in_transaction` / 各自 `begin`），defeat co-tx 原子性 | **INVARIANT OUTBOX-COTX-SESSION-01**：①域侧 **Hard**——combined 方法是唯一 session-写 API（无 `persist`/`emit` 分调），返回 `Result<(),E>` 不漏 tx 句柄，域无半开事务可拆；②adapter 侧 **Medium**——单事务接线（`run_in_transaction` 独占 begin/commit/rollback、`append_outbox` `&mut PgConnection`-only 复用 OUTBOX-ATOMIC-IDEM-01）由集成测试 t11(commit 两行皆在)↔t12(rollback 两行皆无) anti-vacuity 守 | **否（不退化）**：§2.4 `adapter→域` 边 + §2.5 dynosaur 白名单对 `identity` 已覆盖；新增第二域形 port 不加新 crate-graph 风险，`memory`→`identity` 边经既有 LAYER-DEPS-06 反向②（真实 source edge）守。仅**扩展**威胁矩阵，不冲突既有结论 |
 
-`OUTBOX-COTX-SESSION-01` 是 `OUTBOX-ATOMIC-IDEM-01`（守裸 `append_outbox` 在事务内）的 **sibling**（守 session 行 + outbox 行 both-or-neither），非其重载；emit-only `PgEmitter` 与 co-tx `PgSessionUnitOfWork` 复用同一 `append_outbox` 接缝，两路并存（前者用于无 co-located 业务写的 OutboxFact 事件）。
+`OUTBOX-COTX-SESSION-01` 是 `OUTBOX-ATOMIC-IDEM-01`（守裸 `append_outbox` 在事务内）的 **sibling**（守 session 行 + outbox 行 both-or-neither），非其重载；emit-only `PgEmitter` 与 co-tx `PgSessionLifecycle` 复用同一 `append_outbox` 接缝，两路并存（前者用于无 co-located 业务写的 OutboxFact 事件）。
+
+## 10. Amendment（#1278）：`SessionUnitOfWork` + `SessionRepo` 合并为单一 `SessionLifecycle` 域形 port
+
+**触发**：PR #255 finding F3——会话「创建（co-tx，L2）」与「查询 / 软撤销（L1）」分属**两个未绑定**的域形 port（§9 的 `SessionUnitOfWork` + `SessionRepo`）。组合根可注入分属不同底座的实例——`with_seed_credential` 实建一个**新的空** `InMemSessionRepo`、与注入的 UoW **异 store**，导致 login 写入的会话无法被同一 service 的 logout 撤销，且类型系统无法阻止该 bug；且无 login→logout 全链回归。合并为单一 `SessionLifecycle`（`persist_session_and_emit` + `find` + `revoke` 同一 trait），使「两个未绑定 store」从类型层不可表达。
+
+### 10.1 合并仍是同一 Option 2 范式的细化，非新归属轴
+
+`SessionLifecycle` 仍：域形 port 定义于 `identity::ports`、`adapter→域` DIP 内向边、dynosaur Send 变体、`Box<DynX>` 必填注入——把 §9 的 combined-method UoW 与 `find`/`revoke` 读路径收敛进**单一** trait，不引入新归属轴。**零新增** deny.toml / xtask confinement（identity wrapper 已含 postgres/memory；dynosaur/trait-variant 白名单已含 identity）。工业 Rust 一致采用单一会话存储接口、「创建写」与「查询/撤销」不拆端口（`ref: maxcountryman/tower-sessions tower-sessions-core/src/session_store.rs@main` `SessionStore` create+save+load+delete 同 trait；`ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/console_session.rs@main` session_create/lookup/hard_delete 同 impl）；RSS 偏离仅在 combined `persist_session_and_emit` 内嵌 outbox（L2 OutboxFact 契约要求），故保留该 combined 方法（拆 `save`+`emit` 重开 split-tx 洞）。
+
+### 10.2 co-tx 原子性 OUTBOX-COTX-SESSION-01 不退化
+
+`OUTBOX-COTX-SESSION-01`（§9.3）的 Hard 强制力来自 `persist_session_and_emit` 的**方法签名形状**（combined 单方法、域无半开事务句柄），**非** `SessionUnitOfWork` 与 `SessionRepo` 是否分立 trait。合并后该方法与 `find` / `revoke` 并列于同一 trait 仍是唯一 session-写 API（无 `save` / `emit` 分调）；postgres `PgSessionLifecycle` 的事务边界（begin → SET LOCAL → INSERT session → append_outbox → 单 commit）不变，t11/t12/t14 anti-vacuity 照旧守。
+
+### 10.3 威胁矩阵重评（ai-robust「ADR amendment 同步重评」强制）
+
+| 新威胁 | 缓解 / 评级 | 安全模型是否退化 |
+|--------|------------|------------------|
+| 两个未绑定 session port 来自**不同底层 store**（persist 写 store A、find/revoke 查 store B），login 后 logout 失效（接缝悬空，PR #255 F3） | **Hard（类型系统）**：合并为单一 `SessionLifecycle` 域形 port——`LoginService::new` 由 5 必填位置参减为 4（`sessions` + `session_uow` 两独立必填参 → 单一 `lifecycle`），「两 store 选型空间」经**构造器必填参数 + typed function choice** 消除（违反不可表达）。anti-vacuity：service 级 `login_then_logout_revokes_via_shared_lifecycle`（login 写入 → 同 lifecycle find=Some → logout → find=None）守「create/find/revoke 同源」非恒真 | **否（安全模型加强）**：tenant 隔离仍由 `find` / `revoke` 签名的 `TenantId` 位置参承载（跨租 fail-closed）；OUTBOX-COTX-SESSION-01 combined 方法不变；audit actor = canonical user_id（#1277 F1）不受影响。零新增 crate-graph 风险（`adapter→域` 边、dynosaur 白名单对 `identity` 已覆盖） |
+
+durable `find` / `revoke` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE + `0009_add_sessions_revoked.sql` 引入 `revoked` 列；集成测试 t20–t22 覆盖 persist→find / revoke→find None / 跨租隔离）——**补齐原 #1116 的 session durable 闭合**。合并 trait 的必然要求：单一 `SessionLifecycle` 强制 provider 交付完整生命周期，故 postgres **不留 `todo!()` 半实现**（否则 `LoginService::logout` 经 `revoke` 落到 runtime panic——把合并前「无 `PgSessionRepo` ⇒ 编译期挡住」的保护退化成运行期 panic，PR #273 codex F1）。`SessionLifecycle` 的「单一完整 provider」类型约束与生产行为至此闭合一致。
 
 ## 对标证据（ref）
 

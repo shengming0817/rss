@@ -1,7 +1,7 @@
 //! identity::domain::session — 会话持久化快照域实体（dylint rss_domain_no_serialize 守护区）。
 //!
 //! `Session`（会话持久化快照）+ `SessionId` newtype。L2 OutboxFact **co-tx** 的业务写实体：登录 mint
-//! 会话后，`ports::SessionUnitOfWork` 把 `Session` 行与 `identity.session-created` outbox 行**同一本地
+//! 会话后，`ports::SessionLifecycle` 把 `Session` 行与 `identity.session-created` outbox 行**同一本地
 //! 事务**原子写入（FR-003 完整 L2；见 `crate::ports` 与 postgres adapter 的 OUTBOX-COTX-SESSION-01）。
 //!
 //! 持久化形态是 **flat record**（session_id / subject / tenant / expires_at / created_at），刻意**不**复用
@@ -9,7 +9,7 @@
 //! （域层）。域形 repo port 只引域内实体（ADR-005 Option 2，category line）——引 service 层 `authn::Session`
 //! 会令 `ports` 端口耦合服务类型、层序倒置。
 //!
-//! `pub`（ADR-005 Option 2）：作 `ports::SessionUnitOfWork` 签名实体被独立 adapter crate（postgres）跨
+//! `pub`（ADR-005 Option 2）：作 `ports::SessionLifecycle` 签名实体被独立 adapter crate（postgres）跨
 //! crate 命名/收发；字段私有、构造经 `pub(crate)` funnel——adapter 可接收/读取 `Session` 但**不可伪造**
 //! 其不变式（fail-closed，ADR-001）。
 //!
@@ -49,7 +49,7 @@ impl SessionId {
 
     /// 取会话 id 字符串引用。
     ///
-    /// `pub`（非 `pub(crate)`）：postgres adapter 的 `SessionUnitOfWork` impl body 跨 crate 读取以绑 INSERT
+    /// `pub`（非 `pub(crate)`）：postgres adapter 的 `SessionLifecycle` impl body 跨 crate 读取以绑 INSERT
     /// 参数（ADR-005 Option 2 / W 阶段 step 3 最小读集——本 PR 已写实 adapter，故真升 `pub`）。
     pub fn as_str(&self) -> &str {
         &self.0
@@ -104,6 +104,29 @@ impl Session {
             expires_at,
             created_at,
         }
+    }
+
+    /// 跨 crate 受控重建 funnel（#1278）：postgres `PgSessionLifecycle::find` 从持久化行重建 `Session`。
+    ///
+    /// `session_id` / `subject` 是 opaque 串（写入时未做格式校验，同 `SessionId::new` 信任边界——故重建无 parse
+    /// 复核、infallible，区别于 `Role::hydrate` 须复核 id/permission 白名单）；`tenant` 由 adapter 复用查询入参
+    /// （`WHERE tenant_id = $tenant` 已锁该行租户，同 `Role::hydrate` 复用 id）；时刻由 adapter 从持久化 epoch 列
+    /// 还原（不取 DB clock，与写路径 `unix_secs` 编码对称）。字段私有 + 构造经本 funnel ⇒ adapter 可返回
+    /// `Session`、读其访问器，但**不可伪造**其不变式（同 [`super::RoleId`] / `Role::hydrate` 范式）。
+    pub fn hydrate(
+        session_id: impl Into<String>,
+        subject: impl Into<String>,
+        tenant: TenantId,
+        expires_at: SystemTime,
+        created_at: SystemTime,
+    ) -> Self {
+        Self::new(
+            SessionId::new(session_id),
+            subject,
+            tenant,
+            expires_at,
+            created_at,
+        )
     }
 
     // accessor：`pub`（adapter impl body 跨 crate 读取以绑 INSERT；ADR-005 W 阶段 step 3 最小读集）。
@@ -165,6 +188,25 @@ mod tests {
         );
         assert_eq!(s.id().as_str(), "sid-1");
         assert_eq!(s.subject(), "alice-subject");
+        assert_eq!(s.tenant(), tid(TENANT_A));
+        assert_eq!(s.expires_at(), expires);
+        assert_eq!(s.created_at(), created);
+    }
+
+    // Session::hydrate（跨 crate 受控重建 funnel，#1278）：opaque 串经 funnel 重建，访问器回显一致。
+    #[test]
+    fn session_hydrate_echo() {
+        let created = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let expires = created + Duration::from_secs(7_200);
+        let s = Session::hydrate(
+            "sid-hydrated",
+            "bob-subject",
+            tid(TENANT_A),
+            expires,
+            created,
+        );
+        assert_eq!(s.id().as_str(), "sid-hydrated");
+        assert_eq!(s.subject(), "bob-subject");
         assert_eq!(s.tenant(), tid(TENANT_A));
         assert_eq!(s.expires_at(), expires);
         assert_eq!(s.created_at(), created);

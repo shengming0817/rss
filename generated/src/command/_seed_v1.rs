@@ -61,12 +61,16 @@ pub struct SeedDoThingRequest {
 /// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "seed.do-thing";
 
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("_seed", "seed.do-thing");
+
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "seed.commands.do-thing";
 
 /// Producer wrapper（triple funnel 顶层）：把 typed [`SeedDoThingRequest`] 经注入的 [`super::CommandEmit`] 落
-/// durable outbox。baked `CONTRACT_ID` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
+/// durable outbox。baked `CONTRACT` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
 /// `subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
 /// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
 /// 由 `cargo xtask codegen` 派生；勿手改。
@@ -78,7 +82,7 @@ pub async fn emit_async<E: super::CommandEmit>(
 ) -> ::core::result::Result<(), E::Error> {
     emitter
         .emit(
-            CONTRACT_ID,
+            CONTRACT,
             TOPIC,
             &request,
             &subject_id,

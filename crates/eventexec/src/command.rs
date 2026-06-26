@@ -77,17 +77,13 @@ pub async fn emit_async(
     emitter: &DynOutboxEmitter<'_>,
     dispatch_id: DispatchId,
     topic: &str,
-    contract_id: &str,
+    contract: vocab::ContractBinding,
     payload: Vec<u8>,
     subject_id: String,
 ) -> Result<(), CommandEmitError> {
     let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
     let entry = Entry::new(parsed_topic, dispatch_id.into_idem_key(), payload);
-    let envelope = OutboxEnvelopeParts {
-        domain: domain_of_contract(contract_id).to_string(),
-        contract_id: contract_id.to_string(),
-        subject_id,
-    };
+    let envelope = OutboxEnvelopeParts::new(contract, subject_id);
     emitter
         .emit(entry, envelope)
         .await
@@ -95,17 +91,12 @@ pub async fn emit_async(
         .map(|()| {
             // 结构化 debug：domain / contract_id / topic 归因（无 payload 字节、无 subject_id，PII 边界同 DLX log）。
             tracing::debug!(
-                domain = domain_of_contract(contract_id),
-                contract_id,
+                domain = contract.domain(),
+                contract_id = contract.contract_id(),
                 topic,
                 "command: emit ok"
             );
         })
-}
-
-/// 点分 contract id 的归属域段（`<domain>.<name>` 首段；无点则整体）。envelope.domain 路由元数据用。
-fn domain_of_contract(contract_id: &str) -> &str {
-    contract_id.split('.').next().unwrap_or(contract_id)
 }
 
 /// Runtime 命令消费注册 —— 复用 [`run_consumer`] 驱动 + [`IdempotencyStore`] claimer 两阶段去重。
@@ -180,7 +171,7 @@ mod tests {
     };
     use diport::{DynOutboxEmitter, Message, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 
-    use super::{DispatchId, domain_of_contract, emit_async, register_command_handler};
+    use super::{DispatchId, emit_async, register_command_handler};
     use crate::MAX_REDELIVERY;
 
     // ── producer 侧 fake：捕获 emit 的 Entry topic/idem_key/payload + envelope ──────
@@ -216,7 +207,7 @@ mod tests {
                 topic: entry.topic().as_str().to_string(),
                 idem_key: entry.idem_key().as_str().to_string(),
                 payload: entry.payload().to_vec(),
-                contract_id: envelope.contract_id.clone(),
+                contract_id: envelope.contract().contract_id().to_string(),
             });
             Ok(())
         }
@@ -246,7 +237,7 @@ mod tests {
             &emitter,
             dispatch,
             "seed.commands.do-thing",
-            "seed.do-thing",
+            vocab::ContractBinding::from_static("seed", "seed.do-thing"),
             b"{\"amount\":7}".to_vec(),
             "subject-opaque".to_string(),
         )
@@ -278,7 +269,7 @@ mod tests {
             &emitter,
             dispatch,
             "Not A Topic",
-            "seed.do-thing",
+            vocab::ContractBinding::from_static("seed", "seed.do-thing"),
             b"{}".to_vec(),
             "s".to_string(),
         )
@@ -514,7 +505,7 @@ mod tests {
             &emitter,
             dispatch,
             "seed.commands.fail",
-            "seed.fail",
+            vocab::ContractBinding::from_static("seed", "seed.fail"),
             b"{}".to_vec(),
             "subject-opaque".to_string(),
         )
@@ -523,15 +514,6 @@ mod tests {
             matches!(result, Err(super::CommandEmitError::Emit(_))),
             "底层 emitter 失败应映射为 CommandEmitError::Emit: {result:?}"
         );
-    }
-
-    // ── TC-F5b：domain_of_contract 分支断言 ──────────────────────────────────
-
-    /// TC-F5b：domain_of_contract 无点 → 整体返回（unwrap_or 兜底）；有点 → 首段返回。
-    #[test]
-    fn domain_of_contract_branches() {
-        assert_eq!(domain_of_contract("nodot"), "nodot", "无点 → 整体");
-        assert_eq!(domain_of_contract("a.b.c"), "a", "有点 → 首段");
     }
 
     // ── TC-F5c：requeue 路径 → MAX_REDELIVERY 耗尽 → DLX ────────────────────

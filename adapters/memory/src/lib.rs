@@ -30,7 +30,7 @@ use diport::{
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
-use identity::ports::{Session, SessionUnitOfWork};
+use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantId};
 use tokio_util::sync::CancellationToken;
 
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
@@ -174,40 +174,53 @@ impl OutboxEmitter for MemEmitter {
     }
 }
 
-// ── MemSessionUnitOfWork：in-mem 会话 co-tx 替身（demo 拓扑）────────────────────
+// ── MemSessionLifecycle：in-mem 会话生命周期替身（demo 拓扑）────────────────────
 
-/// in-mem 会话 co-tx Unit-of-Work（impl [`identity::ports::SessionUnitOfWork`]）：把 [`Entry`] fan-out 到
-/// [`MemBus`]——demo / 单进程 / 测试用；生产走 postgres `PgSessionUnitOfWork`（单事务 session + outbox co-tx）。
+/// in-mem 会话生命周期 provider（impl [`identity::ports::SessionLifecycle`]，合并原 `MemSessionUnitOfWork`，
+/// #1278）：`persist_session_and_emit` 把 session 存入进程内 store 并把 [`Entry`] fan-out 到 [`MemBus`]，
+/// `find` / `revoke` 在同一 store 操作——demo / 单进程 / 测试用；生产走 postgres `PgSessionLifecycle`
+/// （单事务 session + outbox co-tx）。
 ///
 /// # WARNING / DEMO-ONLY
 ///
-/// **不持久化 session**（同 [`MemEmitter`] 的 demo 哲学）：in-mem 单进程无 durable 会话存储——**登录后 session
-/// 不可被后续鉴权 / 登出查回**（与 postgres 路径产品行为不同）。demo 验证的只是**接缝路由**（登录 → UoW →
-/// 事件流到 audit）。需验「session 可读」的验收**勿用本替身**——走 postgres 路径或在 journey 内自存。
+/// session store 是**进程内 in-mem**（同 [`MemEmitter`] 的 demo 哲学）：单进程内 login 写入的会话可被
+/// 后续 logout / 查询查回（合并端口后 demo 也能验 logout 闭环），但**重启即丢、多实例不共享**——不是
+/// durable 会话存储。需验 durable「session 跨进程可读 / 撤销」的验收**勿用本替身**——走 postgres 路径。
 ///
-/// session 持久化与 co-tx 原子性（both-or-neither）由 postgres `PgSessionUnitOfWork`（INVARIANT
-/// OUTBOX-COTX-SESSION-01）+ 集成测试守。envelope 同 `MemEmitter` 忽略（消费侧从 payload 解码）。
-pub struct MemSessionUnitOfWork {
+/// co-tx 原子性（both-or-neither：session 行 + outbox 行同事务）与 durable 持久化由 postgres
+/// `PgSessionLifecycle`（INVARIANT OUTBOX-COTX-SESSION-01）+ 集成测试守。envelope 同 `MemEmitter` 忽略
+/// （消费侧从 payload 解码）。
+pub struct MemSessionLifecycle {
     bus: MemBus,
+    /// `SessionId` → `(Session, revoked_flag)`：进程内会话 store（demo logout/查询可见 login 写入）。
+    sessions: Arc<Mutex<HashMap<SessionId, (Session, bool)>>>,
 }
 
-impl MemSessionUnitOfWork {
-    /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）。
+impl MemSessionLifecycle {
+    /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）；session store 初始为空。
     pub fn new(bus: MemBus) -> Self {
-        Self { bus }
+        Self {
+            bus,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
-impl SessionUnitOfWork for MemSessionUnitOfWork {
+impl SessionLifecycle for MemSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
-        _session: Session,
+        session: Session,
         entry: Entry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
-        // reason: in-mem 替身不持久化 session（demo 无 durable 存储，同 MemEmitter；真实 co-tx 持久化语义由
-        // PgSessionUnitOfWork 的 OUTBOX-COTX-SESSION-01 守）；只复用 MemPublisher 路径把 entry fan 到总线
+        // demo：把 session 存入进程内 store（demo logout/查询可见），再复用 MemPublisher 把 entry fan 到总线
         // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
+        // reason: 真实 co-tx both-or-neither + durable 持久化由 PgSessionLifecycle 的 OUTBOX-COTX-SESSION-01
+        // 守；本替身重启即丢、envelope 不落库（消费侧从 payload 解码），DEMO-ONLY。
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session.id().clone(), (session, false));
         let request = PublishRequest {
             topic: Topic::new(entry.topic().as_str()),
             event_id: MessageId::new(entry.idem_key().as_str()),
@@ -218,6 +231,28 @@ impl SessionUnitOfWork for MemSessionUnitOfWork {
             .publish(request)
             .await
             .map_err(OutboxEmitError::new)
+    }
+
+    async fn find(
+        &self,
+        tenant: TenantId,
+        session_id: SessionId,
+    ) -> Result<Option<Session>, IdentityError> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(guard
+            .get(&session_id)
+            .filter(|(s, revoked)| !*revoked && s.tenant() == tenant) // 跨租/已撤销 → None
+            .map(|(s, _)| s.clone()))
+    }
+
+    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError> {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = guard.get_mut(&session_id)
+            && entry.0.tenant() == tenant
+        {
+            entry.1 = true; // 跨租 no-op；幂等
+        }
+        Ok(())
     }
 }
 

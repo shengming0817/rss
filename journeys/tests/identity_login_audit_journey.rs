@@ -4,7 +4,7 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
-//! - DI 注入：identity 经 `Box<DynSessionUnitOfWork>`（`MemSessionUnitOfWork`）co-tx 写 session + 发射 outbox
+//! - DI 注入：identity 经 `Box<DynSessionLifecycle>`（`MemSessionLifecycle`）co-tx 写 session + 发射 outbox
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
 //!   sink）；幂等 store 经 `run_consumer` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
@@ -45,9 +45,9 @@ use diport::{
 use eventexec::{ConsumerMeta, run_consumer};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
-use identity::ports::DynSessionUnitOfWork;
+use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};
-use memory::{FixedClock, MemBus, MemEmitter, MemSessionUnitOfWork};
+use memory::{FixedClock, MemBus, MemEmitter, MemSessionLifecycle};
 use primitives::{ListenerKind, Mac, MacAlgorithm, MacKey, MacVerifier};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
@@ -276,11 +276,11 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         consumer_handler(binding.handler),
     );
 
-    // 登录：注入 MemSessionUnitOfWork（co-tx demo 替身：session + outbox fan-out）+ 固定时钟。emit + 等 audit + cancel 收口。
+    // 登录：注入 MemSessionLifecycle（co-tx demo 替身：session + outbox fan-out）+ 固定时钟。emit + 等 audit + cancel 收口。
     // tenant 经 X-Tenant-ID header 解析（组合根职责）；此处 journey 直接 parse 注入 login 位置参。
     let tenant = TenantId::parse(CANON_TENANT)?;
     let login = LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
+        DynSessionLifecycle::new_box(MemSessionLifecycle::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
@@ -474,7 +474,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
 
     let tenant = TenantId::parse(CANON_TENANT)?;
     let login = LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(MemSessionUnitOfWork::new(bus.clone())),
+        DynSessionLifecycle::new_box(MemSessionLifecycle::new(bus.clone())),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,

@@ -157,7 +157,7 @@ envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed 
 
 - **producer 不可漏接** `occurred_at`：由 metadata funnel 的构造器 `OutboxMetadata::new(occurred_at)`
   **必填位置参**承载——「无 occurred_at 的 outbox metadata」类型层不可表达，新增 outbox producer 必须从注入
-  `Clock` 提供（缺失即编译错误）。三条生产构造点（`PgEmitter` / `PgSessionUnitOfWork` / `PgConfigRepo`）同源。
+  `Clock` 提供（缺失即编译错误）。三条生产构造点（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）同源。
 - **业务不可伪造** reserved key：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
   fail-closed 拒；reserved key（含 trace / correlation）只经 funnel 内 sealed setter 写入，不经任何业务可见
   入口（INVARIANT OUTBOX-METADATA-FUNNEL-01）。

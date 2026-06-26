@@ -91,7 +91,7 @@ impl OutboxMetadata {
     /// （#1129/#262 F1）。
     ///
     /// occurred_at 注入折叠进构造器 ⇒「无 occurred_at 的 outbox metadata」**类型层不可表达**（Hard），杜绝
-    /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionUnitOfWork` / `PgConfigRepo`）各从注入 `Clock`
+    /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）各从注入 `Clock`
     /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
@@ -169,13 +169,13 @@ impl OutboxMetadata {
 
 /// `SystemTime` → UNIX epoch 秒（i64）；负偏移收口 0、溢出收口 `i64::MAX`。
 ///
-/// 本 crate **时间编码单源**（#1129 合并）：emitter / session_uow 的 envelope `occurred_at` 与 session 行
+/// 本 crate **时间编码单源**（#1129 合并）：emitter / session_lifecycle 的 envelope `occurred_at` 与 session 行
 /// `expires_at` / `created_at` 共用，消除同 crate 内重复。timestamptz / 整数秒由 server-side `to_timestamp($N)`
 /// 或直绑生成（不给 sqlx 加 time feature）。负偏移 / 正常路径由 outbox 单测 `unix_secs_*` 守。
 ///
 /// 溢出分支（`as_secs > i64::MAX`，约年 ~2920 亿）为防御性收口：`i64::try_from(..).unwrap_or(i64::MAX)`
 /// **类型层静态保证不 panic**；该输入 `SystemTime` 不可移植构造（`UNIX_EPOCH + Duration::from_secs(u64::MAX)`
-/// 在 `SystemTime::add` 即 panic），故不写平台相关红 case（沿用合并前 session_uow 的既定理由）。
+/// 在 `SystemTime::add` 即 panic），故不写平台相关红 case（沿用合并前 session_lifecycle 的既定理由）。
 ///
 /// 跨 crate 另有 `identity::application::unix_secs` / `settings::application::unix_secs` 同名 helper（域 crate
 /// 不依赖本 adapter，故各自「独立维护、语义对齐」）；跨 crate 收敛为单源 + governance 守语义一致已登记 #1294。
@@ -875,7 +875,7 @@ mod tests {
         }
     }
 
-    // #1129 unix_secs 边界收口（从 session_uow 合并入本 crate 单源）：正常偏移直映。
+    // #1129 unix_secs 边界收口（从 session_lifecycle 合并入本 crate 单源）：正常偏移直映。
     #[test]
     fn unix_secs_maps_offset() {
         let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);

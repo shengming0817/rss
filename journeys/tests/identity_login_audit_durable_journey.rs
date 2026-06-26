@@ -31,10 +31,10 @@ use eventexec::{ConsumerMeta, run_consumer};
 use futures::future::BoxFuture;
 use generated::event::identity_v1::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
-use identity::ports::DynSessionUnitOfWork;
+use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus};
-use postgres::{PgConfig, PgOutbox, PgPassword, PgSessionUnitOfWork, PgSslMode, PgStore};
+use postgres::{PgConfig, PgOutbox, PgPassword, PgSessionLifecycle, PgSslMode, PgStore};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -184,7 +184,7 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
     Ok(())
 }
 
-/// durable 端到端：login → PgSessionUnitOfWork co-tx（session 行 + outbox(pending) 同事务）→ relay CAS →
+/// durable 端到端：login → PgSessionLifecycle co-tx（session 行 + outbox(pending) 同事务）→ relay CAS →
 /// MemBus(message_id=EventId) → run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox
 /// Duplicate → audit 仍 1（acc #2）。session 行持久化/原子性由 postgres t11/t12 守（见上方 with_seed_user 注释）。
 ///
@@ -221,12 +221,12 @@ async fn login_audit_durable_topology() -> Result<()> {
         consumer_handler(binding.handler),
     );
 
-    // 生产侧：login → PgSessionUnitOfWork **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
+    // 生产侧：login → PgSessionLifecycle **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
     // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
     // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
     let tenant = TenantId::parse(CANON_TENANT)?;
     let login = LoginService::with_seed_credential(
-        DynSessionUnitOfWork::new_box(PgSessionUnitOfWork::new(
+        DynSessionLifecycle::new_box(PgSessionLifecycle::new(
             &store,
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         )),

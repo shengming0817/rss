@@ -1,8 +1,8 @@
 //! `co_tx_with_outbox` —— 通用 **co-tx** 骨架：begin → SET LOCAL tenant → 业务写闭包 → `append_outbox` →
 //! 单 commit；任一步 Err ⇒ rollback + warn（#1249，吸收 #1232 co-tx）。
 //!
-//! 抽取自 session co-tx 范式（`session_uow.rs`），供配置写 `PgConfigUnitOfWork` 复用。identity
-//! `PgSessionUnitOfWork` 迁移到本骨架延后（保留 t11/t12/t14 不动，见 #1271）。
+//! 抽取自 session co-tx 范式（`session_lifecycle.rs`），供配置写 `PgConfigUnitOfWork` 复用。identity
+//! `PgSessionLifecycle` 迁移到本骨架延后（保留 t11/t12/t14 不动，见 #1271）。
 //!
 //! 错误泛型 `E`：业务写闭包返回 `Result<(), E>`（如 CAS 0 行 → 域 `VersionConflict`）；骨架自身产生的 sqlx
 //! 错误（begin / SET LOCAL / `append_outbox` / commit）经调用方传入的 `map_storage: Fn(sqlx::Error)->E` 收敛进

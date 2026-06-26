@@ -268,7 +268,7 @@ fn make_entry(event_id: &str) -> Entry {
 
 /// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
 /// 的用例，不断言 occurred_at 值）。`occurred_at` 构造期必填（#262 F1），此处取占位 0；envelope occurred_at 的
-/// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgSessionUnitOfWork`）/ config co-tx 专门覆盖（#1129）。
+/// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgSessionLifecycle`）/ config co-tx 专门覆盖（#1129）。
 fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
@@ -1026,7 +1026,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     Ok(())
 }
 
-// ── T11–T14: PgSessionUnitOfWork co-tx（session 持久化 + outbox append 同一事务，#1083/#1192）─────────
+// ── T11–T14: PgSessionLifecycle co-tx（session 持久化 + outbox append 同一事务，#1083/#1192）─────────
 //
 // OUTBOX-COTX-SESSION-01 anti-vacuity：t11 证真实 method commit 两行皆在（含 tenant-correct）、t13 证幂等
 // 重写各恰一行；负向 rollback 双覆盖——t12 在单事务内复刻 co-tx SQL 序列后强制 Err 证两写共回滚，**t14 驱动
@@ -1036,7 +1036,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
 use std::time::{Duration, SystemTime};
 
 use diport::OutboxEnvelopeParts;
-use identity::ports::{SessionUnitOfWork, TenantId};
+use identity::ports::{SessionLifecycle, TenantId};
 
 /// co-tx 测试用 canonical 租户 UUID。
 const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1080,7 +1080,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
-    crate::PgSessionUnitOfWork::new(&store, fixed_clock())
+    crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
         .await?;
 
@@ -1145,7 +1145,7 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let tenant = COTX_TENANT_A.to_string();
     let sid = session_id.clone();
 
-    // 同 PgSessionUnitOfWork 写序列（SET LOCAL + INSERT session + append_outbox）在单事务内执行后强制 Err →
+    // 同 PgSessionLifecycle 写序列（SET LOCAL + INSERT session + append_outbox）在单事务内执行后强制 Err →
     // run_in_transaction 回滚。证明两写**共**回滚（真实 method rollback 路径结构同源，见本节注释 + T10）。
     let rolled = store
         .run_in_transaction::<_, (), sqlx::Error>(move |c| {
@@ -1208,7 +1208,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
     let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let expires = created + Duration::from_secs(3_600);
-    let uow = crate::PgSessionUnitOfWork::new(&store, fixed_clock());
+    let uow = crate::PgSessionLifecycle::new(&store, fixed_clock());
 
     for _ in 0..2 {
         let session = identity::test_support::session(
@@ -1528,12 +1528,12 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
     let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     // expires_at 远超 Postgres timestamptz 上界（年 ~294277）：`to_timestamp(1e13 秒 ≈ 年 ~318850)` 溢出报错
-    // → session INSERT 失败，驱动真实 `PgSessionUnitOfWork` 的 `write_session_and_outbox`→Err→rollback 分支。
+    // → session INSERT 失败，驱动真实 `PgSessionLifecycle` 的 `write_session_and_outbox`→Err→rollback 分支。
     let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000_000);
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
-    let result = crate::PgSessionUnitOfWork::new(&store, fixed_clock())
+    let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
         .await;
     assert!(
@@ -1552,6 +1552,146 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 0, "真实 method 回滚后 outbox 行不应存在");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── T20–T22: PgSessionLifecycle durable find/revoke（合并端口后完整生命周期，#1278；原 #1116）──────────
+//
+// 第二租户（跨租隔离 t22）——与 config/secret 测试 TENANT_B 同值。
+const COTX_TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
+
+/// t20：persist → `find` 命中，重建 session 字段（subject/tenant/时刻）与持久化一致。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t20_find_returns_persisted_session() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t15-sess");
+    let event_id = unique_event_id("t15-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-find", tenant, expires, created);
+    let sid = session.id().clone();
+
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+    lifecycle
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+
+    // find 命中：经 Session::hydrate 重建，字段（含 epoch 时刻 roundtrip）与持久化一致。
+    let s = lifecycle
+        .find(tenant, sid)
+        .await?
+        .expect("persisted session should be found");
+    assert_eq!(s.id().as_str(), session_id, "session_id roundtrip");
+    assert_eq!(s.subject(), "subj-find", "subject roundtrip");
+    assert_eq!(s.tenant(), tenant, "tenant roundtrip");
+    assert_eq!(s.expires_at(), expires, "expires_at epoch roundtrip");
+    assert_eq!(s.created_at(), created, "created_at epoch roundtrip");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t21：`revoke` → `find` 返回 None（软撤销）；重复 / 未知 sid revoke 仍 Ok（幂等）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t16-sess");
+    let event_id = unique_event_id("t16-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-revoke", tenant, expires, created);
+    let sid = session.id().clone();
+
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+    lifecycle
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+    assert!(
+        lifecycle.find(tenant, sid.clone()).await?.is_some(),
+        "revoke 前应能 find 到"
+    );
+
+    // 软撤销 → find None（行仍在、revoked=true）。
+    lifecycle.revoke(tenant, sid.clone()).await?;
+    assert!(
+        lifecycle.find(tenant, sid.clone()).await?.is_none(),
+        "revoke 后 find 应 None"
+    );
+    let row_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(row_cnt.0, 1, "软撤销不删行（行仍在、revoked=true）");
+
+    // 幂等：重复 revoke + 未知 sid revoke 均 Ok。
+    lifecycle.revoke(tenant, sid).await?;
+    let ghost = identity::test_support::session(
+        &unique_event_id("t16-ghost"),
+        "x",
+        tenant,
+        expires,
+        created,
+    );
+    lifecycle.revoke(tenant, ghost.id().clone()).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t22：跨租 revoke no-op（不撤销他租会话）+ 跨租 find None；同租 revoke 生效。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t17-sess");
+    let event_id = unique_event_id("t17-evt");
+    let tenant_a = TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = TenantId::parse(COTX_TENANT_B).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-iso", tenant_a, expires, created);
+    let sid = session.id().clone();
+
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+    lifecycle
+        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .await?;
+
+    // 跨租 find（tenant B 查 tenant A sid）→ None（不泄露存在性）。
+    assert!(
+        lifecycle.find(tenant_b, sid.clone()).await?.is_none(),
+        "跨租 find 应 None"
+    );
+    // 跨租 revoke（tenant B）→ no-op：tenant A 会话仍 find 到。
+    lifecycle.revoke(tenant_b, sid.clone()).await?;
+    assert!(
+        lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+        "跨租 revoke 不应撤销 tenant A 的会话"
+    );
+    // 同租 revoke → find None（隔离正确、撤销生效）。
+    lifecycle.revoke(tenant_a, sid.clone()).await?;
+    assert!(
+        lifecycle.find(tenant_a, sid).await?.is_none(),
+        "同租 revoke 后 find 应 None"
+    );
 
     store.shutdown().await?;
     Ok(())
