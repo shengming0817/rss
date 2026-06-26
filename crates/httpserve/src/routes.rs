@@ -209,16 +209,31 @@ impl AuthenticatedRoutes {
         }
     }
 
-    /// **唯一** bindable 出口：转 axum make-service 交 `axum::serve`（#1017 bind 点天生只能消费已认证 router）。
-    pub fn into_make_service(self) -> axum::routing::IntoMakeService<axum::Router> {
-        self.router.into_make_service()
+    /// 在唯一 bindable 出口封 `request_id` 中间件为**绝对最外层**（外于验签桥 #1109）。
+    ///
+    /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 —— request_id **不**在 [`finalize_auth`] 内挂（那会被组合根
+    /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 RequestId，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
+    /// bind 的 router 都带 request_id 且**不可遗漏**（can't-forget funnel）。生产出口
+    /// [`into_make_service`](Self::into_make_service) 与 test 出口 [`into_router_for_test`](Self::into_router_for_test)
+    /// 共用本 fn ⇒ 层序一致（test 不漂移）。层序（外→内）：`request_id` → 验签桥 → `trace` → `panic_recovery`
+    /// → `Extension(plan)` → enforce → handler。
+    fn sealed_router(self) -> axum::Router {
+        self.router
+            .layer(axum::middleware::from_fn(crate::middleware::request_id))
     }
 
-    /// 测试专用：取回裸 Router 做 `oneshot` e2e 断言。**`cfg(any(test, feature = "test-util"))` 门控（Medium）**——
+    /// **唯一** bindable 出口：封 request_id（[`sealed_router`](Self::sealed_router)）后转 axum make-service 交
+    /// `axum::serve`（bind 点天生只能消费已认证 router；request_id 在此封为最外层，ROUTE-REQUESTID-OUTERMOST-01）。
+    pub fn into_make_service(self) -> axum::routing::IntoMakeService<axum::Router> {
+        self.sealed_router().into_make_service()
+    }
+
+    /// 测试专用：取回裸 Router 做 `oneshot` e2e 断言（经 [`sealed_router`](Self::sealed_router) ⇒ 与生产
+    /// `into_make_service` 同层序，含 request_id 最外层）。**`cfg(any(test, feature = "test-util"))` 门控（Medium）**——
     /// 生产构建里编译期不存在，不削弱 ROUTE-AUTH-FUNNEL-02（生产唯一 bindable 出口仍是 `into_make_service`）。
     #[cfg(any(test, feature = "test-util"))]
     pub fn into_router_for_test(self) -> axum::Router {
-        self.router
+        self.sealed_router()
     }
 }
 
@@ -228,12 +243,14 @@ impl AuthenticatedRoutes {
 /// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
-/// （request-aware panic → 500 envelope）→ `trace` → `request_id`（最外）。请求流（外→内）：request_id →
+/// （request-aware panic → 500 envelope）→ `trace`（最外）。`request_id` **不**在此挂——它由唯一 bindable
+/// 出口 [`AuthenticatedRoutes::sealed_router`] 封为**绝对最外层**（外于组合根后叠的验签桥 #1109，使桥运行时
+/// 可读 RequestId，ROUTE-REQUESTID-OUTERMOST-01 / #1320）。完整请求流（外→内）：request_id → 验签桥 →
 /// trace → panic_recovery → Extension(plan) → 路由匹配 → EnforceService → handler。
 ///
-/// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在**外层**（请求方向先于 `EnforceService`），其注入的
-/// [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位。当前恒 `Ok`——`RouteGroupError` 变体
-/// 留给扩展点（签名冻结保留）。
+/// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
+/// `EnforceService`），其注入的 [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位；request_id
+/// 再外封一层（见上）。当前恒 `Ok`——`RouteGroupError` 变体留给扩展点（签名冻结保留）。
 pub fn finalize_auth(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,
@@ -242,8 +259,7 @@ pub fn finalize_auth(
         .router
         .layer(axum::Extension(plan))
         .layer(axum::middleware::from_fn(crate::middleware::panic_recovery))
-        .layer(axum::middleware::from_fn(crate::middleware::trace))
-        .layer(axum::middleware::from_fn(crate::middleware::request_id));
+        .layer(axum::middleware::from_fn(crate::middleware::trace));
     Ok(AuthenticatedRoutes::new(router))
 }
 
@@ -390,5 +406,88 @@ mod tests {
             .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
         let _make_service = authed.into_make_service();
+    }
+
+    /// 取回完整 Response（不仅 status）做 header 断言（request_id 封口验证）。
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn oneshot_response(router: axum::Router, uri: &str) -> axum::response::Response {
+        let req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        router.oneshot(req).await.expect("oneshot")
+    }
+
+    /// ROUTE-REQUESTID-OUTERMOST-01：`request_id` 不在 `finalize_auth` 内挂，但 bindable 出口
+    /// （`sealed_router`，test 经 `into_router_for_test` 同路径）仍封它 ⇒ 响应带 `x-request-id`。
+    /// NoAuth listener 取 200 路径（避免 enforce 401 干扰，纯验出口封口）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn request_id_sealed_at_bindable_exit() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        let router = finalize_auth(routes, plan)
+            .expect("finalize_auth")
+            .into_router_for_test();
+        let resp = oneshot_response(router, "/list").await;
+        assert_eq!(resp.status(), StatusCode::OK, "NoAuth matched → 200");
+        let rid = resp
+            .headers()
+            .get("x-request-id")
+            .expect("出口 sealed_router 须封 request_id（即便 finalize_auth 未挂）");
+        assert!(!rid.is_empty(), "x-request-id 非空");
+    }
+
+    /// ROUTE-REQUESTID-OUTERMOST-01：request_id 在组合根后叠的**外层**（验签桥位）**之前**运行 ⇒ 该外层
+    /// 中间件运行时已能读到 `RequestId` extension（落实「桥可读 requestId」）。用一个验签桥位的探针层断言
+    /// extension 在场，命中即回写 `x-saw-rid: 1`。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn request_id_visible_to_outer_bridge_layer() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        // 探针层模拟验签桥（经 AuthenticatedRoutes::layer 叠在 finalize_auth 外、request_id 内）：
+        // 读 RequestId extension，在场则回写 marker header。
+        let probed =
+            finalize_auth(routes, plan)
+                .expect("finalize_auth")
+                .layer(axum::middleware::from_fn(
+                    |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                        let saw = req
+                            .extensions()
+                            .get::<crate::middleware::RequestId>()
+                            .is_some();
+                        let mut resp = next.run(req).await;
+                        if saw {
+                            resp.headers_mut()
+                                .insert("x-saw-rid", axum::http::HeaderValue::from_static("1"));
+                        }
+                        resp
+                    },
+                ));
+        let resp = oneshot_response(probed.into_router_for_test(), "/list").await;
+        assert_eq!(
+            resp.headers().get("x-saw-rid").map(|v| v.as_bytes()),
+            Some(&b"1"[..]),
+            "外层（验签桥位）中间件运行时 RequestId 须在场（request_id 已外封先行运行）"
+        );
+    }
+
+    /// `request_id_str` accessor：从 extension 读 request id（在场 → `Some`，不在场 → `None`），
+    /// 不暴露 `RequestId` newtype（供验签桥等组合根外层中间件读关联 id）。
+    #[test]
+    fn request_id_str_reads_from_extensions() {
+        let mut ext = axum::http::Extensions::new();
+        assert_eq!(crate::request_id_str(&ext), None, "无 RequestId → None");
+        ext.insert(crate::middleware::RequestId("test-rid".to_owned()));
+        assert_eq!(
+            crate::request_id_str(&ext),
+            Some("test-rid"),
+            "在场 → Some(借出字符串)"
+        );
     }
 }

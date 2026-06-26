@@ -7,10 +7,10 @@
 //!
 //! 设计要点：
 //! - **本桥不自发裁决**：仅「铸证据 + 埋点」，绝不短路 401/403。无证据时透传，由内层 enforce 作**唯一**鉴权
-//!   裁决方（Public opt-out 路由放行、Require 路由 fail-closed 401）。理由：① enforce 的 `request_id` 中间件
-//!   在本桥**内层**，本桥自发响应拿不到 requestId → envelope 残缺；② 单一裁决方杜绝双判定点；③ 可观测结果
-//!   等价（Require + 坏凭据仍 401，由 enforce 发）；④ 本桥是 blanket 外层、包住含 Public 路由的整个 listener，
-//!   不短路即不误伤 Public。
+//!   裁决方（Public opt-out 路由放行、Require 路由 fail-closed 401）。理由：① 单一裁决方杜绝双判定点；
+//!   ② 可观测结果等价（Require + 坏凭据仍 401，由 enforce 发）；③ 本桥是 blanket 外层、包住含 Public 路由
+//!   的整个 listener，不短路即不误伤 Public；④ 统一 envelope 由 enforce 生成、requestId 完整（`request_id`
+//!   中间件经唯一 bindable 出口封在本桥**外层**，ROUTE-REQUESTID-OUTERMOST-01，本桥运行时 RequestId 已就位）。
 //! - **凭据方案按 listener 静态绑定**（runtime-api.md「单 listener 单 scheme」）：本桥在 finalize_auth 外层，
 //!   `AuthPlan` extension 是内层、本桥运行时尚不可读，故由组合根按 listener 注入对应 [`RequiredScheme`]。
 //! - **Send 安全**：`verify_jwt(&DynPdp)` 的 future 为 `!Send`（`DynPdp` 非 `Sync`，DIPORT-ASYNC-ARC-SEND-01）。
@@ -179,12 +179,17 @@ fn log_deny_not_synchronous() {
 
 /// 验签桥中间件：铸证据 + 埋点 + 透传（不自发裁决，见模块 doc）。
 ///
-/// allow/deny 事件落在 `verify_bridge` span 内（携 `scheme` 上下文，spec FR-009「tracing span」）。
-/// request_id 关联待 #1017 将 request_id 中间件移至本桥外层（当前本桥在 finalize_auth 外、request_id 内层，
-/// 运行时无 RequestId 可读）。
+/// allow/deny 事件落在 `verify_bridge` span 内（携 `scheme` + `request_id` 上下文，spec FR-009「tracing
+/// span」）。request_id 关联已落地（#1320）：`request_id` 中间件经唯一 bindable 出口封在本桥**外层**
+/// （ROUTE-REQUESTID-OUTERMOST-01），本桥运行时 RequestId 已就位 ⇒ 经 `httpserve::request_id_str` 读入
+/// span（不带凭据请求 request_id 为空——span 仅在有 bearer token 时建，无埋点需求）。
 async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) -> Response {
     if let Some(token) = bearer_token(req.headers()) {
-        let span = tracing::debug_span!("verify_bridge", scheme = ?state.scheme);
+        let request_id = httpserve::request_id_str(req.extensions())
+            .unwrap_or_default()
+            .to_owned();
+        let span =
+            tracing::debug_span!("verify_bridge", scheme = ?state.scheme, request_id = %request_id);
         if let Some(evidence) = span.in_scope(|| mint_evidence(&state, &token)) {
             req.extensions_mut().insert(evidence);
         }

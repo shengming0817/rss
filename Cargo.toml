@@ -39,6 +39,7 @@ members = [
   "adapters/s3",
   "adapters/oidc",
   "adapters/grpc",
+  "adapters/httpd",
   "adapters/otel",
   "adapters/prometheus",
   "adapters/vault",

@@ -19,6 +19,19 @@ pub use routes::{
     Primary, UnfinalizedRoutes, finalize_auth,
 };
 
+/// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
+/// [`AuthenticatedRoutes::into_make_service`] 封为**最外层**，ROUTE-REQUESTID-OUTERMOST-01）。
+///
+/// 供组合根叠在 `finalize_auth` 产物**外层**（但 request_id 内层）的中间件——如 #1109 验签桥——读
+/// request 关联 id 入自身 span / 日志（桥运行时 request_id 已就位，落实 #1320「桥可读 requestId」）。
+/// 内层 enforce / handler 仍经请求 extension 直读 [`RouteMeta`] 等；本 accessor 仅为外层中间件提供
+/// 不暴露 `RequestId` newtype 的只读窗口。
+pub fn request_id_str(extensions: &axum::http::Extensions) -> Option<&str> {
+    extensions
+        .get::<middleware::RequestId>()
+        .map(middleware::RequestId::as_str)
+}
+
 use primitives::RouteAuthOptOut;
 
 /// 非-`Primary` listener 路由声明性元数据：**类型层无 auth opt-out 字段**。

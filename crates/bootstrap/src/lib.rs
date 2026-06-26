@@ -42,8 +42,9 @@ pub use domain::{Domain, KernelError, compose};
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use module::{DomainModule, ModuleFactory};
 pub use registry::{
-    ConsumerHandlerFn, HealthProbe, Registry, SubscriberBinding, SubscriberErrorDisposition,
-    SubscriberHandler, SubscriberHandlerError, adapt_subscriber_handler,
+    ConsumerHandlerFn, HealthProbe, HealthReporter, Registry, SubscriberBinding,
+    SubscriberErrorDisposition, SubscriberHandler, SubscriberHandlerError,
+    adapt_subscriber_handler,
 };
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
 pub use sagaprojectiondeps::{

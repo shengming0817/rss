@@ -68,6 +68,42 @@ pub(crate) struct ProbeDecl {
     pub(crate) probe: Box<dyn HealthProbe>,
 }
 
+/// 驱动探针集求值 + worst-of 聚合为 [`primitives::HealthReport`]（[`Registry::readyz_report`] 与
+/// [`HealthReporter::report`] 共用单源）。registry **声明的** [`primitives::ProbeName`] 权威，覆盖探针自报名；
+/// 空探针 → `Unhealthy`（fail-closed，readyz 不因「没探针」误放行）。
+fn aggregate_probes(probes: &[ProbeDecl]) -> primitives::HealthReport {
+    let checks = probes
+        .iter()
+        .map(|d| {
+            let check = d.probe.check();
+            primitives::HealthCheck::new(d.name.clone(), check.status(), check.detail())
+        })
+        .collect();
+    primitives::HealthReport::aggregate(checks)
+}
+
+/// 从 [`Registry`] 取出的 `Send + Sync` 健康报告器（组合根 readyz handler 长期持有，每请求 [`report`](Self::report)）。
+///
+/// 经 [`Registry::take_health_reporter`] 构造。只含 `Vec<ProbeDecl>`（`Box<dyn HealthProbe>` 的 trait
+/// 为 `Send + Sync`）⇒ 本类型 `Send + Sync`，可 `Arc<HealthReporter>` 共享进 axum readyz handler 闭包
+/// （`Fn() -> HealthReport + Send + Sync + 'static`）——区别于整体非 `Sync` 的 `Registry`（含 boxed
+/// `FnOnce` 路由组）。聚合语义与 [`Registry::readyz_report`] 同源（[`aggregate_probes`]）。
+pub struct HealthReporter {
+    probes: Vec<ProbeDecl>,
+}
+
+impl HealthReporter {
+    /// 驱动所持探针求值 + worst-of 聚合（每请求调一次；空探针 → `Unhealthy` fail-closed）。
+    pub fn report(&self) -> primitives::HealthReport {
+        aggregate_probes(&self.probes)
+    }
+
+    /// 所持探针数（供组合根启动日志 / 测试断言）。
+    pub fn probe_count(&self) -> usize {
+        self.probes.len()
+    }
+}
+
 /// bootstrap-local subscriber handler 擦除接缝。
 ///
 /// 不引 `eventexec`（兄弟服务 crate 禁依赖）：handler 消费 [`diport::Message`]（DI-infra，服务可下行
@@ -362,15 +398,21 @@ impl Registry {
     /// 必然是完整注册状态。组合根须在 `compose()` 完成后才暴露 readyz endpoint，且不得对
     /// 手动分步构建的部分 `Registry` 求值。
     pub fn readyz_report(&self) -> primitives::HealthReport {
-        let checks = self
-            .probes
-            .iter()
-            .map(|d| {
-                let check = d.probe.check();
-                primitives::HealthCheck::new(d.name.clone(), check.status(), check.detail())
-            })
-            .collect();
-        primitives::HealthReport::aggregate(checks)
+        aggregate_probes(&self.probes)
+    }
+
+    /// 取出已注册探针，产出 `Send + Sync` 的 [`HealthReporter`]（组合根 readyz handler 长期持有）。
+    ///
+    /// 落实 [`readyz_report`](Self::readyz_report) 文档「handler 如何长期持有探针子集属组合根生命周期」
+    /// 的接缝（#1320）：`Registry` 含 `Vec<RouteGroupDecl>`（boxed `FnOnce` 非 `Sync`）⇒ `Arc<Registry>`
+    /// **非 `Sync`**，无法进 axum readyz handler 闭包（需 `Fn + Send + Sync + 'static`）。本 fn `std::mem::take`
+    /// 探针装进只含 `Box<dyn HealthProbe>`（trait `Send + Sync`）的 [`HealthReporter`]——`Send + Sync`，可
+    /// `Arc` 共享进 handler。`&mut self`：与 [`finalize_routes`](Self::finalize_routes) drain 路由组不争用
+    /// （组合根 finalize 路由后取 reporter；探针从 Registry 移出，二次 take 得空 reporter）。
+    pub fn take_health_reporter(&mut self) -> HealthReporter {
+        HealthReporter {
+            probes: std::mem::take(&mut self.probes),
+        }
     }
 
     /// 按 listener 分组折叠路由组 register 闭包，每 listener 产出一个 [`UnfinalizedRoutes`]（未认证安全态）。
@@ -617,7 +659,7 @@ mod finalize {
     //! （按 listener 分组折叠 typed register 闭包为 per-listener `UnfinalizedRoutes`）。前者复用
     //! `primitives::HealthReport::aggregate`；后者经 typed `route_group::<L>` 守 listener 隔离
     //! （ROUTE-LISTENER-TYPED-01 类型层，#1103 Medium→Hard）+ ROUTE-AUTH-FUNNEL-01（无 bindable 出口）。
-    use super::{HealthProbe, Registry};
+    use super::{HealthProbe, HealthReporter, Registry};
     use crate::domain::KernelError;
     use httpserve::{Health, Internal, Primary};
     use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
@@ -652,6 +694,39 @@ mod finalize {
         let report = reg.readyz_report();
         assert_eq!(report.overall(), HealthStatus::Unhealthy);
         assert!(report.checks().is_empty());
+    }
+
+    /// `take_health_reporter` 取出探针产出 `Send + Sync` reporter，`report` 聚合语义同 `readyz_report`；
+    /// take 后 Registry 探针清空（二次聚合空 → fail-closed Unhealthy）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn take_health_reporter_extracts_probes_and_reports() {
+        let mut reg = Registry::new();
+        reg.probe(
+            probe_name("a"),
+            Box::new(StubProbe {
+                status: HealthStatus::Healthy,
+                self_name: "a",
+            }),
+        )
+        .expect("probe a declared");
+        assert_eq!(reg.probe_count(), 1);
+
+        let reporter = reg.take_health_reporter();
+        assert_eq!(reporter.probe_count(), 1, "探针移入 reporter");
+        assert_eq!(
+            reporter.report().overall(),
+            HealthStatus::Healthy,
+            "reporter.report 聚合语义同 readyz_report"
+        );
+
+        // 探针已从 Registry 移出：probe_count 归零，再聚合 → 空 fail-closed Unhealthy。
+        assert_eq!(reg.probe_count(), 0, "take 后 Registry 探针清空");
+        assert_eq!(reg.readyz_report().overall(), HealthStatus::Unhealthy);
+
+        // reporter 是 Send + Sync（可进 axum readyz handler 闭包）——静态断言。
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<HealthReporter>();
     }
 
     #[test]

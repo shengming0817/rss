@@ -104,6 +104,8 @@ deny = [
   { crate = "s3", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "oidc", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "grpc", wrappers = ["server", "rss", "xtask", "journeys"] },
+  # httpd HTTP 传输 adapter（#1320 运行时入口）：HttpServer + ManagedResource，只被组合根依赖。
+  { crate = "httpd", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "otel", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "prometheus-adapter", wrappers = ["server", "rss", "xtask", "journeys"] },
   { crate = "vault", wrappers = ["server", "rss", "xtask", "journeys"] },

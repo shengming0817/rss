@@ -2342,6 +2342,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpd"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "diport",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4154,6 +4166,7 @@ dependencies = [
  "diport",
  "futures",
  "hmac 0.12.1",
+ "httpd",
  "httpserve",
  "oidc",
  "p256",
@@ -4164,6 +4177,7 @@ dependencies = [
  "sha2 0.10.9",
  "testkit",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -4629,6 +4643,7 @@ dependencies = [
  "diport",
  "futures",
  "hmac 0.12.1",
+ "httpd",
  "httpserve",
  "oidc",
  "p256",
@@ -4638,6 +4653,7 @@ dependencies = [
  "settings",
  "sha2 0.10.9",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",

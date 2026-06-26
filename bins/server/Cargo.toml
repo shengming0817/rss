@@ -36,7 +36,7 @@ postgres = { path = "../../adapters/postgres" }
 # Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
 vault = { path = "../../adapters/vault", features = ["backend"] }
 # VaultSecretResolver 构造：reqwest::Client（TLS-agnostic；组合根构造并注入）。
-# Join #1017：配置 TLS provider（rustls+ring，对齐 sqlx）—— 当前组合根传 Client::new()（pre-GA）。
+# 后续 TLS 切片：配置 TLS provider（rustls+ring，对齐 sqlx）—— 当前组合根传 Client::new()（pre-GA，非 #1320 范围）。
 reqwest = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
@@ -46,18 +46,25 @@ anyhow = { workspace = true }
 futures = { workspace = true }
 # 从配置（env）解 ES256 SEC1 公钥（base64url）。
 base64 = { workspace = true }
+# 运行时入口（#1320）：tokio 多线程运行时（#[tokio::main]）+ net（PgStore/serve）+ signal（SIGTERM/SIGINT 优雅关停）
+# + time（ShutdownStack 超时）+ macros（测试）+ rt-multi-thread。
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+# 关闭取消广播（ShutdownStack root token + httpd serve graceful shutdown）。
+tokio-util = { workspace = true }
+# HTTP 传输 adapter：HttpServer bind + axum::serve + ManagedResource（经 ShutdownStack 托管）。
+httpd = { path = "../../adapters/httpd" }
+# 生产 tracing subscriber（init_tracing：fmt + RUST_LOG env filter）——否则运行时入口日志全 no-op。
+# 同时供 dev e2e 捕获 tracing 输出断言（auth_e2e 埋点）。
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-# e2e `#[tokio::test]` 运行时（生产 `main` 当前同步、不 serve ⇒ tokio 仅测试用；#1017 加 `#[tokio::main]` 时移回生产 dep）。
-tokio = { workspace = true }
-# oneshot 驱动已组装 router（不真实绑端口；#1017 负责 serve）。
+# tokio 已是生产 dep（#1320 `#[tokio::main]`）——其 macros + rt-multi-thread feature 同时供 `#[tokio::test]`，不再单列 dev-dep。
+# oneshot 驱动已组装 router（auth e2e 单元级断言；真实 socket serve 由 httpd 覆盖）。
 tower = { workspace = true, features = ["util"] }
 # e2e 铸 ES256/HS256 测试 JWT（dev-only；生产依赖图无签发能力）。
 p256 = { workspace = true, features = ["ecdsa"] }
 hmac = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
-# 捕获 tracing 输出断言 authz.decision/principal.kind 埋点 + 无 token/subject 泄漏。
-tracing-subscriber = { workspace = true }
 # auth_e2e 经 httpserve test-util 构造 funnel 输入（`routes::unfinalized_for_test`）+ 取回裸 Router
 # （`AuthenticatedRoutes::into_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }

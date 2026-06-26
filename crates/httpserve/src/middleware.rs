@@ -20,6 +20,13 @@ const MAX_REQUEST_ID_LEN: usize = 128;
 #[derive(Clone, Debug)]
 pub(crate) struct RequestId(pub(crate) String);
 
+impl RequestId {
+    /// 借出请求 id 字符串（供 [`crate::request_id_str`] 给组合根外层中间件读 request 关联）。
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 中间件：接收 / 生成 `x-request-id`，注入 extensions，回填响应 header。
 pub(crate) async fn request_id(mut req: Request, next: Next) -> Response {
     let id = req

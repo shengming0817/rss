@@ -1,9 +1,13 @@
 //! server — RSS 组合根（Root 层）：从配置构造生产验签 provider，按 listener 装配
-//! `finalize_routes → finalize_auth → .layer(verify_bridge)` 的认证接线接缝。
+//! `finalize_routes → finalize_auth → .layer(verify_bridge)` 的认证接线接缝，并驱动运行时入口
+//! （tokio 运行时 + per-listener socket bind + `axum::serve` + 信号优雅关停 + wire_X call-site，#1320）。
 //!
-//! 本 crate（#1198 / T004 / PR-C）只落地**认证接线接缝 + e2e**；socket bind / `axum::serve` / 信号优雅关停 /
-//! 全量生产域注册 / 全量 config 编排 = **Join #1017**。live JWKS 远程拉取 + 轮转 = **T003/#1197**（本 PR 用
-//! `StaticKeySource` 构造期注入 key，构造器签名已为其留稳）。
+//! 运行时入口（[`run`]，#1320 Join）：`compose` 域 → `PgStore::connect` + migrations → `wire_settings`
+//! （注册 `configs_ready` probe）→ `assemble_authed_routers` → 组合根挂 Health listener（healthz/readyz）→
+//! 逐 listener bind socket + serve（经 `httpd::HttpServer` + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT
+//! 优雅 drain。各域业务 handler ↔ service 接线 = #1309 及后续域 PR（本 PR 仅打通 async runtime、wire_X
+//! call-site 与 readiness probe）。live JWKS 远程拉取 + 轮转 = **T003/#1197**（本 PR 用 `StaticKeySource`
+//! 构造期注入 key，构造器签名已为其留稳）。listener / pg / vault 传输层 TLS（rustls+ring）= 后续 TLS 切片。
 //!
 //! 安全同批门（ADR-006 §5）：依赖图引真 verifier（`oidc` backend）、不引 stub Pdp（`memory` 经 deny.toml 禁
 //! server/rss；bins 生产 `src/` 无内联 `impl diport::Pdp`，`rss_pdp_impl_adapter_only` dylint 守 +
@@ -15,12 +19,16 @@
 
 pub mod auth_bridge;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
+use axum::http::Method;
 use base64::Engine as _;
-use diport::DynSecretResolver;
+use bootstrap::shutdown::ShutdownStack;
+use diport::{DynManagedResource, DynSecretResolver};
+use httpd::HttpServer;
 use oidc::OidcProvider;
 use postgres::{PgConfig, PgPassword, PgSecretRepo, PgStore, PoolReadiness};
 use primitives::{
@@ -30,6 +38,7 @@ use settings::{
     SecretService, SettingsDomain, SettingsService, empty_flag_store,
     ports::{DynConfigRepo, DynConfigUnitOfWork},
 };
+use tokio_util::sync::CancellationToken;
 use vault::{TenantStoreAllowlist, VaultSecretResolver};
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
@@ -174,10 +183,15 @@ fn required_scheme(listener: ListenerKind) -> Option<RequiredScheme> {
 ///
 /// 每 listener：`finalize_auth(routes, plan)`（消费 `UnfinalizedRoutes` 产 `AuthenticatedRoutes`，注入
 /// AuthPlan 与 framework 中间件）→ 据 `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）。
-/// 产出 `AuthenticatedRoutes` 交 #1017 经 `into_make_service` 绑 socket + serve——bind 点天生只能消费已认证
-/// router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
+/// 产出 `AuthenticatedRoutes` 经 `into_make_service` 绑 socket + serve（[`serve_until_signal`]）——bind 点
+/// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
+///
+/// 借 `&mut Registry`（仅 drain `finalize_routes`，**不**消费）：registry 的探针在此后仍存活，组合根经
+/// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
+/// Health listener 的 readyz handler（每请求 `report`，[`health_listener`]）；整体非 `Sync` 的 `Registry`
+/// 无法进 axum handler 闭包。
 pub fn assemble_authed_routers(
-    mut registry: bootstrap::Registry,
+    registry: &mut bootstrap::Registry,
     provider: Arc<OidcProvider>,
 ) -> anyhow::Result<Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>> {
     let mut out = Vec::new();
@@ -214,7 +228,8 @@ pub fn assemble_authed_routers(
 /// - `RSS_PG_USERNAME` — 连接用户（非空）。
 /// - `RSS_PG_PASSWORD` — 连接密码（非空）。
 ///
-/// TLS 默认 `VerifyFull`（零信任）；生产须配私有 CA 证书（`PgConfig::with_ssl_root_cert` 待 Join #1017）。
+/// TLS 默认 `VerifyFull`（零信任）；生产须配私有 CA 证书（`PgConfig::with_ssl_root_cert` 待后续 TLS 切片，
+/// rustls+ring，pg/vault/listener 同批——非本运行时入口 #1320 范围）。
 /// **禁止 localhost fallback**（生产配置规范，rust-standards §安全检查点）。
 pub(crate) fn build_pg_config_from(
     get: impl Fn(&str) -> Option<String>,
@@ -251,7 +266,7 @@ pub fn build_pg_config() -> anyhow::Result<PgConfig> {
 
 // ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
 
-/// 默认 Vault 请求超时（pre-GA 合理值；生产可经 env 覆盖，待 Join #1017）。
+/// 默认 Vault 请求超时（pre-GA 合理值；生产可经 env 覆盖，待后续 Vault 配置切片——非 #1320 范围）。
 const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 启动时安全警告（pre-GA 安全警告，Finding 6）：系统默认 TLS + 空 allowlist。
@@ -261,7 +276,7 @@ const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
     tracing::warn!(
         reason = "system-default-tls",
-        "vault client using system-default TLS; production must configure rustls+ring (#1017)"
+        "vault client using system-default TLS; production must configure rustls+ring (后续 TLS 切片)"
     );
     if stores.is_empty() {
         tracing::warn!(
@@ -288,7 +303,7 @@ pub(crate) fn build_vault_resolver_from(
     let token = get("RSS_VAULT_TOKEN")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_VAULT_TOKEN"))?;
 
-    // Join #1017: 配置 TLS client（rustls + ring，对齐 sqlx）；当前传 Client::new()（pre-GA）。
+    // 后续 TLS 切片: 配置 TLS client（rustls + ring，对齐 sqlx）；当前传 Client::new()（pre-GA，非 #1320 范围）。
     let client = reqwest::Client::new();
 
     // pre-GA 空 allowlist：无生产 secret reader → 所有 resolve fail-closed Forbidden（网络前拦截）。
@@ -359,7 +374,8 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
 /// - `store`：已建 `PgStore`（`Arc` 共享给 probe + repo）。
 /// - `registry`：bootstrap registry，用于注册 `ConfigsReadyProbe`（`probe` 方法）。
 ///
-/// 返回 `(SettingsService, SecretService)` 供组合根继续组装（#1017 绑 domain + serve）。
+/// 返回 `(SettingsService, SecretService)` 供组合根继续组装（业务 handler ↔ service 接线 = #1309 及后续
+/// 域 PR；本 PR #1320 仅打通 async runtime + wire_X call-site + `configs_ready` probe 注册）。
 ///
 /// # 注意
 ///
@@ -401,21 +417,278 @@ pub async fn wire_settings(
     Ok((settings_svc, secret_svc))
 }
 
-/// 生产组合根入口：构造 provider → compose 域 → 装配认证接线。
+// ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
+
+/// Health listener 路由组前缀（liveness/readiness 在专用 listener 上；operator 配 k8s probe 路径指向此前缀下）。
+const HEALTH_ROUTE_PREFIX: &str = "/health/v1";
+/// liveness 端点契约 ID（框架归属基础设施探针，非域 wire 契约）。
+const HEALTHZ_CONTRACT_ID: &str = "framework.healthz";
+/// readiness 端点契约 ID（框架归属）。
+const READYZ_CONTRACT_ID: &str = "framework.readyz";
+
+/// 构造 Health listener 的已认证路由（`/health/v1/healthz` liveness + `/health/v1/readyz` readiness）。
 ///
-/// settings + secret wiring 待 Join #1017（`wire_settings` 已就位，`run` 内待接线）。
-/// socket bind / serve / 信号优雅关停 = **Join #1017**。
-pub fn run() -> anyhow::Result<()> {
-    let provider = Arc::new(build_provider()?);
-    // settings domain 已注册（#1272/#1274）；wire_settings 在 Join #1017 接线（需异步 PgStore::connect）。
-    let registry = bootstrap::compose(&[&SettingsDomain]).context("compose domains")?;
-    let _authed = assemble_authed_routers(registry, provider)?;
-    // TODO(#1017): 消费 `_authed`——对每个 `(listener, AuthenticatedRoutes)` 调 `.into_make_service()`（**唯一**
-    //   bindable 出口，ROUTE-AUTH-FUNNEL-02）→ `axum::serve(<该 listener 的 socket>, make_service)`；+ 信号优雅
-    //   关停 + 全量生产域注册（identity/settings/audit/...）+ PgStore::connect + run_migrations + wire_settings
-    //   （生产 settings/secret wiring，C2/#1309）。`_authed` 当前被 drop（bind 点未接线）；接线时勿绕开
-    //   `into_make_service` 改走裸 router 路径（类型层已封死，见 httpserve::routes）。
+/// Health 是**框架/组合根**归属：域 crate 不声明 health 路由组，组合根在此经公开 funnel
+/// （`UnfinalizedRoutes::empty().nest_group::<Health>` → `finalize_auth`）挂载——产物仍是 `AuthenticatedRoutes`
+/// （ROUTE-AUTH-FUNNEL：health router 也经 finalize_auth + request_id/trace 中间件，与业务 listener 一致）。
+/// `NoAuth` plan（Health listener 无验签桥）。readyz handler 闭包持 `Arc<HealthReporter>`（`Send + Sync`，
+/// 整体非 `Sync` 的 `Registry` 无法进 handler）每请求 `report`（worst-of 聚合所有已注册探针，含 `configs_ready`）。
+///
+/// `pub`：供冒烟 e2e（`tests/runtime_serve_e2e.rs`）经真实 socket 绑定验证 serve + readyz + 优雅关停闭环。
+pub fn health_listener(
+    reporter: Arc<bootstrap::HealthReporter>,
+) -> anyhow::Result<(ListenerKind, httpserve::AuthenticatedRoutes)> {
+    let routes = httpserve::UnfinalizedRoutes::empty()
+        .nest_group::<httpserve::Health, core::convert::Infallible>(
+            HEALTH_ROUTE_PREFIX,
+            move |rb| {
+                Ok(rb
+                    .mount(
+                        httpserve::Route {
+                            method: Method::GET,
+                            path: "/healthz",
+                            contract_id: HEALTHZ_CONTRACT_ID,
+                        },
+                        httpserve::health::healthz(),
+                    )
+                    .mount(
+                        httpserve::Route {
+                            method: Method::GET,
+                            path: "/readyz",
+                            contract_id: READYZ_CONTRACT_ID,
+                        },
+                        httpserve::health::readyz(move || reporter.report()),
+                    ))
+            },
+        )
+        .context("nest health route group")?;
+    let plan =
+        AuthPlan::new(ListenerKind::Health, AuthScheme::NoAuth).context("health auth plan")?;
+    let authed = httpserve::finalize_auth(routes, plan).context("finalize_auth health")?;
+    Ok((ListenerKind::Health, authed))
+}
+
+// ── listener bind 地址（per-listener env，缺配 fail-fast）─────────────────────────────────────────
+
+/// listener → bind 地址 env 变量名（`RSS_<LISTENER>_LISTEN_ADDR`，值为 `host:port` SocketAddr 串）。
+///
+/// `ListenerKind` 为 `non_exhaustive`：未知 listener 无 env、fail-fast（绝不静默 bind 未知 listener）。
+fn listener_addr_env(listener: ListenerKind) -> anyhow::Result<&'static str> {
+    Ok(match listener {
+        ListenerKind::Primary => "RSS_PRIMARY_LISTEN_ADDR",
+        ListenerKind::Internal => "RSS_INTERNAL_LISTEN_ADDR",
+        ListenerKind::Admin => "RSS_ADMIN_LISTEN_ADDR",
+        ListenerKind::Health => "RSS_HEALTH_LISTEN_ADDR",
+        other => {
+            anyhow::bail!("listener {other:?} has no listen-addr env var (unknown ListenerKind)")
+        }
+    })
+}
+
+/// ShutdownStack 关闭日志的稳定 listener 名（区分多 listener）。
+fn listener_name(listener: ListenerKind) -> &'static str {
+    match listener {
+        ListenerKind::Primary => "http-primary",
+        ListenerKind::Internal => "http-internal",
+        ListenerKind::Admin => "http-admin",
+        ListenerKind::Health => "http-health",
+        // ListenerKind non_exhaustive——未知 listener 用 fallback 名 + 配置期 warn 埋点（与 auth_scheme
+        // 的未知 listener 处理一致）；实际 bind 时 listener_addr_env 已 fail-fast 拒未知 listener。
+        _ => {
+            tracing::warn!(listener = ?listener, "unknown ListenerKind; using fallback name 'http-unknown'");
+            "http-unknown"
+        }
+    }
+}
+
+/// 由注入的配置读取器解析 listener bind 地址（DI 核心，可测）。**fail-fast**：有路由的 listener 缺
+/// `RSS_<LISTENER>_LISTEN_ADDR` 或值非法 SocketAddr 立即 `Err`（不静默 ready）。错误含 env 变量名。
+fn listener_addr_from(
+    listener: ListenerKind,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<SocketAddr> {
+    let var = listener_addr_env(listener)?;
+    let raw = get(var)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {var} (listener has routes)"))?;
+    raw.parse::<SocketAddr>()
+        .with_context(|| format!("{var} must be a valid host:port SocketAddr: {raw}"))
+}
+
+/// 从 `std::env` 解析 listener bind 地址（薄壳，委托 [`listener_addr_from`]）。
+fn listener_addr(listener: ListenerKind) -> anyhow::Result<SocketAddr> {
+    listener_addr_from(listener, |name| std::env::var(name).ok())
+}
+
+// ── per-listener bind + serve + 信号优雅关停 ───────────────────────────────────────────────────
+
+/// 逐 listener bind socket + serve，经 `ShutdownStack` 托管；SIGTERM/SIGINT → LIFO 优雅 drain。
+///
+/// 每 listener：解析 bind 地址（fail-fast）→ `HttpServer::bind`（async fail-fast，注册前暴露端口冲突）→
+/// 经 `ShutdownStack::register_with_token` 在同步 funnel 闭包内 `bound.serve(svc, token)` spawn serve task
+/// （SHUTDOWN-TOKEN-FUNNEL-01）。信号到达 → `stack.shutdown()` 阶段 1 广播 cancel 触发各 serve graceful
+/// drain、阶段 2 LIFO await 收敛。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
+async fn serve_until_signal(
+    listeners: Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>,
+) -> anyhow::Result<()> {
+    // 生产装配：真实 env 地址解析 + 真实信号 future（薄壳，委托可测核心 [`serve_until`]）。
+    serve_until(listeners, listener_addr, wait_for_shutdown_signal()).await
+}
+
+/// 可测核心：注入 `addr_resolver`（listener→bind 地址）与 `shutdown` future（关停触发），驱动 bind 各
+/// listener socket → 经 `ShutdownStack` 托管 serve → `shutdown` resolve 后 LIFO 优雅 drain。
+///
+/// 生产经 [`serve_until_signal`] 注入真实 env 解析 + 信号 future；测试注入 `|_| Ok(127.0.0.1:0)` + 立即
+/// resolve 的 future，覆盖 bind 循环 + 多 listener + ensure-非空 + drain 聚合（serve_until_signal 本身依赖
+/// OS 信号不可 hermetic 测，故抽核心）。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
+// reason: bind 循环 + 启动就绪 / drain 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点；
+// 实际控制流是「bind 各 listener → 等关停 → shutdown」三段——item-level carve-out（error-handling.md §Carve-out）。
+#[allow(clippy::cognitive_complexity)]
+async fn serve_until<R, S>(
+    listeners: Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>,
+    addr_resolver: R,
+    shutdown: S,
+) -> anyhow::Result<()>
+where
+    R: Fn(ListenerKind) -> anyhow::Result<SocketAddr>,
+    S: std::future::Future<Output = anyhow::Result<()>>,
+{
+    anyhow::ensure!(
+        !listeners.is_empty(),
+        "no listener has routes to serve (refusing to start with zero bound sockets)"
+    );
+    let listener_count = listeners.len();
+    let mut stack = ShutdownStack::new(CancellationToken::new());
+    for (listener, routes) in listeners {
+        bind_and_register(&mut stack, listener, routes, &addr_resolver).await?;
+    }
+    // 启动就绪汇总（operator 一眼确认全部 listener 已绑定 + 服务就绪）。
+    tracing::info!(listener_count, "all listeners bound; server ready");
+
+    // shutdown future resolve（生产 = 信号到达，已记 signal 名）→ 仅记 drain 动作（不重复信号事件）。
+    shutdown.await?;
+    tracing::info!("draining listeners (graceful)");
+    report_shutdown_failures(stack.shutdown().await)
+}
+
+/// bind 单 listener socket（async fail-fast）+ 经 funnel 同步 serve-spawn 注册进 `ShutdownStack`。
+///
+/// async bind 在注册前完成 ⇒ 端口冲突 fail-fast；同步 `bound.serve(svc, token)` 在 `register_with_token`
+/// 闭包内消费注入的 child token（SHUTDOWN-TOKEN-FUNNEL-01）。`addr_resolver` 由 [`serve_until`] 注入
+/// （生产 = env 解析，测试 = `127.0.0.1:0` ephemeral）。
+async fn bind_and_register<R>(
+    stack: &mut ShutdownStack,
+    listener: ListenerKind,
+    routes: httpserve::AuthenticatedRoutes,
+    addr_resolver: &R,
+) -> anyhow::Result<()>
+where
+    R: Fn(ListenerKind) -> anyhow::Result<SocketAddr>,
+{
+    let name = listener_name(listener);
+    let addr = addr_resolver(listener)?;
+    let bound = HttpServer::bind(name, addr)
+        .await
+        .with_context(|| format!("bind {name} listener at {addr}"))?;
+    tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
+    let svc = routes.into_make_service();
+    stack.register_with_token(move |token| DynManagedResource::new_box(bound.serve(svc, token)));
     Ok(())
+}
+
+/// 聚合 `ShutdownStack::shutdown` 的 per-listener 失败：空 = 干净退出 `Ok`；非空 = 记录每条 + 非零退出 `Err`
+/// （不静默丢弃关闭错误，决定进程退出码）。
+fn report_shutdown_failures(
+    failures: Vec<bootstrap::shutdown::ResourceShutdownError>,
+) -> anyhow::Result<()> {
+    if failures.is_empty() {
+        tracing::info!("all listeners drained; exiting");
+        return Ok(());
+    }
+    for f in &failures {
+        tracing::error!(error = %f, "listener shutdown failure");
+    }
+    anyhow::bail!(
+        "graceful shutdown completed with {} listener failure(s)",
+        failures.len()
+    )
+}
+
+/// 阻塞至收到关闭信号：unix SIGTERM / SIGINT（容器编排发 SIGTERM、Ctrl-C 发 SIGINT）；非 unix 退回 Ctrl-C。
+// reason: cfg(unix) 分支内 tokio::select! + 2 条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点；
+// 实际控制流是「装两个 signal stream + select 其一」——item-level carve-out（error-handling.md §Carve-out）。
+#[allow(clippy::cognitive_complexity)]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+        let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+        tokio::select! {
+            _ = term.recv() => tracing::info!(signal = "SIGTERM", "shutdown signal received"),
+            _ = int.recv() => tracing::info!(signal = "SIGINT", "shutdown signal received"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("install ctrl-c handler")?;
+        tracing::info!(signal = "ctrl-c", "shutdown signal received");
+    }
+    Ok(())
+}
+
+/// 装配生产 tracing subscriber（fmt + `RUST_LOG` env filter，默认 `info`）。
+///
+/// 组合根 binary 入口在 [`run`] **之前**调用（`main`）——否则运行时入口的全部结构化日志（bind / serve /
+/// shutdown / fail-fast）皆为 no-op、生产零可见性。仅生产入口调用；测试不调（各测试自设 subscriber，见
+/// `auth_e2e` 的 `set_default`），故本 fn 不进 `run`（避免与测试 subscriber 冲突 / 全局 init 重复 panic）。
+pub fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// 生产组合根入口（运行时入口 Join #1320）：compose 域 → connect pg + migrations → wire_settings
+/// （注册 `configs_ready` probe）→ 装配认证接线 → 挂 Health listener → bind + serve + 信号优雅关停。
+///
+/// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
+/// = #1309 及后续域 PR；本 fn 仅打通 async runtime + ≥1 个 wire_X call-site + readiness probe。
+/// tracing subscriber 由 [`init_tracing`] 在 `main` 中先于本 fn 装配。
+pub async fn run() -> anyhow::Result<()> {
+    let provider = Arc::new(build_provider()?);
+    // settings domain 已注册（#1272/#1274）；后续域（identity/audit/…）随各自 wire_X PR 加入 compose 列表。
+    let mut registry = bootstrap::compose(&[&SettingsDomain]).context("compose domains")?;
+
+    // postgres：connect + migrations（生产 fail-fast，缺配/连不上不静默 ready）。
+    let pg = Arc::new(
+        PgStore::connect(&build_pg_config()?)
+            .await
+            .context("connect postgres")?,
+    );
+    pg.run_migrations()
+        .await
+        .context("run postgres migrations")?;
+
+    // wire_settings（≥1 个 wire_X call-site，#1320 DoD）：注册 configs_ready probe + 造 settings/secret service。
+    let (settings_svc, secret_svc) = wire_settings(pg.clone(), &mut registry)
+        .await
+        .context("wire settings")?;
+    // reason: 业务 handler ↔ service 接线属 #1309（本 PR 仅打通 runtime + wire_X call-site + probe）；service
+    //   暂不接 handler，configs_ready probe 已注册并持 `Arc<PgStore>`（pg Arc 亦存活）⇒ readyz 仍生效。
+    let _ = (settings_svc, secret_svc);
+
+    // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
+    let mut listeners =
+        assemble_authed_routers(&mut registry, provider).context("assemble authed routers")?;
+
+    // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
+    // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
+    let reporter = Arc::new(registry.take_health_reporter());
+    listeners.push(health_listener(reporter).context("build health listener")?);
+
+    // bind 各 listener socket + serve + 信号优雅关停。
+    serve_until_signal(listeners).await
 }
 
 #[cfg(test)]
@@ -576,8 +849,8 @@ mod tests {
             )
             .expect("provider"),
         );
-        let registry = bootstrap::compose(&[]).expect("compose empty");
-        let routers = assemble_authed_routers(registry, provider).expect("assemble ok");
+        let mut registry = bootstrap::compose(&[]).expect("compose empty");
+        let routers = assemble_authed_routers(&mut registry, provider).expect("assemble ok");
         assert!(routers.is_empty(), "空域图 ⇒ 无 per-listener router");
     }
 
@@ -741,5 +1014,244 @@ mod tests {
         // 重复注册同名 probe → Err（bootstrap registry 守唯一性）。
         let result = registry.probe(probe_name_b, Box::new(NullProbe));
         assert!(result.is_err(), "duplicate probe name should be rejected");
+    }
+
+    // ── listener bind 地址解析（fail-fast）─────────────────────────────────────────────
+
+    /// 各标准 listener → 正确 env 变量名（per-listener `RSS_<LISTENER>_LISTEN_ADDR`）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_addr_env_maps_each_listener() {
+        assert_eq!(
+            listener_addr_env(ListenerKind::Primary).expect("primary"),
+            "RSS_PRIMARY_LISTEN_ADDR"
+        );
+        assert_eq!(
+            listener_addr_env(ListenerKind::Internal).expect("internal"),
+            "RSS_INTERNAL_LISTEN_ADDR"
+        );
+        assert_eq!(
+            listener_addr_env(ListenerKind::Admin).expect("admin"),
+            "RSS_ADMIN_LISTEN_ADDR"
+        );
+        assert_eq!(
+            listener_addr_env(ListenerKind::Health).expect("health"),
+            "RSS_HEALTH_LISTEN_ADDR"
+        );
+    }
+
+    /// 有路由的 listener 缺 addr env → fail-fast，错误含 env 变量名（不静默 ready）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_addr_missing_env_fails_fast() {
+        let err = listener_addr_from(ListenerKind::Primary, |_| None).expect_err("missing addr");
+        assert!(
+            err.to_string().contains("RSS_PRIMARY_LISTEN_ADDR"),
+            "error 含 env 变量名: {err}"
+        );
+    }
+
+    /// addr env 值非法 SocketAddr → fail-fast，错误含 env 变量名。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_addr_invalid_value_fails_fast() {
+        let err = listener_addr_from(ListenerKind::Health, |_| Some("not-an-addr".to_string()))
+            .expect_err("invalid addr");
+        assert!(
+            err.to_string().contains("RSS_HEALTH_LISTEN_ADDR"),
+            "含 env 名: {err}"
+        );
+    }
+
+    /// 合法 `host:port` → 解析成功。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_addr_valid_value_parses() {
+        let addr = listener_addr_from(ListenerKind::Primary, |_| Some("0.0.0.0:8080".to_string()))
+            .expect("valid addr");
+        assert_eq!(addr.port(), 8080);
+    }
+
+    // ── shutdown 失败聚合（report_shutdown_failures）────────────────────────────────────
+
+    /// 空失败列表 → `Ok`（干净退出）；非空 → `Err` 含失败计数（非零退出码不静默丢弃关闭错误）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn report_shutdown_failures_ok_when_empty_err_when_failures() {
+        use bootstrap::shutdown::{ResourceShutdownError, ShutdownFailureKind};
+
+        assert!(
+            report_shutdown_failures(Vec::new()).is_ok(),
+            "无失败 → Ok 干净退出"
+        );
+
+        let failures = vec![
+            ResourceShutdownError {
+                name: "http-primary".to_owned(),
+                kind: ShutdownFailureKind::Panicked,
+            },
+            ResourceShutdownError {
+                name: "http-health".to_owned(),
+                kind: ShutdownFailureKind::BudgetExhausted,
+            },
+        ];
+        let err = report_shutdown_failures(failures).expect_err("非空失败 → Err");
+        assert!(
+            err.to_string().contains("2 listener failure"),
+            "error 含失败计数: {err}"
+        );
+    }
+
+    // ── serve_until 生产 serve 循环（注入 addr + shutdown future，hermetic）────────────────
+
+    /// 测试 reporter（空探针）。
+    #[allow(clippy::expect_used)]
+    fn test_reporter() -> Arc<bootstrap::HealthReporter> {
+        let mut reg = bootstrap::compose(&[]).expect("compose");
+        Arc::new(reg.take_health_reporter())
+    }
+
+    /// 注入 `127.0.0.1:0` ephemeral 地址解析器（测试用）。
+    fn ephemeral_addr(_l: ListenerKind) -> anyhow::Result<SocketAddr> {
+        "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
+    }
+
+    /// serve_until 核心：注入 ephemeral addr + 立即 resolve 的 shutdown → bind 全部 listener + 干净 drain。
+    /// 覆盖生产 serve loop（serve_until_signal 薄壳依赖 OS 信号不可 hermetic 测）：2 listener bind 循环 + drain。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn serve_until_binds_all_listeners_and_drains_clean() {
+        let listeners = vec![
+            health_listener(test_reporter()).expect("h1"),
+            health_listener(test_reporter()).expect("h2"),
+        ];
+        serve_until(
+            listeners,
+            ephemeral_addr,
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect("serve_until binds 2 listeners + drains clean");
+    }
+
+    /// serve_until 空 listeners → fail-fast Err（拒绝零 socket 启动）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn serve_until_empty_listeners_errs() {
+        let err = serve_until(
+            Vec::new(),
+            ephemeral_addr,
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect_err("空 listeners 拒绝启动");
+        assert!(
+            err.to_string().contains("zero bound sockets"),
+            "error: {err}"
+        );
+    }
+
+    /// serve_until addr_resolver 失败 → bind 前 fail-fast 冒泡 Err（不静默 ready）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn serve_until_addr_resolver_failure_propagates() {
+        let listeners = vec![health_listener(test_reporter()).expect("health")];
+        let err = serve_until(
+            listeners,
+            |_| anyhow::bail!("no addr configured for listener"),
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect_err("addr resolver 失败");
+        assert!(
+            err.to_string().contains("no addr configured"),
+            "error: {err}"
+        );
+    }
+
+    // ── Health listener readyz/healthz（经 funnel 出口 oneshot）──────────────────────────
+
+    /// Health listener 经 funnel 构造（NoAuth）：空探针 → readyz 503（fail-closed）；
+    /// 注册一个 Healthy 探针 → readyz 200。
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn health_listener_readyz_reflects_probes() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let mut empty_reg = bootstrap::compose(&[]).expect("compose empty");
+        let empty = Arc::new(empty_reg.take_health_reporter());
+        let (_, authed) = health_listener(empty).expect("health listener");
+        let resp = authed
+            .into_router_for_test()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/v1/readyz")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "空探针 → readyz fail-closed 503"
+        );
+
+        struct HealthyProbe;
+        impl bootstrap::HealthProbe for HealthyProbe {
+            fn check(&self) -> HealthCheck {
+                HealthCheck::new(
+                    ProbeName::parse("ok").expect("name"),
+                    HealthStatus::Healthy,
+                    "ready",
+                )
+            }
+        }
+        let mut reg = bootstrap::compose(&[]).expect("compose");
+        reg.probe(
+            ProbeName::parse("ok").expect("name"),
+            Box::new(HealthyProbe),
+        )
+        .expect("register probe");
+        let reporter = Arc::new(reg.take_health_reporter());
+        let (_, authed) = health_listener(reporter).expect("health listener");
+        let resp = authed
+            .into_router_for_test()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/v1/readyz")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK, "Healthy 探针 → readyz 200");
+    }
+
+    /// Health listener liveness 端点 `/health/v1/healthz` 恒 200（存活即活）。
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn health_listener_healthz_is_200() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let mut reg = bootstrap::compose(&[]).expect("compose");
+        let reporter = Arc::new(reg.take_health_reporter());
+        let (listener, authed) = health_listener(reporter).expect("health listener");
+        assert_eq!(listener, ListenerKind::Health);
+        let resp = authed
+            .into_router_for_test()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/v1/healthz")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK, "liveness 恒 200");
     }
 }
