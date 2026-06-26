@@ -1,0 +1,3 @@
+pub mod tracewire
+pub fn tracewire::capture() -> core::option::Option<alloc::string::String>
+pub fn tracewire::restore_parent(&tracing::span::Span, &str)

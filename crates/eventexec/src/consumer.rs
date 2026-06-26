@@ -19,6 +19,8 @@ use diport::dead_letter_store::{
     DynDeadLetterStore,
 };
 use diport::{Acker as _, Message, MessageStream};
+// #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
+use tracing::Instrument as _;
 
 use crate::MAX_REDELIVERY;
 
@@ -300,12 +302,18 @@ async fn handle_fresh<S, H>(
 {
     // owned message_id：run_handler_loop 取 msg 所有权，续租 / hard-fence 日志用 owned 串避免借用冲突。
     let message_id = msg.id.as_str().to_owned();
+    // #1224：从 producer 经 outbox metadata → broker header 透传的 W3C traceparent 还原消费 span 的 remote
+    // parent，使 handler span 与 producer 同 trace_id（端到端 trace 续传）。trace 键须在 msg 移入
+    // run_handler_loop 前读出（同 message_id 既有范式）；缺 / 畸形 → span 保持 root（fail-open，不阻消费）。
+    let consume_span = build_consume_span(meta, &message_id, msg.metadata.get(diport::KEY_TRACE));
     tokio::select! {
         // biased：双侧同时就绪时优先 handler 分支——handler 已完成（终态正确）时不误触 hard-fence；
         // commit 侧 CAS 仍兜底「续租未及时探测、commit 时租约已失」的竞态（review #279 DX）。
         biased;
         // handler 先完成：终态已在 loop 内结算；renewal future 被 drop（停止续租）。
-        () = run_handler_loop(idempotency, dlx, meta, handler, msg, key, lease, acker) => {}
+        // `.instrument(consume_span)`：handler 全程在消费 span 内，其内部 span 挂回 producer trace（#1224）。
+        () = run_handler_loop(idempotency, dlx, meta, handler, msg, key, lease, acker)
+            .instrument(consume_span) => {}
         // 续租侧判租约丢失：handler future 被 drop（cancel 执行上下文），hard-fence 结算 Requeue、不 commit。
         () = renewal_loop(idempotency, meta, key, lease, lease_cfg, &message_id) => {
             log_lease_lost(meta, &message_id);
@@ -313,6 +321,29 @@ async fn handle_fresh<S, H>(
             settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
         }
     }
+}
+
+/// 构造消费 span 并（若 producer 透传了 W3C `traceparent`）还原 remote parent，使 handler span 与 producer
+/// 同 `trace_id`（#1224）。`traceparent` 缺失（`None`）/ 畸形 → span 保持 root（fail-open，
+/// [`tracewire::restore_parent`] no-op，不阻消费）。抽出为 helper 控制 [`handle_fresh`] 认知复杂度 ≤15。
+fn build_consume_span(
+    meta: &ConsumerMeta,
+    message_id: &str,
+    traceparent: Option<&str>,
+) -> tracing::Span {
+    // OTel Messaging Semantic Conventions：consumer「process」span 用标准 `messaging.*` 属性，便于 backend
+    // service-map / `messaging.operation` 过滤识别（span name 在 tracing 是静态字面量，故 destination 落字段
+    // 而非 semconv 的 `{destination} {operation}` 动态名）。
+    let span = tracing::info_span!(
+        "outbox.consume",
+        messaging.operation = "process",
+        messaging.destination.name = meta.domain(),
+        messaging.message.id = message_id,
+    );
+    if let Some(tp) = traceparent {
+        tracewire::restore_parent(&span, tp);
+    }
+    span
 }
 
 /// 续租循环（#1213）：每 `lease_cfg.renew_interval` 调 [`consistency::IdempotencyStore::extend`]。
@@ -2253,5 +2284,107 @@ mod tests {
                 "ttl={ttl:?}"
             );
         }
+    }
+
+    // ── #1224：consumer trace 还原（build_consume_span 双分支）──────────────────
+
+    /// W3C traceparent → trace_id 段（`00-<32hex traceid>-<16hex spanid>-<2hex flags>` 的第 2 段）。
+    fn trace_id_of(traceparent: &str) -> String {
+        traceparent.split('-').nth(1).unwrap_or("").to_owned()
+    }
+
+    // round-trip：producer 透传 traceparent → build_consume_span 还原 → 消费 span 与 producer 同 trace_id
+    //（#1224 验收：handler 经 `.instrument(consume_span)` 在该 span 内执行 ⇒ 其 span 挂回原 trace）。otel
+    // subscriber 经 tracewire 脚手架装配（本 crate 不直接 import otel）。
+    // reason(expect): 测试断言——`with_test_subscriber` 内采样 span 的 capture 恒 Some。
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn build_consume_span_restores_producer_trace_id() {
+        tracewire::with_test_subscriber(|| {
+            let producer_tp = tracing::info_span!("producer")
+                .in_scope(tracewire::capture)
+                .expect("producer traceparent");
+            // 消费侧：用透传的 traceparent 建消费 span，其 trace_id 应等于 producer。
+            let consume = super::build_consume_span(&meta(), "msg-trace-1", Some(&producer_tp));
+            let restored = consume
+                .in_scope(tracewire::capture)
+                .expect("consume span traceparent after restore");
+            assert_eq!(
+                trace_id_of(&restored),
+                trace_id_of(&producer_tp),
+                "build_consume_span(Some) 还原 outbox 透传 traceparent ⇒ 消费 span 与 producer 同 trace_id"
+            );
+        });
+    }
+
+    // fail-open 分支：无透传 trace（`None`）→ build_consume_span 不挂 parent、不 panic，消费 span 仍可用
+    //（自生 root trace；tc1_handler_ack 等无 metadata 用例并行佐证消费正常）。
+    // reason(expect): 测试断言——otel 下消费 span 自身恒有 root trace_id。
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn build_consume_span_without_trace_is_root() {
+        tracewire::with_test_subscriber(|| {
+            let consume = super::build_consume_span(&meta(), "msg-trace-2", None);
+            let tp = consume
+                .in_scope(tracewire::capture)
+                .expect("consume span 自身在 otel 下有 root traceparent");
+            // 自生 root：版本前缀合法、不 panic（未挂任何畸形/外来 parent）。
+            assert!(
+                tp.starts_with("00-"),
+                "root 消费 span traceparent 形态合法: {tp}"
+            );
+        });
+    }
+
+    // 端到端（review #298 F#2）：Message 带 broker 透传的 KEY_TRACE → run_consumer → handle_fresh 读
+    // msg.metadata.get(KEY_TRACE) → build_consume_span 还原 → `.instrument` → handler 内 trace_id 与
+    // producer 一致。覆盖「键名 + instrument 接线」整链（build_consume_span 直测覆盖不到 handle_fresh 取值/挂载）。
+    // `insert_wire_pair` 在 #[cfg(test)] 子树调用：dylint rss_diport_envelope_reserved_writer 默认不扫 test，合规。
+    // reason(unwrap/expect): 测试断言——采样 span capture 恒 Some、runtime build / Mutex lock 测试期不失败。
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    #[test]
+    fn run_consumer_restores_trace_from_message_metadata() {
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_handler = seen.clone();
+
+        let producer_trace_id = tracewire::with_test_subscriber(|| {
+            let producer_tp = tracing::info_span!("producer")
+                .in_scope(tracewire::capture)
+                .expect("producer traceparent");
+
+            // broker 透传等价物：subscriber 从 header rehydrate 出带 trace 键的 Message。
+            let mut md = diport::EnvelopeMetadata::empty();
+            md.insert_wire_pair(diport::KEY_TRACE, producer_tp.clone());
+            let msg = Message::new_with_metadata("msg-e2e-trace", b"payload".to_vec(), md);
+
+            let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
+                let seen = seen_handler.clone();
+                Box::pin(async move {
+                    // handler 经 `.instrument(consume_span)` 在还原后的消费 span 内执行。
+                    *seen.lock().unwrap() = tracewire::capture().map(|tp| trace_id_of(&tp));
+                    HandleResult::ack()
+                })
+            };
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_consumer(
+                Box::pin(futures::stream::iter(vec![msg])),
+                FakeIdempotencyStore::fresh(),
+                fake_dlx(FakeDeadLetterStore::new()),
+                meta(),
+                handler,
+                lease_cfg_test(),
+            ));
+            trace_id_of(&producer_tp)
+        });
+
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(producer_trace_id.as_str()),
+            "run_consumer 经 handle_fresh 读 KEY_TRACE → 还原 → instrument ⇒ handler 与 producer 同 trace_id"
+        );
     }
 }

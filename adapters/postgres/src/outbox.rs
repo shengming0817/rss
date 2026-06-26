@@ -74,8 +74,8 @@ impl OutboxMetadata {
     /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
-    /// `occurredAt` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace 待
-    /// #1076 OTel；correlation 已接线 #1160；principal 待 #1397。
+    /// `occurredAt` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace 经
+    /// #1224 接线（emit 侧 `tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397。
     pub(crate) fn new(occurred_at_secs: i64) -> Self {
         // KEY_OCCURRED_AT = diport 单源（#1160 A4）。
         let mut map = serde_json::Map::new();
@@ -100,9 +100,8 @@ impl OutboxMetadata {
     /// 注入 reserved key `trace`（#1193）——**sealed setter**：funnel 内特权写 reserved key（business
     /// free-form [`OutboxMetadata::try_insert`] 仍 fail-closed 拒），承载「业务不可伪造 trace」（Hard）。
     /// KEY_TRACE = diport 单源（#1160 A4）。
-    // reason(dead_code): 生产 caller 待 #1076（OTel trace span 提取源）接线；本 PR 仅建 sealed 注入路径，
-    // 正向单测 `sealed_setters_write_reserved_keys` 行使写入、`reserved_setter_keys_are_reserved` 守注入集 ⊆ 拒绝集。
-    #[allow(dead_code)]
+    /// 生产 caller：[`metadata_with_ambient`]（从当前 tracing span 经 `tracewire::capture` 取 W3C traceparent，
+    /// fail-open；#1224 接线，关闭 #1076 预留槽）。
     pub(crate) fn with_trace(mut self, trace: impl Into<String>) -> Self {
         self.0.insert(
             KEY_TRACE.to_string(),
@@ -170,15 +169,23 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 
 // ── metadata_with_ambient ─────────────────────────────────────────────────────
 
-/// occurred_at 构造期必填 + 有 ambient correlation 则盖章（fail-open：无 scope 省略）。
+/// occurred_at 构造期必填 + 有 ambient correlation / 当前 trace 则盖章（均 fail-open：无则省略）。
 ///
 /// 三条生产 outbox 路径（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）统一经此 helper 构造
-/// envelope metadata，保证 correlation ambient 接线一致（#1160 B3）。
-/// 无 diagctx scope（worker 任务 / 批次未绑定 correlation）→ 仅含 occurred_at，不 panic（fail-open）。
+/// envelope metadata，保证 correlation ambient（#1160 B3）+ trace 透传（#1224）接线一致。
+/// - correlation：从 `diagctx` ambient 读回（无 scope → 省略）。
+/// - trace：`tracewire::capture()` 从当前 tracing span 导出 W3C traceparent（emit 与 handler 同 task 同步执行
+///   ⇒ `Span::current()` 即请求 span；无 otel 层 / 未采样 → `None` 省略）。落 outbox `metadata` 保留键 `trace`，
+///   经 relay → broker header → consumer `tracewire::restore_parent` 还原，使 handler span 与 producer 同 trace_id。
+///
+/// 全部缺失（worker 任务 / 批次未绑 correlation、无 otel）→ 仅含 occurred_at，不 panic（fail-open，不阻投递）。
 pub(crate) fn metadata_with_ambient(occurred_at_secs: i64) -> OutboxMetadata {
     let mut m = OutboxMetadata::new(occurred_at_secs);
     if let Some(c) = diagctx::correlation() {
         m = m.with_correlation(c.as_str());
+    }
+    if let Some(tp) = tracewire::capture() {
+        m = m.with_trace(tp);
     }
     m
 }
@@ -890,8 +897,10 @@ mod tests {
         );
     }
 
-    // #1129/#262 F1：new(secs) 构造期注入 reserved occurredAt（unix 秒 i64）；opaque subjectId 共存；
-    // trace 待 #1076（OTel），correlation 已接线 #1160，principal 待 #1397——本 PR 均不写进 envelope。
+    // #1129/#262 F1：new(secs) 构造期注入 reserved occurredAt（unix 秒 i64）；opaque subjectId 共存。
+    // 本测试走**直接** new()+with_subject_id 路径（非 metadata_with_ambient）：trace（#1224 经
+    // tracewire::capture 注入）/ correlation（#1160 经 diagctx 注入）/ principal（待 #1397）都只在 ambient
+    // helper 路径盖章，故此直接构造路径不含——验证 new 的最小接缝不夹带 ambient reserved key。
     #[test]
     fn metadata_new_writes_occurred_at_unix_secs() {
         let env = super::OutboxEnvelope::new(
@@ -911,7 +920,7 @@ mod tests {
         for absent in ["trace", "correlation", "principal"] {
             assert!(
                 !json.contains(absent),
-                "空接缝 reserved key {absent} 本 PR 不应写入: {json}"
+                "此路径（new+with_subject_id，非 metadata_with_ambient）不盖章 ambient reserved key {absent}: {json}"
             );
         }
     }
@@ -1193,6 +1202,45 @@ mod tests {
         );
         assert!(
             json.contains(r#""occurredAt":42"#),
+            "occurredAt 应存在: {json}"
+        );
+    }
+
+    // ── metadata_with_ambient trace 透传测试（#1224）─────────────────────────
+
+    // 活跃采样 span → metadata_with_ambient 经 tracewire::capture 盖章 reserved key `trace`
+    //（W3C traceparent，与 occurredAt 共存）——#1224 emit 接线正路。otel subscriber 经 tracewire 脚手架装配
+    //（本 crate 不直接 import otel）。
+    #[test]
+    fn metadata_with_ambient_stamps_trace_inside_span() {
+        let json = tracewire::with_test_subscriber(|| {
+            tracing::info_span!("producer").in_scope(|| {
+                OutboxEnvelope::new("d".to_string(), "c".to_string(), metadata_with_ambient(7))
+                    .metadata_json()
+            })
+        });
+        assert!(
+            json.contains(r#""trace":"00-"#),
+            "活跃 span 应盖章 W3C traceparent trace 键: {json}"
+        );
+        assert!(
+            json.contains(r#""occurredAt":7"#),
+            "occurredAt 应存在: {json}"
+        );
+    }
+
+    // 无 otel 层（capture→None）→ 不盖章 trace（fail-open 省略），occurredAt 仍在。
+    // anti-vacuity：缺 otel 不 panic、不写 trace 键（与 inside-span 正路互证分支）。
+    #[test]
+    fn metadata_with_ambient_omits_trace_without_otel() {
+        let json = OutboxEnvelope::new("d".to_string(), "c".to_string(), metadata_with_ambient(7))
+            .metadata_json();
+        assert!(
+            !json.contains(r#""trace""#),
+            "无 otel 时不应含 trace 键: {json}"
+        );
+        assert!(
+            json.contains(r#""occurredAt":7"#),
             "occurredAt 应存在: {json}"
         );
     }

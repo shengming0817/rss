@@ -4,7 +4,7 @@
 //! outbox（与契约声明的 L2 OutboxFact 语义同源）。**域不能命名 `PgConnection` / `OutboxEnvelope`**
 //! （域→adapter 被 `deny.toml` 禁），故 envelope 字段以 opaque [`OutboxEnvelopeParts`] 传入，由 adapter
 //! 组装 provider 私有 envelope（reserved key `occurredAt` 在 adapter 受控构造点经注入 `Clock` 注入，#1129；
-//! trace 待 #1076 OTel；correlation 已接线 #1160；principal 待 #1397；业务均不得伪造，FR-020 /
+//! trace 已接线 #1224（adapter 经 `tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397；业务均不得伪造，FR-020 /
 //! `docs/rules/observability.md` §Outbox Envelope）。
 //!
 //! 与 [`crate::Publisher`] 的分工：`Publisher` 是 relay 把**已持久化** entry 直发到 broker 的端口；
@@ -59,7 +59,7 @@ impl OutboxEmitError {
 /// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`
-/// 取注入 `Clock`，#1129；trace 待 #1076 OTel；correlation 已接线 #1160；principal 待 #1397）。
+/// 取注入 `Clock`，#1129；trace 已接线 #1224（`tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397）。
 ///
 /// 字段私有 + 构造器 [`OutboxEnvelopeParts::new`]（input-struct-field-exclusion，**Hard**）：business 不能绕过
 /// 构造器分别 set domain/contract_id 字段，只能给 `(contract, subject_id)`。`contract` 的**预期**来源是

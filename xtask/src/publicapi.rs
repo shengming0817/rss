@@ -239,11 +239,13 @@ mod tests {
     fn target_crates_by_layer() {
         // basis = diagctx/vocab/ids/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
         assert_eq!(target_crates(Some(Layer::Basis)).len(), 6);
-        assert_eq!(target_crates(Some(Layer::Engine)).len(), 2);
+        // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
+        assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
         // None = basis + engine 全集，无第三份硬编码列表。
-        assert_eq!(target_crates(None).len(), 8);
+        assert_eq!(target_crates(None).len(), 9);
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
+        assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
         assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
     }

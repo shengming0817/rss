@@ -16,6 +16,8 @@ members = [
   # 引擎 / 原语（依赖基础）
   "crates/consistency",
   "crates/primitives",
+  # W3C traceparent capture/restore 单源（#1224）——唯一新 otel 落点，被 postgres emit + eventexec consumer 依赖。
+  "crates/tracewire",
   # DI-infra（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费——DI port trait 单源 + dynosaur unsafe 收敛）
   "crates/diport",
   # 服务（依赖基础 + 引擎 + DI-infra）

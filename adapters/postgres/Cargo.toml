@@ -19,6 +19,9 @@ runctx = { path = "../../crates/runctx" }
 diagctx = { path = "../../crates/diagctx" }
 consistency = { path = "../../crates/consistency" }
 primitives = { path = "../../crates/primitives" }
+# emit 侧从当前 tracing span 捕获 W3C traceparent 写 outbox metadata 保留键 `trace`（#1224，fail-open）；
+# 只依赖此 helper、不直接 import otel（otel 收口在 tracewire/adapters-otel）。
+tracewire = { path = "../../crates/tracewire" }
 # 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。
@@ -50,6 +53,9 @@ integration = ["testkit/containers"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# #1224 trace 接线单测：复用 tracewire 的 `test-util` 脚手架（with_test_subscriber）装 otel subscriber，
+# 验证 metadata_with_ambient 盖章 `trace`——**不直接 import otel**（otel 收口在 tracewire，同 identity test-support 范式）。
+tracewire = { path = "../../crates/tracewire", features = ["test-util"] }
 # test-util 提供 tokio::time::advance / start_paused（采样 loop 时间控制单元测试）。
 # 集成测试用唯一 event_id 法（inbox_dedup 去重隔离验证，避免跨轮次清理）。
 uuid = { workspace = true, features = ["v4"] }

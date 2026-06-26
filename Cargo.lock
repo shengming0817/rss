@@ -1692,6 +1692,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracewire",
  "tracing",
  "tracing-subscriber",
  "trybuild",
@@ -3635,6 +3636,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracewire",
  "tracing",
  "uuid",
  "vocab",
@@ -5664,6 +5666,17 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "tracewire"
+version = "0.0.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "tracing"

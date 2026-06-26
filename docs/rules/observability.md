@@ -165,8 +165,10 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
   `runctx::RequestCtx`（授权信道；correlation 不被任何授权闸门读取）。
   **跨服务约定**：调用方如需贯通跨服务事件/审计关联链路，须在请求携带 `X-Correlation-ID`
   （白名单 `[A-Za-z0-9._-]`、≤128）；缺失时服务自动生成 UUID 保底，但跨服务链路不贯通。
-- `trace`：sealed setter `OutboxMetadata::with_trace` 已建（#1193），源待 OTel 接线（**#1076**，`tracing`
-  无 span 字段读回 API）——本轮仅留 slot。
+- `trace`：W3C `traceparent` 已接线（**#1224**）。emit 侧 `metadata_with_ambient` 经 `tracewire::capture()`
+  从当前 tracing span 导出 traceparent、`OutboxMetadata::with_trace`（#1193 sealed setter）写入 metadata 保留键；
+  relay→broker header 透传（同 correlation #1160）；consumer 侧 `tracewire::restore_parent()` 还原 remote parent，
+  使 handler span 与 producer 同 `trace_id`。**fail-open**：无 otel 层 / 未采样 / 畸形 traceparent ⇒ 省略 / no-op，绝不阻投递。
 - `principal`：typed-but-empty 接缝，待安全 / PII 决策（完整 principal 上 wire 安全决策，**#1397**）——本轮仅留 opaque `subjectId`。
 
 **统一 delivery envelope（#1160）**：envelope metadata 经统一 wire-faithful 类型 `diport::EnvelopeMetadata`

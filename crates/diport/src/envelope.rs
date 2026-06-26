@@ -29,7 +29,7 @@ pub const RESERVED_METADATA_KEYS: [&str; 4] =
 
 /// reserved：事件发生时刻（unix 秒，十进制 string）。producer 经注入 `Clock` 必填（#1129）。
 pub const KEY_OCCURRED_AT: &str = "occurredAt";
-/// reserved：分布式 trace id（源待 OTel #1076，本轮仅留 slot）。
+/// reserved：分布式 trace（W3C `traceparent`，含 trace_id；源经 `tracewire::capture` 注入，已接线 #1224）。
 pub const KEY_TRACE: &str = "trace";
 /// reserved：跨服务关联 id（源经 `diagctx` ambient 注入，已接线 #1160）。
 pub const KEY_CORRELATION: &str = "correlation";

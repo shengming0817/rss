@@ -232,7 +232,7 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 > 仍 redacted，PII 泄露面不变。无新增越权面、无降档。principal 仍 trait/泛型擦除（`runctx → authn` 闭环禁止不变）。
 >
 > **Amendment（#1160，2026-06-26）**：新增 **§D1-bis 可读诊断 context 信道 `diagctx`**（correlation 经
-> 独立 fail-open ambient 信道在 outbox emit 点读回，#1296 一条源链路落地；trace 仍待 OTel #1076、principal 仍待
+> 独立 fail-open ambient 信道在 outbox emit 点读回，#1296 一条源链路落地；trace 经 #1224 接线（`tracewire` W3C traceparent capture/restore）、principal 仍待
 > 安全决策）。已按 `ai-robust.md` §审查要求重评威胁矩阵，**新增三行**：①「诊断 correlation 被误当授权源」——缓解
 > = `diagctx` 独立 crate（图隔离）+ `Option`/fail-open（非 deny）+ 无授权闸门读取，**Medium**（Hard 化 = dylint 禁
 > authz crate import diagctx，已登记 follow-up）；②「correlation 经 spawn 丢失」——fail-open 省略，benign 非安全面

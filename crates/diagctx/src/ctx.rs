@@ -56,8 +56,9 @@ pub enum CorrelationIdError {
     InvalidChar,
 }
 
-/// 请求级**诊断** context——当前仅承载 correlation；trace / cell / request 为后续扩展槽
-/// （trace 待 OTel #1076、principal 待安全决策）。不被任何授权闸门读取（ADR-002 §D1-bis）。
+/// 请求级**诊断** context——当前仅承载 correlation；cell / request 为后续扩展槽
+/// （trace 经 #1224 由 `tracewire` 独立承载、读 tracing span 而非本 ctx；principal 待安全决策）。
+/// 不被任何授权闸门读取（ADR-002 §D1-bis）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticCtx {
     correlation: CorrelationId,

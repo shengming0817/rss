@@ -1,0 +1,31 @@
+[package]
+name = "tracewire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# 唯一碰 opentelemetry 的新落点（#1224 决策 2）：W3C traceparent capture/restore_parent 单源，
+# postgres emit + eventexec consumer 只依赖本 crate、不直接 import otel。Engine 档（被 service + adapter 依赖）。
+tracing = { workspace = true }
+# Span::current().context() / Span::set_parent(cx)：tracing span ↔ OTel Context 桥（OpenTelemetrySpanExt）。
+tracing-opentelemetry = { workspace = true }
+# opentelemetry::Context + propagation traits（TextMapPropagator / Injector / Extractor，HashMap<String,String> 自带 impl）。
+opentelemetry = { workspace = true }
+# W3C TraceContextPropagator（opentelemetry_sdk::propagation，trace feature）——producer inject / consumer extract 单源。
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
+# `test-util` feature 装配确定性测试 subscriber（registry().with(otel layer)）；optional——默认 build 不引入。
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+# 跨 crate 测试脚手架（同 identity/authn 的 `test-support` 范式）：导出 `with_test_subscriber`，
+# 使下游 postgres/eventexec 测试复用 otel subscriber 装配而**不直接 import otel**（otel 收口在本 crate）。
+test-util = ["dep:tracing-subscriber"]
+
+[dev-dependencies]
+# 本 crate 自身单测装 subscriber（与 test-util 同款；自测不经 feature flag）。
+tracing-subscriber = { workspace = true }

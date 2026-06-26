@@ -60,6 +60,7 @@ rss/
 │   ├── diagctx/          # 诊断信道 fail-open correlation（ADR-002 §D1-bis）
 │   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
+│   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点，#1224）
 │   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源（Clock / Signer / Publisher / Subscriber / AuditSink / ManagedResource…）+ dynosaur Dyn wrapper
 │   ├── httpserve/        # axum router / middleware / health
 │   ├── authn/            # jwt / session / refresh / PDP / Principal
@@ -95,7 +96,7 @@ rss/
 ## 分层(crate 图 + deny.toml 编译期强制)
 
 - **基础** `vocab`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖，仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）。现有 sanctioned 前向边:`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro,#1360；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制(#1022 已落，本 PR 加 intra-base 前向例外)。
-- **引擎/原语** `consistency`/`primitives`:依赖基础;不依赖 DI-infra/服务/域/adapters。
+- **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C traceparent capture/restore 单源,#1224)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 收口在此 + `adapters/otel`,二者外不直接 import otel(结构性收口,机器硬化待 follow-up dylint)。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource…,签名只引基础/wire/自定义类型)+ dynosaur Dyn wrapper(ADR-003)。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
