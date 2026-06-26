@@ -45,7 +45,7 @@ pub mod topology;
 
 pub use domain::{Domain, KernelError, compose};
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
-pub use module::{DomainModule, ModuleFactory};
+pub use module::{DomainModule, DomainModuleResult, ModuleFactory, WorkerSpec};
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
 pub use registry::{
     ConsumerHandlerFn, HealthProbe, HealthReporter, Registry, SubscriberBinding,

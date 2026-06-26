@@ -186,6 +186,15 @@ CVE(PR 门覆盖不到的时间维度,告警语义)。azure CI 启用前(`AZURE_
   capability bundle(`PgRuntimeDeps`·`PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
   (`docs/architecture/202606270148-010-persistence-capability-layering.md`);执行体随 #1419(runtime base) / #1421(settings
   闭环) / W 阶段落地,本处不复制未强制细节。
+- **运行时接线契约首切([PERSIST-001] #1422,ADR-010 §2.6 step 2 的 `DomainModuleResult` + `SharedRuntimeDeps` 聚合)**:
+  `bootstrap::DomainModuleResult`(probes/resources/workers 可聚合产物流出,组合根 `merge` 聚合后排空到 `Registry::probe`
+  / `ShutdownStack`,**归属 ADR-010 §2.2 = `bootstrap`**) + `assemblies/runtime` 的 `SharedRuntimeDeps`(infra 流入,持
+  `Arc<PgStore>` 故必留组合根层);`wire_settings` 首用。**INVARIANT WIRING-DEPS-NO-HANDOFF-01(Hard)**:
+  `wire_X(deps: &SharedRuntimeDeps) -> Result<DomainModuleResult>` 签名无参数可塞别域 result ⇒ 跨 module value handoff
+  编译期不可表达。**首切与 ADR-010 §2.2 的差异(字段未冻,随 #1421 细化)**:`DomainModuleResult` 暂为独立 struct(未演进
+  `DomainModule`)、暂无 `name/domain` 与 `services/routes` 字段(域 service 留 `wire_X` 内部经 route 闭包捕获、不出向)。
+  「`SharedRuntimeDeps` 字段仅基础设施」是**约定、非 INVARIANT**(无机器门,`ai-robust.md` 不停留 Soft ⇒ 不作现行规则);
+  升 Medium 字段扫描 guard 见 #1448。
 - **Init fail-fast**:`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`;必填依赖走构造器必填参数
   (编译期);init 内不做 I/O、不 spawn task。
 - **Adapter sealed marker**:unit sealed-marker(`struct PgStore;`)以 native AFIT impl diport 已冻 DI port

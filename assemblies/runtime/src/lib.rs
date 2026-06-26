@@ -20,6 +20,11 @@
 //! 原 xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
+pub mod module;
+
+pub use module::SharedRuntimeDeps;
+
+use bootstrap::DomainModuleResult;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -417,29 +422,34 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
 
 // ── settings + secret wiring ─────────────────────────────────────────────────────────────────
 
-/// 接线 settings 域：构造 `SettingsService` + `SecretService`。
+/// 接线 settings 域（[PERSIST-001] #1422）：构造 `SettingsService` + `SecretService`，产出
+/// `configs_ready` readiness 探针。
 ///
-/// - `store`：已建 `PgStore`（`Arc` 共享给 repo）。
+/// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——`store` 供 repo、`readiness` 供探针读采样态。
 ///
-/// 返回 `(SettingsService, SecretService)` 供组合根继续组装（业务 handler ↔ service 接线 = #1309 及后续
-/// 域 PR；本 PR #1320 仅打通 async runtime + wire_X call-site）。
-/// `configs_ready` probe 注册已移至 [`run`]（保证读的是被 F8 采样驱动的 `PgDbReadiness` handle）。
+/// 产物经 [`DomainModuleResult`] 出向（result object），组合根 `merge` 聚合后排空到 sink；共享 infra 经
+/// [`SharedRuntimeDeps`] 入向。本函数不消费 / 不产出任何别域 value（禁跨 module handoff，签名 Hard）。
+///
+/// # service 暂丢
+///
+/// 业务 handler ↔ service 接线属后续域 PR——接线落地时 route 闭包捕获这些 service、经 `&mut Registry` 的
+/// typed `route_group` 注册，**绝不**经 result 出向（service 不流出 `wire_X`）。本最小 scope 暂 `drop`
+/// （与 #1320 scaffold 一致，未引入新行为）。
 ///
 /// # 注意
 ///
 /// 当前 `empty_flag_store()` 返回空 in-mem store（`seed-data` feature，fail-closed 语义）；
-/// 生产 flag store 待 #1120。
-pub async fn wire_settings(
-    store: Arc<PgStore>,
-) -> anyhow::Result<(SettingsService, SecretService)> {
+/// 生产 flag store 待 #1120。`SystemClock` 仍硬编码——clock 注入（rust-standards「Clock 构造器位置参」）
+/// 属 tangential 改进，不在本 PR 最小 scope。
+pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainModuleResult> {
     // 构造 vault resolver（pre-GA 空 allowlist → 所有 resolve fail-closed Forbidden）。
     let resolver = build_vault_resolver_from(|name| std::env::var(name).ok())
         .context("vault resolver config")?;
 
     // PgConfigRepo / PgSecretRepo 持 pool clone（内部 Arc，轻量），接受 &PgStore。
-    let config_repo_r = postgres::PgConfigRepo::new(&store, Box::new(SystemClock));
-    let config_repo_w = postgres::PgConfigRepo::new(&store, Box::new(SystemClock));
-    let pg_secret_repo = PgSecretRepo::new(&store);
+    let config_repo_r = postgres::PgConfigRepo::new(&deps.store, Box::new(SystemClock));
+    let config_repo_w = postgres::PgConfigRepo::new(&deps.store, Box::new(SystemClock));
+    let pg_secret_repo = PgSecretRepo::new(&deps.store);
 
     let settings_svc = SettingsService::with_postgres(
         DynConfigRepo::new_box(config_repo_r),
@@ -453,8 +463,27 @@ pub async fn wire_settings(
         DynSecretResolver::new_box(resolver),
         Box::new(SystemClock),
     );
+    // reason: handler↔service 接线属后续域 PR；本 PR 仅建接线契约形态，service 暂不消费。
+    drop(settings_svc);
+    drop(secret_svc);
 
-    Ok((settings_svc, secret_svc))
+    settings_module_result(deps.readiness.clone())
+}
+
+/// settings 域 readiness 产物：`configs_ready` 探针（读共享 `PgDbReadiness`）。
+///
+/// 从 [`wire_settings`] 抽出——后者前半段 vault resolver / pg repo 构造受 env + 真实 pg 门控（integration only），
+/// 而本探针 emission 只需 `Arc<PgDbReadiness>`（无 I/O）。独立成纯函数后 `#[cfg(test)]` 可脱离 vault env / 真实 pg
+/// 单测探针 emission 契约（恰一条 configs_ready、无 resources/workers）。
+fn settings_module_result(readiness: Arc<PgDbReadiness>) -> anyhow::Result<DomainModuleResult> {
+    // configs_ready 探针：读 SharedRuntimeDeps 注入的共享 PgDbReadiness（框架 sampler 写）。作 settings 域
+    // readiness 产物经 result 出向——不能放纯声明的 `Domain::init`（需运行时构造的 handle）。
+    let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
+        .context("configs_ready probe name is invalid")?;
+    Ok(DomainModuleResult {
+        probes: vec![(probe_name, Box::new(ConfigsReadyProbe::new(readiness)))],
+        ..Default::default()
+    })
 }
 
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
@@ -587,7 +616,7 @@ async fn serve_until_signal(
 /// 可测核心：注入 `addr_resolver`（listener→bind 地址）与 `shutdown` future（关停触发），驱动 bind 各
 /// listener socket → 经 `ShutdownStack` 托管 serve → `shutdown` resolve 后 LIFO 优雅 drain。
 ///
-/// `register_background`：bind 循环前注册后台 worker 进 `ShutdownStack`（LIFO：先注册先停——sampler 先注册
+/// `register_background`：bind 循环前注册后台 worker 进 `ShutdownStack`（LIFO：先注册后停——sampler 先注册
 /// 则最后停，确保 listener drain 后 sampler 才停）。
 ///
 /// 生产经 [`serve_until_signal`] 注入真实 env 解析 + 信号 future；测试注入 `|_| Ok(127.0.0.1:0)` + 立即
@@ -731,27 +760,34 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .context("run postgres migrations")?;
 
-    // wire_settings（≥1 个 wire_X call-site，#1320 DoD）：造 settings/secret service。
-    let (settings_svc, secret_svc) = wire_settings(pg.clone()).await.context("wire settings")?;
-    // reason: 业务 handler ↔ service 接线属后续域 PR；本 PR 仅打通 runtime + wire_X call-site + probe。
-    drop(settings_svc);
-    drop(secret_svc);
+    // F8：readiness 采样 health（初值 Down，fail-closed）——settings configs_ready 探针读、框架 sampler 写。
+    let readiness = Arc::new(PgDbReadiness::new());
+
+    // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
+    let deps = SharedRuntimeDeps {
+        store: pg.clone(),
+        readiness: readiness.clone(),
+    };
+
+    // 聚合各域 module result（今仅 settings；后续域只需多一行 module.merge(wire_X(&deps).await?)，run() 形态恒定）。
+    let mut module = DomainModuleResult::default();
+    module.merge(wire_settings(&deps).await.context("wire settings")?);
     tracing::warn!(
         stage = "scaffold",
         "business API routes not yet wired; only /health/v1/* served \
         (settings/secret handler↔service 接线属后续域 PR)"
     );
 
-    // F8：readiness 采样 health（初值 Down，fail-closed）+ 注册 configs_ready probe（读采样状态）。
-    let readiness = Arc::new(PgDbReadiness::new());
-    let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
-        .context("configs_ready probe name is invalid")?;
-    registry
-        .probe(
-            probe_name,
-            Box::new(ConfigsReadyProbe::new(readiness.clone())),
-        )
-        .context("register configs_ready probe")?;
+    // 排空域产物探针进 registry（须先于 take_health_reporter，readyz 才聚合 configs_ready）。
+    for (name, probe) in module.probes {
+        let probe_label = name.as_str().to_owned();
+        registry
+            .probe(name, probe)
+            .with_context(|| format!("register domain probe '{probe_label}'"))?;
+    }
+    // 域 detached 资源 / 后台 worker（settings 今为空；路径为后续域就位）——移出供 serve 闭包排空。
+    let domain_resources = module.resources;
+    let domain_workers = module.workers;
     let period = build_readiness_interval();
     tracing::info!(
         sample_interval_secs = period.as_secs(),
@@ -767,11 +803,12 @@ pub async fn run() -> anyhow::Result<()> {
     let reporter = Arc::new(registry.take_health_reporter());
     listeners.push(health_listener(reporter).context("build health listener")?);
 
-    // LIFO 注册顺序：pool guard 先注册（最后关）→ sampler 再注册（pool 关前停）→ listeners 最后注册（最先 drain）。
+    // LIFO 注册顺序：pool guard 先注册（最后关）→ sampler → 域 resources → 域 workers → listeners 最后注册
+    // （最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources → sampler → pool guard。
     let sampler_pg = pg.clone();
     let sampler_health = readiness.clone();
     serve_until_signal(listeners, move |stack| {
-        // 先注册 pool guard（LIFO 最后关——在 sampler 停止后再关池，避免 sampler 在已关闭 pool 上发 probe）。
+        // 先注册框架 pg infra（非域产物）：pool guard（LIFO 最后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
         stack.register_detached(DynManagedResource::new_box(PgStoreGuard::new(pg)));
         // 再注册 sampler（child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
         stack.register_with_token(move |token| {
@@ -783,6 +820,13 @@ pub async fn run() -> anyhow::Result<()> {
             ));
             DynManagedResource::new_box(PgReadinessSampler::adopt(handle, sampler_health, token))
         });
+        // 域产物注册在框架 pg infra 之后 → LIFO 先于 pool 关闭排空（settings 今为空；后续域就位）。
+        for r in domain_resources {
+            stack.register_detached(r);
+        }
+        for w in domain_workers {
+            stack.register_with_token(w);
+        }
     })
     .await
 }
@@ -797,6 +841,21 @@ mod tests {
     /// 测试时钟（这些测试只验构造成功/失败，不验 token exp，故 SystemClock 即可）。
     fn clk() -> Box<dyn diport::Clock> {
         Box::new(SystemClock)
+    }
+
+    /// settings 域产物：恰一条 `configs_ready` 探针、resources / workers 空。
+    ///
+    /// 直测 [`settings_module_result`]（脱离 vault env / 真实 pg），覆盖 `wire_settings` 的探针 emission
+    /// 契约——该路径在 integration Ok 分支（需 vault+pg）外不可达，故抽出后单测以满足新增覆盖。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn settings_module_result_emits_single_configs_ready_probe() {
+        let readiness = Arc::new(PgDbReadiness::new());
+        let result = settings_module_result(readiness).expect("settings_module_result ok");
+        assert_eq!(result.probes.len(), 1, "仅 configs_ready 一条探针");
+        assert_eq!(result.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
+        assert!(result.resources.is_empty(), "settings 今无 detached 资源");
+        assert!(result.workers.is_empty(), "settings 今无后台 worker");
     }
 
     #[test]
