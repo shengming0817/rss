@@ -25,6 +25,8 @@ use std::time::Duration;
 
 use amqp::{AmqpPublisher, AmqpSubscriber};
 use anyhow::anyhow;
+use bootstrap::replaydeps::resolve;
+use bootstrap::{IdempotencyConfig, ResolvedIdempotency, Topology};
 use consistency::{ConsumerGroup, HandleResult};
 use diport::{
     AckableSubscriber, DynDeadLetterStore, Message, MessageId, PublishRequest, Publisher, Topic,
@@ -40,6 +42,18 @@ use tokio_util::sync::CancellationToken;
 const TOPIC: &str = "rss.it.consumer-alo";
 /// 去重锚点 EventId（两次发布同此 id 验幂等）。
 const EVENT_ID: &str = "evt-consumer-alo";
+
+/// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
+/// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造，**不**直接 raw-new——把 in-mem 构造收束到
+/// 已校验的拓扑决策（review #274 F6/C6：本 AMQP journey 原直接 `InMemClaimer::new` 旁路了 resolve 决策绑定）。
+fn demo_claimer(group: ConsumerGroup) -> anyhow::Result<InMemClaimer> {
+    match resolve(Topology::Demo, IdempotencyConfig::default())? {
+        ResolvedIdempotency::Demo => Ok(InMemClaimer::new(group)),
+        other => Err(anyhow!(
+            "demo journey 须解析为 Demo 幂等决策，实得 {other:?}"
+        )),
+    }
+}
 
 /// `run_consumer_ackable` 消费一条真 broker 消息并 settle Ack（at-least-once 终态兑现）。
 ///
@@ -62,7 +76,8 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     // 消费侧：InMemClaimer 幂等 + MemDeadLetterStore；handler 记录被消费的 message id。
     let group =
         ConsumerGroup::parse("audit.consumer-alo").map_err(|_| anyhow!("consumer group parse"))?;
-    let claimer = Arc::new(InMemClaimer::new(group));
+    // 决策绑定（F6/C6）：经 resolve(Topology::Demo) 决策臂构造 in-mem claimer，不直接 raw-new。
+    let claimer = Arc::new(demo_claimer(group)?);
     let consumed = Arc::new(Mutex::new(Vec::<String>::new()));
     let consumed_for_handler = consumed.clone();
     let handler = move |message: Message| -> BoxFuture<'static, HandleResult> {
