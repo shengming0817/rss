@@ -60,7 +60,7 @@ use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, s
 use futures::future::BoxFuture;
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::ports::DynSessionLifecycle;
-use identity::{IdentityDomain, LoginService};
+use identity::{IdentityDomain, LoginService, RefreshService, SeedSigner};
 use memory::{
     FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionLifecycle,
 };
@@ -187,20 +187,32 @@ where
     Ok(health)
 }
 
+/// `login_service` 返回的 (login, refresh) pair。
+type LoginBundle = (
+    Arc<LoginService<SeedSigner>>,
+    Arc<RefreshService<SeedSigner>>,
+);
+
 /// 登录服务（注入 MemSessionLifecycle co-tx 替身 + 固定时钟 + 种子凭据）。
-#[allow(clippy::expect_used)]
-fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginService> {
-    Ok(LoginService::with_seed_credential(
+/// 同时构造 seed refresh service 并返回，供 `IdentityDomain::new` 注入。
+fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
+    let refresh = identity::seed_refresh_service(
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    );
+    let login = Arc::new(LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(MemSessionLifecycle::new(
             bus.clone(),
         ))),
+        Arc::clone(&refresh),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
         ids::UserId::parse(CANON_USER)?,
         PASSWORD,
         tenant,
-    )?)
+    )?);
+    Ok((login, refresh))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -209,10 +221,8 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 
     // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅 + admin 读路由组。
     let (audit_domain, audit) = audit_domain();
-    let identity_domain = IdentityDomain::new(Arc::new(login_service(
-        &bus,
-        TenantId::parse(CANON_TENANT)?,
-    )?));
+    let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
+    let identity_domain = IdentityDomain::new(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let route_groups = registry.route_groups();
@@ -257,7 +267,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 
     // 登录（emit）+ 等 audit；worker 在独立线程并发消费，无需同任务 `tokio::join!`。
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let login = login_service(&bus, tenant)?;
+    let (login, _refresh) = login_service(&bus, tenant)?;
     let response = login
         .login(
             tenant,
@@ -436,10 +446,8 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
     let (audit_domain, audit) = audit_domain();
-    let identity_domain = IdentityDomain::new(Arc::new(login_service(
-        &bus,
-        TenantId::parse(CANON_TENANT)?,
-    )?));
+    let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
+    let identity_domain = IdentityDomain::new(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let SubscriberBinding {
@@ -464,7 +472,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     .await?;
 
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let login = login_service(&bus, tenant)?;
+    let (login, _refresh) = login_service(&bus, tenant)?;
     let result = login
         .login(
             tenant,

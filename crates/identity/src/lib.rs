@@ -40,6 +40,9 @@ pub use application::{
     ChangePasswordError, IdentityDomain, LoginError, LoginService, RbacAdminError,
     RbacAdminService, RefreshBundle, RefreshError, RefreshService,
 };
+/// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
+#[cfg(any(test, feature = "seed-login"))]
+pub use application::{SeedSigner, seed_refresh_service};
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///

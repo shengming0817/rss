@@ -1,16 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "IdentityLoginResponse",
+  "title": "IdentityRefreshResponse",
   "type": "object",
   "required": ["data"],
   "properties": {
     "data": {
-      "title": "IdentityLoginData",
+      "title": "IdentityRefreshData",
       "type": "object",
-      "required": ["sessionId", "expiresAt", "accessToken", "refreshToken", "accessExpiresAt"],
+      "required": ["accessToken", "refreshToken", "accessExpiresAt"],
       "properties": {
-        "sessionId": { "type": "string", "x-redaction": "secret" },
-        "expiresAt": { "type": "integer", "format": "int64" },
         "accessToken": { "type": "string", "x-redaction": "secret" },
         "refreshToken": { "type": "string", "x-redaction": "secret" },
         "accessExpiresAt": { "type": "integer", "format": "int64" }

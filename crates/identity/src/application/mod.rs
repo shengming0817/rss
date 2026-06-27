@@ -1,9 +1,12 @@
 //! identity 应用层：登录编排（哈希凭据 + lockout + L2 co-tx）/ 密码变更（CAS）/ logout（软撤销），#1189。
 //!
-//! 登录路径（PR4 + #1277）：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate` → `AuthOutcome` 分流：
-//! 已知+错推进 lockout、未知不建锁、成功清零）→ mint 会话（subject = credential 携带的 canonical
-//! `ids::UserId`，**非** 登录标识，F1）→ **co-tx**（[`Session`] 持久化 + `identity.session-created` outbox
-//! append 同一事务，经 `ports::SessionLifecycle::persist_session_and_emit`）→ 返回 `IdentityLoginResponse`。
+//! 登录路径（PR4 + #1277，F4 reorder）：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate` →
+//! `AuthOutcome` 分流：已知+错推进 lockout、未知不建锁、成功清零）→ mint 会话数据（session_id/payload/
+//! entry/envelope，local，no I/O）→ **首发 token mint**（`issue_initial`，先于 co-tx，F4）→ **co-tx**
+//! （[`Session`] 持久化 + `identity.session-created` outbox append 同一事务，经
+//! `ports::SessionLifecycle::persist_session_and_emit`）→ 返回 `IdentityLoginResponse`。
+//! mint-first 语义：mint 失败 ⇒ clean failure（无 session/outbox）；co-tx 失败 ⇒ orphan refresh token
+//! （无 session/outbox，随 TTL 自然过期）——全面消除 co-tx 先/mint 失败的半成功窗口（F4 reorder）。
 //! logout 经同一 `ports::SessionLifecycle::revoke` 软撤销（create / find / revoke 同源，#1278）。
 //!
 //! 下游 audit 订阅消费该事件。co-tx 接缝由 postgres adapter `PgSessionLifecycle`
@@ -29,7 +32,10 @@ use generated::event::identity_v1::session_created::{
 use generated::http::identity_v1::{
     IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, SPEC as LOGIN_HTTP_SPEC,
 };
-use generated::http::{HttpAuthMode, HttpHeaderMode};
+use generated::http::identity_v2::{
+    IdentityRefreshData, IdentityRefreshRequest, IdentityRefreshResponse, SPEC as REFRESH_HTTP_SPEC,
+};
+use generated::http::{HttpAuthMode, HttpHeaderMode, HttpSpec};
 use httpserve::{Primary, PrimaryRoute};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
@@ -56,6 +62,10 @@ const SESSION_DOMAIN: &str = CONTRACT.domain();
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
 
+/// JWT 署名用途字面量（seed-login / test 路径；≥ 3 处使用，rust-standards §工程护栏抽 const）。
+#[cfg(any(test, feature = "seed-login"))]
+pub(crate) const SEED_JWT_PURPOSE: &str = "auth.jwt.access";
+
 /// 登录失败。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射，error-handling.md）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -79,6 +89,10 @@ pub enum LoginError {
     /// 凭据仓储操作失败（CredentialRepo 方法错误通道；in-mem 不触发，postgres 接线 W）。
     #[error("credential store error")]
     Credential(#[source] IdentityError),
+    /// 首发 token 签发失败（access JWT 铸造或 refresh token 落库失败，如 vault `Signer` 不可用，#1252）。
+    /// mint 先于 co-tx（F4 reorder）：签发失败 ⇒ **clean failure**——无 session 创建、无 outbox 事件。
+    #[error("initial token issuance failed")]
+    TokenIssue(#[source] RefreshError),
 }
 
 /// 密码变更失败。库错误枚举（const-literal message）。
@@ -118,25 +132,32 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 ///
 /// 注入形态为 `Arc<DynCredentialRepo>` + `Arc<DynSessionLifecycle>`：域形端口基 trait 为 `Send + Sync`，
 /// 使 `LoginService` 可作为 axum handler 共享 state，且 `login().await` future 为 `Send`（#1234）。
-pub struct LoginService {
+///
+/// 泛型 `S: Signer`（#1252）：登录成功后经注入的 [`RefreshService<S>`] 首发 access JWT + refresh token bundle
+/// （回带至响应）——令组合根注入的 vault `Signer` 有生产消费方。`S` 静态分发（`DynSigner` 非 Sync，见
+/// [`authn::JwtIssuer`] DIPORT-ASYNC-ARC-SEND-01），组合根单态化 `S = vault::VaultSigner`。
+pub struct LoginService<S> {
     credentials: Arc<DynCredentialRepo<'static>>,
     lifecycle: Arc<DynSessionLifecycle<'static>>,
+    refresh: Arc<RefreshService<S>>,
     clock: Box<dyn Clock>,
     session_ttl: Duration,
 }
 
-impl LoginService {
-    /// 组合根构造：3 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
-    /// （create/find/revoke 同源，#1278）。
+impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
+    /// 组合根构造：4 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
+    /// （create/find/revoke 同源，#1278）；`refresh` 承载首发 token 签发（#1252）。
     pub fn new(
         credentials: Arc<DynCredentialRepo<'static>>,
         lifecycle: Arc<DynSessionLifecycle<'static>>,
+        refresh: Arc<RefreshService<S>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
     ) -> Self {
         Self {
             credentials,
             lifecycle,
+            refresh,
             clock,
             session_ttl,
         }
@@ -145,8 +166,12 @@ impl LoginService {
     /// 种子构造（test/seed-login 门控）：哈希凭据种子 + 注入的会话生命周期 provider。
     /// 明文 `password` 仅入参，经 argon2 哈希入库，不存明文。
     #[cfg(any(test, feature = "seed-login"))]
+    // reason: seed-login 构造器含 8 个必填位置参（lifecycle/refresh/clock/ttl/login/user_id/password/tenant），
+    // 每个均为不可省略的域依赖，不拆 builder（YAGNI；test-only / seed-login feature-gated，非业务 public API）。
+    #[allow(clippy::too_many_arguments)]
     pub fn with_seed_credential(
         lifecycle: Arc<DynSessionLifecycle<'static>>,
+        refresh: Arc<RefreshService<S>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
         login: impl Into<String>,
@@ -163,13 +188,14 @@ impl LoginService {
         Ok(Self::new(
             Arc::from(crate::ports::DynCredentialRepo::new_box(creds)),
             lifecycle,
+            refresh,
             clock,
             session_ttl,
         ))
     }
 
     /// 登录：lockout 门控 → 恒定成本验签 + 原子锁定记账（`authenticate`）→ 据 [`AuthOutcome`] 分流 →
-    /// mint 会话 → co-tx（session + outbox）→ 返回响应。
+    /// mint 会话数据 → **首发 token mint**（`issue_initial`，先于 co-tx，F4 reorder）→ co-tx（session + outbox）→ 返回响应。
     ///
     /// `tenant` 已由 handler 从 `X-Tenant-ID` header parse，不在本方法重新 parse。`request.username` 仅作
     /// [`LoginIdentifier`] 凭据查找键；写 wire / audit 的是 credential 携带的 canonical [`ids::UserId`]
@@ -247,8 +273,20 @@ impl LoginService {
         // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；business 只给 opaque subject。
         let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject.clone());
 
-        // 5. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
-        let session = Session::new(session_id.clone(), subject, tenant, expires_at, now);
+        // 5. 首发 token bundle（#1252，F4 reorder：mint 先于 co-tx）。
+        //    铸 access JWT（注入的 vault `Signer`）+ 签发首个 refresh token——令组合根注入的 `Signer`
+        //    有生产消费方。先于 co-tx 执行：mint 失败 ⇒ clean failure（无 session/outbox）。
+        //    residual window：mint 成功但步骤 6 co-tx 失败 ⇒ orphan refresh token（无 session/outbox；
+        //    随 TTL 自然过期）——完全消除「co-tx 先、mint 失败 ⇒ session 已建但无 token」的半成功窗口。
+        //    `subject` = canonical user uuid（JWT `sub`），kind = User（ES256 路径，alg↔kind 一致）。
+        let bundle = self
+            .refresh
+            .issue_initial(tenant, &subject, vocab::PrincipalKind::User)
+            .await
+            .map_err(LoginError::TokenIssue)?;
+
+        // 6. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
+        let session = Session::new(session_id.clone(), subject.clone(), tenant, expires_at, now);
         self.lifecycle
             .persist_session_and_emit(session, entry, envelope)
             .await
@@ -258,6 +296,9 @@ impl LoginService {
             data: IdentityLoginData {
                 session_id: session_id.as_str().to_string(),
                 expires_at: unix_secs(expires_at),
+                access_token: bundle.access.as_str().to_string(),
+                refresh_token: bundle.refresh.as_str().to_string(),
+                access_expires_at: bundle.access.expires_at(),
             },
         })
     }
@@ -435,6 +476,34 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         Ok(authn::RefreshToken::new(secret.expose()))
     }
 
+    /// 登录首发：铸 access JWT（注入的 vault `Signer` 经 [`authn::JwtIssuer`] 签）+ 签发并落库首个 refresh
+    /// token，组成 [`RefreshBundle`]。供 [`LoginService`] 登录成功后调用——令 minted JWT 有生产消费方（#1252）。
+    ///
+    /// 顺序同 `rotate` 的「mint 先于持久副作用」：先 mint access（失败 ⇒ 无 refresh 记录残留、客户端重登即可），
+    /// 成功后 `issue` 落库 refresh token。`subject` / `kind` 是 access JWT 与 refresh 记录的同源 claim。
+    ///
+    /// `skip_all`：subject 不入 span（零信任；可含 PII，observability.md §redaction）。
+    #[tracing::instrument(
+        skip_all,
+        fields(domain = SESSION_DOMAIN, operation = "refresh_issue_initial", tenant_id = %tenant),
+        err
+    )]
+    pub async fn issue_initial(
+        &self,
+        tenant: vocab::TenantId,
+        subject: &str,
+        kind: vocab::PrincipalKind,
+    ) -> Result<RefreshBundle, RefreshError> {
+        // mint 先于落库：access mint 失败 ⇒ 未写任何 refresh 记录、客户端重登即可（无悬挂 token）。
+        let access = self
+            .issuer
+            .issue(subject, Some(tenant), kind)
+            .await
+            .map_err(RefreshError::Mint)?;
+        let refresh = self.issue(tenant, subject, kind).await?;
+        Ok(RefreshBundle { access, refresh })
+    }
+
     /// 轮换 refresh token（reuse-detection + 新 access JWT + 新 refresh token）。
     ///
     /// ## 步骤顺序（参见 struct 级 rustdoc 关于「mint 先于 CAS」的说明）
@@ -473,6 +542,12 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
                 .revoke_lineage(tenant, rec.lineage_id().clone())
                 .await
                 .map_err(RefreshError::Store)?;
+            tracing::warn!(
+                tenant_id = %tenant,
+                lineage_id = %rec.lineage_id().as_str(),
+                operation = "refresh_replay_detected",
+                "refresh token replay detected; lineage revoked"
+            );
             return Err(RefreshError::Replayed);
         }
 
@@ -511,6 +586,12 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
                 .revoke_lineage(tenant, rec.lineage_id().clone())
                 .await
                 .map_err(RefreshError::Store)?;
+            tracing::warn!(
+                tenant_id = %tenant,
+                lineage_id = %rec.lineage_id().as_str(),
+                operation = "refresh_replay_detected",
+                "refresh token replay detected; lineage revoked"
+            );
             return Err(RefreshError::Replayed);
         }
 
@@ -550,6 +631,66 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Seed/journey 首发 token 装配（seed-login / test 门控；生产经组合根注入 vault Signer）
+// ---------------------------------------------------------------------------
+
+/// Demo/journey 用确定性 stub `Signer`（固定字节签名；**非生产**——生产经组合根注入 vault `Signer`）。
+/// 仅 `seed-login`/test 构建编译（生产依赖图无此符号，同 `with_seed_credential` 门控，PR #186 F1）。
+#[cfg(any(test, feature = "seed-login"))]
+#[derive(Clone, Debug)]
+pub struct SeedSigner;
+
+#[cfg(any(test, feature = "seed-login"))]
+#[allow(unknown_lints, rss_diport_impl_allowlist)] // reason: test/seed-login 确定性 stub；仅 seed-login feature / #[cfg(test)] 构建编译，生产依赖图无此符号；非可互换 production provider（#1252）。unknown_lints 消除 clippy 对 dylint-only lint 的告警。
+impl diport::Signer for SeedSigner {
+    async fn sign(
+        &self,
+        _req: diport::SignRequest,
+    ) -> Result<diport::Signature, diport::SignerError> {
+        // reason: 确定性占位签名——seed/journey 不验 crypto，只需 `issue()` 成功落库首发 token（#1252）。
+        Ok(diport::Signature::new(
+            b"seed-signer-deterministic-bytes".to_vec(),
+        ))
+    }
+    async fn shutdown(&self) -> Result<(), diport::SignerError> {
+        Ok(())
+    }
+}
+
+/// 装配 demo/journey 用 in-mem [`RefreshService`]（[`SeedSigner`] + in-mem store + 默认 ES256 config）。
+/// 供 journey 把首发 token 签发装进 [`LoginService::with_seed_credential`] / [`IdentityDomain`]（#1252）。
+/// `mk_clock` 产两个时钟（issuer + service 各一）——seed 路径无系统时钟读（journey 注入 FixedClock）。
+#[cfg(any(test, feature = "seed-login"))]
+#[allow(clippy::expect_used)]
+pub fn seed_refresh_service(
+    mk_clock: impl Fn() -> Box<dyn diport::Clock>,
+    refresh_ttl: Duration,
+) -> Arc<RefreshService<SeedSigner>> {
+    let issuer = authn::JwtIssuer::new(
+        Arc::new(SeedSigner),
+        mk_clock(),
+        authn::JwtIssuerConfig {
+            key: diport::KeyId::new("seed-jwt-key"),
+            alg: authn::JwtAlg::Es256,
+            purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+            issuer: "https://seed.local".to_string(),
+            audience: "rss-seed".to_string(),
+            ttl: Duration::from_secs(900),
+        },
+    )
+    // reason: const config（非空 iss/aud/key、ttl>0）⇒ JwtIssuer::new 不可能失败。
+    .expect("seed jwt issuer config is valid");
+    Arc::new(RefreshService::new(
+        crate::ports::DynRefreshTokenStore::new_box(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+        ),
+        Arc::new(issuer),
+        mk_clock(),
+        refresh_ttl,
+    ))
+}
+
 const MAX_LOGIN_BODY_BYTES: usize = 64 * 1024;
 
 fn request_id_from(req: &Request<Body>) -> String {
@@ -558,8 +699,9 @@ fn request_id_from(req: &Request<Body>) -> String {
         .to_string()
 }
 
-fn login_relative_path() -> Result<&'static str, KernelError> {
-    let rel = LOGIN_HTTP_SPEC
+/// 业务相对 path（去掉 [`LOGIN_ROUTE_PREFIX`]，供 route_group 相对挂载）。login/refresh 共用同一前缀。
+fn spec_relative_path(spec: &HttpSpec) -> Result<&'static str, KernelError> {
+    let rel = spec
         .path
         .strip_prefix(LOGIN_ROUTE_PREFIX)
         .ok_or(KernelError::RouteGroup)?;
@@ -570,12 +712,13 @@ fn login_relative_path() -> Result<&'static str, KernelError> {
     }
 }
 
-fn login_method() -> Result<Method, KernelError> {
-    Method::from_bytes(LOGIN_HTTP_SPEC.method.as_bytes()).map_err(|_| KernelError::RouteGroup)
+fn spec_method(spec: &HttpSpec) -> Result<Method, KernelError> {
+    Method::from_bytes(spec.method.as_bytes()).map_err(|_| KernelError::RouteGroup)
 }
 
-fn login_opt_out() -> Result<Option<RouteAuthOptOut>, KernelError> {
-    match LOGIN_HTTP_SPEC.auth.mode {
+/// public 端点 opt-out（identity 的 login/refresh 均 pre-auth；refresh token 自身即凭据）。非-public mode fail-closed。
+fn spec_opt_out(spec: &HttpSpec) -> Result<Option<RouteAuthOptOut>, KernelError> {
+    match spec.auth.mode {
         HttpAuthMode::Public => Ok(Some(RouteAuthOptOut::Public)),
         HttpAuthMode::Permission
         | HttpAuthMode::Bootstrap
@@ -584,48 +727,71 @@ fn login_opt_out() -> Result<Option<RouteAuthOptOut>, KernelError> {
     }
 }
 
-fn tenant_header_name() -> Result<&'static str, KernelError> {
-    LOGIN_HTTP_SPEC
-        .headers
+fn tenant_header_name(spec: &HttpSpec) -> Result<&'static str, KernelError> {
+    spec.headers
         .iter()
         .find(|h| h.mode == HttpHeaderMode::PopulateOnly)
         .map(|h| h.name)
         .ok_or(KernelError::RouteGroup)
 }
 
-async fn login_handler(State(service): State<Arc<LoginService>>, req: Request<Body>) -> Response {
-    let request_id = request_id_from(&req);
-    let tenant_header = match tenant_header_name() {
-        Ok(name) => name,
-        Err(_) => return httpserve::error::internal_error(&request_id),
-    };
-    let tenant = match req
+/// 从 `req` 解析 `X-Tenant-ID`（pre-auth tenant 来源）+ 读 body bytes，二者任一失败回 4xx/5xx。
+/// login/refresh handler 共用——同 public + populate-only header 形态。
+async fn parse_tenant_and_body(
+    req: Request<Body>,
+    spec: &HttpSpec,
+    request_id: &str,
+) -> Result<(TenantId, Bytes), Response> {
+    let tenant_header =
+        tenant_header_name(spec).map_err(|_| httpserve::error::internal_error(request_id))?;
+    let tenant = req
         .headers()
         .get(tenant_header)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| TenantId::parse(s).ok())
-    {
-        Some(tenant) => tenant,
-        None => return httpserve::error::validation_bad_request(&request_id),
-    };
+        .ok_or_else(|| httpserve::error::validation_bad_request(request_id))?;
     let (_, body) = req.into_parts();
-    let body = match to_bytes(body, MAX_LOGIN_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    let body = to_bytes(body, MAX_LOGIN_BODY_BYTES)
+        .await
+        .map_err(|_| httpserve::error::validation_bad_request(request_id))?;
+    Ok((tenant, body))
+}
+
+async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
+    State(service): State<Arc<LoginService<S>>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let (tenant, body) = match parse_tenant_and_body(req, &LOGIN_HTTP_SPEC, &request_id).await {
+        Ok(parts) => parts,
+        Err(resp) => return resp,
     };
     login_handler_bytes(service, tenant, body, &request_id).await
 }
 
 #[cfg(test)]
-pub(crate) fn login_router_for_test(service: Arc<LoginService>) -> axum::Router {
+pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
+    service: Arc<LoginService<S>>,
+) -> axum::Router {
     axum::Router::new().route(
         LOGIN_HTTP_SPEC.path,
-        post(login_handler).with_state(service),
+        post(login_handler::<S>).with_state(service),
     )
 }
 
-async fn login_handler_bytes(
-    service: Arc<LoginService>,
+#[cfg(test)]
+pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>(
+    service: Arc<RefreshService<S>>,
+) -> axum::Router {
+    axum::Router::new().route(
+        REFRESH_HTTP_SPEC.path,
+        post(refresh_handler::<S>).with_state(service),
+    )
+}
+
+#[allow(clippy::cognitive_complexity)] // reason: match 臂 + SessionWrite orphan-refresh warn 分支（F4 reorder，#1252）；拆散 handler 反降低可读性
+async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
+    service: Arc<LoginService<S>>,
     tenant: TenantId,
     body: Bytes,
     request_id: &str,
@@ -639,8 +805,19 @@ async fn login_handler_bytes(
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(LoginError::InvalidCredentials) => httpserve::error::unauthenticated(request_id),
         Err(err) => {
+            if matches!(&err, LoginError::SessionWrite(_)) {
+                // F4 reorder 残留窗口：mint 成功后 co-tx 失败 ⇒ refresh token 已落库但无 session/outbox；
+                // 随 TTL 自然过期，无 session/outbox 副作用。
+                tracing::warn!(
+                    request_id,
+                    tenant_id = %tenant_log,
+                    operation = "login",
+                    "session persist failed after token mint; refresh token orphaned (TTL-expiring)"
+                );
+            }
             tracing::error!(
                 error = %err,
+                error_chain = format!("{err:#}"),
                 request_id,
                 tenant_id = %tenant_log,
                 contract_id = LOGIN_HTTP_SPEC.contract_id,
@@ -652,30 +829,97 @@ async fn login_handler_bytes(
     }
 }
 
-/// identity 域 bootstrap 生命周期：声明登录路由组。
-pub struct IdentityDomain {
-    login: Arc<LoginService>,
+async fn refresh_handler<S: diport::Signer + Send + Sync + 'static>(
+    State(service): State<Arc<RefreshService<S>>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let (tenant, body) = match parse_tenant_and_body(req, &REFRESH_HTTP_SPEC, &request_id).await {
+        Ok(parts) => parts,
+        Err(resp) => return resp,
+    };
+    refresh_handler_bytes(service, tenant, body, &request_id).await
 }
 
-impl IdentityDomain {
-    pub fn new(login: Arc<LoginService>) -> Self {
-        Self { login }
+async fn refresh_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
+    service: Arc<RefreshService<S>>,
+    tenant: TenantId,
+    body: Bytes,
+    request_id: &str,
+) -> Response {
+    let request: IdentityRefreshRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(request_id),
+    };
+    let tenant_log = tenant.to_string();
+    let presented = authn::RefreshToken::new(request.refresh_token);
+    match service.rotate(tenant, &presented).await {
+        Ok(bundle) => {
+            let response = IdentityRefreshResponse {
+                data: IdentityRefreshData {
+                    access_token: bundle.access.as_str().to_string(),
+                    refresh_token: bundle.refresh.as_str().to_string(),
+                    access_expires_at: bundle.access.expires_at(),
+                },
+            };
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        // refresh token 是凭据：未知/重放/过期一律 401（不区分以免 token 探测），重放已触发级联撤销。
+        Err(RefreshError::Invalid | RefreshError::Replayed | RefreshError::Expired) => {
+            httpserve::error::unauthenticated(request_id)
+        }
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                error_chain = format!("{err:#}"),
+                request_id,
+                tenant_id = %tenant_log,
+                contract_id = REFRESH_HTTP_SPEC.contract_id,
+                operation = "refresh",
+                "identity refresh failed"
+            );
+            httpserve::error::internal_error(request_id)
+        }
     }
 }
 
-impl Domain for IdentityDomain {
+/// identity 域 bootstrap 生命周期：声明 login + refresh 路由组（同 Primary listener、同 `/api/v1/identity`
+/// 前缀，#1252）。泛型 `S: Signer` 随两服务穿透，组合根单态化 `S = vault::VaultSigner`。
+pub struct IdentityDomain<S> {
+    login: Arc<LoginService<S>>,
+    refresh: Arc<RefreshService<S>>,
+}
+
+impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
+    pub fn new(login: Arc<LoginService<S>>, refresh: Arc<RefreshService<S>>) -> Self {
+        Self { login, refresh }
+    }
+}
+
+impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        let service = Arc::clone(&self.login);
+        let login = Arc::clone(&self.login);
+        let refresh = Arc::clone(&self.refresh);
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
-            Ok(rb.mount_primary(
+            let rb = rb.mount_primary(
                 PrimaryRoute {
-                    method: login_method()?,
-                    path: login_relative_path()?,
+                    method: spec_method(&LOGIN_HTTP_SPEC)?,
+                    path: spec_relative_path(&LOGIN_HTTP_SPEC)?,
                     contract_id: LOGIN_HTTP_SPEC.contract_id,
-                    opt_out: login_opt_out()?,
+                    opt_out: spec_opt_out(&LOGIN_HTTP_SPEC)?,
                 },
-                post(login_handler).with_state(service),
-            ))
+                post(login_handler::<S>).with_state(login),
+            );
+            let rb = rb.mount_primary(
+                PrimaryRoute {
+                    method: spec_method(&REFRESH_HTTP_SPEC)?,
+                    path: spec_relative_path(&REFRESH_HTTP_SPEC)?,
+                    contract_id: REFRESH_HTTP_SPEC.contract_id,
+                    opt_out: spec_opt_out(&REFRESH_HTTP_SPEC)?,
+                },
+                post(refresh_handler::<S>).with_state(refresh),
+            );
+            Ok(rb)
         })?;
         Ok(())
     }
@@ -769,15 +1013,21 @@ mod tests {
     }
 
     /// 构造用 with_seed_credential 的 LoginService（默认 CANON_TENANT + 登录标识 alice / canonical
-    /// CANON_USER / correct-horse）。
+    /// CANON_USER / correct-horse）。内置独立 in-mem RefreshService（#1252 新 2nd arg）。
     fn seed_service(
         capture: &CapturingSessionLifecycle,
         now_secs: u64,
         ttl_secs: u64,
-    ) -> LoginService {
+    ) -> LoginService<TestSigner> {
+        let refresh = Arc::new(make_refresh_svc(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+            make_clock(now_secs),
+            Duration::from_secs(2_592_000),
+        ));
         #[allow(clippy::expect_used)]
         LoginService::with_seed_credential(
             Arc::from(DynSessionLifecycle::new_box(capture.clone())),
+            refresh,
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
             "alice",
@@ -786,6 +1036,34 @@ mod tests {
             tid(CANON_TENANT),
         )
         .expect("seed_service ok")
+    }
+
+    /// 构造 IdentityDomain<TestSigner>（shared RefreshService）供路由声明测试使用（#1252 new 2-arg ctor）。
+    fn seed_domain(
+        capture: CapturingSessionLifecycle,
+        now_secs: u64,
+        ttl_secs: u64,
+    ) -> IdentityDomain<TestSigner> {
+        let refresh = Arc::new(make_refresh_svc(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+            make_clock(now_secs),
+            Duration::from_secs(2_592_000),
+        ));
+        #[allow(clippy::expect_used)]
+        let login = Arc::new(
+            LoginService::with_seed_credential(
+                Arc::from(DynSessionLifecycle::new_box(capture)),
+                Arc::clone(&refresh),
+                make_clock(now_secs),
+                Duration::from_secs(ttl_secs),
+                "alice",
+                uid(CANON_USER),
+                "correct-horse",
+                tid(CANON_TENANT),
+            )
+            .expect("seed_domain login ok"),
+        );
+        IdentityDomain::new(login, refresh)
     }
 
     #[test]
@@ -1293,6 +1571,11 @@ mod tests {
         let svc = LoginService::new(
             Arc::from(DynCredentialRepo::new_box(mock)),
             Arc::from(DynSessionLifecycle::new_box(capture)),
+            Arc::new(make_refresh_svc(
+                crate::internal::mem::InMemRefreshTokenStore::new(),
+                make_clock(1_000),
+                Duration::from_secs(2_592_000),
+            )),
             make_clock(1_000),
             Duration::from_secs(3_600),
         );
@@ -1399,8 +1682,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn identity_domain_declares_login_route_group() {
-        let capture = CapturingSessionLifecycle::default();
-        let domain = IdentityDomain::new(Arc::new(seed_service(&capture, 1_000, 3_600)));
+        let domain = seed_domain(CapturingSessionLifecycle::default(), 1_000, 3_600);
         let reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert_eq!(groups.len(), 1);
@@ -1412,7 +1694,7 @@ mod tests {
     fn login_service_and_erased_deps_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
 
-        assert_send_sync::<LoginService>();
+        assert_send_sync::<LoginService<TestSigner>>();
         assert_send_sync::<Box<DynCredentialRepo<'static>>>();
         assert_send_sync::<Box<DynSessionLifecycle<'static>>>();
     }
@@ -1420,14 +1702,15 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn identity_login_route_mount_consumes_generated_spec() {
-        let capture = CapturingSessionLifecycle::default();
-        let domain = IdentityDomain::new(Arc::new(seed_service(&capture, 1_000, 3_600)));
+        let domain = seed_domain(CapturingSessionLifecycle::default(), 1_000, 3_600);
         let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let routes = reg.finalize_routes().expect("finalize routes");
+        // identity domain 在 1 个 Primary listener 上挂载 2 条路由（login + refresh），
+        // finalize_routes 按 listener 分组 → len() 仍 1（计组/listener，非 route 数）。
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].0, ListenerKind::Primary);
         assert_eq!(
-            login_relative_path().expect("relative path"),
+            spec_relative_path(&LOGIN_HTTP_SPEC).expect("relative path"),
             generated::http::identity_v1::PATH
                 .strip_prefix(LOGIN_ROUTE_PREFIX)
                 .expect("generated path has prefix")
@@ -1438,7 +1721,7 @@ mod tests {
         );
         assert_eq!(LOGIN_HTTP_SPEC.method, "POST");
         assert_eq!(
-            login_opt_out().expect("opt out"),
+            spec_opt_out(&LOGIN_HTTP_SPEC).expect("opt out"),
             Some(RouteAuthOptOut::Public)
         );
     }
@@ -1473,7 +1756,7 @@ mod tests {
             authn::JwtIssuerConfig {
                 key: diport::KeyId::new("test-key"),
                 alg: authn::JwtAlg::Es256,
-                purpose: diport::SigningPurpose::new("auth.jwt.access"),
+                purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 issuer: "https://test.example".to_string(),
                 audience: "test-audience".to_string(),
                 ttl: Duration::from_secs(900),
@@ -1801,7 +2084,7 @@ mod tests {
             authn::JwtIssuerConfig {
                 key: diport::KeyId::new("test-key"),
                 alg: authn::JwtAlg::Es256,
-                purpose: diport::SigningPurpose::new("auth.jwt.access"),
+                purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 issuer: "https://test.example".to_string(),
                 audience: "test-audience".to_string(),
                 ttl: Duration::from_secs(900),
@@ -1842,6 +2125,378 @@ mod tests {
             found.status(),
             RefreshStatus::Active,
             "mint 失败不得消费旧 refresh（#284 F1：mint 先于 CAS）"
+        );
+    }
+
+    // ── 测试 L1252-a：login 首发 token bundle（#1252）────────────────────────────
+    // login 成功后响应包含 access JWT + refresh token bundle（首发，#1252）。
+    // TestSigner 返回固定字节 → JWT 非空；refresh token 经 CSPRNG 签发。
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_issues_initial_token_bundle() {
+        let capture = CapturingSessionLifecycle::default();
+        let svc = seed_service(&capture, 1_700_000_000, 3_600);
+
+        let resp = svc
+            .login(
+                tid(CANON_TENANT),
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect("login ok");
+
+        assert!(
+            !resp.data.access_token.is_empty(),
+            "access_token 非空（#1252 首发）"
+        );
+        assert!(
+            !resp.data.refresh_token.is_empty(),
+            "refresh_token 非空（#1252 首发）"
+        );
+        assert!(
+            resp.data.access_expires_at > 0,
+            "access_expires_at > 0（JWT 含有效期）"
+        );
+    }
+
+    // ── 测试 H-Login-1：login_handler HTTP 级契约测试（F3）─────────────────────────
+    // 经 login_router_for_test（真实 login_handler）验证：201 + token bundle 字段非空。
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_handler_returns_201_with_token_bundle() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use testkit::ContractRequest;
+
+        let capture = CapturingSessionLifecycle::default();
+        let svc = Arc::new(seed_service(&capture, 1_700_000_000, 3_600));
+        let router = login_router_for_test(svc);
+
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(LOGIN_HTTP_SPEC.path)
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                }),
+        )
+        .await?;
+
+        resp.ensure_status(axum::http::StatusCode::CREATED)?;
+        let decoded: IdentityLoginResponse = resp.json()?;
+        assert!(!decoded.data.session_id.is_empty(), "session_id 非空");
+        assert!(
+            !decoded.data.access_token.is_empty(),
+            "access_token 非空（#1252）"
+        );
+        assert!(
+            !decoded.data.refresh_token.is_empty(),
+            "refresh_token 非空（#1252）"
+        );
+        assert!(
+            decoded.data.access_expires_at > 0,
+            "access_expires_at > 0（JWT 含有效期）"
+        );
+        assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
+        Ok(())
+    }
+
+    // ── 测试 H-Refresh-1..4：refresh_handler HTTP 级契约测试（F2）──────────────────
+    // 四维断言：happy(201) / 缺租户头(400) / 坏 body(400) / 未知 token(401)。
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_handler_happy_path_returns_201_with_token_bundle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testkit::ContractRequest;
+
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = Arc::new(make_refresh_svc(
+            store,
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ));
+        let ta = tid(CANON_TENANT);
+
+        // 先签发一个 refresh token 落库，供 handler 轮换。
+        let rf = svc
+            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .await
+            .expect("issue ok");
+
+        let router = refresh_router_for_test(Arc::clone(&svc));
+
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(REFRESH_HTTP_SPEC.path)
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityRefreshRequest {
+                    refresh_token: rf.as_str().to_string(),
+                }),
+        )
+        .await?;
+
+        resp.ensure_status(axum::http::StatusCode::CREATED)?;
+        let decoded: IdentityRefreshResponse = resp.json()?;
+        assert!(!decoded.data.access_token.is_empty(), "access_token 非空");
+        assert!(!decoded.data.refresh_token.is_empty(), "refresh_token 非空");
+        assert!(decoded.data.access_expires_at > 0, "access_expires_at > 0");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_handler_missing_tenant_header_returns_400()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use testkit::ContractRequest;
+
+        let svc = Arc::new(make_refresh_svc(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ));
+        let router = refresh_router_for_test(svc);
+
+        // 不带 X-Tenant-ID header → parse_tenant_and_body → 400
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(REFRESH_HTTP_SPEC.path).json(&IdentityRefreshRequest {
+                refresh_token: "any-token".to_string(),
+            }),
+        )
+        .await?;
+
+        // F5.1：断言 HTTP 状态码 + error envelope 格式（code / message / requestId）。
+        // wire 格式：{"error":{"code":"ERR_...","message":"...","details":[],"requestId":"..."}}
+        resp.ensure_status(axum::http::StatusCode::BAD_REQUEST)?;
+        let env: serde_json::Value = resp.json()?;
+        assert_eq!(
+            env["error"]["code"].as_str().unwrap_or(""),
+            "ERR_CORE_VALIDATION",
+            "缺 tenant header → ERR_CORE_VALIDATION"
+        );
+        assert!(
+            !env["error"]["message"].as_str().unwrap_or("").is_empty(),
+            "error.message 应非空"
+        );
+        assert!(
+            !env["error"]["requestId"].as_str().unwrap_or("").is_empty(),
+            "error.requestId 应存在"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_handler_bad_body_returns_400() -> Result<(), Box<dyn std::error::Error>> {
+        use testkit::ContractRequest;
+
+        let svc = Arc::new(make_refresh_svc(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ));
+        let router = refresh_router_for_test(svc);
+
+        // 发送非 JSON body → serde_json::from_slice 失败 → 400
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(REFRESH_HTTP_SPEC.path)
+                .header("X-Tenant-ID", CANON_TENANT)
+                .raw_json(b"not-valid-json"),
+        )
+        .await?;
+
+        // F5.1：断言 HTTP 状态码 + error envelope 格式（code / message / requestId）。
+        resp.ensure_status(axum::http::StatusCode::BAD_REQUEST)?;
+        let env: serde_json::Value = resp.json()?;
+        assert_eq!(
+            env["error"]["code"].as_str().unwrap_or(""),
+            "ERR_CORE_VALIDATION",
+            "坏 body → ERR_CORE_VALIDATION"
+        );
+        assert!(
+            !env["error"]["message"].as_str().unwrap_or("").is_empty(),
+            "error.message 应非空"
+        );
+        assert!(
+            !env["error"]["requestId"].as_str().unwrap_or("").is_empty(),
+            "error.requestId 应存在"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_handler_unknown_token_returns_401() -> Result<(), Box<dyn std::error::Error>> {
+        use testkit::ContractRequest;
+
+        let svc = Arc::new(make_refresh_svc(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ));
+        let router = refresh_router_for_test(svc);
+
+        // 未知 token → RefreshError::Invalid → 401
+        let resp = testkit::call(
+            router,
+            ContractRequest::post(REFRESH_HTTP_SPEC.path)
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityRefreshRequest {
+                    refresh_token: "this-token-was-never-issued".to_string(),
+                }),
+        )
+        .await?;
+
+        // F5.1：断言 HTTP 状态码 + error envelope 格式（code / message / requestId）。
+        resp.ensure_status(axum::http::StatusCode::UNAUTHORIZED)?;
+        let env: serde_json::Value = resp.json()?;
+        assert_eq!(
+            env["error"]["code"].as_str().unwrap_or(""),
+            "ERR_CORE_UNAUTHENTICATED",
+            "未知 token → ERR_CORE_UNAUTHENTICATED"
+        );
+        assert!(
+            !env["error"]["message"].as_str().unwrap_or("").is_empty(),
+            "error.message 应非空"
+        );
+        assert!(
+            !env["error"]["requestId"].as_str().unwrap_or("").is_empty(),
+            "error.requestId 应存在"
+        );
+        Ok(())
+    }
+
+    // ── 测试 L1252-c：login mint 先于 co-tx（F4 reorder）— FailingSigner ⇒ TokenIssue + 零 session ──
+    //
+    // 回归验证（anti-vacuity）：`FailingSigner.sign()` 永远失败，`issue_initial` 必然返回
+    // `RefreshError::Mint` → `LoginError::TokenIssue`。由于 mint 先于 co-tx（F4 reorder），
+    // `persist_session_and_emit` 从未执行，故 `capture.count() == 0`（零 session / 零 outbox 事件）。
+    // 若顺序仍是「co-tx 先、mint 后」，则 capture.count() 会 == 1，断言会暴露回退。
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_failing_signer_no_session_on_token_issue_failure() {
+        // 构造 RefreshService<FailingSigner>（issue_initial 必然失败）。
+        let issuer = authn::JwtIssuer::new(
+            std::sync::Arc::new(FailingSigner),
+            make_clock(1_700_000_000),
+            authn::JwtIssuerConfig {
+                key: diport::KeyId::new("test-key"),
+                alg: authn::JwtAlg::Es256,
+                purpose: diport::SigningPurpose::new(SEED_JWT_PURPOSE),
+                issuer: "https://test.example".to_string(),
+                audience: "test-audience".to_string(),
+                ttl: Duration::from_secs(900),
+            },
+        )
+        .expect("valid jwt issuer config");
+
+        let refresh_svc = Arc::new(RefreshService::new(
+            crate::ports::DynRefreshTokenStore::new_box(
+                crate::internal::mem::InMemRefreshTokenStore::new(),
+            ),
+            std::sync::Arc::new(issuer),
+            make_clock(1_700_000_000),
+            Duration::from_secs(2_592_000),
+        ));
+
+        let capture = CapturingSessionLifecycle::default();
+        let svc = LoginService::with_seed_credential(
+            Arc::from(DynSessionLifecycle::new_box(capture.clone())),
+            refresh_svc,
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed ok");
+
+        let err = svc
+            .login(
+                tid(CANON_TENANT),
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect_err("failing signer must error");
+
+        // mint-first（F4 reorder）：mint 失败 ⇒ TokenIssue，零 session co-tx 写、零 outbox 事件。
+        assert!(
+            matches!(err, LoginError::TokenIssue(_)),
+            "expected TokenIssue, got {err:?}"
+        );
+        assert_eq!(
+            capture.count(),
+            0,
+            "mint-first reorder：mint 失败 ⇒ 零 session co-tx 写（F4 回归）"
+        );
+    }
+
+    // ── 测试 L1252-b：login 首发 refresh token 可轮换（store 已落库，#1252）─────────
+    // 通过共享 in-mem store 的 RefreshService 轮换，证明 login 签发的 refresh token 已落库
+    // （若 login 未落库，rotate 必返回 Invalid）。
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_initial_refresh_token_is_seeded_in_store() {
+        let capture = CapturingSessionLifecycle::default();
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let refresh_svc = Arc::new(make_refresh_svc(
+            store.clone(),
+            make_clock(1_700_000_000),
+            Duration::from_secs(2_592_000),
+        ));
+        let login_svc = LoginService::with_seed_credential(
+            Arc::from(DynSessionLifecycle::new_box(capture)),
+            Arc::clone(&refresh_svc),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+            "alice",
+            uid(CANON_USER),
+            "correct-horse",
+            tid(CANON_TENANT),
+        )
+        .expect("seed ok");
+        let ta = tid(CANON_TENANT);
+
+        let resp = login_svc
+            .login(
+                ta,
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect("login ok");
+
+        assert!(
+            !resp.data.refresh_token.is_empty(),
+            "login refresh_token 非空"
+        );
+
+        // 用 login 回带的 refresh token 轮换 → Ok 证明 login 已落库 store（#1252）
+        let rt = authn::RefreshToken::new(resp.data.refresh_token.as_str());
+        let bundle = refresh_svc
+            .rotate(ta, &rt)
+            .await
+            .expect("rotate ok after login（token 已在 store）");
+        assert!(!bundle.access.as_str().is_empty(), "rotated access 非空");
+        assert_ne!(
+            bundle.refresh.as_str(),
+            resp.data.refresh_token.as_str(),
+            "轮换后 refresh ≠ 旧 refresh（一次性）"
         );
     }
 }

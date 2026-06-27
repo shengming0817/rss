@@ -139,17 +139,23 @@ async fn login_audit_durable_topology() -> Result<()> {
     let (audit_domain, audit) = audit_domain();
 
     // 组装 audit 订阅（contract_id/topic/group 单源自 generated SUBSCRIPTIONS）。
-    let identity_domain = IdentityDomain::new(Arc::new(LoginService::with_seed_credential(
+    let refresh_identity = identity::seed_refresh_service(
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    );
+    let login_identity = Arc::new(LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(
             id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
+        Arc::clone(&refresh_identity),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
         ids::UserId::parse(CANON_USER)?,
         PASSWORD,
         TenantId::parse(CANON_TENANT)?,
-    )?));
+    )?);
+    let identity_domain = IdentityDomain::new(login_identity, refresh_identity);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
     let binding = single_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
@@ -178,10 +184,15 @@ async fn login_audit_durable_topology() -> Result<()> {
     // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
     // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
     let tenant = TenantId::parse(CANON_TENANT)?;
+    let refresh_for_login = identity::seed_refresh_service(
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    );
     let login = LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(
             id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
+        refresh_for_login,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,

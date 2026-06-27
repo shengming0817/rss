@@ -4,7 +4,8 @@
 
 ## 现存（draft，本 feature 升 active）
 
-- **`identity.login`**（http，**L2 OutboxFact**——与权威 `contracts/http/identity/v1/contract.toml` `consistencyLevel = "OutboxFact"` 同源：登录在同事务写本地会话 + 发布 `identity.session-created` outbox fact，故 login 契约整体是 L2；`SessionRepo::create` 仅是其中的 L1 子步骤，不单独成契约一致性边界）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt}}`（本阶段不含 JWT）。
+- **`identity.login`**（http，**L2 OutboxFact**——与权威 `contracts/http/identity/v1/contract.toml` `consistencyLevel = "OutboxFact"` 同源：登录在同事务写本地会话 + 发布 `identity.session-created` outbox fact，故 login 契约整体是 L2；`SessionRepo::create` 仅是其中的 L1 子步骤，不单独成契约一致性边界）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}}`——登录成功首发 access JWT（vault `Signer` 经 `authn::JwtIssuer` 签）+ refresh token bundle（#1252 Join 接线）。
+- **`identity.refresh`**（http，**L1 LocalTx**，`contracts/http/identity/v2/`）：`POST /api/v1/identity/refresh`，Public（opt_out；refresh token 自身即凭据）。tenant 来源 `X-Tenant-ID` header。req `{refreshToken}` → resp `{data:{accessToken,refreshToken,accessExpiresAt}}`——轮换 refresh token 血缘（reuse-detection 级联撤销）+ 铸新 access JWT。未知/重放/过期 → 401（#1252）。
 - **`identity.session-created`**（event，L2 OutboxFact）：payload `{sessionId,subject,tenantId,occurredAt}`；订阅方 audit。
 
 ## 新增（PR5）

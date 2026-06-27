@@ -10,6 +10,26 @@ lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
 
+[[diportProviders]]
+port = "diport::Signer"
+provider = "vault::VaultSigner"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-access-token-signing"
+
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+
 # edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
 port = "diport::RateLimiter"

@@ -67,6 +67,21 @@ impl VaultToken {
     }
 }
 
+/// Vault Transit ECDSA 签名 marshaling（`marshaling_algorithm` 请求字段）。按消费用途显式构造：
+/// - `Asn1`：ASN.1 DER（Vault 默认；X.509/证书签发；响应 `<b64>` 用 STANDARD base64）。
+/// - `Jws`：raw r‖s（JWT/JWS 访问 token；响应 `<b64>` 用 URL-safe base64）。
+///
+/// 选错 ⇒ JWS verifier（期 64B raw r‖s）收到 DER 会验签失败（#1252）；X.509 消费方收到 raw r‖s 同理失败。
+/// 此选择是**构造期决策**（newtype funnel），不可在运行期动态切换——确保 `VaultSigner` 实例行为单一且可审计。
+#[cfg(feature = "backend")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureMarshaling {
+    /// ASN.1 DER 编码（X.509/证书签发消费）；Vault 响应 `<b64>` 为 STANDARD base64。
+    Asn1,
+    /// Raw r‖s 编码（JWT/JWS 消费）；Vault 响应 `<b64>` 为 URL-safe base64（无 padding）。
+    Jws,
+}
+
 /// HashiCorp Vault Transit 签名 adapter（sealed-marker）。raw 连接物料经 `backend` feature 门控、保持私有：
 /// - `client`：组合根注入的预配置 TLS `reqwest::Client`（adapter TLS-agnostic，对标 s3 注入 aws `Client`）。
 /// - `base`：构造期校验过 scheme（https / 经 `new_allow_http` 显式放行的 http）的 base `Url`；请求时 clone 后
@@ -85,6 +100,9 @@ pub struct VaultSigner {
     mount_segments: Vec<String>,
     #[cfg(feature = "backend")]
     timeout: Duration,
+    /// 签名 marshaling：构造期决策，决定请求体 `marshaling_algorithm` 字段与响应签名 base64 解码引擎。
+    #[cfg(feature = "backend")]
+    marshaling: SignatureMarshaling,
 }
 
 /// 构造期配置校验错误（fail-fast，非静默 noop）。
@@ -117,13 +135,15 @@ pub enum VaultConfigError {
 impl VaultSigner {
     /// 构造 Transit 签名 adapter（**https-only**）。`client` 由组合根预配置 TLS 后注入；`addr` 是 base URL
     /// （形如 `https://vault.example:8200`，尾斜杠 / 含 path 均可）；`mount` 通常 `transit`（支持嵌套 `team/transit`）；
-    /// `token` 是 Vault 认证 token；`timeout` 是请求级超时。非 https / 非法 URL / 空 mount 段 / 空值即 `Err`（fail-fast）。
+    /// `token` 是 Vault 认证 token；`timeout` 是请求级超时；`marshaling` 决定签名编码——JWT/JWS 用 `Jws`，
+    /// X.509/证书签发用 `Asn1`（错选 ⇒ 验签失败，#1252）。非 https / 非法 URL / 空 mount 段 / 空值即 `Err`（fail-fast）。
     pub fn new(
         client: reqwest::Client,
         addr: impl Into<String>,
         token: impl Into<String>,
         mount: impl Into<String>,
         timeout: Duration,
+        marshaling: SignatureMarshaling,
     ) -> Result<Self, VaultConfigError> {
         Self::build(
             client,
@@ -132,6 +152,7 @@ impl VaultSigner {
             mount.into(),
             timeout,
             false,
+            marshaling,
         )
     }
 
@@ -143,6 +164,7 @@ impl VaultSigner {
         token: impl Into<String>,
         mount: impl Into<String>,
         timeout: Duration,
+        marshaling: SignatureMarshaling,
     ) -> Result<Self, VaultConfigError> {
         Self::build(
             client,
@@ -151,6 +173,7 @@ impl VaultSigner {
             mount.into(),
             timeout,
             true,
+            marshaling,
         )
     }
 
@@ -161,6 +184,7 @@ impl VaultSigner {
         mount: String,
         timeout: Duration,
         allow_http: bool,
+        marshaling: SignatureMarshaling,
     ) -> Result<Self, VaultConfigError> {
         if addr.trim().is_empty() {
             return Err(VaultConfigError::EmptyAddr);
@@ -181,6 +205,7 @@ impl VaultSigner {
             token: VaultToken::new(token),
             mount_segments,
             timeout,
+            marshaling,
         })
     }
 }
@@ -227,6 +252,7 @@ impl diport::Signer for VaultSigner {
             self.token.as_str(),
             &self.mount_segments,
             self.timeout,
+            self.marshaling,
             request,
         )
         .await
@@ -283,7 +309,7 @@ mod backend_tests {
     //! 构造期 fail-fast（空值 / 非法 URL / 非 https scheme / 非法 mount 段）+ 生命周期（name + 双 shutdown），无 live 后端。
     use std::time::Duration;
 
-    use super::{VaultConfigError, VaultSigner};
+    use super::{SignatureMarshaling, VaultConfigError, VaultSigner};
     use diport::{ManagedResource, Signer};
 
     const ADDR: &str = "https://vault.example:8200";
@@ -295,13 +321,28 @@ mod backend_tests {
     // （error-handling.md §Carve-out 要求 item-level），测试体不散落 `expect`。
     #[allow(clippy::expect_used)]
     fn valid_signer() -> VaultSigner {
-        VaultSigner::new(reqwest::Client::new(), ADDR, TOKEN, MOUNT, TIMEOUT).expect("valid config")
+        VaultSigner::new(
+            reqwest::Client::new(),
+            ADDR,
+            TOKEN,
+            MOUNT,
+            TIMEOUT,
+            SignatureMarshaling::Jws,
+        )
+        .expect("valid config")
     }
 
     #[test]
     fn new_rejects_empty_addr() {
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), "", TOKEN, MOUNT, TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                "",
+                TOKEN,
+                MOUNT,
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::EmptyAddr)
         ));
     }
@@ -309,7 +350,14 @@ mod backend_tests {
     #[test]
     fn new_rejects_invalid_url() {
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), "not a url", TOKEN, MOUNT, TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                "not a url",
+                TOKEN,
+                MOUNT,
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::InvalidAddr)
         ));
     }
@@ -323,7 +371,8 @@ mod backend_tests {
                 "http://vault.example:8200",
                 TOKEN,
                 MOUNT,
-                TIMEOUT
+                TIMEOUT,
+                SignatureMarshaling::Asn1,
             ),
             Err(VaultConfigError::InsecureScheme)
         ));
@@ -338,7 +387,8 @@ mod backend_tests {
                 "http://127.0.0.1:8200",
                 TOKEN,
                 MOUNT,
-                TIMEOUT
+                TIMEOUT,
+                SignatureMarshaling::Jws,
             )
             .is_ok()
         );
@@ -347,7 +397,14 @@ mod backend_tests {
     #[test]
     fn new_rejects_empty_mount() {
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), ADDR, TOKEN, "", TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                TOKEN,
+                "",
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::EmptyMount)
         ));
     }
@@ -356,7 +413,15 @@ mod backend_tests {
     fn new_accepts_nested_mount() {
         // F3：嵌套 mount 拆成多段（不被编码成单段 `%2F`）。
         assert!(
-            VaultSigner::new(reqwest::Client::new(), ADDR, TOKEN, "team/transit", TIMEOUT).is_ok()
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                TOKEN,
+                "team/transit",
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            )
+            .is_ok()
         );
     }
 
@@ -364,11 +429,25 @@ mod backend_tests {
     fn new_rejects_mount_path_traversal() {
         // F3：`.`/`..`/空段 拒绝（防路径穿越）。
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), ADDR, TOKEN, "transit/..", TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                TOKEN,
+                "transit/..",
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::InvalidMountSegment)
         ));
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), ADDR, TOKEN, "a//b", TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                TOKEN,
+                "a//b",
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::InvalidMountSegment)
         ));
     }
@@ -376,7 +455,14 @@ mod backend_tests {
     #[test]
     fn new_rejects_empty_token() {
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), ADDR, "", MOUNT, TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                "",
+                MOUNT,
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::EmptyToken)
         ));
     }
@@ -384,14 +470,31 @@ mod backend_tests {
     #[test]
     fn new_rejects_whitespace_only_token() {
         assert!(matches!(
-            VaultSigner::new(reqwest::Client::new(), ADDR, "   ", MOUNT, TIMEOUT),
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                "   ",
+                MOUNT,
+                TIMEOUT,
+                SignatureMarshaling::Asn1
+            ),
             Err(VaultConfigError::EmptyToken)
         ));
     }
 
     #[test]
     fn new_accepts_valid_config() {
-        assert!(VaultSigner::new(reqwest::Client::new(), ADDR, TOKEN, MOUNT, TIMEOUT).is_ok());
+        assert!(
+            VaultSigner::new(
+                reqwest::Client::new(),
+                ADDR,
+                TOKEN,
+                MOUNT,
+                TIMEOUT,
+                SignatureMarshaling::Jws
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -407,7 +510,7 @@ mod backend_tests {
 mod integration {
     //! Live HashiCorp Vault Transit round-trip（需真 Vault + transit 引擎已 mount + 一个签名 key）。
     //! env fail-closed（对标 adapters/amqp/tests/integration.rs）；`#[ignore]` 默认不跑。
-    use super::VaultSigner;
+    use super::{SignatureMarshaling, VaultSigner};
     use diport::{KeyId, SignRequest, Signer, SigningPurpose};
 
     // env fail-closed：缺 ADDR/TOKEN 时 `.expect` 大声失败（不静默跳过），对标 amqp 集成测试。
@@ -423,12 +526,14 @@ mod integration {
         let mount = std::env::var("RSS_VAULT_TEST_MOUNT").unwrap_or_else(|_| "transit".to_string());
         let key = std::env::var("RSS_VAULT_TEST_KEY").unwrap_or_else(|_| "rss-test".to_string());
         // dev Vault 多为 plaintext http → new_allow_http；必填 request timeout。
+        // Jws：集成测试对接 JWT/JWS 签名用途（raw r‖s，URL-safe base64）。
         let signer = VaultSigner::new_allow_http(
             reqwest::Client::new(),
             addr,
             token,
             mount,
             std::time::Duration::from_secs(30),
+            SignatureMarshaling::Jws,
         )
         .expect("valid config");
         let signature = signer

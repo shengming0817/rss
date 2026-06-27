@@ -16,6 +16,8 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 const REVOCATION_STORE_PORT: &str = "diport::RevocationStore";
+const SIGNER_PORT: &str = "diport::Signer";
+const PDP_PORT: &str = "diport::Pdp";
 const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 const LOCK_STORE_PORT: &str = "diport::LockStore";
 const CAS_STORE_PORT: &str = "diport::CasStore";
@@ -101,6 +103,10 @@ pub(crate) struct DiportProvider {
 pub(crate) enum DiportPort {
     #[serde(rename = "diport::RevocationStore")]
     RevocationStore,
+    #[serde(rename = "diport::Signer")]
+    Signer,
+    #[serde(rename = "diport::Pdp")]
+    Pdp,
     #[serde(rename = "diport::RateLimiter")]
     RateLimiter,
     #[serde(rename = "diport::LockStore")]
@@ -113,6 +119,8 @@ impl DiportPort {
     fn as_str(self) -> &'static str {
         match self {
             Self::RevocationStore => REVOCATION_STORE_PORT,
+            Self::Signer => SIGNER_PORT,
+            Self::Pdp => PDP_PORT,
             Self::RateLimiter => RATE_LIMITER_PORT,
             Self::Lock => LOCK_STORE_PORT,
             Self::Cas => CAS_STORE_PORT,
@@ -373,6 +381,18 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             durability: ProviderDurability::Persistent,
             required_features: &[],
             provider_crate: "postgres",
+        }),
+        "vault::VaultSigner" => Some(ProviderSpec {
+            port: DiportPort::Signer,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "vault",
+        }),
+        "oidc::OidcProvider" => Some(ProviderSpec {
+            port: DiportPort::Pdp,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "oidc",
         }),
         _ => None,
     }
@@ -939,6 +959,70 @@ durability = "ephemeral-memory""#,
             ),
             r#"[package]
 name = "runtime"
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn active_vault_signer_with_dependency_and_required_feature_is_allowed() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-active-vault-signer");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::Signer"
+provider = "vault::VaultSigner"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-access-token-signing"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+vault = { path = "../../adapters/vault", features = ["backend"] }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn active_oidc_pdp_with_dependency_and_required_feature_is_allowed() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-active-oidc-pdp");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
 "#,
         )?;
 

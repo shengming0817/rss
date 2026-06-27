@@ -77,8 +77,12 @@ pub struct JwtIssuerConfig {
 /// 已签发 JWT（typed 输出 newtype；私有内容；`Debug` 脱敏；不 derive `Serialize`）。
 ///
 /// 唯一 mint 点 = [`JwtIssuer::issue`]（`pub(crate)` 构造 funnel）。同 [`crate::AccessToken`] / [`crate::Jwt`]
-/// 脱敏范式：bearer 凭据不进 `Debug` / tracing。
-pub struct MintedJwt(String);
+/// 脱敏范式：bearer 凭据不进 `Debug` / tracing。携带 `exp`（= JWT `exp` claim，权威单源）供下游 wire 回带
+/// `accessExpiresAt`——与 token 内 claim 同一次时钟计算，杜绝 wire 值与 claim 漂移。
+pub struct MintedJwt {
+    raw: String,
+    expires_at: i64,
+}
 
 impl std::fmt::Debug for MintedJwt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,14 +91,19 @@ impl std::fmt::Debug for MintedJwt {
 }
 
 impl MintedJwt {
-    /// 受控构造（生产唯一调用方 = [`JwtIssuer::issue`]）。
-    pub(crate) fn new(raw: String) -> Self {
-        Self(raw)
+    /// 受控构造（生产唯一调用方 = [`JwtIssuer::issue`]）。`expires_at` = JWT `exp`（epoch 秒）。
+    pub(crate) fn new(raw: String, expires_at: i64) -> Self {
+        Self { raw, expires_at }
     }
 
     /// 取紧凑 JWS 串引用。
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.raw
+    }
+
+    /// JWT `exp`（UNIX epoch 秒）——与紧凑串内 `exp` claim 同源同值。
+    pub fn expires_at(&self) -> i64 {
+        self.expires_at
     }
 }
 
@@ -332,9 +341,12 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
             .await
             .map_err(JwtIssueError::Sign)?;
 
-        // 5) 紧凑序列化：signing_input "." base64url(signature)。
+        // 5) 紧凑序列化：signing_input "." base64url(signature)。`exp` 与 claim 同源（time_claims 一次计算）。
         let signature_b64 = B64_URL.encode(signature.as_bytes());
-        Ok(MintedJwt::new(format!("{signing_input}.{signature_b64}")))
+        Ok(MintedJwt::new(
+            format!("{signing_input}.{signature_b64}"),
+            exp,
+        ))
     }
 }
 

@@ -51,7 +51,7 @@
 
 ## 凭据 / 应用编排（`application/`）
 
-- `LoginService`（已部分实现 G1）：注入 `CredentialRepo` + `SessionRepo` + `DynPublisher` + `Clock`（构造器位置参）。真实 `login`：从 `X-Tenant-ID` header 取 tenant（body 禁 tenantId）→ 校验密码 → `SessionRepo::create`（L1）→ 同事务 `Publisher::publish(identity.session-created)`（L2）；响应 `data:{sessionId,expiresAt}`（本阶段不含 JWT，JWT 由 authn 在 #1017 接线）。`change_password`：CAS（version pin → bump）。`logout`：`SessionRepo::revoke`（域侧软撤销，已颁发 JWT 在 TTL 内仍有效，硬吊销延 #1003）。
+- `LoginService`（已部分实现 G1）：注入 `CredentialRepo` + `SessionRepo` + `DynPublisher` + `Clock`（构造器位置参）。真实 `login`：从 `X-Tenant-ID` header 取 tenant（body 禁 tenantId）→ 校验密码 → 首发 token mint（`issue_initial`，#1252 已接线）→ `SessionRepo::create`（L1）→ 同事务 `Publisher::publish(identity.session-created)`（L2）；响应 `data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 access JWT + refresh token bundle；vault Signer 经 authn::JwtIssuer 签）。`change_password`：CAS（version pin → bump）。`logout`：`SessionRepo::revoke`（域侧软撤销，已颁发 JWT 在 TTL 内仍有效，硬吊销延 #1003）。
 - `RbacAdminService`（PR5）：注入 `RoleRepo` + `DynPublisher`。`assign_role` / `revoke_role`：落绑定 + 发 `identity.role-{assigned,revoked}`（L2）。
 - `IdentityDomain`（bootstrap `Domain`）：`init` 声明路由组（Primary listener，`/api/v1/identity`，login opt-out Public）+ 注册 handler；fail-fast，无 panic。
 
@@ -69,7 +69,7 @@
 
 | 端点 | method/path | 一致性 | 鉴权 | Permission | 当前 |
 |------|-------------|--------|------|------------|------|
-| login | POST `/api/v1/identity/login` | **L2 OutboxFact**（与权威 contract.toml 同源：同事务写会话 + 发 session-created；`SessionRepo::create` 仅 L1 子步骤，不单独成契约边界） | Public（opt_out） | — | ✓ draft→active；tenant 来源 X-Tenant-ID header，body 禁 tenantId；响应不含 JWT |
+| login | POST `/api/v1/identity/login` | **L2 OutboxFact**（与权威 contract.toml 同源：同事务写会话 + 发 session-created；`SessionRepo::create` 仅 L1 子步骤，不单独成契约边界） | Public（opt_out） | — | ✓ draft→active；tenant 来源 X-Tenant-ID header，body 禁 tenantId；响应含 `{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 JWT bundle 已接线） |
 | password-change | POST `/api/v1/identity/password/change` | L1 | 鉴权（selfScoped） | `identity:profile:write` | 新增 |
 | logout | POST `/api/v1/identity/logout` | L1 | 鉴权（selfScoped） | `identity:session:write` | 新增；仅域侧软撤销，硬吊销延 #1003 |
 | roles assign | POST `/api/v1/identity/roles` | L2 | 鉴权 | `identity:role:assign` | 新增 |

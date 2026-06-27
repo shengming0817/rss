@@ -120,7 +120,7 @@
 
 **Logout 安全边界**：本阶段仅域侧软撤销（`SessionRepo::revoke`）。**已颁发 JWT 在 TTL 内仍有效，无硬吊销**；硬吊销（CredentialFence / 黑名单）依赖 authn #1003 落地后在 Join #1017 接线。
 
-**Login 响应**：响应 `data: {sessionId, expiresAt}`，本阶段**不含 JWT**（JWT 签发由 authn 在 #1017 接线）。
+**Login 响应**：响应 `data: {sessionId, expiresAt, accessToken, refreshToken, accessExpiresAt}`，登录成功首发 access JWT + refresh token bundle（#1252 已接线；vault Signer 经 authn::JwtIssuer 签）。
 
 **Why this priority**: 把 domain L0（US1–US3）编排成可用的登录会话闭环——这是 identity 对外的核心业务价值。依赖 US3（CredentialRepo）。独占 `application/login.rs` + `domain/session.rs` + `ports.rs`(SessionRepo)。
 
@@ -128,7 +128,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 合法凭据 + 合法 `X-Tenant-ID` header，**When** `login`，**Then** 创建会话 + 发布一条 `identity.session-created`（subject/tenant/occurred_at），响应 `data: {sessionId, expiresAt}`（无 JWT）。
+1. **Given** 合法凭据 + 合法 `X-Tenant-ID` header，**When** `login`，**Then** 创建会话 + 发布一条 `identity.session-created`（subject/tenant/occurred_at），响应 `data: {sessionId, expiresAt, accessToken, refreshToken, accessExpiresAt}`（#1252 首发 access JWT + refresh token bundle）。
 2. **Given** 错误凭据，**When** `login`，**Then** 返回 `LoginError::InvalidCredentials`，**不**创建会话、**不**发事件（无孤立事件）。
 3. **Given** 密码变更请求携带旧版本号，**When** 并发两次变更，**Then** 仅一次成功（CAS），另一次因版本不匹配被拒。
 4. **Given** 活动会话，**When** `logout`，**Then** 会话被域侧软撤销（`SessionRepo::revoke`），已颁发 JWT 在 TTL 内仍有效（无硬吊销，硬吊销延 #1003）。

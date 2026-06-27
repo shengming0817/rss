@@ -40,8 +40,8 @@ use crypto::RustCryptoMacVerifier;
 use diport::DynManagedResource;
 use httpd::HttpServer;
 use identity::{
-    IdentityDomain, LoginService,
-    ports::{DynCredentialRepo, DynSessionLifecycle},
+    IdentityDomain, LoginService, RefreshService,
+    ports::{DynCredentialRepo, DynRefreshTokenStore, DynSessionLifecycle},
 };
 use oidc::OidcProvider;
 use postgres::{
@@ -55,7 +55,7 @@ use ratelimit::GovernorLimiter;
 use settings::ports::DynSecretRepo;
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
-use vault::{TenantStoreAllowlist, VaultRuntimeDeps, VaultSecretResolver};
+use vault::{TenantStoreAllowlist, VaultRuntimeDeps, VaultSecretResolver, VaultSigner};
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -424,21 +424,25 @@ fn build_readiness_interval() -> Duration {
 /// 默认 Vault 请求超时（pre-GA 合理值；生产可经 env 覆盖，待后续 Vault 配置切片——非 #1320 范围）。
 const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 启动时安全警告（pre-GA 安全警告，Finding 6）：系统默认 TLS + 空 allowlist。
-// reason: tracing::warn! 宏展开在 clippy cognitive_complexity 计数时贡献额外节点，
-// 实际控制流简单（2 warn！+ 1 if），item-level carve-out（error-handling.md §Carve-out）。
-#[allow(clippy::cognitive_complexity)]
+/// 启动时安全警告（pre-GA）：vault `TenantStoreAllowlist` 为空 ⇒ 所有 secret resolve fail-closed Forbidden。
+/// （TLS 已由 [`build_vault_tls_client`] rustls 接线，#1252，不再警告 no-TLS-backend。）
 fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
-    tracing::warn!(
-        reason = "no-tls-backend",
-        "no TLS backend configured (reqwest default-features=false); add rustls-tls before enabling vault allowlist"
-    );
     if stores.is_empty() {
         tracing::warn!(
             reason = "empty-allowlist",
             "vault TenantStoreAllowlist is empty: all secret resolve calls will return Forbidden (fail-closed); populate allowlist for production (#1272)"
         );
     }
+}
+
+/// 构造 vault HTTP client（rustls + ring + webpki-roots，#1252）：reqwest `rustls-tls-webpki-roots` feature
+/// 选 ring crypto provider（`__rustls-ring`，禁 aws-lc，与 deny.toml openssl/aws-lc ban 一致）+ Mozilla 根 CA。
+/// secret resolver 与 Transit `Signer` 共用——二者均经 https 访问 vault（signer 在 login/refresh 热路径真实签发）。
+fn build_vault_tls_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .context("build vault rustls TLS client")
 }
 
 /// 从注入的配置读取器构造 `VaultSecretResolver`（fail-fast：必填 env 缺失立即返 `Err`）。
@@ -453,18 +457,16 @@ fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
 pub(crate) fn build_vault_resolver_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<VaultSecretResolver> {
-    let addr = get("RSS_VAULT_ADDR")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_VAULT_ADDR"))?;
-    let token = get("RSS_VAULT_TOKEN")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_VAULT_TOKEN"))?;
+    let addr = get(VAULT_ADDR_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
+    let token = get(VAULT_TOKEN_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
 
-    // 后续 TLS 切片: 配置 TLS client（rustls + ring，对齐 sqlx）；当前传 Client::new()（pre-GA，非 #1320 范围）。
-    let client = reqwest::Client::new();
+    // rustls + ring + webpki-roots（#1252）：vault token 经 TLS 加密出网。
+    let client = build_vault_tls_client()?;
 
     // pre-GA 空 allowlist：无生产 secret reader → 所有 resolve fail-closed Forbidden（网络前拦截）。
     // 待后续 issue 填充 TenantStoreAllowlist（per-store mount + prefix，#1272 follow-up）。
-    // 安全入场条件（#1272）：填充非空 allowlist 的 PR 必须同批配置 rustls-tls client（上方 TLS 切片）——
-    // 否则 vault token 经无 TLS backend 的 Client 明文出网。当前空 allowlist 下 Client 从不发请求，故安全。
     let stores = TenantStoreAllowlist::new(std::iter::empty())
         .map_err(|e| anyhow::anyhow!("vault store allowlist config error: {e}"))?;
 
@@ -733,16 +735,166 @@ fn identity_session_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Re
     }
 }
 
-/// 接线 identity 域：postgres credential repo + postgres session lifecycle + SystemClock + session TTL。
-pub fn wire_identity(deps: &SharedRuntimeDeps) -> anyhow::Result<IdentityDomain> {
+/// vault base URL env（resolver + signer 复用，fail-fast 必填）。
+const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
+/// vault token env（同上）。
+const VAULT_TOKEN_ENV: &str = "RSS_VAULT_TOKEN";
+
+/// JWT access-token 签发 env（ES256，组合根注入 vault `Signer`，#1252）。
+const JWT_ISSUER_ENV: &str = "RSS_JWT_ISSUER";
+const JWT_AUDIENCE_ENV: &str = "RSS_JWT_AUDIENCE";
+/// vault Transit sign key 名 = JOSE `kid`（验签侧据 kid 选 oidc ES256 公钥；二者须由运维一致接线，OIDC-ALG-KEYPATH-01）。
+const JWT_KEY_ID_ENV: &str = "RSS_JWT_ES256_KEY_ID";
+const JWT_ACCESS_TTL_ENV: &str = "RSS_JWT_ACCESS_TTL_SECS";
+/// vault Transit mount path（如 `transit`，per-deploy）。
+const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
+/// refresh token 有效期 env（缺省 30 天）。
+const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
+const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+const MAX_REFRESH_TTL_SECS: u64 = 365 * 24 * 60 * 60; // 1 year（refresh 长于 session）
+/// access JWT 签名用途（vault Transit purpose 归因，固定字面量）。
+const JWT_SIGNING_PURPOSE: &str = "auth.jwt.access";
+
+fn refresh_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<u64> {
+    match env(REFRESH_TTL_ENV) {
+        Some(raw) => {
+            let ttl = raw
+                .parse::<u64>()
+                .with_context(|| format!("{REFRESH_TTL_ENV} must be an integer seconds value"))?;
+            anyhow::ensure!(ttl > 0, "{REFRESH_TTL_ENV} must be > 0");
+            anyhow::ensure!(
+                ttl <= MAX_REFRESH_TTL_SECS,
+                "{REFRESH_TTL_ENV} must be <= {MAX_REFRESH_TTL_SECS}"
+            );
+            Ok(ttl)
+        }
+        None => Ok(DEFAULT_REFRESH_TTL_SECS),
+    }
+}
+
+/// 从注入的配置读取器构造 vault `VaultSigner`（Transit ES256 签 access JWT）。
+///
+/// - `allow_http=false`（生产）：`VaultSigner::new`（HTTPS-only，fail-fast 拒非 https URL）+ rustls client。
+/// - `allow_http=true`（集成测试 hermetic mock）：`VaultSigner::new_allow_http`（接受 http wiremock 地址）+
+///   同 rustls client（兼处理 http 连接，保持 client 构造一致）。
+///
+/// 两路均用 `Jws` marshaling：JWT/JWS 需 raw `r‖s`（vault 默认 asn1=DER 会让 oidc 验签失败，OIDC-ALG-KEYPATH-01）。
+fn build_vault_signer_with(
+    get: impl Fn(&str) -> Option<String>,
+    allow_http: bool,
+) -> anyhow::Result<VaultSigner> {
+    let addr = get(VAULT_ADDR_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
+    let token = get(VAULT_TOKEN_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
+    let mount = get(VAULT_TRANSIT_MOUNT_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
+    let client = build_vault_tls_client()?;
+    if allow_http {
+        VaultSigner::new_allow_http(
+            client,
+            addr,
+            token,
+            mount,
+            DEFAULT_VAULT_TIMEOUT,
+            vault::SignatureMarshaling::Jws,
+        )
+    } else {
+        VaultSigner::new(
+            client,
+            addr,
+            token,
+            mount,
+            DEFAULT_VAULT_TIMEOUT,
+            vault::SignatureMarshaling::Jws,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("vault signer config error: {e}"))
+}
+
+/// 从 env 构造 access JWT 签发配置（ES256；issuer/audience/key-id/ttl 必填 fail-fast，对称
+/// `JwtIssuer::new` 构造期校验）。`key` = vault Transit sign key 名 = JOSE `kid`（验签侧据此选公钥）。
+fn build_jwt_issuer_config(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<authn::JwtIssuerConfig> {
+    let issuer = get(JWT_ISSUER_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_ISSUER_ENV}"))?;
+    let audience = get(JWT_AUDIENCE_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_AUDIENCE_ENV}"))?;
+    let key_id = get(JWT_KEY_ID_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_KEY_ID_ENV}"))?;
+    let ttl_secs = get(JWT_ACCESS_TTL_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_ACCESS_TTL_ENV}"))?
+        .parse::<u64>()
+        .with_context(|| format!("{JWT_ACCESS_TTL_ENV} must be an integer seconds value"))?;
+    anyhow::ensure!(ttl_secs > 0, "{JWT_ACCESS_TTL_ENV} must be > 0");
+    Ok(authn::JwtIssuerConfig {
+        key: diport::KeyId::new(key_id),
+        alg: authn::JwtAlg::Es256,
+        purpose: diport::SigningPurpose::new(JWT_SIGNING_PURPOSE),
+        issuer,
+        audience,
+        ttl: Duration::from_secs(ttl_secs),
+    })
+}
+
+/// 接线 identity 域（生产路径）：薄壳，委托 [`wire_identity_with`]（读 `std::env`，HTTPS-only signer）。
+pub fn wire_identity(deps: &SharedRuntimeDeps) -> anyhow::Result<IdentityDomain<VaultSigner>> {
+    wire_identity_with(deps, |n| std::env::var(n).ok(), false)
+}
+
+/// 接线 identity 域（可注入配置读取器 + http 允许标志，供集成测试注入 hermetic mock vault）：
+/// postgres credential/session/refresh store + vault `Signer`（经 [`build_vault_signer_with`]）
+/// 经 [`authn::JwtIssuer`] 签 access JWT + SystemClock + session/refresh TTL（#1252）。
+///
+/// - `get`：配置读取器（生产 = `|n| std::env::var(n).ok()`；测试 = 注入 mock vault URL + JWT 配置）。
+///   消费 `RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`、`RSS_JWT_ISSUER`、
+///   `RSS_JWT_AUDIENCE`、`RSS_JWT_ES256_KEY_ID`、`RSS_JWT_ACCESS_TTL_SECS`、
+///   `RSS_IDENTITY_SESSION_TTL_SECS`（可选）、`RSS_REFRESH_TTL_SECS`（可选）。
+/// - `vault_allow_http`：`true` 接受 http URL（wiremock hermetic 测试）；`false` HTTPS-only（生产）。
+///
+/// 生产行为与 [`wire_identity`] 完全等价。单态化 `S = vault::VaultSigner`。
+pub fn wire_identity_with(
+    deps: &SharedRuntimeDeps,
+    get: impl Fn(&str) -> Option<String>,
+    vault_allow_http: bool,
+) -> anyhow::Result<IdentityDomain<VaultSigner>> {
     let identity_pg = deps.pg.for_domain::<caps::Identity>();
-    let ttl = Duration::from_secs(identity_session_ttl_secs(|name| std::env::var(name).ok())?);
+    // get 借用（非 Copy）⇒ |n| get(n) 重借传给各 build helper（每次创建新引用闭包，get 始终可用）。
+    let ttl = Duration::from_secs(identity_session_ttl_secs(|n| get(n))?);
+    let refresh_ttl = Duration::from_secs(refresh_ttl_secs(|n| get(n))?);
+
     let credentials = Arc::from(DynCredentialRepo::new_box(identity_pg.credential_repo()));
     let lifecycle = Arc::from(DynSessionLifecycle::new_box(
         identity_pg.session_lifecycle(Box::new(SystemClock)),
     ));
-    let service = LoginService::new(credentials, lifecycle, Box::new(SystemClock), ttl);
-    Ok(IdentityDomain::new(Arc::new(service)))
+
+    // vault `Signer` + JWT issuer（#1252）：access JWT 经 vault Transit ES256 签。signer shutdown 是 no-op
+    // （reqwest pool drop 即释放），同 Pdp `provider` 不入 ShutdownStack——无需独立句柄注册。
+    let signer = Arc::new(build_vault_signer_with(|n| get(n), vault_allow_http)?);
+    let issuer = Arc::new(
+        authn::JwtIssuer::new(
+            signer,
+            Box::new(SystemClock),
+            build_jwt_issuer_config(|n| get(n))?,
+        )
+        .map_err(|e| anyhow::anyhow!("jwt issuer config error: {e}"))?,
+    );
+
+    let refresh = Arc::new(RefreshService::new(
+        DynRefreshTokenStore::new_box(identity_pg.refresh_token_store()),
+        issuer,
+        Box::new(SystemClock),
+        refresh_ttl,
+    ));
+    let login = Arc::new(LoginService::new(
+        credentials,
+        lifecycle,
+        Arc::clone(&refresh),
+        Box::new(SystemClock),
+        ttl,
+    ));
+    Ok(IdentityDomain::new(login, refresh))
 }
 
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
@@ -1433,7 +1585,7 @@ mod tests {
         // 缺 RSS_VAULT_ADDR → fail-fast（不静默装配 vault）；错误含变量名、不含值。
         let result = build_vault_runtime_deps(|_| None);
         assert!(
-            matches!(&result, Err(e) if format!("{e:#}").contains("RSS_VAULT_ADDR")),
+            matches!(&result, Err(e) if format!("{e:#}").contains(VAULT_ADDR_ENV)),
             "缺 vault addr env 须 fail-fast 且错误含变量名"
         );
     }
@@ -1441,10 +1593,9 @@ mod tests {
     #[test]
     fn build_vault_runtime_deps_missing_token_fails_fast() {
         // 仅 addr 在、缺 RSS_VAULT_TOKEN → fail-fast（独立验证 token 路径，非 || 宽松匹配）。
-        let get =
-            |k: &str| (k == "RSS_VAULT_ADDR").then(|| "https://vault.example:8200".to_string());
+        let get = |k: &str| (k == VAULT_ADDR_ENV).then(|| "https://vault.example:8200".to_string());
         assert!(
-            matches!(&build_vault_runtime_deps(get), Err(e) if format!("{e:#}").contains("RSS_VAULT_TOKEN")),
+            matches!(&build_vault_runtime_deps(get), Err(e) if format!("{e:#}").contains(VAULT_TOKEN_ENV)),
             "缺 vault token env 须 fail-fast 且错误含变量名"
         );
     }
@@ -1455,8 +1606,8 @@ mod tests {
         // addr + token 在 → 构造成功（无 live vault：VaultSecretResolver::new 仅构造期校验 URL/token +
         // 空 allowlist + warn_vault_startup_security 告警路径）；runtime_resources 单源派生恰一条 resolver guard。
         let get = |k: &str| match k {
-            "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
-            "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+            _ if k == VAULT_ADDR_ENV => Some("https://vault.example:8200".to_string()),
+            _ if k == VAULT_TOKEN_ENV => Some("s.testtoken".to_string()),
             _ => None,
         };
         let deps = build_vault_runtime_deps(get);
@@ -2188,6 +2339,201 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "初值 Down（未采样）→ readyz fail-closed 503"
         );
+    }
+
+    // ── refresh_ttl_secs 测试 ────────────────────────────────────────────────────────────────
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn refresh_ttl_secs_rejects_zero() {
+        let err = refresh_ttl_secs(|n| (n == REFRESH_TTL_ENV).then(|| "0".to_string()))
+            .expect_err("zero refresh ttl must fail");
+        assert!(
+            err.to_string().contains("must be > 0"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn refresh_ttl_secs_rejects_above_max() {
+        let err = refresh_ttl_secs(|n| {
+            (n == REFRESH_TTL_ENV).then(|| (MAX_REFRESH_TTL_SECS + 1).to_string())
+        })
+        .expect_err("above max refresh ttl must fail");
+        assert!(
+            err.to_string()
+                .contains(&format!("must be <= {MAX_REFRESH_TTL_SECS}")),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn refresh_ttl_secs_defaults_to_30_days() {
+        let ttl = refresh_ttl_secs(|_| None).expect("default refresh ttl");
+        assert_eq!(ttl, DEFAULT_REFRESH_TTL_SECS, "缺省 → 30 天");
+    }
+
+    // ── build_vault_signer_with fail-fast 测试 ───────────────────────────────────────────────
+
+    #[test]
+    fn build_vault_signer_missing_addr_fails_fast() {
+        // 缺 VAULT_ADDR_ENV → fail-fast；错误含变量名，不含值。
+        // 提供 token + mount，确保报错确为缺 addr 而非其它变量。
+        let get = |k: &str| {
+            if k == VAULT_TOKEN_ENV {
+                Some("s.testtoken".to_string())
+            } else if k == VAULT_TRANSIT_MOUNT_ENV {
+                Some("transit".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_ADDR_ENV)),
+            "缺 vault addr 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_vault_signer_missing_token_fails_fast() {
+        // 提供 https addr（VaultSigner::new 校验 scheme）+ mount；缺 token → fail-fast。
+        let get = |k: &str| {
+            if k == VAULT_ADDR_ENV {
+                Some("https://vault.test:8200".to_string())
+            } else if k == VAULT_TRANSIT_MOUNT_ENV {
+                Some("transit".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_TOKEN_ENV)),
+            "缺 vault token 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_vault_signer_missing_mount_fails_fast() {
+        // 提供 https addr + token；缺 transit mount → fail-fast（VaultSigner 需 mount）。
+        let get = |k: &str| {
+            if k == VAULT_ADDR_ENV {
+                Some("https://vault.test:8200".to_string())
+            } else if k == VAULT_TOKEN_ENV {
+                Some("s.testtoken".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_TRANSIT_MOUNT_ENV)),
+            "缺 vault transit mount 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    // ── build_jwt_issuer_config fail-fast 测试 ───────────────────────────────────────────────
+
+    #[test]
+    fn build_jwt_issuer_config_missing_issuer_fails_fast() {
+        // 所有其它 env 在，缺 issuer → fail-fast（错误含 env 名）。
+        let get = |k: &str| {
+            if k == JWT_AUDIENCE_ENV {
+                Some("rss".to_string())
+            } else if k == JWT_KEY_ID_ENV {
+                Some("my-key".to_string())
+            } else if k == JWT_ACCESS_TTL_ENV {
+                Some("3600".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_jwt_issuer_config(get), Err(e) if format!("{e:#}").contains(JWT_ISSUER_ENV)),
+            "缺 JWT issuer 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_jwt_issuer_config_missing_audience_fails_fast() {
+        // issuer 在，缺 audience → fail-fast。
+        let get = |k: &str| {
+            if k == JWT_ISSUER_ENV {
+                Some("https://issuer.test".to_string())
+            } else if k == JWT_KEY_ID_ENV {
+                Some("my-key".to_string())
+            } else if k == JWT_ACCESS_TTL_ENV {
+                Some("3600".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_jwt_issuer_config(get), Err(e) if format!("{e:#}").contains(JWT_AUDIENCE_ENV)),
+            "缺 JWT audience 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_jwt_issuer_config_missing_key_fails_fast() {
+        // issuer + audience 在，缺 key_id → fail-fast。
+        let get = |k: &str| {
+            if k == JWT_ISSUER_ENV {
+                Some("https://issuer.test".to_string())
+            } else if k == JWT_AUDIENCE_ENV {
+                Some("rss".to_string())
+            } else if k == JWT_ACCESS_TTL_ENV {
+                Some("3600".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_jwt_issuer_config(get), Err(e) if format!("{e:#}").contains(JWT_KEY_ID_ENV)),
+            "缺 JWT key_id 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_jwt_issuer_config_zero_access_ttl_fails_fast() {
+        // 全必填在，ttl_secs = 0 → ensure!(ttl > 0) fail-fast。
+        let get = |k: &str| {
+            if k == JWT_ISSUER_ENV {
+                Some("https://issuer.test".to_string())
+            } else if k == JWT_AUDIENCE_ENV {
+                Some("rss".to_string())
+            } else if k == JWT_KEY_ID_ENV {
+                Some("my-key".to_string())
+            } else if k == JWT_ACCESS_TTL_ENV {
+                Some("0".to_string())
+            } else {
+                None
+            }
+        };
+        assert!(
+            matches!(&build_jwt_issuer_config(get), Err(e) if e.to_string().contains("must be > 0")),
+            "access ttl = 0 须 fail-fast"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_jwt_issuer_config_happy() {
+        // 全必填 env 均有 → 构造成功。
+        let get = |k: &str| {
+            if k == JWT_ISSUER_ENV {
+                Some("https://issuer.test".to_string())
+            } else if k == JWT_AUDIENCE_ENV {
+                Some("rss".to_string())
+            } else if k == JWT_KEY_ID_ENV {
+                Some("my-es256-key".to_string())
+            } else if k == JWT_ACCESS_TTL_ENV {
+                Some("3600".to_string())
+            } else {
+                None
+            }
+        };
+        build_jwt_issuer_config(get).expect("all JWT issuer vars present → Ok");
     }
 
     /// Health listener liveness 端点 `/health/v1/healthz` 恒 200（存活即活）。

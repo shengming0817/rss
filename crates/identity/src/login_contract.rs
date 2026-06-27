@@ -13,7 +13,7 @@ use diport::Clock;
 use generated::http::identity_v1::{IdentityLoginRequest, IdentityLoginResponse, SPEC};
 use testkit::ContractRequest;
 
-use crate::application::login_router_for_test;
+use crate::application::{RefreshService, login_router_for_test};
 use crate::{LoginService, ports::DynSessionLifecycle};
 
 const SEED_USER: &str = "alice";
@@ -47,12 +47,55 @@ fn tenant_id() -> vocab::TenantId {
     vocab::TenantId::parse(CANON_TENANT).expect("canonical tenant")
 }
 
+/// 最小 Signer 替身（固定字节签名；域 crate 单测不依赖 adapter）。
+#[derive(Clone)]
+struct ContractSigner;
+
+impl diport::Signer for ContractSigner {
+    async fn sign(
+        &self,
+        _req: diport::SignRequest,
+    ) -> Result<diport::Signature, diport::SignerError> {
+        Ok(diport::Signature::new(b"contract-test-sig-bytes".to_vec()))
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::SignerError> {
+        Ok(())
+    }
+}
+
+fn make_refresh_svc() -> Arc<RefreshService<ContractSigner>> {
+    #[allow(clippy::expect_used)]
+    let issuer = authn::JwtIssuer::new(
+        Arc::new(ContractSigner),
+        clock(),
+        authn::JwtIssuerConfig {
+            key: diport::KeyId::new("contract-test-key"),
+            alg: authn::JwtAlg::Es256,
+            purpose: diport::SigningPurpose::new("auth.jwt.access"),
+            issuer: "https://test.example".to_string(),
+            audience: "test-audience".to_string(),
+            ttl: Duration::from_secs(900),
+        },
+    )
+    .expect("valid jwt issuer config");
+    Arc::new(RefreshService::new(
+        crate::ports::DynRefreshTokenStore::new_box(
+            crate::internal::mem::InMemRefreshTokenStore::new(),
+        ),
+        Arc::new(issuer),
+        clock(),
+        Duration::from_secs(2_592_000),
+    ))
+}
+
 fn login_router() -> axum::Router {
     #[allow(clippy::expect_used)]
     let service = LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(
             crate::internal::mem::InMemSessionLifecycle::default(),
         )),
+        make_refresh_svc(),
         clock(),
         Duration::from_secs(SESSION_TTL_SECS),
         SEED_USER,
@@ -85,6 +128,19 @@ async fn login_ok_returns_session_matching_generated_schema()
         decoded.data.expires_at,
         i64::try_from(NOW_SECS + SESSION_TTL_SECS)?,
         "expiresAt 须是 UNIX epoch 秒，而非 TTL 秒 stub"
+    );
+    // #1252：login 响应包含首发 access JWT + refresh token bundle。
+    assert!(
+        !decoded.data.access_token.is_empty(),
+        "access_token 非空（#1252）"
+    );
+    assert!(
+        !decoded.data.refresh_token.is_empty(),
+        "refresh_token 非空（#1252）"
+    );
+    assert!(
+        decoded.data.access_expires_at > 0,
+        "access_expires_at > 0（#1252）"
     );
     Ok(())
 }

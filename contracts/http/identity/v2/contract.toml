@@ -1,0 +1,24 @@
+# identity refresh-token 轮换 HTTP 契约。
+# 出示 refresh token → 旋转血缘 + 铸新 access JWT（vault Signer 经 authn::JwtIssuer 签）。
+# 单域 refresh-token CAS 本地事务，不发 outbox fact ⇒ consistencyLevel = LocalTx（L1）。
+# version=v2 仅作 identity 域第二个 HTTP 端点槽位（同 settings v1/v2 两端点先例），URL 仍 /api/v1。
+id = "identity.refresh"
+kind = "http"
+domain = "identity"
+version = "v2"
+owner = "identity"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+path = "/api/v1/identity/refresh"
+method = "POST"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "public"
+reason = "refresh presents the refresh token as its own credential; access token may already be expired"
+
+[endpoints.http.headers]
+"X-Tenant-ID" = "populate-only"

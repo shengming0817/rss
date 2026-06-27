@@ -8,7 +8,19 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use diport::{SignRequest, Signature, SignerError};
+
+use crate::SignatureMarshaling;
+
+/// URL-safe base64 engine（Vault Transit `jws` marshaling 响应编码：`-`/`_` 替换 `+`/`/`，无 padding）。
+/// `DecodePaddingMode::Indifferent`：Vault 响应带或不带 padding 均可解码，健壮对接。
+const BASE64_URL: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::URL_SAFE,
+    GeneralPurposeConfig::new()
+        .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+        .with_encode_padding(false),
+);
 
 /// Vault token header（`X-Vault-Token`）。
 const VAULT_TOKEN_HEADER: &str = "X-Vault-Token";
@@ -39,15 +51,32 @@ struct MissingSignature;
 #[error("vault transit signature is not a valid vault:vN: tagged value")]
 struct MalformedSignature;
 
-/// 构造 Transit `sign` 请求体 `{"input": base64(message)}`（vaultrs `SignDataRequest.input` = base64 明文）。
-pub(crate) fn build_sign_body(message: &[u8]) -> serde_json::Value {
-    serde_json::json!({ "input": BASE64.encode(message) })
+/// 构造 Transit `sign` 请求体：`input` 始终 STANDARD base64（Vault 要求），`marshaling_algorithm` 显式声明
+/// 编码方式（`"asn1"` = ASN.1 DER + STANDARD base64 响应；`"jws"` = raw r‖s + URL-safe base64 响应）。
+/// 不声明则 Vault 默认 `asn1`，但**显式声明**消除了对 Vault 版本默认值的隐式依赖（F1，#1252）。
+/// input encoding 恒为 STANDARD；只有**响应**签名的编码随 marshaling 变化。
+pub(crate) fn build_sign_body(
+    message: &[u8],
+    marshaling: SignatureMarshaling,
+) -> serde_json::Value {
+    let marshaling_str = match marshaling {
+        SignatureMarshaling::Asn1 => "asn1",
+        SignatureMarshaling::Jws => "jws",
+    };
+    serde_json::json!({
+        "input": BASE64.encode(message),
+        "marshaling_algorithm": marshaling_str,
+    })
 }
 
 /// 解析 Transit `sign` 成功响应 `{"data":{"signature":"vault:vN:<b64>"}}` → [`Signature`]（**原始签名字节**，
-/// 符合 `diport::Signature` = 签名结果字节契约，被 deviceloop 证书签发消费）。缺 `data.signature` / `{"data":null}`
-/// / `{"errors":[..]}` → `MissingSignature`；前缀·版本·base64 非法 → `MalformedSignature`（经 [`SignerError`] 脱敏）。
-pub(crate) fn parse_sign_response(body: &[u8]) -> Result<Signature, SignerError> {
+/// 符合 `diport::Signature` = 签名结果字节契约）。缺 `data.signature` / `{"data":null}` / `{"errors":[..]}`
+/// → `MissingSignature`；前缀·版本·base64 非法 → `MalformedSignature`（经 [`SignerError`] 脱敏）。
+/// `marshaling` 决定响应体 `<b64>` 段使用 STANDARD（`Asn1`）还是 URL-safe（`Jws`）base64 解码。
+pub(crate) fn parse_sign_response(
+    body: &[u8],
+    marshaling: SignatureMarshaling,
+) -> Result<Signature, SignerError> {
     #[derive(serde::Deserialize)]
     struct Envelope {
         // reason: 只反序列化 data.signature；Vault 错误体 `{"errors":[..]}` 的 errors 内容（可能含 policy /
@@ -61,16 +90,21 @@ pub(crate) fn parse_sign_response(body: &[u8]) -> Result<Signature, SignerError>
     }
     let envelope: Envelope = serde_json::from_slice(body).map_err(SignerError::new)?;
     match envelope.data {
-        Some(data) => decode_vault_signature(&data.signature),
+        Some(data) => decode_vault_signature(&data.signature, marshaling),
         None => Err(SignerError::new(MissingSignature)),
     }
 }
 
-/// Vault Transit `vault:v<N>:<base64>` → 原始签名字节。校验 `vault:v` 前缀 + 数字版本段，再 STANDARD base64
-/// decode `<base64>` 部分（version 是 Vault 验签元数据，对 provider-agnostic `diport::Signature` 无意义，剥离）。
+/// Vault Transit `vault:v<N>:<b64>` → 原始签名字节。校验 `vault:v` 前缀 + 数字版本段，再按 `marshaling`
+/// 选 base64 引擎 decode `<b64>` 部分（version 是 Vault 验签元数据，对 provider-agnostic `diport::Signature`
+/// 无意义，剥离）：`Asn1` = STANDARD；`Jws` = URL-safe（Vault jws 响应用 `-`/`_` 替换 `+`/`/`，无 padding）。
 /// reason: 不复用 Vault tagged 串作 opaque token——`diport::Signature` 契约是签名字节（signer.rs），消费方
-/// （deviceloop 证书签发）需原始字节；若业务确需 Vault verify 的 tagged token，应拆独立 verify-capable port。
-fn decode_vault_signature(tagged: &str) -> Result<Signature, SignerError> {
+/// （JWT/JWS 用 Jws；deviceloop 证书签发用 Asn1）需原始字节；若业务确需 Vault verify 的 tagged token，应拆
+/// 独立 verify-capable port。
+fn decode_vault_signature(
+    tagged: &str,
+    marshaling: SignatureMarshaling,
+) -> Result<Signature, SignerError> {
     let rest = tagged
         .strip_prefix("vault:v")
         .ok_or_else(|| SignerError::new(MalformedSignature))?;
@@ -80,13 +114,17 @@ fn decode_vault_signature(tagged: &str) -> Result<Signature, SignerError> {
     if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
         return Err(SignerError::new(MalformedSignature));
     }
-    let bytes = BASE64.decode(b64).map_err(SignerError::new)?;
+    let bytes = match marshaling {
+        SignatureMarshaling::Asn1 => BASE64.decode(b64).map_err(SignerError::new)?,
+        SignatureMarshaling::Jws => BASE64_URL.decode(b64).map_err(SignerError::new)?,
+    };
     Ok(Signature::new(bytes))
 }
 
 /// 执行 Transit `sign`：`POST {base}/v1/{mount…}/sign/{key}`，header `X-Vault-Token`，请求级 `timeout`。
 /// `base` 已在构造期校验 scheme（https / 显式 http）。`mount_segments`（构造期按 `/` 拆分校验）逐段 push、`key`
 /// 单段 push——均经 `Url::path_segments_mut` percent-encode（杜绝路径段注入）。`token` / `message` 绝不进 span / 日志。
+/// `marshaling` 决定请求体 `marshaling_algorithm` 字段与响应 `<b64>` 段解码引擎（`Asn1`=STANDARD；`Jws`=URL-safe）。
 #[tracing::instrument(
     name = "vault.transit.sign",
     skip_all,
@@ -98,6 +136,7 @@ pub(crate) async fn sign_impl(
     token: &str,
     mount_segments: &[String],
     timeout: Duration,
+    marshaling: SignatureMarshaling,
     request: SignRequest,
 ) -> Result<Signature, SignerError> {
     let mut url = base.clone();
@@ -116,7 +155,7 @@ pub(crate) async fn sign_impl(
     }
     // reason: serde_json::Value 序列化理论上不失败（无非序列化字段）；用 map_err 而非 expect 符合库错误规范
     // （error-handling.md），无需 item-level #[allow]。
-    let payload = serde_json::to_vec(&build_sign_body(request.message.as_bytes()))
+    let payload = serde_json::to_vec(&build_sign_body(request.message.as_bytes(), marshaling))
         .map_err(SignerError::new)?;
 
     let response = client
@@ -160,7 +199,7 @@ pub(crate) async fn sign_impl(
         .bytes()
         .await
         .map_err(|e| warn_and_wrap(OP_SIGN_READ, e))?;
-    parse_sign_response(&body)
+    parse_sign_response(&body, marshaling)
 }
 
 /// 记录低基数诊断（reqwest 错误归类为静态类别，**不打印其 `Display`**——杜绝 endpoint URL / 请求详情进日志；
@@ -224,31 +263,68 @@ mod tests {
     //! Transit 请求体构造 / 响应解析纯逻辑（无 live 后端，确定性）。
     use base64::Engine as _;
 
-    use super::{BASE64, build_sign_body, parse_sign_response};
+    use super::{BASE64, BASE64_URL, build_sign_body, parse_sign_response};
+    use crate::SignatureMarshaling;
 
     #[test]
     fn build_sign_body_base64_encodes_input() {
-        // base64("payload") == "cGF5bG9hZA=="（STANDARD，含 padding）。
-        let body = build_sign_body(b"payload");
+        // base64("payload") == "cGF5bG9hZA=="（STANDARD，含 padding）。input 始终 STANDARD base64。
+        let body = build_sign_body(b"payload", SignatureMarshaling::Asn1);
         assert_eq!(body["input"].as_str(), Some("cGF5bG9hZA=="));
     }
 
     #[test]
     fn build_sign_body_empty_message_encodes_empty_input() {
-        let body = build_sign_body(b"");
+        let body = build_sign_body(b"", SignatureMarshaling::Asn1);
         assert_eq!(body["input"].as_str(), Some(""));
     }
 
     #[test]
     fn build_sign_body_binary_bytes_encode_correctly() {
         // 真实用途是 CSR / 证书 DER 等二进制字节（含 \x00/\xFF），验确定性 base64（非纯 ASCII 路径）。
+        // input 始终 STANDARD base64，与 marshaling 无关。
         let message: &[u8] = &[0x00, 0xFF, 0xAB];
         let expected = BASE64.encode(message); // 锚定期望 = 同一 STANDARD 引擎输出（"AP+r"）。
         assert_eq!(expected, "AP+r");
         assert_eq!(
-            build_sign_body(message)["input"].as_str(),
+            build_sign_body(message, SignatureMarshaling::Asn1)["input"].as_str(),
             Some(expected.as_str())
         );
+    }
+
+    #[test]
+    fn build_sign_body_asn1_includes_marshaling_algorithm_asn1() {
+        // Asn1 marshaling → 请求体显式携带 `"marshaling_algorithm":"asn1"`，消除对 Vault 默认值的隐式依赖（#1252）。
+        let body = build_sign_body(b"msg", SignatureMarshaling::Asn1);
+        assert_eq!(
+            body["marshaling_algorithm"].as_str(),
+            Some("asn1"),
+            "Asn1 marshaling must send marshaling_algorithm=asn1"
+        );
+    }
+
+    #[test]
+    fn build_sign_body_jws_includes_marshaling_algorithm_jws() {
+        // Jws marshaling → 请求体显式携带 `"marshaling_algorithm":"jws"`（JWT/JWS 消费方需 raw r‖s，#1252）。
+        let body = build_sign_body(b"msg", SignatureMarshaling::Jws);
+        assert_eq!(
+            body["marshaling_algorithm"].as_str(),
+            Some("jws"),
+            "Jws marshaling must send marshaling_algorithm=jws"
+        );
+    }
+
+    #[test]
+    fn build_sign_body_jws_input_is_still_standard_base64() {
+        // Jws marshaling 下 input 仍为 STANDARD base64（只有响应 body 的签名段用 url-safe，anti-vacuity）。
+        let message: &[u8] = &[0xFB]; // STANDARD: "+w=="; URL_SAFE: "-w"。
+        let body = build_sign_body(message, SignatureMarshaling::Jws);
+        assert_eq!(
+            body["input"].as_str(),
+            Some("+w=="),
+            "input must always be STANDARD base64 regardless of marshaling"
+        );
+        assert_eq!(body["marshaling_algorithm"].as_str(), Some("jws"));
     }
 
     #[test]
@@ -256,54 +332,80 @@ mod tests {
         // base64("rawsig") == "cmF3c2ln"；解码后返回原始字节（剥离 vault:v1: 前缀），符合 diport::Signature 字节契约。
         let body = br#"{"data":{"signature":"vault:v1:cmF3c2ln"}}"#;
         assert!(matches!(
-            parse_sign_response(body),
+            parse_sign_response(body, SignatureMarshaling::Asn1),
             Ok(sig) if sig.as_bytes() == b"rawsig"
         ));
     }
 
     #[test]
+    fn parse_jws_decodes_url_safe_base64() {
+        // anti-vacuity：0xFB 在 STANDARD base64 编码为 "+w=="，在 URL_SAFE（无 padding）编码为 "-w"。
+        // `vault:v1:-w` 经 Jws 路径（BASE64_URL）解码 → [0xFB]；Asn1（BASE64）路径下 "-" 不在字母表 → Err。
+        // 此测证明 Jws 路径确实使用 URL-safe 引擎（非仅名义区分）。
+        let url_safe_b64 = BASE64_URL.encode([0xFB_u8]); // "-w"（URL_SAFE，无 padding）
+        assert_eq!(
+            url_safe_b64, "-w",
+            "0xFB must encode to '-w' in url-safe no-pad base64"
+        );
+        let body_str = format!(r#"{{"data":{{"signature":"vault:v1:{url_safe_b64}"}}}}"#);
+        // Jws 路径：成功 decode → [0xFB]
+        assert!(
+            matches!(
+                parse_sign_response(body_str.as_bytes(), SignatureMarshaling::Jws),
+                Ok(sig) if sig.as_bytes() == [0xFB_u8]
+            ),
+            "Jws path must decode url-safe base64 '-w' to [0xFB]"
+        );
+        // Asn1 路径：'-' 不在 STANDARD 字母表 → Err（anti-vacuity：两路径确实不同）
+        assert!(
+            parse_sign_response(body_str.as_bytes(), SignatureMarshaling::Asn1).is_err(),
+            "Asn1 path must fail on url-safe base64 char '-'"
+        );
+    }
+
+    #[test]
     fn parse_signature_missing_prefix_is_err() {
         let body = br#"{"data":{"signature":"cmF3c2ln"}}"#;
-        assert!(parse_sign_response(body).is_err());
+        assert!(parse_sign_response(body, SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
     fn parse_signature_non_numeric_version_is_err() {
         let body = br#"{"data":{"signature":"vault:vX:cmF3c2ln"}}"#;
-        assert!(parse_sign_response(body).is_err());
+        assert!(parse_sign_response(body, SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
     fn parse_signature_invalid_base64_is_err() {
         // `vault:v1:` 前缀合法、版本数字合法，但 base64 体非法（'!' 不在字母表）→ MalformedSignature/解码错误。
         let body = br#"{"data":{"signature":"vault:v1:!!!"}}"#;
-        assert!(parse_sign_response(body).is_err());
+        assert!(parse_sign_response(body, SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
     fn parse_vault_errors_envelope_is_err() {
         // 非 2xx 体（`{"errors":[..]}`，无 data）→ Err（缺 signature）。
         let body = br#"{"errors":["permission denied"]}"#;
-        assert!(parse_sign_response(body).is_err());
+        assert!(parse_sign_response(body, SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
     fn parse_data_null_is_err() {
         // 显式 `{"data":null}`（与 data 缺失不同形状，但同走 None 分支）→ Err。
         let body = br#"{"data":null}"#;
-        assert!(parse_sign_response(body).is_err());
+        assert!(parse_sign_response(body, SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
     fn parse_missing_signature_field_is_err() {
         // 2xx 但 data 无 signature 字段（畸形）→ Err。
         let body = br#"{"data":{}}"#;
-        assert!(parse_sign_response(body).is_err());
+        assert!(parse_sign_response(body, SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
     fn parse_malformed_json_is_err() {
-        assert!(parse_sign_response(b"not json").is_err());
+        assert!(parse_sign_response(b"not json", SignatureMarshaling::Asn1).is_err());
     }
 
     #[test]
@@ -377,6 +479,7 @@ mod sign_impl_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::sign_impl;
+    use crate::SignatureMarshaling;
 
     // reason: header 可达性验证用占位值（断言 X-Vault-Token 被注入），非真实 token / token 格式规范。
     const TOKEN: &str = "test-token";
@@ -397,7 +500,7 @@ mod sign_impl_tests {
     }
 
     // 固定 mount=["transit"] + timeout=200ms 调 sign_impl（直接传 http base Url；scheme 校验在 VaultSigner::new，
-    // 非 sign_impl 职责，故无需构造 VaultSigner）。
+    // 非 sign_impl 职责，故无需构造 VaultSigner）。Asn1：OK_BODY 含 STANDARD base64 "cmF3c2ln" = "rawsig"。
     async fn call(server: &MockServer, key: &str) -> Result<Signature, SignerError> {
         sign_impl(
             &reqwest::Client::new(),
@@ -405,6 +508,7 @@ mod sign_impl_tests {
             TOKEN,
             &["transit".to_string()],
             Duration::from_millis(200),
+            SignatureMarshaling::Asn1,
             sign_request(key),
         )
         .await
@@ -495,6 +599,7 @@ mod sign_impl_tests {
             TOKEN,
             &["transit".to_string()],
             Duration::from_secs(5),
+            SignatureMarshaling::Asn1,
             sign_request("k"),
         )
         .await;

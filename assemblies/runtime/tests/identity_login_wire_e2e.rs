@@ -1,5 +1,14 @@
-//! identity.login production wire e2e: PgRuntimeDeps credential/session providers → wire_identity →
-//! bootstrap compose/finalize → Primary router handler.
+//! identity login + refresh 生产 wire e2e（#1252）：wiremock vault Transit mock（动态 ES256 签）+
+//! postgres credential/session/refresh store → `wire_identity_with` → Primary router handler。
+//!
+//! 覆盖：
+//! ① login → 201 + accessToken/refreshToken/accessExpiresAt/sessionId（vault mock 真实签发，生产 wire 通路）；
+//! ② refresh → 201 + 新 token bundle（rotation 闭环：旧 token 轮换、新 token 铸出）；
+//! ③ 同 refreshToken 再用 → 401（one-shot rotation reuse detection，refresh store 已废弃旧 token）。
+//!
+//! hermetic：wiremock 模拟 vault Transit（无 live vault），postgres testcontainer 或 env pg。
+//! 不做 JWT oidc 验签（login/refresh 是 Public 端点，verify bridge 不拦截）；仅证生产 wire 通路
+//! 可铸出 token bundle 且 rotation 与 reuse-detect 经 postgres store 正确联动。
 
 #![cfg(feature = "integration")]
 
@@ -9,14 +18,18 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
 use generated::http::identity_v1::SPEC as LOGIN_SPEC;
+use generated::http::identity_v2::SPEC as REFRESH_SPEC;
 use identity::ports::{Credential, CredentialRepo as _, TenantId};
+use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::ListenerKind;
-use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity};
+use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity_with};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
+use wiremock::matchers::{body_partial_json, method as match_method};
+use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -26,6 +39,44 @@ const LOGIN_USERNAME: &str = "alice";
 const PASSWORD: &str = "correct-horse";
 const TEST_APP_ROLE: &str = "rss_identity_login_e2e_app";
 const TEST_APP_PASSWORD: &str = "identity_login_e2e_pw";
+
+// ── vault Transit mock helpers（mirror refresh_mint_e2e.rs） ────────────────────────────────────
+
+/// 测试 P-256 私钥（静态，dev-only；mock vault 用此 key 签）。
+#[allow(clippy::expect_used)]
+fn sk_jwt() -> SigningKey {
+    let bytes: [u8; 32] = std::array::from_fn(|i| (i + 1) as u8);
+    SigningKey::from_slice(&bytes).expect("valid P-256 scalar")
+}
+
+/// wiremock Transit `/sign` 响应器：解 `{"input": base64std(signing_input)}` → 用 `sk` 对 signing-input
+/// 字节做 ES256 签（r‖s 64B，JWS marshaling）→ 回 `{"data":{"signature":"vault:v1:<base64url(r‖s)>"}}`
+/// （镜像真实 vault Transit JWS 响应）。动态签：signing-input 含 issuer 内部计算的 iat/exp，无法预制。
+struct TransitSignResponder {
+    sk: SigningKey,
+}
+
+impl Respond for TransitSignResponder {
+    #[allow(clippy::expect_used)]
+    fn respond(&self, req: &MockRequest) -> ResponseTemplate {
+        let body: serde_json::Value =
+            serde_json::from_slice(&req.body).expect("mock vault: request body is json");
+        let input_b64 = body["input"]
+            .as_str()
+            .expect("mock vault: transit sign body has string input");
+        let message = B64_STD
+            .decode(input_b64)
+            .expect("mock vault: input is standard base64");
+        // ES256 over signing-input bytes（p256 内部 SHA-256 prehash）；to_bytes() = 定长 r‖s（JWS 形态）。
+        // 真 vault `marshaling_algorithm=jws` 输出 URL-safe base64（非 standard），VaultSigner(Jws) 同形解码。
+        let sig: Signature = self.sk.sign(&message);
+        let tagged = format!("vault:v1:{}", B64_URL.encode(sig.to_bytes()));
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({ "data": { "signature": tagged } }))
+    }
+}
+
+// ── postgres fixture helpers ────────────────────────────────────────────────────────────────────
 
 async fn connect_pg()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
@@ -111,14 +162,34 @@ fn test_provider() -> oidc::OidcProvider {
         "rss",
         "user",
         None,
-        Some(&B64.encode([7u8; 32])),
+        Some(&B64_URL.encode([7u8; 32])),
         Box::new(SystemClock),
     )
     .expect("test provider")
 }
 
+// ── 端到端测试 ───────────────────────────────────────────────────────────────────────────────────
+
+/// login + refresh 生产 wire 端到端：vault Transit mock（hermetic）→ token bundle 铸出 → rotation → reuse-detect。
+///
+/// 断言 a: POST /api/v1/identity/login → 201 + accessToken/refreshToken/accessExpiresAt/sessionId。
+/// 断言 b: POST /api/v1/identity/refresh（login 取的 refreshToken）→ 201 + 新 token bundle。
+/// 断言 c: 再用同一 refreshToken → 401（one-shot rotation reuse detection）。
 #[tokio::test(flavor = "multi_thread")]
-async fn wire_identity_primary_router_serves_public_login() -> TestResult {
+async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
+    // 1. hermetic vault Transit mock：任意 POST + marshaling_algorithm=jws → 动态 ES256 签。
+    //    anti-vacuity matcher（body_partial_json）保证 VaultSigner 必须请求 JWS marshaling，否则 404 → 失败。
+    let vault_server = MockServer::start().await;
+    Mock::given(match_method("POST"))
+        .and(body_partial_json(
+            serde_json::json!({ "marshaling_algorithm": "jws" }),
+        ))
+        .respond_with(TransitSignResponder { sk: sk_jwt() })
+        .mount(&vault_server)
+        .await;
+    let vault_uri = vault_server.uri();
+
+    // 2. postgres fixture + credential seed（login 凭据）。
     let (_fixture, pg) = connect_pg().await?;
     let tenant = TenantId::parse(CANON_TENANT)?;
     let credential = Credential::hydrate(
@@ -133,13 +204,14 @@ async fn wire_identity_primary_router_serves_public_login() -> TestResult {
         .save(credential)
         .await?;
 
-    // #1498：SharedRuntimeDeps 现含 vault bundle。identity wiring 不消费 vault；构造 stub bundle（合法
-    // addr/token，无真实连接——resolver 仅构造期校验 URL/token）满足结构，wire_identity 不触碰它。
+    // 3. vault bundle（#1498）：pre-GA 空 allowlist，secret resolver 不触 vault；仅构造器结构满足
+    //    SharedRuntimeDeps.vault 字段。mock http URL 可用（resolver 仅构造期校验 URL，无连接）。
     let vault = runtime::build_vault_runtime_deps(|name| match name {
-        "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
+        "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
         "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
         _ => None,
     })?;
+    // SharedRuntimeDeps 现含 redis bundle（#1255/#332）——构造 redis fixture 满足结构（identity wiring 不消费）。
     let redis_fixture = testkit::env_or_redis().await?;
     let redis = runtime::build_redis_runtime_deps(|name| {
         (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
@@ -150,7 +222,25 @@ async fn wire_identity_primary_router_serves_public_login() -> TestResult {
         redis: Some(redis),
         vault,
     };
-    let identity_domain = wire_identity(&deps)?;
+
+    // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
+    let identity_domain = wire_identity_with(
+        &deps,
+        |name| match name {
+            "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
+            "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
+            "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
+            "RSS_JWT_ISSUER" => Some("https://issuer.test".to_string()),
+            "RSS_JWT_AUDIENCE" => Some("rss".to_string()),
+            "RSS_JWT_ES256_KEY_ID" => Some("rss-jwt-es256".to_string()),
+            "RSS_JWT_ACCESS_TTL_SECS" => Some("900".to_string()),
+            "RSS_REFRESH_TTL_SECS" => Some("2592000".to_string()),
+            _ => None,
+        },
+        true,
+    )?;
+
+    // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     let mut primary = None;
     for (listener, routes) in runtime::assemble_authed_routers(
@@ -164,26 +254,96 @@ async fn wire_identity_primary_router_serves_public_login() -> TestResult {
         }
     }
     let app = primary.ok_or("identity domain did not produce Primary router")?;
-    let body = format!(r#"{{"username":"{LOGIN_USERNAME}","password":"{PASSWORD}"}}"#);
-    let response = app
+
+    // ── 断言 a: login → 201 + token bundle ────────────────────────────────────────────────────
+    let login_body = format!(r#"{{"username":"{LOGIN_USERNAME}","password":"{PASSWORD}"}}"#);
+    let login_resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri(LOGIN_SPEC.path)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("X-Tenant-ID", CANON_TENANT)
-                .body(Body::from(body))?,
+                .body(Body::from(login_body))?,
         )
         .await?;
-
     assert_eq!(
-        response.status(),
+        login_resp.status(),
         StatusCode::CREATED,
-        "public identity.login should pass finalize_auth without bearer token"
+        "login should return 201 (public identity.login + vault mock sign)"
     );
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
-    let text = String::from_utf8(bytes.to_vec())?;
-    assert!(text.contains(r#""sessionId":"#), "response body: {text}");
-    assert!(text.contains(r#""expiresAt":"#), "response body: {text}");
+    let login_bytes = axum::body::to_bytes(login_resp.into_body(), usize::MAX).await?;
+    let login_text = String::from_utf8(login_bytes.to_vec())?;
+    assert!(
+        login_text.contains(r#""accessToken":"#),
+        "login response must contain accessToken; body: {login_text}"
+    );
+    assert!(
+        login_text.contains(r#""refreshToken":"#),
+        "login response must contain refreshToken; body: {login_text}"
+    );
+    assert!(
+        login_text.contains(r#""accessExpiresAt":"#),
+        "login response must contain accessExpiresAt; body: {login_text}"
+    );
+    assert!(
+        login_text.contains(r#""sessionId":"#),
+        "login response must contain sessionId; body: {login_text}"
+    );
+
+    // 提取 refreshToken 供后续断言（rotation + reuse-detect）。
+    let login_json: serde_json::Value = serde_json::from_str(&login_text)?;
+    let refresh_token_orig = login_json["data"]["refreshToken"]
+        .as_str()
+        .ok_or("login response missing data.refreshToken")?
+        .to_string();
+
+    // ── 断言 b: 首次 refresh → 201 + 新 token bundle（rotation 成功）──────────────────────────
+    let refresh_body = serde_json::json!({ "refreshToken": refresh_token_orig }).to_string();
+    let refresh_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(REFRESH_SPEC.path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Tenant-ID", CANON_TENANT)
+                .body(Body::from(refresh_body.clone()))?,
+        )
+        .await?;
+    assert_eq!(
+        refresh_resp.status(),
+        StatusCode::CREATED,
+        "first refresh should return 201 (valid token rotation)"
+    );
+    let refresh_bytes = axum::body::to_bytes(refresh_resp.into_body(), usize::MAX).await?;
+    let refresh_text = String::from_utf8(refresh_bytes.to_vec())?;
+    assert!(
+        refresh_text.contains(r#""accessToken":"#),
+        "refresh response must contain accessToken; body: {refresh_text}"
+    );
+    assert!(
+        refresh_text.contains(r#""refreshToken":"#),
+        "refresh response must contain refreshToken; body: {refresh_text}"
+    );
+
+    // ── 断言 c: 同 refreshToken 再用 → 401（one-shot rotation reuse detection）──────────────────
+    let reuse_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(REFRESH_SPEC.path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Tenant-ID", CANON_TENANT)
+                .body(Body::from(refresh_body))?,
+        )
+        .await?;
+    assert_eq!(
+        reuse_resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "reused refresh token should return 401 (one-shot rotation reuse detection)"
+    );
+
     Ok(())
 }

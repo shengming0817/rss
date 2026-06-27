@@ -23,13 +23,14 @@ use crate::ports::SessionLifecycle;
 use consistency::Entry;
 #[cfg(test)]
 use diport::{OutboxEmitError, OutboxEnvelopeParts};
-#[cfg(test)]
+// Arc 供 InMemSessionLifecycle（test）与 InMemRefreshTokenStore（test/seed-login）共享 store 句柄。
+#[cfg(any(test, feature = "seed-login"))]
 use std::sync::Arc;
 
-// RefreshTokenStore in-mem 替身（`#[cfg(test)]` 门控，同 InMemSessionLifecycle）。
-#[cfg(test)]
+// RefreshTokenStore in-mem 替身（test/seed-login 门控）：seed-login 供 journey/demo 登录首发 token 落库（#1252）。
+#[cfg(any(test, feature = "seed-login"))]
 use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord};
-#[cfg(test)]
+#[cfg(any(test, feature = "seed-login"))]
 use crate::ports::RefreshTokenStore;
 
 // RBAC 角色仓储 + 绑定生命周期 in-mem 替身（`#[cfg(test)]` 门控，#1190）。
@@ -440,21 +441,22 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
 /// 内部 `Arc<Mutex<..>>`（`&self` + 内部可变；锁仅同步持有、**不跨 `.await`** ⇒ future 仍 `Send`）；
 /// `Arc` ⇒ clone 共享同一 store（`RefreshService` 测试中两个 service 实例共享）。
 ///
-/// **`#[cfg(test)]`**：生产 postgres adapter 落地后无 seed 消费者——仅本 crate 单测使用（防 dead_code）。
-#[cfg(test)]
+/// **`#[cfg(any(test, feature = "seed-login"))]`**：本 crate 单测 + journey/demo 登录首发 token 落库
+/// 消费（#1252，经 [`crate::seed_refresh_service`]）；生产 postgres adapter 承载真实持久化（防 dead_code）。
+#[cfg(any(test, feature = "seed-login"))]
 #[derive(Clone, Default)]
 pub(crate) struct InMemRefreshTokenStore {
     records: Arc<Mutex<std::collections::HashMap<RefreshTokenId, RefreshTokenRecord>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "seed-login"))]
 impl InMemRefreshTokenStore {
     pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "seed-login"))]
 impl RefreshTokenStore for InMemRefreshTokenStore {
     async fn insert(&self, record: RefreshTokenRecord) -> Result<(), crate::domain::IdentityError> {
         recover(&self.records).insert(record.id().clone(), record);

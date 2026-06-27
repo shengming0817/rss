@@ -294,6 +294,10 @@ pub trait SessionLifecycleLocal: Send + Sync {
 /// 归属为域形 port（签名引用 [`RefreshTokenRecord`]/[`RefreshTokenId`]/[`RefreshTokenHash`]）→ 本域 crate
 /// `ports`，非 diport（ADR-005 category line，同 [`SessionLifecycle`]）。
 ///
+/// 基 trait 带 `Send + Sync` supertrait（同 `CredentialRepo`/`SessionLifecycle`）：refresh / login handler 经
+/// `Arc<RefreshService<S>>` 共享同一 store 作 axum handler state，且 `rotate().await` future 须为 `Send`
+/// （axum handler 要求）——故 `Box<DynRefreshTokenStore>` 须 `Sync`（#1252 接线 refresh/login 端点）。
+///
 /// **哈希存储（不存明文）**：store 只持 secret 的 SHA-256 摘要（[`RefreshTokenHash`]）——攻陷 store 不泄露可用
 /// refresh token（摘要不可逆）。secret 生成 / 摘要计算在 `secure::refresh`（base 层 crypto），编排在
 /// `application::RefreshService`（域 / store 不做 crypto）。
@@ -312,8 +316,9 @@ pub trait SessionLifecycleLocal: Send + Sync {
 #[dynosaur(pub DynRefreshTokenStore = dyn(box) RefreshTokenStore, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RefreshTokenStore` 变体 +
-// dynosaur `DynRefreshTokenStore` 承载（DI 注入走 Send wrapper）。与 SessionLifecycle / diport DI port 同范式。
-pub trait RefreshTokenStoreLocal {
+// dynosaur `DynRefreshTokenStore` 承载（DI 注入走 Send wrapper）。`Send + Sync` supertrait 使
+// `Box<DynRefreshTokenStore>` 为 `Sync`、`RefreshService<S>` 可作共享 handler state（同 SessionLifecycle，#1252）。
+pub trait RefreshTokenStoreLocal: Send + Sync {
     /// 持久化新签发记录（`status = Active`；签发链根 `lineage_id == id`）。
     async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
 
@@ -616,8 +621,10 @@ mod smoke_credential {
 #[cfg(test)]
 mod smoke_refresh {
     //! build smoke：`RefreshTokenStore` 域形 async port 同范式（PORT-SHAPE-01/02，#1325）——native-AFIT impl +
-    //! mockall mock 均经 `Box<DynRefreshTokenStore>` 装入 + `Send`。`NoopRefreshTokenStore` body `todo!()`，
-    //! 故只构造 Dyn wrapper + 断言 `Send`，**不 `.await`**（真实行为由 `internal::mem::InMemRefreshTokenStore`
+    //! mockall mock 均经 `Box<DynRefreshTokenStore>` 装入 + `Send + Sync`。`RefreshTokenStoreLocal` supertrait
+    //! 为 `Send + Sync`（#1252 接线 refresh/login handler 共享 state 要求），故 `DynRefreshTokenStore` 亦
+    //! `Send + Sync`；烟测断言升级为 `assert_send_sync`。`NoopRefreshTokenStore` body `todo!()`，
+    //! 故只构造 Dyn wrapper + 断言 `Send + Sync`，**不 `.await`**（真实行为由 `internal::mem::InMemRefreshTokenStore`
     //! + `application::RefreshService` 集成测试覆盖）。
     use super::{
         DynRefreshTokenStore, IdentityError, RefreshRotation, RefreshTokenHash, RefreshTokenId,
@@ -648,20 +655,20 @@ mod smoke_refresh {
         }
     }
 
-    fn assert_send<T: Send>(_: &T) {}
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
-    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 `Send`。
+    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send+Sync 变体（#1252）。
     #[test]
     fn refresh_store_impls_load_into_dyn_wrapper() {
         let from_impl: Box<DynRefreshTokenStore> =
             DynRefreshTokenStore::new_box(NoopRefreshTokenStore);
-        assert_send(&from_impl);
+        assert_send_sync(&from_impl);
         let from_mock: Box<DynRefreshTokenStore> =
             DynRefreshTokenStore::new_box(MockTestRefreshTokenStore::new());
-        assert_send(&from_mock);
+        assert_send_sync(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧构造器必填位置参注入（`Box<DynRefreshTokenStore>` 非 Option，缺失即编译错误）。
+    // PORT-SHAPE-02：消費侧构造器必填位置参注入（`Box<DynRefreshTokenStore>` 非 Option，缺失即编译错误）。
     struct RefreshStoreService {
         _store: Box<DynRefreshTokenStore<'static>>,
     }
@@ -675,11 +682,11 @@ mod smoke_refresh {
     fn refresh_store_is_required_ctor_injectable() {
         let from_impl =
             RefreshStoreService::new(DynRefreshTokenStore::new_box(NoopRefreshTokenStore));
-        assert_send(&from_impl._store);
+        assert_send_sync(&from_impl._store);
         let from_mock = RefreshStoreService::new(DynRefreshTokenStore::new_box(
             MockTestRefreshTokenStore::new(),
         ));
-        assert_send(&from_mock._store);
+        assert_send_sync(&from_mock._store);
     }
 
     mockall::mock! {
