@@ -33,7 +33,9 @@ use std::process::Command;
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
 // curated extras 不是架构 layer，只是安全敏感公开 API 面的定点 golden 例外。
-const CURATED_EXTRA_CRATES: &[&str] = &["authn"];
+// `diport`（DI-infra 层，非 basis/engine）：持全部安全敏感 DI port（Signer/SecretResolver/Pdp/Revocation/
+// KeyProvider…），公开 trait/类型面是轴 A SemVer 边界，列入 curated extras 定点冻结（#1470）。
+const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport"];
 
 /// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
 /// 编译器即强制回退 rolling `nightly`（其 rustdoc-json 格式随日期漂移 ⇒ baseline 误报）；本 const 经
@@ -251,15 +253,19 @@ mod tests {
         assert_eq!(target_crates(Some(Layer::Basis)).len(), 6);
         // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis + engine + curated extras（安全敏感封装面例外）全集。
-        assert_eq!(target_crates(None).len(), 10);
+        // None = basis(6) + engine(3) + curated extras(authn/diport=2) 全集。
+        assert_eq!(target_crates(None).len(), 11);
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
-        assert_eq!(target_crates(Some(Layer::Curated)), vec!["authn"]);
+        assert_eq!(target_crates(Some(Layer::Curated)), vec!["authn", "diport"]);
         assert!(target_crates(None).contains(&"authn"));
+        assert!(target_crates(None).contains(&"diport"));
         assert!(!target_crates(Some(Layer::Basis)).contains(&"authn"));
         assert!(!target_crates(Some(Layer::Engine)).contains(&"authn"));
+        // diport 是 DI-infra 层，既非 basis 也非 engine——只经 curated extras 入 baseline。
+        assert!(!target_crates(Some(Layer::Basis)).contains(&"diport"));
+        assert!(!target_crates(Some(Layer::Engine)).contains(&"diport"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
         assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
     }
@@ -298,6 +304,48 @@ mod tests {
             assert!(
                 !baseline.contains(forbidden),
                 "authn public-api golden 不得暴露私有 mint funnel: {forbidden}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn diport_public_api_golden_reexports_send_variant_not_base_trait() -> anyhow::Result<()> {
+        let baseline = std::fs::read_to_string(baseline_dir()?.join("diport.txt"))?;
+        // crate 根 re-export = Send 变体 + Dyn wrapper + KeyProvider 公开类型（adapters/组合根消费面）。
+        for required in [
+            "pub trait diport::KeyProvider: core::marker::Send",
+            "pub struct diport::DynKeyProvider",
+            "pub struct diport::KeyRef",
+            "pub struct diport::EncryptOutput",
+            // 方法列在定义路径（cargo-public-api 惯例），非 re-export 路径；parse ⇄ to_token 对称 token 存储面单源。
+            "pub fn diport::key_provider::KeyRef::to_token",
+        ] {
+            assert!(
+                baseline.contains(required),
+                "diport public-api golden 缺少必要公开项: {required}"
+            );
+        }
+        // 非 Send 基 trait `*Local` **不**在 crate 根 re-export（仅 `diport::key_provider::KeyProviderLocal`
+        // 经 pub mod 可达），避免 glob import 方法解析歧义（ADR-003 落地结论）。
+        assert!(
+            !baseline.contains("pub trait diport::KeyProviderLocal"),
+            "diport public-api golden 不得在 crate 根 re-export 基 trait KeyProviderLocal"
+        );
+        // 安全负向不变式（ADR-011 §D3 防 timing oracle）：key 标识 `KeyName`/`KeyVersion`/`KeyRef` **禁** derive
+        // `PartialEq`/`Eq`——只能经 `ct_eq` 等值-only 匹配。golden 锁住「无 `==` 能力」，杜绝后续 PR 重生 baseline
+        // 时误把 `==`（非常数时间）纳入公开面。负向 golden + 不 derive（类型层）双守。
+        for forbidden in [
+            "impl core::cmp::PartialEq for diport::key_provider::KeyName",
+            "impl core::cmp::Eq for diport::key_provider::KeyName",
+            "impl core::cmp::PartialEq for diport::key_provider::KeyVersion",
+            "impl core::cmp::Eq for diport::key_provider::KeyVersion",
+            "impl core::cmp::PartialEq for diport::key_provider::KeyRef",
+            "impl core::cmp::Eq for diport::key_provider::KeyRef",
+        ] {
+            assert!(
+                !baseline.contains(forbidden),
+                "diport public-api golden 不得暴露 key 标识的非常数时间 `==`（ADR-011 §D3）: {forbidden}"
             );
         }
         Ok(())

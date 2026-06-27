@@ -403,6 +403,7 @@ dependencies = [
  "dynosaur",
  "futures",
  "ids",
+ "primitives",
  "secure",
  "thiserror 2.0.18",
  "tokio-util",
@@ -778,6 +779,15 @@ name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "home"
@@ -1588,14 +1598,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "secure"
 version = "0.0.0"
 dependencies = [
  "argon2",
  "base64",
+ "hmac",
+ "secrecy",
  "securederive",
  "sha2",
+ "subtle",
  "thiserror 2.0.18",
+ "vocab",
  "zeroize",
 ]
 

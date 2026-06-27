@@ -6,7 +6,7 @@
 //!
 //! ## 派发策略（ADR-003）
 //!
-//! - **async DI port**（`Signer` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ManagedResource`）：native AFIT + dynosaur
+//! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ManagedResource`）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
 //!   - **Send**：dyn wrapper 的 boxed future 须 `Send`（ShutdownStack 经 `tokio::spawn` 隔离 panic）。
@@ -51,6 +51,14 @@
 //! **消费侧**（域 / 服务 / adapter）：`impl MyPort for ...`（Send 变体，**非** `MyPortLocal`）；组合根经
 //! `DynMyPort::new_box(impl)` / `new_arc(impl)` 构造 `Box<DynMyPort>` / `Arc<DynMyPort>` 注入（必填构造器位置参）。
 //!
+//! ## key 标识选型（`KeyId` vs `KeyRef`，勿混用）
+//!
+//! 两个 port 的 key 标识语义不同，不可互替：
+//! - [`signer::KeyId`]（签名 port）：**opaque 标识**，无版本语义，provider 内部据此选签名 key。
+//! - [`key_provider::KeyRef`]（加解密 port）：**name + version 复合**，承载轮换语义（current-primary 写 /
+//!   previous-read 解，ADR-011 §D3）；其 version [`key_provider::KeyVersion`] 严格定长常数时间匹配。
+//!   加解密 adapter 用 `KeyRef`（**非** `KeyId`）；存储 token 经 `KeyRef::parse` ⇄ `to_token` 对称读写。
+//!
 //! ## sealing（ADR-003 §4.2 方案 ②）
 //!
 //! DI port trait 集中到独立 crate 后，sealed-trait（仅定义 crate 内封闭）无法对独立 adapter crate
@@ -81,6 +89,7 @@ pub mod clock;
 pub mod dead_letter_store;
 pub mod envelope;
 pub mod fenced_writer;
+pub mod key_provider;
 pub mod leader_elector;
 pub mod lock_store;
 pub mod managed_resource;
@@ -126,6 +135,10 @@ pub use envelope::{
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
     WriteOutcome,
+};
+pub use key_provider::{
+    DynKeyProvider, EncryptOutput, KeyName, KeyParseError, KeyProvider, KeyProviderError, KeyRef,
+    KeyVersion,
 };
 pub use leader_elector::{
     DynLeaderElector, LeaderElector, LeaderElectorError, LeaderId, LeaderIdError, LeaseToken,
