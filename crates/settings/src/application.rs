@@ -7,16 +7,25 @@
 //! rolledBack）。flag 求值经域内
 //! [`crate::internal::ports::FlagStore`] 取快照 + `domain::evaluate_flag`（L0 纯计算）。
 //!
-//! 追踪弹边界（同 identity G1）：服务由组合根（journeys）直接调用，**不逐字节跑 axum**；[`SettingsDomain`]
-//! 只经 bootstrap [`Registry`] **声明**配置路由组（register 闭包收集、不执行）。真实持久化（postgres adapter）
-//! + axum 挂载（域 crate 经 `reg.route_group::<httpserve::Primary>` 收到的 `ListenerRouter<Primary>` 的 `mount_primary` 方法，#1113/#1103 typed route funnel——非已退役的 `httpserve::mount_primary` 自由函数）+ wire `ERR_SETTINGS_*` 前缀注册留 Join。
+//! HTTP 接缝（#1430 PERSIST-009 settings 首条 durable module 闭环）：[`SettingsDomain`] 持 config + secret
+//! 应用服务，`init` 经 typed `route_group::<Primary>` + `mount_primary`（`ListenerRouter<Primary>` 方法，
+//! #1113/#1103 typed route funnel）从 generated SPEC 挂 `settings.config-publish` / `settings.secret-publish`
+//! 两条认证路由（鉴权 = permission，租户来自验签 [`httpserve::Authenticated`] 证据、非 pre-auth header）。
+//! 域错误经 generic `vocab::CoreErrorKind` 映射状态码（4xx 客户端 / 5xx 内部，不铸 `ERR_SETTINGS_` 命名空间）。
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
 //! ref: crates/identity/src/application.rs（L2 OutboxFact 经 OutboxEmitter 落 durable outbox 范式，#1100）
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use axum::Json;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::{Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
 use diport::{Clock, OutboxEnvelopeParts};
@@ -24,14 +33,20 @@ use generated::event::settings_v1::{
     CONTRACT, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
     TOPIC as VERSION_CHANGED_TOPIC,
 };
+use generated::http::HttpAuthMode;
 use generated::http::settings_v1::{
-    SettingsConfigPublishData, SettingsConfigPublishRequest, SettingsConfigPublishResponse,
+    SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData, SettingsConfigPublishRequest,
+    SettingsConfigPublishResponse,
 };
-use httpserve::Primary;
+use generated::http::settings_v2::SPEC as SECRET_HTTP_SPEC;
+use httpserve::{Authenticated, Primary, PrimaryRoute};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
-use vocab::TenantId;
+use primitives::RouteAuthOptOut;
+use vocab::{CoreError, CoreErrorKind, TenantId};
+
+use crate::secret_application::secret_publish_handler;
 
 use crate::domain::{
     ConfigEntry, ConfigRepoError, ConfigValue, ConfigVersion, EvalContext, FlagDecision, FlagKey,
@@ -42,7 +57,9 @@ use crate::internal::mem::{
     InMemConfigRepo, InMemConfigUnitOfWork, InMemFlagStore, new_config_store,
 };
 use crate::internal::ports::FlagStore;
-use crate::ports::{ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfWork};
+use crate::ports::{
+    ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
+};
 
 /// 配置路由组前缀（Primary listener，业务 API）。
 pub const SETTINGS_ROUTE_PREFIX: &str = "/api/v1/settings";
@@ -106,8 +123,8 @@ fn unix_secs(t: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-/// u64 版本号 → wire i64（溢出收口 `i64::MAX`）。
-fn wire_version(version: u64) -> i64 {
+/// u64 版本号 → wire i64（溢出收口 `i64::MAX`）。config / secret handler 共用。
+pub(crate) fn wire_version(version: u64) -> i64 {
     i64::try_from(version).unwrap_or(i64::MAX)
 }
 
@@ -366,20 +383,181 @@ impl SettingsService {
     }
 }
 
-/// settings 域 bootstrap 生命周期：声明配置路由组。
+// ---------------------------------------------------------------------------
+// HTTP handler / route 装配（config-publish；secret-publish 在 secret_application）
+// ---------------------------------------------------------------------------
+
+/// config publish 请求体上界（防御性 body 限额，对标 identity `MAX_LOGIN_BODY_BYTES`）。
+const MAX_CONFIG_BODY_BYTES: usize = 64 * 1024;
+
+/// 取请求注入的 request id（中间件注入；缺失回退 `"unknown"`）。
+pub(crate) fn request_id_from(req: &Request<Body>) -> String {
+    httpserve::request_id_str(req.extensions())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// 认证拒因（small；避免 `Result<_, Response>` 触 clippy `result_large_err`——`Response` ≥128B）：
+/// `Unauthenticated` → 401、`Forbidden` → 403。config / secret handler 共用，经 [`AuthReject::into_response`] 落地。
+pub(crate) enum AuthReject {
+    /// 无 [`Authenticated`] 证据（fail-closed；正常经 enforce 层后必有，缺失即框架接线异常）→ 401。
+    Unauthenticated,
+    /// 证据存在但租户 `None`（跨租 service / super-admin 主体）→ 403（settings 写是租户作用域资源）。
+    Forbidden,
+}
+
+impl AuthReject {
+    pub(crate) fn into_response(self, request_id: &str) -> Response {
+        match self {
+            AuthReject::Unauthenticated => httpserve::error::unauthenticated(request_id),
+            AuthReject::Forbidden => httpserve::error::forbidden(request_id),
+        }
+    }
+}
+
+/// 从请求认证证据取租户（post-auth 单源，对标零信任）。**不读** pre-auth `X-Tenant-ID` header——租户来自验签
+/// claim。拒因经 small [`AuthReject`] 出向（handler 映射到响应），避开 `Result<_, Response>` 的大 Err。
+pub(crate) fn authenticated_tenant(req: &Request<Body>) -> Result<TenantId, AuthReject> {
+    match req.extensions().get::<Authenticated>() {
+        None => Err(AuthReject::Unauthenticated),
+        Some(auth) => auth.tenant_id().ok_or(AuthReject::Forbidden),
+    }
+}
+
+/// 从 generated SPEC 派生 [`PrimaryRoute`]（method / 相对 path / contract_id / opt_out 单源，杜绝手写漂移）。
+/// 相对 path = SPEC 绝对 path 剥 [`SETTINGS_ROUTE_PREFIX`]（对标 identity `login_relative_path`）。
+fn primary_route_from_spec(spec: &generated::http::HttpSpec) -> Result<PrimaryRoute, KernelError> {
+    let rel = spec
+        .path
+        .strip_prefix(SETTINGS_ROUTE_PREFIX)
+        .filter(|rel| rel.starts_with('/') && rel.len() > 1)
+        .ok_or(KernelError::RouteGroup)?;
+    let method = Method::from_bytes(spec.method.as_bytes()).map_err(|_| KernelError::RouteGroup)?;
+    // permission ⇒ 无 opt-out（listener JWT 强制）；public ⇒ Public 降级；其它降级 settings 端点不支持。
+    let opt_out = match spec.auth.mode {
+        HttpAuthMode::Permission => None,
+        HttpAuthMode::Public => Some(RouteAuthOptOut::Public),
+        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
+            return Err(KernelError::RouteGroup);
+        }
+    };
+    Ok(PrimaryRoute {
+        method,
+        path: rel,
+        contract_id: spec.contract_id,
+        opt_out,
+    })
+}
+
+/// `settings.config-publish` handler（Primary listener，JWT 认证）：认证证据取租户 → parse body →
+/// `publish_config`（CAS 写 + outbox co-tx，L2）→ 201。租户来自验签证据（post-auth），非 pre-auth header。
+async fn config_publish_handler(
+    State(service): State<Arc<SettingsService>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let tenant = match authenticated_tenant(&req) {
+        Ok(tenant) => tenant,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let (_, body) = req.into_parts();
+    let body = match to_bytes(body, MAX_CONFIG_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    config_publish_handler_bytes(service, tenant, body, &request_id).await
+}
+
+/// config-publish 核心（tenant 已解析）：parse → service → typed 响应 / 错误映射。供单测直接驱动。
+pub(crate) async fn config_publish_handler_bytes(
+    service: Arc<SettingsService>,
+    tenant: TenantId,
+    body: Bytes,
+    request_id: &str,
+) -> Response {
+    let request: SettingsConfigPublishRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(request_id),
+    };
+    match service.publish_config(tenant, request).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(err) => config_error_response(&err, tenant, request_id),
+    }
+}
+
+/// `SettingsServiceError` → wire 响应：generic [`CoreErrorKind`] 派生状态码（4xx 客户端 / 5xx 内部），
+/// **不**铸 `ERR_SETTINGS_` 命名空间（复用 vocab 通用 kind）。5xx 记结构化 error（const message，无 PII；
+/// `tenant_id` 是合法低基数可观测字段、非凭据，透传供跨租定位——对标 identity handler 错误日志）。
+fn config_error_response(
+    err: &SettingsServiceError,
+    tenant: TenantId,
+    request_id: &str,
+) -> Response {
+    let kind = match err {
+        SettingsServiceError::InvalidKey | SettingsServiceError::PercentageOutOfRange => {
+            CoreErrorKind::Validation
+        }
+        SettingsServiceError::VersionConflict => CoreErrorKind::Conflict,
+        SettingsServiceError::NotFound => CoreErrorKind::NotFound,
+        SettingsServiceError::PayloadEncode(_)
+        | SettingsServiceError::EntryBuild
+        | SettingsServiceError::Storage(_) => CoreErrorKind::Internal,
+    };
+    if matches!(kind, CoreErrorKind::Internal) {
+        tracing::error!(
+            error = %err,
+            request_id,
+            tenant_id = %tenant,
+            contract_id = CONFIG_HTTP_SPEC.contract_id,
+            operation = "config_publish",
+            "settings config publish failed"
+        );
+    }
+    httpserve::error::core_error_response(&CoreError::new(kind), request_id)
+}
+
+/// settings 域 bootstrap 生命周期：挂载 config-publish / secret-publish 业务路由（Primary listener）。
 ///
-/// 追踪弹只**声明**（register 闭包收集、不执行）——证明 bootstrap 组装了 settings 的 Primary 配置路由。
-pub struct SettingsDomain;
+/// 持有 config 应用服务 + secret 仓储端口（构造器必填位置参注入，缺失即编译错误，rust-standards §工程护栏）；
+/// `init` 经 typed `route_group::<Primary>` + `mount_primary` 从 generated SPEC 单源挂两条认证路由
+/// （对标 identity `IdentityDomain`）。
+///
+/// secret 路由 State 持 `Arc<DynSecretRepo>`（而非 `SecretService`）：`SecretService` 含 `Box<DynSecretResolver>`
+/// （diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）⇒ 非 `Sync`、不可作 axum State；
+/// publish 路径不需 resolver，故经仓储端口直挂（见 `secret_application::publish_secret_to_repo`）。
+///
+/// `configs_ready` 探针由组合根（`assemblies/runtime::wire_settings`）经 `DomainModuleResult` 注册——探针包
+/// `PgDbReadiness`（adapter 类型，域 crate 不可依赖 adapter），故不在此声明（层序约束）。
+pub struct SettingsDomain {
+    config: Arc<SettingsService>,
+    secret_repo: Arc<DynSecretRepo<'static>>,
+}
+
+impl SettingsDomain {
+    /// 组合根构造：注入 config 应用服务 + secret 仓储端口（已装配域形 repo / UoW provider）。
+    pub fn new(config: Arc<SettingsService>, secret_repo: Arc<DynSecretRepo<'static>>) -> Self {
+        Self {
+            config,
+            secret_repo,
+        }
+    }
+}
 
 impl Domain for SettingsDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        // 配置路由组（Primary listener，typed marker）。register 闭包追踪弹不执行：Join 经
-        //   rb.mount_primary(PrimaryRoute { method, path, contract_id, opt_out }, handler)
-        // 挂真实 axum 路由（settings.config-publish 鉴权由 listener auth plan 承载，无 Public 降级）。
-        reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, Ok)?;
-        // configs_ready readiness probe 由组合根（bins/rss·server 的 wire_settings）经 registry.probe() 注册
-        // （持有 PgStore 的组合根决定 probe 生命周期，Domain::init 保持声明式、不做 I/O）。
-        // 生产 HTTP 挂载留 Join #1017（生产 run() 接 wire_settings 见 #1309）。
+        let config = Arc::clone(&self.config);
+        let secret_repo = Arc::clone(&self.secret_repo);
+        reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&CONFIG_HTTP_SPEC)?,
+                post(config_publish_handler).with_state(config),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&SECRET_HTTP_SPEC)?,
+                post(secret_publish_handler).with_state(secret_repo),
+            );
+            Ok(rb)
+        })?;
         Ok(())
     }
 }
@@ -664,14 +842,178 @@ mod tests {
         assert!(matches!(err, SettingsServiceError::InvalidKey));
     }
 
+    // ── #1430 settings durable module：HTTP handler / route 装配测试 ──────────────────
+    use crate::internal::mem::{InMemSecretRepo, new_secret_store};
+    use primitives::RequiredScheme;
+    use testkit::ContractRequest;
+    use vocab::PrincipalKind;
+
+    /// in-mem secret 仓储端口（secret-publish 路由 State / SettingsDomain 构造替身）。
+    fn secret_repo_arc() -> Arc<DynSecretRepo<'static>> {
+        Arc::from(DynSecretRepo::new_box(InMemSecretRepo::from_shared(
+            new_secret_store(),
+        )))
+    }
+
+    /// 测试用 SettingsDomain 实例（config 服务 + secret 仓储端口，均 in-mem 替身）。
+    fn settings_domain_for_test() -> SettingsDomain {
+        let capture = CapturingEmitter::default();
+        SettingsDomain::new(
+            Arc::new(service_with(&capture, InMemFlagStore::new())),
+            secret_repo_arc(),
+        )
+    }
+
+    /// post-auth 认证证据（JWT / User / 带租户）。`Authenticated::new` 在 `#[cfg(test)]` 不被
+    /// `rss_authenticated_callsite` dylint 扫（模拟验签桥注入）。
+    fn user_evidence(t: TenantId) -> Authenticated {
+        Authenticated::new(
+            RequiredScheme::Jwt,
+            PrincipalKind::User,
+            "test-subject",
+            Some(t),
+        )
+    }
+
+    fn config_router(service: Arc<SettingsService>, auth: Option<Authenticated>) -> axum::Router {
+        let router =
+            axum::Router::new().route("/configs", post(config_publish_handler).with_state(service));
+        match auth {
+            Some(a) => router.layer(axum::Extension(a)),
+            None => router,
+        }
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
-    fn settings_domain_declares_config_route_group() {
-        let reg = bootstrap::compose(&[&SettingsDomain]).expect("compose ok");
+    fn settings_domain_declares_business_route_group() {
+        let domain = settings_domain_for_test();
+        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
-        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups.len(),
+            1,
+            "config + secret 同 /api/v1/settings 路由组"
+        );
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, SETTINGS_ROUTE_PREFIX);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn primary_route_from_config_spec_derives_relative_path_no_optout() {
+        let route = primary_route_from_spec(&CONFIG_HTTP_SPEC).expect("route");
+        assert_eq!(route.path, "/configs", "SPEC 绝对 path 剥前缀得相对挂载段");
+        assert_eq!(route.method, Method::POST);
+        assert_eq!(route.contract_id, "settings.config-publish");
+        assert!(route.opt_out.is_none(), "permission 模式无 opt-out 降级");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_publish_handler_authed_returns_201_and_emits_fact() {
+        let capture = CapturingEmitter::default();
+        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let router = config_router(svc, Some(user_evidence(tenant())));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/configs").json(&publish_req("app.timeout", "30s")),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::CREATED).expect("201");
+        let decoded: SettingsConfigPublishResponse = resp.json().expect("json");
+        assert_eq!(decoded.data.key, "app.timeout");
+        assert_eq!(decoded.data.version, 1, "首次发布 = v1");
+        assert_eq!(emitted_facts(&capture).len(), 1, "co-tx 发一次 outbox fact");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_publish_handler_missing_auth_returns_401() {
+        let capture = CapturingEmitter::default();
+        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let router = config_router(svc, None);
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/configs").json(&publish_req("app.k", "v")),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::UNAUTHORIZED)
+            .expect("缺认证证据 → 401");
+        assert_eq!(emitted_facts(&capture).len(), 0, "未认证 → 零写");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_publish_handler_principal_without_tenant_returns_403() {
+        let capture = CapturingEmitter::default();
+        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        // 跨租主体（Service，tenant=None）→ settings 写是租户作用域资源 → 403。
+        let auth = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Service, "svc", None);
+        let router = config_router(svc, Some(auth));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/configs").json(&publish_req("app.k", "v")),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::FORBIDDEN)
+            .expect("无租户作用域 → 403");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_publish_bytes_invalid_json_returns_400() {
+        let capture = CapturingEmitter::default();
+        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let resp = config_publish_handler_bytes(
+            svc,
+            tenant(),
+            axum::body::Bytes::from_static(b"not json"),
+            "rid",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_publish_bytes_invalid_key_returns_400() {
+        let capture = CapturingEmitter::default();
+        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let body = serde_json::to_vec(&publish_req("bad key", "v")).expect("serialize");
+        let resp = config_publish_handler_bytes(svc, tenant(), body.into(), "rid").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "非法 key → 400 Validation"
+        );
+    }
+
+    #[test]
+    fn config_error_response_maps_status_codes() {
+        let cases = [
+            (SettingsServiceError::InvalidKey, StatusCode::BAD_REQUEST),
+            (
+                SettingsServiceError::PercentageOutOfRange,
+                StatusCode::BAD_REQUEST,
+            ),
+            (SettingsServiceError::VersionConflict, StatusCode::CONFLICT),
+            (SettingsServiceError::NotFound, StatusCode::NOT_FOUND),
+            (
+                SettingsServiceError::EntryBuild,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(
+                config_error_response(&err, tenant(), "rid").status(),
+                want,
+                "{err:?} → {want}"
+            );
+        }
     }
 
     const TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";

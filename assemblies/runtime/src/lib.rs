@@ -51,7 +51,8 @@ use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
     RequiredScheme,
 };
-use settings::{SecretService, SettingsDomain, SettingsService, empty_flag_store};
+use settings::ports::DynSecretRepo;
+use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
 use vault::{TenantStoreAllowlist, VaultRuntimeDeps, VaultSecretResolver};
 
@@ -546,36 +547,29 @@ impl bootstrap::HealthProbe for RlsReadyProbe {
 
 // ── settings + secret wiring ─────────────────────────────────────────────────────────────────
 
-/// 接线 settings 域（[PERSIST-001] #1422）：构造 `SettingsService` + `SecretService`，产出
-/// `configs_ready` readiness 探针。
+/// 接线 settings 域（#1430 PERSIST-009 settings 首条 durable module 闭环）：构造 config 应用服务 + secret
+/// 仓储端口、产出 `configs_ready` readiness 探针，返回 `(SettingsDomain, DomainModuleResult)`。
 ///
 /// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——内部持 [`PgRuntimeDeps`] capability bundle；settings
 ///   wiring 只拿 `PgDomainDeps<caps::Settings>`，拿不到 identity repo 或裸 pool。
 ///
-/// 产物经 [`DomainModuleResult`] 出向（result object），组合根 `merge` 聚合后排空到 sink；共享 infra 经
-/// [`SharedRuntimeDeps`] 入向。本函数不消费 / 不产出任何别域 value（禁跨 module handoff，签名 Hard）。
+/// [`SettingsDomain`] 持构造好的 config 服务 + secret 仓储端口，经 `Domain::init` 挂 config-publish /
+/// secret-publish 路由（service 经 route 闭包捕获、**绝不**经 result 出向，WIRING-DEPS-NO-HANDOFF-01）；
+/// `configs_ready` 探针经 [`DomainModuleResult`] 出向（探针包 `PgDbReadiness` = adapter 类型，须在组合根构造、
+/// 不能放域 crate `Domain::init`）。组合根 `compose(&[&settings_domain, ..])` 装配路由 + `merge(module)` 聚合探针。
 ///
-/// # service 暂丢
-///
-/// 业务 handler ↔ service 接线属后续域 PR——接线落地时 route 闭包捕获这些 service、经 `&mut Registry` 的
-/// typed `route_group` 注册，**绝不**经 result 出向（service 不流出 `wire_X`）。本最小 scope 暂 `drop`
-/// （与 #1320 scaffold 一致，未引入新行为）。
+/// secret-publish 路由 State 持 `Arc<DynSecretRepo>`（publish 路径不需 resolver）：**不构造 `SecretService`**——
+/// 其 `Box<DynSecretResolver>`（diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）使整体非 `Sync`、
+/// 不可作 axum State。vault resolver 句柄经 `deps.vault.runtime_resources()` 在 `run()` 注册 guard（lifecycle 不变）。
 ///
 /// # 注意
 ///
-/// 当前 `empty_flag_store()` 返回空 in-mem store（`seed-data` feature，fail-closed 语义）；
-/// 生产 flag store 待 #1120。`SystemClock` 仍硬编码——clock 注入（rust-standards「Clock 构造器位置参」）
-/// 属 tangential 改进，不在本 PR 最小 scope。
-pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainModuleResult> {
-    // vault secret resolver 经 capability bundle dispatch 注入（#1498）：per-domain 受控句柄
-    // `VaultDomainDeps<caps::Settings>`，拿不到 signer 或裸 client；resolver 构造已在 run() 装配 bundle 时完成
-    // （pre-GA 空 allowlist → 所有 resolve fail-closed Forbidden）。
-    let resolver = deps
-        .vault
-        .for_domain::<vault::caps::Settings>()
-        .secret_resolver();
-
-    // 单一 settings bundle（PERSIST-003）：read+write config + secret 同 pool、单 clock 经 Arc 扇出，预包装
+/// 当前 `empty_flag_store()` 返回空 in-mem store（`seed-data` feature，fail-closed 语义）；生产 flag store
+/// 待 #1120。`SystemClock` 仍硬编码——clock 注入（rust-standards「Clock 构造器位置参」）属 tangential，不在本 PR scope。
+pub async fn wire_settings(
+    deps: &SharedRuntimeDeps,
+) -> anyhow::Result<(SettingsDomain, DomainModuleResult)> {
+    // 单一 settings bundle（PERSIST-003）：read+write config + secret repo 同 pool、单 clock 经 Arc 扇出，预包装
     // 域形 dyn port——组合根不再散装构造 repo / 手工 DynX 包裹 / 配对 read↔write。
     let (configs, writer, secrets) = deps
         .pg
@@ -583,14 +577,17 @@ pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainMod
         .settings_bundle(Arc::new(SystemClock))
         .into_parts();
 
-    let settings_svc =
+    // config 应用服务（L2 OutboxFact：CAS 写 + outbox co-tx）→ 经 Arc 作 config-publish 路由 axum State。
+    let config_svc =
         SettingsService::with_postgres(configs, writer, empty_flag_store(), Box::new(SystemClock));
-    let secret_svc = SecretService::with_postgres(secrets, resolver, Box::new(SystemClock));
-    // reason: handler↔service 接线属后续域 PR；本 PR 仅建接线契约形态，service 暂不消费。
-    drop(settings_svc);
-    drop(secret_svc);
+    // secret 仓储端口 → 经 Arc 作 secret-publish 路由 axum State（`DynSecretRepo` 已 Send+Sync）。
+    let secret_repo: Arc<DynSecretRepo<'static>> = Arc::from(secrets);
 
-    settings_module_result(deps.pg.readiness_handle())
+    let module = settings_module_result(deps.pg.readiness_handle())?;
+    Ok((
+        SettingsDomain::new(Arc::new(config_svc), secret_repo),
+        module,
+    ))
 }
 
 /// settings 域 readiness 产物：`configs_ready` 探针（读共享 `PgDbReadiness`）。
@@ -1042,21 +1039,20 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
     let audit_domain = wire_audit(&deps).context("wire audit")?;
     let identity_domain = wire_identity(&deps).context("wire identity")?;
+    // settings durable module（#1430 PERSIST-009）：domain 实例持 config 服务 + secret 仓储端口（挂 config-publish /
+    // secret-publish 业务路由）；module 携 configs_ready 探针。
+    let (settings_domain, settings_module) = wire_settings(&deps).await.context("wire settings")?;
 
-    // settings domain（#1272/#1274）+ identity/audit domain 注册（声明 routes/subscribers）。
-    let mut registry = bootstrap::compose(&[&SettingsDomain, &identity_domain, &audit_domain])
+    // settings/identity/audit domain 实例注册（声明 routes/subscribers/probes）。
+    let mut registry = bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])
         .context("compose domains")?;
 
-    // 聚合各域 module result（今仅 settings；后续域只需多一行 module.merge(wire_X(&deps).await?)，run() 形态恒定）。
+    // 聚合各域 module result（settings configs_ready 探针；后续域只需多一行 module.merge(wire_X(&deps).await?)）。
     let mut module = DomainModuleResult::default();
-    module.merge(wire_settings(&deps).await.context("wire settings")?);
+    module.merge(settings_module);
     // provider capability bundle 单源装配（#1498）：vault resolver guard 经 runtime_resources() 单源排进
     // module.resources，组合根不再逐 channel 手写 register_detached（D5）。redis/amqp 待各自 durable body 接入。
     module.resources.extend(deps.vault.runtime_resources());
-    tracing::warn!(
-        stage = "scaffold",
-        "settings/secret handler↔service wiring remains scaffolded; identity login is wired"
-    );
 
     // 排空域产物探针进 registry（须先于 take_health_reporter，readyz 才聚合 configs_ready）。
     for (name, probe) in module.probes {
@@ -1571,7 +1567,7 @@ mod tests {
             primitives::ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
         let probe_name_b =
             primitives::ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
-        let mut registry = bootstrap::compose(&[&SettingsDomain]).expect("compose settings");
+        let mut registry = bootstrap::compose(&[]).expect("empty compose");
 
         // 注册一个实现了 HealthProbe 的占位 probe（不需要 PgStore，不连 DB）。
         struct NullProbe;
@@ -1602,7 +1598,7 @@ mod tests {
             primitives::ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
         let name_b =
             primitives::ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
-        let mut registry = bootstrap::compose(&[&SettingsDomain]).expect("compose settings");
+        let mut registry = bootstrap::compose(&[]).expect("empty compose");
         let flag = Arc::new(AtomicBool::new(true));
 
         registry

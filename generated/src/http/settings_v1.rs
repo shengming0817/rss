@@ -142,3 +142,20 @@ pub const CONTRACT_ID: &str = "settings.config-publish";
 /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("settings", "settings.config-publish");
+
+/// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PATH: &str = "/api/v1/settings/configs";
+
+/// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: super::HttpSpec = super::HttpSpec {
+    contract_id: CONTRACT_ID,
+    contract: CONTRACT,
+    path: PATH,
+    method: "POST",
+    auth: super::HttpAuthSpec {
+        mode: super::HttpAuthMode::Permission,
+        reason: None,
+        permission: Some("settings.config-publish"),
+    },
+    headers: &[],
+};

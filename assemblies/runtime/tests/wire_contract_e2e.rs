@@ -1,10 +1,10 @@
-//! 接线契约 e2e（[PERSIST-001] #1422 + 单源装配 #1498）：`wire_settings(&SharedRuntimeDeps) ->
-//! DomainModuleResult` 形态 + vault capability bundle 装配出口。
+//! 接线契约 e2e（[PERSIST-001] #1422 + 单源装配 #1498 + #1430 durable module）：`wire_settings(&SharedRuntimeDeps)
+//! -> (SettingsDomain, DomainModuleResult)` 形态 + vault capability bundle 装配出口。
 //!
 //! **正向集成（常态 CI 必跑，无 ambient env 依赖）**：用测试内固定 addr/token 构造 stub `VaultRuntimeDeps`
 //! （`build_vault_runtime_deps`，无外部 vault 也成功），与 pg testcontainer 组 `SharedRuntimeDeps`，验：
-//! - `wire_settings`（resolver 经 bundle dispatch 注入，env-独立）产物恰一条 `configs_ready` 探针、
-//!   `resources` / `workers` 空（settings wire_X 产物本身无 detached 资源）；
+//! - `wire_settings`（resolver 经 bundle dispatch 注入，env-独立）返回 `(SettingsDomain, DomainModuleResult)`，
+//!   module 产物恰一条 `configs_ready` 探针、`resources` / `workers` 空（settings wire_X 产物本身无 detached 资源）；
 //! - bundle `runtime_resources()` 单源派生恰一条 resolver guard（#1498 D5 单源 rollback）。
 //!
 //! 对标 `controller-runtime/envtest`：负例查外部 env 缺失，**正向路径用测试内受控依赖继续执行**，不让核心
@@ -61,8 +61,9 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
 
     let deps = SharedRuntimeDeps { pg, vault };
 
-    // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 产物恰一条 configs_ready 探针。
-    let result = wire_settings(&deps).await?;
+    // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回 (SettingsDomain, DomainModuleResult)；
+    // module 半边产物恰一条 configs_ready 探针（#1430：domain 半边经 run() compose 挂业务路由，此处只验 module 出向）。
+    let (_settings_domain, result) = wire_settings(&deps).await?;
     assert_eq!(result.probes.len(), 1, "settings 仅 configs_ready 一条探针");
     assert_eq!(
         result.probes[0].0.as_str(),

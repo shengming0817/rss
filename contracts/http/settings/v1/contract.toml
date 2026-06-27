@@ -1,15 +1,23 @@
-# settings 配置发布 HTTP 契约（draft）——RW-W 配置版本化写入/发布接缝。
+# settings 配置发布 HTTP 契约（active）——RW-W 配置版本化写入/发布接缝。
 # 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
 # 写入新配置版本 + 发布 config-version-changed outbox fact ⇒ consistencyLevel = OutboxFact（L2）。
-# draft：服务层闭环验接缝，不逐字节跑 axum serving；graduate 到 active（含 path+method active 必填）留 Join。
+# graduate draft→active（#1430 PERSIST-009 settings 首条 durable module 闭环）：挂活路由 + 鉴权 = permission。
 id = "settings.config-publish"
 kind = "http"
 domain = "settings"
 version = "v1"
 owner = "settings"
 consistencyLevel = "OutboxFact"
-lifecycle = "draft"
+lifecycle = "active"
+path = "/api/v1/settings/configs"
+method = "POST"
 
 [schemas]
 request = "request.schema.json"
 response = "response.schema.json"
+
+# 租户作用域特权写：Primary listener JWT verify 强制已认证主体（缺/匿名 fail-closed 401）；
+# 租户来自验签 claim（非 pre-auth X-Tenant-ID header）。permission 声明意图，PDP graduate 后细粒度 enforce。
+[endpoints.http.auth]
+mode = "permission"
+permission = "settings.config-publish"

@@ -325,8 +325,12 @@ impl SecretRef {
         {
             return Err(SettingsError::SecretRefInvalid);
         }
+        // version 与 ref_key 同字符集守卫（控制字符 / ASCII 空白拒绝）：防 `\r\n` 等经 adapter 拼入远端
+        // 请求头 / URL 触发注入——secret-publish 路由（#1430）已使本 funnel wire-reachable，权威校验须自洽。
         if let Some(v) = version
-            && (v.is_empty() || v.len() > MAX_KEY_LEN)
+            && (v.is_empty()
+                || v.len() > MAX_KEY_LEN
+                || v.chars().any(|c| c.is_control() || c.is_ascii_whitespace()))
         {
             return Err(SettingsError::SecretRefInvalid);
         }
@@ -1497,6 +1501,23 @@ mod tests {
                 Err(SettingsError::SecretRefInvalid)
             ),
             "ref_key='{bad_key}' 应 SecretRefInvalid"
+        );
+    }
+
+    /// version 与 ref_key 同字符集守卫（#1430）：含控制字符 / ASCII 空白的 refVersion → SecretRefInvalid，
+    /// 防 `\r\n` 等经 adapter 拼入远端请求头注入。
+    #[rstest]
+    #[case("v 1")]
+    #[case("v\t1")]
+    #[case("v\r\n1")]
+    fn secret_ref_parse_control_or_whitespace_in_version_err(#[case] bad_version: &str) {
+        let sid = store("vault");
+        assert!(
+            matches!(
+                SecretRef::parse(sid, "db/password", Some(bad_version)),
+                Err(SettingsError::SecretRefInvalid)
+            ),
+            "refVersion='{bad_version}' 应 SecretRefInvalid"
         );
     }
 

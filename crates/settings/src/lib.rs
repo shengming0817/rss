@@ -9,7 +9,8 @@
 //!
 //! 签名冻结（G0）已补真实行为：`domain` newtype 校验 / `diff` / `evaluate_flag`（全 11 operator + 百分比
 //! 分桶）；`application` 经 in-mem `Publisher`（L2 OutboxFact）打通配置发布/回滚接缝。真实持久化（postgres
-//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载留 Join。`smoke` 保留为签名冻结回归（绑函数指针锁签名）。
+//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载（config-publish / secret-publish 认证路由）已落（#1430
+//! PERSIST-009 settings 首条 durable module 闭环）。`smoke` 保留为签名冻结回归（绑函数指针锁签名）。
 //!
 //! # 对标
 //!
@@ -41,6 +42,18 @@ pub use secret_application::{SecretService, SecretServiceError};
 #[cfg(any(test, feature = "seed-data"))]
 pub fn empty_flag_store() -> FlagStoreBox {
     FlagStoreBox(Box::new(internal::mem::InMemFlagStore::new()))
+}
+
+/// 返回空 in-mem secret 仓储端口（`Arc<DynSecretRepo>`），供 seed / journey 注入 [`SettingsDomain::new`]
+/// 的 secret-publish 路由 State（#1430）。
+///
+/// 与 [`empty_flag_store`] 同治理姿态：`InMemSecretRepo` 保持 `pub(crate)` 封装，此工厂是唯一对外构造路径
+/// （调用方只需持有 `Arc<DynSecretRepo>`，无需命名内部类型）。仅 `test` / `seed-data` 可用（非生产 store）。
+#[cfg(any(test, feature = "seed-data"))]
+pub fn empty_secret_repo() -> std::sync::Arc<ports::DynSecretRepo<'static>> {
+    std::sync::Arc::from(ports::DynSecretRepo::new_box(
+        internal::mem::InMemSecretRepo::from_shared(internal::mem::new_secret_store()),
+    ))
 }
 
 // ---------------------------------------------------------------------------

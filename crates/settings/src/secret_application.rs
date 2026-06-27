@@ -12,11 +12,23 @@
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
 //! ref: external-secrets/external-secrets api/v1beta1/secretstore_types.go（SecretResolver 对标）
 
-use diport::{Clock, DynSecretResolver, SecretMaterial, SecretResolver};
-use vocab::TenantId;
+use std::sync::Arc;
 
+use axum::Json;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use diport::{Clock, DynSecretResolver, SecretMaterial, SecretResolver};
+use generated::http::settings_v2::{
+    SPEC as SECRET_HTTP_SPEC, SettingsSecretPublishData, SettingsSecretPublishRequest,
+    SettingsSecretPublishResponse,
+};
+use vocab::{CoreError, CoreErrorKind, TenantId};
+
+use crate::application::{authenticated_tenant, request_id_from, wire_version};
 use crate::domain::{
-    SecretEntry, SecretKey, SecretRef, SecretRepoError, SecretVersion, SettingsError,
+    SecretEntry, SecretKey, SecretRef, SecretRepoError, SecretVersion, SettingsError, StoreId,
 };
 use crate::ports::{DynSecretRepo, SecretRepo};
 
@@ -109,6 +121,13 @@ fn secret_ref_to_coordinate(r: &SecretRef) -> diport::SecretCoordinate {
 /// 必填依赖走构造器位置参（缺失即编译错误）：`secrets`（坐标仓储）、`resolver`（材料解析 provider）、
 /// `clock`（保留位置参，未来扩展审计时间戳用，当前未使用）。
 ///
+/// # 生产构造约束（#1430）
+///
+/// **生产组合根不构造 `SecretService`**：secret-publish 路由经 `Arc<DynSecretRepo>` + [`secret_publish_handler`]
+/// 直挂（写引用坐标走 [`publish_secret_to_repo`]，不需 resolver）。`SecretService` 持 `Box<DynSecretResolver>`
+/// （ADR-003 Amendment #1095：diport infra 端口 `Send` 非 `Sync`）⇒ 整体非 `Sync`、不可作 axum State。本类型
+/// 承载 secret **resolve** 路径（解析材料；对应 HTTP 路由待落）+ 测试，仍是 secret 域服务的完整 API 表面。
+///
 /// # fail-closed 契约
 ///
 /// `resolve_secret` 每次均发起 fresh resolver 调用，绝不缓存材料——零信任边界要求 secret 读取须 fresh。
@@ -153,22 +172,12 @@ impl SecretService {
         }
     }
 
-    /// 当前 secret key 的下一版本号（无历史 → 1）。
+    /// 写入新 secret 引用版本（CAS，L1 本地事务）。返回新版本号。并发冲突冒泡 `VersionConflict`。
     ///
-    /// 与 `SettingsService::next_version` 同逻辑：使用 `latest_version`（含 tombstone）而非 `find`，
-    /// 保证 delete 后 version 单调不重置（防 event_id 复用，对齐 #1249 F1）。
-    async fn next_version(
-        &self,
-        tenant: TenantId,
-        key: &SecretKey,
-    ) -> Result<u64, SecretServiceError> {
-        let current = self.secrets.latest_version(tenant, key).await?;
-        Ok(current.map_or(1, |v| v + 1))
-    }
-
-    /// 写入新 secret 引用版本（CAS，L1 本地事务）。
-    ///
-    /// 返回新版本号。并发冲突冒泡 `VersionConflict`。
+    /// 逻辑收口进 [`publish_secret_to_repo`]（仅依赖仓储，无 resolver / clock）——secret-publish handler 共享
+    /// 同一单源（DRY）。handler 的 axum State 只持 `Arc<DynSecretRepo>` 而非整个 `SecretService`：`SecretService`
+    /// 持 `Box<DynSecretResolver>`（diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）⇒ 整体非
+    /// `Sync`、不可作 axum State；publish 路径不需 resolver，故经仓储端口直挂（避开冻结端口签名，不动 ADR-003）。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn publish_secret(
         &self,
@@ -176,10 +185,7 @@ impl SecretService {
         key: SecretKey,
         secret_ref: SecretRef,
     ) -> Result<u64, SecretServiceError> {
-        let version = self.next_version(tenant, &key).await?;
-        let entry = SecretEntry::new(key, secret_ref, tenant, SecretVersion::new(version));
-        self.secrets.save(tenant, entry).await?;
-        Ok(version)
+        publish_secret_to_repo(&self.secrets, tenant, key, secret_ref).await
     }
 
     /// 读取当前活跃 secret 引用（不存在返回 `Ok(None)`）。
@@ -264,6 +270,120 @@ impl SecretService {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP handler（secret-publish；route 装配在 application::SettingsDomain::init）
+// ---------------------------------------------------------------------------
+
+/// `settings.secret-publish` 请求体上界（防御性 body 限额）。
+const MAX_SECRET_BODY_BYTES: usize = 64 * 1024;
+
+/// secret 坐标发布核心（**仅依赖仓储**，无 resolver / clock）：CAS 写新版本（`latest+1`，含 tombstone 单调
+/// 不重置，防 event_id 复用对齐 #1249 F1），返回新版本号；并发冲突冒泡 `VersionConflict`。
+///
+/// `SecretService::publish_secret` 与 secret-publish handler 共享此单源（DRY）。handler State 仅持
+/// `Arc<DynSecretRepo>`（已 `Send + Sync`），不持整个 `SecretService`（含 `Send`-only resolver、非 `Sync`）。
+pub(crate) async fn publish_secret_to_repo(
+    secrets: &DynSecretRepo<'static>,
+    tenant: TenantId,
+    key: SecretKey,
+    secret_ref: SecretRef,
+) -> Result<u64, SecretServiceError> {
+    let current = secrets.latest_version(tenant, &key).await?;
+    let version = current.map_or(1, |v| v + 1);
+    let entry = SecretEntry::new(key, secret_ref, tenant, SecretVersion::new(version));
+    secrets.save(tenant, entry).await?;
+    Ok(version)
+}
+
+/// `settings.secret-publish` handler（Primary listener，JWT 认证）：认证证据取租户 → parse body →
+/// domain newtype funnel（`SecretKey` / `StoreId` / `SecretRef::parse` 权威校验，路径穿越在此 fail-closed）→
+/// [`publish_secret_to_repo`]（CAS 写引用坐标，L1 无 outbox）→ 201。请求 / 响应**绝无 secret 材料**（只写坐标）。
+/// State 仅持 `Arc<DynSecretRepo>`（见 [`publish_secret_to_repo`] 说明：避开 `SecretService` 非 `Sync`）。
+pub(crate) async fn secret_publish_handler(
+    State(secrets): State<Arc<DynSecretRepo<'static>>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let tenant = match authenticated_tenant(&req) {
+        Ok(tenant) => tenant,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let (_, body) = req.into_parts();
+    let body = match to_bytes(body, MAX_SECRET_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    secret_publish_handler_bytes(&secrets, tenant, body, &request_id).await
+}
+
+/// secret-publish 核心（tenant 已解析）：parse + domain funnel + 仓储发布。供单测直接驱动。
+pub(crate) async fn secret_publish_handler_bytes(
+    secrets: &DynSecretRepo<'static>,
+    tenant: TenantId,
+    body: Bytes,
+    request_id: &str,
+) -> Response {
+    let request: SettingsSecretPublishRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(request_id),
+    };
+    // domain newtype 权威校验（key 两段 / store 单段 / ref 路径穿越防御，Hard funnel）→ 非法即 4xx Validation。
+    let (key, secret_ref) = match parse_secret_publish(&request) {
+        Ok(parsed) => parsed,
+        Err(_) => return httpserve::error::validation_bad_request(request_id),
+    };
+    match publish_secret_to_repo(secrets, tenant, key, secret_ref).await {
+        Ok(version) => {
+            let response = SettingsSecretPublishResponse {
+                data: SettingsSecretPublishData {
+                    key: request.key,
+                    version: wire_version(version),
+                },
+            };
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(err) => secret_error_response(&err, tenant, request_id),
+    }
+}
+
+/// 请求体 → domain newtype（权威校验单源；非法坐标 / 穿越路径从此不可表达）。
+fn parse_secret_publish(
+    request: &SettingsSecretPublishRequest,
+) -> Result<(SecretKey, SecretRef), SettingsError> {
+    let key = SecretKey::parse(&request.key)?;
+    let store_id = StoreId::parse(&request.store_id)?;
+    let secret_ref = SecretRef::parse(store_id, &request.ref_key, request.ref_version.as_deref())?;
+    Ok((key, secret_ref))
+}
+
+/// `SecretServiceError` → wire 响应：generic [`CoreErrorKind`] 派生状态码（4xx 客户端 / 5xx 内部），
+/// **不**铸 `ERR_SETTINGS_` 命名空间（复用 vocab 通用 kind）。5xx 记结构化 error（const message，无 PII；
+/// `tenant_id` 是合法低基数可观测字段、非凭据，透传供跨租定位——对标 identity handler 错误日志）。
+fn secret_error_response(err: &SecretServiceError, tenant: TenantId, request_id: &str) -> Response {
+    let kind = match err {
+        SecretServiceError::InvalidKey => CoreErrorKind::Validation,
+        SecretServiceError::VersionConflict => CoreErrorKind::Conflict,
+        SecretServiceError::NotFound | SecretServiceError::VersionNotFound => {
+            CoreErrorKind::NotFound
+        }
+        SecretServiceError::SecretForbidden => CoreErrorKind::Forbidden,
+        SecretServiceError::SecretStoreUnavailable | SecretServiceError::Storage(_) => {
+            CoreErrorKind::Internal
+        }
+    };
+    if matches!(kind, CoreErrorKind::Internal) {
+        tracing::error!(
+            error = %err,
+            request_id,
+            tenant_id = %tenant,
+            contract_id = SECRET_HTTP_SPEC.contract_id,
+            operation = "secret_publish",
+            "settings secret publish failed"
+        );
+    }
+    httpserve::error::core_error_response(&CoreError::new(kind), request_id)
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -277,6 +397,12 @@ mod tests {
     use super::*;
     use crate::domain::{SecretKey, SecretRef, StoreId};
     use crate::ports::DynSecretRepo;
+
+    use axum::routing::post;
+    use httpserve::Authenticated;
+    use primitives::RequiredScheme;
+    use testkit::ContractRequest;
+    use vocab::PrincipalKind;
 
     const TENANT_STR: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B_STR: &str = "00000000-0000-4000-8000-000000000abc";
@@ -342,6 +468,164 @@ mod tests {
         mock.expect_resolve()
             .returning(|_, _| Ok(SecretMaterial::new(b"material".to_vec())));
         service_with_mock_resolver(mock)
+    }
+
+    // ── #1430 settings durable module：secret-publish HTTP handler 测试 ────────────────
+
+    /// in-mem secret 仓储端口（secret-publish 路由 State 替身；publish 路径不需 resolver）。
+    fn secret_repo_arc() -> Arc<DynSecretRepo<'static>> {
+        Arc::from(DynSecretRepo::new_box(InMemSecretRepo::from_shared(
+            new_secret_store(),
+        )))
+    }
+
+    /// post-auth 认证证据（`Authenticated::new` 在 `#[cfg(test)]` 不被 dylint 扫，模拟验签桥注入）。
+    fn user_evidence(t: TenantId) -> Authenticated {
+        Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject", Some(t))
+    }
+
+    fn secret_router(
+        repo: Arc<DynSecretRepo<'static>>,
+        auth: Option<Authenticated>,
+    ) -> axum::Router {
+        let router =
+            axum::Router::new().route("/secrets", post(secret_publish_handler).with_state(repo));
+        match auth {
+            Some(a) => router.layer(axum::Extension(a)),
+            None => router,
+        }
+    }
+
+    fn publish_request(version: Option<&str>) -> SettingsSecretPublishRequest {
+        SettingsSecretPublishRequest {
+            key: "vault.db".to_string(),
+            store_id: "vault".to_string(),
+            ref_key: "myapp/db-password".to_string(),
+            ref_version: version.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_handler_authed_returns_201() {
+        let router = secret_router(secret_repo_arc(), Some(user_evidence(tenant())));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").json(&publish_request(Some("v3"))),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::CREATED).expect("201");
+        let decoded: SettingsSecretPublishResponse = resp.json().expect("json");
+        assert_eq!(decoded.data.key, "vault.db");
+        assert_eq!(decoded.data.version, 1, "首次发布 = v1");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_handler_missing_auth_returns_401() {
+        let router = secret_router(secret_repo_arc(), None);
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").json(&publish_request(None)),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::UNAUTHORIZED)
+            .expect("缺认证证据 → 401");
+    }
+
+    #[tokio::test]
+    async fn secret_publish_bytes_invalid_json_returns_400() {
+        let repo = secret_repo_arc();
+        let resp = secret_publish_handler_bytes(
+            &repo,
+            tenant(),
+            axum::body::Bytes::from_static(b"not json"),
+            "rid",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_bytes_path_traversal_returns_400() {
+        let repo = secret_repo_arc();
+        let req = SettingsSecretPublishRequest {
+            key: "vault.db".to_string(),
+            store_id: "vault".to_string(),
+            ref_key: "a/../evil".to_string(),
+            ref_version: None,
+        };
+        let body = serde_json::to_vec(&req).expect("serialize");
+        let resp = secret_publish_handler_bytes(&repo, tenant(), body.into(), "rid").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "路径穿越坐标 → 400 Validation（domain newtype funnel fail-closed）"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn publish_secret_to_repo_increments_version_monotonically() {
+        let repo = secret_repo_arc();
+        let v1 = publish_secret_to_repo(
+            &repo,
+            tenant(),
+            make_key("vault.db"),
+            make_ref("vault", "k"),
+        )
+        .await
+        .expect("v1");
+        let v2 = publish_secret_to_repo(
+            &repo,
+            tenant(),
+            make_key("vault.db"),
+            make_ref("vault", "k"),
+        )
+        .await
+        .expect("v2");
+        assert_eq!((v1, v2), (1, 2), "CAS latest+1 单调递增");
+    }
+
+    #[test]
+    fn secret_error_response_maps_status_codes() {
+        let cases = [
+            (SecretServiceError::InvalidKey, StatusCode::BAD_REQUEST),
+            (SecretServiceError::VersionConflict, StatusCode::CONFLICT),
+            (SecretServiceError::NotFound, StatusCode::NOT_FOUND),
+            (SecretServiceError::VersionNotFound, StatusCode::NOT_FOUND),
+            (SecretServiceError::SecretForbidden, StatusCode::FORBIDDEN),
+            (
+                SecretServiceError::SecretStoreUnavailable,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(
+                secret_error_response(&err, tenant(), "rid").status(),
+                want,
+                "{err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_handler_principal_without_tenant_returns_403() {
+        // 跨租主体（Service，tenant=None）→ secret 写是租户作用域资源 → 403（与 config handler 对称）。
+        let auth = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Service, "svc", None);
+        let router = secret_router(secret_repo_arc(), Some(auth));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").json(&publish_request(None)),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::FORBIDDEN)
+            .expect("无租户作用域 → 403");
     }
 
     // ── resolve_secret：resolver 恰调一次 ─────────────────────────────────────────────────

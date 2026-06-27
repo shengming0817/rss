@@ -12,6 +12,7 @@
 //!
 //! ref: watermill message/router.go@fbce4d6cd13c8657c668c7e7990fef90d2471b8a（分发循环）
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -23,7 +24,7 @@ use generated::event::settings_v1::{
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use memory::{FixedClock, MemBus, MemEmitter};
 use primitives::ListenerKind;
-use settings::{SettingsDomain, SettingsService};
+use settings::{SettingsDomain, SettingsService, empty_secret_repo};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
@@ -39,12 +40,41 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     // 1. in-mem 基础设施（DI port provider 替身）。
     let bus = MemBus::new();
 
-    // 2. bootstrap 组装：settings 声明配置路由组（声明收集，register 闭包不执行）。
-    let registry = bootstrap::compose(&[&SettingsDomain])?;
+    // 2. bootstrap 组装：settings durable module 实例（#1430）经 Domain::init 挂 config-publish /
+    //    secret-publish 业务路由组（config 服务 + secret 仓储端口构造器注入）。
+    let domain = SettingsDomain::new(
+        Arc::new(SettingsService::with_seed(
+            MemEmitter::new(bus.clone()),
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        )),
+        empty_secret_repo(),
+    );
+    let mut registry = bootstrap::compose(&[&domain])?;
     let route_groups = registry.route_groups();
-    assert_eq!(route_groups.len(), 1, "settings 配置路由组已声明");
+    assert_eq!(
+        route_groups.len(),
+        1,
+        "config + secret 同 /api/v1/settings 业务路由组"
+    );
     assert_eq!(route_groups[0], (ListenerKind::Primary, "/api/v1/settings"));
-    assert_eq!(registry.probe_count(), 0, "追踪弹未注册探针");
+    // configs_ready 探针经组合根 wire_settings 的 DomainModuleResult 出向（探针包 PgDbReadiness=adapter 类型），
+    // 不在域 crate Domain::init 注册——故 compose 后 registry 无探针。
+    assert_eq!(
+        registry.probe_count(),
+        0,
+        "探针经 module result 出向、不在 Domain::init 注册"
+    );
+    // #1430 review F4：finalize_routes() 实跑 route_group register 闭包——config/secret handler 经
+    // primary_route_from_spec 剥 generated SPEC.path 前缀 + mount_primary 实际挂载。证明生产路由注册链
+    // (compose → finalize_routes → SPEC.path strip/mount) 成立，非仅声明（route_groups 只验声明、不跑闭包）；
+    // SPEC.path 与 SETTINGS_ROUTE_PREFIX 漂移会在 primary_route_from_spec 处 Err、于此暴露。
+    let finalized = registry.finalize_routes()?;
+    assert_eq!(
+        finalized.len(),
+        1,
+        "config + secret 两路由 finalize 进单一 Primary listener"
+    );
+    assert_eq!(finalized[0].0, ListenerKind::Primary);
 
     // 3. 订阅 config-version-changed（须先于发布——in-mem 无重放）。
     let token = CancellationToken::new();

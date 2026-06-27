@@ -17,19 +17,11 @@ seed-data = []
 [dependencies]
 thiserror = { workspace = true }
 vocab = { path = "../vocab" }
-ids = { path = "../ids" }
 secure = { path = "../secure" }
-support = { path = "../support" }
-runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
-authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
-eventexec = { path = "../eventexec" }
-observ = { path = "../observ" }
-distributed = { path = "../distributed" }
-deviceloop = { path = "../deviceloop" }
 generated = { path = "../../generated" }
 # 域形 repo DI port（ports 模块 ConfigRepo）的 async dyn 派发：native AFIT + dynosaur dyn-compatible wrapper +
 # trait-variant Send 变体（同 diport 范式，ADR-003/ADR-004 C1）。归属域 crate 而非 diport：repo port 签名
@@ -41,6 +33,8 @@ trait-variant = { workspace = true }
 diport = { path = "../diport" }
 # version-published / rollback event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
 serde_json = { workspace = true }
+# config/secret publish HTTP handler（axum extractor / response / routing；对标 identity login handler）。
+axum = { workspace = true }
 # 配置发布 / flag 求值结构化 span（不记 ConfigValue / PII context；observability.md §日志）。
 tracing = { workspace = true }
 # feature-flag rollout operator 求值（SemVer / 日期）。详见 workspace.dependencies 注释。
@@ -54,3 +48,6 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 mockall = { workspace = true }
 # 域纯逻辑表驱动参数化测试（rust-standards §一致性级别 L0）。
 rstest = { workspace = true }
+# config/secret publish 契约 HTTP 测试（对标 identity login_contract）：testkit oneshot harness + axum 样板 router。
+# testkit 零 adapter 依赖（dev-dep 消费不破「域单测不依赖 adapter crate」）。
+testkit = { path = "../testkit" }

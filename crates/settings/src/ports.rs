@@ -41,7 +41,9 @@ pub use vocab::TenantId;
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `ConfigRepo` 变体 + dynosaur
 // `DynConfigRepo` 承载（DI 注入走 Send wrapper）。与 diport DI port 同范式（ADR-003/ADR-004 C1）。
-pub trait ConfigRepoLocal {
+// `Send + Sync` supertrait（#1430）：`SettingsService` 作 axum handler 共享 state（`Arc<SettingsService>`）
+// 须跨线程共享 `DynConfigRepo`——identity ports 同约定（跨 handler 共享端口在基 trait 加 Send+Sync）。
+pub trait ConfigRepoLocal: Send + Sync {
     /// 取 key 当前活跃配置（最高版本且**非 tombstone**）；不存在 / 已删（latest 为 tombstone）返回 `Ok(None)`。
     async fn find(
         &self,
@@ -90,7 +92,8 @@ pub trait ConfigRepoLocal {
 #[dynosaur(pub DynConfigUnitOfWork = dyn(box) ConfigUnitOfWork, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: 同 ConfigRepoLocal——Send 由 trait_variant `ConfigUnitOfWork` 变体 + dynosaur wrapper 承载。
-pub trait ConfigUnitOfWorkLocal {
+// `Send + Sync` supertrait（#1430）：随 `SettingsService` 作 axum handler 共享 state（同 ConfigRepoLocal 约定）。
+pub trait ConfigUnitOfWorkLocal: Send + Sync {
     /// CAS 写新配置版本 + 同事务 append outbox 行（both-or-neither）。CAS 冲突返
     /// [`ConfigRepoError::VersionConflict`]、持久化失败返 [`ConfigRepoError::Storage`]；任一步失败整事务
     /// 回滚（配置写与 outbox 行皆不落库）。
@@ -117,7 +120,8 @@ pub trait ConfigUnitOfWorkLocal {
 #[dynosaur(pub DynSecretRepo = dyn(box) SecretRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: 同 ConfigRepoLocal——Send 由 trait_variant `SecretRepo` 变体 + dynosaur wrapper 承载。
-pub trait SecretRepoLocal {
+// `Send + Sync` supertrait（#1430）：随 `SecretService` 作 axum handler 共享 state（同 ConfigRepoLocal 约定）。
+pub trait SecretRepoLocal: Send + Sync {
     /// 取 key 当前活跃 secret 引用（最高版本且非 tombstone）；不存在 / 已删返回 `Ok(None)`。
     async fn find(
         &self,
