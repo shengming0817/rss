@@ -1162,14 +1162,51 @@ members = ["rss_demo", "rss_orphan"]
     fn assembly_carrier_has_verify_ci_gate() {
         // assembly validate 在 verify.rs 的 verify 与 ci step 列表中均运行 ⇒ assembly.rs
         // 的 INVARIANT 锚点（ASSEMBLY-PROVIDER-CRATE-01）必须登记 `verify,ci` gate，否则
-        // archrules 判 MissingGate（#1572）。
-        // 互补侧（gate 字符串声明的 plan 成员资格）由 verify.rs 的 full_plan_order_and_count /
-        // ci_plan_order_and_count 守——删 assembly-validate plan 步即那两测试红；合起来覆盖
-        // 「gate 字符串 ↔ plan 实际成员」双向漂移（review F2）。
+        // archrules 判 MissingGate（#1572）。gate 字符串 ↔ plan 实际成员的双向绑定由下方
+        // `gate_strings_bound_to_verify_ci_plan_membership` 机器守（review F2 / #1574）。
         let root = Path::new("/repo");
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/assembly.rs")),
             Some("verify,ci")
+        );
+    }
+
+    /// INVARIANT: ARCHRULES-GATE-PLAN-BIND-01 —— `xtask_gate` 的 gate 字符串与 verify plan 成员资格
+    /// 机器绑定：`full_plan` / `ci_plan` 中每个 in-process carrier 步（`Internal` / `ToolGatedInternal`），
+    /// 其 carrier 文件的 `xtask_gate` 必须 token-含对应 lane（full→`verify`、ci→`ci`）。闭合 #1574——
+    /// gate 字符串原为无机器校验的自由文本，既可相对 plan 漂移（plan 删步但 gate 仍声明），也可拼写错
+    /// （如 `verfy`）；本绑定使二者皆门红。carrier→文件 由 verify.rs `InternalCheck::carrier_file` 穷举
+    /// match 守（缺登记即编译失败）；gate 缺/错即 token 不含 lane 而红。anti-vacuity：断言至少校验过一个 carrier。
+    /// 注：audit lane 不在此绑定——`audit_plan` 无 in-process carrier 步（仅外部 deny/audit `Tool`），
+    /// gate 的 `audit` token 表「模块与 audit lane 相关」（如 verify.rs 自身），非精确 plan 成员，语义不同。
+    #[test]
+    fn gate_strings_bound_to_verify_ci_plan_membership() {
+        let root = Path::new("/repo");
+        let gate_has_lane = |file: &str, lane: &str| -> bool {
+            xtask_gate(root, &root.join(file))
+                .unwrap_or_default()
+                .split(',')
+                .any(|tok| tok.trim() == lane)
+        };
+        let mut checked = 0usize;
+        for (plan, lane) in [
+            (crate::verify::full_plan(), "verify"),
+            (crate::verify::ci_plan(), "ci"),
+        ] {
+            for step in &plan {
+                let Some(file) = step.carrier_file() else {
+                    continue;
+                };
+                checked += 1;
+                assert!(
+                    gate_has_lane(file, lane),
+                    "{file} 在 `{lane}` plan 中，但其 xtask_gate 未声明 `{lane}` lane（gate↔plan 漂移或拼写错）"
+                );
+            }
+        }
+        assert!(
+            checked > 0,
+            "未校验任何 carrier——plan 内省失效（anti-vacuity）"
         );
     }
 

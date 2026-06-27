@@ -91,6 +91,34 @@ enum InternalCheck {
     PublicApiCheck,
 }
 
+impl InternalCheck {
+    /// 该 in-process 检查的 xtask 源文件（archrules `xtask_gate` 表里的 carrier 路径）。
+    /// 穷举 match（无 `_` 臂）⇒ 新增 `InternalCheck` 变体必须同步登记 carrier，否则编译失败；
+    /// 供 `archrules::tests::gate_strings_bound_to_verify_ci_plan_membership` 把 gate 字符串与
+    /// plan 成员资格机器绑定（ARCHRULES-GATE-PLAN-BIND-01，#1574）。
+    #[cfg(test)]
+    pub(crate) fn carrier_file(self) -> &'static str {
+        match self {
+            Self::ContractValidate => "xtask/src/contract/validate.rs",
+            Self::AssemblyValidate => "xtask/src/assembly.rs",
+            Self::ContractBreaking => "xtask/src/contract/breaking.rs",
+            Self::LayerDeps => "xtask/src/layerdeps.rs",
+            Self::WsDepsDrift => "xtask/src/wsdeps.rs",
+            Self::DocContracts => "xtask/src/doc_contracts.rs",
+            Self::ArchRules => "xtask/src/archrules.rs",
+            Self::CodegenCheck => "xtask/src/codegen.rs",
+            Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
+            Self::SchemaRlsGuard => "xtask/src/schema_rls.rs",
+            Self::SetLocalFunnel => "xtask/src/setlocal_funnel.rs",
+            Self::MigrationsSerial => "xtask/src/migrations.rs",
+            Self::CommandSymmetry => "xtask/src/command_symmetry.rs",
+            Self::DeferGate => "xtask/src/defergate.rs",
+            Self::Coverage => "xtask/src/coverage.rs",
+            Self::PublicApiCheck => "xtask/src/publicapi.rs",
+        }
+    }
+}
+
 /// 门步载体。`Internal` 在进程内跑；`CargoBuiltin` 是 toolchain 自带子命令（免探测）；
 /// `Tool` 是第三方 cargo 子命令（先探测，缺则按 [`resolve_tool`] 决策）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +142,7 @@ enum StepKind {
 
 /// 单个门步。`program` 恒为 `cargo`，故只存 `args`。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Step {
+pub(crate) struct Step {
     label: &'static str,
     args: &'static [&'static str],
     kind: StepKind,
@@ -122,6 +150,21 @@ struct Step {
     env: &'static [(&'static str, &'static str)],
     /// 是否需要编译全 workspace —— `--fast` 据此裁剪（true 的步在 fast 下跳过）。
     needs_compile: bool,
+}
+
+impl Step {
+    /// 该步对应的 xtask carrier 源文件——仅 in-process 检查（`Internal` / `ToolGatedInternal`）有；
+    /// `CargoBuiltin`（fmt/build/clippy…）与外部 `Tool`（deny/audit/dylint/nextest）非 archrules carrier，返回 `None`。
+    /// 供 gate↔plan 绑定测试遍历（ARCHRULES-GATE-PLAN-BIND-01，#1574）。
+    #[cfg(test)]
+    pub(crate) fn carrier_file(&self) -> Option<&'static str> {
+        match &self.kind {
+            StepKind::Internal(check) | StepKind::ToolGatedInternal { check, .. } => {
+                Some(check.carrier_file())
+            }
+            StepKind::CargoBuiltin | StepKind::Tool { .. } => None,
+        }
+    }
 }
 
 /// 缺工具决策（纯函数，INVARIANT VERIFY-TOOL-GATE-01）。
@@ -664,7 +707,7 @@ fn step_public_api() -> Step {
 }
 
 /// verify 全量门步计划（单一事实源；顺序 = 执行顺序）。feature-test 门紧随 nextest（同测试相位）。
-fn full_plan() -> Vec<Step> {
+pub(crate) fn full_plan() -> Vec<Step> {
     let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
@@ -696,7 +739,7 @@ fn full_plan() -> Vec<Step> {
 /// `--all-features --all-targets`；覆盖率门替 nextest（兼跑 workspace 测试）；尾追 public-api --check（轴 A）。
 /// `audit`（cargo-audit）紧随 `deny` 后（issue #1133：供应链漏洞门入 PR 阻断 lane，独立于 deny advisories 的
 /// 防御纵深）。ci 恒全量（无 `--fast`）。
-fn ci_plan() -> Vec<Step> {
+pub(crate) fn ci_plan() -> Vec<Step> {
     let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
