@@ -41,7 +41,7 @@ mod tx;
 pub use audit_repo::PgAuditRepo;
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
-pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, caps};
+pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, PgSettingsBundle, caps};
 pub use checkpoint::PgCheckpointStore;
 pub use config_repo::PgConfigRepo;
 pub use credential_repo::PgCredentialRepo;

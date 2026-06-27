@@ -51,10 +51,7 @@ use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
     RequiredScheme,
 };
-use settings::{
-    SecretService, SettingsDomain, SettingsService, empty_flag_store,
-    ports::{DynConfigRepo, DynConfigUnitOfWork},
-};
+use settings::{SecretService, SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
 use vault::{TenantStoreAllowlist, VaultSecretResolver};
 
@@ -563,21 +560,18 @@ pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainMod
     let resolver = build_vault_resolver_from(|name| std::env::var(name).ok())
         .context("vault resolver config")?;
 
-    let settings_pg = deps.pg.for_domain::<caps::Settings>();
-    // 受控能力句柄派发 repo（pool clone 在 bundle 内、不出 postgres crate）：读/写各一份 PgConfigRepo（同 pool）。
-    let config_repo_r = settings_pg.config_repo(Box::new(SystemClock));
-    let config_repo_w = settings_pg.config_repo(Box::new(SystemClock));
-    let pg_secret_repo = settings_pg.secret_repo();
+    // 单一 settings bundle（PERSIST-003）：read+write config + secret 同 pool、单 clock 经 Arc 扇出，预包装
+    // 域形 dyn port——组合根不再散装构造 repo / 手工 DynX 包裹 / 配对 read↔write。
+    let (configs, writer, secrets) = deps
+        .pg
+        .for_domain::<caps::Settings>()
+        .settings_bundle(Arc::new(SystemClock))
+        .into_parts();
 
-    let settings_svc = SettingsService::with_postgres(
-        DynConfigRepo::new_box(config_repo_r),
-        DynConfigUnitOfWork::new_box(config_repo_w),
-        empty_flag_store(),
-        Box::new(SystemClock),
-    );
-
+    let settings_svc =
+        SettingsService::with_postgres(configs, writer, empty_flag_store(), Box::new(SystemClock));
     let secret_svc = SecretService::with_postgres(
-        settings::ports::DynSecretRepo::new_box(pg_secret_repo),
+        secrets,
         DynSecretResolver::new_box(resolver),
         Box::new(SystemClock),
     );

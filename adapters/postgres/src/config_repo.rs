@@ -16,6 +16,8 @@
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型：save 以 version+1 守乐观并发）
 //! ref: crates/identity 域形 UoW 端口范式 + adapters/postgres/src/session_lifecycle.rs（co-tx 范式）
 
+use std::sync::Arc;
+
 use consistency::Entry;
 use diport::{Clock, OutboxEnvelopeParts};
 use futures::future::BoxFuture;
@@ -33,19 +35,20 @@ use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgSessionLifecycle`]）clone 构造；
 /// 读端口与 co-tx 写共用同一 `pool`（保证读得到已提交写）。
 ///
-/// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Box<dyn Clock>`，同 [`crate::PgEmitter`] /
-/// [`crate::PgSessionLifecycle`]）：co-tx outbox envelope `occurred_at` 时间源（#1129/#262 F1——settings 的
-/// `settings.config-version-changed` 生产 outbox 路径，本是第三条漏接 occurred_at 的构造点）。
+/// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Arc<dyn Clock>`）：co-tx outbox envelope `occurred_at`
+/// 时间源（#1129/#262 F1——settings 的 `settings.config-version-changed` 生产 outbox 路径，本是第三条漏接
+/// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgSessionLifecycle`]）：
+/// settings bundle 以**单一**注入 clock 经 `Arc::clone` 扇出到 read/write 两个实例（PERSIST-003，#1424）。
 pub struct PgConfigRepo {
     pool: sqlx::PgPool,
-    clock: Box<dyn Clock>,
+    clock: Arc<dyn Clock>,
 }
 
 impl PgConfigRepo {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
-    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::config_repo` 收口。
-    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
+    pub(crate) fn new(store: &PgStore, clock: Arc<dyn Clock>) -> Self {
         Self {
             pool: store.pool.clone(),
             clock,

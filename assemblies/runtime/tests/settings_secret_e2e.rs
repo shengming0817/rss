@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime};
 use diport::{Clock, DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolverError};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use settings::SecretService;
-use settings::ports::{DynSecretRepo, SecretKey, SecretRef, StoreId, TenantId};
+use settings::ports::{SecretKey, SecretRef, StoreId, TenantId};
 
 // ── 测试用常量 ────────────────────────────────────────────────────────────────
 
@@ -132,8 +132,13 @@ async fn connect_pg_and_setup()
 
 /// 构造 SecretService（真 PgSecretRepo via settings 域受控句柄 + InlineMemResolver + FixedClock）。
 fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretService {
+    // settings bundle 产出 secret box（本 e2e 不消费 read/write config）。
+    let (_configs, _writer, secrets) = deps
+        .for_domain::<caps::Settings>()
+        .settings_bundle(Arc::new(FixedClock))
+        .into_parts();
     SecretService::with_postgres(
-        DynSecretRepo::new_box(deps.for_domain::<caps::Settings>().secret_repo()),
+        secrets,
         DynSecretResolver::new_box(resolver),
         Box::new(FixedClock),
     )

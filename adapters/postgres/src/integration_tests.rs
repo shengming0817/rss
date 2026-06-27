@@ -50,9 +50,14 @@ impl diport::Clock for FixedClock {
     }
 }
 
-/// 构造注入用 clock（`Box<dyn Clock>`，与全项目 clock 注入约定一致，固定 [`fixed_clock_time`]）。
+/// 构造注入用 clock（`Box<dyn Clock>`，emitter / session lifecycle 注入约定，固定 [`fixed_clock_time`]）。
 fn fixed_clock() -> Box<dyn diport::Clock> {
     Box::new(FixedClock(fixed_clock_time()))
+}
+
+/// 构造注入用 clock（`Arc<dyn Clock>`，`PgConfigRepo` 共享扇出约定，固定 [`fixed_clock_time`]，#1424）。
+fn fixed_clock_arc() -> std::sync::Arc<dyn diport::Clock> {
+    std::sync::Arc::new(FixedClock(fixed_clock_time()))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2710,7 +2715,7 @@ async fn setup_config(store: &PgStore) -> Result<(), Box<dyn std::error::Error +
 async fn tc1_config_save_find_roundtrip() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.timeout").unwrap();
 
@@ -2728,13 +2733,100 @@ async fn tc1_config_save_find_roundtrip() -> TestResult {
     Ok(())
 }
 
+/// tc1b：经 `settings_bundle` funnel 解包的 `DynConfigRepo` 在真实 DB 上 save→find 闭合——验证 bundle
+/// 预包装的 config 读写路径（非散装 `PgConfigRepo::new`）端到端可用（PG-BUNDLE-SETTINGS-04 集成覆盖，#1424）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    // 经 funnel：PgRuntimeDeps → for_domain::<Settings> → settings_bundle → into_parts（取 read config box）。
+    let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
+    let (configs, _writer, _secrets) = deps
+        .for_domain::<crate::caps::Settings>()
+        .settings_bundle(fixed_clock_arc())
+        .into_parts();
+    let tenant = config_tenant();
+    let key = SettingKey::parse("bundle.timeout").unwrap();
+
+    assert!(configs.find(tenant, &key).await?.is_none(), "未写入 → None");
+    configs
+        .save(tenant, config_entry("bundle.timeout", "30s", 1))
+        .await?;
+    let found = configs.find(tenant, &key).await?.unwrap();
+    assert_eq!(found.value(), "30s", "bundle DynConfigRepo find 取回值");
+    assert_eq!(found.version(), 1, "bundle DynConfigRepo find 取回版本");
+    Ok(())
+}
+
+/// tc1c：经 `settings_bundle` funnel 解包的 `writer`（`DynConfigUnitOfWork`）在真实 DB 上 `save_and_append_outbox`
+/// co-tx 落 config 行 + outbox 行 + 构造期注入 occurred_at——证 bundle write lane 与 direct co-tx（tc5）语义等价
+/// （F2，#1424；补 tc1b 只覆盖 read lane 的缺口）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    // store 即将移入 deps（PG-BUNDLE-POOL-03 无 pool accessor）→ 先 clone pool 供验证查询。
+    let pool = store.pool.clone();
+    let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
+    let (_configs, writer, _secrets) = deps
+        .for_domain::<crate::caps::Settings>()
+        .settings_bundle(fixed_clock_arc())
+        .into_parts();
+    let tenant = config_tenant();
+    let event_id = unique_event_id("cfg-tc1c-evt");
+
+    writer
+        .save_and_append_outbox(
+            tenant,
+            config_entry("bundle.cotx", "v1", 1),
+            config_outbox_entry(&event_id),
+            config_envelope("bundle.cotx"),
+        )
+        .await?;
+
+    // config 行 + outbox 行 co-tx 两行皆在（tenant-correct）。
+    let crow: (i64, String) = sqlx::query_as(
+        "SELECT count(*), max(tenant_id::text) FROM config_entries WHERE config_key = $1 AND version = 1",
+    )
+    .bind("bundle.cotx")
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(crow.0, 1, "bundle writer：config 行应写入");
+    assert_eq!(crow.1, CONFIG_TENANT, "bundle writer：config 行 tenant_id");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        ob_cnt.0, 1,
+        "bundle writer：outbox 行应写入（co-tx 两行皆在）"
+    );
+    // occurred_at 来自 bundle 构造期注入的 Arc clock（write lane 经 save_and_append_outbox 用）。
+    let cfg_meta: (String,) =
+        sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        cfg_meta
+            .0
+            .replace(' ', "")
+            .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
+        "bundle writer co-tx outbox metadata 应含注入 clock 的 occurred_at: {}",
+        cfg_meta.0
+    );
+    Ok(())
+}
+
 /// tc2：版本历史——find = max(version)；find_version 取精确历史版本；缺失版本 → None。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn tc2_config_find_version_returns_history() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -2770,7 +2862,7 @@ async fn tc2_config_find_version_returns_history() -> TestResult {
 async fn tc3_config_save_cas_conflict() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
 
     repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
@@ -2804,7 +2896,7 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
 async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -2852,7 +2944,7 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
 async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5-evt");
 
@@ -3026,7 +3118,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
 async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
 
     repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
@@ -3071,7 +3163,7 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
 async fn tc8_config_find_maps_storage_error() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
 
     // 关池（PgConfigRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 sqlx 错误 → Storage。
@@ -3097,7 +3189,7 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
 async fn tc9_config_cross_tenant_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.k").unwrap();
@@ -3160,7 +3252,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
 async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.conformance").unwrap();
@@ -3204,7 +3296,7 @@ fn config_event_id(tenant: TenantId, key: &str, version: u64) -> String {
 async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
