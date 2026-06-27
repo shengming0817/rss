@@ -1,0 +1,64 @@
+# Cross-domain transport dispatch 可观测性告警规则（#1007，归属 distributed transport seam）。
+#
+# Prometheus rule_files 格式。metric/label 契约单源见 docs/rules/observability.md §Cross-domain Transport。
+# 改 metric 名/label 须同步 emit site（crates/distributed/src/transport.rs record_dispatch_metrics）+
+# 本文件 + 上述文档。
+#
+# 校验：promtool check rules docs/ops/transport-dispatch-alerts.rules.yaml
+#
+# 注：transport_mode/outcome 是闭值集低基数 label（distributed::{TransportMode,TransportOutcome}::as_label）。
+# 目标 domain/contract_id 故意不入 metric label（基数随契约增长），故告警按 transport_mode 聚合定位 in-proc/remote。
+groups:
+  - name: transport-dispatch
+    rules:
+      # 错误率 SLO：某 transport_mode 的分发失败占比超 5%（跨域调用核心可用性信号）。by(transport_mode)
+      # 区分 in-proc / remote 故障来源；for:5m 抗瞬时尖峰。分母含 ok+error，rate[5m] 平滑。
+      - alert: TransportDispatchErrorRatioHigh
+        expr: |
+          sum by (transport_mode) (rate(domain_transport_dispatch_total{outcome="error"}[5m]))
+          /
+          sum by (transport_mode) (rate(domain_transport_dispatch_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "跨域 transport 分发错误率超 5%（transport_mode={{ $labels.transport_mode }}）"
+          description: "domain_transport_dispatch_total 错误占比 {{ $value | humanizePercentage }}（transport_mode={{ $labels.transport_mode }}）；remote=目标 domain 不可达/超时，in_proc=被调 handler 失败，查 dispatch span 与目标 domain readyz。"
+
+      # 任意错误增长（早期信号）：某 transport_mode 近 10min 出现失败即告警，先于错误率阈值穿透。
+      - alert: TransportDispatchErrorsAppearing
+        expr: sum by (transport_mode) (increase(domain_transport_dispatch_total{outcome="error"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "跨域 transport 分发出现失败（transport_mode={{ $labels.transport_mode }}）"
+          description: "近 10min domain_transport_dispatch_total{outcome=error} 增长 {{ $value }}（transport_mode={{ $labels.transport_mode }}）；排查目标 domain 连通性 / 契约兼容性。"
+
+      # 分发延迟 P95 过高：跨域调用慢 → 上游 handler 阻塞。by(transport_mode) 区分 in-proc/remote 慢源。
+      # 阈值按部署基线调（此处 1s 兜底；remote 含网络往返，in_proc 应远低于此）。
+      - alert: TransportDispatchLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (transport_mode, le) (rate(domain_transport_dispatch_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "跨域 transport 分发 P95 延迟过高（transport_mode={{ $labels.transport_mode }}）"
+          description: "domain_transport_dispatch_duration_seconds P95={{ $value }}s（transport_mode={{ $labels.transport_mode }}）；remote 慢=网络/目标 domain 慢，in_proc 慢=被调 handler 慢，查目标 domain 指标。"
+
+      # 采样停更探测：series 曾存在但近 10min 无新分发样本（transport 装配回退/卡死或流量归零）。
+      # 优于裸 absent()（后者仅在 metric family 从未出现时触发）。注：流量本就为零时本规则会触发——
+      # 跨域调用非持续流量场景下视为 info，按部署需要决定是否启用。
+      - alert: TransportDispatchNoData
+        expr: absent_over_time(domain_transport_dispatch_total[10m])
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "跨域 transport 分发近 10min 无数据（无流量或 metrics-facade 未装配）"
+          description: "10min 内无 domain_transport_dispatch_total 新样本；确认是否预期零流量，否则检查 distributed transport 装配与 /metrics 接入。"

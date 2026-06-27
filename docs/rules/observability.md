@@ -159,19 +159,34 @@ label 闭值集纪律：
 
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
-## Cross-domain Transport
+## Cross-domain Transport（#1007）
 
-跨域同步 HTTP contract 调用经 `distributed` 的 transport seam（`DomainTransport` trait）时，
-必须记录：
+跨域同步 HTTP contract 调用经 `distributed::DomainTransport` seam 时，统一由
+`distributed::InstrumentedDomainTransport` 在每次 dispatch 结算时发射下列 metric（bare 名，emit site =
+`distributed::record_dispatch_metrics`，minimal 直发 `metrics` facade，无 recorder 即 no-op）：
 
-- `transport_mode`：仅允许 `in_proc`、`remote`。
-- `outcome`：每次分发都记录，不能只记录成功路径。
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `domain_transport_dispatch_total` | Counter | `transport_mode`,`outcome` | 单次跨域 contract 分发结算（成功与失败路径均记） |
+| `domain_transport_dispatch_duration_seconds` | Histogram | `transport_mode`,`outcome` | 单次分发端到端耗时（注入 `Clock` 测量，含 in-proc / remote 往返） |
 
-`transport_mode` 与 `outcome` 都必须通过 sealed typed value 表达。metric label 保持低基数；
-超出闭值集的错误细节只写 trace span，不进入 metric label。
+label 闭值集纪律：
 
-remote 调用的 metrics 和 tracer 必须同源注入。共享依赖里的 tracer 缺失（`Option::None`）时统一降级
-NoopTracer——构造器以 typed 形态传入，从类型层杜绝 remote span start 边界裸判空。
+- `transport_mode` 闭合于 `distributed::TransportMode::as_label()`（`in_proc`/`remote`）；`outcome` 闭合于
+  `distributed::TransportOutcome::as_label()`（`ok`/`error`）——crate 自有 `as_label()` 闭映射，单源、无副本可漂移。
+- 每次分发都记录 `outcome`，不能只记录成功路径。错误细节（kind / source）**不进入** metric label，保持低基数。
+- 目标 domain、`contract_id` **不入 metric label**（基数随契约数增长）：它们只进 dispatch span。
+
+dispatch span（`domain_transport.dispatch`）只记录 `transport_mode`、目标 `domain`、`contract_id`（三者均为
+路由元数据）；path / headers / body 经 `secure::Redact` 字段策略脱敏，不得明文进入 Debug 或 span 字段。契约身份
+经 `vocab::ContractBinding` 单源绑定（domain + contract_id 不可漂移）；caller-supplied header 经
+`distributed::TransportHeaders` fail-closed 白名单（仅诊断 / trace-context 头，拒 `authorization` / `cookie` /
+`x-tenant-id` 等），认证 / 租户 / 服务凭据由 adapter 从已认证信道铸造、不经此 seam。remote HTTP adapter 仅实现
+`DomainTransport`，不另建一套指标标签。
+
+**告警面**单源 `docs/ops/transport-dispatch-alerts.rules.yaml`（Prometheus rule，`outcome="error"` 错误率 +
+P95 延迟 + 采样停更）。新增或改名上述 metric / label 必须同步 schema、tests、dashboard、该 rules 文件与
+emit site（`crates/distributed/src/transport.rs`）。
 
 ## Redis Namespace
 

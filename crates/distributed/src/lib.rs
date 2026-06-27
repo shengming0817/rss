@@ -9,8 +9,14 @@
 
 mod cas;
 mod locker;
+mod transport;
 pub use cas::StateCas;
 pub use locker::Locker;
+pub use transport::{
+    DomainMethod, DomainRequest, DomainResponse, DomainTransport, DomainTransportError,
+    DomainTransportErrorKind, InstrumentedDomainTransport, TransportHeaderError, TransportHeaders,
+    TransportMode, TransportOutcome,
+};
 
 /// Fencing token（单调递增；对齐 openraft LogId/Vote 单调语义，防止脑裂写入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
