@@ -5,6 +5,7 @@
 - **日期**：2026-06-27
 - **关联**：issue #1471 [field-protection ADR] · 子 Feature #1465 [framework 底座] / #1466 [KeyProvider 与 Vault Transit] /
   #1467 [settings ConfigValue 静态加密] · capability gap **P1-9**（`docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md`）
+  · **子设计 ADR-012**（`202606271755-012-settings-configvalue-encryption-design.md`，issue **#1473**：把 §D7 #1467 具体化到 settings —— AADForConfig 字节编码 / 存储列 migration / 旧明文读 + 回滚 / 保护策略分层）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发 → KeyProvider port 归属）· **ADR-005**（域形 vs infra port category line，本 ADR 复用其归属判据不重证）
 - **既有能力**：#1359/#1360 已交付 observe-time 字段级 **redaction**（`securederive::Redact` derive + `secure` redaction funnel）；本 ADR 在其上把 **storage encryption** 划成独立面
 - **归属**：framework（数据保护语义边界 / DI 接缝 / provider-agnostic 基础设施治理，正确性要求 provider 可互换）
