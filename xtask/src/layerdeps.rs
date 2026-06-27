@@ -31,6 +31,10 @@
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
+//! INVARIANT: LAYER-DEPS-09 —— `runctx` 的 `test-support` **feature** 只准经 `[dev-dependencies]` 启用，
+//!   禁在任一 shipped 依赖表（`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。该 feature 暴露
+//!   `pub fn runctx::test_support::app_ctx`——生产构建启用即可不经 `impl runctx::PrincipalFacet` 直接造
+//!   `AppCtx`、绕过伪造门 dylint `rss_principal_facet_impl_allowlist`（#1105 review C-3：Soft→Medium 机器门）。
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -61,6 +65,11 @@ pub(crate) enum Rule {
     UnresolvedPath,
     /// LAYER-DEPS-08：test-support 库被 shipped 依赖（应只经 `[dev-dependencies]` 消费）。
     TestSupportShipped,
+    /// LAYER-DEPS-09：`runctx` 的 `test-support` **feature** 被 shipped 依赖表启用（应只经
+    /// `[dev-dependencies]` 启用）。该 feature 暴露 `pub fn runctx::test_support::app_ctx`——生产构建启用即可
+    /// 不经 `impl runctx::PrincipalFacet` 直接造 `AppCtx`，绕过伪造门 `rss_principal_facet_impl_allowlist`
+    /// （#1105 review C-3：把该旁路从 Cargo.toml 注释约定 Soft 升为机器门 Medium）。
+    RunctxTestSupportFeatureShipped,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -127,12 +136,15 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_test_support_confinement(&scan.edges));
+        let shipped_deps = collect_shipped_deps(&root, &members)?;
+        findings.extend(scan_runctx_testsupport(&shipped_deps));
 
         let summary = format!(
-            "{} 成员 / {} 内部边 / {} wrappers 全部通过",
+            "{} 成员 / {} 内部边 / {} wrappers / {} shipped 依赖（runctx/test-support 扫描）全部通过",
             members.len(),
             scan.edges.len(),
-            bans.len()
+            bans.len(),
+            shipped_deps.len(),
         );
         Ok((summary, findings))
     }
@@ -416,6 +428,72 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
         .collect()
 }
 
+/// 被消费 crate（`runctx`）+ 其 `test-support` feature 名（LAYER-DEPS-09 守卫常量）。
+const TEST_SUPPORT_FEATURE: &str = "test-support";
+const RUNCTX_CRATE: &str = "runctx";
+
+/// 一条 **shipped**（非 dev）依赖表条目的 feature 视图——供 [`scan_runctx_testsupport`] 纯函数扫描。
+/// `[dev-dependencies]` 不入（[`MemberManifest`] 刻意不解析 dev 表），故收集到的均为 shipped。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShippedDep {
+    /// 声明该依赖的成员 crate 名。
+    pub(crate) from: String,
+    /// 该成员 manifest 相对路径（finding 定位用）。
+    pub(crate) manifest_file: String,
+    /// 依赖表 section（`[dependencies]` / `[build-dependencies]` / `[target.<cfg>.…]`）。
+    pub(crate) section: String,
+    /// manifest 中书写的依赖 key。
+    pub(crate) key: String,
+    /// 该依赖启用的 feature 列表。
+    pub(crate) features: Vec<String>,
+}
+
+/// LAYER-DEPS-09 纯扫描：flag 任一 shipped 依赖表里 `runctx` 启用 `test-support` feature 的条目。
+///
+/// `runctx/test-support` 暴露 `pub fn runctx::test_support::app_ctx[_with_kind]`——生产构建启用即可不经
+/// `impl runctx::PrincipalFacet`（dylint `rss_principal_facet_impl_allowlist` 守的伪造门）直接造 `AppCtx`、
+/// 伪造任意 tenant/principal。该 feature 只准 `[dev-dependencies]` 启用（dev 边不进生产 artifact，resolver 2
+/// 下 dev-dep feature 不 unify 进 normal build）。纯函数（输入 `&[ShippedDep]`）便于 synthetic 红/绿单测。
+pub(crate) fn scan_runctx_testsupport(deps: &[ShippedDep]) -> Vec<Finding> {
+    deps.iter()
+        .filter(|d| {
+            d.key == RUNCTX_CRATE && d.features.iter().any(|f| f == TEST_SUPPORT_FEATURE)
+        })
+        .map(|d| {
+            finding(
+                Rule::RunctxTestSupportFeatureShipped,
+                d.from.clone(),
+                format!(
+                    "{} {}.{} 启用 `runctx/{TEST_SUPPORT_FEATURE}` ⇒ 生产构建可经 `runctx::test_support::app_ctx` 伪造 AppCtx、绕过 `PrincipalFacet` 伪造门；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
+                    d.manifest_file, d.section, d.key
+                ),
+            )
+        })
+        .collect()
+}
+
+/// 读各成员全部 shipped 依赖表（`dep_entries`），收集每条 detailed 依赖的 feature 视图（[`ShippedDep`]）。
+/// dev-dependencies 不入（[`MemberManifest`] 不解析 dev 表），故天然只覆盖 shipped 表。
+fn collect_shipped_deps(root: &Path, members: &[Member]) -> Result<Vec<ShippedDep>> {
+    let mut out = Vec::new();
+    for m in members {
+        let manifest = read_member_manifest(root, &m.path)?;
+        let manifest_file = format!("{}/Cargo.toml", m.path);
+        for (section, key, spec) in manifest.dep_entries() {
+            if let DepSpec::Detailed(d) = spec {
+                out.push(ShippedDep {
+                    from: m.name.clone(),
+                    manifest_file: manifest_file.clone(),
+                    section,
+                    key: key.to_string(),
+                    features: d.features.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// 对给定白名单逐 entry 委托 [`check_confinement_entry`]。allowlist 作参数（非直读 const）使**完整路径**
 /// 可被注入合成白名单的红 case 覆盖——含「白名单本身越层」（const 漂移）这条否则无法合成的分支。
 fn check_confinement_against(
@@ -590,6 +668,9 @@ struct DetailedDep {
     path: Option<String>,
     #[serde(default)]
     workspace: bool,
+    /// 该依赖启用的 feature 列表（LAYER-DEPS-09：守 `runctx/test-support` 不进 shipped 依赖表）。
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -849,6 +930,71 @@ mod tests {
         let findings = check_test_support_confinement(&[e("identity", "testkit")]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::TestSupportShipped);
+    }
+
+    // ---- LAYER-DEPS-09：runctx 的 test-support feature 进 shipped 依赖表 ----
+
+    fn sdep(from: &str, section: &str, key: &str, features: &[&str]) -> ShippedDep {
+        ShippedDep {
+            from: from.to_string(),
+            manifest_file: format!("crates/{from}/Cargo.toml"),
+            section: section.to_string(),
+            key: key.to_string(),
+            features: features.iter().map(|f| (*f).to_string()).collect(),
+        }
+    }
+
+    /// 红：`[dependencies]` 启用 `runctx/test-support` ⇒ RunctxTestSupportFeatureShipped。
+    #[test]
+    fn red_runctx_testsupport_in_dependencies() {
+        let findings = scan_runctx_testsupport(&[sdep(
+            "badcrate",
+            "[dependencies]",
+            "runctx",
+            &["test-support"],
+        )]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::RunctxTestSupportFeatureShipped);
+        assert_eq!(findings[0].subject, "badcrate");
+    }
+
+    /// 红：build-dependencies / target 依赖同为 shipped ⇒ 均 flagged（feature 仍泄进生产构建）。
+    #[test]
+    fn red_runctx_testsupport_in_build_and_target_deps() {
+        let findings = scan_runctx_testsupport(&[
+            sdep("b1", "[build-dependencies]", "runctx", &["test-support"]),
+            sdep(
+                "b2",
+                "[target.cfg(unix).dependencies]",
+                "runctx",
+                &["test-support"],
+            ),
+        ]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    /// 绿：runctx 不启用 test-support（无 feature / 仅其它 feature）⇒ 无 finding。
+    #[test]
+    fn green_runctx_without_testsupport() {
+        let findings = scan_runctx_testsupport(&[
+            sdep("authn", "[dependencies]", "runctx", &[]),
+            sdep("other", "[dependencies]", "runctx", &["some-other-feature"]),
+        ]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// 绿（specificity）：别的 crate 有名为 `test-support` 的 feature（非 runctx）⇒ 不误报（只守 runctx）。
+    #[test]
+    fn green_testsupport_feature_on_non_runctx_dep() {
+        let findings =
+            scan_runctx_testsupport(&[sdep("x", "[dependencies]", "someother", &["test-support"])]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// anti-vacuity：空输入 ⇒ 无 finding（守卫非恒报；非恒绿由上方红例证）。
+    #[test]
+    fn antivacuity_runctx_testsupport_empty_is_clean() {
+        assert!(scan_runctx_testsupport(&[]).is_empty());
     }
 
     #[test]
@@ -1362,6 +1508,7 @@ d = { path = "../d" }
         DepSpec::Detailed(DetailedDep {
             path: path.map(str::to_string),
             workspace,
+            features: Vec::new(),
         })
     }
 

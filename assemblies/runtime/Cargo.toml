@@ -18,6 +18,9 @@ path = "src/lib.rs"
 bootstrap = { path = "../../crates/bootstrap" }
 httpserve = { path = "../../crates/httpserve" }
 authn = { path = "../../crates/authn" }
+# 验签桥经 authn::app_ctx 建 runctx::AppCtx + runctx::scope 绑定 ambient（tenant/principal），下游
+# （enforce + handler + diport emit）经 runctx::try_current 取（#1105，ADR-002 §D5）。
+runctx = { path = "../../crates/runctx" }
 primitives = { path = "../../crates/primitives" }
 diport = { path = "../../crates/diport" }
 # 生产验签 provider（真 RustCrypto ES256/HS256；backend feature 开 impl diport::Pdp）。安全同批门：依赖图引真

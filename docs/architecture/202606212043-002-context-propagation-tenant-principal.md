@@ -81,8 +81,9 @@ diagctx 是另一个 crate / 另一个 task_local，没有任何授权闸门读�
   保持双泛型（把 runctx 对具体 payload 的耦合收敛到 `AppCtx` 单一别名点），principal 仍 trait/泛型擦除。
 - **intra-base sub-DAG —— 本 PR（#1032）已落地**：sanctioned 边 `runctx → vocab`；`AppCtx` 的 tenant 收敛为
   具体 `vocab::tenant::TenantId`（带「空 / nil / 非 canonical 非法」fail-closed 校验），`TenantSlot` 占位删除；
-  principal 仍 `PrincipalSlot` 占位（W 阶段由 authn principal facet 取代——`runctx → authn` 闭环禁止，principal
-  永不可被 runctx 按具体类型持有）。base 规则措辞 + 决策 #2 回填同 PR 落（`INVARIANT: BASE-INTRADAG-01`）。备选见 §6。
+  principal 经 `Arc<dyn PrincipalFacet>` 擦除注入（**W 阶段已落地，#1105**：`PrincipalSlot` 占位删除，authn 的
+  `Principal` impl `runctx::PrincipalFacet`——`runctx → authn` 闭环禁止，principal 永不可被 runctx 按具体类型持有）。
+  base 规则措辞 + 决策 #2 回填同 PR 落（`INVARIANT: BASE-INTRADAG-01`）。备选见 §6。
 
 ### D4 — 取消 / deadline 不进 RequestCtx
 
@@ -100,14 +101,20 @@ header（`docs/rules/tenancy.md` §Tenant source）。**HTTP request body 不得
 
 - **body 反序列化构造不可表达（Hard）**：`RequestCtx` 私有字段 + **不 derive `Deserialize`** ⇒ 「从 body
   反序列化出一个 RequestCtx」在类型上不可表达。上游另由契约 codegen 拒绝声明 `tenantId` 的 request schema（`tenancy.md`，Hard）。
-- **下游 crate 直接 `new` 伪造不可表达（Hard，具体 `AppCtx`）**：`AppCtx = RequestCtx<vocab::tenant::TenantId, PrincipalSlot>`
-  的 principal payload（`PrincipalSlot`）构造器是 `#[cfg(test)] pub(crate)` + 字段私有 ⇒ 外部 crate **无构造路径**，无法
-  mint 一个 `AppCtx`（crate 可见性，Hard）——伪造门收敛到 principal 接缝。tenant 虽是公有可解析的 `TenantId`，但其 `parse`
-  fail-closed 拒空 / nil / 非 canonical，无法 mint 非法 tenant。`RequestCtx::Debug` 手写 redacted（不打印 tenant/principal
+- **下游 crate 伪造 `AppCtx` 的门 = Medium dylint（#1105 W 阶段落地，原 Hard 占位门退场）**：
+  `AppCtx = RequestCtx<vocab::tenant::TenantId, Arc<dyn PrincipalFacet>>`。生产构造 `AppCtx` 需一个
+  `Arc<dyn PrincipalFacet>` 值，而 `PrincipalFacet` 的**生产 impl-er 只有 authn**（其已验证 `Principal` impl facet）。
+  跨 crate「只有 authn 能 impl」**类型层不可表达**——sealed-trait 只能封闭到定义 crate，无法选择性放行下游 authn
+  （ADR-003 §4.2 已确立）。故由 dylint `rss_principal_facet_impl_allowlist` 承载（Medium，INVARIANT
+  PRINCIPAL-FACET-IMPL-AUTHN-01，镜像 `rss_diport_impl_allowlist` / `rss_crosstenant_callsite`）：非 {runctx, authn}
+  crate `impl PrincipalFacet` 即报。外部 crate impl 不了 facet ⇒ 拿不到 principal payload ⇒ 构造不出 `AppCtx`。tenant
+  虽公有可解析，但 `TenantId::parse` fail-closed 拒空 / nil / 非 canonical。`RequestCtx::Debug` 手写 redacted（不打印
   payload），杜绝 `?ctx` 泄露授权 PII；`TenantId` 自身 `Debug` 有意可见（UUID 是可观测标识、非凭据）。
-- **泛型 `RequestCtx::new` 的 trusted-caller 门（W 阶段）**：泛型构造对任意 `T/P` 开放——「只在已认证通道构造」
-  这一条对泛型入口当前仍是**约定**（rustdoc/ADR），其类型化（sealed capability，由 authn 验签后持有并传入）随 authn 落
-  W 阶段；届时具体实例化已收敛为受信 `vocab::TenantId` + authn principal facet，trusted-caller 成 Hard。
+  > **威胁矩阵重评（ai-robust「ADR amendment 落地须同步重评威胁矩阵」，#1105）**：原 spike 把伪造门记为 **Hard**
+  > （`PrincipalSlot::new` 仅 `#[cfg(test)]`、生产无构造路径）——但那以「`AppCtx` 生产根本造不出」为代价（功能不可用，
+  > 正是 #1105 修的 bug）。W 阶段让生产可构造，伪造门**必然**从「类型层无构造路径」退为「跨 crate 限定唯一 impl-er」，
+  > 后者类型层不可表达，最强可用载体是 dylint（**Medium**）。这与 diport / pdp / crosstenant 同型问题同源评级，
+  > 非降级失守；上游另由 crate 依赖图守「facet 只在 runctx 定义」（基础层无人能重定义同名 trait 并让 `AppCtx` 接受）。
 
 ### D6 — fail-closed：ctx 缺失即 deny
 
@@ -129,7 +136,7 @@ impl<T, P> RequestCtx<T, P> {
     pub fn tenant(&self) -> &T;
     pub fn principal(&self) -> &P;
 }
-pub type AppCtx = RequestCtx<vocab::tenant::TenantId, PrincipalSlot>; // #1032：tenant 已收敛为 TenantId；principal 仍占位
+pub type AppCtx = RequestCtx<vocab::tenant::TenantId, Arc<dyn PrincipalFacet>>; // #1105：principal facet 擦除（authn impl）
 
 // local.rs —— task_local! 传播 + fail-closed 访问器。
 pub fn scope<F: Future>(ctx: AppCtx, fut: F) -> TaskLocalFuture<AppCtx, F>; // 边界绑定一次
@@ -196,8 +203,8 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 | 威胁 | 后果 | 缓解 | enforcement 档位 |
 |------|------|------|------------------|
 | request body 携带 `tenantId` 冒充租户 | 跨租户写 | `RequestCtx` 私有字段 + 无 `Deserialize`（body 构造不可表达）；契约 codegen 拒绝 `tenantId` request schema | **Hard**（类型 + codegen funnel） |
-| 下游 crate 直接 `RequestCtx::new` 伪造 `AppCtx` | 伪造 tenant/principal 越权 | `AppCtx` 的 `PrincipalSlot` 构造器 `#[cfg(test)] pub(crate)` + 字段私有 ⇒ 外部无构造路径（伪造门收敛到 principal 接缝）；tenant 虽公有可解析，但 `TenantId::parse` fail-closed 拒空/nil/非 canonical，无法 mint 非法 tenant；泛型 `new` 的 trusted-caller capability 随 authn 落 W 阶段 | **Hard**（具体 `AppCtx`，crate 可见性 + `TenantId` fail-closed 解析）+ 约定→W 阶段 Hard（泛型入口） |
-| `?ctx` / 断言 / 日志泄露 tenant/principal 原值 | 授权 PII 入日志 | `RequestCtx` 手写 redacted `Debug`（不打印 payload、不要求 `T/P: Debug`）；`PrincipalSlot` Debug 同样 redacted（`TenantId` Debug 有意可见——UUID 是可观测标识、非凭据） | **Hard**（类型，payload 在 Debug 通道不可达） |
+| 下游 crate 直接 `RequestCtx::new` 伪造 `AppCtx` | 伪造 tenant/principal 越权 | **#1105 W 阶段落地后**：`AppCtx` principal payload = `Arc<dyn PrincipalFacet>`，生产构造需 facet 值，而 `PrincipalFacet` 生产 impl-er 只有 authn（已验证 `Principal`）；跨 crate「只有 authn 能 impl」类型层不可表达（sealed-trait 跨 crate 不可行，ADR-003 §4.2），由 dylint `rss_principal_facet_impl_allowlist`（PRINCIPAL-FACET-IMPL-AUTHN-01）守；外部 impl 不了 facet ⇒ 造不出 `AppCtx`。tenant 虽公有可解析，但 `TenantId::parse` fail-closed 拒空/nil/非 canonical | **Medium**（dylint impl-allowlist，跨 crate 单一 impl-er 类型层不可表达；与 diport/pdp/crosstenant 同源）+ **Hard**（`TenantId` fail-closed 解析、facet 定义面在 runctx 由 crate 依赖图守） |
+| `?ctx` / 断言 / 日志泄露 tenant/principal 原值 | 授权 PII 入日志 | `RequestCtx` 手写 redacted `Debug`（`#[redact(internal)]` 两字段 → `Absent`，不打印 payload、不要求 `T/P: Debug`，principal payload `Arc<dyn PrincipalFacet>` 同样不被渲染）；`TenantId` Debug 有意可见——UUID 是可观测标识、非凭据 | **Hard**（类型，payload 在 Debug 通道不可达） |
 | ctx 缺失被当作 anonymous / default-tenant 放行 | fail-open 越权 | 读访问器返回 `Result`，缺失 = `Err(MissingCtx)`，无 panicking / 伪造路径；PDP 缺租户 deny | **Hard**（类型）+ **Medium**（fail-closed 行为测试） |
 | tenant / principal 被塞进 tracing span 后被下游误当授权源 | 授权基于可丢弃 / 可改写信号 | runctx **不依赖 tracing**，API 面无「ctx→span」通道 | **Hard**（crate 依赖图） |
 | spawn / blocking 出的任务**运行时**丢 ctx → 子任务读到空 | 后台越权 / fail-open | 子任务无 ctx 即 `Err(MissingCtx)`，调用方 fail-closed | **Medium**（fail-closed 运行时行为 + 测试锁定 `tokio::spawn` / `spawn_blocking` 不继承） |
@@ -239,3 +246,22 @@ span 字段（这些 crate 依赖 tracing）；runctx **不依赖 tracing**，�
 > （`rss_spawn_missing_scope` 刻意不覆盖 diagctx）；③「业务伪造 reserved envelope key」——producer + wire 两侧
 > `try_insert` fail-closed 拒 + emit 层无 reserved 槽，维持 **Hard**（+ wire 站点 dylint Medium）。**§D1 的两条 Hard
 > 边界（诊断不进授权 `RequestCtx`、runctx↛tracing）原封不动，无降档、无新增越权面**；diagctx 不被任何授权闸门读取。
+>
+> **Amendment（#1105，W 阶段 principal facet 落地）**：§D5 的 principal 占位 `PrincipalSlot` 删除，`AppCtx` =
+> `RequestCtx<TenantId, Arc<dyn PrincipalFacet>>`——authn 的已验证 `Principal` 经 `runctx::PrincipalFacet` 擦除注入，
+> **生产可构造 `AppCtx`**（修复「生产造不出 ctx ⇒ 验签桥无法 `runctx::scope` ⇒ 下游 diport 取不到 ambient tenant」
+> 的实际断点：PR 前全仓唯一 scope 是 audit 的 `#[tokio::test]`）。组合根验签桥（`assemblies/runtime/src/auth_bridge.rs`）
+> 在验签得到 scoped principal 后经 `authn::app_ctx` 建 `AppCtx`、**经 `httpserve::PendingScopeCtx` extension 传给内层
+> `EnforceService`，由其在 `Require`-Allow 后建 `runctx::scope`**；跨租户主体（Service/SuperAdmin，tenant=None）不建
+> （fail-closed = `MissingCtx`）。**外部 review 硬化两点（#1105 F1/F2）**：F1 `app_ctx(principal) -> Option<AppCtx>`
+> 从 `Principal` 自身派生 tenant（移除独立 `tenant` 参数）⇒ tenant 与 principal 错配**类型层不可表达**（消除「合法
+> Principal 配任意 TenantId」的越租户向量）；F2 scope 从验签桥（enforce 外层、读不到 `opt_out`）移进 `EnforceService`，
+> **仅 `Require`-Allow（认证路由放行）建 scope，Public opt-out 丢弃 `PendingScopeCtx` 不建**——使 ambient scope 与
+> route auth 决策对齐（避免 Public 路由因携有效 Bearer 被误绑 ambient tenant）。已按本要求重评威胁矩阵：「直接
+> `RequestCtx::new` 伪造」行从 **Hard**（`PrincipalSlot::new` 生产无构造路径——但代价是 ctx 生产不可用）改为 **Medium**
+> （dylint `rss_principal_facet_impl_allowlist` 限 facet 只在 authn impl）：跨 crate「只有 authn 能 impl」类型层不可
+> 表达（sealed-trait 跨 crate 不可行，ADR-003 §4.2），dylint 为最强可用载体，与 diport/pdp/crosstenant 同源评级——
+> **非降档失守**（原 Hard 以功能不可用为代价，W 阶段使功能可用后伪造门必然落到「限定唯一 impl-er」= 跨 crate 类型层
+> 不可表达 = Medium）。「`?ctx` 泄露」行 PII 面不变（`RequestCtx::Debug` 仍 redact 两字段 → payload 不渲染）。§D1 两条
+> Hard 边界、§D6 fail-closed 原封不动，无新增越权面。**§D5「泛型 `RequestCtx::new` trusted-caller 门（W 阶段约定）」
+> 子条退场**（W 阶段已落地为上述 dylint 门）。

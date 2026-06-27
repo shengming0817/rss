@@ -6,6 +6,18 @@
 //! 匹配 `Require(scheme)` 的路由放行（AUTH-EVIDENCE-REQUIRE-01）。
 //!
 //! 设计要点：
+//! - **ambient context 派生 + 传递（#1105，ADR-002 §D5）**：验签得到带 tenant claim 的 scoped principal
+//!   （User/Device/Admin）时，本桥经 `authn::app_ctx`（tenant 从 Principal 自身派生，错配不可表达，#1105 F1）
+//!   建 [`runctx::AppCtx`]，**经 `httpserve::PendingScopeCtx` extension 传给内层 enforce**——**scope 不在桥
+//!   建立**。本桥叠在 `AuthenticatedRoutes` **外层**、运行期读不到 route 的 `opt_out`，无法区分 Public / Require；
+//!   故由持决策方的 `EnforceService` 在 **`Require`-Allow**（认证路由放行）后建 `runctx::scope` 绑定 handler
+//!   （+ 下游 diport emit），使 ambient scope 与 route auth 决策对齐（#1105 F2：避免 Public 路由因携有效 Bearer
+//!   被误绑 ambient tenant）。深层经 `runctx::try_current()` 取 tenant/principal 做 RLS/ABAC。跨租户主体
+//!   （Service/SuperAdmin，`tenant=None`）⇒ `app_ctx` 返回 `None`、本桥不附 PendingScopeCtx ⇒ 下游
+//!   `try_current()` 得 `MissingCtx`（fail-closed，跨租户读经显式 `audited_cross_tenant` 路径）。
+//!   **bootstrap 预认证**（`auth.bootstrap:true` HTTP Basic + `X-Tenant-ID`）当前**未在本 runtime 接线**
+//!   （`auth_scheme` 仅 Jwt/ServiceToken/NoAuth，无 basic 路径）⇒ 无 handler 需 ambient scope；bootstrap 落地时
+//!   须在其装配点同样经 PendingScopeCtx + enforce 接 scope（与本桥同范式）。
 //! - **本桥不自发裁决**：仅「铸证据 + 埋点」，绝不短路 401/403。无证据时透传，由内层 enforce 作**唯一**鉴权
 //!   裁决方（Public opt-out 路由放行、Require 路由 fail-closed 401）。理由：① 单一裁决方杜绝双判定点；
 //!   ② 可观测结果等价（Require + 坏凭据仍 401，由 enforce 发）；③ 本桥是 blanket 外层、包住含 Public 路由
@@ -104,9 +116,12 @@ fn verify_principal(
 /// `verify_jwt` 的 `From<PdpError>` 三变体一一保真（`InvalidSignature`→`TokenInvalid`、`Untrusted`→`TokenUntrusted`、
 /// `Expired`→`TokenExpired`），故 [`deny_reason`] 据变体记**三路**告警分级（区分疑似攻击 vs 疑似配置错 vs 过期）。
 /// 本桥不为日志粒度旁路 `verify_jwt` funnel（保「唯一信任原点」姿态）——`deny_reason` 只读已收敛的 `AuthnError`。
-fn mint_evidence(state: &VerifyState, token: &str) -> Option<Authenticated> {
+fn mint_evidence(
+    state: &VerifyState,
+    token: &str,
+) -> Option<(Authenticated, Option<runctx::AppCtx>)> {
     match verify_principal(&state.provider, state.scheme, token) {
-        Some(Ok(principal)) => Some(log_allow(state.scheme, &principal)),
+        Some(Ok(principal)) => Some(allow_evidence(state.scheme, principal)),
         // err = AuthnError 变体（PdpError 经 verify_* 一一保真，三路），脱敏；不产证据 ⇒ enforce fail-closed。
         Some(Err(err)) => {
             log_deny_verify(&err);
@@ -123,13 +138,33 @@ fn mint_evidence(state: &VerifyState, token: &str) -> Option<Authenticated> {
     }
 }
 
-/// allow 分支埋点（脱敏：仅 decision + principal.kind 枚举，无 subject/token）。
+/// allow 分支：埋点（脱敏：仅 decision + principal.kind 枚举，无 subject/token）+ 铸 [`Authenticated`] 证据
+/// + （scoped 主体）经 [`authn::app_ctx`] 派生 ambient [`runctx::AppCtx`]（#1105，ADR-002 §D5）。
 ///
 /// `debug` 级（非 info）：成功鉴权是 per-request 热路径操作数据，非生命周期事件（observability.md 日志分级）。
-fn log_allow(scheme: RequiredScheme, principal: &authn::Principal) -> Authenticated {
+///
+/// 返回的 `Option<AppCtx>` 由 [`verify`] 经 `httpserve::PendingScopeCtx` 传给内层 enforce——**scope 不在桥
+/// 建立**，由 enforce 在 `Require`-Allow 后绑定（#1105 F2：scope 与 route auth 决策对齐）。tenant 从 Principal
+/// 自身派生（`app_ctx` 内部，#1105 F1）：scoped 主体（User/Device/Admin）⇒ `Some`；跨租户（Service/SuperAdmin，
+/// `tenant=None`）⇒ `None`（无 ambient scope）。
+fn allow_evidence(
+    scheme: RequiredScheme,
+    principal: authn::Principal,
+) -> (Authenticated, Option<runctx::AppCtx>) {
     let kind = principal.kind();
-    tracing::debug!(authz.decision = "allow", principal.kind = ?kind, "verify-bridge");
-    Authenticated::new(scheme, kind, principal.audit_subject(), principal.tenant())
+    let tenant = principal.tenant();
+    // `scoped_principal`（闭值 bool，非 PII）：scoped 主体（有 tenant claim）⇒ 桥附 PendingScopeCtx、enforce
+    // 在 Require-Allow 后可建 ambient scope；跨租户主体（tenant=None）⇒ false（不附、不建）。operator 据此核查。
+    tracing::debug!(
+        authz.decision = "allow",
+        principal.kind = ?kind,
+        scoped_principal = tenant.is_some(),
+        "verify-bridge"
+    );
+    let evidence = Authenticated::new(scheme, kind, principal.audit_subject(), tenant);
+    // tenant 从 Principal 自身派生（#1105 F1：调用方无从错配 tenant/principal）；跨租户主体 ⇒ None。
+    let ctx = authn::app_ctx(Arc::new(principal));
+    (evidence, ctx)
 }
 
 /// 验签失败 deny 埋点（`AuthnError` 变体 + 闭值 `authz.deny_reason`，脱敏）。
@@ -191,8 +226,16 @@ async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) 
             .to_owned();
         let span =
             tracing::debug_span!("verify_bridge", scheme = ?state.scheme, request_id = %request_id);
-        if let Some(evidence) = span.in_scope(|| mint_evidence(&state, &token)) {
+        if let Some((evidence, ctx)) = span.in_scope(|| mint_evidence(&state, &token)) {
             req.extensions_mut().insert(evidence);
+            // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
+            // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
+            // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体
+            // ctx=None ⇒ 不附 ⇒ 下游 `try_current()` fail-closed `MissingCtx`。
+            if let Some(ctx) = ctx {
+                req.extensions_mut()
+                    .insert(httpserve::PendingScopeCtx::new(ctx));
+            }
         }
     }
     next.run(req).await

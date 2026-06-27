@@ -237,8 +237,9 @@ impl Principal {
 
     /// 从 principal + 请求 ctx 派生行级可见性义务（ADR-002）。
     ///
-    /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<vocab::tenant::TenantId, PrincipalSlot>`
-    /// 别名，遵循 ADR-002 显式传 `&RequestCtx` 而非隐式线程局部的原则。
+    /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<vocab::tenant::TenantId, Arc<dyn PrincipalFacet>>`
+    /// 别名，遵循 ADR-002 显式传 `&RequestCtx` 而非隐式线程局部的原则（本函数只读 `ctx.tenant()`；
+    /// principal payload 供 diport / 审计等其它 ambient 消费者）。
     /// ctx 缺失 fail-closed（返回 [`runctx::MissingCtx`]，绝不伪造 RowScope）。
     ///
     /// scoped 主体（user/device/admin）的行级隔离以**已认证 ctx tenant** 为准，且 fail-closed 要求
@@ -272,6 +273,43 @@ impl Principal {
             _ => Err(runctx::MissingCtx),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// runctx 接缝：Principal → AppCtx（ADR-002 §D5 principal facet 落地）
+// ---------------------------------------------------------------------------
+
+/// `Principal` 经 [`runctx::PrincipalFacet`] 擦除注入 [`runctx::AppCtx`] 的 principal payload。
+///
+/// 生产唯一 impl-er = authn（INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01，dylint
+/// `rss_principal_facet_impl_allowlist` 守，Medium——跨 crate sealed-trait 不可行，ADR-003 §4.2 / ADR-002
+/// §D5）。只暴露 vetted **非-PII** facet：`kind`（分类标量）+ `matches_subject`（受控比较，不泄露明文
+/// subject）——与 [`Principal::kind`] / [`Principal::matches_subject`] 同语义，subject 明文不出 authn 边界。
+impl runctx::PrincipalFacet for Principal {
+    fn kind(&self) -> PrincipalKind {
+        self.kind
+    }
+
+    fn matches_subject(&self, subject: &str) -> bool {
+        self.subject == subject
+    }
+}
+
+/// 由已验证 [`Principal`] 构造 [`runctx::AppCtx`]——**tenant 从 Principal 自身的已验证 claim 派生**，
+/// 调用方无法把合法 Principal 与另一个 tenant 错配（#1105 review F1：tenant 与 principal 不可分割，
+/// 错配类型层不可表达 / AI-HARD）。
+///
+/// - scoped 主体（User/Device/Admin，`principal.tenant()==Some(t)`）⇒ `Some(AppCtx)`（绑定该 tenant）。
+/// - 跨租户主体（Service/SuperAdmin，`tenant==None`）⇒ `None`：无单一 ambient tenant，不建 scope
+///   （消费方 fail-closed `MissingCtx`；跨租户读经显式 `audited_cross_tenant_visibility` 路径）。
+///
+/// `Principal` 经 authn 验签 funnel mint（外部不可伪造）；`Arc<Principal>` 经 unsized 强转为
+/// `Arc<dyn PrincipalFacet>`（trait object 廉价共享，满足 `AppCtx: Clone`）。伪造门：外部 crate impl 不了
+/// [`runctx::PrincipalFacet`]（dylint 限 authn）、mint 不了 [`Principal`]（验签 seal），故造不出合法 `AppCtx`。
+pub fn app_ctx(principal: std::sync::Arc<Principal>) -> Option<runctx::AppCtx> {
+    let tenant = principal.tenant()?;
+    let facet: std::sync::Arc<dyn runctx::PrincipalFacet> = principal;
+    Some(runctx::RequestCtx::new(tenant, facet))
 }
 
 // ---------------------------------------------------------------------------
@@ -836,6 +874,64 @@ fn test_jwt(payload_json: &str) -> String {
         eng.encode(payload_json.as_bytes()),
         eng.encode(b"sig"),
     )
+}
+
+#[cfg(test)]
+mod principal_facet_tests {
+    //! `Principal` → `runctx::PrincipalFacet` 擦除 + [`super::app_ctx`] mint（ADR-002 §D5，#1105）。
+    //! facet 只暴露 vetted 非-PII（kind / 受控 subject 比较）；`app_ctx` 把已验证 Principal + 已认证
+    //! tenant 装进 `runctx::AppCtx`，供验签桥经 `runctx::scope` 绑定 ambient。
+    use super::{CANON_TENANT, Principal, PrincipalKind, app_ctx};
+    use runctx::PrincipalFacet;
+    use std::sync::Arc;
+    use vocab::tenant::TenantId;
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> TenantId {
+        TenantId::parse(CANON_TENANT).expect("canonical tenant")
+    }
+
+    // facet 暴露 kind + 受控 subject 比较（不泄露明文）。
+    #[test]
+    fn facet_exposes_kind_and_controlled_subject_match() {
+        let p = Principal::for_test(PrincipalKind::User, "alice", Some(tenant()));
+        assert_eq!(PrincipalFacet::kind(&p), PrincipalKind::User);
+        assert!(PrincipalFacet::matches_subject(&p, "alice"));
+        assert!(!PrincipalFacet::matches_subject(&p, "bob"));
+    }
+
+    // app_ctx 从 Principal 自身 tenant 派生 AppCtx（scoped 主体 → Some）；ambient 消费者经访问器取回 vetted facet。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn app_ctx_derives_tenant_for_scoped_principal() {
+        let tid = tenant();
+        let p = Arc::new(Principal::for_test(
+            PrincipalKind::Admin,
+            "admin1",
+            Some(tid),
+        ));
+        let ctx = app_ctx(p).expect("scoped principal (有 tenant) 应 mint AppCtx");
+        // tenant 来自 principal 自身 claim，调用方无从错配（F1）。
+        assert_eq!(ctx.tenant(), &tid);
+        assert_eq!(ctx.principal().kind(), PrincipalKind::Admin);
+        assert!(ctx.principal().matches_subject("admin1"));
+        assert!(!ctx.principal().matches_subject("intruder"));
+    }
+
+    // 跨租户主体（Service/SuperAdmin，tenant=None）→ app_ctx 返回 None（不建 ambient scope）。
+    #[test]
+    fn app_ctx_none_for_cross_tenant_principal() {
+        let service = Arc::new(Principal::for_test(PrincipalKind::Service, "svc", None));
+        assert!(
+            app_ctx(service).is_none(),
+            "service 主体无单一 tenant ⇒ app_ctx None"
+        );
+        let super_admin = Arc::new(Principal::for_test(PrincipalKind::SuperAdmin, "root", None));
+        assert!(
+            app_ctx(super_admin).is_none(),
+            "superAdmin 跨租户 ⇒ app_ctx None"
+        );
+    }
 }
 
 #[cfg(test)]

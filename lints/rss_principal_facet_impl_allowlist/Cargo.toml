@@ -1,0 +1,38 @@
+[package]
+name = "rss_principal_facet_impl_allowlist"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "RSS 治理：runctx::PrincipalFacet 仅 authn 可 impl（impl-site caller-crate allowlist，INVARIANT PRINCIPAL-FACET-IMPL-AUTHN-01）"
+
+[lib]
+crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep runctx）
+
+# 本 lint 按 **caller crate 名**（impl 所在 crate ∈ {runctx, authn}）判 allowlist（同 rss_crosstenant_callsite 范式）。
+# UI fixture 编译为单一 example crate、crate 名 = example target 名，故两个 example target：
+#   - rss_principal_facet_impl_allowlist_ui（crate 名 ∉ allowlist）→ 红例：impl PrincipalFacet 触发；
+#   - authn（crate 名 = 生产 allowlist 项）→ 绿例：impl PrincipalFacet 不触发（anti-vacuity，验 allowlist 分支非恒报）。
+# golden 随源文件名（ui/main.stderr / ui/authn.stderr）。
+[[example]]
+name = "rss_principal_facet_impl_allowlist_ui"
+path = "ui/main.rs"
+
+[[example]]
+name = "authn"
+path = "ui/authn.rs"
+
+[dependencies]
+# clippy_utils rev 与 lints/rust-toolchain.toml 的 nightly 配对（dylint v6.0.1 模板），勿单独升级其一。
+# 升级步骤见 lints/README.md「前置」。ref: dylint internal/template/Cargo.toml@v6.0.1
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+# ui fixture impl 真 runctx::PrincipalFacet：lint 按被 impl trait 的 crate 名（runctx）+ trait 名匹配，
+# 本地 stub trait 无法触发。`vocab` 供 facet 方法签名的 `PrincipalKind`。
+runctx = { path = "../../crates/runctx" }
+vocab = { path = "../../crates/vocab" }
+
+[package.metadata.rust-analyzer]
+rustc_private = true

@@ -39,10 +39,11 @@
 pub mod ctx;
 pub mod local;
 
-// `AppCtx` 的 tenant 已是具体 `vocab::tenant::TenantId`（ADR-002 §D3）；principal 仍 `PrincipalSlot`
-// 占位（`#[doc(hidden)]` + `pub(crate)` 构造，外部不可 mint ⇒ `AppCtx` 不可伪造），W 阶段由 authn
-// principal facet 取代。consumer 经 `AppCtx` 不透明持有、经访问器借用（ADR-002 §D5）。
-pub use ctx::{AppCtx, RequestCtx};
+// `AppCtx` 的 tenant 已是具体 `vocab::tenant::TenantId`（ADR-002 §D3）；principal 是 `Arc<dyn PrincipalFacet>`
+// ——authn 的 `Principal` 经 `PrincipalFacet` 擦除注入（生产 impl 面仅 authn，由 dylint
+// `rss_principal_facet_impl_allowlist` 守，Medium，ADR-002 §D5）。外部 crate impl 不了 facet ⇒ 造不出
+// `AppCtx`（伪造门）。consumer 经 `AppCtx` 不透明持有、经访问器借用。
+pub use ctx::{AppCtx, PrincipalFacet, RequestCtx};
 pub use local::{MissingCtx, scope, try_current, try_with};
 
 // 测试支撑（`test-support` feature）：下游 crate 单测经 `runctx::test_support::app_ctx` 构造 `AppCtx`。

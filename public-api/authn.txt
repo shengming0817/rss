@@ -381,14 +381,18 @@ impl<T> typenum::type_operators::Same for authn::MintedJwt
 pub type authn::MintedJwt::Output = T
 pub struct authn::Principal
 impl authn::Principal
-pub async fn authn::Principal::audited_cross_tenant_visibility(&self, &runctx::ctx::AppCtx, &diport::audit_sink::__dynosaur_macro_dynauditsink::DynAuditSink<'_>, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<vocab::tenant::RowVisibility, authn::CrossTenantError>
-impl authn::Principal
+pub fn authn::Principal::audit_subject(&self) -> &str
 pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt) -> core::result::Result<Self, authn::AuthnError>
 pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken) -> core::result::Result<Self, authn::AuthnError>
 pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool
 pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
 pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+impl authn::Principal
+pub async fn authn::Principal::audited_cross_tenant_visibility(&self, &runctx::ctx::AppCtx, &diport::audit_sink::__dynosaur_macro_dynauditsink::DynAuditSink<'_>, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<vocab::tenant::RowVisibility, authn::CrossTenantError>
+impl runctx::ctx::PrincipalFacet for authn::Principal
+pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
+pub fn authn::Principal::matches_subject(&self, &str) -> bool
 impl core::marker::Freeze for authn::Principal
 impl core::marker::Send for authn::Principal
 impl core::marker::Sync for authn::Principal
@@ -565,5 +569,6 @@ impl<T> core::convert::From<T> for authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::from(T) -> T
 impl<T> typenum::type_operators::Same for authn::VerifiedServiceToken
 pub type authn::VerifiedServiceToken::Output = T
+pub fn authn::app_ctx(alloc::sync::Arc<authn::Principal>) -> core::option::Option<runctx::ctx::AppCtx>
 pub async fn authn::verify_jwt(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
 pub async fn authn::verify_service_token(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>

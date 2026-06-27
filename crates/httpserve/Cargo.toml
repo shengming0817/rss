@@ -16,10 +16,13 @@ workspace = true
 test-util = []
 
 [dependencies]
-# 基础/引擎（仅用到的 path dep；ids/secure/support/runctx/consistency 未用 → 不声明，避免 cargo-udeps 多余依赖）
+# 基础/引擎（仅用到的 path dep；ids/secure/support/consistency 未用 → 不声明，避免 cargo-udeps 多余依赖）
 vocab = { path = "../vocab" }           # CoreError / CoreErrorKind / PublicDetail（wire error mapper 单源）
 primitives = { path = "../primitives" } # AuthPlan / resolve_requirement / HealthReport（健康聚合）
 diagctx = { path = "../diagctx" }       # correlation 诊断信道，service→base（ADR-002 §D1-bis）
+# enforce 在 Require-Allow 后建 runctx::scope（ambient tenant/principal 与 route auth 决策对齐，#1105 F2）；
+# AppCtx 由组合根验签桥经 PendingScopeCtx extension 传入（httpserve 不依赖 authn，只 scope 已构造的 AppCtx）。
+runctx = { path = "../runctx" }
 # Auth decision audit sink / injected clock（finalize_auth_with_audit）。
 diport = { path = "../diport" }
 # HTTP runtime（生态对标 axum + tower，不自造中间件 trait）

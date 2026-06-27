@@ -195,6 +195,32 @@ impl AuthAudit {
     }
 }
 
+// ── PendingScopeCtx ──────────────────────────────────────────────────────────
+
+/// 待建 ambient scope 的 [`runctx::AppCtx`] 载体——组合根验签桥（外层 layer）在验签得到 **scoped** principal
+/// 后插入请求 extension；[`EnforceService`] 在 **`Require`-Allow**（认证路由放行，非 Public opt-out）后取出并
+/// `runctx::scope` 绑定 handler（#1105 F2：scope 与 route auth 决策对齐——避免 Public 路由因携有效 Bearer 被
+/// 误绑 ambient tenant；验签桥在 enforce 外层、运行期读不到 opt_out，故由 enforce 持决策方建 scope）。
+///
+/// 字段私有 + [`PendingScopeCtx::into_ctx`] 为 `pub(crate)`：仅 httpserve(enforce) 可取出 `AppCtx` 建 scope，
+/// handler 即便从 extension 读到本类型也提取不出 ctx（须经 `runctx::try_current` 正道）。构造
+/// [`PendingScopeCtx::new`] 公开供验签桥插入——伪造 `AppCtx` 仍受 runctx `PrincipalFacet` 伪造门约束
+/// （外部 crate mint 不出合法 `AppCtx`，见 `rss_principal_facet_impl_allowlist`）。
+#[derive(Clone)]
+pub struct PendingScopeCtx(runctx::AppCtx);
+
+impl PendingScopeCtx {
+    /// 组合根验签桥构造（携已验证 scoped principal 的 `AppCtx`）。
+    pub fn new(ctx: runctx::AppCtx) -> Self {
+        Self(ctx)
+    }
+
+    /// 取出 `AppCtx`（仅 enforce 用于 `runctx::scope`）。
+    pub(crate) fn into_ctx(self) -> runctx::AppCtx {
+        self.0
+    }
+}
+
 // ── EnforceLayer ─────────────────────────────────────────────────────────────
 
 /// 鉴权 enforce tower Layer（每路由 opt_out + RouteMeta；Copy + Clone 满足 MethodRouter::layer 约束）。
@@ -455,6 +481,9 @@ where
             None => AuthRequirement::Deny,
             Some(p) => resolve_requirement(p, opt_out),
         };
+        // 仅**认证路由**（`Require`）放行后建 ambient scope；Public opt-out（`requirement=Allow`）不建——
+        // 杜绝 Public 路由因携有效 Bearer 被误绑 ambient tenant（#1105 F2，scope 与 route auth 决策对齐）。
+        let is_require = matches!(requirement, AuthRequirement::Require(_));
 
         let decision = decide_auth(requirement, evidence_scheme);
         log_auth_decision(decision, meta.contract_id, evidence.as_ref());
@@ -475,6 +504,13 @@ where
                 reject_response(decision, &rid).await
             });
         }
+        // PendingScopeCtx 总是取走（不残留 extension）；仅 `Require`-Allow 用它建 scope，Public opt-out 丢弃（F2）。
+        let pending_ctx = req.extensions_mut().remove::<PendingScopeCtx>();
+        let scope_ctx = if is_require {
+            pending_ctx.map(PendingScopeCtx::into_ctx)
+        } else {
+            None
+        };
         Box::pin(async move {
             if let Err(error) =
                 record_auth_audit(audit, decision, meta.contract_id, rid.clone(), evidence).await
@@ -487,7 +523,12 @@ where
                 );
                 return Ok(crate::error::internal_error(&rid));
             }
-            inner.call(req).await
+            // ambient scope 绑定 handler（+ 下游 diport emit）：scoped 认证主体（有 tenant）才建，跨租户 /
+            // Public ⇒ 下游 `runctx::try_current()` fail-closed `MissingCtx`（#1105 F2）。
+            match scope_ctx {
+                Some(ctx) => runctx::scope(ctx, inner.call(req)).await,
+                None => inner.call(req).await,
+            }
         })
     }
 }

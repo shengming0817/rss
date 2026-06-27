@@ -13,7 +13,7 @@ pub mod health;
 mod middleware;
 pub mod routes;
 
-pub use auth::{AuditSinkHandle, Authenticated, RouteMeta};
+pub use auth::{AuditSinkHandle, Authenticated, PendingScopeCtx, RouteMeta};
 pub use routes::{
     Admin, AuthenticatedRoutes, Health, Internal, Listener, ListenerRouter, NonPrimaryListener,
     Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,

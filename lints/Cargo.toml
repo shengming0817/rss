@@ -9,6 +9,7 @@ members = [
   "rss_spawn_missing_scope",
   "rss_crosstenant_callsite",
   "rss_diport_impl_allowlist",
+  "rss_principal_facet_impl_allowlist",
   "rss_authplan_callsite",
   "rss_authenticated_callsite",
   "rss_diport_error_debug_redacted",

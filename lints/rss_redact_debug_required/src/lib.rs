@@ -5,7 +5,7 @@
 //! INVARIANT: REDACT-DEBUG-REQUIRED-01
 //!
 //! 守护范围是 issue #1359 本轮迁移的高风险 `(crate, type)`：`diport::AuditEvent`、
-//! `identity::RoleBinding`/`Session`/`SessionId`、`runctx::RequestCtx`/`PrincipalSlot`、
+//! `identity::RoleBinding`/`Session`/`SessionId`、`runctx::RequestCtx`、
 //! `diport::SecretMaterial`/`SecretCoordinate`。这是刻意窄扫：
 //! `Debug` 在本仓大量用于安全的 enum/error/配置值，按字段名或字符串全仓启发式扫描会产生治理噪声。
 //! 本 lint 只防止已迁移的敏感边界回退到裸 `derive(Debug)`；新增敏感 DTO 应同步把类型名纳入本名单。
@@ -103,6 +103,9 @@ const SENSITIVE_DEBUG_DTO_NAMES: &[&str] = &[
     "Session",
     "SessionId",
     "RequestCtx",
+    // `PrincipalSlot` 生产类型已于 #1105 删除（runctx principal payload 改 `Arc<dyn PrincipalFacet>`）；
+    // 此名仅留作 **UI fixture 通用样例**（`ui/main.rs` 的本地 stub `struct PrincipalSlot`），证明 lint 对
+    // 名单内裸 derive(Debug) 类型触发——非生产守护项（生产 `(crate,type)` 匹配见下，已无 runctx PrincipalSlot 臂）。
     "PrincipalSlot",
     "SecretMaterial",
     "SecretCoordinate",
@@ -120,7 +123,7 @@ fn is_sensitive_debug_dto(cx: &LateContext<'_>, type_name: &str) -> bool {
             "diport",
             "AuditEvent" | "SecretMaterial" | "SecretCoordinate"
         ) | ("identity", "RoleBinding" | "Session" | "SessionId")
-            | ("runctx", "RequestCtx" | "PrincipalSlot")
+            | ("runctx", "RequestCtx")
     )
 }
 

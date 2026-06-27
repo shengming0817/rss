@@ -46,8 +46,10 @@ pub struct MissingCtx;
 
 #[cfg(test)]
 mod tests {
-    use crate::ctx::{AppCtx, PrincipalSlot, RequestCtx};
+    use crate::ctx::{AppCtx, PrincipalFacet, RequestCtx, TestPrincipalFacet};
     use crate::local::{MissingCtx, scope, try_current, try_with};
+    use std::sync::Arc;
+    use vocab::PrincipalKind;
     use vocab::tenant::TenantId;
 
     // 测试 fixture：把任意 label 确定性映射到合法 canonical UUID（distinct label ⇒ distinct id，
@@ -68,20 +70,34 @@ mod tests {
     }
 
     fn sample(tenant: &str, principal: &str) -> AppCtx {
-        RequestCtx::new(tid(tenant), PrincipalSlot::new(principal))
+        let facet: Arc<dyn PrincipalFacet> =
+            Arc::new(TestPrincipalFacet::new(PrincipalKind::User, principal));
+        RequestCtx::new(tid(tenant), facet)
+    }
+
+    // `AppCtx` 的 principal payload 是 trait object（`Arc<dyn PrincipalFacet>`），无 `PartialEq`——
+    // ambient 能力快照非值类型。测试经可观测字段断言：tenant 相等 + principal kind/subject 匹配。
+    fn assert_ctx(ctx: &AppCtx, tenant: &str, subject: &str) {
+        assert_eq!(ctx.tenant(), &tid(tenant), "tenant 不匹配");
+        assert_eq!(ctx.principal().kind(), PrincipalKind::User, "kind 不匹配");
+        assert!(
+            ctx.principal().matches_subject(subject),
+            "principal subject 不匹配"
+        );
     }
 
     // happy path：scope 绑定后深层 try_current 取回同一快照。
+    #[allow(clippy::unwrap_used)] // reason: 测试断言 scope 内 try_current 必为 Ok。
     #[tokio::test]
     async fn scope_binds_and_current_reads() {
         let seen = scope(sample("t1", "u1"), async { try_current() }).await;
-        assert_eq!(seen, Ok(sample("t1", "u1")));
+        assert_ctx(&seen.unwrap(), "t1", "u1");
     }
 
     // fail-closed 核心不变式（ADR-002 §D6）：无 scope 时返回 Err，绝不伪造 ctx。
     #[tokio::test]
     async fn try_current_outside_scope_is_err() {
-        assert_eq!(try_current(), Err(MissingCtx));
+        assert_eq!(try_current().err(), Some(MissingCtx));
     }
 
     // try_current 是 total 函数：ctx 缺失产出 Err，永不 panic（workspace panic=deny）。
@@ -107,6 +123,7 @@ mod tests {
     }
 
     // 嵌套：内层 scope 遮蔽外层；内层 future 完成后外层快照恢复。
+    #[allow(clippy::unwrap_used)] // reason: 测试断言两层 scope 内 try_current 均为 Ok。
     #[tokio::test]
     async fn nested_scope_inner_shadows_outer() {
         let (inner_seen, outer_seen) = scope(sample("outer", "u"), async {
@@ -115,8 +132,8 @@ mod tests {
             (inner_seen, outer_seen)
         })
         .await;
-        assert_eq!(inner_seen, Ok(sample("inner", "u")));
-        assert_eq!(outer_seen, Ok(sample("outer", "u")));
+        assert_ctx(&inner_seen.unwrap(), "inner", "u");
+        assert_ctx(&outer_seen.unwrap(), "outer", "u");
     }
 
     // ctx 访问器返回绑定的 payload（覆盖 ctx.rs）。
@@ -124,21 +141,22 @@ mod tests {
     fn ctx_accessors_return_bound_payload() {
         let ctx = sample("t", "p");
         assert_eq!(ctx.tenant(), &tid("t"));
-        assert_eq!(ctx.principal(), &PrincipalSlot::new("p"));
+        assert_eq!(ctx.principal().kind(), PrincipalKind::User);
+        assert!(ctx.principal().matches_subject("p"));
     }
 
     // 并发隔离：两个任务各自 scope 不同 tenant，互不串台（多租户隔离）。
+    #[allow(clippy::unwrap_used)] // reason: 已先断言 JoinHandle is_ok，unwrap 等价 assert。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scope_isolation_across_concurrent_tasks() {
         let a = tokio::spawn(scope(sample("ta", "ua"), async { try_current() }));
         let b = tokio::spawn(scope(sample("tb", "ub"), async { try_current() }));
         let (ra, rb) = tokio::join!(a, b);
-        // 先显式断言 JoinHandle 未 panic / abort —— 否则 .ok() 会把 JoinError 静默成 None，
-        // 让「任务失败」与「ctx 缺失」无法区分。
+        // 先显式断言 JoinHandle 未 panic / abort，再断言各自取回自己 scope 的快照。
         assert!(ra.is_ok(), "task a join failed: {ra:?}");
         assert!(rb.is_ok(), "task b join failed: {rb:?}");
-        assert_eq!(ra.ok(), Some(Ok(sample("ta", "ua"))));
-        assert_eq!(rb.ok(), Some(Ok(sample("tb", "ub"))));
+        assert_ctx(&ra.unwrap().unwrap(), "ta", "ua");
+        assert_ctx(&rb.unwrap().unwrap(), "tb", "ub");
     }
 
     // spawn 不继承 task_local（R2 footgun）+ 受认可的「捕获-重绑」传播范式。
@@ -149,7 +167,11 @@ mod tests {
             tokio::spawn(async { try_current() }).await.ok()
         })
         .await;
-        assert_eq!(bare, Some(Err(MissingCtx)));
+        // bare = Some(Err(MissingCtx))：子任务无继承 ctx。
+        assert!(
+            matches!(bare, Some(Err(MissingCtx))),
+            "裸 spawn 子任务不应继承父 ctx"
+        );
 
         // (b) 范式：spawn 前捕获，子任务内重新 scope。
         let propagated = scope(sample("t", "p"), async {
@@ -159,7 +181,14 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(propagated, Some(Ok(sample("t", "p"))));
+        // propagated = Some(Ok(ctx))：重绑后子任务取回父快照。
+        assert!(
+            matches!(propagated, Some(Ok(_))),
+            "重绑后子任务应取回父 ctx"
+        );
+        if let Some(Ok(ctx)) = propagated {
+            assert_ctx(&ctx, "t", "p");
+        }
     }
 
     // spawn_blocking 同样不继承 task_local（lib.rs 文档三情形之一）：子闭包 fail-closed。
@@ -169,7 +198,10 @@ mod tests {
             tokio::task::spawn_blocking(try_current).await.ok()
         })
         .await;
-        assert_eq!(seen, Some(Err(MissingCtx)));
+        assert!(
+            matches!(seen, Some(Err(MissingCtx))),
+            "spawn_blocking 子闭包不应继承父 ctx"
+        );
     }
 
     // 边界错误消息稳定（覆盖 MissingCtx Display）。
@@ -179,10 +211,16 @@ mod tests {
     }
 
     // RequestCtx 是 Clone 的不可变快照；Debug 必须脱敏（绝不泄 tenant/principal payload，F2/ADR §D1）。
+    // 注：`AppCtx` 的 principal payload 是 trait object、无 `PartialEq`——clone 一致性经可观测字段断言。
     #[test]
-    fn request_ctx_clone_eq_and_debug_redacted() {
+    fn request_ctx_clone_and_debug_redacted() {
         let ctx = sample("SECRET_TENANT", "SECRET_PRINCIPAL");
-        assert_eq!(ctx, ctx.clone());
+        let cloned = ctx.clone();
+        // clone 保留可观测字段（tenant + principal kind/subject）。
+        assert_eq!(cloned.tenant(), ctx.tenant());
+        assert_eq!(cloned.principal().kind(), ctx.principal().kind());
+        assert!(cloned.principal().matches_subject("SECRET_PRINCIPAL"));
+        // Debug 脱敏：类型名出现，payload 不泄露。
         let dbg = format!("{ctx:?}");
         assert!(dbg.contains("RequestCtx"), "应出类型名: {dbg}");
         assert!(dbg.contains("redacted"), "应标 redacted: {dbg}");
@@ -190,13 +228,5 @@ mod tests {
             !dbg.contains("SECRET"),
             "Debug 不得泄露 tenant/principal payload: {dbg}"
         );
-    }
-
-    // principal slot 的 Debug 脱敏（assert_eq! 失败消息走 Debug，principal subject 是凭据级 PII，不裸打印）。
-    // 注：`TenantId` Debug 为 derived（打印 UUID）——tenant id 是合法可观测标识（observ span 字段），非凭据，
-    // 有意不脱敏；RequestCtx 的 `secure::Redact` 派生仍对 tenant/principal 统一出 `<redacted>`（见上 test）。
-    #[test]
-    fn principal_slot_debug_is_redacted() {
-        assert!(!format!("{:?}", PrincipalSlot::new("SECRET")).contains("SECRET"));
     }
 }

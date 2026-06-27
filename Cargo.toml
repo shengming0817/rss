@@ -77,6 +77,7 @@ libraries = [
   { path = "lints/rss_spawn_missing_scope" },
   { path = "lints/rss_crosstenant_callsite" },
   { path = "lints/rss_diport_impl_allowlist" },
+  { path = "lints/rss_principal_facet_impl_allowlist" },
   { path = "lints/rss_authplan_callsite" },
   { path = "lints/rss_authenticated_callsite" },
   { path = "lints/rss_diport_error_debug_redacted" },

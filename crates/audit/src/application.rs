@@ -7,8 +7,8 @@
 //!
 //! # 鉴权作用域（本轮租户级；跨租户 super-admin 读 = follow-up）
 //!
-//! `AppCtx.principal` 当前是 `runctx::PrincipalSlot` 占位（非 `authn::Principal`，principal facet 入 ctx 是
-//! 独立 W 项；`runctx → authn` 是禁止的依赖环）。故 handler 只能读 ctx **tenant** 做租户级作用域；跨租户
+//! `AppCtx.principal` 是 `Arc<dyn runctx::PrincipalFacet>`（authn 的 `Principal` 经擦除注入；`runctx → authn`
+//! 是禁止的依赖环，故 runctx 不按具体类型持有 principal，#1105）。本 handler 只读 ctx **tenant** 做租户级作用域；跨租户
 //! （`RowScope::All`，super-admin 派生）+ 专用 `rss_audit_admin` postgres 池 + 501 fail-closed 待 principal
 //! facet + 持久化 adapter 落地（docs/rules/audit-ledger.md、tenancy.md）。Admin listener auth 限定可达者。
 //!

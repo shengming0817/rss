@@ -125,10 +125,15 @@ fn super_admin_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
 }
 /// `user` kind JWT（需 tenant claim；默认 claim 名 `tenant_id`）。
 fn user_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
+    scoped_jwt(sk, exp, iss, aud, "user")
+}
+
+/// scoped kind（user/device/admin）JWT（带 tenant claim；sub=alice）——参数化 kind 供多 kind scope e2e 复用。
+fn scoped_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str, kind: &str) -> String {
     mint_es256(
         sk,
         &format!(
-            r#"{{"sub":"alice","exp":{exp},"iss":"{iss}","aud":"{aud}","kind":"user","tenant_id":"{TENANT}"}}"#
+            r#"{{"sub":"alice","exp":{exp},"iss":"{iss}","aud":"{aud}","kind":"{kind}","tenant_id":"{TENANT}"}}"#
         ),
     )
 }
@@ -139,11 +144,11 @@ fn user_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
 #[allow(clippy::expect_used)]
 fn es256_provider() -> OidcProvider {
     let es256_b64 = B64.encode(sec1(&sk_jwt()));
-    // trust superAdmin（无 tenant 路径）+ user（带 tenant 路径），覆盖两类 JWT。
+    // trust superAdmin（无 tenant 路径）+ user/device/admin（带 tenant 路径），覆盖跨租户 + 全 scoped kind。
     provider_from_b64(
         ISS,
         AUD,
-        "superAdmin,user",
+        "superAdmin,user,device,admin",
         Some(&es256_b64),
         None,
         Box::new(FixedClock(NOW)),
@@ -301,6 +306,179 @@ async fn user_jwt_records_auth_audit_principal_kind() {
     );
     assert_eq!(event.resource_id, "test.protected");
     assert_eq!(event.outcome, diport::AuditOutcome::Success);
+}
+
+// ── 验收：runctx ambient scope 建立（#1105，ADR-002 §D5） ──────────────────────────
+//
+// 验签桥得到带 tenant 的 scoped principal ⇒ `runctx::scope` 绑定下游全链；探针 handler 经
+// `runctx::try_current()` 取回 ambient——证明「下游经 ambient 取已认证 tenant/principal」端到端成立
+// （PR1 前全仓唯一 scope 是 audit 的 `#[tokio::test]`，生产路径从未建立）。两分支：scoped 主体（有 tenant）
+// 建 scope / 跨租户主体（tenant=None）+ public 无凭据 不建 scope（fail-closed = MissingCtx）。
+
+/// scope 探针响应：ambient 缺失时的 fail-closed 标记（≥3 处复用，抽 const）。
+const SCOPE_MISSING: &str = "scope=missing";
+
+/// 探针 handler：读 ambient `runctx`——经此断言验签桥已绑定 scope；缺 scope 时 fail-closed 落 [`SCOPE_MISSING`]。
+async fn scope_probe() -> String {
+    match runctx::try_current() {
+        Ok(ctx) => format!(
+            "tenant={};kind={:?};alice={}",
+            ctx.tenant(),
+            ctx.principal().kind(),
+            ctx.principal().matches_subject("alice"),
+        ),
+        Err(_) => SCOPE_MISSING.to_string(),
+    }
+}
+
+/// scope 探针 router：`/scope`（Require）+ `/scope-public`（Public opt-out），均挂 [`scope_probe`]，叠 es256 桥。
+#[allow(clippy::expect_used)]
+fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            httpserve::PrimaryRoute {
+                method: Method::GET,
+                path: "/scope",
+                contract_id: "test.scope",
+                opt_out: None,
+            },
+            get(scope_probe),
+        )
+        .mount_primary(
+            httpserve::PrimaryRoute {
+                method: Method::GET,
+                path: "/scope-public",
+                contract_id: "test.scope.public",
+                opt_out: Some(RouteAuthOptOut::Public),
+            },
+            get(scope_probe),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Jwt)
+}
+
+/// oneshot 取回 (status, body)（scope 探针断言响应体）。
+#[allow(clippy::unwrap_used)]
+async fn body_of(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+) -> (StatusCode, String) {
+    let mut builder = axum::http::Request::builder().method(Method::GET).uri(uri);
+    if let Some(value) = bearer {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    let resp = app
+        .into_router_for_test()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    // size 上限 4096：探针响应是短串（<100B），上限即「超此即 bug」的 tripwire（非 usize::MAX 的无界）。
+    let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn user_jwt_establishes_runctx_scope_for_downstream() {
+    // user JWT 带 tenant claim → 验签桥 runctx::scope 绑定 → 下游 handler 经 try_current() 取到已认证
+    // tenant + principal facet（kind=User、受控 subject 匹配 alice）。
+    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let (status, body) = body_of(
+        jwt_router_with_scope_probe(),
+        "/scope",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        format!("tenant={TENANT};kind=User;alice=true"),
+        "下游须经 ambient runctx 取到已认证 tenant + facet（scope 已建立）"
+    );
+}
+
+#[tokio::test]
+async fn super_admin_jwt_without_tenant_leaves_scope_missing() {
+    // 跨租户主体（superAdmin，tenant=None）→ 不建 scope → 下游 try_current() = MissingCtx（fail-closed）；
+    // 仍放行（有证据）证明「不建 scope」≠「拒绝」。
+    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let (status, body) = body_of(
+        jwt_router_with_scope_probe(),
+        "/scope",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "superAdmin JWT 仍放行（证据在场）");
+    assert_eq!(
+        body, SCOPE_MISSING,
+        "跨租户主体无单一 ambient tenant ⇒ 不建 scope（fail-closed）"
+    );
+}
+
+#[tokio::test]
+async fn device_jwt_establishes_runctx_scope_for_downstream() {
+    // Device kind（scoped，带 tenant）走与 User 同一 allow_evidence 路径 → 建 scope（防 kind 差异化回归）。
+    let token = scoped_jwt(&sk_jwt(), NOW + 3600, ISS, AUD, "device");
+    let (status, body) = body_of(
+        jwt_router_with_scope_probe(),
+        "/scope",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        format!("tenant={TENANT};kind=Device;alice=true"),
+        "Device scoped 主体须建 ambient scope"
+    );
+}
+
+#[tokio::test]
+async fn admin_jwt_establishes_runctx_scope_for_downstream() {
+    // Admin kind（scoped，带 tenant）同样建 scope——ABAC 最相关的 scoped 角色，确保非 User 的 scoped 路径也覆盖。
+    let token = scoped_jwt(&sk_jwt(), NOW + 3600, ISS, AUD, "admin");
+    let (status, body) = body_of(
+        jwt_router_with_scope_probe(),
+        "/scope",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        format!("tenant={TENANT};kind=Admin;alice=true"),
+        "Admin scoped 主体须建 ambient scope"
+    );
+}
+
+#[tokio::test]
+async fn public_route_without_token_has_no_scope() {
+    // 无凭据 public 路由 → 无证据无 scope → 下游 try_current() = MissingCtx（public 路由本不该碰租户作用域 infra）。
+    let (status, body) = body_of(jwt_router_with_scope_probe(), "/scope-public", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, SCOPE_MISSING, "无凭据请求无 ambient scope");
+}
+
+#[tokio::test]
+async fn public_route_with_valid_bearer_has_no_scope() {
+    // #1105 F2（核心回归）：Public 路由即便携**有效** Bearer 也不建 ambient scope。scope 由 enforce 仅在
+    // Require-Allow 建立，Public opt-out（requirement=Allow）丢弃 PendingScopeCtx——防「Public handler 因
+    // 携 Bearer 误绑 ambient tenant」。修复前（scope 在验签桥建）此用例会取到 tenant 而 FAIL。
+    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let (status, body) = body_of(
+        jwt_router_with_scope_probe(),
+        "/scope-public",
+        Some(&format!("Bearer {token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body, SCOPE_MISSING,
+        "Public 路由携有效 Bearer 仍不建 ambient scope（scope 与 route auth 决策对齐，F2）"
+    );
 }
 
 #[tokio::test]
@@ -512,6 +690,40 @@ async fn service_token_hs256_is_200() {
         status(app, "/svc", Some(&format!("Bearer {token}"))).await,
         StatusCode::OK,
         "有效 HS256 service-token → 证据注入放行 200"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn service_token_does_not_establish_scope() {
+    // service 主体（Internal/ServiceToken）tenant=None → 不建 ambient scope（与 Primary/JWT scope 用例互补的
+    // 回归：若 `from_verified_service_token` 将来误带 tenant，本用例会 FAIL）。仍放行（有证据）。
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256(
+        &secret,
+        &format!(
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            NOW + 3600
+        ),
+    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+        rb.mount(
+            httpserve::Route {
+                method: Method::GET,
+                path: "/scope",
+                contract_id: "test.svc.scope",
+            },
+            get(scope_probe),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+    let (status, body) = body_of(app, "/scope", Some(&format!("Bearer {token}"))).await;
+    assert_eq!(status, StatusCode::OK, "service-token 仍放行（证据在场）");
+    assert_eq!(
+        body, SCOPE_MISSING,
+        "service 主体（tenant=None）不建 ambient scope"
     );
 }
 

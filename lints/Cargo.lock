@@ -1511,6 +1511,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_principal_facet_impl_allowlist"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "runctx",
+ "vocab",
+]
+
+[[package]]
 name = "rss_projection_append_only"
 version = "0.0.0"
 dependencies = [
