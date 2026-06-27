@@ -34,7 +34,8 @@ mod refresh;
 mod session;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
-pub use rbac::Role; // Role 是 pub（ports::RoleRepo 签名实体，跨 crate 命名）。
+// Role / RoleBinding 是 pub（ports::{RoleRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
+pub use rbac::{Role, RoleBinding};
 // Session / SessionId 是 pub（ports::SessionLifecycle 签名实体，跨 crate 命名）；与 RoleId 不同，二者有
 // 生产消费方（application 构造 + postgres adapter 读取），非 ADR-004 C8 冻结期 dead，故不带 allow(dead_code)。
 pub use session::{Session, SessionId};
@@ -59,7 +60,7 @@ pub(crate) use abac::{
 pub use account::{AccountLockout, AccountStatus, AuthOutcome, Credential, LoginIdentifier};
 // reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
 #[allow(unused_imports)]
-pub(crate) use rbac::{Permission, RoleBinding, authorize_rbac};
+pub(crate) use rbac::{Permission, authorize_rbac};
 
 // ---------------------------------------------------------------------------
 // 共享校验 helper（ID 三连复用：同字符集 + 长度上界 + IdParseError）

@@ -27,7 +27,9 @@ use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHand
 use consistency::ConsumerGroup;
 use diport::Message;
 use futures::future::BoxFuture;
-use generated::event::identity_v1::{IdentitySessionCreatedPayload, SUBSCRIPTIONS};
+use generated::event::identity_v1::session_created::{
+    IdentitySessionCreatedPayload, SUBSCRIPTIONS,
+};
 use generated::http::audit_v1::{
     AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
 };

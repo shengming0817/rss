@@ -29,7 +29,7 @@ use dynosaur::dynosaur;
 pub use crate::domain::{
     AccountLockout, AccountStatus, AuthOutcome, Credential, IdentityError, LoginIdentifier,
     RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, Role,
-    RoleId, Session, SessionId, kind_from_db, kind_to_db,
+    RoleBinding, RoleId, Session, SessionId, kind_from_db, kind_to_db,
 };
 pub use vocab::TenantId;
 
@@ -63,6 +63,63 @@ pub trait RoleRepoLocal {
 
     /// 持久化角色（upsert）。
     async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError>;
+}
+
+/// 角色绑定生命周期 DI port（域形；provider 可换：prod postgres / test in-mem）——RBAC 角色分配 / 撤销的
+/// **L2 OutboxFact co-tx** 写口（#1190 US5）。
+///
+/// 公开 [`RoleBindingLifecycle`] 是 **Send 变体**（adapter `impl RoleBindingLifecycle for ...`），
+/// [`DynRoleBindingLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Arc<DynRoleBindingLifecycle>` 注入，
+/// 供 [`crate::RbacAdminService`] 作 axum handler state 间接共享）。归属为域形 port（签名引用 [`RoleBinding`]
+/// / [`RoleId`]）→ 本域 crate `ports`，非 diport（ADR-005 category line，同 [`SessionLifecycle`]）。
+///
+/// **co-tx（L2，both-or-neither）**：binding 行写 / 删与 outbox(`identity.role-{assigned,revoked}`) 行须
+/// **同一本地事务**原子落地——域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）
+/// 与 `envelope`，adapter 在单事务内先注入 tenant scope（SET LOCAL）、写/删 binding、`append_outbox`，单
+/// commit；任一步失败整体 rollback。**唯一 binding-写 API**（域无 `save`/`emit` 分调、无半开事务句柄；co-tx
+/// 不可拆解在类型层成立，同 [`SessionLifecycle`] 的 OUTBOX-COTX-SESSION-01）。
+///
+/// INVARIANT: OUTBOX-COTX-BINDING-01 — binding 行写/删与 role-event outbox 行 both-or-neither（Hard，
+/// combined-method funnel 在类型层成立）；#1017 生产 postgres `PgRoleBindingLifecycle` impl 落地时须以此 ID
+/// 标注 same-tx 接线 + 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无），同 OUTBOX-COTX-SESSION-01。
+///
+/// **租户隔离由签名承载（fail-closed）**：`assign_and_emit` 的 tenant 来自 `binding.tenant()`；
+/// `revoke_and_emit` 接 typed [`TenantId`] 位参做 store scope——跨租 revoke → 幂等 `Ok(false)`（不撤、不发
+/// 事件、不泄露存在性，IDENTITY-AUTHZ-TENANT-01）。失败通道经 [`OutboxEmitError`]（infra 错误，source 已
+/// PII-redacted）冒泡。
+///
+/// **draft 阶段**：本 PR 仅交付 port + `#[cfg(test)]` in-mem 替身 + 发布侧 producer 测试；生产 postgres
+/// adapter impl + audit 消费侧延后（#1017）——事件 draft 无下游，边界安全。
+///
+/// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
+/// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
+#[trait_variant::make(RoleBindingLifecycle: Send)]
+#[dynosaur(pub DynRoleBindingLifecycle = dyn(box) RoleBindingLifecycle, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RoleBindingLifecycle` 变体 +
+// dynosaur `DynRoleBindingLifecycle` 承载。`Send + Sync` supertrait 使 `Arc<DynRoleBindingLifecycle>` 可
+// 被 RbacAdminService 跨 await 持有 / 作 handler state 共享（同 SessionLifecycle）。
+pub trait RoleBindingLifecycleLocal: Send + Sync {
+    /// **分配（co-tx，L2）**：把 [`RoleBinding`] 行（upsert）与 outbox(`identity.role-assigned`) 行同一本地
+    /// 事务原子写入。tenant scope 来自 `binding.tenant()`（无独立 tenant 入参可错位）。
+    async fn assign_and_emit(
+        &self,
+        binding: RoleBinding,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError>;
+
+    /// **撤销（co-tx，L2）**：仅撤目标 binding（`(tenant, role_id, subject)` 键），命中则同事务删 binding +
+    /// 写 outbox(`identity.role-revoked`) 行、返回 `Ok(true)`；未命中（不存在 / 跨租）→ **不删、不写 outbox**、
+    /// 返回 `Ok(false)`（幂等 + 跨租隐藏存在性）。`entry`/`envelope` 在未命中时被丢弃（其 EventId 独立 opaque）。
+    async fn revoke_and_emit(
+        &self,
+        tenant: TenantId,
+        role_id: RoleId,
+        subject: String,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, OutboxEmitError>;
 }
 
 /// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。

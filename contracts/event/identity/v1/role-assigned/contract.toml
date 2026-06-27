@@ -1,0 +1,18 @@
+# identity role-assigned event 契约（draft）——RBAC 角色分配 outbox 闭环（#1190/T021，US5）。
+# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 角色分配 emit 的 outbox fact ⇒ consistencyLevel = OutboxFact（L2，binding 写 + outbox 同事务）。
+# lifecycle = draft：audit 订阅消费延 #1017，draft 以免触发 active-subscriber 校验（R14）。
+id = "identity.role-assigned"
+kind = "event"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "draft"
+# 稳定 dotted topic（broker routing key）；draft 阶段 producer 已用它落 outbox。delivery 延至升 active 再声明（R11）。
+topic = "identity.role-assigned"
+
+[schemas]
+payload = "payload.schema.json"
+
+# draft：暂无 subscriber（audit 消费延 #1017）。升 active 前须补 [[subscriptions]]（R14）。

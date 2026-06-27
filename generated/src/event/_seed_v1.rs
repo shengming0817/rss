@@ -77,6 +77,6 @@ pub const CONTRACT: ::vocab::ContractBinding =
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
 /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
-/// `SubscriptionSpec` 类型定义见父 mod（`event/mod.rs`）；此处通过 `super::` 引用，无重复定义。
+/// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];

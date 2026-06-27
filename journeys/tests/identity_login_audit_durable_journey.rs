@@ -37,7 +37,7 @@ use diport::{
 };
 use eventexec::{ConsumerMeta, LeaseConfig, run_consumer};
 use futures::future::BoxFuture;
-use generated::event::identity_v1::IdentitySessionCreatedPayload;
+use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};

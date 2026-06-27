@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityRoleAssignedPayload",
+  "type": "object",
+  "required": ["roleId", "subject", "assignedBy", "tenantId", "occurredAt"],
+  "properties": {
+    "roleId": { "type": "string" },
+    "subject": { "type": "string", "x-pii": "generic" },
+    "assignedBy": { "type": "string", "format": "uuid", "x-pii": "generic" },
+    "tenantId": { "type": "string" },
+    "occurredAt": { "type": "integer", "format": "int64" }
+  },
+  "additionalProperties": false
+}

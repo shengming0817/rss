@@ -19,6 +19,10 @@ pub(crate) struct DiscoveredContract {
     pub(crate) path_kind: String,
     pub(crate) path_domain: String,
     pub(crate) path_version: String,
+    /// 端点 slug 段（多契约嵌套形态 `{kind}/{domain}/{version}/{slug}/contract.toml` 的第 4 段）；
+    /// 扁平单契约形态（`{kind}/{domain}/{version}/contract.toml`）为 `None`。slug 经 kebab→snake 作
+    /// generated 子模块名（`pub mod <slug_ident>`），供同 `{domain}_{version}` 模块下多端点命名空间隔离。
+    pub(crate) slug: Option<String>,
     pub(crate) manifest: ContractManifest,
 }
 
@@ -43,10 +47,10 @@ fn load_contract(contracts_root: &Path, manifest_path: &Path) -> Result<Discover
         .with_context(|| format!("读取 {}", manifest_path.display()))?;
     let manifest = ContractManifest::from_toml_str(&text)
         .with_context(|| format!("解析 {}", manifest_path.display()))?;
-    let (path_kind, path_domain, path_version) =
-        path_segments(contracts_root, &dir).with_context(|| {
+    let (path_kind, path_domain, path_version, slug) = path_segments(contracts_root, &dir)
+        .with_context(|| {
             format!(
-                "契约目录层级须为 contracts/{{kind}}/{{domain}}/{{version}}/: {}",
+                "契约目录层级须为 contracts/{{kind}}/{{domain}}/{{version}}/[<slug>/]: {}",
                 dir.display()
             )
         })?;
@@ -55,6 +59,7 @@ fn load_contract(contracts_root: &Path, manifest_path: &Path) -> Result<Discover
         path_kind,
         path_domain,
         path_version,
+        slug,
         manifest,
     })
 }
@@ -74,17 +79,33 @@ fn collect_contract_tomls(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// 取 dir 相对 contracts_root 的末 3 段（kind/domain/version）。层级不符返回 `None`。
-pub(crate) fn path_segments(contracts_root: &Path, dir: &Path) -> Option<(String, String, String)> {
+/// 取 dir 相对 contracts_root 的段。两种合法形态：
+/// - **扁平**（单契约）`{kind}/{domain}/{version}` → slug `None`；
+/// - **嵌套**（同 `{domain}/{version}` 多端点 / 多事件）`{kind}/{domain}/{version}/{slug}` → slug `Some`。
+///
+/// 其它段数（≤2 / ≥5）返回 `None`（层级非法）。slug 语法 / 扁平嵌套不可混用由 validate R20/R21 守。
+pub(crate) fn path_segments(
+    contracts_root: &Path,
+    dir: &Path,
+) -> Option<(String, String, String, Option<String>)> {
     let rel = dir.strip_prefix(contracts_root).ok()?;
     let segs: Vec<&str> = rel
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .collect();
     match segs.as_slice() {
-        [kind, domain, version] => {
-            Some((kind.to_string(), domain.to_string(), version.to_string()))
-        }
+        [kind, domain, version] => Some((
+            kind.to_string(),
+            domain.to_string(),
+            version.to_string(),
+            None,
+        )),
+        [kind, domain, version, slug] => Some((
+            kind.to_string(),
+            domain.to_string(),
+            version.to_string(),
+            Some(slug.to_string()),
+        )),
         _ => None,
     }
 }
@@ -137,13 +158,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_segments_three_segments_returns_some() {
+    fn path_segments_three_segments_flat_slug_none() {
         let root = std::path::Path::new("/contracts");
         let dir = std::path::Path::new("/contracts/http/_seed/v1");
         let result = path_segments(root, dir);
         assert_eq!(
             result,
-            Some(("http".to_string(), "_seed".to_string(), "v1".to_string()))
+            Some((
+                "http".to_string(),
+                "_seed".to_string(),
+                "v1".to_string(),
+                None
+            ))
+        );
+    }
+
+    #[test]
+    fn path_segments_four_segments_nested_slug_some() {
+        let root = std::path::Path::new("/contracts");
+        let dir = std::path::Path::new("/contracts/event/identity/v1/role-assigned");
+        let result = path_segments(root, dir);
+        assert_eq!(
+            result,
+            Some((
+                "event".to_string(),
+                "identity".to_string(),
+                "v1".to_string(),
+                Some("role-assigned".to_string())
+            ))
         );
     }
 
@@ -155,9 +197,9 @@ mod tests {
     }
 
     #[test]
-    fn path_segments_four_segments_returns_none() {
+    fn path_segments_five_segments_returns_none() {
         let root = std::path::Path::new("/contracts");
-        let dir = std::path::Path::new("/contracts/http/_seed/v1/extra");
+        let dir = std::path::Path::new("/contracts/http/_seed/v1/a/b");
         assert!(path_segments(root, dir).is_none());
     }
 

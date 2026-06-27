@@ -57,8 +57,19 @@ enum ModKind {
 }
 
 /// 渲染全部期望文件（相对 `generated/src` 的路径 → 内容），确定性排序。
+///
+/// 同 `{kind}/{domain}/{version}` 的全部契约聚合进**一个** `{domain}_{version}.rs`（module）。两形态：
+/// - **扁平**（单契约，`slug=None`）：裸顶层常量（与历史输出字节一致，不迁移其它域）。
+/// - **嵌套**（多契约，`slug=Some`）：每契约一个 `pub mod <slug_ident> { payload + glue }`，glue 内 POD
+///   引用（`SubscriptionSpec`/`HttpSpec`/`CommandEmit` 等，定义在 `{kind}/mod.rs`）路径深一级 → `super::super::`。
+///
+/// 扁平 / 嵌套不可混用（同 module 既裸常量又子模块语义二义）；validate R21 守 authoring 面，此处 codegen
+/// 自守（独立于 validate 运行）。
 fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>> {
     let mut files: Vec<(PathBuf, String)> = Vec::new();
+    // group: (kind_dir, module) → (mod_kind, 同 module 的契约切片)。BTreeMap 保确定性序。
+    let mut groups: BTreeMap<(String, String), (ModKind, Vec<&DiscoveredContract>)> =
+        BTreeMap::new();
     // kinds: kind_dir → (modules, mod_kind) ——event/command kind 需在 mod.rs 特化加 POD / seam 定义。
     let mut kinds: BTreeMap<String, (BTreeSet<String>, ModKind)> = BTreeMap::new();
     for c in contracts {
@@ -80,13 +91,20 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
             ContractKind::Command => ModKind::Command,
             ContractKind::Saga => ModKind::Plain,
         };
-        let rel = PathBuf::from(&kind_dir).join(format!("{module}.rs"));
-        files.push((rel, render_contract(c)?));
+        groups
+            .entry((kind_dir.clone(), module.clone()))
+            .or_insert_with(|| (mod_kind, Vec::new()))
+            .1
+            .push(c);
         let entry = kinds
             .entry(kind_dir)
             .or_insert_with(|| (BTreeSet::new(), mod_kind));
         entry.0.insert(module);
         entry.1 = mod_kind; // 同 kind_dir 内所有契约同 kind
+    }
+    for ((kind_dir, module), (_mod_kind, group)) in &groups {
+        let rel = PathBuf::from(kind_dir).join(format!("{module}.rs"));
+        files.push((rel, render_module_file(group)?));
     }
     for (kind_dir, (modules, mod_kind)) in &kinds {
         files.push((
@@ -98,14 +116,92 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
     Ok(files)
 }
 
-/// 模块名 `{domain}_{version}`（如 `_seed_v1`）——每契约独立模块，跨契约类型名天然无碰撞。
+/// 模块名 `{domain}_{version}`（如 `_seed_v1`）。同 `{domain}_{version}` 的多契约（嵌套形态）聚合进一个
+/// 模块文件，经 `pub mod <slug>` 子命名空间隔离类型名。
 fn module_name(domain: &str, version: &str) -> String {
     format!("{domain}_{version}")
 }
 
-/// 单契约的 typify 派生：按声明顺序把 schema 文件喂进一个 TypeSpace。
-/// 对 event kind 额外追加从 manifest 派生的订阅注册 glue（CONTRACT_ID / TOPIC / SUBSCRIPTIONS）。
-fn render_contract(c: &DiscoveredContract) -> Result<String> {
+/// 渲染一个 `{domain}_{version}.rs` 模块文件（含 1 个 `@generated` 头 + 1..N 个契约 body）。
+/// 扁平（单契约 `slug=None`）→ 裸 body；嵌套（多契约 `slug=Some`）→ 每契约 `pub mod <slug_ident> { body }`。
+fn render_module_file(group: &[&DiscoveredContract]) -> Result<String> {
+    let first = group
+        .first()
+        .context("空契约 group（codegen 不变式被破坏）")?;
+    let source = format!(
+        "contracts/{}/{}/{}/",
+        first.manifest.kind.as_dir(),
+        first.manifest.domain,
+        first.manifest.version
+    );
+    let header = generated_header(&source);
+
+    let has_flat = group.iter().any(|c| c.slug.is_none());
+    let has_nested = group.iter().any(|c| c.slug.is_some());
+    if has_flat && has_nested {
+        bail!(
+            "module {}/{} 同时含扁平（直接 contract.toml）与嵌套（<slug>/contract.toml）契约——二义（CONTRACT-NEST-EXCLUSIVE-01）",
+            first.manifest.domain,
+            first.manifest.version
+        );
+    }
+    // 扁平：恰一契约，裸 body（顶层常量，POD 引用 super::）——与历史输出字节一致。
+    if has_flat {
+        if group.len() != 1 {
+            bail!(
+                "module {}/{} 扁平形态却有 {} 个契约（扁平须恰一）",
+                first.manifest.domain,
+                first.manifest.version,
+                group.len()
+            );
+        }
+        return Ok(format!(
+            "{header}{}",
+            render_contract_body(first, "super::")?
+        ));
+    }
+
+    // 嵌套：每契约一个 `pub mod <slug_ident> { body }`，body POD 引用深一级 super::super::。
+    let mut ordered: Vec<&&DiscoveredContract> = group.iter().collect();
+    ordered.sort_by(|a, b| a.slug.cmp(&b.slug)); // 按 slug 确定性序
+    let mut seen_idents: BTreeSet<String> = BTreeSet::new();
+    let mut out = header;
+    for c in ordered {
+        let slug = c
+            .slug
+            .as_deref()
+            .context("嵌套契约缺 slug（codegen 不变式）")?;
+        let ident = slug_module_ident(slug)?;
+        if !seen_idents.insert(ident.clone()) {
+            bail!(
+                "module {}/{} 的 slug {slug:?} 派生重复子模块名 {ident}（kebab→snake 碰撞）",
+                first.manifest.domain,
+                first.manifest.version
+            );
+        }
+        let body = render_contract_body(c, "super::super::")?;
+        out.push_str(&format!(
+            "\n/// 端点 `{slug}` 派生契约（源 `{slug}/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。\npub mod {ident} {{\n{body}\n}}\n"
+        ));
+    }
+    Ok(out)
+}
+
+/// slug（kebab）→ generated 子模块标识符（snake）。经 `syn::Ident` 收口（拒非法标识符 / raw `r#`），与
+/// command request title 同款防注入闭环；R20 是 authoring 上游闸门，本守卫是 codegen 写盘前自守。
+fn slug_module_ident(slug: &str) -> Result<String> {
+    let ident = slug.replace('-', "_");
+    if ident.starts_with("r#") || syn::parse_str::<syn::Ident>(&ident).is_err() {
+        bail!("slug {slug:?} 派生非法 Rust 模块标识符 {ident:?}（防注入生成代码）");
+    }
+    Ok(ident)
+}
+
+/// 单契约的 typify 派生 body（payload DTO + 派生 glue，**不含** `@generated` 头）。
+/// `sup` 是 POD 引用前缀：扁平 body 用 `"super::"`（POD 在父 `{kind}/mod.rs`）、嵌套 body 在
+/// `pub mod <slug>` 内故用 `"super::super::"`。对 event kind 追加订阅注册 glue（CONTRACT_ID / TOPIC /
+/// SUBSCRIPTIONS），http kind 追加 SPEC，command kind 追加 emit/register wrapper。
+fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
     let mut space = TypeSpace::new(&settings);
@@ -162,25 +258,16 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
     // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
     // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
     // command kind：追加 CONTRACT/CONTRACT_ID/TOPIC + typed emit/register wrapper（triple funnel 顶层；
-    // 泛型收口到 command/mod.rs 的 CommandEmit/CommandRegister seam）。
+    // 泛型收口到 command/mod.rs 的 CommandEmit/CommandRegister seam）。`sup` = POD 引用前缀（嵌套深一级）。
     match c.manifest.kind {
-        ContractKind::Event => {
-            let glue = render_event_glue(c)?;
-            Ok(format!("{}{}{}", generated_header(&source), payload, glue))
-        }
-        ContractKind::Command => {
-            let glue = render_command_glue(c)?;
-            Ok(format!("{}{}{}", generated_header(&source), payload, glue))
-        }
-        ContractKind::Http => {
-            let glue = render_http_glue(c)?;
-            Ok(format!("{}{}{}", generated_header(&source), payload, glue))
-        }
-        ContractKind::Saga => Ok(format!("{}{}", generated_header(&source), payload)),
+        ContractKind::Event => Ok(format!("{}{}", payload, render_event_glue(c, sup)?)),
+        ContractKind::Command => Ok(format!("{}{}", payload, render_command_glue(c, sup)?)),
+        ContractKind::Http => Ok(format!("{}{}", payload, render_http_glue(c, sup)?)),
+        ContractKind::Saga => Ok(payload),
     }
 }
 
-fn render_http_glue(c: &DiscoveredContract) -> Result<String> {
+fn render_http_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let domain = &c.manifest.domain;
     let contract_id = &c.manifest.id;
     for (field, value) in [("domain", domain.as_str()), ("id", contract_id.as_str())] {
@@ -258,7 +345,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
             HttpHeaderMode::PopulateOnly => "PopulateOnly",
         };
         headers.push(format!(
-            "    super::HttpHeaderSpec {{ name: \"{name}\", mode: super::HttpHeaderMode::{header_mode} }}"
+            "    {sup}HttpHeaderSpec {{ name: \"{name}\", mode: {sup}HttpHeaderMode::{header_mode} }}"
         ));
     }
     let headers_body = if headers.is_empty() {
@@ -272,13 +359,13 @@ pub const CONTRACT: ::vocab::ContractBinding =
 pub const PATH: &str = "{path}";
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SPEC: super::HttpSpec = super::HttpSpec {{
+pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     contract_id: CONTRACT_ID,
     contract: CONTRACT,
     path: PATH,
     method: "{method}",
-    auth: super::HttpAuthSpec {{
-        mode: super::HttpAuthMode::{mode},
+    auth: {sup}HttpAuthSpec {{
+        mode: {sup}HttpAuthMode::{mode},
         reason: {reason},
         permission: {permission},
     }},
@@ -308,7 +395,7 @@ fn render_option_str(value: Option<&str>, field: &str) -> Result<String> {
 ///
 /// typed `Request` 类型名 = request schema 的 `title`（typify 用作根类型名）；拼进生成源前经
 /// `syn::Ident` 收口（防注入非法标识符）。CONTRACT_ID/TOPIC 由 manifest 派生（draft 无 topic 回退用 id）。
-fn render_command_glue(c: &DiscoveredContract) -> Result<String> {
+fn render_command_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let domain = &c.manifest.domain;
     let contract_id = &c.manifest.id;
     let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
@@ -331,7 +418,7 @@ pub const TOPIC: &str = "{topic}";
 /// `tenant` 是 typed RLS scope（必填）；`subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
 /// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
 /// 由 `cargo xtask codegen` 派生；勿手改。
-pub async fn emit_async<E: super::CommandEmit>(
+pub async fn emit_async<E: {sup}CommandEmit>(
     emitter: &E,
     request: {request_ty},
     tenant: ::vocab::TenantId,
@@ -347,7 +434,7 @@ pub async fn emit_async<E: super::CommandEmit>(
 /// [`super::CommandRegister`]。baked `CONTRACT_ID` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
 pub fn register_handler<Reg, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output
 where
-    Reg: super::CommandRegister,
+    Reg: {sup}CommandRegister,
     H: Fn({request_ty}) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
     Fut: ::core::future::Future<Output = Reg::Outcome> + ::core::marker::Send + 'static,
 {{
@@ -390,15 +477,15 @@ fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
 /// event kind 订阅注册 glue（从 manifest 派生，不消费 schema）。
 ///
 /// 派生 `CONTRACT_ID`、`TOPIC`（active 必有 topic；draft 无 topic 则回退用 id）、以及
-/// `SUBSCRIPTIONS: &[super::SubscriptionSpec]` 常量切片（每个 `[[subscriptions]]` 条目一行）。
-/// `SubscriptionSpec` 类型定义在 `event/mod.rs`（特化 event mod.rs），本文件通过 `super::` 引用——
-/// 避免每个 event 模块重复定义同名 struct（INVARIANT CODEGEN-DRIFT-01）。
+/// `SUBSCRIPTIONS` 常量切片（每个 `[[subscriptions]]` 条目一行）。`SubscriptionSpec` 类型定义在
+/// `event/mod.rs`（特化 event mod.rs），本文件经 `sup` 前缀引用（扁平 `super::` / 嵌套子模块 `super::super::`）
+/// ——避免每个 event 模块重复定义同名 struct（INVARIANT CODEGEN-DRIFT-01）。
 ///
 /// **防注入守卫（review #216 F6）**：consumer / group 被拼进 Rust 字符串字面量；codegen 可独立于
 /// `cargo xtask contract validate`（R7）运行，故此处经 [`is_safe_codegen_ident`] 再次校验形态，含引号 /
 /// 反斜杠 / 空白等可破坏字面量 / 注入源码的字符即 `bail!`。与 R7 互为上下游闭环 funnel（authoring 拒绝 +
 /// 派生防御），非只锁单侧 callsite。
-fn render_event_glue(c: &DiscoveredContract) -> Result<String> {
+fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let contract_id = &c.manifest.id;
     // domain + id 同源绑成 `CONTRACT: ContractBinding`（#1193）；domain 取自 manifest domain 字段（非 id 派生）。
     let domain = &c.manifest.domain;
@@ -444,7 +531,7 @@ fn render_event_glue(c: &DiscoveredContract) -> Result<String> {
             );
         }
         subs.push(format!(
-            "    super::SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, consumer: \"{}\", group: \"{}\" }}",
+            "    {sup}SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, consumer: \"{}\", group: \"{}\" }}",
             s.consumer, s.group
         ));
     }
@@ -472,10 +559,11 @@ pub const CONTRACT: ::vocab::ContractBinding =
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
 /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
-/// `SubscriptionSpec` 类型定义见父 mod（`event/mod.rs`）；此处通过 `super::` 引用，无重复定义。
+/// `SubscriptionSpec` 类型定义见父 `{kind}/mod.rs`（经 `{sup}` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[{subs_body}];
-"#
+pub const SUBSCRIPTIONS: &[{sup}SubscriptionSpec] = &[{subs_body}];
+"#,
+        kind = c.manifest.kind.as_dir(),
     ))
 }
 
@@ -1676,6 +1764,97 @@ mod tests {
             result.is_err(),
             "非法 title 须被 codegen bail（防注入类型名）"
         );
+        Ok(())
+    }
+
+    /// 嵌套形态种子：同 `event/identity/v1` 下两个 `<slug>/contract.toml`（draft，无 subscriptions）。
+    fn seed_nested_events(root: &Path) -> Result<()> {
+        for (slug, title) in [
+            ("role-assigned", "IdentityRoleAssignedPayload"),
+            ("role-revoked", "IdentityRoleRevokedPayload"),
+        ] {
+            let dir = root.join(format!("contracts/event/identity/v1/{slug}"));
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(
+                dir.join("contract.toml"),
+                format!(
+                    "id = \"identity.{slug}\"\n\
+                     kind = \"event\"\n\
+                     domain = \"identity\"\n\
+                     version = \"v1\"\n\
+                     owner = \"identity\"\n\
+                     consistencyLevel = \"OutboxFact\"\n\
+                     lifecycle = \"draft\"\n\
+                     topic = \"identity.{slug}\"\n\
+                     [schemas]\n\
+                     payload = \"payload.schema.json\"\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("payload.schema.json"),
+                format!(
+                    "{{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"{title}\",\
+                     \"type\":\"object\",\"required\":[\"roleId\"],\
+                     \"properties\":{{\"roleId\":{{\"type\":\"string\"}}}},\"additionalProperties\":false}}"
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 嵌套聚合（#1190）：同 `{domain}/{version}` 多契约聚合进**一个** `event/identity_v1.rs`，每契约一个
+    /// `pub mod <slug_ident>`，glue POD 引用深一级 `super::super::`，且全文件只有一个 `@generated` 头。
+    /// synthetic positive + 幂等无漂移（anti-vacuity：扁平 golden 不受影响由 `--check` 真仓守）。
+    #[test]
+    fn nested_events_aggregate_into_one_module_with_submodules() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_nested");
+        seed_nested_events(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        generate(&contracts, &gen_src, true)?; // 幂等：无漂移
+        let file = std::fs::read_to_string(gen_src.join("event/identity_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            file.contains("pub mod role_assigned"),
+            "缺 role_assigned 子模块: {file}"
+        );
+        assert!(
+            file.contains("pub mod role_revoked"),
+            "缺 role_revoked 子模块: {file}"
+        );
+        assert!(
+            file.contains("super::super::SubscriptionSpec"),
+            "嵌套 glue POD 须 super::super:: 引用父 mod 定义: {file}"
+        );
+        assert_eq!(
+            file.matches("@generated").count(),
+            1,
+            "聚合文件须单一 @generated 头: {file}"
+        );
+        Ok(())
+    }
+
+    /// codegen 自守（独立于 validate）：同 `{domain}/{version}` 扁平 + 嵌套混用须 bail。
+    #[test]
+    fn mixed_flat_and_nested_in_one_module_bails() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_mixed");
+        seed_nested_events(&root)?;
+        // 再在同 version 目录直放一个扁平 contract.toml（混用）。
+        let flat = root.join("contracts/event/identity/v1");
+        std::fs::write(
+            flat.join("contract.toml"),
+            "id = \"identity.flat\"\nkind = \"event\"\ndomain = \"identity\"\nversion = \"v1\"\n\
+             owner = \"identity\"\nconsistencyLevel = \"OutboxFact\"\nlifecycle = \"draft\"\n\
+             topic = \"identity.flat\"\n[schemas]\npayload = \"payload.schema.json\"\n",
+        )?;
+        std::fs::write(
+            flat.join("payload.schema.json"),
+            "{\"title\":\"IdentityFlatPayload\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(result.is_err(), "扁平/嵌套混用须被 codegen 自守 bail");
         Ok(())
     }
 }

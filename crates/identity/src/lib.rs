@@ -37,8 +37,8 @@ mod internal;
 pub mod ports;
 
 pub use application::{
-    ChangePasswordError, IdentityDomain, LoginError, LoginService, RefreshBundle, RefreshError,
-    RefreshService,
+    ChangePasswordError, IdentityDomain, LoginError, LoginService, RbacAdminError,
+    RbacAdminService, RefreshBundle, RefreshError, RefreshService,
 };
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。

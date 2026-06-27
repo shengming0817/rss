@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityRoleRevokedPayload",
+  "type": "object",
+  "required": ["roleId", "subject", "revokedBy", "tenantId", "occurredAt"],
+  "properties": {
+    "roleId": { "type": "string" },
+    "subject": { "type": "string", "x-pii": "generic" },
+    "revokedBy": { "type": "string", "format": "uuid", "x-pii": "generic" },
+    "tenantId": { "type": "string" },
+    "occurredAt": { "type": "integer", "format": "int64" }
+  },
+  "additionalProperties": false
+}

@@ -3,7 +3,7 @@
 //! contract schema 的字段级 `x-pii` / `x-redaction` 必须派生成安全 `Debug`；
 //! public 字段仍可见，敏感字段不泄漏原值。
 
-use generated::event::identity_v1::IdentitySessionCreatedPayload;
+use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use generated::http::settings_v2::SettingsSecretPublishRequest;

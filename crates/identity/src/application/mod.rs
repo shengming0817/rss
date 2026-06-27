@@ -23,7 +23,9 @@ use axum::routing::post;
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use generated::event::identity_v1::{CONTRACT, IdentitySessionCreatedPayload, TOPIC};
+use generated::event::identity_v1::session_created::{
+    CONTRACT, IdentitySessionCreatedPayload, TOPIC,
+};
 use generated::http::identity_v1::{
     IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, SPEC as LOGIN_HTTP_SPEC,
 };
@@ -43,6 +45,10 @@ use crate::domain::{
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynSessionLifecycle, RefreshTokenStore, SessionLifecycle,
 };
+
+/// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
+mod rbac_admin;
+pub use rbac_admin::{RbacAdminError, RbacAdminService};
 
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
 /// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。

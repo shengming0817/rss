@@ -32,6 +32,14 @@ use crate::domain::{RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshToke
 #[cfg(test)]
 use crate::ports::RefreshTokenStore;
 
+// RBAC 角色仓储 + 绑定生命周期 in-mem 替身（`#[cfg(test)]` 门控，#1190）。
+#[cfg(test)]
+use crate::domain::{Role, RoleBinding, RoleId};
+#[cfg(test)]
+use crate::ports::{RoleBindingLifecycle, RoleRepo};
+#[cfg(test)]
+use std::collections::HashSet;
+
 // ---------------------------------------------------------------------------
 // InMemCredentialRepo — CredentialRepo 域形 DI port 的 in-mem 替身（PR3）
 // ---------------------------------------------------------------------------
@@ -250,6 +258,174 @@ impl SessionLifecycle for InMemSessionLifecycle {
 }
 
 // ---------------------------------------------------------------------------
+// InMemRoleRepo / InMemRoleBindingLifecycle — RBAC 角色仓储 + 绑定生命周期 in-mem 替身（#1190，US5）
+// ---------------------------------------------------------------------------
+
+/// `RoleRepo` 的 in-memory 替身：仅记录「存在的 `(tenant, role_id)`」集合。`find` 命中返回一个**占位**
+/// [`Role`]（`RbacAdminService::assign_role` 只校验角色存在性、不读 Role 内容，且 `Role` 非 `Clone` ⇒
+/// 无需存实体，命中即构占位）。跨租 find→None（不泄露存在性）。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct InMemRoleRepo {
+    roles: Arc<Mutex<HashSet<(String, String)>>>, // (tenant, role_id)
+}
+
+#[cfg(test)]
+impl InMemRoleRepo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 种子：标记 `(tenant, role_id)` 存在。
+    pub(crate) fn with_role(self, tenant: TenantId, role_id: &RoleId) -> Self {
+        recover(&self.roles).insert((tenant.to_string(), role_id.as_str().to_string()));
+        self
+    }
+}
+
+#[cfg(test)]
+impl RoleRepo for InMemRoleRepo {
+    async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError> {
+        let exists = recover(&self.roles).contains(&(tenant.to_string(), id.as_str().to_string()));
+        // reason: assign 只校验存在性；Role 非 Clone ⇒ 命中构占位实体（name / 权限不参与 assign 判定）。
+        Ok(exists.then(|| Role::new(id, "seeded".to_string(), vec![])))
+    }
+
+    async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError> {
+        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()));
+        Ok(())
+    }
+}
+
+/// 捕获的一条已发事件：`entry`（topic + 幂等键 EventId + payload）+ `envelope`（contract_id / tenant /
+/// subject_id）。捕获 `idem_key` 使测试可断言 EventId 独立性（非靠 payload 差异侧证）；捕获 envelope 三元
+/// 使测试可断言 contract 绑定、租户 scope、以及 **envelope subject_id = actor opaque id**（非 target，F2）。
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct CapturedEvent {
+    pub(crate) topic: String,
+    pub(crate) idem_key: String,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) contract_id: String,
+    pub(crate) env_tenant: String,
+    pub(crate) subject_id: String,
+}
+
+#[cfg(test)]
+impl CapturedEvent {
+    fn of(entry: &Entry, envelope: &OutboxEnvelopeParts) -> Self {
+        Self {
+            topic: entry.topic().as_str().to_string(),
+            idem_key: entry.idem_key().as_str().to_string(),
+            payload: entry.payload().to_vec(),
+            contract_id: envelope.contract().contract_id().to_string(),
+            env_tenant: envelope.tenant().to_string(),
+            subject_id: envelope.subject_id().to_string(),
+        }
+    }
+}
+
+/// `RoleBindingLifecycle` 的 in-memory 替身：binding 集合 `(tenant, role_id, subject)` + 捕获已发事件
+/// [`CapturedEvent`]（供发布侧 producer 测试断言 emit 一致性）。`fail=true` 模拟 co-tx 写失败
+/// （L2 原子性：emit 失败 ⇒ binding 不落、事件不记，both-or-neither）。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct InMemRoleBindingLifecycle {
+    bindings: Arc<Mutex<HashSet<(String, String, String)>>>,
+    emitted: Arc<Mutex<Vec<CapturedEvent>>>,
+    fail: bool,
+}
+
+#[cfg(test)]
+impl InMemRoleBindingLifecycle {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 失败模式（模拟 co-tx 写失败，供 L2 原子性测试）。
+    pub(crate) fn failing() -> Self {
+        Self {
+            fail: true,
+            ..Self::default()
+        }
+    }
+
+    /// 种子：标记一条 binding 存在（供 revoke 命中测试）。
+    pub(crate) fn with_binding(self, tenant: TenantId, role_id: &RoleId, subject: &str) -> Self {
+        recover(&self.bindings).insert((
+            tenant.to_string(),
+            role_id.as_str().to_string(),
+            subject.to_string(),
+        ));
+        self
+    }
+
+    /// 当前是否存在该 binding。
+    pub(crate) fn has_binding(&self, tenant: TenantId, role_id: &RoleId, subject: &str) -> bool {
+        recover(&self.bindings).contains(&(
+            tenant.to_string(),
+            role_id.as_str().to_string(),
+            subject.to_string(),
+        ))
+    }
+
+    /// 已捕获事件序列 [`CapturedEvent`]（确定性快照）。
+    pub(crate) fn emitted(&self) -> Vec<CapturedEvent> {
+        recover(&self.emitted).clone()
+    }
+}
+
+#[cfg(test)]
+impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
+    async fn assign_and_emit(
+        &self,
+        binding: RoleBinding,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError> {
+        if self.fail {
+            // reason: 模拟 co-tx 写失败 ⇒ both-or-neither：binding 不落、事件不记（提前返回）。
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "inmem-rbac-cotx-fail",
+            )));
+        }
+        recover(&self.bindings).insert((
+            binding.tenant().to_string(),
+            binding.role_id().as_str().to_string(),
+            binding.subject().to_string(),
+        ));
+        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        Ok(())
+    }
+
+    async fn revoke_and_emit(
+        &self,
+        tenant: TenantId,
+        role_id: RoleId,
+        subject: String,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, OutboxEmitError> {
+        if self.fail {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "inmem-rbac-cotx-fail",
+            )));
+        }
+        let key = (
+            tenant.to_string(),
+            role_id.as_str().to_string(),
+            subject.clone(),
+        );
+        // 仅撤目标 binding；未命中（不存在 / 跨租）→ 不删、不发事件、返回 false（隐藏存在性 + 幂等）。
+        let removed = recover(&self.bindings).remove(&key);
+        if removed {
+            recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        }
+        Ok(removed)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InMemRefreshTokenStore — RefreshTokenStore 域形 DI port 的 in-mem 替身（#1325）
 // ---------------------------------------------------------------------------
 
@@ -406,7 +582,7 @@ mod tests {
 
     fn dummy_envelope() -> OutboxEnvelopeParts {
         OutboxEnvelopeParts::new(
-            generated::event::identity_v1::CONTRACT,
+            generated::event::identity_v1::session_created::CONTRACT,
             tid(TENANT_A),
             "subject-1",
         )

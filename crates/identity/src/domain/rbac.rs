@@ -141,10 +141,12 @@ impl Role {
 ///
 /// Debug 经 `secure::Redact` 字段级脱敏：subject 可能是 email / username 等 PII，不得原文打印到日志；
 /// role_id 和 tenant 非敏感，正常打印。
-// reason: 同 Permission（生产调用方待 W；当前仅测试消费）。
-#[allow(dead_code)]
+///
+/// 可见性（ADR-005 域形 port 签名实体）：`pub`（经 `ports` façade 暴露，供 `RoleBindingLifecycle` co-tx
+/// port 签名引用 + 独立 adapter crate 跨 crate impl 读字段）；字段私有 + 构造器 `new` 保持 `pub(crate)` funnel
+/// ——外部可命名 / 收发 / 读访问器，但**不可伪造**（fail-closed，#1190 RbacAdminService 落 binding）。
 #[derive(secure::Redact)]
-pub(crate) struct RoleBinding {
+pub struct RoleBinding {
     #[redact(pii = "generic")]
     subject: String,
     #[redact(public)]
@@ -153,10 +155,9 @@ pub(crate) struct RoleBinding {
     tenant: vocab::TenantId,
 }
 
-// reason: 同 Permission（生产调用方待 W；当前仅测试消费）。
-#[allow(dead_code)]
 impl RoleBinding {
-    /// 构造角色绑定（subject / role / tenant 必填）。
+    /// 构造角色绑定（subject / role / tenant 必填）。`pub(crate)` funnel：外部不可伪造（仅域内
+    /// `RbacAdminService` 经此落 binding）。
     pub(crate) fn new(
         subject: impl Into<String>,
         role_id: RoleId,
@@ -170,17 +171,17 @@ impl RoleBinding {
     }
 
     /// 取 subject 引用。
-    pub(crate) fn subject(&self) -> &str {
+    pub fn subject(&self) -> &str {
         &self.subject
     }
 
     /// 取角色 ID 引用。
-    pub(crate) fn role_id(&self) -> &RoleId {
+    pub fn role_id(&self) -> &RoleId {
         &self.role_id
     }
 
     /// 取绑定租户。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> vocab::TenantId {
         self.tenant
     }
 }

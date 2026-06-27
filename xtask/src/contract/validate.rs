@@ -35,13 +35,16 @@
 //! 组合或 JSON Schema 内容），类型层无法免费表达，
 //! 故与 R1–R7 同属 Medium——「能 Hard 则 Hard、余下 Medium」的正确分层。
 //!
+//! 嵌套多契约（同 `{domain}/{version}` 多端点 / 多事件，第 4 段 slug）的 slug 段语法（R20）+ 扁平/嵌套
+//! 形态不可混用（R21）；前者逐契约、后者跨契约。
+//!
 //! 规则执行顺序（注释编号 = 执行先后）：
 //!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
 //!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
 //!   → R9 PerKindFieldScope → R18 HttpAuth → R19 HttpTenantSource → R10 SagaBlock
 //!   → R11 ActiveDeliverySupported → R13 SchemaTitle → R16 SchemaRedaction → R17 SchemaProtection
-//!   → R14 ActiveSubscriber
-//!   跨契约（validate_cross，需全局视图）：R12 DuplicateId
+//!   → R14 ActiveSubscriber → R20 SlugSyntax
+//!   跨契约（validate_cross，需全局视图）：R12 DuplicateId → R21 SlugMixing
 
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,6 +135,19 @@ pub(crate) enum Rule {
     HttpAuth,
     /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文或声明式 populate-only header。
     HttpTenantSource,
+    /// R20：嵌套形态（`{kind}/{domain}/{version}/{slug}/`）的 slug 段语法须收口——slug 经 kebab→snake 拼进
+    /// generated `pub mod <slug_ident>`（见 codegen），须为合法 Rust 模块标识符前体（首 `a-z`、余 `[a-z0-9_-]`、
+    /// 无首尾 `-`），杜绝坏值流入生成子模块名 / 路径。与 codegen 写盘前防逃逸守卫互为表里。
+    ///
+    /// INVARIANT: CONTRACT-SLUG-SYNTAX-01 — 嵌套端点 slug 须为合法 module ident 前体（Medium，CI 门；authoring
+    /// 上游闸门）；下游 codegen `slug_module_ident` 经 `syn::Ident` 自守（Hard），二者互为闭环 funnel。
+    SlugSyntax,
+    /// R21：同一 `{kind}/{domain}/{version}` 下扁平（直接 `contract.toml`，单契约）与嵌套（`<slug>/contract.toml`，
+    /// 多契约）形态**不可混用**——混用使 generated `{domain}_{version}.rs` 既要裸常量又要子模块、语义二义。
+    ///
+    /// INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 — 一个 `{domain}/{version}` 模块要么全扁平（恰一契约）、要么全嵌套
+    /// （≥1 子契约），不得既含直接 `contract.toml` 又含子目录契约（Medium，CI 门）。跨契约规则（需 group 视图）。
+    SlugMixing,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -161,9 +177,40 @@ pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding
 }
 
 /// 跨契约规则聚合点：需要**全局视图**（看到所有契约才能判定），无法在逐契约的 [`validate_contract`]
-/// 内表达。现仅 R12 DuplicateId；后续跨契约不变式在此追加。
+/// 内表达。现含 R12 DuplicateId、R21 SlugMixing；后续跨契约不变式在此追加。
 fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
-    rule_duplicate_id(contracts)
+    let mut out = rule_duplicate_id(contracts);
+    out.extend(rule_slug_mixing(contracts));
+    out
+}
+
+/// R21：同 `{kind}/{domain}/{version}` 下扁平 / 嵌套形态不可混用（INVARIANT: CONTRACT-NEST-EXCLUSIVE-01）。
+/// 按三段 group；某 group 同时含扁平契约（`slug=None`）与嵌套契约（`slug=Some`）即报（同根因 1 条）。
+/// synthetic red：version 目录直放 `contract.toml` 又含 `<slug>/contract.toml` → Finding；
+/// anti-vacuity：纯扁平（1×None）/ 纯嵌套（N×Some）group 均通过（见 `r21_*` 测试）。
+fn rule_slug_mixing(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+    let mut by_group: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for c in contracts {
+        let key = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
+        let entry = by_group.entry(key).or_insert((false, false));
+        match c.slug {
+            None => entry.0 = true,    // 含扁平
+            Some(_) => entry.1 = true, // 含嵌套
+        }
+    }
+    by_group
+        .into_iter()
+        .filter(|(_, (flat, nested))| *flat && *nested)
+        .map(|(label, _)| {
+            finding(
+                Rule::SlugMixing,
+                &label,
+                "同 {kind}/{domain}/{version} 既含直接 contract.toml（扁平）又含 <slug>/contract.toml（嵌套）；\
+                 二选一：单契约用扁平、多契约全部移入各自 <slug>/ 子目录"
+                    .to_string(),
+            )
+        })
+        .collect()
 }
 
 /// R12：contract `id` 须跨全部契约全局唯一（INVARIANT: CONTRACT-IDUNIQ-01）。同根因（同一重复 id）
@@ -171,7 +218,7 @@ fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
 fn rule_duplicate_id(contracts: &[DiscoveredContract]) -> Vec<Finding> {
     let mut by_id: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for c in contracts {
-        let label = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
+        let label = contract_label(c);
         by_id.entry(c.manifest.id.as_str()).or_default().push(label);
     }
     by_id
@@ -188,12 +235,25 @@ fn rule_duplicate_id(contracts: &[DiscoveredContract]) -> Vec<Finding> {
         .collect()
 }
 
+/// 契约诊断 label：相对 `{kind}/{domain}/{version}`，**嵌套契约附 `/{slug}` 段**（机器稳定、跨机一致；
+/// 嵌套 sibling 出错时精确定位到端点子目录，不退化为三段歧义）。注：R21 mixing 的 group **键**仍用三段
+/// （按 `{domain}/{version}` 聚合才能检出混用），不经本 helper。
+fn contract_label(c: &DiscoveredContract) -> String {
+    match &c.slug {
+        Some(slug) => format!(
+            "{}/{}/{}/{}",
+            c.path_kind, c.path_domain, c.path_version, slug
+        ),
+        None => format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version),
+    }
+}
+
 /// 对单契约跑全部 per-contract 规则（执行顺序 = 下方 `extend` 调用序）。跨契约规则（R12 DuplicateId）
 /// 在 [`validate_cross`]，不在此（它需全局视图）。
 pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
-    // label 用相对 `{kind}/{domain}/{version}` 三段（机器稳定、跨机一致），不用绝对磁盘路径
-    // ——CI / 多开发机的 finding 输出须可对应 repo 路径，便于定位。
-    let label = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
+    // label 用相对 `{kind}/{domain}/{version}[/{slug}]`（机器稳定、跨机一致；嵌套带 slug 段精确定位），
+    // 不用绝对磁盘路径——CI / 多开发机的 finding 输出须可对应 repo 路径，便于定位。
+    let label = contract_label(c);
     let mut findings = Vec::new();
     findings.extend(rule_saga_consistency(&c.manifest, &label));
     findings.extend(rule_command_consistency(&c.manifest, &label));
@@ -213,7 +273,24 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_schema_redaction(c, &label));
     findings.extend(rule_schema_protection(c, &label));
     findings.extend(rule_active_subscriber(&c.manifest, &label));
+    findings.extend(rule_slug_syntax(c, &label));
     findings
+}
+
+/// R20：嵌套 slug 段语法（INVARIANT: CONTRACT-SLUG-SYNTAX-01）。扁平契约（`slug=None`）豁免。
+/// slug 经 kebab→snake 拼进 generated `pub mod <slug_ident>`，须为合法 module ident 前体。
+fn rule_slug_syntax(c: &DiscoveredContract, label: &str) -> Option<Finding> {
+    let slug = c.slug.as_deref()?;
+    if is_safe_slug(slug) {
+        return None;
+    }
+    Some(finding(
+        Rule::SlugSyntax,
+        label,
+        format!(
+            "slug 段非法：须首字符 a-z、余 [a-z0-9_-]、无首尾连字符（kebab→snake 作 generated 子模块名），实为 {slug:?}"
+        ),
+    ))
 }
 
 /// R1：saga ⇒ WorkflowEventual。
@@ -998,6 +1075,16 @@ fn is_version(s: &str) -> bool {
     matches!(s.strip_prefix('v'), Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// 嵌套端点 slug 段：非空、首字符 `a-z`、余 `[a-z0-9_-]`、无首尾连字符（kebab）。slug 经 `-`→`_`
+/// 转换后作 generated `pub mod <ident>`；首字符 `a-z` + 该字符集保证 snake 形态是合法 Rust 标识符。
+/// 拒大写 / 数字开头 / `.`、`/`、`\` 等路径分量 / 首尾 `-`（`-foo`/`foo-`/`-`）。
+fn is_safe_slug(s: &str) -> bool {
+    matches!(s.bytes().next(), Some(b) if b.is_ascii_lowercase())
+        && !s.ends_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 /// 点分 id 文法谓词：每段首字符 `a-z`、余 `[a-z0-9-]`（如 `seed.echo`、`config.entry-upserted`）。
 /// R7 用它统一校验三类**同形**字段——contract `id`、event `topic`、`[[subscriptions]].group`（见各调用点）；
 /// 三者文法一致，故共用单源。小写连字符同 RSS 事件命名约定（见 CLAUDE.md：`session.created` /
@@ -1124,6 +1211,7 @@ mod tests {
             path_kind: m.kind.as_dir().to_string(),
             path_domain: m.domain.clone(),
             path_version: m.version.clone(),
+            slug: None,
             dir,
             manifest: m,
         }
@@ -2467,6 +2555,100 @@ mod tests {
     fn r12_empty_contracts_ok() {
         // 边界：零契约 → 无 finding（不 panic）。
         assert!(rule_duplicate_id(&[]).is_empty());
+    }
+
+    // ── R20 SlugSyntax（per-contract，读 c.slug）─────────────────────────────
+
+    /// 构造一个带 slug 的 event 契约（嵌套形态）。
+    fn discovered_event_slug(
+        domain: &str,
+        version: &str,
+        slug: Option<&str>,
+    ) -> DiscoveredContract {
+        let m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain(domain.to_string()),
+            payload_schemas(),
+        );
+        let mut c = discovered(m, PathBuf::from("/x"));
+        c.path_kind = "event".to_string();
+        c.path_domain = domain.to_string();
+        c.path_version = version.to_string();
+        c.slug = slug.map(str::to_string);
+        c
+    }
+
+    #[test]
+    fn r20_flat_slug_none_no_finding() {
+        // anti-vacuity：扁平契约（slug=None）豁免 R20。
+        let c = discovered_event_slug("identity", "v1", None);
+        assert!(rule_slug_syntax(&c, "event/identity/v1").is_none());
+    }
+
+    #[test]
+    fn r20_valid_kebab_slug_no_finding() {
+        // anti-vacuity（正向）：合法 kebab slug 通过（kebab→snake 合法 ident）。
+        let c = discovered_event_slug("identity", "v1", Some("role-assigned"));
+        assert!(rule_slug_syntax(&c, "event/identity/v1/role-assigned").is_none());
+    }
+
+    #[rstest]
+    #[case("Role-Assigned")] // 大写
+    #[case("1role")] // 数字开头
+    #[case("role-")] // 尾连字符
+    #[case("role.assigned")] // 点（路径分量）
+    #[case("role/assigned")] // 斜杠（逃逸）
+    fn r20_unsafe_slug_finding(#[case] slug: &str) {
+        // synthetic red：非法 slug → SlugSyntax finding。
+        let c = discovered_event_slug("identity", "v1", Some(slug));
+        let f = rule_slug_syntax(&c, "event/identity/v1");
+        assert_eq!(
+            f.map(|f| f.rule),
+            Some(Rule::SlugSyntax),
+            "slug {slug:?} 应被拒"
+        );
+    }
+
+    // ── R21 SlugMixing（跨契约，看同 {kind}/{domain}/{version} group）──────────
+
+    #[test]
+    fn r21_pure_flat_no_finding() {
+        // anti-vacuity：纯扁平（1×None）group 通过。
+        let contracts = vec![discovered_event_slug("identity", "v1", None)];
+        assert!(rule_slug_mixing(&contracts).is_empty());
+    }
+
+    #[test]
+    fn r21_pure_nested_no_finding() {
+        // anti-vacuity：纯嵌套（N×Some）group 通过。
+        let contracts = vec![
+            discovered_event_slug("identity", "v1", Some("role-assigned")),
+            discovered_event_slug("identity", "v1", Some("role-revoked")),
+        ];
+        assert!(rule_slug_mixing(&contracts).is_empty());
+    }
+
+    #[test]
+    fn r21_mixed_flat_and_nested_finding() {
+        // synthetic red：同 group 含扁平 + 嵌套 → SlugMixing（同根因 1 条）。
+        let contracts = vec![
+            discovered_event_slug("identity", "v1", None),
+            discovered_event_slug("identity", "v1", Some("role-assigned")),
+        ];
+        let findings = rule_slug_mixing(&contracts);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::SlugMixing);
+    }
+
+    #[test]
+    fn r21_distinct_groups_not_mixed() {
+        // 不同 {domain}/{version}：flat identity/v1 + nested identity/v2 → 各自纯净，不报。
+        let contracts = vec![
+            discovered_event_slug("identity", "v1", None),
+            discovered_event_slug("identity", "v2", Some("role-assigned")),
+        ];
+        assert!(rule_slug_mixing(&contracts).is_empty());
     }
 
     // ── R13 SchemaTitle（per-contract，读 declared schema 文件）──────────────

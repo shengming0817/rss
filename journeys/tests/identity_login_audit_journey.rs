@@ -387,7 +387,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
             .emit(
                 entry,
                 OutboxEnvelopeParts::new(
-                    generated::event::identity_v1::CONTRACT,
+                    generated::event::identity_v1::session_created::CONTRACT,
                     TenantId::parse(CANON_TENANT)?,
                     CANON_USER,
                 ),
@@ -536,7 +536,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
         .emit(
             entry,
             OutboxEnvelopeParts::new(
-                generated::event::identity_v1::CONTRACT,
+                generated::event::identity_v1::session_created::CONTRACT,
                 TenantId::parse(CANON_TENANT)?,
                 CANON_USER,
             ),
