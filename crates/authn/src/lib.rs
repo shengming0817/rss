@@ -19,7 +19,8 @@
 //! `Principal::row_visibility` 的 `SuperAdmin`（裸同步路径）/ `Service` / `Anonymous` 分支返回
 //! `Err(runctx::MissingCtx)`，强制调用方 deny；字段私有，外部无法绕过 funnel 伪造特权主体。
 //! 跨租户 All-scope 唯一经 [`Principal::audited_cross_tenant_visibility`] 派生——派生与持久 audit ledger
-//! **同址**（无审计无 All-scope，fail-closed），INVARIANT: TENANCY-CROSSTENANT-AUDIT-01。
+//! INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 —— All-scope 派生与持久 audit ledger 写入同址；
+//! 无审计无 All-scope，audit 写失败 fail-closed。
 
 #![forbid(unsafe_code)]
 

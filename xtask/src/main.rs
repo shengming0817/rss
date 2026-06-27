@@ -4,6 +4,8 @@
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
+//!   `cargo xtask archrules list|verify` ArchRules 派生索引（从真实 carrier 的 `INVARIANT:` 反向索引 rule
+//!                                      → carrier → evidence → gate；verify 为 CI 门）
 //!   `cargo xtask contract breaking [--against <git-ref>] [--deny]`
 //!                                      wire JSON-Schema 跨版本破坏检测门（ADR-008，对标 Buf WIRE_JSON）：base ref
 //!                                      （默认 origin/develop）↔ working-tree schema 递归 diff；窗口分级默认 warn
@@ -37,6 +39,7 @@
 //!                                      self-provision postgres/redis/rabbitmq 跑 `--features integration` 测试。
 //!                                      **docker-gated**（fail-closed；env URL 全在则对接长存服务免 docker）。
 //!                                      **已接入 azure-pipelines PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
+mod archrules;
 mod assembly;
 mod cmd;
 mod codegen;
@@ -77,6 +80,8 @@ enum Command {
     },
     ContractValidate,
     AssemblyValidate,
+    ArchRulesList,
+    ArchRulesVerify,
     ContractBreaking {
         /// base git-ref（缺省 = `contract::breaking::DEFAULT_AGAINST`）。
         against: Option<String>,
@@ -120,6 +125,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
     match argv.as_slice() {
         ["codegen"] => Ok(Command::Codegen { check: false }),
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
+        ["archrules", rest @ ..] => parse_archrules(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
         ["layer-deps"] => Ok(Command::LayerDeps),
@@ -136,8 +142,19 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
+        }
+    }
+}
+
+/// 解析 `archrules <sub>` 子命令（fail-closed：只接受 positional list/verify，不提供 --list 兼容形态）。
+fn parse_archrules(args: &[&str]) -> Result<Command> {
+    match args {
+        ["list"] => Ok(Command::ArchRulesList),
+        ["verify"] => Ok(Command::ArchRulesVerify),
+        other => {
+            bail!("未知 archrules 子命令: {other:?}；用法: cargo xtask archrules <list | verify>")
         }
     }
 }
@@ -292,6 +309,8 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Codegen { check } => codegen::run(check),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
+        Command::ArchRulesList => archrules::list(),
+        Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
         Command::ContractBreaking { against, deny } => {
             let mode = if deny {
                 contract::breaking::EnforcementMode::Deny
@@ -381,6 +400,27 @@ mod tests {
             Command::AssemblyValidate
         );
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_archrules_list_verify() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["archrules", "list"]))?,
+            Command::ArchRulesList
+        );
+        assert_eq!(
+            parse_command(&s(&["archrules", "verify"]))?,
+            Command::ArchRulesVerify
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_archrules_rejects_bad() {
+        assert!(parse_command(&s(&["archrules"])).is_err());
+        assert!(parse_command(&s(&["archrules", "--list"])).is_err());
+        assert!(parse_command(&s(&["archrules", "list", "extra"])).is_err());
+        assert!(parse_command(&s(&["archrules", "bogus"])).is_err());
     }
 
     #[test]

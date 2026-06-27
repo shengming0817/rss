@@ -37,7 +37,7 @@ thiserror = { workspace = true }
 # 域形 repo/service DI port（ports 模块）的 async dyn 派发：native AFIT + dynosaur dyn-compatible wrapper +
 # trait-variant Send 变体（同 diport 范式，ADR-003/ADR-004 C1）。归属域 crate 而非 diport：repo port 签名
 # 引用域内实体，不得收敛 diport（Option 2/ADR-005）。dynosaur/trait-variant 依赖经 deny.toml 白名单收敛
-# （DIPORT-MACRO-CONFINE-01′：diport + 定义 repo port 的域 crate）。
+# （DIPORT-MACRO-CONFINE-02：diport + 定义 repo port 的域 crate）。
 dynosaur = { workspace = true }
 trait-variant = { workspace = true }
 # 登录服务：注入 diport::Publisher（发 session-created outbox fact）+ Clock（会话到期）。

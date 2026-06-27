@@ -56,6 +56,8 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 
 禁止直接在规则文件中维护落地实例清单。实例、符号、盲区和评级证明写在对应静态守卫
 （clippy lint 文档、cargo-deny 注释、治理 `#[test]` 模块 rustdoc）、ADR 或代码注释中。
+规则反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生；文档只能薄引用，
+不得成为 rule inventory 的事实源。
 
 ## Hard 范本
 

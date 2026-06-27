@@ -4,7 +4,7 @@
 //! 治理门的**唯一**实际 gate。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + assembly validate + layer-deps + codegen --check
+//!   2. in-process meta：contract validate + assembly validate + archrules + layer-deps + codegen --check
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
@@ -42,7 +42,7 @@
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
-use crate::{assembly, codegen, contract, doc_contracts, layerdeps, wsdeps};
+use crate::{archrules, assembly, codegen, contract, doc_contracts, layerdeps, wsdeps};
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::Stdio;
@@ -69,6 +69,8 @@ enum InternalCheck {
     WsDepsDrift,
     /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
     DocContracts,
+    /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
+    ArchRules,
     CodegenCheck,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
@@ -194,6 +196,15 @@ fn step_doc_contracts() -> Step {
         label: "doc-contracts",
         args: &[],
         kind: StepKind::Internal(InternalCheck::DocContracts),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_archrules() -> Step {
+    Step {
+        label: "archrules",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ArchRules),
         env: &[],
         needs_compile: false,
     }
@@ -644,6 +655,7 @@ fn full_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_doc_contracts(),
+        step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
@@ -675,6 +687,7 @@ fn ci_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_doc_contracts(),
+        step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
@@ -901,6 +914,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
+        InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
@@ -999,6 +1013,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
@@ -1022,7 +1037,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(13) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(14) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -1036,6 +1051,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
@@ -1051,8 +1067,8 @@ mod tests {
         }
     }
 
-    /// meta 十三项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
-    /// doc-contracts / codegen /
+    /// meta 十四项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
+    /// doc-contracts / archrules / codegen /
     /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
     /// defer-gate）在两种模式恒在。
     #[test]
@@ -1073,6 +1089,7 @@ mod tests {
                     "layer-deps",
                     "wsdeps-drift",
                     "doc-contracts",
+                    "archrules",
                     "codegen-check",
                     "pdp-allow-guard",
                     "schema-rls",
@@ -1084,6 +1101,22 @@ mod tests {
                 "fast={fast}"
             );
         }
+    }
+
+    #[test]
+    fn archrules_is_no_compile_internal_gate_in_fast_and_ci() -> anyhow::Result<()> {
+        for (name, plan) in [("fast", verify_plan(&opts(true, false))), ("ci", ci_plan())] {
+            let step = plan
+                .iter()
+                .find(|s| s.label == "archrules")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
+            assert!(!step.needs_compile, "archrules 须是 no-compile gate");
+            assert!(matches!(
+                step.kind,
+                StepKind::Internal(InternalCheck::ArchRules)
+            ));
+        }
+        Ok(())
     }
 
     /// 决策真值表（INVARIANT VERIFY-TOOL-GATE-01）：缺工具默认 fail-closed，豁免仅经显式 flag。
@@ -1181,6 +1214,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
@@ -1269,6 +1303,8 @@ mod tests {
             "contract-breaking",
             "layer-deps",
             "wsdeps-drift",
+            "doc-contracts",
+            "archrules",
             "codegen-check",
             "pdp-allow-guard",
             "schema-rls",

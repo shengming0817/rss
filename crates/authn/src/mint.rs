@@ -33,7 +33,7 @@ const B64_URL: base64::engine::GeneralPurpose = base64::engine::general_purpose:
 /// `alg=none` / RS256 等**类型层不可表达**（闭枚举 = mint 侧白名单）。pre-GA 允许与验签侧 2-variant 枚举
 /// 重复（CLAUDE.md domain-patterns：同形不强行共享 Rust 类型）。
 ///
-/// INVARIANT: OIDC-ALG-WHITELIST-01-MINT（Hard，类型层；alg=none/RS256 不可 mint，anti-vacuity：
+/// INVARIANT: OIDC-ALG-WHITELIST-MINT-01（Hard，类型层；alg=none/RS256 不可 mint，anti-vacuity：
 /// `jwt_alg_jose_strings` 锁 JOSE 串）。alg↔purpose↔key 三者一致性（OIDC-ALG-KEYPATH-01）由**组合根**接线
 /// 时保证 + signer adapter 自身 fail-closed（purpose allowlist + key 精确匹配，如 softca）承载——authn 无法
 /// 在类型层守（`SigningPurpose` 是 adapter 定义的 opaque 值，非 authn 词汇），故该 Hard 强制层属 wiring/W。

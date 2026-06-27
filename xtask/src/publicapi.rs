@@ -63,7 +63,7 @@ pub(crate) enum Layer {
 /// 解析 layer → 目标 crate 集。`None` = basis + engine + curated extras（不另列第三份 ALL，避免漂移）。
 /// 排除 proc-macro 工具 crate（[`crate::layers::is_proc_macro`]）——其契约由 codegen golden 守，
 /// 非 SemVer 库 API 面，不入 public-api baseline。
-fn target_crates(layer: Option<Layer>) -> Vec<&'static str> {
+pub(crate) fn target_crates(layer: Option<Layer>) -> Vec<&'static str> {
     let select: Vec<&'static str> = match layer {
         Some(Layer::Basis) => BASIS_CRATES.to_vec(),
         Some(Layer::Engine) => ENGINE_CRATES.to_vec(),

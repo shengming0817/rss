@@ -189,7 +189,7 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
 /// generated 分层 wrapper」是不同类别：目标是**外部** crate（不在 workspace 成员集），故不走 stale / 反向②
 /// 校验，改校验 deny.toml wrappers 恰等白名单（集合相等，防开洞 / 漏列 / typo）。
 ///
-/// INVARIANT: DIPORT-MACRO-CONFINE-01′（Option 2 / ADR-005 把 `-01` 由「仅 diport」放宽为白名单）——
+/// INVARIANT: DIPORT-MACRO-CONFINE-02（Option 2 / ADR-005 把 `-01` 由「仅 diport」放宽为白名单）——
 ///   DI port 的 dyn-dispatch 宏（dynosaur）+ Send 变体生成（trait-variant）只能被 **DI port 定义点 crate**
 ///   依赖：provider-agnostic infra port 定义点 `diport`（DiPort 层），及**定义自身 repo/service DI port 的
 ///   域 crate**（Domain 层，Option 2）。provider-agnostic vs 域形 port 的归属 category line 见 ADR-005 /
@@ -320,7 +320,7 @@ pub(crate) fn check_wrappers(
     }
 
     for b in bans {
-        // 外部 crate 收敛 wrapper（dynosaur/trait-variant → diport+域 crate 白名单，DIPORT-MACRO-CONFINE-01′）
+        // 外部 crate 收敛 wrapper（dynosaur/trait-variant → diport+域 crate 白名单，DIPORT-MACRO-CONFINE-02）
         // 是独立类别——由 `check_external_confinement` 单独校验（白名单越层 + 正向覆盖 + 集合相等），此处跳过，
         // 避免被误判为 stale 分层 wrapper。
         if EXTERNAL_CONFINEMENT_WRAPPERS
@@ -385,7 +385,7 @@ pub(crate) fn check_wrappers(
     findings
 }
 
-/// 外部 crate 收敛 wrapper 校验（DIPORT-MACRO-CONFINE-01′）——与分层 wrapper（[`check_wrappers`]）正交：
+/// 外部 crate 收敛 wrapper 校验（DIPORT-MACRO-CONFINE-02）——与分层 wrapper（[`check_wrappers`]）正交：
 /// 目标是**外部** crate（不在 workspace 成员集）。委托 [`check_confinement_against`]（生产用真实
 /// [`EXTERNAL_CONFINEMENT_WRAPPERS`]）。
 pub(crate) fn check_external_confinement(members: &[Member], bans: &[BanEntry]) -> Vec<Finding> {
@@ -429,7 +429,7 @@ fn check_confinement_against(
         .collect()
 }
 
-/// 单个外部收敛 entry 的双向 fail-closed 校验（DIPORT-MACRO-CONFINE-01′）：
+/// 单个外部收敛 entry 的双向 fail-closed 校验（DIPORT-MACRO-CONFINE-02）：
 /// - **白名单越层 / typo**：`allow` 每个条目须现存且属 DI port 定义层（DiPort/Domain）——防白名单本身把
 ///   非 port 层 crate 列为 sanctioned 依赖方。
 /// - **正向覆盖**：`ext` 必须有对应 ban——否则删除 `dynosaur`/`trait-variant` ban 会使 dyn-dispatch 宏收敛
@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     /// 外部收敛专用 fixture：在 [`wrapper_fixture_members`] 上加 `settings`（Domain，定义自身 repo port），
-    /// 使 `EXTERNAL_CONFINEMENT_WRAPPERS` 白名单的 `settings` 条目能解析到 Domain 成员（DIPORT-MACRO-CONFINE-01′）。
+    /// 使 `EXTERNAL_CONFINEMENT_WRAPPERS` 白名单的 `settings` 条目能解析到 Domain 成员（DIPORT-MACRO-CONFINE-02）。
     /// 不复用 `wrapper_fixture_members`（加 settings 会令 `check_wrappers_*` fixtures 需补 settings ban，cascade）。
     fn confinement_fixture_members() -> Vec<Member> {
         let mut members = wrapper_fixture_members();
@@ -1197,7 +1197,7 @@ mod tests {
         assert_eq!(findings[0].subject, "identity");
     }
 
-    // DIPORT-MACRO-CONFINE-01′（check_external_confinement）：外部收敛 wrapper 白名单 = DI port 定义点集
+    // DIPORT-MACRO-CONFINE-02（check_external_confinement）：外部收敛 wrapper 白名单 = DI port 定义点集
     // （diport[DiPort] + 定义自身 repo/service port 的域 crate，Option 2/ADR-005）。双向 fail-closed。
     #[test]
     fn external_confinement_green() {
