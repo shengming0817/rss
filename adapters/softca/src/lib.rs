@@ -14,6 +14,8 @@
 //! **两级 CA / 共享 Ledger / CRL 仍不在本切片**：root→intermediate split、signer/revocation 同源共享 Ledger、
 //!   DER CRL 单调 Number 导出 + `revoked_at` 生产读路径属 P0-2 后续 wave（epic #991）；本切片
 //!   `InMemRevocationLedger` 是非持久 dev/demo store（重启清空），生产撤销走持久 CRL/OCSP 后端（同 port 可替换）。
+//!   demo assembly 声明层以 `lifecycle="draft" + durability="ephemeral-memory"` 登记该 provider；
+//!   `cargo xtask assembly validate` 拒绝 production `diport::RevocationStore` 使用非持久后端。
 //!
 //! **CA 私钥 custody（软件 CA 固有边界——诚实声明，勿夸大）**：
 //!   - **进程内裸持是软件 CA 固有的**：CA 私钥 scalar 由 ring `EcdsaKeyPair` 持有**进程生命周期**，ring 不提供
@@ -262,7 +264,8 @@ impl ManagedResource for SoftCaSigner {
 /// 是键的一部分，跨租户 / 跨设备的 `is_revoked` 天然返回 `false`（webpki `find_serial` 未命中语义），无需运行期
 /// scope gate。**幂等**：重复撤销同一 `(scope, serial)` 经 `entry().or_insert` 保留首次撤销时刻。
 ///
-/// **dev / demo 边界**：进程内、非持久（重启即清空撤销集）——生产应走持久 CRL / OCSP 后端（同 port 可替换）。
+/// **dev / demo 边界**：进程内、非持久（重启即清空撤销集）——demo/test assembly 只能把该 provider 声明为
+/// `draft` / `ephemeral-memory`；production 撤销必须走持久 CRL / OCSP 后端（同 port 可替换）。
 /// 与 [`SoftCaSigner`] 解耦（独立 struct）：本切片只落 store，signer / revocation 共享 Ledger（同源、两级 CA）
 /// 属 P0-2 后续 wave。
 #[cfg(feature = "backend")]

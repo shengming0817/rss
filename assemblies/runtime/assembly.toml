@@ -1,0 +1,11 @@
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::RevocationStore"
+provider = "softca::InMemRevocationLedger"
+providerCrate = "softca"
+consumer = "deviceloop"
+lifecycle = "draft"
+durability = "ephemeral-memory"
+purpose = "device-certificate-revocation"

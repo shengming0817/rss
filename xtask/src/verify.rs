@@ -4,7 +4,7 @@
 //! 治理门的**唯一**实际 gate。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + layer-deps + codegen --check
+//!   2. in-process meta：contract validate + assembly validate + layer-deps + codegen --check
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
@@ -42,7 +42,7 @@
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
-use crate::{codegen, contract, layerdeps, wsdeps};
+use crate::{assembly, codegen, contract, layerdeps, wsdeps};
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::Stdio;
@@ -60,6 +60,8 @@ struct VerifyOpts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalCheck {
     ContractValidate,
+    /// assembly-level DI provider 声明校验（RevocationStore active provider 必须持久）。
+    AssemblyValidate,
     /// wire JSON-Schema 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。窗口分级：默认 warn（退出码 0），
     /// env `RSS_WIRE_BREAKING=deny` 对 active 契约破坏升 deny（退出码 1）；against = origin/develop。
     ContractBreaking,
@@ -145,6 +147,15 @@ fn step_contract_validate() -> Step {
         label: "contract-validate",
         args: &[],
         kind: StepKind::Internal(InternalCheck::ContractValidate),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_assembly_validate() -> Step {
+    Step {
+        label: "assembly-validate",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::AssemblyValidate),
         env: &[],
         needs_compile: false,
     }
@@ -617,6 +628,7 @@ fn full_plan() -> Vec<Step> {
     let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
+        step_assembly_validate(),
         step_contract_breaking(),
         step_layer_deps(),
         step_wsdeps_drift(),
@@ -646,6 +658,7 @@ fn ci_plan() -> Vec<Step> {
     let mut plan = vec![
         step_fmt(),
         step_contract_validate(),
+        step_assembly_validate(),
         step_contract_breaking(),
         step_layer_deps(),
         step_wsdeps_drift(),
@@ -866,6 +879,7 @@ fn run_tool_gated(
 fn run_internal(check: InternalCheck) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
+        InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
         // wire 破坏门：against=origin/develop，窗口分级经 env（默认 warn，退出码 0；deny 模式 active 破坏退出码 1）。
         InternalCheck::ContractBreaking => contract::breaking::run(
             contract::breaking::DEFAULT_AGAINST,
@@ -966,6 +980,7 @@ mod tests {
             vec![
                 "fmt",
                 "contract-validate",
+                "assembly-validate",
                 "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
@@ -992,7 +1007,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(10) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(12) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -1001,6 +1016,7 @@ mod tests {
             vec![
                 "fmt",
                 "contract-validate",
+                "assembly-validate",
                 "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
@@ -1019,7 +1035,7 @@ mod tests {
         }
     }
 
-    /// meta 十一项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
+    /// meta 十二项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift / codegen /
     /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
     /// defer-gate）在两种模式恒在。
     #[test]
@@ -1035,6 +1051,7 @@ mod tests {
                 internals,
                 vec![
                     "contract-validate",
+                    "assembly-validate",
                     "contract-breaking",
                     "layer-deps",
                     "wsdeps-drift",
@@ -1141,6 +1158,7 @@ mod tests {
             vec![
                 "fmt",
                 "contract-validate",
+                "assembly-validate",
                 "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
@@ -1228,6 +1246,7 @@ mod tests {
         for label in [
             "fmt",
             "contract-validate",
+            "assembly-validate",
             "contract-breaking",
             "layer-deps",
             "wsdeps-drift",

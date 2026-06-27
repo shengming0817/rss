@@ -3,6 +3,7 @@
 //! 子命令：
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
+//!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
 //!   `cargo xtask contract breaking [--against <git-ref>] [--deny]`
 //!                                      wire JSON-Schema 跨版本破坏检测门（ADR-008，对标 Buf WIRE_JSON）：base ref
 //!                                      （默认 origin/develop）↔ working-tree schema 递归 diff；窗口分级默认 warn
@@ -13,7 +14,7 @@
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract
-//!                                      validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
+//!                                      validate / assembly validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
 //!                                      `--fast` 只跑无需编译的步（fmt+meta+deny）；`--allow-missing-tools` 缺外部
 //!                                      工具时显式宽限（默认 fail-closed）。详见 `verify.rs`。
 //!   `cargo xtask public-api [--layer basis|engine|curated] [--check] [--allow-missing]`
@@ -35,6 +36,7 @@
 //!                                      self-provision postgres/redis/rabbitmq 跑 `--features integration` 测试。
 //!                                      **docker-gated**（fail-closed；env URL 全在则对接长存服务免 docker）。
 //!                                      **已接入 azure-pipelines PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
+mod assembly;
 mod cmd;
 mod codegen;
 mod command_symmetry;
@@ -72,6 +74,7 @@ enum Command {
         check: bool,
     },
     ContractValidate,
+    AssemblyValidate,
     ContractBreaking {
         /// base git-ref（缺省 = `contract::breaking::DEFAULT_AGAINST`）。
         against: Option<String>,
@@ -115,6 +118,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen"] => Ok(Command::Codegen { check: false }),
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["contract", rest @ ..] => parse_contract(rest),
+        ["assembly", rest @ ..] => parse_assembly(rest),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["verify", rest @ ..] => parse_verify(rest),
@@ -128,7 +132,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -142,6 +146,14 @@ fn parse_contract(args: &[&str]) -> Result<Command> {
         other => bail!(
             "未知 contract 子命令: {other:?}；用法: cargo xtask contract <validate | breaking [--against <git-ref>] [--deny]>"
         ),
+    }
+}
+
+/// 解析 `assembly <sub>` 子命令（fail-closed：未知子命令即 `Err`）。
+fn parse_assembly(args: &[&str]) -> Result<Command> {
+    match args {
+        ["validate"] => Ok(Command::AssemblyValidate),
+        other => bail!("未知 assembly 子命令: {other:?}；用法: cargo xtask assembly validate"),
     }
 }
 
@@ -275,6 +287,7 @@ fn dispatch(args: &[String]) -> Result<()> {
     match parse_command(args)? {
         Command::Codegen { check } => codegen::run(check),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
+        Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
         Command::ContractBreaking { against, deny } => {
             let mode = if deny {
                 contract::breaking::EnforcementMode::Deny
@@ -357,6 +370,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_assembly_validate() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["assembly", "validate"]))?,
+            Command::AssemblyValidate
+        );
+        Ok(())
+    }
+
+    #[test]
     fn parse_command_contract_breaking_bare() -> anyhow::Result<()> {
         assert_eq!(
             parse_command(&s(&["contract", "breaking"]))?,
@@ -407,6 +429,8 @@ mod tests {
         assert!(parse_command(&s(&["contract", "validate", "--bogus"])).is_err());
         assert!(parse_command(&s(&["contract", "breaking", "--bogus"])).is_err());
         assert!(parse_command(&s(&["contract", "breaking", "--against"])).is_err()); // 缺值
+        assert!(parse_command(&s(&["assembly", "bogus"])).is_err());
+        assert!(parse_command(&s(&["assembly", "validate", "--bogus"])).is_err());
     }
 
     #[test]
@@ -642,6 +666,8 @@ mod tests {
         assert!(parse_command(&s(&["bogus"])).is_err());
         assert!(parse_command(&s(&["contract"])).is_err()); // 缺 validate
         assert!(parse_command(&s(&["contract", "bogus"])).is_err());
+        assert!(parse_command(&s(&["assembly"])).is_err()); // 缺 validate
+        assert!(parse_command(&s(&["assembly", "bogus"])).is_err());
     }
 
     /// 合法子命令后的未知尾参必须 fail-closed（不被静默吞掉）。
@@ -650,6 +676,7 @@ mod tests {
         assert!(parse_command(&s(&["verify", "--bogus"])).is_err());
         assert!(parse_command(&s(&["layer-deps", "--bogus"])).is_err());
         assert!(parse_command(&s(&["contract", "validate", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["assembly", "validate", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--check", "--bogus"])).is_err());
         assert!(parse_command(&s(&["codegen", "--check", "extra"])).is_err());
