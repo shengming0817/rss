@@ -80,6 +80,15 @@ pub type WorkerSpec = Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResourc
 /// `name` / `domain` 字段随 #1421 settings 闭环（ADR step 5）补。域 service **不经**此结构出向（留 `wire_X`
 /// 内部经 route 闭包捕获）——配合 `assemblies/runtime` 的 `wire_X(deps: &SharedRuntimeDeps) -> Result<DomainModuleResult>`
 /// 签名（INVARIANT WIRING-DEPS-NO-HANDOFF-01，Hard）杜绝跨 module value handoff。
+///
+/// # provider 单源装配（#1498）
+///
+/// per-provider capability bundle（`PgRuntimeDeps` / `RedisRuntimeDeps` / `AmqpRuntimeDeps` /
+/// `VaultRuntimeDeps`）是 managed-resource/rollback 的**唯一装配出口**。adapter **不依赖 bootstrap**，
+/// 故 bundle 经 `runtime_resources(&self) -> Vec<Box<DynManagedResource>>`（仅 `diport` 类型）单源派生其
+/// 受管资源，组合根 `module.resources.extend(bundle.runtime_resources())` 装配进本结构——消灭组合根逐
+/// channel 手写 `register_detached`（GoCell D5 多通道漂移根因）。redis/amqp 待各自 durable body 接入；
+/// vault 已 live（`assemblies/runtime::run`）。pg 残留 `store_guard`/`sampler` 手写接线回填见 follow-up #1541。
 #[derive(Default)]
 pub struct DomainModuleResult {
     /// readiness / liveness 探针，组合根排空进 [`Registry::probe`]（须先于 `take_health_reporter`，readyz 才聚合）。

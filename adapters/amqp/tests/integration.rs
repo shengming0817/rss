@@ -10,11 +10,11 @@
 
 use std::time::Duration;
 
-use amqp::{AmqpPublisher, AmqpSubscriber};
+use amqp::{AmqpPublisher, AmqpRuntimeDeps, AmqpSubscriber};
 use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
-    KEY_SUBJECT_ID, MessageId, PublishRequest, Publisher, Topic,
+    KEY_SUBJECT_ID, ManagedResource, MessageId, PublishRequest, Publisher, Topic,
 };
 use futures::StreamExt;
 use testkit::FixtureError;
@@ -569,5 +569,64 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     token.cancel();
     Publisher::shutdown(&publisher).await?;
     AckableSubscriber::shutdown(&subscriber).await?;
+    Ok(())
+}
+
+/// #1498 bundle 装配出口：`AmqpRuntimeDeps::connect` 打开一个域 vhost 的 publisher + subscriber，经
+/// `infra()` 派发 DI-ready port 句柄跑 publish→subscribe 闭环；`runtime_resources()` 单源派生
+/// publisher-guard + subscriber-guard（各关其 connection），经 guard 关停干净收敛（D5 单源 rollback）。
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_bundle").await?;
+    let topic = Topic::new("rss.it.bundle");
+    let token = CancellationToken::new();
+
+    let deps = AmqpRuntimeDeps::connect(&url, "amqp-it-bundle").await?;
+
+    // 经 bundle 派发的 port 句柄跑闭环（证明 dispatch 共享 bundle conn、port 可用）。
+    let subscriber = deps.infra().subscriber();
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
+    let publisher = deps.infra().publisher();
+    publisher
+        .publish(PublishRequest::new(
+            topic,
+            MessageId::new("evt-bundle-1"),
+            b"hello-bundle".to_vec(),
+        ))
+        .await?;
+
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await?
+        .ok_or_else(|| anyhow!("bundle stream closed without yielding a message"))?;
+    assert_eq!(delivery.message.payload, b"hello-bundle".to_vec());
+    delivery
+        .acker
+        .settle(AckAction::Ack)
+        .await
+        .map_err(|e| anyhow!("settle failed: {e}"))?;
+
+    // 单源 runtime_resources：恰两条受管连接（publisher-guard + subscriber-guard），名带 -pub / -sub 后缀。
+    let resources = deps.runtime_resources();
+    assert_eq!(
+        resources.len(),
+        2,
+        "bundle 单源派生 publisher-guard + subscriber-guard"
+    );
+    assert_eq!(resources[0].name(), "amqp-it-bundle-pub");
+    assert_eq!(resources[1].name(), "amqp-it-bundle-sub");
+
+    token.cancel();
+    // port-local shutdown 关 channel；guard（runtime_resources）单源关 connection。
+    Publisher::shutdown(publisher.as_ref()).await?;
+    AckableSubscriber::shutdown(subscriber.as_ref()).await?;
+    for resource in resources {
+        resource
+            .shutdown()
+            .await
+            .map_err(|e| anyhow!("bundle resource shutdown failed: {e}"))?;
+    }
     Ok(())
 }

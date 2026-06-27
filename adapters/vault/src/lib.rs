@@ -30,6 +30,11 @@ mod transit;
 mod secret_resolver;
 
 #[cfg(feature = "backend")]
+mod bundle;
+
+#[cfg(feature = "backend")]
+pub use bundle::{VaultDomain, VaultDomainDeps, VaultRuntimeDeps, caps};
+#[cfg(feature = "backend")]
 pub use secret_resolver::{
     StoreBinding, TenantStoreAllowlist, VaultSecretResolver, VaultSecretResolverConfigError,
 };

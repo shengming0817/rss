@@ -25,6 +25,7 @@
 //! ref: oxidecomputer/omicron nexus/src/context.rs@8eb92537bd12598dfd2c861f897a88962fabf684
 
 use postgres::PgRuntimeDeps;
+use vault::VaultRuntimeDeps;
 
 /// 共享基础设施依赖，流入每个域的 `wire_X`（parameter object，[`bootstrap::DomainModuleResult`] 的入向配对）。
 ///
@@ -41,6 +42,11 @@ pub struct SharedRuntimeDeps {
     /// 不暴露 `Arc<PgStore>` / `PgPool`，保持 PG-BUNDLE-FUNNEL-01/03：repo、readiness、sampler、pool guard
     /// 均经 `PgRuntimeDeps` 方法派发。
     pub pg: PgRuntimeDeps,
+
+    /// 共享 vault capability bundle（#1498）；settings 域经 `vault.for_domain::<caps::Settings>().secret_resolver()`
+    /// 投影受控 secret-resolution 句柄，拿不到 signer 或裸 `reqwest::Client`（VAULT-BUNDLE-RESOLVER-02）。
+    /// 其 `runtime_resources()` 单源派生 resolver guard，组合根 `merge` 进 `DomainModuleResult.resources`。
+    pub vault: VaultRuntimeDeps,
 }
 
 #[cfg(test)]

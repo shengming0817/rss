@@ -42,6 +42,8 @@
 mod settle;
 
 #[cfg(feature = "integration")]
+mod bundle;
+#[cfg(feature = "integration")]
 mod conn;
 #[cfg(feature = "integration")]
 mod publisher;
@@ -51,6 +53,8 @@ mod subscriber;
 #[cfg(not(feature = "integration"))]
 mod fallback;
 
+#[cfg(feature = "integration")]
+pub use bundle::{AmqpInfraDeps, AmqpRuntimeDeps};
 #[cfg(feature = "integration")]
 pub use conn::AmqpConnectError;
 #[cfg(feature = "integration")]

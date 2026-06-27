@@ -62,6 +62,22 @@ adapter bundle 是 §2.3 的一般化：任一 adapter（不止 postgres）经�
 句柄集 + `ManagedResource`），消除散装 per-port `new` + 散装 shutdown 登记。bundle 在**组合根装配**、注入域 / 服务；adapter 仍
 不被域依赖（`域→adapter` 禁，DIP 方向不变，ADR-005 §2.4）。
 
+**落地（#1498，RW-W-hardening）**：§2.3 的 pg 范式（#1422/#1423）已一般化到 redis / amqp / vault——`RedisRuntimeDeps`（funnel +
+`RedisInfraDeps::idempotency`，REDIS-BUNDLE-FUNNEL-01/POOL-02）、`AmqpRuntimeDeps`（per-vhost = per-connection，`AmqpInfraDeps`
+派发 publisher/subscriber，AMQP-BUNDLE-CONN-01）、`VaultRuntimeDeps`（sealed `caps::Settings` + `VaultDomainDeps<Settings>::secret_resolver`，
+VAULT-BUNDLE-DOMAIN-01/RESOLVER-02）。各 provider 能力按真实能力面落 InfraDeps（provider-agnostic：redis idempotency / amqp
+transport / vault signer）或 per-domain DomainDeps（域消费：vault resolver→settings）；不造空壳层。
+
+**层序修正（adapter 不依赖 bootstrap）**：`DomainModuleResult` 在服务层 `bootstrap`，adapter 不依赖它（pg adapter 亦然）。
+故 bundle 的 managed-resource/rollback 单源**不**返回 `DomainModuleResult`，而经 `runtime_resources(&self) -> Vec<Box<DynManagedResource>>`
+（仅 `diport` 类型）派生；组合根 `module.resources.extend(bundle.runtime_resources())` 装配进 §2.2 的 `DomainModuleResult.resources`。
+本三 provider 当前只产 resource guard（probe/worker＝syshealth 独立任务），故 `runtime_resources()` 即完整单源。vault 已 live
+（`assemblies/runtime::run`，resolver guard 经此单源排入）；redis/amqp live durable 接线随各自 body（#1116-1120）。
+
+**pg 回填 follow-up（#1541）**：pg 自身在 `run()` 仍手写 `store_guard`（detached）/ `spawn_readiness_sampler`（worker）登记——其 worker
+需 `bootstrap::WorkerSpec`（cancel token），不能纯经 `runtime_resources()` 出。把 pg 这两通道也收口到单源导出（消灭其残留手写）
+跟踪于 **#1541**（用户裁定，不在 #1498 内做），本 ADR §2.2/§2.4 的单源装配语义不变。
+
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
 为防「自底向上长能力」退化回无追踪 defer 补洞，本批新增 defer gate（#1432）：**governed 高风险路径**（`docs/rules` +
@@ -81,8 +97,8 @@ adapter bundle 是 §2.3 的一般化：任一 adapter（不止 postgres）经�
 能力**自底向上**长出，按序（每步标已落 / 待落）：
 
 1. provider-agnostic infra port + 域形 port 归属 — **已落**（ADR-003 / ADR-005）。
-2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **待落**（#1419）。
-3. Pg capability bundle（`PgRuntimeDeps` / `PgDomainDeps`）+ adapter bundle — **待落**（#1419）。
+2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **已落**（#1422）。
+3. Pg capability bundle（`PgRuntimeDeps` / `PgDomainDeps`）— **已落**（#1423）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；redis/amqp live durable 接入 — **待后续**（#1116-1120）。
 4. L1/L2 repo/UoW conformance（CAS / rollback / tenant / co-tx both-or-neither）— session 维度**已落**（ADR-005 §9/§10），其余 W 阶段。
 5. 第一条 durable 闭环：settings module + routes / probes / resources / journey — **待落**（#1421）。
 6. defer gate — **本批落**（#1432）。
@@ -138,7 +154,7 @@ ROUTE-AUTH-FUNNEL-01）。故**无威胁矩阵重评**（ai-robust「ADR amendme
 
 ## 8. Follow-up（落地同步点 + 后续 issue）
 
-- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体 + 字段冻结：**#1419**。
+- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）。字段冻结（codegen / golden）仍随首条 durable 闭环（#1421）后续。
 - settings durable 第一条闭环（routes / probes / resources / journey）：**#1421**。
 - defer gate ratchet 扩域（自由词散文 + 代码注释 `crates/*`、`xtask/*` + 历史约 6700 baseline 冻结轨道）：登记为 #1447（不阻塞本 PR）。
 - 各域 repo/UoW conformance（CAS / rollback / tenant / co-tx）：W 阶段逐域。

@@ -10,6 +10,12 @@
 
 mod claimer;
 
+#[cfg(feature = "backend")]
+mod bundle;
+
+#[cfg(feature = "backend")]
+pub use bundle::{RedisInfraDeps, RedisRuntimeDeps};
+
 use diport::{ManagedResource, ShutdownError};
 
 /// Redis 幂等 claimer adapter（sealed-marker）。
@@ -43,7 +49,10 @@ impl RedisStore {
     ///
     /// **fail-fast**：拒绝 `< 1ms` 的 TTL（亚毫秒丢精度、零非法）——错误配置在组合根接线期即暴露，
     /// 不在运行期命令层静默钳制（review F2）。
-    pub fn new(
+    ///
+    /// `pub(crate)`：唯一公开构造路径是 [`RedisRuntimeDeps::setup`]（funnel，REDIS-BUNDLE-FUNNEL-01）；
+    /// 外部 crate 不能直接 mint `RedisStore`，须经 bundle 装配出口。
+    pub(crate) fn new(
         pool: deadpool_redis::Pool,
         ttl: core::time::Duration,
         group: consistency::ConsumerGroup,

@@ -37,7 +37,7 @@ use axum::http::Method;
 use base64::Engine as _;
 use bootstrap::shutdown::ShutdownStack;
 use crypto::RustCryptoMacVerifier;
-use diport::{DynManagedResource, DynSecretResolver};
+use diport::DynManagedResource;
 use httpd::HttpServer;
 use identity::{
     IdentityDomain, LoginService,
@@ -53,7 +53,7 @@ use primitives::{
 };
 use settings::{SecretService, SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
-use vault::{TenantStoreAllowlist, VaultSecretResolver};
+use vault::{TenantStoreAllowlist, VaultRuntimeDeps, VaultSecretResolver};
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -436,6 +436,17 @@ pub(crate) fn build_vault_resolver_from(
         .map_err(|e| anyhow::anyhow!("vault resolver config error: {e}"))
 }
 
+/// 组合根级 vault capability bundle 构造（#1498）：env → `VaultSecretResolver`（fail-closed without env，
+/// 见 [`build_vault_resolver_from`]）→ [`VaultRuntimeDeps`]（vault 的 dispatch + lifecycle 单源装配出口）。
+///
+/// vault env 缺失即 `Err`（fail-closed，不静默装配 vault）——本函数是 `run()` 装配 [`SharedRuntimeDeps::vault`]
+/// 的构造点（取代旧 `wire_settings` 内联 resolver 构造，resolver 改经 bundle dispatch 注入）。
+pub fn build_vault_runtime_deps(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<VaultRuntimeDeps> {
+    Ok(VaultRuntimeDeps::new(build_vault_resolver_from(get)?))
+}
+
 // ── ConfigsReadyProbe ─────────────────────────────────────────────────────────────────────────
 
 /// probe 探针稳定名（`ProbeName::parse` 校验合法字符；underscore_case，与 prometheus metric 约定一致）。
@@ -556,9 +567,13 @@ impl bootstrap::HealthProbe for RlsReadyProbe {
 /// 生产 flag store 待 #1120。`SystemClock` 仍硬编码——clock 注入（rust-standards「Clock 构造器位置参」）
 /// 属 tangential 改进，不在本 PR 最小 scope。
 pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainModuleResult> {
-    // 构造 vault resolver（pre-GA 空 allowlist → 所有 resolve fail-closed Forbidden）。
-    let resolver = build_vault_resolver_from(|name| std::env::var(name).ok())
-        .context("vault resolver config")?;
+    // vault secret resolver 经 capability bundle dispatch 注入（#1498）：per-domain 受控句柄
+    // `VaultDomainDeps<caps::Settings>`，拿不到 signer 或裸 client；resolver 构造已在 run() 装配 bundle 时完成
+    // （pre-GA 空 allowlist → 所有 resolve fail-closed Forbidden）。
+    let resolver = deps
+        .vault
+        .for_domain::<vault::caps::Settings>()
+        .secret_resolver();
 
     // 单一 settings bundle（PERSIST-003）：read+write config + secret 同 pool、单 clock 经 Arc 扇出，预包装
     // 域形 dyn port——组合根不再散装构造 repo / 手工 DynX 包裹 / 配对 read↔write。
@@ -570,11 +585,7 @@ pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainMod
 
     let settings_svc =
         SettingsService::with_postgres(configs, writer, empty_flag_store(), Box::new(SystemClock));
-    let secret_svc = SecretService::with_postgres(
-        secrets,
-        DynSecretResolver::new_box(resolver),
-        Box::new(SystemClock),
-    );
+    let secret_svc = SecretService::with_postgres(secrets, resolver, Box::new(SystemClock));
     // reason: handler↔service 接线属后续域 PR；本 PR 仅建接线契约形态，service 暂不消费。
     drop(settings_svc);
     drop(secret_svc);
@@ -939,8 +950,16 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .context("setup postgres deps")?;
 
+    // vault capability bundle（#1498）：env → resolver → VaultRuntimeDeps（单源装配出口）。vault env 缺失即
+    // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
+    let vault =
+        build_vault_runtime_deps(|name| std::env::var(name).ok()).context("setup vault deps")?;
+
     // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
-    let deps = SharedRuntimeDeps { pg: pg.clone() };
+    let deps = SharedRuntimeDeps {
+        pg: pg.clone(),
+        vault,
+    };
 
     // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
     let audit_domain = wire_audit(&deps).context("wire audit")?;
@@ -953,6 +972,9 @@ pub async fn run() -> anyhow::Result<()> {
     // 聚合各域 module result（今仅 settings；后续域只需多一行 module.merge(wire_X(&deps).await?)，run() 形态恒定）。
     let mut module = DomainModuleResult::default();
     module.merge(wire_settings(&deps).await.context("wire settings")?);
+    // provider capability bundle 单源装配（#1498）：vault resolver guard 经 runtime_resources() 单源排进
+    // module.resources，组合根不再逐 channel 手写 register_detached（D5）。redis/amqp 待各自 durable body 接入。
+    module.resources.extend(deps.vault.runtime_resources());
     tracing::warn!(
         stage = "scaffold",
         "settings/secret handler↔service wiring remains scaffolded; identity login is wired"
@@ -1233,6 +1255,45 @@ mod tests {
         let key = B64.encode([0x42u8; 32]);
         let get = move |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| key.clone());
         assert!(build_audit_hasher(get).is_ok(), "有效 32B key 须构造成功");
+    }
+
+    // #1498 vault capability bundle 构造（fail-closed 由 wire_settings 内联迁到 build_vault_runtime_deps，
+    // 经 build_vault_resolver_from）——专项 DI 单测（注入 get，无 live vault / 无 env 副作用）。
+    #[test]
+    fn build_vault_runtime_deps_missing_addr_fails_fast() {
+        // 缺 RSS_VAULT_ADDR → fail-fast（不静默装配 vault）；错误含变量名、不含值。
+        let result = build_vault_runtime_deps(|_| None);
+        assert!(
+            matches!(&result, Err(e) if format!("{e:#}").contains("RSS_VAULT_ADDR")),
+            "缺 vault addr env 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn build_vault_runtime_deps_missing_token_fails_fast() {
+        // 仅 addr 在、缺 RSS_VAULT_TOKEN → fail-fast（独立验证 token 路径，非 || 宽松匹配）。
+        let get =
+            |k: &str| (k == "RSS_VAULT_ADDR").then(|| "https://vault.example:8200".to_string());
+        assert!(
+            matches!(&build_vault_runtime_deps(get), Err(e) if format!("{e:#}").contains("RSS_VAULT_TOKEN")),
+            "缺 vault token env 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // reason: 有效 env 必构造成功，item-level carve-out。
+    fn build_vault_runtime_deps_valid_env_single_sources_resolver() {
+        // addr + token 在 → 构造成功（无 live vault：VaultSecretResolver::new 仅构造期校验 URL/token +
+        // 空 allowlist + warn_vault_startup_security 告警路径）；runtime_resources 单源派生恰一条 resolver guard。
+        let get = |k: &str| match k {
+            "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
+            "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+            _ => None,
+        };
+        let deps = build_vault_runtime_deps(get);
+        assert!(deps.is_ok(), "有效 vault env 须构造成功");
+        let resources = deps.expect("valid vault deps").runtime_resources();
+        assert_eq!(resources.len(), 1, "vault bundle 单源派生 resolver guard");
     }
 
     #[test]

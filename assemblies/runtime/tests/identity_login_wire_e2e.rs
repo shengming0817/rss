@@ -133,7 +133,14 @@ async fn wire_identity_primary_router_serves_public_login() -> TestResult {
         .save(credential)
         .await?;
 
-    let deps = SharedRuntimeDeps { pg };
+    // #1498：SharedRuntimeDeps 现含 vault bundle。identity wiring 不消费 vault；构造 stub bundle（合法
+    // addr/token，无真实连接——resolver 仅构造期校验 URL/token）满足结构，wire_identity 不触碰它。
+    let vault = runtime::build_vault_runtime_deps(|name| match name {
+        "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
+        "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
+        _ => None,
+    })?;
+    let deps = SharedRuntimeDeps { pg, vault };
     let identity_domain = wire_identity(&deps)?;
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     let mut primary = None;

@@ -8,13 +8,14 @@
 
 #![cfg(feature = "integration")]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState};
 use deadpool_redis::{Config, Runtime};
 use diport::ManagedResource;
-use redis::RedisStore;
+use redis::{RedisRuntimeDeps, RedisStore};
 use testkit::FixtureError;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -32,10 +33,14 @@ fn mint_token() -> LeaseToken {
     LeaseToken::mint()
 }
 
-fn make_store(url: &str, ttl: Duration, group: &str) -> Result<RedisStore, FixtureError> {
+// 经 bundle funnel 构造（REDIS-BUNDLE-FUNNEL-01：`RedisStore::new` 已 pub(crate)，唯一公开装配出口是
+// `RedisRuntimeDeps::setup`）；派发 `Arc<RedisStore>` 幂等句柄（deref 出 `IdempotencyStore`/`ManagedResource`）。
+fn make_store(url: &str, ttl: Duration, group: &str) -> Result<Arc<RedisStore>, FixtureError> {
     let pool = Config::from_url(url).create_pool(Some(Runtime::Tokio1))?;
     let group = ConsumerGroup::parse(group)?;
-    Ok(RedisStore::new(pool, ttl, group)?)
+    Ok(RedisRuntimeDeps::setup(pool, ttl, group)?
+        .infra()
+        .idempotency())
 }
 
 // ─── 既有基础行为（更新至新签名：try_claim/commit/release 均携带 lease token）────────────────
