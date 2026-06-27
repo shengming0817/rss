@@ -94,6 +94,55 @@ impl JwksReadinessHandle {
     }
 }
 
+/// JWKS key 快照存储（读写 poison recovery 的唯一 funnel）。外部刷新 / 验签路径不得直接触碰裸
+/// `RwLock<Arc<KeySet>>`，避免读写侧可观测性漂移。
+struct JwksSnapshotStore {
+    inner: RwLock<Arc<KeySet>>,
+}
+
+impl JwksSnapshotStore {
+    fn new(initial: KeySet) -> Self {
+        Self {
+            inner: RwLock::new(Arc::new(initial)),
+        }
+    }
+
+    /// 取当前验签 key 快照（verify 同步路径调；`Arc` clone 零拷贝、与刷新换出无锁竞争撕裂）。
+    ///
+    /// 锁中毒时记 error 并继续复用恢复出的快照（`into_inner`）；不静默——日志暴露异常，避免
+    /// 「中毒后悄悄供旧 key」无可观测性。
+    fn snapshot(&self) -> Arc<KeySet> {
+        let guard = self.inner.read().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                target: LOG_TARGET,
+                resource = LOG_TARGET,
+                reason = "jwks_snapshot_lock_poisoned",
+                operation = "read",
+                "jwks snapshot rwlock poisoned; serving recovered snapshot"
+            );
+            poisoned.into_inner()
+        });
+        Arc::clone(&guard)
+    }
+
+    /// 原子换出 fresh 快照。写锁中毒时与读侧同源记录 error，再恢复 guard 并继续替换，保持刷新成功语义。
+    /// fresh 覆盖完成后清除 poison 状态，避免一次已恢复异常在后续读写路径上永久重复报错。
+    fn replace(&self, set: KeySet) {
+        let mut guard = self.inner.write().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                target: LOG_TARGET,
+                resource = LOG_TARGET,
+                reason = "jwks_snapshot_lock_poisoned",
+                operation = "write",
+                "jwks snapshot rwlock poisoned; applying fresh snapshot after recovery"
+            );
+            poisoned.into_inner()
+        });
+        *guard = Arc::new(set);
+        self.inner.clear_poison();
+    }
+}
+
 /// **本地文件** JWKS key 源（**仅文件路径，不做任何 in-app HTTP/TLS 拉取**——见模块文档；in-app HTTPS 直连
 /// 远程 IdP = follow-up）。持当前快照（后台刷新原子换出）+ readiness 标志 + 刷新任务句柄。
 ///
@@ -108,8 +157,8 @@ pub struct JwksKeySource {
     source_id: Arc<str>,
     /// 源路径（[`Self::reload`] 重读 + 诊断用）。
     path: PathBuf,
-    /// 当前验签 key 快照（`RwLock<Arc<_>>`：读侧 verify 同步取 `Arc` clone 零撕裂；刷新侧整体换出）。
-    snapshot: Arc<RwLock<Arc<KeySet>>>,
+    /// 当前验签 key 快照（读侧 clone `Arc`；刷新侧整体换出；poison recovery 经 [`JwksSnapshotStore`] 单源）。
+    snapshot: Arc<JwksSnapshotStore>,
     /// 上次刷新是否成功（FR-005 `oidc_jwks_ready` 信号源；probe 注册 = #1109/T004）。
     ready: Arc<AtomicBool>,
     /// 刷新任务取消信号（`shutdown` 触发；幂等——ShutdownStack 阶段 1 可能已 cancel）。
@@ -164,7 +213,7 @@ impl JwksKeySource {
         let source_id = source_id.into();
         let path = path.into();
         let initial = read_and_parse(&path)?; // 初始 fail-fast（含非空校验）。
-        let snapshot = Arc::new(RwLock::new(Arc::new(initial)));
+        let snapshot = Arc::new(JwksSnapshotStore::new(initial));
         let ready = Arc::new(AtomicBool::new(true));
         let handle = spawn_poll(
             Arc::clone(&source_id),
@@ -193,21 +242,9 @@ impl JwksKeySource {
         }
     }
 
-    /// 取当前验签 key 快照（verify 同步路径调；`Arc` clone 零拷贝、与刷新换出无锁竞争撕裂）。
-    ///
-    /// 锁中毒（写侧 panic-while-locked，本 crate 内不可达——刷新/读路径无 panic 点）时记 error 并复用毒化前快照
-    /// （`into_inner`）；不静默——日志暴露异常，避免「中毒后悄悄供旧 key」无可观测性。
+    /// 取当前验签 key 快照（verify 同步路径调；poison recovery / 日志经 [`JwksSnapshotStore`] 单源）。
     pub(crate) fn snapshot(&self) -> Arc<KeySet> {
-        let guard = self.snapshot.read().unwrap_or_else(|poisoned| {
-            tracing::error!(
-                target: LOG_TARGET,
-                resource = LOG_TARGET,
-                reason = "jwks_snapshot_lock_poisoned",
-                "jwks snapshot rwlock poisoned; serving last pre-poison snapshot"
-            );
-            poisoned.into_inner()
-        });
-        Arc::clone(&guard)
+        self.snapshot.snapshot()
     }
 
     /// 上次刷新是否成功（FR-005 `oidc_jwks_ready` readiness 信号；degraded = 源刷新失败但仍持 last-good 快照）。
@@ -256,7 +293,7 @@ fn spawn_poll(
     source_id: Arc<str>,
     path: PathBuf,
     period: Duration,
-    snapshot: Arc<RwLock<Arc<KeySet>>>,
+    snapshot: Arc<JwksSnapshotStore>,
     ready: Arc<AtomicBool>,
     token: CancellationToken,
 ) -> JoinHandle<()> {
@@ -288,7 +325,7 @@ fn spawn_poll(
 // false-positive，拆 helper 只搬走 tracing 调用、不增可读性。item-level carve-out（error-handling.md §Carve-out）。
 // 本 PR（#1274/#1272）随 workspace 门绿顺带收口此预存阻塞，不改 refresh 行为。
 #[allow(clippy::cognitive_complexity)]
-fn refresh(source_id: &str, path: &Path, snapshot: &RwLock<Arc<KeySet>>, ready: &AtomicBool) {
+fn refresh(source_id: &str, path: &Path, snapshot: &JwksSnapshotStore, ready: &AtomicBool) {
     match read_and_parse(path) {
         Ok(set) => apply_fresh(source_id, snapshot, ready, set),
         Err(e) => mark_degraded(source_id, ready, &e),
@@ -297,11 +334,8 @@ fn refresh(source_id: &str, path: &Path, snapshot: &RwLock<Arc<KeySet>>, ready: 
 
 /// 解析成功：原子换出快照 + `ready=true`（degraded 复位）。
 /// 从 [`refresh`] 抽出（tracing 宏膨胀使 `refresh` cognitive_complexity 触阈，拆分而非 carve-out）。
-///
-/// 注：写侧锁中毒（`unwrap_or_else(|e| e.into_inner())`）当前无 `tracing::error!`，与读侧 `snapshot()`
-/// 不对称——pre-existing 行为（本拆分仅原样保留），补对称告警见 #1295。
-fn apply_fresh(source_id: &str, snapshot: &RwLock<Arc<KeySet>>, ready: &AtomicBool, set: KeySet) {
-    *snapshot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(set);
+fn apply_fresh(source_id: &str, snapshot: &JwksSnapshotStore, ready: &AtomicBool, set: KeySet) {
+    snapshot.replace(set);
     ready.store(true, Ordering::Release);
     tracing::debug!(
         target: LOG_TARGET,
@@ -482,6 +516,57 @@ mod tests {
     const SK1_BYTES: [u8; 32] = [0x42; 32];
     const SK2_BYTES: [u8; 32] = [0x11; 32];
 
+    /// 确定性 tracing 捕获（JWKS poison recovery 回归测试用）。仅包住本测试触发的新 callsite，避免与
+    /// `verify.rs` 的全局 subscriber fixture 争抢全局状态。
+    mod capture {
+        use std::cell::RefCell;
+        use std::io::Write;
+
+        use tracing_subscriber::fmt::MakeWriter;
+
+        thread_local! {
+            static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        }
+
+        struct ThreadLocalWriter;
+        impl Write for ThreadLocalWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                BUF.with(|b| b.borrow_mut().extend_from_slice(buf));
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for ThreadLocalWriter {
+            type Writer = ThreadLocalWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                ThreadLocalWriter
+            }
+        }
+
+        pub(super) fn collect(f: impl FnOnce()) -> String {
+            BUF.with(|b| b.borrow_mut().clear());
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalWriter)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                f();
+                captured()
+            })
+        }
+
+        #[allow(clippy::expect_used)]
+        fn captured() -> String {
+            BUF.with(|b| String::from_utf8(b.borrow().clone()).expect("utf8"))
+        }
+    }
+
     /// 唯一临时文件 + RAII 清理（零 tempfile 依赖：`temp_dir` + pid + 进程内自增序号）。
     static SEQ: AtomicU64 = AtomicU64::new(0);
     struct TempJwks {
@@ -557,6 +642,73 @@ mod tests {
         let signing_input = format!("{header}.{body}");
         let sig: Signature = signing.sign(signing_input.as_bytes());
         format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+    }
+
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(clippy::panic)]
+    fn poison_snapshot_store_write_lock(store: &JwksSnapshotStore) {
+        let _hook_guard = match PANIC_HOOK_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = match store.inner.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            panic!("snapshot-store-test-poison");
+        }));
+        std::panic::set_hook(previous_hook);
+        assert!(
+            result.is_err(),
+            "poison helper must panic while holding the write lock"
+        );
+    }
+
+    // ── JWKS 快照锁 poison recovery funnel ─────────────────────────────────────
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn snapshot_store_read_poison_logs_and_serves_snapshot() {
+        let set = parse_jwks(jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "k1")]).as_bytes()).expect("jwks");
+        let store = JwksSnapshotStore::new(set);
+        poison_snapshot_store_write_lock(&store);
+
+        let logged = capture::collect(|| {
+            let snap = store.snapshot();
+            assert_eq!(snap.es256_candidates(Some("k1")).count(), 1);
+        });
+
+        assert!(logged.contains("jwks_snapshot_lock_poisoned"));
+        assert!(logged.contains("serving recovered snapshot"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn snapshot_store_write_poison_logs_and_replaces_snapshot() {
+        let initial =
+            parse_jwks(jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "k1")]).as_bytes()).expect("initial");
+        let fresh =
+            parse_jwks(jwks_doc(&[ec_jwk(&sk(&SK2_BYTES), "k2")]).as_bytes()).expect("fresh");
+        let store = JwksSnapshotStore::new(initial);
+        poison_snapshot_store_write_lock(&store);
+
+        let logged = capture::collect(|| store.replace(fresh));
+
+        assert!(logged.contains("jwks_snapshot_lock_poisoned"));
+        assert!(logged.contains("applying fresh snapshot after recovery"));
+        assert!(
+            !store.inner.is_poisoned(),
+            "fresh replacement should clear recovered poison state"
+        );
+        let reread_logged = capture::collect(|| {
+            let snap = store.snapshot();
+            assert_eq!(snap.es256_candidates(Some("k2")).count(), 1);
+            assert_eq!(snap.es256_candidates(Some("k1")).count(), 0);
+        });
+        assert!(!reread_logged.contains("jwks_snapshot_lock_poisoned"));
     }
 
     // ── JWKS 文档解析矩阵 ───────────────────────────────────────────────────────
