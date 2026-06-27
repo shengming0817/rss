@@ -1,12 +1,15 @@
-//! distributed — RSS 分布式原语（provider-agnostic 值类型）。
+//! distributed — RSS 分布式原语（provider-agnostic 值类型）+ typed state-CAS facade。
 //!
 //! 提供 fencing token 单调性、分布式锁 key、CAS 请求/结果、共识传输消息和节点角色。
-//! distlock / CAS DI port trait 集中在 `diport`；本 crate 只定义值类型，不依赖 openraft / dynosaur。
+//! distlock / CAS DI port trait 集中在 `diport`；本 crate 定义值类型并实现 [`StateCas`] facade。
 //!
 //! ref: databendlabs/openraft openraft/src/lib.rs@main
 //!   LogId/Vote 单调性 = fencing 语义；ServerState = NodeRole。
 //!
-//! ADR-004 C8：签名冻结阶段所有函数体为 `todo!()`，覆盖率豁免。
+//! ADR-004 C8：签名冻结阶段所有函数体为 `todo!()`，覆盖率豁免（distlock 切片仍冻结）。
+
+mod cas;
+pub use cas::StateCas;
 
 /// Fencing token（单调递增；对齐 openraft LogId/Vote 单调语义，防止脑裂写入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -14,13 +17,13 @@ pub struct FencingToken(u64);
 
 impl FencingToken {
     /// 构造 fencing token。
-    pub fn new(_value: u64) -> Self {
-        todo!()
+    pub fn new(value: u64) -> Self {
+        Self(value)
     }
 
     /// 返回底层 u64 值。
     pub fn value(&self) -> u64 {
-        todo!()
+        self.0
     }
 }
 
@@ -41,18 +44,19 @@ impl LockKey {
 }
 
 /// CAS 操作 key（newtype，不与 `LockKey` 或裸 `String` 混用）。
+/// typed facade key，经 `StateCas` 映射为 `diport::CasStoreKey` 下沉端口。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CasKey(String);
 
 impl CasKey {
     /// 构造 CAS key。
-    pub fn new(_key: impl Into<String>) -> Self {
-        todo!()
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
     }
 
     /// 返回底层字符串切片。
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -65,7 +69,7 @@ pub struct LockGrant {
 }
 
 /// CAS 请求（对齐 openraft client_write typed AppData）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CasRequest<T> {
     pub key: CasKey,
     pub expected: Option<T>,
@@ -74,13 +78,48 @@ pub struct CasRequest<T> {
 }
 
 /// CAS 操作结果。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum CasOutcome<T> {
     /// CAS 成功应用，返回新 fencing token。
     Applied { token: FencingToken },
     /// CAS 冲突，当前值与 expected 不符。
     Conflict { current: Option<T> },
+    /// CAS 被 fence：`expected_token` 低于该 key 当前 token（旧 leader stale 写被挡）。返回当前 token
+    /// 供调用方重读 / 停写重选举——fence 是**预期控制流**（与 [`CasOutcome::Conflict`] 同档、非 error），
+    /// 对齐 diport 端口层 `CasStoreOutcome::Fenced`，不把高水位 token 压扁进无字段错误。
+    Fenced { token: FencingToken },
+}
+
+/// PII 边界：手写 `Debug` 对 payload 字段（`expected`/`new_value`，可能含敏感 MDM 设备状态/凭据）输出
+/// `<redacted>`；`key`/`token` 是路由/版本元数据，可观测。与 diport 端口层 `CasStoreRequest` 脱敏纪律一致
+/// （INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 同源）。
+impl<T> std::fmt::Debug for CasRequest<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CasRequest")
+            .field("key", &self.key)
+            .field("expected", &"<redacted>")
+            .field("new_value", &"<redacted>")
+            .field("token", &self.token)
+            .finish()
+    }
+}
+
+/// PII 边界：`Conflict.current`（当前状态 payload）输出 `<redacted>`；`Applied.token` / `Fenced.token`
+/// 是版本元数据，可观测。
+impl<T> std::fmt::Debug for CasOutcome<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CasOutcome::Applied { token } => {
+                f.debug_struct("Applied").field("token", token).finish()
+            }
+            CasOutcome::Conflict { .. } => f
+                .debug_struct("Conflict")
+                .field("current", &"<redacted>")
+                .finish(),
+            CasOutcome::Fenced { token } => f.debug_struct("Fenced").field("token", token).finish(),
+        }
+    }
 }
 
 /// 节点传输消息（provider-agnostic；adapter 映射到 openraft RPC）。
@@ -208,51 +247,54 @@ mod smoke {
         }
     }
 
-    /// 证明 CasOutcome::<u64> 各 variant 可构造；FencingToken::new 只绑定 fn 指针，不调用。
-    /// Applied variant 需要 FencingToken——因 new() 是 todo!()，改为构造 Conflict variant
-    /// 并同时验证 Applied 的类型签名（绑定 fn ptr 即可，不需运行时调用）。
+    /// 证明 FencingToken 和 CasKey 往返正确；LockKey::new 仍是 todo!() 仅绑定 fn 指针。
+    #[test]
+    fn fencing_token_and_cas_key_round_trip() {
+        // FencingToken 真实调用。
+        let t = FencingToken::new(42);
+        assert_eq!(t.value(), 42);
+        let t0 = FencingToken::new(0);
+        assert_eq!(t0.value(), 0);
+
+        // CasKey 真实调用。
+        let k = CasKey::new("tenant-1/state");
+        assert_eq!(k.as_str(), "tenant-1/state");
+        let k2 = CasKey::new(String::from("owned-string"));
+        assert_eq!(k2.as_str(), "owned-string");
+
+        // LockKey::new 仍是 todo!()——只绑 fn-ptr 验证签名，不调用。
+        let _lock_key_fn: fn(&str) -> LockKey = |s| LockKey::new(s);
+    }
+
+    /// 证明 CasOutcome::<u64> Applied / Conflict 各 variant 可在运行时构造。
     #[test]
     fn cas_outcome_constructible() {
-        // 绑定函数指针只验证签名，不调用（避免触发 todo!()）。
-        let _fn_ptr: fn(u64) -> FencingToken = FencingToken::new;
-        let _lock_key_fn: fn(&str) -> LockKey = |s| LockKey::new(s);
+        let applied: CasOutcome<u64> = CasOutcome::Applied {
+            token: FencingToken::new(1),
+        };
+        assert!(matches!(applied, CasOutcome::Applied { token } if token.value() == 1));
 
-        // Conflict variant 不依赖 FencingToken::new，可直接构造。
-        let outcome: CasOutcome<u64> = CasOutcome::Conflict { current: Some(42) };
+        let conflict: CasOutcome<u64> = CasOutcome::Conflict { current: Some(42) };
         assert!(matches!(
-            outcome,
+            conflict,
             CasOutcome::Conflict { current: Some(42) }
         ));
     }
 
-    /// 证明 CasOutcome::Applied 的 token 字段类型为 FencingToken（通过 if let 类型推断）。
-    #[test]
-    fn cas_outcome_applied_signature() {
-        // 验证 Applied { token: FencingToken } 字段类型在类型系统中成立——
-        // 通过构造函数引用而非运行时值，完成编译期类型检查。
-        type AppliedMaker = fn(FencingToken) -> CasOutcome<u64>;
-        let _: AppliedMaker = |t| CasOutcome::Applied { token: t };
-    }
-
-    /// 证明 CasRequest 字段布局可在类型系统中构造（不调用 todo!() 函数体）。
+    /// 证明 CasRequest 字段布局正确，key/expected/new_value/token 可构造。
     #[test]
     fn cas_request_field_layout() {
-        // 绑定 CasKey::new 函数指针，验证签名而不调用（避免触发 todo!()）。
-        let _cas_key_fn: fn(&str) -> CasKey = |s| CasKey::new(s);
-        // 验证 token 字段为 Option<FencingToken>，key 字段为 CasKey，value 类型正确。
-        let _make: fn(CasKey, Option<FencingToken>) -> CasRequest<u32> = |k, t| CasRequest {
-            key: k,
-            expected: None,
-            new_value: 1u32,
-            token: t,
-        };
-        // 构造不依赖 todo!() 的字段验证——仅检查 expected/new_value/token 类型。
-        let _check_types: fn(CasKey) -> CasRequest<u32> = |k| CasRequest {
-            key: k,
+        let key = CasKey::new("req-key");
+        let req: CasRequest<u32> = CasRequest {
+            key,
             expected: Some(0u32),
             new_value: 1u32,
-            token: None,
+            token: Some(FencingToken::new(3)),
         };
+        assert_eq!(req.key.as_str(), "req-key");
+        assert_eq!(req.expected, Some(0u32));
+        assert_eq!(req.new_value, 1u32);
+        assert_eq!(req.token.map(|t| t.value()), Some(3));
     }
 
     /// 证明 LockGrant 字段布局正确（不调用 todo!() 构造器）。
@@ -269,5 +311,48 @@ mod smoke {
     fn lock_grant_send_sync() {
         fn _assert_send_sync<T: Send + Sync>() {}
         _assert_send_sync::<LockGrant>();
+    }
+
+    /// PII 边界：CasRequest<T>/CasOutcome<T> 手写 Debug 对 expected/new_value/Conflict.current 输出
+    /// `<redacted>`；key/token 可观测（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 同源）。
+    #[test]
+    fn cas_request_and_outcome_debug_redacts_payload() {
+        // anti-vacuity：裸 &str 的 Debug 包含原始值。
+        assert!(format!("{:?}", "topsecret").contains("topsecret"));
+
+        let req: CasRequest<String> = CasRequest {
+            key: CasKey::new("device-1/state"),
+            expected: Some("topsecret".into()),
+            new_value: "new-secret".into(),
+            token: Some(FencingToken::new(7)),
+        };
+        let dbg = format!("{req:?}");
+        assert!(
+            !dbg.contains("topsecret"),
+            "expected 不应在 Debug 输出中: {dbg}"
+        );
+        assert!(
+            !dbg.contains("new-secret"),
+            "new_value 不应在 Debug 输出中: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug 输出应含 <redacted>: {dbg}"
+        );
+        assert!(
+            dbg.contains("device-1/state"),
+            "key 应在 Debug 输出中: {dbg}"
+        );
+        assert!(dbg.contains('7'), "token 值应在 Debug 输出中: {dbg}");
+
+        let conflict: CasOutcome<String> = CasOutcome::Conflict {
+            current: Some("topsecret".into()),
+        };
+        let dbg = format!("{conflict:?}");
+        assert!(
+            !dbg.contains("topsecret"),
+            "Conflict.current 不应在 Debug 输出中: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
     }
 }

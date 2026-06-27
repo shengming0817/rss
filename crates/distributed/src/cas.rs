@@ -1,0 +1,461 @@
+//! `StateCas` —— typed state-CAS facade：把 `CasRequest<T>` 序列化成 **canonical JSON** 字节经
+//! [`diport::DynCasStore`] 落地。
+//!
+//! 泛型 `T` 留在本层（dyn port 不能有泛型方法，ADR-003 §4.6）。
+//!
+//! **canonical 编码（正确性关键）**：typed facade 把「语义值相等」降成「字节相等」做 CAS 比较，但
+//! 本 workspace 的 `serde_json` 启用了 `preserve_order`（依赖 `indexmap`），普通序列化保留插入序、**非
+//! canonical**——无序 map（如 `HashMap`）同一语义值会产不同字节序、被误判 `Conflict`。故序列化前经
+//! [`canonical_json_bytes`] 递归排序 object key，保证同值同字节。
+//!
+//! ref: etcd-io/etcd client/v3/txn.go（etcd-revision 条件写）；
+//! ref: databendlabs/openraft openraft/src/lib.rs（LogId/Vote 单调性 = fencing token）；
+//! ref: RFC 8785 JSON Canonicalization Scheme（object 属性按 key 排序后序列化）。
+
+use crate::{CasOutcome, CasRequest, DistError, FencingToken};
+use diport::CasStore as _;
+
+/// 把 `T` 编码为 **canonical JSON** 字节：递归排序 object key（见模块文档的正确性说明）。
+fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&canonicalize(serde_json::to_value(value)?))
+}
+
+/// 递归把 `serde_json::Value` 的 object key 排序（array 序保留——语义有意义）。
+fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            // 经 BTreeMap 排序后再收回 serde_json::Map（preserve_order 下即按此 sorted 序写出）。
+            let sorted: std::collections::BTreeMap<String, serde_json::Value> =
+                map.into_iter().map(|(k, v)| (k, canonicalize(v))).collect();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize).collect())
+        }
+        scalar => scalar,
+    }
+}
+
+/// Typed state-CAS facade。组合根经构造器注入 [`diport::DynCasStore`] provider（必填位置参，缺失即编译错误）。
+pub struct StateCas {
+    store: Box<diport::DynCasStore<'static>>,
+}
+
+impl StateCas {
+    /// 组合根注入 CAS provider（必填位置参，缺失即编译错误）。
+    pub fn new(store: Box<diport::DynCasStore<'static>>) -> Self {
+        Self { store }
+    }
+
+    /// Typed compare-and-swap：序列化 `expected`/`new_value`（canonical JSON），映射 token，调 port，映回 typed outcome。
+    ///
+    /// - `Ok(CasOutcome::Applied{token})`：成功落地，token 单调 +1。
+    /// - `Ok(CasOutcome::Conflict{current})`：值不符，回当前值供重读。
+    /// - `Ok(CasOutcome::Fenced{token})`：`expected_token` stale，回当前 token，调用方应停写重选举（fence 是预期控制流）。
+    /// - `Err(DistError::Fatal)`：serde 序列化/反序列化失败（payload 不合法，不可重试）。
+    /// - `Err(DistError::Transport)`：infra 故障（port 返回 `CasStoreError`，可重试）。
+    pub async fn compare_and_swap<T>(
+        &self,
+        request: CasRequest<T>,
+    ) -> Result<CasOutcome<T>, DistError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let key = diport::CasStoreKey::new(request.key.as_str());
+        let expected = match request.expected {
+            Some(v) => Some(canonical_json_bytes(&v).map_err(|e| {
+                tracing::warn!(error = %e, "cas facade: serialize expected failed");
+                DistError::Fatal
+            })?),
+            None => None,
+        };
+        let new_value = canonical_json_bytes(&request.new_value).map_err(|e| {
+            tracing::warn!(error = %e, "cas facade: serialize new_value failed");
+            DistError::Fatal
+        })?;
+        let expected_token = request.token.map(|t| vocab::Epoch::new(t.value()));
+
+        let outcome = self
+            .store
+            .compare_and_swap(diport::CasStoreRequest {
+                key,
+                expected,
+                new_value,
+                expected_token,
+            })
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "cas facade: store transport failure");
+                DistError::Transport
+            })?;
+
+        match outcome {
+            diport::CasStoreOutcome::Applied { token } => Ok(CasOutcome::Applied {
+                token: FencingToken::new(token.get()),
+            }),
+            diport::CasStoreOutcome::Conflict { current } => {
+                let current = match current {
+                    Some(bytes) => Some(
+                        serde_json::from_slice::<T>(&bytes).map_err(|e| {
+                            tracing::warn!(error = %e, "cas facade: deserialize conflict current failed");
+                            DistError::Fatal
+                        })?,
+                    ),
+                    None => None,
+                };
+                Ok(CasOutcome::Conflict { current })
+            }
+            diport::CasStoreOutcome::Fenced { current_token } => {
+                tracing::debug!(?current_token, "cas facade: fenced (expected_token stale)");
+                // fence 是预期控制流：保留当前 token 供调用方重读/停写，不压扁进无字段错误。
+                Ok(CasOutcome::Fenced {
+                    token: FencingToken::new(current_token.get()),
+                })
+            }
+            // reason: CasStoreOutcome 是 #[non_exhaustive]，跨 crate match 须带 catch-all；
+            // 未来新增变体保守映射为 infra 级 Fatal（fail-safe，不静默成功）。
+            _ => Err(DistError::Fatal),
+        }
+    }
+
+    /// 委派注入的 provider 释放 infra 资源（生产 adapter 经 `bootstrap::ShutdownStack` 编排；本方法是 port-local 关闭路径）。
+    pub async fn shutdown(&self) -> Result<(), diport::CasStoreError> {
+        self.store.shutdown().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CasKey;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// 内联 FakeCasStore（etcd-revision 逻辑）——仅在 #[cfg(test)] 子树，不被 dylint impl-allowlist 扫描。
+    #[derive(Default)]
+    struct FakeCasStore {
+        state: Mutex<HashMap<String, (Vec<u8>, vocab::Epoch)>>,
+    }
+
+    impl diport::CasStore for FakeCasStore {
+        async fn compare_and_swap(
+            &self,
+            request: diport::CasStoreRequest,
+        ) -> Result<diport::CasStoreOutcome, diport::CasStoreError> {
+            let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match m.get(request.key.as_str()) {
+                None => {
+                    if request.expected.is_none() {
+                        let token = vocab::Epoch::new(1);
+                        m.insert(request.key.as_str().to_owned(), (request.new_value, token));
+                        Ok(diport::CasStoreOutcome::Applied { token })
+                    } else {
+                        Ok(diport::CasStoreOutcome::Conflict { current: None })
+                    }
+                }
+                Some((current, current_token)) => {
+                    if matches!(request.expected_token, Some(t) if t < *current_token) {
+                        return Ok(diport::CasStoreOutcome::Fenced {
+                            current_token: *current_token,
+                        });
+                    }
+                    if request.expected.as_deref() == Some(current.as_slice()) {
+                        let token = current_token.next();
+                        m.insert(request.key.as_str().to_owned(), (request.new_value, token));
+                        Ok(diport::CasStoreOutcome::Applied { token })
+                    } else {
+                        Ok(diport::CasStoreOutcome::Conflict {
+                            current: Some(current.clone()),
+                        })
+                    }
+                }
+            }
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::CasStoreError> {
+            // reason: in-mem fake store 无 infra 资源，关闭无需释放。
+            Ok(())
+        }
+    }
+
+    fn make_facade() -> StateCas {
+        StateCas::new(diport::DynCasStore::<'static>::new_box(
+            FakeCasStore::default(),
+        ))
+    }
+
+    /// create-if-absent（expected=None）→ Applied{token=FencingToken(1)}。
+    #[tokio::test]
+    async fn create_if_absent_returns_applied_with_token_one() -> Result<(), DistError> {
+        let cas = make_facade();
+        let outcome = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("state/device-1"),
+                expected: None::<u64>,
+                new_value: 42u64,
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Applied { token } if token.value() == 1),
+            "expected Applied{{token=1}}, got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// 值匹配 → Applied，token 较上次 +1（bump）。
+    #[tokio::test]
+    async fn matching_value_returns_applied_with_bumped_token() -> Result<(), DistError> {
+        let cas = make_facade();
+
+        // 先建 key。
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("state/device-2"),
+            expected: None::<u64>,
+            new_value: 100u64,
+            token: None,
+        })
+        .await?;
+
+        // 值匹配更新 → Applied{token=2}。
+        let outcome = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("state/device-2"),
+                expected: Some(100u64),
+                new_value: 200u64,
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Applied { token } if token.value() == 2),
+            "expected Applied{{token=2}}, got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// 值不符 → Conflict{current=Some(反序列化回的 T)}。
+    #[tokio::test]
+    async fn mismatched_value_returns_conflict_with_current() -> Result<(), DistError> {
+        let cas = make_facade();
+
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("state/device-3"),
+            expected: None::<u64>,
+            new_value: 77u64,
+            token: None,
+        })
+        .await?;
+
+        // Conflict 是 Ok 分支，不是 Err，用 `?` 正常传播。
+        let outcome = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("state/device-3"),
+                expected: Some(999u64), // 故意错误
+                new_value: 88u64,
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(&outcome, CasOutcome::Conflict { current: Some(v) } if *v == 77u64),
+            "expected Conflict{{current=Some(77)}}, got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// expected_token stale（低于当前）→ Ok(CasOutcome::Fenced{token=当前高水位})——fence 是预期控制流，
+    /// 保留当前 token 供调用方重读/停写（F3：不再压扁成无字段 FencingMismatch）。
+    #[tokio::test]
+    async fn stale_token_returns_fenced_with_current_token() -> Result<(), DistError> {
+        let cas = make_facade();
+
+        // 建 key，current_token = 1。
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("state/device-4"),
+            expected: None::<u64>,
+            new_value: 1u64,
+            token: None,
+        })
+        .await?;
+
+        // expected_token=0 < current_token=1 → Fenced{token=1}（Ok 分支，携当前高水位）。
+        let outcome = cas
+            .compare_and_swap(CasRequest::<u64> {
+                key: CasKey::new("state/device-4"),
+                expected: Some(1u64),
+                new_value: 2u64,
+                token: Some(FencingToken::new(0)),
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Fenced { token } if token.value() == 1),
+            "expected Fenced{{token=1}}, got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// F2 canonical 回归：同一语义值的 `HashMap`，插入顺序不同应产相同 canonical 字节 → Applied（非 Conflict）。
+    /// 若退回非 canonical `serde_json::to_vec`（保留插入序），字节序不同 → 误判 Conflict，本测试 fail。
+    #[tokio::test]
+    async fn canonical_encoding_ignores_map_insertion_order() -> Result<(), DistError> {
+        let cas = make_facade();
+
+        let mut initial = HashMap::new();
+        initial.insert("beta".to_owned(), 2u64);
+        initial.insert("alpha".to_owned(), 1u64);
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("state/map"),
+            expected: None::<HashMap<String, u64>>,
+            new_value: initial,
+            token: None,
+        })
+        .await?;
+
+        // 语义相等但**插入序相反**的 expected → canonical 编码后字节相同 → 命中 → Applied{token=2}。
+        let mut expected = HashMap::new();
+        expected.insert("alpha".to_owned(), 1u64);
+        expected.insert("beta".to_owned(), 2u64);
+        let mut next = HashMap::new();
+        next.insert("alpha".to_owned(), 9u64);
+        let outcome = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("state/map"),
+                expected: Some(expected),
+                new_value: next,
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Applied { token } if token.value() == 2),
+            "canonical 编码应让不同插入序的同值 map 命中 Applied，got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// serde 往返：u64 基本类型编解码正确。
+    #[tokio::test]
+    async fn serde_round_trip_u64() -> Result<(), DistError> {
+        let cas = make_facade();
+
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("serde/u64"),
+            expected: None::<u64>,
+            new_value: u64::MAX,
+            token: None,
+        })
+        .await?;
+
+        let outcome = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("serde/u64"),
+                expected: Some(u64::MAX),
+                new_value: 0u64,
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Applied { .. }),
+            "expected Applied"
+        );
+        Ok(())
+    }
+
+    /// shutdown 委派：FakeCasStore 注入后 state_cas.shutdown().await 返回 Ok(())。
+    #[tokio::test]
+    async fn shutdown_delegates_to_store() -> Result<(), diport::CasStoreError> {
+        let cas = make_facade();
+        cas.shutdown().await
+    }
+
+    /// Fix 4：expected=Some + 键不存在 → Conflict{current:None}（None 路径不触发反序列化）。
+    #[tokio::test]
+    async fn expected_some_key_absent_returns_conflict_with_current_none() -> Result<(), DistError>
+    {
+        let cas = make_facade();
+        let outcome = cas
+            .compare_and_swap(CasRequest::<u64> {
+                key: CasKey::new("state/absent-key"),
+                expected: Some(42u64),
+                new_value: 99u64,
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Conflict { current: None }),
+            "expected Conflict{{current:None}}, got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// Fix 5：expected_token == current_token（相等=不 stale，应 Applied 非 Fenced）——anti-mutation：防误改 < 为 <=。
+    #[tokio::test]
+    async fn equal_token_is_not_fenced() -> Result<(), DistError> {
+        let cas = make_facade();
+        // create → current_token = FencingToken(1)
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("state/equal-token"),
+            expected: None::<u64>,
+            new_value: 1u64,
+            token: None,
+        })
+        .await?;
+        // expected_token=Some(FencingToken(1)) == 当前 token → Applied（非 Fenced）
+        let outcome = cas
+            .compare_and_swap(CasRequest::<u64> {
+                key: CasKey::new("state/equal-token"),
+                expected: Some(1u64),
+                new_value: 2u64,
+                token: Some(FencingToken::new(1)),
+            })
+            .await?;
+        assert!(
+            matches!(outcome, CasOutcome::Applied { token } if token.value() == 2),
+            "expected_token == current_token 应 Applied，got {outcome:?}",
+        );
+        Ok(())
+    }
+
+    /// serde 往返：自定义 struct 编解码正确。
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug, Clone)]
+    struct DeviceState {
+        version: u32,
+        label: String,
+    }
+
+    #[tokio::test]
+    async fn serde_round_trip_struct() -> Result<(), DistError> {
+        let cas = make_facade();
+        let initial = DeviceState {
+            version: 1,
+            label: "alpha".into(),
+        };
+
+        cas.compare_and_swap(CasRequest {
+            key: CasKey::new("serde/struct"),
+            expected: None::<DeviceState>,
+            new_value: initial.clone(),
+            token: None,
+        })
+        .await?;
+
+        // 值不符 → Conflict，current 应反序列化回 initial。Conflict 是 Ok 分支。
+        let outcome = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("serde/struct"),
+                expected: Some(DeviceState {
+                    version: 99,
+                    label: "wrong".into(),
+                }),
+                new_value: DeviceState {
+                    version: 2,
+                    label: "beta".into(),
+                },
+                token: None,
+            })
+            .await?;
+        assert!(
+            matches!(&outcome, CasOutcome::Conflict { current: Some(s) } if *s == initial),
+            "expected Conflict with initial struct, got {outcome:?}",
+        );
+        Ok(())
+    }
+}

@@ -23,12 +23,13 @@ use consistency::{
 };
 
 use diport::{
-    AuditEvent, AuditSink, AuditSinkError, Checkpoint, CheckpointId, CheckpointOwner,
-    CheckpointStoreError, CheckpointVersion, Clock, DeadLetterRecord, DeadLetterStore,
-    DeadLetterStoreError, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
-    JournalEntry, LeaderElector, LeaderElectorError, LeaderId, LeaseToken, Message, MessageId,
-    MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore,
-    PublishRequest, Publisher, PublisherError, SagaId, SagaJournal, SagaJournalError, SaveOutcome,
+    AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreKey, CasStoreOutcome,
+    CasStoreRequest, Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError,
+    CheckpointVersion, Clock, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
+    FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError, JournalEntry,
+    LeaderElector, LeaderElectorError, LeaderId, LeaseToken, Message, MessageId, MessageStream,
+    OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest,
+    Publisher, PublisherError, SagaId, SagaJournal, SagaJournalError, SaveOutcome,
     SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, Subscriber,
     SubscriberError, Topic, WriteOutcome,
 };
@@ -626,6 +627,70 @@ impl FencedWriter for MemFencedWriter {
     }
 
     async fn shutdown(&self) -> Result<(), FencedWriterError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
+// ── MemCasStore：in-mem state-CAS 替身（etcd-revision 条件写）──────────────────────────────────────
+
+/// `MemCasStore` 内部 HashMap 类型别名（规避 clippy::type_complexity）。
+type CasStateMap = HashMap<CasStoreKey, (Vec<u8>, vocab::Epoch)>;
+
+/// in-mem state-CAS 替身（impl [`diport::CasStore`]）：per-key `(value, revision token)`，etcd-revision 条件写。
+/// 生产替身走 etcd/redis/postgres adapter；本 crate 仅测试/demo 用。
+/// INVARIANT: CAS-REVISION-MONO-01（per-key token 单调 + etcd-revision CAS；回归见本 crate 单测）。
+#[derive(Clone, Default)]
+pub struct MemCasStore {
+    state: Arc<Mutex<CasStateMap>>,
+}
+
+impl MemCasStore {
+    /// 新建空 store（各 key 无值无 token，首写 create-if-absent 恒 Applied）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl CasStore for MemCasStore {
+    async fn compare_and_swap(
+        &self,
+        request: CasStoreRequest,
+    ) -> Result<CasStoreOutcome, CasStoreError> {
+        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // 克隆现有条目（释放不可变借用），避免与后续 map.insert 的可变借用冲突。
+        let existing = map.get(&request.key).map(|(v, t)| (v.clone(), *t));
+        match existing {
+            None => {
+                // 仅 expected==None（create-if-absent）命中；否则期望某值但键不存在 → Conflict{None}。
+                if request.expected.is_none() {
+                    let token = vocab::Epoch::new(1);
+                    map.insert(request.key, (request.new_value, token));
+                    Ok(CasStoreOutcome::Applied { token })
+                } else {
+                    Ok(CasStoreOutcome::Conflict { current: None })
+                }
+            }
+            Some((current, current_token)) => {
+                // 先判 fencing：expected_token 低于当前 token → stale，拒写。
+                if matches!(request.expected_token, Some(t) if t < current_token) {
+                    return Ok(CasStoreOutcome::Fenced { current_token });
+                }
+                // 再判值：匹配 → 写入 + token.next()；不符 → Conflict{当前值}。
+                if request.expected.as_deref() == Some(current.as_slice()) {
+                    let token = current_token.next();
+                    map.insert(request.key, (request.new_value, token));
+                    Ok(CasStoreOutcome::Applied { token })
+                } else {
+                    Ok(CasStoreOutcome::Conflict {
+                        current: Some(current),
+                    })
+                }
+            }
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), CasStoreError> {
         // reason: in-mem 无 infra 资源，关闭无需释放。
         Ok(())
     }
@@ -1400,6 +1465,327 @@ mod tests {
         fn assert_fenced_writer<T: FencedWriter>(_: PhantomData<T>) {}
         assert_leader_elector(PhantomData::<MemLeaderElector>);
         assert_fenced_writer(PhantomData::<MemFencedWriter>);
+    }
+
+    // ── MemCasStore 测试（INVARIANT: CAS-REVISION-MONO-01）──────────────────────────────────────────
+
+    /// 建空键 create-if-absent：expected=None → Applied{token=Epoch(1)}。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn absent_create_applies() {
+        let store = MemCasStore::new();
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: CasStoreKey::new("k1"),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(1)
+            }
+        );
+    }
+
+    /// 值匹配 CAS：Applied，token 从 Epoch(1) 推进到 Epoch(2)（bump 验证）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn match_applies_and_bumps_token() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k2");
+        // 首写
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create ok");
+        // 值匹配 swap
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v1".to_vec()),
+                new_value: b"v2".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(2)
+            },
+            "token 应从 1 推进到 2"
+        );
+    }
+
+    /// 值不符：expected=错误值 → Conflict{current=Some(实际当前值)}。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mismatch_conflicts() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k3");
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"actual".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create ok");
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"wrong".to_vec()),
+                new_value: b"new".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Conflict {
+                current: Some(b"actual".to_vec())
+            }
+        );
+    }
+
+    /// 键已存在但 expected=None → Conflict（不是覆盖写；create-if-absent 仅对不存在键有效）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn expected_none_on_existing_conflicts() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k4");
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create ok");
+        // expected=None 对已存在键 → Conflict（None 不匹配 Some("v1")）
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v2".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Conflict {
+                current: Some(b"v1".to_vec())
+            }
+        );
+    }
+
+    /// stale token：expected_token=Epoch(0) < 当前 Epoch(1) → Fenced{current_token=Epoch(1)}。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn stale_token_fenced() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k5");
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create ok");
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v1".to_vec()),
+                new_value: b"v2".to_vec(),
+                expected_token: Some(vocab::Epoch::new(0)), // stale < 当前 Epoch(1)
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Fenced {
+                current_token: vocab::Epoch::new(1)
+            }
+        );
+    }
+
+    /// 连续多次成功 swap：token 严格单调递增 1→2→3。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn token_monotonic_across_swaps() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k6");
+        // 首写 → token=1
+        let r1 = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create");
+        assert_eq!(
+            r1,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(1)
+            }
+        );
+        // 第二次 → token=2
+        let r2 = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v1".to_vec()),
+                new_value: b"v2".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("swap 2");
+        assert_eq!(
+            r2,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(2)
+            }
+        );
+        // 第三次 → token=3
+        let r3 = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v2".to_vec()),
+                new_value: b"v3".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("swap 3");
+        assert_eq!(
+            r3,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(3)
+            }
+        );
+    }
+
+    /// anti-vacuity：写新值后，用旧 expected 再 CAS 必 Conflict（证 CAS 真比较、非恒 Applied）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn anti_vacuity_old_expected_after_write() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k7");
+        // 首写 v1
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create");
+        // 写入 v2（覆盖 v1）
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v1".to_vec()),
+                new_value: b"v2".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("swap to v2");
+        // 用旧 expected=v1 再 CAS → Conflict（当前是 v2）
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v1".to_vec()),
+                new_value: b"v3".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("stale cas");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Conflict {
+                current: Some(b"v2".to_vec())
+            },
+            "写新值后旧 expected 必 Conflict"
+        );
+    }
+
+    /// Fix 4：expected=Some + 键不存在 → Conflict{current:None}（CAS-REVISION-MONO-01 边界——None 路径）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn expected_some_on_absent_key_returns_conflict_none() {
+        let store = MemCasStore::new();
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: CasStoreKey::new("absent-key"),
+                expected: Some(b"something".to_vec()),
+                new_value: b"new".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Conflict { current: None },
+            "expected=Some 但键不存在 → Conflict{{current:None}}"
+        );
+    }
+
+    /// Fix 5：expected_token == current_token（相等=不 stale，应放行 Applied 非 Fenced）——anti-mutation：防误改 < 为 <=。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn equal_token_is_not_fenced() {
+        let store = MemCasStore::new();
+        let key = CasStoreKey::new("k-equal-token");
+        // create → token=Epoch(1)
+        store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: None,
+                new_value: b"v1".to_vec(),
+                expected_token: None,
+            })
+            .await
+            .expect("create ok");
+        // expected_token=Some(Epoch(1)) == 当前 token → Applied（非 Fenced）
+        let outcome = store
+            .compare_and_swap(CasStoreRequest {
+                key: key.clone(),
+                expected: Some(b"v1".to_vec()),
+                new_value: b"v2".to_vec(),
+                expected_token: Some(vocab::Epoch::new(1)),
+            })
+            .await
+            .expect("cas ok");
+        assert_eq!(
+            outcome,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(2)
+            },
+            "expected_token == current_token 应 Applied，而非 Fenced"
+        );
+    }
+
+    /// 编译锁：MemCasStore impl CasStore（trait 约束满足）。
+    #[test]
+    fn mem_cas_store_impl_cas_store() {
+        use core::marker::PhantomData;
+        fn assert_cas_store<T: CasStore>(_: PhantomData<T>) {}
+        assert_cas_store(PhantomData::<MemCasStore>);
     }
 
     // ── MemSagaJournal 测试 ───────────────────────────────────────────────────

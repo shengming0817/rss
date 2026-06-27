@@ -17,3 +17,10 @@ runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 thiserror = { workspace = true }
+diport = { path = "../diport" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

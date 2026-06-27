@@ -75,6 +75,7 @@
 
 pub mod acker;
 pub mod audit_sink;
+pub mod cas_store;
 pub mod checkpoint_store;
 pub mod clock;
 pub mod dead_letter_store;
@@ -103,6 +104,9 @@ pub use acker::{
     DynAcker,
 };
 pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
+pub use cas_store::{
+    CasStore, CasStoreError, CasStoreKey, CasStoreOutcome, CasStoreRequest, DynCasStore,
+};
 pub use checkpoint_store::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,

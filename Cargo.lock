@@ -1532,12 +1532,17 @@ name = "distributed"
 version = "0.0.0"
 dependencies = [
  "consistency",
+ "diport",
  "ids",
  "primitives",
  "runctx",
  "secure",
+ "serde",
+ "serde_json",
  "support",
  "thiserror",
+ "tokio",
+ "tracing",
  "vocab",
 ]
 

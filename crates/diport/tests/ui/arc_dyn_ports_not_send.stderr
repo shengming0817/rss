@@ -187,3 +187,22 @@ note: required by a bound in `assert_send`
    |
 19 | fn assert_send<T: Send>() {}
    |                   ^^^^ required by this bound in `assert_send`
+
+error[E0277]: `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)` cannot be shared between threads safely
+  --> tests/ui/arc_dyn_ports_not_send.rs:33:19
+   |
+33 |     assert_send::<Arc<DynCasStore<'static>>>();
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)` cannot be shared between threads safely
+   |
+   = help: within `DynCasStore<'static>`, the trait `Sync` is not implemented for `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)`
+note: required because it appears within the type `DynCasStore<'static>`
+  --> src/cas_store.rs
+   |
+   | #[dynosaur(pub DynCasStore = dyn(box) CasStore, bridge(dyn))]
+   |                ^^^^^^^^^^^
+   = note: required for `Arc<DynCasStore<'static>>` to implement `Send`
+note: required by a bound in `assert_send`
+  --> tests/ui/arc_dyn_ports_not_send.rs:19:19
+   |
+19 | fn assert_send<T: Send>() {}
+   |                   ^^^^ required by this bound in `assert_send`
