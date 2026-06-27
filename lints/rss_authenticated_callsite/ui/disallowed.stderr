@@ -1,7 +1,7 @@
 warning: Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` 不得在此 crate 调用
   --> $DIR/disallowed.rs:15:15
    |
-LL |     let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User);
+LL |     let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject-1", None);
    |               ^^^^^^^^^^^^^^^^^^
    |
    = help: 在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`
@@ -15,5 +15,13 @@ LL |     let mint = Authenticated::new;
    |
    = help: 在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`
 
-warning: 2 warnings emitted
+warning: Principal subject 是审计 PII funnel：`Principal::audit_subject` 仅组合根可调用
+  --> $DIR/disallowed.rs:34:20
+   |
+LL |     let _subject = authn::Principal::audit_subject;
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 在 assembly / bin crate 的组合根验签桥中只为 `diport::AuditEvent` 构造读取 subject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`
+
+warning: 3 warnings emitted
 

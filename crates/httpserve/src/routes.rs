@@ -14,10 +14,11 @@
 //! 与兄弟 crate `bootstrap` 的协同：`bootstrap::Registry::finalize_routes` 经受控 `bootstrap → httpserve`
 //! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根跑 [`finalize_auth`] 产 [`AuthenticatedRoutes`]。
 
-use crate::auth::enforce_layer;
+use crate::auth::{AuditSinkHandle, AuthAudit, enforce_layer};
 use crate::{PrimaryRoute, Route, RouteGroupError};
 use core::marker::PhantomData;
 use primitives::{AuthPlan, ListenerKind};
+use std::sync::Arc;
 
 /// 封闭 [`Listener`] / [`NonPrimaryListener`] 实现面：外部 crate 无法命名 [`sealed::Sealed`] ⇒ 无法新增
 /// listener marker（type-layer Hard seal，对齐 `vocab::contract::owner` 私有内层封闭先例）。
@@ -265,9 +266,32 @@ pub fn finalize_auth(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    let router = routes
-        .router
-        .layer(axum::Extension(plan))
+    finalize_auth_inner(routes, plan, None)
+}
+
+/// #1113 funnel transform with auth decision audit sink.
+///
+/// The sink records final enforce decisions. Missing authenticated evidence is not audited because no trusted tenant can
+/// be derived without the verify bridge.
+pub fn finalize_auth_with_audit(
+    routes: UnfinalizedRoutes,
+    plan: AuthPlan,
+    audit_sink: AuditSinkHandle,
+    clock: Arc<dyn diport::Clock>,
+) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    finalize_auth_inner(routes, plan, Some(AuthAudit::new(audit_sink, clock)))
+}
+
+fn finalize_auth_inner(
+    routes: UnfinalizedRoutes,
+    plan: AuthPlan,
+    audit: Option<AuthAudit>,
+) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    let mut router = routes.router.layer(axum::Extension(plan));
+    if let Some(audit) = audit {
+        router = router.layer(axum::Extension(audit));
+    }
+    let router = router
         .layer(axum::middleware::from_fn(crate::middleware::panic_recovery))
         .layer(axum::middleware::from_fn(crate::middleware::trace));
     Ok(AuthenticatedRoutes::new(router))

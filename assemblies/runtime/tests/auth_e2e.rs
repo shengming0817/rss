@@ -10,7 +10,7 @@
 //!
 //! NOTE: `bins/rss` 与 `bins/server` 已成薄壳（#1309）；验签桥逻辑现集中在 `assemblies/runtime`。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -18,6 +18,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use diport::{AuditEvent, AuditSink, AuditSinkError};
 use futures::FutureExt as _;
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
@@ -38,6 +39,34 @@ struct FixedClock(i64);
 impl diport::Clock for FixedClock {
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.0 as u64)
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingAuditSink {
+    events: Arc<Mutex<Vec<AuditEvent>>>,
+}
+
+impl RecordingAuditSink {
+    fn events(&self) -> Vec<AuditEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+impl AuditSink for RecordingAuditSink {
+    async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event);
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), AuditSinkError> {
+        Ok(())
     }
 }
 
@@ -171,6 +200,30 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
     }
 }
 
+#[allow(clippy::expect_used)]
+fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRoutes {
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            httpserve::PrimaryRoute {
+                method: Method::GET,
+                path: "/protected",
+                contract_id: "test.protected",
+                opt_out: None,
+            },
+            get(|| async { "ok" }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
+    let authed = httpserve::finalize_auth_with_audit(
+        routes,
+        plan,
+        httpserve::AuditSinkHandle::new(sink),
+        Arc::new(FixedClock(NOW)),
+    )
+    .expect("finalize_auth_with_audit");
+    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Jwt)
+}
+
 #[allow(clippy::unwrap_used)]
 async fn status(
     app: httpserve::AuthenticatedRoutes,
@@ -220,6 +273,34 @@ async fn user_jwt_with_tenant_via_production_builder_is_200() {
         StatusCode::OK,
         "user kind + tenant 经生产装配路径 → 200"
     );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn user_jwt_records_auth_audit_principal_kind() {
+    let sink = RecordingAuditSink::default();
+    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    assert_eq!(
+        status(
+            jwt_router_with_audit(sink.clone()),
+            "/protected",
+            Some(&format!("Bearer {token}"))
+        )
+        .await,
+        StatusCode::OK
+    );
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.principal_id, "alice");
+    assert_eq!(format!("{:?}", event.principal_kind), "User");
+    assert_eq!(
+        event.tenant_id.expect("user auth audit tenant").to_string(),
+        TENANT
+    );
+    assert_eq!(event.resource_id, "test.protected");
+    assert_eq!(event.outcome, diport::AuditOutcome::Success);
 }
 
 #[tokio::test]
@@ -455,31 +536,68 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
     }
 }
 #[allow(clippy::unwrap_used)]
-fn captured(buf: &Arc<Mutex<Vec<u8>>>) -> String {
-    String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+fn global_trace_buf() -> &'static Arc<Mutex<Vec<u8>>> {
+    static BUF: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+    BUF.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
 }
 
-#[tokio::test]
+fn tracing_capture_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[allow(clippy::expect_used)]
+fn ensure_global_trace_capture() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let sub = tracing_subscriber::fmt()
+            .with_writer(VecWriter(global_trace_buf().clone()))
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        tracing::subscriber::set_global_default(sub).expect("install test tracing subscriber");
+    });
+    tracing::callsite::rebuild_interest_cache();
+}
+
 #[allow(clippy::unwrap_used)]
-async fn tracing_allow_logs_decision_and_kind_no_pii() {
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    // allow 为 debug 级 + verify_bridge span（debug）⇒ 捕获须开到 DEBUG。
-    let sub = tracing_subscriber::fmt()
-        .with_writer(VecWriter(buf.clone()))
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let _g = tracing::subscriber::set_default(sub);
+fn trace_len() -> usize {
+    global_trace_buf()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
+}
+
+#[allow(clippy::unwrap_used)]
+fn captured_since(start: usize) -> String {
+    let guard = global_trace_buf().lock().unwrap_or_else(|e| e.into_inner());
+    String::from_utf8(guard[start..].to_vec()).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn block_on_current_thread<T>(fut: impl std::future::Future<Output = T>) -> T {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(fut)
+}
+
+#[test]
+#[allow(clippy::unwrap_used)]
+fn tracing_allow_logs_decision_and_kind_no_pii() {
+    let _capture_guard = tracing_capture_lock().lock().unwrap();
+    ensure_global_trace_capture();
 
     let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
-    let st = status(
+    let start = trace_len();
+    let st = block_on_current_thread(status(
         jwt_router(Some(RequiredScheme::Jwt)),
         "/protected",
         Some(&format!("Bearer {token}")),
-    )
-    .await;
+    ));
     assert_eq!(st, StatusCode::OK);
 
-    let logs = captured(&buf);
+    let logs = captured_since(start);
     assert!(
         logs.contains("authz.decision"),
         "须记结构化字段键 authz.decision: {logs}"
@@ -505,9 +623,11 @@ async fn tracing_allow_logs_decision_and_kind_no_pii() {
 ///   **验签通过但缺 tenant**（authn 派生失败）  → `principal_invalid` / `PrincipalInvalid`。
 /// 末路是 review F1 回归锚：验签**通过后**的良性 principal 失败**不得**误报成 `signature_invalid` 攻击信号。
 /// 复用既有拒绝路径 token 构造（`bad_signature_is_401` / `wrong_issuer_is_401` / `expired_is_401`）。
-#[tokio::test]
+#[test]
 #[allow(clippy::unwrap_used)]
-async fn tracing_deny_logs_per_variant_reason_no_pii() {
+fn tracing_deny_logs_per_variant_reason_no_pii() {
+    let _capture_guard = tracing_capture_lock().lock().unwrap();
+    ensure_global_trace_capture();
     // 验签通过（sk_jwt 签 + 正确 iss/aud/exp + kind=user 受信）但**无 tenant_id claim** → PDP 透传 tenant=None
     // → authn `derive_from_claims` 派生失败（user 需 tenant）→ PrincipalInvalid（非 PDP 签名失败）。
     let principal_invalid_jwt = mint_es256(
@@ -543,22 +663,15 @@ async fn tracing_deny_logs_per_variant_reason_no_pii() {
             "验签通过缺 tenant→PrincipalInvalid",
         ),
     ] {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(VecWriter(buf.clone()))
-            .with_max_level(tracing::Level::DEBUG)
-            .finish();
-        let _g = tracing::subscriber::set_default(sub);
-
-        let st = status(
+        let start = trace_len();
+        let st = block_on_current_thread(status(
             jwt_router(Some(RequiredScheme::Jwt)),
             "/protected",
             Some(&format!("Bearer {token}")),
-        )
-        .await;
+        ));
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{label}");
 
-        let logs = captured(&buf);
+        let logs = captured_since(start);
         assert!(
             logs.contains("authz.decision"),
             "{label}: 须记结构化字段键 authz.decision: {logs}"

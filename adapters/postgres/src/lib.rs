@@ -17,6 +17,7 @@
 //! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
 
 mod audit_repo;
+mod auth_audit_sink;
 mod bundle;
 mod checkpoint;
 mod config_repo;
@@ -38,6 +39,7 @@ mod session_lifecycle;
 mod tx;
 
 pub use audit_repo::PgAuditRepo;
+pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, caps};
 pub use checkpoint::PgCheckpointStore;

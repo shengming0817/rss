@@ -92,6 +92,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "authn"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "consistency",
+ "diport",
+ "ids",
+ "primitives",
+ "runctx",
+ "secure",
+ "serde",
+ "serde_json",
+ "support",
+ "thiserror 2.0.18",
+ "uuid",
+ "vocab",
+]
+
+[[package]]
 name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -820,6 +839,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "diagctx",
+ "diport",
  "futures",
  "primitives",
  "serde",
@@ -1383,6 +1403,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "rss_authenticated_callsite"
 version = "0.0.0"
 dependencies = [
+ "authn",
  "clippy_utils",
  "dylint_linting",
  "dylint_testing",

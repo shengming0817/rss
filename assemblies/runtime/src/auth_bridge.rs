@@ -129,7 +129,7 @@ fn mint_evidence(state: &VerifyState, token: &str) -> Option<Authenticated> {
 fn log_allow(scheme: RequiredScheme, principal: &authn::Principal) -> Authenticated {
     let kind = principal.kind();
     tracing::debug!(authz.decision = "allow", principal.kind = ?kind, "verify-bridge");
-    Authenticated::new(scheme, kind)
+    Authenticated::new(scheme, kind, principal.audit_subject(), principal.tenant())
 }
 
 /// 验签失败 deny 埋点（`AuthnError` 变体 + 闭值 `authz.deny_reason`，脱敏）。

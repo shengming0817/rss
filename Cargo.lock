@@ -2393,6 +2393,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "diagctx",
+ "diport",
  "futures",
  "httpserve",
  "primitives",

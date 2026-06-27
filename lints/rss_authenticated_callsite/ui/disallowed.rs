@@ -12,11 +12,16 @@ use vocab::PrincipalKind;
 
 fn main() {
     // R1：非组合根 crate 调 Authenticated::new → 触发。
-    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User);
+    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject-1", None);
 
     // R2（别名绕过闭合）：函数项别名引用即触发（path 解析到同一 DefId）；后续 `mint(...)` 调本地绑定不再触发。
     let mint = Authenticated::new;
-    let _ev2 = mint(RequiredScheme::ServiceToken, PrincipalKind::Service);
+    let _ev2 = mint(
+        RequiredScheme::ServiceToken,
+        PrincipalKind::Service,
+        "service-1",
+        None,
+    );
 
     // G1（specificity anti-vacuity）：调 Vec::new 不触发——证明 lint 非「任意 ::new 调用」，self-ty 检查生效。
     let _v: Vec<u8> = Vec::new();
@@ -25,11 +30,15 @@ fn main() {
     // 只针对 Authenticated::new（item 名 != "new"）。
     let _f = httpserve::finalize_auth;
 
+    // R3：非组合根 crate 引用 Principal 审计 subject accessor → 触发。
+    let _subject = authn::Principal::audit_subject;
+
     // G3（逃生门）：item-level #[allow] 抑制。
     allowed_by_attr();
 }
 
 #[allow(rss_authenticated_callsite)] // reason: UI fixture 验证逃生门
 fn allowed_by_attr() {
-    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Admin);
+    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Admin, "admin-1", None);
+    let _subject = authn::Principal::audit_subject;
 }

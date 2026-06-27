@@ -3,7 +3,7 @@ name = "rss_authenticated_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：限定 httpserve::Authenticated::new 仅组合根（assembly / bin crate）可调用（callsite-allowlist，INVARIANT AUTH-EVIDENCE-MINT-01）"
+description = "RSS 治理：限定认证证据与审计 subject funnel 仅组合根（assembly / bin crate）可调用（callsite-allowlist）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep httpserve / vocab）
@@ -32,8 +32,9 @@ dylint_linting = "6.0.1"
 [dev-dependencies]
 dylint_testing = "6.0.1"
 # ui fixture 调真 httpserve funnel：lint 按 callee crate 名（httpserve）匹配，本地 stub 无法触发。
-# vocab 供 PrincipalKind、primitives 供 RequiredScheme 实参（Authenticated::new(scheme, principal_kind)）。
+# vocab 供 PrincipalKind、primitives 供 RequiredScheme 实参。
 httpserve = { path = "../../crates/httpserve" }
+authn = { path = "../../crates/authn" }
 vocab = { path = "../../crates/vocab" }
 primitives = { path = "../../crates/primitives" }
 

@@ -68,6 +68,35 @@ impl diport::Clock for SystemClock {
     }
 }
 
+/// Test/lightweight auth decision audit sink provider.
+///
+/// Production uses `postgres::PgAuthAuditSink` through `PgRuntimeDeps`; this provider exists for unit tests and
+/// non-production assembly checks where no durable store is available.
+#[derive(Clone, Default)]
+pub struct TracingAuthAuditSink;
+
+impl diport::AuditSink for TracingAuthAuditSink {
+    async fn record(&self, event: diport::AuditEvent) -> Result<(), diport::AuditSinkError> {
+        let outcome = match event.outcome {
+            diport::AuditOutcome::Success => "success",
+            diport::AuditOutcome::Failure { reason } => reason,
+            _ => "unknown",
+        };
+        tracing::info!(
+            audit.action = event.action,
+            audit.outcome = outcome,
+            resource.kind = event.resource_kind,
+            principal.kind = ?event.principal_kind,
+            "http auth audit event"
+        );
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
+        Ok(())
+    }
+}
+
 /// 从 env 构造生产验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
 ///
 /// - `RSS_OIDC_ISSUER` / `RSS_OIDC_AUDIENCE`：必填。
@@ -206,12 +235,20 @@ fn required_scheme(listener: ListenerKind) -> Option<RequiredScheme> {
 pub fn assemble_authed_routers(
     registry: &mut bootstrap::Registry,
     provider: Arc<OidcProvider>,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>> {
     let mut out = Vec::new();
     for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
         let scheme = auth_scheme(listener);
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
-        let authed = httpserve::finalize_auth(routes, plan).context("finalize_auth")?;
+        let authed = httpserve::finalize_auth_with_audit(
+            routes,
+            plan,
+            audit_sink.clone(),
+            audit_clock.clone(),
+        )
+        .context("finalize_auth")?;
         let required = required_scheme(listener);
         let wired = match required {
             Some(req) => auth_bridge::apply_verify_bridge(authed, provider.clone(), req),
@@ -918,8 +955,13 @@ pub async fn run() -> anyhow::Result<()> {
     );
 
     // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
+    // Auth decision audit is a flat durable sink, not the `audit::AuditRepo` hash-chain actor model.
+    let auth_audit_sink =
+        httpserve::AuditSinkHandle::new(pg.for_domain::<caps::Audit>().auth_audit_sink());
+    let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
     let mut listeners =
-        assemble_authed_routers(&mut registry, provider).context("assemble authed routers")?;
+        assemble_authed_routers(&mut registry, provider, auth_audit_sink, auth_audit_clock)
+            .context("assemble authed routers")?;
 
     // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
     // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
@@ -1179,7 +1221,13 @@ mod tests {
             .expect("provider"),
         );
         let mut registry = bootstrap::compose(&[]).expect("compose empty");
-        let routers = assemble_authed_routers(&mut registry, provider).expect("assemble ok");
+        let routers = assemble_authed_routers(
+            &mut registry,
+            provider,
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+        )
+        .expect("assemble ok");
         assert!(routers.is_empty(), "空域图 ⇒ 无 per-listener router");
     }
 

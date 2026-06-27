@@ -53,7 +53,8 @@ pub enum AuditOutcome {
 /// `occurred_at` 由 [`crate::Clock`] DI port 注入结果填入（caller 取注入时钟，本类型不直接取系统时钟）。
 /// `action` / `resource_kind` 使用 `&'static str` const literal，遵循 error-handling const-literal 规范。
 ///
-/// `tenant_id` 使用 [`vocab::TenantId`] 强类型，保证非空 + canonical UUID 校验（tenancy.md fail-closed）。
+/// `tenant_id` 使用 [`vocab::TenantId`] 强类型；跨租户主体（service / super-admin）可能无单一租户归属，
+/// 因而允许 `None` 作为已认证主体快照的一部分。
 /// `principal_id` / `resource_id` 待 typed id（W 阶段）。
 /// `correlation_id` 为跨服务关联 ID（由 outbox envelope correlation 注入），与 `request_id`（单次 HTTP
 /// 请求追踪）不同语义。
@@ -67,9 +68,12 @@ pub struct AuditEvent {
     /// 操作主体标识。待 typed id（W 阶段）。
     #[redact(pii = "generic")]
     pub principal_id: String,
-    /// 租户标识（非空 canonical UUID，tenancy.md fail-closed）。
+    /// 操作主体类别（脱敏闭值集，供审计按主体类型分层）。
     #[redact(public)]
-    pub tenant_id: vocab::TenantId,
+    pub principal_kind: vocab::PrincipalKind,
+    /// 主体租户快照；跨租户主体（service / super-admin）可能为 `None`。
+    #[redact(public)]
+    pub tenant_id: Option<vocab::TenantId>,
     /// 资源类别（const literal）。
     #[redact(public)]
     pub resource_kind: &'static str,
@@ -148,7 +152,8 @@ mod smoke {
         let _assert_fields = |e: AuditEvent| {
             let _ = &e.occurred_at;
             let _ = &e.principal_id;
-            let _ = &e.tenant_id; // vocab::TenantId
+            let _ = &e.principal_kind;
+            let _ = &e.tenant_id; // Option<vocab::TenantId>
             let _ = &e.resource_kind;
             let _ = &e.resource_id;
             let _ = &e.action;
@@ -213,7 +218,10 @@ mod pii_debug {
         AuditEvent {
             occurred_at: std::time::SystemTime::UNIX_EPOCH,
             principal_id: "alice@corp.example".to_string(),
-            tenant_id: vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+            principal_kind: vocab::PrincipalKind::User,
+            tenant_id: Some(
+                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+            ),
             resource_kind: "session",
             resource_id: "device-7f3a".to_string(),
             action: "login",

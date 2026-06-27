@@ -27,16 +27,19 @@
 //!
 //! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main
 
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::extract::Request;
 use axum::response::Response;
+use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
 use tower::Layer;
 use tower::Service;
-use vocab::PrincipalKind;
+use vocab::{PrincipalKind, TenantId};
 
 use crate::middleware::RequestId;
 
@@ -60,11 +63,12 @@ pub struct RouteMeta {
 /// 认证证据 extension：验签桥在凭据校验通过后注入请求 extension，enforce 层据此对 `Require` 路由放行
 /// （INVARIANT: AUTH-EVIDENCE-REQUIRE-01）。
 ///
-/// 承载**脱敏标量**：已验证的 [`RequiredScheme`]（验签桥实际验证的凭据方案）+ [`PrincipalKind`]（主体类别）
-/// ——无 subject / token / PII，零 authn 依赖（httpserve 是兄弟服务 authn 的不可依赖方，Service 层只依赖
-/// Basis|Engine|DiPort，故放行机制由 httpserve own 类型承载）。`scheme` 用 [`RequiredScheme`]（非 `AuthScheme`）：
-/// 类型层杜绝「`NoAuth` 证据」自相矛盾——无认证不产证据。私有字段 + [`Authenticated::new`] 构造 funnel：
-/// 外部可命名 / 收发、不可篡字段；`new` callsite 由 `rss_authenticated_callsite` dylint 限组合根
+/// 承载已验证主体的审计快照：已验证的 [`RequiredScheme`]（验签桥实际验证的凭据方案）+
+/// [`PrincipalKind`]（主体类别）+ principal subject + tenant。principal subject 是 PII，只允许进入
+/// [`diport::AuditEvent`]，不得写入普通 tracing / Debug / metrics label。httpserve 仍不依赖 authn：组合根验签桥
+/// 负责把 `authn::Principal` 降维成本类型。`scheme` 用 [`RequiredScheme`]（非 `AuthScheme`）：类型层杜绝
+/// 「`NoAuth` 证据」自相矛盾——无认证不产证据。私有字段 + [`Authenticated::new`] 构造 funnel：外部可命名 /
+/// 收发、不可篡字段；`new` callsite 由 `rss_authenticated_callsite` dylint 限组合根
 /// （AUTH-EVIDENCE-MINT-01）。**不 derive `Serialize`**（内部证据，非 wire 类型）。
 ///
 /// 注入方（验签桥）由组合根外层 `.layer()` 装配，本 crate 不构造（与 `AuthPlan` 同治理姿态：域 crate 不构造、
@@ -72,20 +76,29 @@ pub struct RouteMeta {
 /// 推送范式。
 ///
 /// ref: tower-rs/tower-http tower-http/src/auth/async_require_authorization.rs@master
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct Authenticated {
     scheme: RequiredScheme,
     principal_kind: PrincipalKind,
+    principal_id: String,
+    tenant_id: Option<TenantId>,
 }
 
 impl Authenticated {
     /// 构造认证证据（验签桥在凭据校验通过后调用）。`scheme` = 验签桥**实际验证的**凭据方案（enforce 按路由
     /// `Require(required)` exact-match 比对，scheme 不匹配 fail-closed 401，杜绝 scheme 混淆）；`principal_kind`
-    /// 为脱敏分类标量。
-    pub fn new(scheme: RequiredScheme, principal_kind: PrincipalKind) -> Self {
+    /// 为脱敏分类标量；`principal_id` / `tenant_id` 只用于审计事件构造。
+    pub fn new(
+        scheme: RequiredScheme,
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        tenant_id: Option<TenantId>,
+    ) -> Self {
         Self {
             scheme,
             principal_kind,
+            principal_id: principal_id.into(),
+            tenant_id,
         }
     }
 
@@ -97,6 +110,88 @@ impl Authenticated {
     /// 已认证主体的脱敏分类（供下游审计 / 可观测 / 行级可见域派生消费）。
     pub fn principal_kind(&self) -> PrincipalKind {
         self.principal_kind
+    }
+
+    /// 已认证主体 subject（PII）：仅供本 crate 的审计事件构造，不得写入 tracing / Debug / metrics label。
+    pub(crate) fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    /// 已认证主体租户；跨租户主体（service / super-admin）可能为 `None`。
+    pub fn tenant_id(&self) -> Option<TenantId> {
+        self.tenant_id
+    }
+}
+
+impl fmt::Debug for Authenticated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authenticated")
+            .field("scheme", &self.scheme)
+            .field("principal_kind", &self.principal_kind)
+            .field("principal_id", &"<redacted>")
+            .field("tenant_id", &self.tenant_id)
+            .finish()
+    }
+}
+
+trait SharedAuditSink: Send + Sync + 'static {
+    fn record<'a>(
+        &'a self,
+        event: AuditEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AuditSinkError>> + Send + 'a>>;
+}
+
+impl<S> SharedAuditSink for S
+where
+    S: AuditSink + Send + Sync + 'static,
+{
+    fn record<'a>(
+        &'a self,
+        event: AuditEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AuditSinkError>> + Send + 'a>> {
+        Box::pin(AuditSink::record(self, event))
+    }
+}
+
+/// Async audit sink handle usable from axum request extensions.
+///
+/// The handle keeps a Sync facade over static-dispatched providers (`Arc<S: AuditSink + Send + Sync>`), matching
+/// DIPORT-ASYNC-ARC-SEND-01 for multi-request async consumers without serializing the hot path behind a mutex.
+#[derive(Clone)]
+pub struct AuditSinkHandle {
+    inner: Arc<dyn SharedAuditSink>,
+}
+
+impl AuditSinkHandle {
+    pub fn new<S>(sink: S) -> Self
+    where
+        S: AuditSink + Send + Sync + 'static,
+    {
+        Self {
+            inner: Arc::new(sink),
+        }
+    }
+
+    async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
+        self.inner.record(event).await
+    }
+}
+
+impl fmt::Debug for AuditSinkHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AuditSinkHandle(<redacted>)")
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AuthAudit {
+    sink: AuditSinkHandle,
+    clock: Arc<dyn diport::Clock>,
+}
+
+impl AuthAudit {
+    pub(crate) fn new(sink: AuditSinkHandle, clock: Arc<dyn diport::Clock>) -> Self {
+        Self { sink, clock }
     }
 }
 
@@ -156,42 +251,149 @@ impl<S> Layer<S> for EnforceLayer {
 /// 拒绝响应类型别名（降低类型复杂度）。
 type DenyFuture<E> = Pin<Box<dyn Future<Output = Result<Response, E>> + Send>>;
 
-/// Deny 分支：403 Forbidden + 日志。
-fn deny_response<E>(contract_id: &'static str, rid: &str) -> DenyFuture<E> {
-    tracing::warn!(contract_id, "auth deny");
-    short_circuit(crate::error::forbidden(rid))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthDecision {
+    Allow,
+    Require,
+    Deny,
 }
 
-/// Require 分支：无 [`Authenticated`] 证据 / 证据方案与路由 `Require(required)` 不匹配时 fail-closed 401 + 日志。
-///
-/// httpserve 不验签（冻结 finalize_auth 签名无 verifier 参）：放行**仅**凭请求 extension 的 `Authenticated` 证据
-/// **且其 `scheme()` exact-match 路由要求**——证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入（见
-/// [`reject_if_needed`]，AUTH-EVIDENCE-REQUIRE-01）。缺证据 / 方案不匹配 → 401；对外可达路由经
-/// PrimaryRoute.opt_out(Public/PasswordResetExempt) 显式降级。
-fn require_response<E>(contract_id: &'static str, rid: &str) -> DenyFuture<E> {
-    tracing::warn!(contract_id, "auth require fail-closed 401");
-    short_circuit(crate::error::unauthenticated(rid))
+impl AuthDecision {
+    fn as_label(self) -> &'static str {
+        match self {
+            AuthDecision::Allow => "allow",
+            AuthDecision::Require => "require",
+            AuthDecision::Deny => "deny",
+        }
+    }
+
+    fn audit_outcome(self) -> AuditOutcome {
+        match self {
+            AuthDecision::Allow => AuditOutcome::Success,
+            AuthDecision::Require => AuditOutcome::Failure {
+                reason: "unauthorized",
+            },
+            AuthDecision::Deny => AuditOutcome::Failure {
+                reason: "forbidden",
+            },
+        }
+    }
 }
 
-/// 决策结果转拒绝响应（`None` = Allow，`Some` = 短路响应）。
+/// 决策结果（Allow / Require / Deny）。
 ///
 /// `evidence_scheme` = 请求所携 [`Authenticated`] 证据的已验证方案（无证据 / `Anonymous` 证据 → `None`，见 `call`）。
 /// `Require(required)` 仅在 `evidence_scheme == Some(required)`（证据存在且**方案 exact-match**）时放行；无证据或
 /// 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（AUTH-EVIDENCE-REQUIRE-01，杜绝 scheme 混淆）。
 /// `Deny` / wildcard 永远 403，证据不参与（fail-closed 不可降级）。
-fn reject_if_needed<E>(
+fn decide_auth(
     requirement: AuthRequirement,
     evidence_scheme: Option<RequiredScheme>,
+) -> AuthDecision {
+    match requirement {
+        AuthRequirement::Allow => AuthDecision::Allow,
+        // Require：携已验证证据**且方案 exact-match 路由要求** → 放行；否则 fail-closed 401。
+        AuthRequirement::Require(required) if evidence_scheme == Some(required) => {
+            AuthDecision::Allow
+        }
+        AuthRequirement::Require(_) => AuthDecision::Require,
+        // Deny + #[non_exhaustive] wildcard 均 fail-closed 403。
+        _ => AuthDecision::Deny,
+    }
+}
+
+#[allow(clippy::cognitive_complexity)]
+// reason: tracing macros expand into control-flow that inflates this closed three-way decision logger; the source-level
+// logic is only decision x optional principal_kind field.
+fn log_auth_decision(
+    decision: AuthDecision,
+    contract_id: &'static str,
+    evidence: Option<&Authenticated>,
+) {
+    match evidence {
+        Some(ev) => match decision {
+            AuthDecision::Allow => tracing::debug!(
+                contract_id,
+                authz.decision = decision.as_label(),
+                principal.kind = ?ev.principal_kind(),
+                "auth allow"
+            ),
+            AuthDecision::Require => tracing::warn!(
+                contract_id,
+                authz.decision = decision.as_label(),
+                principal.kind = ?ev.principal_kind(),
+                "auth require fail-closed 401"
+            ),
+            AuthDecision::Deny => tracing::warn!(
+                contract_id,
+                authz.decision = decision.as_label(),
+                principal.kind = ?ev.principal_kind(),
+                "auth deny"
+            ),
+        },
+        None => match decision {
+            AuthDecision::Allow => tracing::debug!(
+                contract_id,
+                authz.decision = decision.as_label(),
+                "auth allow"
+            ),
+            AuthDecision::Require => tracing::warn!(
+                contract_id,
+                authz.decision = decision.as_label(),
+                "auth require fail-closed 401"
+            ),
+            AuthDecision::Deny => tracing::warn!(
+                contract_id,
+                authz.decision = decision.as_label(),
+                "auth deny"
+            ),
+        },
+    }
+}
+
+fn auth_audit_event(
+    audit: &AuthAudit,
+    decision: AuthDecision,
     contract_id: &'static str,
     rid: &str,
-) -> Option<DenyFuture<E>> {
-    match requirement {
-        AuthRequirement::Allow => None,
-        // Require：携已验证证据**且方案 exact-match 路由要求** → 放行；否则 fail-closed 401。
-        AuthRequirement::Require(required) if evidence_scheme == Some(required) => None,
-        AuthRequirement::Require(_) => Some(require_response(contract_id, rid)),
-        // Deny + #[non_exhaustive] wildcard 均 fail-closed 403。
-        _ => Some(deny_response(contract_id, rid)),
+    evidence: &Authenticated,
+) -> AuditEvent {
+    AuditEvent {
+        occurred_at: audit.clock.now(),
+        principal_id: evidence.principal_id().to_string(),
+        principal_kind: evidence.principal_kind(),
+        tenant_id: evidence.tenant_id(),
+        resource_kind: "http_route",
+        resource_id: contract_id.to_string(),
+        action: "httpserve:authz",
+        outcome: decision.audit_outcome(),
+        request_id: (!rid.is_empty()).then(|| rid.to_string()),
+        correlation_id: diagctx::correlation().map(|c| c.as_str().to_string()),
+    }
+}
+
+async fn record_auth_audit(
+    audit: Option<AuthAudit>,
+    decision: AuthDecision,
+    contract_id: &'static str,
+    rid: String,
+    evidence: Option<Authenticated>,
+) -> Result<(), AuditSinkError> {
+    let Some(audit) = audit else {
+        return Ok(());
+    };
+    let Some(evidence) = evidence else {
+        return Ok(());
+    };
+    let event = auth_audit_event(&audit, decision, contract_id, &rid, &evidence);
+    audit.sink.record(event).await
+}
+
+fn reject_response<E>(decision: AuthDecision, rid: &str) -> DenyFuture<E> {
+    match decision {
+        AuthDecision::Require => short_circuit(crate::error::unauthenticated(rid)),
+        AuthDecision::Deny => short_circuit(crate::error::forbidden(rid)),
+        AuthDecision::Allow => short_circuit(crate::error::internal_error(rid)),
     }
 }
 
@@ -218,10 +420,12 @@ where
         let opt_out = self.opt_out;
         let meta = self.meta.clone();
         let plan = req.extensions().get::<primitives::AuthPlan>().copied();
+        let audit = req.extensions().get::<AuthAudit>().cloned();
         // 验签桥（组合根外层 layer）校验通过后注入的认证证据；enforce 据其**已验证方案**放行 Require 路由。
         // fail-closed 防御纵深：`Anonymous` 证据视同无证据（→ None）——绝不过 Require（即便验签桥误注入；
         // 匿名可达路由经 PrimaryRoute.opt_out(Public) 而非 Require）。方案 exact-match 由 reject_if_needed 比对，
         // 杜绝 scheme 混淆（如 Jwt 证据撞 Require(Mtls)）。AUTH-EVIDENCE-REQUIRE-01。
+        let evidence = req.extensions().get::<Authenticated>().cloned();
         let evidence_scheme = req
             .extensions()
             .get::<Authenticated>()
@@ -252,25 +456,130 @@ where
             Some(p) => resolve_requirement(p, opt_out),
         };
 
-        if let Some(resp) = reject_if_needed(requirement, evidence_scheme, meta.contract_id, &rid) {
-            return resp;
+        let decision = decide_auth(requirement, evidence_scheme);
+        log_auth_decision(decision, meta.contract_id, evidence.as_ref());
+
+        if decision != AuthDecision::Allow {
+            let audit_fut =
+                record_auth_audit(audit, decision, meta.contract_id, rid.clone(), evidence);
+            return Box::pin(async move {
+                if let Err(error) = audit_fut.await {
+                    tracing::error!(
+                        contract_id = meta.contract_id,
+                        authz.decision = decision.as_label(),
+                        error = %error,
+                        "auth audit record failed before reject"
+                    );
+                    return Ok(crate::error::internal_error(&rid));
+                }
+                reject_response(decision, &rid).await
+            });
         }
-        Box::pin(inner.call(req))
+        Box::pin(async move {
+            if let Err(error) =
+                record_auth_audit(audit, decision, meta.contract_id, rid.clone(), evidence).await
+            {
+                tracing::error!(
+                    contract_id = meta.contract_id,
+                    authz.decision = decision.as_label(),
+                    error = %error,
+                    "auth audit record failed before allow"
+                );
+                return Ok(crate::error::internal_error(&rid));
+            }
+            inner.call(req).await
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::SystemTime;
+
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode, header};
     use axum::routing::get;
     use axum::{Extension, Router};
+    use diport::{AuditSink, AuditSinkError};
     use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
     use tower::ServiceExt;
 
     use super::*;
 
     const TEST_CONTRACT: &str = "test.contract";
+    const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::unwrap_used)]
+    fn tenant() -> TenantId {
+        TenantId::parse(TEST_TENANT).unwrap()
+    }
+
+    fn authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
+        Authenticated::new(scheme, kind, "principal-1", Some(tenant()))
+    }
+
+    fn tenantless_authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
+        Authenticated::new(scheme, kind, "platform-principal-1", None)
+    }
+
+    #[derive(Clone)]
+    struct RecordingAuditSink {
+        events: Arc<Mutex<Vec<AuditEvent>>>,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl RecordingAuditSink {
+        fn new() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                fail: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn failing() -> Self {
+            let sink = Self::new();
+            sink.fail.store(true, Ordering::SeqCst);
+            sink
+        }
+
+        fn events(&self) -> Vec<AuditEvent> {
+            self.events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    impl AuditSink for RecordingAuditSink {
+        async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(AuditSinkError::new(std::io::Error::other("audit-failed")));
+            }
+            self.events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), AuditSinkError> {
+            Ok(())
+        }
+    }
+
+    struct TestClock;
+
+    impl diport::Clock for TestClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
+        }
+    }
+
+    fn audit_ext(sink: RecordingAuditSink) -> AuthAudit {
+        AuthAudit::new(AuditSinkHandle::new(sink), Arc::new(TestClock))
+    }
 
     #[allow(clippy::unwrap_used)]
     fn build_router(opt_out: Option<RouteAuthOptOut>, plan: Option<AuthPlan>) -> Router {
@@ -282,6 +591,15 @@ mod tests {
             router = router.layer(Extension(p));
         }
         router
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn build_router_with_audit(
+        opt_out: Option<RouteAuthOptOut>,
+        plan: Option<AuthPlan>,
+        sink: RecordingAuditSink,
+    ) -> Router {
+        build_router(opt_out, plan).layer(Extension(audit_ext(sink)))
     }
 
     #[allow(clippy::unwrap_used)]
@@ -338,7 +656,7 @@ mod tests {
             .unwrap();
         // 验签桥范式：外层 layer 校验通过后注入证据；此处直接 insert 模拟该接缝。
         req.extensions_mut()
-            .insert(Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -354,10 +672,8 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(Authenticated::new(
-            RequiredScheme::Mtls,
-            PrincipalKind::User,
-        ));
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Mtls, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -373,10 +689,8 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(Authenticated::new(
-            RequiredScheme::Jwt,
-            PrincipalKind::Anonymous,
-        ));
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::Anonymous));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -392,9 +706,164 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User));
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn allow_records_success_audit_event() {
+        let sink = RecordingAuditSink::new();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let router = build_router_with_audit(None, Some(plan), sink.clone());
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.principal_id, "principal-1");
+        assert_eq!(event.principal_kind, PrincipalKind::User);
+        assert_eq!(event.tenant_id, Some(tenant()));
+        assert_eq!(event.resource_kind, "http_route");
+        assert_eq!(event.resource_id, TEST_CONTRACT);
+        assert_eq!(event.action, "httpserve:authz");
+        assert_eq!(event.outcome, AuditOutcome::Success);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn require_without_evidence_does_not_forge_audit_event() {
+        let sink = RecordingAuditSink::new();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let router = build_router_with_audit(None, Some(plan), sink.clone());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(sink.events().is_empty());
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn tenantless_authenticated_evidence_still_records_audit_event() {
+        let sink = RecordingAuditSink::new();
+        let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).unwrap();
+        let router = build_router_with_audit(None, Some(plan), sink.clone());
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(tenantless_authed(
+            RequiredScheme::ServiceToken,
+            PrincipalKind::Service,
+        ));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].principal_id, "platform-principal-1");
+        assert_eq!(events[0].principal_kind, PrincipalKind::Service);
+        assert_eq!(events[0].tenant_id, None);
+        assert_eq!(events[0].outcome, AuditOutcome::Success);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn require_scheme_mismatch_records_unauthorized_audit_event() {
+        let sink = RecordingAuditSink::new();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let router = build_router_with_audit(None, Some(plan), sink.clone());
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Mtls, PrincipalKind::User));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].outcome,
+            AuditOutcome::Failure {
+                reason: "unauthorized"
+            }
+        );
+        assert_eq!(events[0].principal_kind, PrincipalKind::User);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn deny_with_evidence_records_forbidden_audit_event() {
+        let sink = RecordingAuditSink::new();
+        let router = build_router_with_audit(None, None, sink.clone());
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].outcome,
+            AuditOutcome::Failure {
+                reason: "forbidden"
+            }
+        );
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn allow_audit_failure_fails_closed_500() {
+        let sink = RecordingAuditSink::failing();
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).unwrap();
+        let router = build_router_with_audit(None, Some(plan), sink);
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn deny_audit_failure_fails_closed_500() {
+        let sink = RecordingAuditSink::failing();
+        let router = build_router_with_audit(None, None, sink);
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[allow(clippy::unwrap_used)]

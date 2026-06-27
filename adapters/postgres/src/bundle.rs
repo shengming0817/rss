@@ -43,10 +43,10 @@ use diport::{Clock, DynPublisher};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    PgAuditRepo, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo, PgDbReadiness,
-    PgDeadLetterStore, PgEmitter, PgError, PgInboxStore, PgOutbox, PgProjectionEvents,
-    PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo, PgSagaJournal, PgSecretRepo,
-    PgSessionLifecycle, PgStore, PgStoreGuard,
+    PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo,
+    PgDbReadiness, PgDeadLetterStore, PgEmitter, PgError, PgInboxStore, PgOutbox,
+    PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo, PgSagaJournal,
+    PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -289,6 +289,15 @@ impl PgDomainDeps<caps::Audit> {
     {
         PgAuditRepo::new(&self.store, hasher)
     }
+
+    /// Flat durable auth decision audit sink (`diport::AuditSink`) for httpserve enforcement.
+    ///
+    /// This deliberately stays outside the hash-chain [`audit::ports::AuditRepo`] actor model because auth principals
+    /// are generic subjects, not only `ids::UserId`.
+    #[must_use]
+    pub fn auth_audit_sink(&self) -> PgAuthAuditSink {
+        PgAuthAuditSink::new(&self.store)
+    }
 }
 
 /// framework/global postgres 基建能力句柄（`Clone`，provider-agnostic、非单域）。
@@ -483,6 +492,12 @@ mod tests {
         let _ = infra.checkpoint();
         let _ = infra.saga_journal();
         let _ = infra.projection_events();
+    }
+
+    #[tokio::test]
+    async fn audit_accessors_construct() {
+        let a: PgDomainDeps<caps::Audit> = deps().for_domain();
+        let _ = a.auth_audit_sink();
     }
 
     #[tokio::test]

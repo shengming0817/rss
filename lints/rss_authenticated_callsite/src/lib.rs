@@ -1,6 +1,6 @@
 #![feature(rustc_private)]
-//! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定 `Authenticated` 证据构造入口仅组合根可调用。
-//! `httpserve::Authenticated::new` 仅 assembly / bin crate（组合根）可调用。
+//! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据与审计 subject funnel 仅组合根可调用。
+//! `httpserve::Authenticated::new` 与 `authn::Principal::audit_subject` 仅 assembly / bin crate（组合根）可调用。
 //!
 //! INVARIANT: AUTH-EVIDENCE-MINT-01
 //!
@@ -15,7 +15,7 @@
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
 //! - 上游（构造守卫）：`Authenticated` 字段私有，外部 crate 仅能经 `new` 合法构造——类型层私有字段已封 struct
 //!   literal，但 `new` 为 `pub`（验签桥在 httpserve 外的组合根，无法 `pub(crate)` 收口），故经 callsite lint 约束。
-//! - 下游（使用守卫）：`Authenticated` 可 Copy 传递，使用侧无需 mint——mint 点即唯一约束面。
+//! - 下游（使用守卫）：`Authenticated` 可 Clone 传递，使用侧无需 mint——mint 点即唯一约束面。
 //!
 //! 判定四步：① callee crate 名 == "httpserve"；② item 名 == "new"；③ parent 是 Impl；
 //! ④ impl self 类型的 adt 名 == "Authenticated"（self-ty 检查，杜绝 `Vec::new` 等同名 fn 误报）。
@@ -38,7 +38,7 @@ use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
-/// 仅这些 crate 可调用 `Authenticated::new`——单一 greppable 真源，扩项须治理评审。
+/// 仅这些 crate 可调用认证证据 / 审计 subject funnel——单一 greppable 真源，扩项须治理评审。
 /// 组合根（assembly / bin）的验签桥在凭据校验通过后构造 `Authenticated` 并经外层 `.layer()` 注入，是唯一合法构造点。
 /// 当前生产代码无 `Authenticated` callsite（验签桥 = #1109 后续），allowlist 为前瞻守卫。
 /// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
@@ -63,7 +63,12 @@ dylint_linting::declare_late_lint! {
     /// ### Example
     /// ```ignore
     /// // 域 crate（非组合根）：
-    /// let ev = httpserve::Authenticated::new(vocab::PrincipalKind::User); // 触发
+    /// let ev = httpserve::Authenticated::new(
+    ///     primitives::RequiredScheme::Jwt,
+    ///     vocab::PrincipalKind::User,
+    ///     "subject-1",
+    ///     None,
+    /// ); // 触发
     /// ```
     /// Use instead: 在 assembly / bin crate 的组合根验签桥中构造 `Authenticated`，经外层 `.layer()` 注入。
     pub RSS_AUTHENTICATED_CALLSITE,
@@ -81,8 +86,26 @@ impl<'tcx> LateLintPass<'tcx> for RssAuthenticatedCallsite {
         let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
             return;
         };
-        if is_authenticated_mint_did(cx, did) && !caller_is_allowed(cx) {
-            emit(cx, expr.hir_id, expr.span);
+        if caller_is_allowed(cx) {
+            return;
+        }
+        if is_authenticated_mint_did(cx, did) {
+            emit(
+                cx,
+                expr.hir_id,
+                expr.span,
+                "Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` 不得在此 crate 调用",
+                "在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`",
+            );
+        }
+        if is_principal_audit_subject_did(cx, did) {
+            emit(
+                cx,
+                expr.hir_id,
+                expr.span,
+                "Principal subject 是审计 PII funnel：`Principal::audit_subject` 仅组合根可调用",
+                "在 assembly / bin crate 的组合根验签桥中只为 `diport::AuditEvent` 构造读取 subject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`",
+            );
         }
     }
 }
@@ -116,6 +139,26 @@ fn is_authenticated_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
     }
 }
 
+/// `did` 是 `authn::Principal` 的审计 subject accessor。
+fn is_principal_audit_subject_did(cx: &LateContext<'_>, did: DefId) -> bool {
+    if cx.tcx.crate_name(did.krate).as_str() != "authn" {
+        return false;
+    }
+    if cx.tcx.item_name(did).as_str() != "audit_subject" {
+        return false;
+    }
+    let parent_did = cx.tcx.parent(did);
+    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
+        return false;
+    }
+    let self_ty = cx.tcx.type_of(parent_did).skip_binder();
+    if let Some(adt_def) = self_ty.ty_adt_def() {
+        cx.tcx.item_name(adt_def.did()).as_str() == "Principal"
+    } else {
+        false
+    }
+}
+
 /// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
 /// 按 crate 名判定不可被「在别的 crate 里 `mod server`」伪造。
 fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
@@ -124,17 +167,15 @@ fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
 
 /// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
 /// `#[allow(rss_authenticated_callsite)]` 逃生门生效（同 rss_authplan_callsite）。
-fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
+fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, message: &'static str, help: &'static str) {
     span_lint_hir_and_then(
         cx,
         RSS_AUTHENTICATED_CALLSITE,
         hir_id,
         span,
-        "Authenticated 证据仅组合根（assembly / bin crate）可构造：`Authenticated::new` 不得在此 crate 调用",
+        message,
         |diag| {
-            diag.help(
-                "在 assembly / bin crate 的组合根验签桥中构造 Authenticated，经外层 `.layer()` 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authenticated_callsite)] // reason: ...`",
-            );
+            diag.help(help);
         },
     );
 }

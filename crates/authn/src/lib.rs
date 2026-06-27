@@ -216,6 +216,15 @@ impl Principal {
         self.tenant
     }
 
+    /// 返回审计用途的已验证 subject。
+    ///
+    /// 这是唯一暴露 subject 明文的生产 accessor，仅供组合根把已验签主体降维为 `diport::AuditEvent`
+    /// / `httpserve::Authenticated` 审计快照。调用方不得把该值写入 tracing / Debug / metrics label；callsite
+    /// 由 `rss_authenticated_callsite` dylint 限定在组合根。
+    pub fn audit_subject(&self) -> &str {
+        &self.subject
+    }
+
     /// 本主体 subject 是否等于 `subject`（**受控比较，不泄露明文 subject**）。
     ///
     /// 授权路径用此判定某条绑定（如 `RoleBinding.subject`）是否归属本 principal——把「绑定属于本主体」
@@ -439,8 +448,9 @@ mod crosstenant {
             let event = diport::AuditEvent {
                 occurred_at: clock.now(),
                 principal_id: self.subject.clone(),
+                principal_kind: self.kind,
                 // reason: super-admin 自身 tenant=None；审计记录「行使 All-scope 的目标租户」= ctx.tenant，非自身 tenant。
-                tenant_id: *ctx.tenant(),
+                tenant_id: Some(*ctx.tenant()),
                 resource_kind: audit.resource_kind,
                 resource_id: audit.resource_id.clone(),
                 action: audit.action,
@@ -1027,8 +1037,10 @@ mod audited_cross_tenant_tests {
         let ev = &evs[0];
         assert_eq!(ev.occurred_at, t0, "occurred_at 取注入 Clock");
         assert_eq!(ev.principal_id, "root-subject");
+        assert_eq!(ev.principal_kind, PrincipalKind::SuperAdmin);
         assert_eq!(
-            ev.tenant_id, tid,
+            ev.tenant_id,
+            Some(tid),
             "tenant_id 取 ctx 行使 All-scope 的租户上下文"
         );
         assert_eq!(ev.resource_kind, "cross_tenant_visibility");

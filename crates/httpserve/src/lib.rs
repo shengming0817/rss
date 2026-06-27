@@ -13,10 +13,10 @@ pub mod health;
 mod middleware;
 pub mod routes;
 
-pub use auth::{Authenticated, RouteMeta};
+pub use auth::{AuditSinkHandle, Authenticated, RouteMeta};
 pub use routes::{
     Admin, AuthenticatedRoutes, Health, Internal, Listener, ListenerRouter, NonPrimaryListener,
-    Primary, UnfinalizedRoutes, finalize_auth,
+    Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
 };
 
 /// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口

@@ -1016,7 +1016,8 @@ mod tests {
         AuditEvent {
             occurred_at: SystemTime::UNIX_EPOCH,
             principal_id: "alice".to_string(),
-            tenant_id: TenantId::parse(CANON_TENANT).expect("canonical tenant"),
+            principal_kind: vocab::PrincipalKind::User,
+            tenant_id: Some(TenantId::parse(CANON_TENANT).expect("canonical tenant")),
             resource_kind: "session",
             resource_id: "sess-1".to_string(),
             action: "login",

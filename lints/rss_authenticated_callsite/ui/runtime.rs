@@ -11,5 +11,6 @@ use vocab::PrincipalKind;
 
 fn main() {
     // G：组合根（runtime assembly crate）调 Authenticated::new 不触发（合法的验签桥构造点）。
-    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User);
+    let _ev = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject-1", None);
+    let _subject = authn::Principal::audit_subject;
 }

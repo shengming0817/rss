@@ -55,6 +55,16 @@ async fn panicking_handler() -> axum::response::Response {
 
 const C: &str = "httpserve.test";
 const X_REQUEST_ID: &str = "x-request-id";
+const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+#[allow(clippy::unwrap_used)]
+fn tenant() -> vocab::TenantId {
+    vocab::TenantId::parse(TENANT).unwrap()
+}
+
+fn authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
+    Authenticated::new(scheme, kind, "principal-1", Some(tenant()))
+}
 
 // ── mount / 路由匹配 ─────────────────────────────────────────────────────────
 
@@ -143,7 +153,7 @@ async fn primary_public_opt_out_with_evidence_is_200() {
         .body(Body::empty())
         .unwrap();
     req.extensions_mut()
-        .insert(Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -232,7 +242,7 @@ async fn primary_require_with_authenticated_evidence_allows() {
         .body(Body::empty())
         .unwrap();
     req.extensions_mut()
-        .insert(Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User));
+        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -262,10 +272,8 @@ async fn primary_require_with_mismatched_scheme_is_401() {
         .uri("/api/v1/x")
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut().insert(Authenticated::new(
-        RequiredScheme::Mtls,
-        PrincipalKind::User,
-    ));
+    req.extensions_mut()
+        .insert(authed(RequiredScheme::Mtls, PrincipalKind::User));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
