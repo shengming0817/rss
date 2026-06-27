@@ -493,7 +493,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn audit_domain_declares_subscriber_and_admin_route_group() {
         let domain = AuditDomain::new(repo());
-        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert!(
             groups
@@ -502,7 +502,7 @@ mod tests {
                     && *prefix == AUDIT_ROUTE_PREFIX),
             "admin 读路由组须声明在 Admin listener: {groups:?}"
         );
-        let subs = reg.into_subscribers();
+        let subs = reg.drain_subscribers();
         assert_eq!(subs.len(), 1);
         let spec = SUBSCRIPTIONS[0];
         assert_eq!(spec.consumer, AUDIT_DOMAIN);

@@ -36,7 +36,7 @@ pub(crate) struct RouteGroupDecl {
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
 ///
-/// contract_id、topic、consumer group、handler 四元组；经 [`Registry::into_subscribers`]
+/// contract_id、topic、consumer group、handler 四元组；经 [`Registry::drain_subscribers`]
 /// 转为 [`SubscriberBinding`] 交组合根接 eventexec 分发驱动。
 pub(crate) struct SubscriberDecl {
     pub(crate) contract_id: &'static str,
@@ -265,7 +265,7 @@ pub trait HealthProbe: Send + Sync {
 /// 组合根推荐的调用顺序：
 /// 1. [`readyz_report`](Self::readyz_report)（`&self`，可随时调、含 finalize 后）——驱动所有探针求值聚合。
 /// 2. [`finalize_routes`](Self::finalize_routes)（`&mut self`，drain routes）——按 listener 分组折叠路由组。
-/// 3. [`into_subscribers`](Self::into_subscribers)（`self`，消费）——取出订阅声明交 eventexec 分发驱动。
+/// 3. [`drain_subscribers`](Self::drain_subscribers)（`&mut self`，drain）——取出订阅声明交 eventexec 分发驱动。
 ///
 /// [`Domain::init`]: crate::domain::Domain::init
 pub struct Registry {
@@ -325,7 +325,7 @@ impl Registry {
     ///   不得在 init 内 `unwrap`/`expect`。
     /// - `handler`：bootstrap-local 擦除对象（[`SubscriberHandler`]）。
     ///
-    /// 组合根 finalize 经 [`Registry::into_subscribers`] 取出 [`SubscriberBinding`] 接 eventexec 分发驱动。
+    /// 组合根 finalize 经 [`Registry::drain_subscribers`] 取出 [`SubscriberBinding`] 接 eventexec 分发驱动。
     /// DomainId = 注册域，由注册时机隐式记录（不作为参数，避免与 contract owner 语义冲突）。
     pub fn subscriber(
         &mut self,
@@ -418,7 +418,7 @@ impl Registry {
     /// 按 listener 分组折叠路由组 register 闭包，每 listener 产出一个 [`UnfinalizedRoutes`]（未认证安全态）。
     ///
     /// 排空 `route_groups`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
-    /// [`into_subscribers`](Self::into_subscribers) 不争用消费权；消费顺序由组合根定）。同一 listener 的
+    /// [`drain_subscribers`](Self::drain_subscribers) 不争用消费权；消费顺序由组合根定）。同一 listener 的
     /// 多个组折叠进同一累加器；不同 listener 各自独立——`Internal`/`Admin`/`Health` 路由**不可**
     /// 落到 `Primary`（对外）listener（由 [`route_group`](Self::route_group) 的 typed `L` 类型层守）。
     /// register 闭包 Err 原样冒泡（保留变体），并记 listener/prefix/error 结构化错误日志。
@@ -481,11 +481,13 @@ impl Registry {
 
     /// 取出订阅绑定（contract_id + topic + group + handler），交组合根接 eventexec 分发驱动。
     ///
-    /// 消费 `self`（声明在 finalize 阶段交出，Registry 不再复用）。
+    /// 排空 `subscribers`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
+    /// [`finalize_routes`](Self::finalize_routes) 不争用消费权；消费顺序由组合根定）。
+    /// 幂等 drain——`subscribers` 排空后再次调用返回空 `Vec`（非错误）。
     /// 返回 [`SubscriberBinding`] 列表；组合根据 `topic` 订阅 broker，据 `group` 接 ConsumerBase，
     /// 据 `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
-    pub fn into_subscribers(self) -> Vec<SubscriberBinding> {
-        self.subscribers
+    pub fn drain_subscribers(&mut self) -> Vec<SubscriberBinding> {
+        std::mem::take(&mut self.subscribers)
             .into_iter()
             .map(|d| SubscriberBinding {
                 contract_id: d.contract_id,
@@ -557,7 +559,7 @@ mod smoke {
 #[cfg(test)]
 mod collect {
     //! Registry 声明收集 + 取出（RW-G1 已写实）：route_group / subscriber 收集，
-    //! route_groups() / into_subscribers() 取出，compose 跨域聚合。
+    //! route_groups() / drain_subscribers() 取出，compose 跨域聚合。
     use super::{Message, Registry, SubscriberHandler, SubscriberHandlerError};
     use crate::domain::{Domain, KernelError, compose};
     use futures::future::BoxFuture;
@@ -597,7 +599,7 @@ mod collect {
         assert_eq!(groups[0].1, "/api/v1/identity");
         assert_eq!(reg.probe_count(), 0);
 
-        let subs = reg.into_subscribers();
+        let subs = reg.drain_subscribers();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].contract_id, "identity.session-created");
         assert_eq!(subs[0].topic, "identity.session-created");
@@ -627,9 +629,9 @@ mod collect {
     #[test]
     #[allow(clippy::expect_used)]
     fn compose_aggregates_all_domains() {
-        let reg = compose(&[&TwoGroupDomain, &OneSubDomain]).expect("compose ok");
+        let mut reg = compose(&[&TwoGroupDomain, &OneSubDomain]).expect("compose ok");
         assert_eq!(reg.route_groups().len(), 1);
-        let subs = reg.into_subscribers();
+        let subs = reg.drain_subscribers();
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[0].topic, "topic.a");
         assert_eq!(subs[0].contract_id, "contract.topic-a");
@@ -694,6 +696,48 @@ mod finalize {
         let report = reg.readyz_report();
         assert_eq!(report.overall(), HealthStatus::Unhealthy);
         assert!(report.checks().is_empty());
+    }
+
+    /// `drain_subscribers` 取出订阅绑定，drain 后 Registry 订阅列表清空（二次 drain 返回空 Vec）。
+    ///
+    /// 仿照 `take_health_reporter_extracts_probes_and_reports`：注册一个 subscriber，drain，
+    /// 断言绑定已返回 + 二次 drain 幂等返回空。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn drain_subscribers_extracts_bindings_and_clears() {
+        use super::{Message, SubscriberHandler, SubscriberHandlerError};
+        use futures::future::BoxFuture;
+
+        struct StubHandler;
+        impl SubscriberHandler for StubHandler {
+            fn handle(
+                &self,
+                _message: Message,
+            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let group =
+            consistency::ConsumerGroup::parse("test.drain-group").expect("valid consumer group");
+        let mut reg = Registry::new();
+        reg.subscriber(
+            "test.drain-topic",
+            "drain.topic",
+            group,
+            Box::new(StubHandler),
+        )
+        .expect("subscriber declared");
+
+        let bindings = reg.drain_subscribers();
+        assert_eq!(bindings.len(), 1, "drain 取出一个绑定");
+        assert_eq!(bindings[0].contract_id, "test.drain-topic");
+        assert_eq!(bindings[0].topic, "drain.topic");
+        assert_eq!(bindings[0].group.as_str(), "test.drain-group");
+
+        // 二次 drain 幂等返回空（subscribers 已被 std::mem::take 清空）。
+        let second = reg.drain_subscribers();
+        assert!(second.is_empty(), "二次 drain 返回空 Vec");
     }
 
     /// `take_health_reporter` 取出探针产出 `Send + Sync` reporter，`report` 聚合语义同 `readyz_report`；

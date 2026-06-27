@@ -20,6 +20,7 @@
 //! 原 xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
+pub mod event_transport;
 pub mod module;
 
 pub use module::SharedRuntimeDeps;
@@ -381,6 +382,11 @@ pub(crate) fn parse_pg_ssl_mode(raw: Option<String>) -> PgSslMode {
 /// 从 `std::env` 构造 `PgConfig`。
 pub fn build_pg_config() -> anyhow::Result<PgConfig> {
     build_pg_config_from(|name| std::env::var(name).ok())
+}
+
+/// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
+pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
+    event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
 }
 
 // ── DB readiness 采样周期 helper ───────────────────────────────────────────────────────────────
@@ -1309,6 +1315,30 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
         )
         .context("register rls_ready probe")?;
+
+    // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
+    // Demo 拓扑 fail-fast（生产不走 in-memory 路径；TOPO-INMEM-SEAL-01 组合根层保证）。
+    let event_cfg = build_event_transport_config().context("event transport config")?;
+    if event_cfg.topology == bootstrap::Topology::Demo {
+        anyhow::bail!(
+            "RSS_TOPOLOGY=demo is not supported in the production runtime; \
+             use durable-shared or durable-isolated"
+        );
+    }
+    let event_subscribers = registry.drain_subscribers();
+    let event_runtime = event_transport::wire_event_transport(&pg, event_subscribers, event_cfg)
+        .await
+        .context("wire event transport")?;
+    let event_infra_guards = event_runtime.infra_guards;
+    let event_workers = event_runtime.workers;
+    // 排空事件传输探针进 registry（须先于 take_health_reporter；与域探针同批注册）。
+    for (name, probe) in event_runtime.probes {
+        let probe_label = name.as_str().to_owned();
+        registry
+            .probe(name, probe)
+            .with_context(|| format!("register event probe '{probe_label}'"))?;
+    }
+
     // 域 detached 资源 / 后台 worker（settings 今为空；路径为后续域就位）——移出供 serve 闭包排空。
     let domain_resources = module.resources;
     let domain_workers = module.workers;
@@ -1332,9 +1362,11 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let reporter = Arc::new(registry.take_health_reporter());
     listeners.push(health_listener(reporter, metrics_exporter).context("build health listener")?);
 
-    // LIFO 注册顺序：otel exporter 先注册（最后关，关停期 span flush）→ pool guard → sampler → 域 resources →
-    // 域 workers → listeners 最后注册（最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources
-    // → sampler → pool guard → otel exporter（trace flush 在所有组件静默后）。otel 仅在配了 RSS_OTEL_ENDPOINT 时存在。
+    // LIFO 注册顺序：otel exporter 先注册（最后关，关停期 span flush）→ pg pool guard → sampler →
+    // event infra guards（AMQP+Redis）→ event workers（relay+consumers）→ 域 resources → 域 workers →
+    // listeners 最后注册（最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources →
+    //   event workers（relay+consumers drain）→ event infra guards（AMQP+Redis 断连）→ sampler → pg pool guard
+    //   → otel exporter（trace flush 在所有组件静默后）。otel 仅在配了 RSS_OTEL_ENDPOINT 时存在。
     serve_until_signal(listeners, move |stack| {
         // otel trace 导出 exporter（若已配 RSS_OTEL_ENDPOINT）**最先**注册 → LIFO 最后 drain：span flush 在所有
         // 组件（listeners → workers → 域 resources → sampler → pool guard）全部静默后执行，不丢失关停期 span。
@@ -1348,7 +1380,15 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         stack.register_with_token(move |token| {
             DynManagedResource::new_box(pg.spawn_readiness_sampler(period, token))
         });
-        // 域产物注册在框架 pg infra 之后 → LIFO 先于 pool 关闭排空（settings 今为空；后续域就位）。
+        // 事件传输 infra guards（AMQP + Redis）先于 workers 注册 → LIFO 在 workers drain 后才断连接。
+        for g in event_infra_guards {
+            stack.register_detached(g);
+        }
+        // 事件传输 workers（relay + consumers）自带 CancellationToken，经 register_detached 注册（self-cancel）。
+        for w in event_workers {
+            stack.register_detached(w);
+        }
+        // 域产物注册在事件传输之后 → LIFO 先于事件传输排空（settings 今为空；后续域就位）。
         for r in domain_resources {
             stack.register_detached(r);
         }

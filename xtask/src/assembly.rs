@@ -16,6 +16,8 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 const REVOCATION_STORE_PORT: &str = "diport::RevocationStore";
+const PUBLISHER_PORT: &str = "diport::Publisher";
+const ACKABLE_SUBSCRIBER_PORT: &str = "diport::AckableSubscriber";
 const SIGNER_PORT: &str = "diport::Signer";
 const PDP_PORT: &str = "diport::Pdp";
 const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
@@ -103,6 +105,12 @@ pub(crate) struct DiportProvider {
 pub(crate) enum DiportPort {
     #[serde(rename = "diport::RevocationStore")]
     RevocationStore,
+    /// `diport::Publisher` —— at-most-once 事件发布端口（amqp publisher 实现，#1251）。
+    #[serde(rename = "diport::Publisher")]
+    Publisher,
+    /// `diport::AckableSubscriber` —— manual-ack at-least-once 订阅端口（amqp subscriber 实现，#1251）。
+    #[serde(rename = "diport::AckableSubscriber")]
+    AckableSubscriber,
     #[serde(rename = "diport::Signer")]
     Signer,
     #[serde(rename = "diport::Pdp")]
@@ -119,6 +127,8 @@ impl DiportPort {
     fn as_str(self) -> &'static str {
         match self {
             Self::RevocationStore => REVOCATION_STORE_PORT,
+            Self::Publisher => PUBLISHER_PORT,
+            Self::AckableSubscriber => ACKABLE_SUBSCRIBER_PORT,
             Self::Signer => SIGNER_PORT,
             Self::Pdp => PDP_PORT,
             Self::RateLimiter => RATE_LIMITER_PORT,
@@ -363,6 +373,20 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             durability: ProviderDurability::EphemeralMemory,
             required_features: &[],
             provider_crate: "ratelimit",
+        }),
+        // #1251 eventbus 真传输：amqp publisher/subscriber 是 topology-gated durable 选型的 diport-infra
+        // provider；真 lapin impl 经 amqp `backend` feature 门控（持久 broker，非内存）。
+        "amqp::AmqpPublisher" => Some(ProviderSpec {
+            port: DiportPort::Publisher,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "amqp",
+        }),
+        "amqp::AmqpSubscriber" => Some(ProviderSpec {
+            port: DiportPort::AckableSubscriber,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "amqp",
         }),
         "redis::RedisLockStore" => Some(ProviderSpec {
             port: DiportPort::Lock,
@@ -967,6 +991,80 @@ name = "runtime"
         Ok(())
     }
 
+    // ---- #1251 eventbus 真传输 provider（diport::Publisher / diport::AckableSubscriber）----
+
+    /// demo-profile manifest，单条 amqp transport provider（topology-gated durable 选型）。
+    fn amqp_manifest(provider: &str, port: &str, lifecycle: &str, durability: &str) -> String {
+        format!(
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "{port}"
+provider = "{provider}"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "{lifecycle}"
+durability = "{durability}"
+purpose = "eventbus-transport"
+"#
+        )
+    }
+
+    const CARGO_AMQP_BACKEND: &str = r#"[package]
+name = "runtime"
+
+[dependencies]
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
+"#;
+
+    const CARGO_AMQP_NO_BACKEND: &str = r#"[package]
+name = "runtime"
+
+[dependencies]
+amqp = { path = "../../adapters/amqp" }
+"#;
+
+    #[test]
+    fn amqp_publisher_active_persistent_with_backend_is_allowed() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-amqp-publisher-green");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpPublisher",
+                "diport::Publisher",
+                "active",
+                "persistent",
+            ),
+            CARGO_AMQP_BACKEND,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn amqp_subscriber_active_persistent_with_backend_is_allowed() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-amqp-subscriber-green");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpSubscriber",
+                "diport::AckableSubscriber",
+                "active",
+                "persistent",
+            ),
+            CARGO_AMQP_BACKEND,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
     #[test]
     fn active_vault_signer_with_dependency_and_required_feature_is_allowed() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-active-vault-signer");
@@ -1028,6 +1126,120 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn amqp_subscriber_active_without_backend_feature_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-amqp-subscriber-no-backend");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpSubscriber",
+                "diport::AckableSubscriber",
+                "active",
+                "persistent",
+            ),
+            CARGO_AMQP_NO_BACKEND,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveProviderFeature),
+            "active amqp subscriber without backend feature must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn amqp_subscriber_declared_ephemeral_durability_mismatch() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-amqp-subscriber-durability");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpSubscriber",
+                "diport::AckableSubscriber",
+                "active",
+                "ephemeral-memory",
+            ),
+            CARGO_AMQP_BACKEND,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProviderDurabilityMismatch),
+            "persistent amqp subscriber must not be declared ephemeral-memory: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn amqp_publisher_active_without_backend_feature_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-amqp-publisher-no-backend");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpPublisher",
+                "diport::Publisher",
+                "active",
+                "persistent",
+            ),
+            CARGO_AMQP_NO_BACKEND,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveProviderFeature),
+            "active amqp publisher without backend feature must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn amqp_publisher_declared_ephemeral_durability_mismatch() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-amqp-publisher-durability");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpPublisher",
+                "diport::Publisher",
+                "active",
+                "ephemeral-memory",
+            ),
+            CARGO_AMQP_BACKEND,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProviderDurabilityMismatch),
+            "persistent amqp publisher must not be declared ephemeral-memory: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn amqp_provider_declared_on_wrong_port_rejected() -> anyhow::Result<()> {
+        // amqp::AmqpPublisher 声明在 AckableSubscriber 端口上 ⇒ spec.port 不匹配 ⇒ ActiveProviderPort。
+        let root = unique_tmp("assembly-amqp-wrong-port");
+        write_assembly(
+            &root,
+            &amqp_manifest(
+                "amqp::AmqpPublisher",
+                "diport::AckableSubscriber",
+                "active",
+                "persistent",
+            ),
+            CARGO_AMQP_BACKEND,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::ActiveProviderPort),
+            "amqp publisher declared on subscriber port must be rejected: {findings:?}"
+        );
         Ok(())
     }
 }

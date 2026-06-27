@@ -104,9 +104,9 @@ pub fn audit_domain() -> (AuditDomain, CapturingVerifier) {
 
 /// 取唯一 session-created 订阅绑定（断言恰一个）。
 pub fn single_subscription(
-    registry: bootstrap::Registry,
+    mut registry: bootstrap::Registry,
 ) -> anyhow::Result<bootstrap::SubscriberBinding> {
-    let mut subs = registry.into_subscribers();
+    let mut subs = registry.drain_subscribers();
     anyhow::ensure!(subs.len() == 1, "恰一个 session-created 订阅");
     subs.pop().ok_or_else(|| anyhow::anyhow!("订阅缺失"))
 }

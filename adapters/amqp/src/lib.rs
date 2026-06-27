@@ -27,7 +27,7 @@
 //!
 //! # feature 门控
 //!
-//! 真实 lapin broker I/O 在 `integration` feature 下编译；默认 build（无 feature）退化为 sealed-marker
+//! 真实 lapin broker I/O 在 `backend` feature 下编译；默认 build（无 feature）退化为 sealed-marker
 //! 签名冻结壳（`todo!()` body），保 ADAPTER-PORT-FREEZE-01 默认 `cargo test` / `verify` 绿、不拉
 //! broker 客户端树。本 PR 仅明文 `amqp://`（rustls/native-tls 后端的 crypto provider license 不在
 //! deny.toml allow-list）；生产 AMQPS/TLS = follow-up。
@@ -35,34 +35,34 @@
 //! ref: lapin examples/pubsub.rs@main（connect → create_channel → queue_declare → basic_publish →
 //! basic_consume → Consumer Stream），与 `adapters/memory` 的 `take_until(token)` 流取消范式一致。
 
-// feature-agnostic：AckAction→broker 结算模式映射（不依赖 lapin）。`cfg(any(test, integration))`：
-// 默认 `cargo test`（test cfg）下编译并跑表驱动测试（进 verify gate）；integration 下供 AmqpAcker 消费；
-// 纯默认 lib build（无 test / 无 integration）无生产消费方 ⇒ 不编译，免 dead_code。
-#[cfg(any(test, feature = "integration"))]
+// feature-agnostic：AckAction→broker 结算模式映射（不依赖 lapin）。`cfg(any(test, backend))`：
+// 默认 `cargo test`（test cfg）下编译并跑表驱动测试（进 verify gate）；backend 下供 AmqpAcker 消费；
+// 纯默认 lib build（无 test / 无 backend）无生产消费方 ⇒ 不编译，免 dead_code。
+#[cfg(any(test, feature = "backend"))]
 mod settle;
 
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 mod bundle;
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 mod conn;
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 mod publisher;
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 mod subscriber;
 
-#[cfg(not(feature = "integration"))]
+#[cfg(not(feature = "backend"))]
 mod fallback;
 
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 pub use bundle::{AmqpInfraDeps, AmqpRuntimeDeps};
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 pub use conn::AmqpConnectError;
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 pub use publisher::AmqpPublisher;
-#[cfg(feature = "integration")]
+#[cfg(feature = "backend")]
 pub use subscriber::AmqpSubscriber;
 
-#[cfg(not(feature = "integration"))]
+#[cfg(not(feature = "backend"))]
 pub use fallback::{AmqpPublisher, AmqpSubscriber};
 
 #[cfg(test)]

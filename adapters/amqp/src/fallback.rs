@@ -1,6 +1,6 @@
-//! sealed-marker 签名冻结壳（无 `integration` feature）——保 ADAPTER-PORT-FREEZE-01 默认 build 绿。
+//! sealed-marker 签名冻结壳（无 `backend` feature）——保 ADAPTER-PORT-FREEZE-01 默认 build 绿。
 //!
-//! body = `todo!()`：真实 lapin broker I/O 在 `integration` feature 下编译（见 `publisher` / `subscriber`
+//! body = `todo!()`：真实 lapin broker I/O 在 `backend` feature 下编译（见 `publisher` / `subscriber`
 //! 模块）；默认 build 不拉 broker 客户端树。crate 保持 forbid(unsafe_code)（继承 workspace lints，
 //! 不 invoke dynosaur 宏）。
 //!
@@ -14,44 +14,44 @@ use diport::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// AMQP 发布 adapter（sealed-marker；真实 lapin impl 见 `integration` feature）。私有字段 ⇒ 外部不可构造。
+/// AMQP 发布 adapter（sealed-marker；真实 lapin impl 见 `backend` feature）。私有字段 ⇒ 外部不可构造。
 pub struct AmqpPublisher(());
 
-/// AMQP 订阅 adapter（sealed-marker；真实 lapin impl 见 `integration` feature）。私有字段 ⇒ 外部不可构造。
+/// AMQP 订阅 adapter（sealed-marker；真实 lapin impl 见 `backend` feature）。私有字段 ⇒ 外部不可构造。
 pub struct AmqpSubscriber(());
 
 impl Publisher for AmqpPublisher {
     async fn publish(&self, _request: PublishRequest) -> Result<(), PublisherError> {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 
     async fn shutdown(&self) -> Result<(), PublisherError> {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 }
 
 impl ManagedResource for AmqpPublisher {
     fn name(&self) -> &str {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 }
 
 impl ManagedResource for AmqpSubscriber {
     fn name(&self) -> &str {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 }
@@ -62,12 +62,12 @@ impl AckableSubscriber for AmqpSubscriber {
         _topic: Topic,
         _token: CancellationToken,
     ) -> Result<DeliveryStream, SubscriberError> {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 
     async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 integration feature。
+        // reason: sealed-marker 占位——仅签名冻结（ADAPTER-PORT-FREEZE-01），真实实现在 backend feature。
         todo!()
     }
 }

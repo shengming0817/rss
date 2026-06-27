@@ -38,8 +38,12 @@ identity = { path = "../../crates/identity" }
 crypto-adapter = { path = "../../adapters/crypto" }
 # postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + PgAuditRepo + 采样组件）。
 postgres = { path = "../../adapters/postgres" }
-# Redis adapter（RedisRuntimeDeps + distlock/CAS/idempotency runtime resources）。
+# eventbus 真传输 topology-gated 接线（#1251）：durable transport = amqp publisher/subscriber（backend=真 lapin，
+# 不拉 testkit）+ eventexec relay/consumer 执行体 + deadpool-redis 池构造。
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
+# Redis adapter（package=redis-adapter，import 名 redis；RedisRuntimeDeps + distlock/CAS/idempotency；#1251 用 idempotency）。
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
+eventexec = { path = "../../crates/eventexec" }
 deadpool-redis = { workspace = true }
 # Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
 vault = { path = "../../adapters/vault", features = ["backend"] }
@@ -75,8 +79,10 @@ otel = { path = "../../adapters/otel", features = ["backend"] }
 prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"] }
 
 [features]
-# 需要真实 postgres 的集成测试（无 docker 时只需能编译；不运行），经 testkit/containers 激活 testcontainers。
-integration = ["testkit/containers"]
+# 需要真实 postgres + RabbitMQ + Redis 的集成测试（无 docker 时只需能编译；不运行）。
+# testkit/containers：激活 testcontainers fixture（PgFixture/RabbitFixture/RedisFixture）。
+# identity/seed-login：启用 LoginService::with_seed_credential（仅 e2e 测试用；生产组合根不启用）。
+integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
 # tokio 已是生产 dep（#1320 `#[tokio::main]`）——其 macros + rt-multi-thread feature 同时供 `#[tokio::test]`，不再单列 dev-dep。
@@ -96,6 +102,8 @@ generated = { path = "../../generated" }
 ids = { path = "../../crates/ids" }
 secure = { path = "../../crates/secure" }
 sqlx = { workspace = true }
+# event_transport 单测构造 SubscriberBinding（group 字段类型 consistency::ConsumerGroup）。
+consistency = { path = "../../crates/consistency" }
 # refresh/login mint→verify e2e（#1252）：wiremock 模拟 vault Transit `/sign`（动态 ES256 签）+ serde_json 编解
 # mock 请求/响应；vocab::{TenantId,PrincipalKind} 构造 JwtIssuer::issue 入参（dev-only，hermetic，无 live vault）。
 wiremock = { workspace = true }

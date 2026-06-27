@@ -257,6 +257,14 @@ impl PgDomainDeps<caps::Settings> {
             secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(&self.store)),
         }
     }
+
+    /// outbox relay（L2 本地事务 + 发布；`settings.config-version-changed`）。`publisher` 必填（构造器位置参）。
+    /// `PgOutbox` 经 `RelayConfig` 的 domain 过滤 outbox 表行，故构造仅需 store + publisher（与 identity 同形，
+    /// #1251 F2：N-域 relay——每个 L2 OutboxFact 发布域各一个 relay，否则该域 outbox 在 durable runtime 静默积压）。
+    #[must_use]
+    pub fn outbox(&self, publisher: Box<DynPublisher<'static>>) -> PgOutbox {
+        PgOutbox::new(&self.store, publisher)
+    }
 }
 
 /// settings 域 durable 接线包（PERSIST-003 / #1424）：read config 仓储 + write co-tx UoW + secret 坐标仓储，

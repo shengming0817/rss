@@ -56,8 +56,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use consistency::HandleResult;
 use consistency::idempotency::IdempotencyStore;
+use consistency::{HandleResult, OutboxRelay, OutboxSource};
 use diport::{DeliveryStream, DynDeadLetterStore, Message, MessageStream};
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -226,6 +226,44 @@ where
     ConsumerWorker::adopt(name, handle, health, token)
 }
 
+/// spawn outbox relay worker（专用 OS 线程 + panic-safety `StoppedOnExit` 守卫，与
+/// `spawn_consumer_ackable` 对称）。
+///
+/// `PgOutbox: Send+!Sync` → `Arc<PgOutbox>: !Send` → relay future `!Send`，不可 `tokio::spawn`；
+/// 解法：`store: A`（`A: Send`）跨线程移入，在线程内 `Arc::new(store)` 构建——`Arc<A>`（`!Send`）
+/// 始终在单一线程持有，无需 `Send`（与 [`crate::RelayWorker`] / OS 线程模式对称）。
+///
+/// panic-safety：`StoppedOnExit` Drop 守卫覆盖**所有**退出路径（runtime 构建失败、relay future
+/// panic unwind、正常返回），确保 `health.mark_stopped()`（readyz Unhealthy）不被 panic 跳过。
+/// `relay_loop` 自身在取消后亦调 `mark_stopped`（幂等：两次 store 同值，正常路径无害）。
+///
+/// 返回的 [`ConsumerWorker`] 持同一 `health` + `token`，shutdown 取消 token → relay_loop break →
+/// 线程退出 → join → Ok（健康态翻 Unhealthy）。
+#[allow(clippy::too_many_arguments)]
+// reason: relay spawn 7 参数是最小必要集（name/store/config/clock/token/health/metrics 各自语义独立），
+// 同 spawn_consumer_ackable item-level carve-out（error-handling.md §Carve-out）。
+pub fn spawn_relay<A>(
+    name: String,
+    store: A,
+    config: crate::RelayConfig,
+    clock: Arc<dyn diport::Clock>,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+    metrics: Arc<dyn crate::OutboxMetrics>,
+) -> ConsumerWorker
+where
+    A: OutboxSource + OutboxRelay + Send + 'static,
+{
+    let health_loop = Arc::clone(&health);
+    let token_run = token.clone();
+    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
+        // Arc::new(store) 在线程内构建：Arc<A>(!Send) 不跨线程；store: A (Send) 跨线程移入。
+        let store = Arc::new(store);
+        crate::relay::relay_loop(store, config, clock, token_run, health_loop, metrics).await;
+    });
+    ConsumerWorker::adopt(name, handle, health, token)
+}
+
 /// spawn at-least-once 消费 worker（Durable / AMQP 路径，每条终态向 broker settle）。
 ///
 /// 组合根先 `subscribe_ackable(topic, token)` 得 `stream`、再调本函数。`DeliveryStream` 每条
@@ -269,6 +307,7 @@ mod tests {
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
         DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, LeaseConfig,
         Message, MessageStream, Mutex, WorkerHealth, spawn_consumer, spawn_consumer_ackable,
+        spawn_relay,
     };
 
     /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
@@ -540,6 +579,98 @@ mod tests {
     fn consumer_worker_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ConsumerWorker>();
+    }
+
+    // ── spawn_relay fakes ──────────────────────────────────────────────────────
+
+    /// noop relay store：`poll_pending` 恒返空批，`relay` 恒返 `Ok(Ack)`（spawn_relay happy-path 用）。
+    struct NoopRelayStore;
+
+    impl consistency::OutboxSource for NoopRelayStore {
+        async fn poll_pending(
+            &self,
+            _domain: &str,
+            _limit: usize,
+        ) -> Result<Vec<consistency::outbox::Entry>, consistency::error::EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    impl consistency::OutboxRelay for NoopRelayStore {
+        async fn relay(
+            &self,
+            _entry: &consistency::outbox::Entry,
+        ) -> Result<consistency::outbox::Disposition, consistency::error::EngineError> {
+            Ok(consistency::outbox::Disposition::Ack)
+        }
+    }
+
+    /// 固定时钟替身（满足 `diport::Clock: Send+Sync` 约束；now() 恒返 UNIX_EPOCH）。
+    struct FixedClockRelay;
+    impl diport::Clock for FixedClockRelay {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+    }
+
+    /// noop metrics（spawn_relay 测试不断言发射计数）。
+    struct NoopRelayMetrics;
+    impl crate::OutboxMetrics for NoopRelayMetrics {
+        fn record_publish(&self, _: &vocab::DomainName, _: consistency::outbox::Disposition) {}
+        fn record_backlog(&self, _: &vocab::DomainName, _: consistency::BacklogSample) {}
+        fn record_tick_duration(&self, _: crate::RelayPhase, _: f64) {}
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: 测试用合法 RelayConfig，parse 失败即参数写错；item-level carve-out。
+    fn relay_cfg_for_test() -> crate::RelayConfig {
+        crate::RelayConfig::new(
+            vec!["testdomain".to_string()],
+            std::time::Duration::from_secs(60), // 长轮询间隔：测试期间不触发 tick
+            10,
+            std::time::Duration::from_secs(60),
+        )
+        .expect("valid test relay config")
+    }
+
+    // ── spawn_relay tests ──────────────────────────────────────────────────────
+
+    /// spawn_relay → 运行中 Healthy；cancel + shutdown → Ok；退出后 Unhealthy（panic-safety 路径）。
+    #[tokio::test]
+    async fn spawn_relay_healthy_then_shutdown_stopped() {
+        let health = Arc::new(WorkerHealth::healthy());
+        let token = CancellationToken::new();
+
+        let worker = spawn_relay(
+            "outbox-relay-test".into(),
+            NoopRelayStore,
+            relay_cfg_for_test(),
+            Arc::new(FixedClockRelay),
+            token.clone(),
+            Arc::clone(&health),
+            Arc::new(NoopRelayMetrics),
+        );
+
+        // 运行中 Healthy（relay_loop 跑在线程内，未退出）。
+        assert_eq!(
+            worker.health().status(),
+            primitives::healthz::HealthStatus::Healthy,
+            "spawn_relay worker must be Healthy while running"
+        );
+
+        // shutdown → Ok（cancel → relay_loop break → 线程退出 → join）。
+        token.cancel();
+        assert!(
+            worker.shutdown().await.is_ok(),
+            "spawn_relay worker shutdown must succeed"
+        );
+
+        // 退出后 Unhealthy（relay_loop mark_stopped + StoppedOnExit 守卫双重保证）。
+        assert_eq!(
+            worker.health().status(),
+            primitives::healthz::HealthStatus::Unhealthy,
+            "relay worker must be Unhealthy after shutdown (StoppedOnExit guard)"
+        );
     }
 
     /// EVENT_CONSUMER_PROBE 可通过 ProbeName::parse + 无 `_ready` 后缀（运行时操作 probe，对标

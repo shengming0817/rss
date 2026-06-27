@@ -4346,15 +4346,18 @@ dependencies = [
 name = "runtime"
 version = "0.0.0"
 dependencies = [
+ "amqp",
  "anyhow",
  "audit",
  "authn",
  "axum",
  "base64",
  "bootstrap",
+ "consistency",
  "crypto-adapter",
  "deadpool-redis",
  "diport",
+ "eventexec",
  "futures",
  "generated",
  "hmac 0.12.1",

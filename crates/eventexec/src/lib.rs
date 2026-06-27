@@ -13,7 +13,7 @@ pub use consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable
 
 pub mod consumer_worker;
 pub use consumer_worker::{
-    ConsumerWorker, EVENT_CONSUMER_PROBE, spawn_consumer, spawn_consumer_ackable,
+    ConsumerWorker, EVENT_CONSUMER_PROBE, spawn_consumer, spawn_consumer_ackable, spawn_relay,
 };
 
 // 命令分发 runtime（P12，#1124）：sealed emit funnel + 幂等消费。`emit_async` 不在 crate root re-export
