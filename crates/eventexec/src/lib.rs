@@ -2,7 +2,7 @@
 //!
 //! 已写实：`consumer`（ConsumerBase + DLX）/ `relay`（outbox relay/sweeper worker）/ `reconcile`
 //! （控制环 harness）/ `saga`（[`SagaExecutorImpl`] 前向 append + 逆序补偿 + checkpoint resume）/
-//! `run_dispatch`。`ConsumerError::new` 等少量接缝仍 `todo!()`（ADR-004 C8 覆盖率豁免）。
+//! `run_dispatch` / `ConsumerError::new`。少量历史接缝的覆盖率豁免见 ADR-004 C8。
 //!
 //! ref: watermill message/message.go+pubsub.go+router.go@master
 //!      oxidecomputer/steno src/saga_action_generic.rs@main
@@ -56,7 +56,7 @@ use futures::future::BoxFuture;
 // （issue #1075，ADR-003 DI port 收敛）；本 crate 经 `diport::Message` 消费（HandlerFn/ConsumerFn 入参）。
 // 统一 delivery envelope（#1160）：`Message.metadata: diport::EnvelopeMetadata` 从 broker header 透传，
 // handler 经 `msg.metadata.get(..)` / `.occurred_at_secs()` 读 occurred_at / subjectId / correlation。
-use diport::Message;
+use diport::{Message, RedactedSource};
 
 // ── 处理结论 ─────────────────────────────────────────────────────────────────
 
@@ -84,12 +84,14 @@ pub type ConsumerFn =
 #[error("consumer failed")]
 pub struct ConsumerError {
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    source: RedactedSource,
 }
 
 impl ConsumerError {
-    pub fn new<E: std::error::Error + Send + Sync + 'static>(_source: E) -> Self {
-        todo!()
+    pub fn new<E: std::error::Error + Send + Sync + 'static>(source: E) -> Self {
+        Self {
+            source: RedactedSource::new(source),
+        }
     }
 }
 
@@ -288,5 +290,24 @@ mod tests {
         });
         run_dispatch(stream_of(&[b"a"]), handler).await;
         assert_eq!(counter.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn consumer_error_redacts_source_debug_and_chain() {
+        let err = ConsumerError::new(std::io::Error::other("redis://user:hunter2@cache"));
+        assert_eq!(err.to_string(), "consumer failed");
+        let dbg = format!("{err:?}");
+        assert!(!dbg.contains("hunter2"), "Debug 泄漏 source: {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "first source is RedactedSource");
+        let Some(source) = source else {
+            return;
+        };
+        assert_eq!(source.to_string(), "<redacted>");
+        assert!(
+            std::error::Error::source(source).is_none(),
+            "source chain must stop at RedactedSource"
+        );
     }
 }

@@ -77,7 +77,8 @@ pub struct SettingsConfigPublishData {
 ///      "x-redaction": "internal"
 ///    },
 ///    "value": {
-///      "type": "string"
+///      "type": "string",
+///      "x-redaction": "secret"
 ///    }
 ///  },
 ///  "additionalProperties": false
@@ -89,7 +90,7 @@ pub struct SettingsConfigPublishData {
 pub struct SettingsConfigPublishRequest {
     #[redact(internal)]
     pub key: ::std::string::String,
-    #[redact(public)]
+    #[redact(secret)]
     pub value: ::std::string::String,
 }
 ///`SettingsConfigPublishResponse`

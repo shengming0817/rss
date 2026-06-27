@@ -17,6 +17,8 @@ securederive = { path = "../securederive" }
 sha2 = { workspace = true }
 # secure::refresh（#1325）：base64url 编码不透明 secret。
 base64 = { workspace = true }
+# PasswordHash PHC 字符串 drop 时清零堆内存（纵深防御，避免哈希物料残留进程内存）。
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # 表驱动单测（脱敏模式 / key 判敏感 / URL 凭据剥离参数化，#1360）。

@@ -50,8 +50,12 @@ struct AllowedRawBox {
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
-// G4（结构性豁免 anti-vacuity）：名为 `RedactedSource` 的 struct 持裸 Box<dyn Error> → 不触发。
-// 证明脱敏 newtype 自身（受控持有点）经 enclosing-struct 名豁免，无需 #[allow]。
+// R4（同名绕过 anti-vacuity）：crate root 同名 `RedactedSource` 不在 canonical 路径 → 仍触发。
 struct RedactedSource(Box<dyn std::error::Error + Send + Sync + 'static>);
 
+// G4（结构性豁免 anti-vacuity）：canonical `diport::redacted::RedactedSource` 持裸 Box<dyn Error> → 不触发。
+// 证明脱敏 newtype 自身（受控持有点）经 DefId 路径豁免，无需 #[allow]。
+mod redacted {
+    pub struct RedactedSource(Box<dyn std::error::Error + Send + Sync + 'static>);
+}
 fn main() {}

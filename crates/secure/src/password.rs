@@ -31,12 +31,12 @@ pub enum PasswordError {
 /// `Debug` 经 `#[derive(Redact)]` 字段级脱敏（PHC 物料 → `<redacted>`，渲染 `PasswordHash(<redacted>)`），
 /// 替换手写 impl（#1360）。
 #[derive(Clone, PartialEq, Eq, secure::Redact)]
-pub struct PasswordHash(#[redact(secret)] String);
+pub struct PasswordHash(#[redact(secret)] zeroize::Zeroizing<String>);
 
 impl PasswordHash {
     /// 持久化 PHC 字符串（adapter 存库时读取——不含明文，含 argon2 摘要 + 参数 + 盐）。
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     /// 从已存 PHC 字符串回读（postgres adapter 加载凭据时重建）。
@@ -44,13 +44,13 @@ impl PasswordHash {
     pub fn parse(phc: &str) -> Result<Self, PasswordError> {
         // 校验 well-formed PHC（拒绝任意串伪装哈希）；解析仅借用，存储 owned 原串。
         PhcHash::new(phc).map_err(|_| PasswordError::Hash)?;
-        Ok(Self(phc.to_string()))
+        Ok(Self(zeroize::Zeroizing::new(phc.to_string())))
     }
 
     /// 仅测试：绕过校验直接包裹（覆盖 [`verify_password`] 对损坏 PHC 的 fail-closed 分支）。
     #[cfg(test)]
     fn from_unchecked(raw: &str) -> Self {
-        Self(raw.to_string())
+        Self(zeroize::Zeroizing::new(raw.to_string()))
     }
 }
 
@@ -66,14 +66,14 @@ pub fn hash_password(plaintext: &str) -> Result<PasswordHash, PasswordError> {
         .hash_password(plaintext.as_bytes(), &salt)
         .map_err(|_| PasswordError::Hash)?
         .to_string();
-    Ok(PasswordHash(phc))
+    Ok(PasswordHash(zeroize::Zeroizing::new(phc)))
 }
 
 /// constant-time 验签：argon2 再哈希候选明文 + 常时比对存储摘要。
 /// fail-closed——解析失败 / 不匹配均返回 `false`（不区分以免侧信道）。
 pub fn verify_password(plaintext: &str, hash: &PasswordHash) -> bool {
     // 损坏的存储串不可能经构造 funnel（parse 已校验），此 Err 分支为纵深防御；落 false 不 panic。
-    let Ok(parsed) = PhcHash::new(&hash.0) else {
+    let Ok(parsed) = PhcHash::new(hash.0.as_str()) else {
         return false;
     };
     Argon2::default()
@@ -146,6 +146,16 @@ mod tests {
         assert_eq!(dbg, "PasswordHash(<redacted>)");
         assert!(!dbg.contains("argon2"), "Debug 不得泄哈希算法/摘要");
         assert!(!dbg.contains("secret-pw"), "Debug 不得泄明文");
+    }
+
+    #[test]
+    fn password_hash_storage_zeroizes_on_drop() {
+        fn _assert_zeroizing_string(_: &zeroize::Zeroizing<String>) {}
+
+        let h = hash_password("zeroize-me").expect("hash ok");
+        _assert_zeroizing_string(&h.0);
+        let cloned = h.clone();
+        _assert_zeroizing_string(&cloned.0);
     }
 
     #[test]

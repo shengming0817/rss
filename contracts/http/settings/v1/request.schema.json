@@ -5,7 +5,7 @@
   "required": ["key", "value"],
   "properties": {
     "key": { "type": "string", "x-redaction": "internal" },
-    "value": { "type": "string" }
+    "value": { "type": "string", "x-redaction": "secret" }
   },
   "additionalProperties": false
 }

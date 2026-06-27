@@ -1,5 +1,5 @@
 warning: 受守护 error struct 不得持裸 `Box<dyn Error>` source 字段：改用 `RedactedSource` newtype（Debug/Display 脱敏）
-  --> $DIR/diport.rs:9:13
+  --> $DIR/eventexec.rs:5:13
    |
 LL |     source: Box<dyn std::error::Error + Send + Sync + 'static>,
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -8,28 +8,12 @@ LL |     source: Box<dyn std::error::Error + Send + Sync + 'static>,
    = note: `#[warn(rss_diport_error_debug_redacted)]` on by default
 
 warning: 受守护 error struct 不得持裸 `Box<dyn Error>` source 字段：改用 `RedactedSource` newtype（Debug/Display 脱敏）
-  --> $DIR/diport.rs:16:13
-   |
-LL |     source: BoxedDynError,
-   |             ^^^^^^^^^^^^^
-   |
-   = help: 把字段类型换成 `diport::RedactedSource`，并经 `RedactedSource::new(source)` 包装 adapter 错误（其 Debug/Display 已脱敏）；极少数确需保留裸 Box 的情形加 `#[allow(rss_diport_error_debug_redacted)] // reason: ...`（item-level 逃生门）
-
-warning: 受守护 error struct 不得持裸 `Box<dyn Error>` source 字段：改用 `RedactedSource` newtype（Debug/Display 脱敏）
-  --> $DIR/diport.rs:23:13
-   |
-LL |     source: Box<DynStdError>,
-   |             ^^^^^^^^^^^^^^^^
-   |
-   = help: 把字段类型换成 `diport::RedactedSource`，并经 `RedactedSource::new(source)` 包装 adapter 错误（其 Debug/Display 已脱敏）；极少数确需保留裸 Box 的情形加 `#[allow(rss_diport_error_debug_redacted)] // reason: ...`（item-level 逃生门）
-
-warning: 受守护 error struct 不得持裸 `Box<dyn Error>` source 字段：改用 `RedactedSource` newtype（Debug/Display 脱敏）
-  --> $DIR/diport.rs:54:23
+  --> $DIR/eventexec.rs:9:23
    |
 LL | struct RedactedSource(Box<dyn std::error::Error + Send + Sync + 'static>);
    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 把字段类型换成 `diport::RedactedSource`，并经 `RedactedSource::new(source)` 包装 adapter 错误（其 Debug/Display 已脱敏）；极少数确需保留裸 Box 的情形加 `#[allow(rss_diport_error_debug_redacted)] // reason: ...`（item-level 逃生门）
 
-warning: 4 warnings emitted
+warning: 2 warnings emitted
 

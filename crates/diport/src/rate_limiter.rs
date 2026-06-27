@@ -52,8 +52,10 @@ impl RateLimitError {
 /// 不裸传 `&str`。opaque：key 组合策略随消费域（httpserve middleware，#1106）派生，不在 DI-infra 层冻结。
 ///
 /// `Hash + Eq + Clone`：provider 据此分桶（governor keyed store 的 key 约束）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RateLimitKey(String);
+///
+/// `Debug` 经字段级脱敏，避免 per-principal key（tenant/principal/route）随 `?key` / `{key:?}` 泄漏主体标识。
+#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+pub struct RateLimitKey(#[redact(pii = "generic")] String);
 
 impl RateLimitKey {
     /// 由字符串构造限流 key。
@@ -186,5 +188,21 @@ mod smoke_error {
             !format!("{err:?}").contains("leak-marker-rl"),
             "wrapper Debug 泄漏 source: {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod pii_debug {
+    //! `RateLimitKey` Debug 脱敏回归：key 可能含 per-principal 标识（email / sub / route）。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    use super::RateLimitKey;
+
+    #[test]
+    fn rate_limit_key_debug_redacts_inner_key() {
+        let key = RateLimitKey::new("tenant-a:alice@corp.example:/admin");
+        let dbg = format!("{key:?}");
+        assert!(!dbg.contains("alice@corp.example"), "principal 泄漏: {dbg}");
+        assert!(!dbg.contains("/admin"), "route/key 原文泄漏: {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
     }
 }

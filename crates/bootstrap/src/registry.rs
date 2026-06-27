@@ -9,7 +9,7 @@
 //! [`Domain::init`]: crate::domain::Domain::init
 
 use crate::domain::KernelError;
-use diport::Message;
+use diport::{Message, RedactedSource};
 use futures::future::BoxFuture;
 use httpserve::{Listener, ListenerRouter, UnfinalizedRoutes};
 use primitives::ListenerKind;
@@ -144,7 +144,7 @@ pub enum SubscriberErrorDisposition {
 pub struct SubscriberHandlerError {
     disposition: SubscriberErrorDisposition,
     #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    source: RedactedSource,
 }
 
 impl SubscriberHandlerError {
@@ -155,7 +155,7 @@ impl SubscriberHandlerError {
     {
         Self {
             disposition: SubscriberErrorDisposition::Permanent,
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 
@@ -166,7 +166,7 @@ impl SubscriberHandlerError {
     {
         Self {
             disposition: SubscriberErrorDisposition::Transient,
-            source: Box::new(source),
+            source: RedactedSource::new(source),
         }
     }
 
@@ -1214,5 +1214,25 @@ mod handler_adapt {
             "瞬态失败不得绕过 requeue 预算被永久 Reject"
         );
         assert_eq!(result.error_summary(), Some("transient engine error"));
+    }
+
+    #[test]
+    fn subscriber_handler_error_redacts_source_debug_and_chain() {
+        let err =
+            SubscriberHandlerError::permanent(std::io::Error::other("postgres://user:hunter2@db"));
+        assert_eq!(err.to_string(), "subscriber handler failed");
+        let dbg = format!("{err:?}");
+        assert!(!dbg.contains("hunter2"), "Debug 泄漏 source: {dbg}");
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "first source is RedactedSource");
+        let Some(source) = source else {
+            return;
+        };
+        assert_eq!(source.to_string(), "<redacted>");
+        assert!(
+            std::error::Error::source(source).is_none(),
+            "source chain must stop at RedactedSource"
+        );
     }
 }

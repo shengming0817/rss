@@ -5,6 +5,7 @@
 
 use generated::event::identity_v1::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::IdentityLoginRequest;
+use generated::http::settings_v1::SettingsConfigPublishRequest;
 use generated::http::settings_v2::SettingsSecretPublishRequest;
 
 #[test]
@@ -36,6 +37,25 @@ fn settings_secret_request_debug_redacts_store_coordinates() {
     for leaked in ["vault.db", "prod-vault", "apps/rss/db-password", "v42"] {
         assert!(!rendered.contains(leaked), "coordinate leaked: {rendered}");
     }
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[test]
+fn settings_config_publish_debug_redacts_value() {
+    let req = SettingsConfigPublishRequest {
+        key: "auth.jwtSigningKey".to_string(),
+        value: "super-secret-config-value".to_string(),
+    };
+
+    let rendered = format!("{req:?}");
+    assert!(
+        !rendered.contains("auth.jwtSigningKey"),
+        "key leaked: {rendered}"
+    );
+    assert!(
+        !rendered.contains("super-secret-config-value"),
+        "value leaked: {rendered}"
+    );
     assert!(rendered.contains("<redacted>"), "{rendered}");
 }
 
