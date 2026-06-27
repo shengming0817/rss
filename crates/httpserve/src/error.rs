@@ -38,6 +38,8 @@ fn status_for(kind: CoreErrorKind) -> StatusCode {
         CoreErrorKind::Conflict => StatusCode::CONFLICT,
         CoreErrorKind::Validation => StatusCode::BAD_REQUEST,
         CoreErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        CoreErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        CoreErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
         // `CoreErrorKind` 是 `#[non_exhaustive]`：未知未来 kind fail-closed 映射 5xx
         // （→ details strip，绝不把未知 kind 当 4xx 误下发明细）。
         // 此 arm 在跨 crate 环境下结构上不可测试（外部无法构造新 variant），属预期覆盖盲区。
@@ -120,6 +122,30 @@ pub fn internal_error(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::Internal), request_id)
 }
 
+/// 413 Payload Too Large 信封：`ERR_CORE_PAYLOAD_TOO_LARGE` + `PAYLOAD_TOO_LARGE` 固定配对。
+pub fn payload_too_large(request_id: &str) -> axum::response::Response {
+    core_error_response(&CoreError::new(CoreErrorKind::PayloadTooLarge), request_id)
+}
+
+/// 429 Too Many Requests 信封：`ERR_CORE_TOO_MANY_REQUESTS` + `TOO_MANY_REQUESTS` 固定配对。
+/// `Retry-After` header 设为 ceil 整数秒（GCRA 建议，避免客户端过早重试仍被拒）。
+pub fn too_many_requests(
+    request_id: &str,
+    retry_after: std::time::Duration,
+) -> axum::response::Response {
+    let mut resp = core_error_response(&CoreError::new(CoreErrorKind::TooManyRequests), request_id);
+    // ceil 到整数秒：(ms + 999) / 1000，等价 u128::div_ceil(1000)；clamp 到 u64::MAX 防溢出。
+    let ms = retry_after.as_millis();
+    let secs = u64::try_from(ms.div_ceil(1000)).unwrap_or(u64::MAX);
+    if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+        resp.headers_mut().insert(
+            axum::http::header::HeaderName::from_static("retry-after"),
+            val,
+        );
+    }
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +174,16 @@ mod tests {
                 internal_error("rid"),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ERR_CORE_INTERNAL",
+            ),
+            (
+                payload_too_large("rid"),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ERR_CORE_PAYLOAD_TOO_LARGE",
+            ),
+            (
+                too_many_requests("rid", std::time::Duration::from_millis(1500)),
+                StatusCode::TOO_MANY_REQUESTS,
+                "ERR_CORE_TOO_MANY_REQUESTS",
             ),
         ] {
             assert_eq!(resp.status(), want_status);
@@ -262,9 +298,53 @@ mod tests {
             (CoreErrorKind::Conflict, StatusCode::CONFLICT),
             (CoreErrorKind::Validation, StatusCode::BAD_REQUEST),
             (CoreErrorKind::Internal, StatusCode::INTERNAL_SERVER_ERROR),
+            (
+                CoreErrorKind::PayloadTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                CoreErrorKind::TooManyRequests,
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
         ];
         for (kind, want) in cases {
             assert_eq!(status_for(kind), want, "kind={kind:?}");
         }
+    }
+
+    /// `too_many_requests` 响应包含 `Retry-After: <ceil秒>` header。
+    /// 1500ms → ceil(1500/1000) = 2s。
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn too_many_requests_sets_retry_after_ceil_secs() {
+        let resp = too_many_requests("rid", std::time::Duration::from_millis(1500));
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .expect("须有 Retry-After header")
+            .to_str()
+            .expect("header 值可转 str");
+        assert_eq!(retry_after, "2", "1500ms ceil→2s");
+
+        // 0ms → 0s（0.div_ceil(1000) = 0）。
+        let resp0 = too_many_requests("rid", std::time::Duration::from_millis(0));
+        let v0 = resp0
+            .headers()
+            .get("retry-after")
+            .expect("须有 Retry-After")
+            .to_str()
+            .expect("str");
+        assert_eq!(v0, "0", "0ms → 0s");
+
+        // 1000ms → 1s（整除）。
+        let resp1 = too_many_requests("rid", std::time::Duration::from_millis(1000));
+        let v1 = resp1
+            .headers()
+            .get("retry-after")
+            .expect("须有 Retry-After")
+            .to_str()
+            .expect("str");
+        assert_eq!(v1, "1", "1000ms → 1s");
     }
 }

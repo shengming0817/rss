@@ -181,15 +181,33 @@ impl UnfinalizedRoutes {
 /// INVARIANT: ROUTE-AUTH-FUNNEL-02 —— 唯一生产者 = [`finalize_auth`]（构造 `pub(crate)`，外部 crate 无法
 /// mint）；[`into_make_service`](Self::into_make_service) 是唯一 bindable 出口。验签桥（#1109）经
 /// [`layer`](Self::layer) 叠在外层、保持封印（产物仍是 `AuthenticatedRoutes`，只能加层不能替换）。
+///
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 —— body-limit **层**（CL 闸 + Limited wrap）叠在
+/// [`sealed_router`](Self::sealed_router) 唯一 funnel ⇒ 每个 bindable router 必带且必 outer 于 auth：
+/// CL-declared 超限 → before-auth clean 413；无声明/chunked → Limited read-time 字节硬顶（内存有界，
+/// 未认证请求经 enforce 401 时 body 从不被读，无 pre-auth buffer）。详见 middleware.rs body_limit 注释。
 #[must_use = "AuthenticatedRoutes 须经 into_make_service bind（否则 router 未 serve）"]
 pub struct AuthenticatedRoutes {
     router: axum::Router,
+    hardening: crate::protect::EdgeHardening,
 }
 
 impl AuthenticatedRoutes {
     /// 唯一生产入口（`pub(crate)`）——仅 [`finalize_auth`] 可构造，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
     pub(crate) fn new(router: axum::Router) -> Self {
-        Self { router }
+        Self {
+            router,
+            hardening: crate::protect::EdgeHardening::default(),
+        }
+    }
+
+    /// 覆盖边缘防护配置（body-limit + security-headers）。
+    ///
+    /// 组合根在 `finalize_auth` 产物上调用，覆盖默认的 [`crate::protect::EdgeHardening`] 值
+    /// （如调整 body 上限或关闭 HSTS）。`sealed_router` 将使用更新后的配置叠层。
+    pub fn with_edge_hardening(mut self, hardening: crate::protect::EdgeHardening) -> Self {
+        self.hardening = hardening;
+        self
     }
 
     /// 在已认证 router **外层**叠中间件（验签桥 #1109 的请求方向先于 `EnforceService`）。
@@ -207,10 +225,11 @@ impl AuthenticatedRoutes {
     {
         Self {
             router: self.router.layer(layer),
+            hardening: self.hardening,
         }
     }
 
-    /// 在唯一 bindable 出口封 `request_id`（绝对最外层）+ `correlation`（紧贴内侧）。
+    /// 在唯一 bindable 出口封全局防护中间件链（请求 ID + correlation + security-headers + body-limit）。
     ///
     /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 —— `request_id` **不**在 [`finalize_auth`] 内挂（那会被组合根
     /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 `RequestId`，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
@@ -219,24 +238,53 @@ impl AuthenticatedRoutes {
     /// INVARIANT: ROUTE-CORRELATION-INNER-REQUESTID-01 —— `correlation` 封在 `request_id` 内侧、验签桥外侧：
     ///   · `request_id` 先行（外层）确保 `RequestId` extension 在场，`correlation` 可读回作回退值；
     ///   · `diagctx::scope` 包住验签桥 + handler + application + adapter emit ⇒ outbox emit 可经
-    ///     [`diagctx::correlation`] 读回 correlation id（ADR-002 §D1-bis）；
-    ///   · 二者均由本出口封口 ⇒ 每个被 bind 的 router 都带 correlation 且不可遗漏（can't-forget funnel）。
+    ///     [`diagctx::correlation`] 读回 correlation id（ADR-002 §D1-bis）。
+    ///
+    /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 —— body-limit **层**（CL 闸 + Limited wrap）outer 于 auth 验签桥：
+    ///   · **CL-declared 超限 → before-auth clean 413（`ERR_CORE_PAYLOAD_TOO_LARGE`）**：层1 CL fast-reject
+    ///     在验签桥前拒，无 auth 开销；
+    ///   · **无声明/chunked → `http_body_util::Limited` 字节硬顶（read-time，内存有界）**：未认证请求经
+    ///     enforce 401 时 body 从不被读 ⇒ 无 pre-auth buffer（DoS 优姿态；见 middleware.rs body_limit reason）。
+    ///   CL 路径的**拒绝决策** before-auth；无 CL 路径的 cap 由 Limited read-time 实施，非 before-auth 413。
+    /// 结构性 Hard：唯一 bindable 出口经本 funnel 封层，不可遗漏。security-headers outer 于 body-limit（所有响应
+    /// 含 413 均追加安全头）。
+    ///
+    /// 层序（外→内）：`request_id` → `correlation` → security-headers → body-limit → 验签桥
+    /// → `trace` → `panic_recovery` → `Extension(plan)` → enforce → handler。
     ///
     /// 生产出口 [`into_make_service`](Self::into_make_service) 与 test 出口
     /// [`into_router_for_test`](Self::into_router_for_test) 共用本 fn ⇒ 层序一致（test 不漂移）。
-    /// 层序（外→内）：`request_id` → `correlation` → 验签桥 → `trace` → `panic_recovery`
-    /// → `Extension(plan)` → enforce → handler。
     fn sealed_router(self) -> axum::Router {
         // `.layer` 调用顺序 = 内→外；最后 `.layer(request_id)` 使其成为绝对最外层。
-        self.router
+
+        // 1. body-limit（最内层新防护，outer 于验签桥）。
+        let mut router = self.router.layer(axum::middleware::from_fn_with_state(
+            self.hardening.body_limit,
+            crate::middleware::body_limit,
+        ));
+
+        // 2. security-headers（outer 于 body-limit；所有响应包含安全头）。
+        for hl in self.hardening.headers.response_layers() {
+            router = router.layer(hl);
+        }
+
+        // 3. correlation + request_id（绝对最外两层）。
+        router
             .layer(axum::middleware::from_fn(crate::middleware::correlation))
             .layer(axum::middleware::from_fn(crate::middleware::request_id))
     }
 
-    /// **唯一** bindable 出口：封 request_id（[`sealed_router`](Self::sealed_router)）后转 axum make-service 交
-    /// `axum::serve`（bind 点天生只能消费已认证 router；request_id 在此封为最外层，ROUTE-REQUESTID-OUTERMOST-01）。
-    pub fn into_make_service(self) -> axum::routing::IntoMakeService<axum::Router> {
-        self.sealed_router().into_make_service()
+    /// **唯一** bindable 出口：封防护层（[`sealed_router`](Self::sealed_router)）后转 axum
+    /// `IntoMakeServiceWithConnectInfo`（bind 时注入 `ConnectInfo<SocketAddr>`，供 rate_limit
+    /// 中间件读 peer IP；天生只能消费已认证 router，ROUTE-AUTH-FUNNEL-02）。
+    pub fn into_make_service(
+        self,
+    ) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
+        axum::Router,
+        std::net::SocketAddr,
+    > {
+        self.sealed_router()
+            .into_make_service_with_connect_info::<std::net::SocketAddr>()
     }
 
     /// 测试专用：取回裸 Router 做 `oneshot` e2e 断言（经 [`sealed_router`](Self::sealed_router) ⇒ 与生产
@@ -522,6 +570,180 @@ mod tests {
             crate::request_id_str(&ext),
             Some("test-rid"),
             "在场 → Some(借出字符串)"
+        );
+    }
+
+    // ── edge hardening 集成测试（经 sealed_router / into_router_for_test funnel）─────────────────
+
+    /// security-headers 通过 sealed_router funnel 叠在所有响应上（200 路径）。
+    /// 验证 `x-content-type-options: nosniff` 等默认安全头存在且值正确。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn security_headers_present_in_successful_response() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        let router = finalize_auth(routes, plan)
+            .expect("finalize_auth")
+            .into_router_for_test();
+
+        let resp = oneshot_response(router, "/list").await;
+        assert_eq!(resp.status(), StatusCode::OK, "NoAuth → 200");
+
+        // 各安全头存在且值正确。
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("x-content-type-options")
+                .expect("x-content-type-options")
+                .as_bytes(),
+            b"nosniff"
+        );
+        assert_eq!(
+            headers
+                .get("x-frame-options")
+                .expect("x-frame-options")
+                .as_bytes(),
+            b"DENY"
+        );
+        assert_eq!(
+            headers
+                .get("referrer-policy")
+                .expect("referrer-policy")
+                .as_bytes(),
+            b"no-referrer"
+        );
+        assert_eq!(
+            headers
+                .get("cross-origin-resource-policy")
+                .expect("corp")
+                .as_bytes(),
+            b"same-origin"
+        );
+        assert!(
+            headers.get("strict-transport-security").is_some(),
+            "HSTS 默认开启"
+        );
+        assert!(
+            headers.get("cache-control").is_some(),
+            "cache-control 默认注入"
+        );
+    }
+
+    /// body-limit 超出 Content-Length 门限时返回 413，经 sealed_router funnel 有效（#1106）。
+    /// 使用 with_edge_hardening 设小上限（10 bytes）验证 funnel 叠层生效。
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    // reason: test helper — NonZeroUsize::new(10) is known non-zero, unwrap is infallible.
+    async fn body_limit_via_sealed_router_returns_413_on_oversized_cl() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        let router = finalize_auth(routes, plan)
+            .expect("finalize_auth")
+            .with_edge_hardening(crate::protect::EdgeHardening {
+                body_limit: crate::protect::BodyLimit::new(
+                    std::num::NonZeroUsize::new(10).unwrap(),
+                ),
+                headers: crate::protect::SecurityHeaders::default(),
+            })
+            .into_router_for_test();
+
+        // Content-Length: 11 > 10 → 413
+        let req = Request::builder()
+            .uri("/list")
+            .header("content-length", "11")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "CL>cap → 413");
+
+        // Content-Length: 10 ≤ 10 → 200（NoAuth）
+        let req_ok = Request::builder()
+            .uri("/list")
+            .header("content-length", "10")
+            .body(Body::empty())
+            .expect("request");
+        let resp_ok = router.oneshot(req_ok).await.expect("oneshot");
+        assert_eq!(resp_ok.status(), StatusCode::OK, "CL==cap → 200");
+    }
+
+    /// FIX-5：security-headers 叠在 body-limit 外侧 → 413 错误响应也包含安全头。
+    ///
+    /// 证 security-headers outer 于 body-limit（layer 叠加顺序：security-headers 在 body-limit 外层），
+    /// 所有响应（含 413 拒绝路径）均追加安全头。复用 body-limit 413 setup + 追加安全头断言。
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    // reason: test helper — NonZeroUsize::new(10) is known non-zero, unwrap is infallible.
+    async fn security_headers_present_in_413_error_response() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        let router = finalize_auth(routes, plan)
+            .expect("finalize_auth")
+            .with_edge_hardening(crate::protect::EdgeHardening {
+                body_limit: crate::protect::BodyLimit::new(
+                    std::num::NonZeroUsize::new(10).unwrap(),
+                ),
+                headers: crate::protect::SecurityHeaders::default(),
+            })
+            .into_router_for_test();
+
+        // Content-Length: 11 > 10 → 413（CL fast-reject）。
+        let req = Request::builder()
+            .uri("/list")
+            .header("content-length", "11")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "CL>cap → 413");
+
+        // 413 响应也必须有安全头（security-headers outer 于 body-limit）。
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("x-content-type-options")
+                .expect("413 须有 x-content-type-options")
+                .as_bytes(),
+            b"nosniff",
+            "security-headers 应在 413 错误响应上存在（outer 于 body-limit）"
+        );
+        assert_eq!(
+            headers
+                .get("x-frame-options")
+                .expect("413 须有 x-frame-options")
+                .as_bytes(),
+            b"DENY"
+        );
+        assert_eq!(
+            headers
+                .get("referrer-policy")
+                .expect("413 须有 referrer-policy")
+                .as_bytes(),
+            b"no-referrer"
+        );
+    }
+
+    /// request_id 头仍在（回归：加入 edge hardening 层后 request_id 封口不受影响）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn request_id_still_present_after_edge_hardening_layers() {
+        let routes =
+            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("plan");
+        let router = finalize_auth(routes, plan)
+            .expect("finalize_auth")
+            .into_router_for_test();
+
+        let resp = oneshot_response(router, "/list").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("x-request-id").is_some(),
+            "x-request-id 在 edge hardening 层后仍存在"
         );
     }
 

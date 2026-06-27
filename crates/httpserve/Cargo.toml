@@ -27,7 +27,9 @@ runctx = { path = "../runctx" }
 diport = { path = "../diport" }
 # HTTP runtime（生态对标 axum + tower，不自造中间件 trait）
 axum = { workspace = true }
+http-body-util = { workspace = true }  # Limited：stream-level 字节硬顶（#1106 FIX-1，body-limit 中间件）
 tower = { workspace = true }                             # EnforceLayer/EnforceService impl tower::Layer/Service（axum from_fn 不可用于 MethodRouter::layer）
+tower-http = { workspace = true, features = ["set-header"] } # security-headers（SetResponseHeaderLayer，#1106 批次2）
 futures = { workspace = true }         # panic_recovery 中间件 catch_unwind（AssertUnwindSafe + FutureExt）
 # wire DTO 序列化（error envelope / readyz 响应）
 serde = { workspace = true }

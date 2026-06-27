@@ -51,6 +51,7 @@ use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
     RequiredScheme,
 };
+use ratelimit::GovernorLimiter;
 use settings::ports::DynSecretRepo;
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
@@ -223,12 +224,35 @@ fn required_scheme(listener: ListenerKind) -> Option<RequiredScheme> {
     }
 }
 
-/// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 `finalize_auth` + 外层验签桥。
+/// 默认限流配额：10 req/s，burst 20（per-peer-IP keyed，组合根 owner；可配置化 follow-up #1106）。
+///
+/// `NonZeroU32::new(10/20)` 对字面量非零常量不可失败——`expect` 是构造期 programmer error
+/// （此处不可恢复，item-level carve-out，error-handling.md §Carve-out）。
+#[allow(clippy::expect_used)]
+fn default_rate_quota() -> ratelimit::QuotaConfig {
+    // reason: 10 / 20 是 compile-time 字面量，NonZeroU32::new 仅在 0 时返 None；
+    // 字面量非零，此 expect 是构造期 programmer error（不可恢复，item-level carve-out）。
+    ratelimit::QuotaConfig::per_second(
+        std::num::NonZeroU32::new(10).expect("non-zero rate-per-second constant"),
+        std::num::NonZeroU32::new(20).expect("non-zero burst constant"),
+    )
+}
+
+/// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 `finalize_auth` + 外层验签桥
+/// + rate-limit 中间件（组合根叠加点，INVARIANT RATELIMIT-BEFORE-AUTH-01）。
 ///
 /// 每 listener：`finalize_auth(routes, plan)`（消费 `UnfinalizedRoutes` 产 `AuthenticatedRoutes`，注入
-/// AuthPlan 与 framework 中间件）→ 据 `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）。
+/// AuthPlan 与 framework 中间件）→ 据 `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
+/// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
 /// 产出 `AuthenticatedRoutes` 经 `into_make_service` 绑 socket + serve（[`serve_until_signal`]）——bind 点
 /// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
+///
+/// 层序（外→内）：body-limit（httpserve sealed_router，最外防护）→ rate-limit（本函数 verify-bridge 后叠）
+/// → 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
+/// （INVARIANT RATELIMIT-BEFORE-AUTH-01：组合根在 verify-bridge 后 .layer ⇒ outer 于桥）。
+///
+/// Health listener 由 [`health_listener`] 单独构造、**不经本函数、不叠限流**——探针不限速（k8s
+/// liveness/readiness 在高负载下不应被限流触发级联重启），有意设计。
 ///
 /// 借 `&mut Registry`（仅 drain `finalize_routes`，**不**消费）：registry 的探针在此后仍存活，组合根经
 /// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
@@ -240,6 +264,13 @@ pub fn assemble_authed_routers(
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>> {
+    // 默认限流配额（owner=组合根，可调）：10 req/s，burst 20。peer-IP keyed（见 #1106 / RealIP follow-up）。
+    // 共享跨所有 listener——统一 per-IP 预算，避免分散 listener 各自独立 bucket 使 burst 预算 N 倍膨胀。
+    //
+    // 已知限制（multi-instance）：in-mem `GovernorLimiter` 是 per-instance 独立桶，N 副本部署下
+    // 每实例独立配额（全局视图 ≈ N × 单实例率）；全局一致限流须 redis-distributed provider（future）。
+    // 叠加 peer-IP-after-proxy 退化（RealIP follow-up），本限流当前为单实例 best-effort 防护。
+    let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
     let mut out = Vec::new();
     for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
         let scheme = auth_scheme(listener);
@@ -256,6 +287,12 @@ pub fn assemble_authed_routers(
             Some(req) => auth_bridge::apply_verify_bridge(authed, provider.clone(), req),
             None => authed,
         };
+        // INVARIANT RATELIMIT-BEFORE-AUTH-01 —— rate-limit 在 verify-bridge 之后 .layer，
+        // 层序上 outer 于桥（请求方向先 rate-limit 后验签），在 auth 计算前拦截超额请求。
+        let wired = wired.layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&rate_limiter),
+            httpserve::rate_limit::<GovernorLimiter>,
+        ));
         // 装配决策可观测：operator 启动时从日志核查每 listener 的 auth scheme + 是否挂验签桥
         //（闭值枚举，无 PII）——否则「Primary 究竟 Jwt+桥 还是意外 NoAuth」从日志无从核查。
         tracing::info!(

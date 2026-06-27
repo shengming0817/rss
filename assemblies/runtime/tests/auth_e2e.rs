@@ -248,6 +248,94 @@ async fn status(
     resp.status()
 }
 
+// ── BODYLIMIT-BEFORE-AUTH-01 tripwire ───────────────────────────────────────────
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 tripwire（FIX-2）：
+/// JWT-scheme listener + 超大 Content-Length + 无 Authorization → 413（非 401）。
+/// 证 body-limit（sealed_router 叠）outer 于验签桥 enforce——超大请求在 auth 验证前已被拦截。
+#[tokio::test]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn body_limit_blocks_before_jwt_auth_tripwire() {
+    let authed =
+        jwt_router(Some(RequiredScheme::Jwt)).with_edge_hardening(httpserve::EdgeHardening {
+            // reason: 10 is a known non-zero constant; unwrap is infallible.
+            body_limit: httpserve::BodyLimit::new(std::num::NonZeroUsize::new(10).unwrap()), // 极小上限（10 bytes）
+            headers: httpserve::SecurityHeaders::default(),
+        });
+
+    let req = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri("/protected")
+        .header("content-length", "100") // 100 >> 10 limit，无 Authorization header
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = authed.into_router_for_test().oneshot(req).await.unwrap();
+    // BODYLIMIT-BEFORE-AUTH-01：body-limit outer → 先拦截，响应 413 而非 401。
+    assert_ne!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "BODYLIMIT-BEFORE-AUTH-01: body-limit outer 于 JWT auth → 非 401"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "BODYLIMIT-BEFORE-AUTH-01: 超大 CL + 无 auth → 413"
+    );
+}
+
+// ── RATELIMIT-BEFORE-AUTH-01 tripwire ───────────────────────────────────────────
+/// 恒返回 Limited 的测试限流器（tripwire 专用，已耗尽桶的语义等价物）。
+struct AlwaysLimitedRateLimiter;
+
+impl diport::RateLimiter for AlwaysLimitedRateLimiter {
+    async fn check(
+        &self,
+        _key: diport::RateLimitKey,
+    ) -> Result<diport::RateLimitDecision, diport::RateLimitError> {
+        Ok(diport::RateLimitDecision::Limited {
+            retry_after: std::time::Duration::from_secs(1),
+        })
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+        Ok(())
+    }
+}
+
+/// INVARIANT: RATELIMIT-BEFORE-AUTH-01 tripwire（FIX-3）：
+/// JWT-scheme listener + 已耗尽限流器 + 无 Authorization → 429（非 401）。
+/// 证 rate-limit（verify-bridge 后 .layer ⇒ outer 于桥）在 auth 计算前已拦截请求。
+#[tokio::test]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn rate_limit_blocks_before_jwt_auth_tripwire() {
+    let limiter = Arc::new(AlwaysLimitedRateLimiter);
+    // 在 verify-bridge 后叠 rate-limit（对应 assemble_authed_routers 中的叠加顺序）。
+    let authed = jwt_router(Some(RequiredScheme::Jwt)).layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&limiter),
+        httpserve::rate_limit::<AlwaysLimitedRateLimiter>,
+    ));
+
+    let req = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri("/protected")
+        // 无 Authorization header——rate-limit outer 应先触发 429，不到 401。
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = authed.into_router_for_test().oneshot(req).await.unwrap();
+    // RATELIMIT-BEFORE-AUTH-01：rate-limit outer 于验签桥 → 先拦截，429 而非 401。
+    assert_ne!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "RATELIMIT-BEFORE-AUTH-01: rate-limit outer 于 JWT auth → 非 401"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "RATELIMIT-BEFORE-AUTH-01: 已耗尽 limiter + 无 auth → 429"
+    );
+}
+
 // ── 验收：成功路径 ────────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn valid_jwt_is_200() {

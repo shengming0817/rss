@@ -1,8 +1,12 @@
 //! httpd adapter —— HTTP 传输 adapter（#1320 运行时入口 Join）。
 //!
-//! 单一 `HttpServer`：bind `TcpListener` → `axum::serve` 已认证 router 的 `IntoMakeService` →
+//! 单一 `HttpServer`：bind `TcpListener` → `axum::serve` 已认证 router 的
+//! `IntoMakeServiceWithConnectInfo<Router, SocketAddr>` →
 //! serve task 监听注入的 [`CancellationToken`] 优雅关停；`impl diport::ManagedResource` 经
 //! `cancel()` + await JoinHandle 收敛。**精确对标 `adapters/grpc` 的 `GrpcServer`**（transport=adapter）。
+//!
+//! ConnectInfo 贯通（#1106）：`into_make_service_with_connect_info::<SocketAddr>()` 在 bind 时注入
+//! `ConnectInfo<SocketAddr>` extension，供 `httpserve::rate_limit` 中间件读 peer IP 做 per-IP keyed 限流。
 //!
 //! # 为何是 adapter（而非 httpserve 服务 crate）
 //!
@@ -30,7 +34,7 @@
 use std::net::SocketAddr;
 
 use axum::Router;
-use axum::routing::IntoMakeService;
+use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use diport::{ManagedResource, ShutdownError};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -94,7 +98,11 @@ impl BoundHttpServer {
     /// 须在 **tokio runtime 上下文**调用——内部 `tokio::spawn` 在无 runtime 时 panic。从 async fn
     /// （如 `serve_until_signal`）或 `ShutdownStack::register_with_token` 闭包内调用即满足（组合根均在
     /// `#[tokio::main]` 运行时内）。
-    pub fn serve(self, svc: IntoMakeService<Router>, token: CancellationToken) -> HttpServer {
+    pub fn serve(
+        self,
+        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
+        token: CancellationToken,
+    ) -> HttpServer {
         let serve_token = token.clone();
         let listener = self.listener;
         let handle = tokio::spawn(async move {
@@ -143,7 +151,7 @@ impl HttpServer {
     pub async fn serve_with_token(
         name: &'static str,
         addr: SocketAddr,
-        svc: IntoMakeService<Router>,
+        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
         token: CancellationToken,
     ) -> Result<Self, HttpServeError> {
         Ok(Self::bind(name, addr).await?.serve(svc, token))
@@ -154,7 +162,7 @@ impl HttpServer {
     pub async fn serve(
         name: &'static str,
         addr: SocketAddr,
-        svc: IntoMakeService<Router>,
+        svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>,
     ) -> Result<Self, HttpServeError> {
         Self::serve_with_token(name, addr, svc, CancellationToken::new()).await
     }
@@ -203,11 +211,11 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpStream;
 
-    /// 极简 router → IntoMakeService，挂一个 GET /healthz 恒 200。
-    fn make_svc() -> IntoMakeService<Router> {
+    /// 极简 router → IntoMakeServiceWithConnectInfo（注入 ConnectInfo<SocketAddr>），挂一个 GET /healthz 恒 200。
+    fn make_svc() -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
         Router::new()
             .route("/healthz", get(|| async { "ok" }))
-            .into_make_service()
+            .into_make_service_with_connect_info::<std::net::SocketAddr>()
     }
 
     /// 绑 `127.0.0.1:0` ephemeral → 真 socket 上发 HTTP/1.1 GET，读回状态行（raw，无 reqwest dep）。

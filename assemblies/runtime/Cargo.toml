@@ -58,6 +58,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sig
 tokio-util = { workspace = true }
 # HTTP 传输 adapter：HttpServer bind + axum::serve + ManagedResource（经 ShutdownStack 托管）。
 httpd = { path = "../../adapters/httpd" }
+# in-mem keyed 限流 adapter（GovernorLimiter：per-peer-IP GCRA，diport::RateLimiter impl；#1106 rate-limit wiring）。
+# lifecycle=active providerCrate 须直接依赖（contract-fanout.md §DI provider）。
+ratelimit = { path = "../../adapters/ratelimit" }
 # 生产 tracing subscriber（init_tracing：fmt + RUST_LOG env filter + 可选 otel 桥接 Layer）——否则运行时入口日志全 no-op。
 # 同时供 dev e2e 捕获 tracing 输出断言（auth_e2e 埋点）。registry()/fmt::layer() 经默认 fmt feature（fmt→registry）可用。
 tracing-subscriber = { workspace = true }

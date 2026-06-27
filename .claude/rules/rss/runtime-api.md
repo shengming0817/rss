@@ -71,6 +71,39 @@ listener auth chain 必须显式声明。无认证使用 `AuthNone`，`None` 是
 
 域 crate 禁止构造 AuthPlan；组合根（assembly / bin crate）组装后通过 bootstrap option 注入。
 
+## Edge 防护中间件（#1106）
+
+`httpserve` 边缘防护层（tower Layer），层序（外→内）固定为：
+
+```
+request_id → correlation → security-headers → body-limit → rate-limit → 验签桥 → trace → panic_recovery → Extension(plan) → 路由匹配 → enforce → handler
+```
+
+- **body-limit + security-headers**：由 `AuthenticatedRoutes::sealed_router`（唯一 bindable funnel）**无条件叠默认**——
+  每个 bind / 测试出口的 router 都带且不可遗漏（can't-forget funnel，同 `request_id`，Hard）。策略经 typed
+  `httpserve::EdgeHardening { body_limit: BodyLimit, headers: SecurityHeaders }`（两字段非 `Option`、必有值），
+  默认 body-limit = 1 MiB、security-headers = 零信任头集（`X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy`/
+  CSP `default-src 'none'`/`Cross-Origin-Resource-Policy`/`Cache-Control`/HSTS）。组合根可经
+  `AuthenticatedRoutes::with_edge_hardening(EdgeHardening)` 覆盖（owner=httpserve 定默认，组合根可调；`without_hsts()`
+  关 HSTS）。
+- **BODYLIMIT-BEFORE-AUTH-01**（精确语义，两路径）：body-limit **层**（CL 闸 + Limited wrap）outer 于 auth：
+  · **CL-declared 超限 → before-auth clean 413（`ERR_CORE_PAYLOAD_TOO_LARGE`）**：CL fast-reject 在验签桥前拒，
+    无 auth 开销（auth 计算 + body 读取双重开销可避免，gocell 史 commit 248dbdd12）。
+  · **无声明/chunked → `http_body_util::Limited` 字节硬顶（read-time，内存有界）**；未认证请求经 enforce 401
+    时 body 从不被读 ⇒ 无 pre-auth buffer（DoS 优姿态——不选 option (a) 主动 buffer，auth 前 buffer 未认证请求
+    回归 unauth DoS 姿态；安全目标[内存有界]已由 Limited 达成）。非 before-auth 413（无 CL 路径 cap 在 read-time）。
+  结构性保证（baked 在 `sealed_router` 唯一 bindable 出口）+ 行为 tripwire 测试（CL 超大 + 无凭据 → 413 而非 401）。
+- **rate-limit**：opt-in 注入式（provider 不可在服务层 default）。组合根经
+  `.layer(from_fn_with_state(Arc<S>, httpserve::rate_limit::<S>))` 在 **验签桥之后**叠（⇒ outer 于桥 = before-auth，
+  **RATELIMIT-BEFORE-AUTH-01**）；`S: diport::RateLimiter + Send + Sync`（泛型静态分发——`DynRateLimiter` 非 Sync 不可
+  作 axum state，同 `JwtIssuer<S>` 范式）。key = **peer IP**（`ConnectInfo<SocketAddr>`，故唯一 bindable 出口
+  `into_make_service` 改 `into_make_service_with_connect_info::<SocketAddr>`；httpd adapter serve 形参配套改）。超限 →
+  `vocab::CoreErrorKind::TooManyRequests`（429 + `Retry-After` ceil 整数秒）。限流器故障 **fail-open**（不拒服务、记
+  `tracing::error`）。provider 注入经 `assembly.toml [[diportProviders]] port="diport::RateLimiter"`（active）+
+  `cargo xtask assembly validate`。
+  > **已知限制（RealIP follow-up）**：peer IP 在反向代理后退化为代理 IP（全局桶）。正确 per-client IP 须可信
+  > `X-Forwarded-For` 解析（RealIP 中间件，本轮 defer）。
+
 ## Option 范式
 
 - 强依赖 option 必须 fail-fast，不静默 noop。

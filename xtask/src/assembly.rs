@@ -15,6 +15,7 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 const REVOCATION_STORE_PORT: &str = "diport::RevocationStore";
+const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -32,6 +33,11 @@ pub(crate) enum Rule {
     ProviderDurabilityMismatch,
     /// active provider 必须启用 provider symbol 所需 feature。
     ActiveProviderFeature,
+    /// manifest 声明的 providerCrate 与 xtask provider matrix 锁定的实现 crate 不符。
+    ///
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 — provider↔providerCrate 绑定由 xtask provider
+    /// matrix 单源锁定；manifest 声明错误 crate 名须被机器拒（Medium，red test 反恒真）。
+    ProviderCrateMismatch,
 }
 
 pub(crate) struct AssemblyValidate;
@@ -92,12 +98,15 @@ pub(crate) struct DiportProvider {
 pub(crate) enum DiportPort {
     #[serde(rename = "diport::RevocationStore")]
     RevocationStore,
+    #[serde(rename = "diport::RateLimiter")]
+    RateLimiter,
 }
 
 impl DiportPort {
     fn as_str(self) -> &'static str {
         match self {
             Self::RevocationStore => REVOCATION_STORE_PORT,
+            Self::RateLimiter => RATE_LIMITER_PORT,
         }
     }
 }
@@ -263,6 +272,18 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
                             ),
                         ));
                     }
+                    if spec.provider_crate != provider.provider_crate {
+                        findings.push(finding(
+                            Rule::ProviderCrateMismatch,
+                            &subject,
+                            format!(
+                                "field=providerCrate provider `{}` 的实现 crate 是 `{}`，manifest 不得声明为 `{}`",
+                                provider.provider,
+                                spec.provider_crate,
+                                provider.provider_crate
+                            ),
+                        ));
+                    }
                 }
                 _ => findings.push(finding(
                     Rule::ActiveProviderPort,
@@ -308,6 +329,8 @@ struct ProviderSpec {
     port: DiportPort,
     durability: ProviderDurability,
     required_features: &'static [&'static str],
+    /// xtask provider matrix 锁定的实现 crate 名；必须与 manifest `providerCrate` 严格匹配。
+    provider_crate: &'static str,
 }
 
 fn provider_spec(provider: &str) -> Option<ProviderSpec> {
@@ -316,6 +339,13 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             port: DiportPort::RevocationStore,
             durability: ProviderDurability::EphemeralMemory,
             required_features: &["backend"],
+            provider_crate: "softca",
+        }),
+        "ratelimit::GovernorLimiter" => Some(ProviderSpec {
+            port: DiportPort::RateLimiter,
+            durability: ProviderDurability::EphemeralMemory,
+            required_features: &[],
+            provider_crate: "ratelimit",
         }),
         _ => None,
     }
@@ -700,6 +730,125 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn active_rate_limiter_provider_passes() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-rate-limiter-active");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::RevocationStore"
+provider = "softca::InMemRevocationLedger"
+providerCrate = "softca"
+consumer = "deviceloop"
+lifecycle = "draft"
+durability = "ephemeral-memory"
+purpose = "device-certificate-revocation"
+
+[[diportProviders]]
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.is_empty(),
+            "active ratelimit::GovernorLimiter provider (no required_features) must pass: {findings:?}"
+        );
+        Ok(())
+    }
+
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 — provider↔providerCrate 绑定 red test（anti-vacuity）。
+    /// `ratelimit::GovernorLimiter` 与 `providerCrate = "softca"` 不匹配，active 声明必须被拒。
+    #[test]
+    fn active_provider_with_wrong_provider_crate_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-provider-crate-mismatch");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "softca"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+softca = { path = "../../adapters/softca" }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProviderCrateMismatch),
+            "provider↔providerCrate mismatch must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 — provider↔providerCrate 绑定正例（non-vacuous green path）。
+    /// `ratelimit::GovernorLimiter` + `providerCrate = "ratelimit"` 正确绑定，不应产生 ProviderCrateMismatch。
+    #[test]
+    fn active_provider_with_correct_provider_crate_is_allowed() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-provider-crate-correct");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.rule != Rule::ProviderCrateMismatch),
+            "correct providerCrate must not produce ProviderCrateMismatch: {findings:?}"
+        );
         Ok(())
     }
 

@@ -8,10 +8,12 @@
 //!
 //! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main
 
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use diport::{RateLimitDecision, RateLimitKey, RateLimiter};
 use futures::FutureExt;
+use std::sync::Arc;
 
 const X_REQUEST_ID: &str = "x-request-id";
 
@@ -145,6 +147,130 @@ pub(crate) async fn trace(req: Request, next: Next) -> Response {
     let resp = next.run(req).instrument(span.clone()).await;
     span.record("status", resp.status().as_u16());
     resp
+}
+
+/// 中间件：Content-Length 检查 + stream-level 字节硬顶——超过 [`crate::protect::BodyLimit`] 上限则拦截。
+///
+/// 两层防护（互补，不互斥）：
+/// 1. **CL fast-reject（before-auth clean 413）**：声明 `Content-Length` 超限 → 预知拒（pre-auth，
+///    token 验证前 clean 413，`ERR_CORE_PAYLOAD_TOO_LARGE`）。
+/// 2. **stream-level 字节硬顶（read-time，内存有界，非 before-auth 413）**：用
+///    [`http_body_util::Limited`] 重包请求体——无声明或 chunked 体在**读取阶段**超限时返回 error，
+///    内存被钳在 limit，防 DoS 内存耗尽。
+///    // reason: 不选 option (a)（auth 前主动 buffer 全部请求体）：auth 前为未认证请求 buffer ≤limit
+///    // 字节回归 unauth DoS 姿态；Limited wrap 下，未认证请求经 enforce 401 时 body **从不被读/buffer**，
+///    // DoS 姿态更优（安全目标[内存有界]已由 Limited 达成，无需 option a）。
+///
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01（精确语义）：
+///   · **CL-declared 超限 → before-auth clean 413**（层1 fast-reject，auth 计算 + body 读取双重开销可避免）。
+///   · **无声明/chunked → `http_body_util::Limited` 字节硬顶（read-time）**，内存有界，非 before-auth 413。
+///     未认证请求经 enforce 401 时 body 从不被读 ⇒ 无 pre-auth buffer（DoS 优姿态，见 reason 注释）。
+///   body-limit **层** outer 于 auth 验签桥；CL 路径拒绝决策 before-auth。
+///
+/// 通过 [`axum::middleware::from_fn_with_state`] 注入 [`crate::protect::BodyLimit`] 状态；
+/// `sealed_router` 以 `EdgeHardening::body_limit` 填充，默认 1 MiB。
+pub(crate) async fn body_limit(
+    State(limit): State<crate::protect::BodyLimit>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let rid = req
+        .extensions()
+        .get::<RequestId>()
+        .map(|r| r.0.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    // 层1 CL fast-reject：声明超限 → 预知拒（pre-auth clean 413，token 验证前提前拦截）。
+    let content_length = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    if let Some(len) = content_length
+        && len > limit.bytes() as u64
+    {
+        tracing::warn!(
+            content_length = len,
+            limit = limit.bytes(),
+            request_id = %rid,
+            "body-limit exceeded (Content-Length fast-reject)"
+        );
+        return crate::error::payload_too_large(&rid);
+    }
+
+    // 层2 stream-level 字节硬顶：Limited wrap 钳制 body 读取字节数上限。
+    // reason: 攻击者省略 Content-Length（chunked/流式）绕过层1时，层2钳制内存上限（防 DoS 内存耗尽）。
+    let (parts, body) = req.into_parts();
+    let limited = http_body_util::Limited::new(body, limit.bytes());
+    let req = Request::from_parts(parts, axum::body::Body::new(limited));
+    next.run(req).await
+}
+
+/// 429 埋点独立 fn（tracing 宏展开对 cognitive_complexity 贡献高，分摊保 ≤15；每 fn 一条宏）。
+///
+/// FIX-7：rate-limit 超额时记 `retry_after_ms` + `request_id`，供运维关联流量溯源。
+/// 不记 peer IP（保守起见，IP 为中等 PII；`request_id` 已足够关联运维 context）。
+#[inline]
+fn log_rate_limited(rid: &str, retry_after: std::time::Duration) {
+    tracing::info!(
+        retry_after_ms = retry_after.as_millis() as u64,
+        request_id = %rid,
+        "rate-limit exceeded: 429"
+    );
+}
+
+/// 中间件：IP 级限流——经 [`diport::RateLimiter`] port 判定，超配额则 429 Too Many Requests。
+///
+/// **fail-open**：限流器 provider 故障（`Err`）时放行请求，不因 provider 不可用拒正常用户。
+/// 未来 [`diport::RateLimitDecision`] 新增 variant 同样 fail-open（`_` arm）。
+///
+/// # reason (fail-open)
+/// 限流器是 best-effort 防护，provider 故障时服务可用性优先于限流保护；
+/// 极端 DDoS 场景下网络层（CDN/WAF）应作第一道防线。
+///
+/// peer IP 来自 [`axum::extract::ConnectInfo<SocketAddr>`] extension（生产经
+/// `into_make_service_with_connect_info` 注入；缺失时 fallback "unknown"——仅限 oneshot 单测环境）。
+///
+/// # INVARIANT: RATE-LIMIT-PEER-IP-01
+/// 生产路径经 `into_make_service_with_connect_info::<SocketAddr>()` 绑定（`routes.rs`），
+/// `ConnectInfo<SocketAddr>` 天然在场；oneshot 测试环境手动插入或留 "unknown"（均合法）。
+pub async fn rate_limit<S>(State(limiter): State<Arc<S>>, req: Request, next: Next) -> Response
+where
+    S: RateLimiter + Send + Sync + 'static,
+{
+    let rid = req
+        .extensions()
+        .get::<RequestId>()
+        .map(|r| r.0.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    // 读 peer IP；缺 ConnectInfo → fallback "unknown"（oneshot 测试场景）。
+    // reason: 生产经 into_make_service_with_connect_info 必有 ConnectInfo，fallback 仅测试路径。
+    let ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let key = RateLimitKey::new(ip);
+
+    match limiter.check(key).await {
+        Ok(RateLimitDecision::Allowed) => next.run(req).await,
+        Ok(RateLimitDecision::Limited { retry_after }) => {
+            log_rate_limited(&rid, retry_after);
+            crate::error::too_many_requests(&rid, retry_after)
+        }
+        // reason: fail-open — 未知未来 variant 保守放行（non_exhaustive 演进窗口）。
+        Ok(_) => next.run(req).await,
+        Err(e) => {
+            // reason: fail-open — 限流器 provider 故障时服务可用性优先。
+            tracing::error!(error = %e, request_id = %rid, fail_open = true, "rate limiter check failed; fail-open");
+            next.run(req).await
+        }
+    }
 }
 
 /// 中间件：request-aware panic recovery → 500 envelope（requestId 来自请求 extension）。
@@ -459,4 +585,412 @@ mod tests {
     // （trace 与该探针同为 correlation scope 内层）。span 字段值的运行期断言需 process-isolated tracing
     // subscriber harness（`cargo test` 线程并行与 tracing 全局 callsite interest 缓存竞争）——本仓无此先例
     // （既有 `request_id` 进 span 同样未做字段级单测），不为单字段引入 racy harness。
+
+    // ── body_limit 测试 ──────────────────────────────────────────────────────────────────────────
+
+    #[allow(clippy::unwrap_used)]
+    // reason: test helper — cap is always a hard-coded non-zero constant supplied by test callers.
+    fn body_limit_app(cap: usize) -> Router {
+        use axum::routing::any;
+        Router::new()
+            .route("/", any(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                crate::protect::BodyLimit::new(std::num::NonZeroUsize::new(cap).unwrap()),
+                body_limit,
+            ))
+    }
+
+    /// 大幅超限（CL=10000 >> cap=100）：与 `one_over_cap` 覆盖不同场景（批量超限 vs. 边界 cap+1）。
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn body_limit_content_length_over_cap_returns_413() {
+        let app = body_limit_app(100);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-length", "10000") // 大幅超限（批量超限场景）
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn body_limit_content_length_equal_cap_returns_200() {
+        let app = body_limit_app(100);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-length", "100")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn body_limit_content_length_one_over_cap_returns_413() {
+        let app = body_limit_app(100);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-length", "101")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn body_limit_no_content_length_passes_through() {
+        let app = body_limit_app(100);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "无 Content-Length 放行");
+    }
+
+    /// stream-level cap（read-time，**非** before-auth 413）：无 Content-Length 但 body 超 limit → 读取被 Limited 钳住（非 200）。
+    ///
+    /// 这是 BODYLIMIT-BEFORE-AUTH-01 的**无 CL 路径**：`http_body_util::Limited` 字节硬顶在 read-time 生效，
+    /// 内存有界。注意：此路径**不**产生 before-auth 413——CL fast-reject（层1）未触发，Limited 错误由实际读 body
+    /// 的 handler 遇到；与 `body_limit_blocks_before_jwt_auth_tripwire`（CL 路径 before-auth 413）语义不同。
+    ///
+    /// 用实际读 body 的 handler（`to_bytes`）触发 `Limited` 错误；断言超限 body ≠ 200（cap 生效），limit 内 200。
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn body_limit_no_cl_stream_over_cap_is_not_200() {
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        // handler：实际读 body，触发 Limited 错误（如 handler 不读 body 则 Limited 不生效）。
+        async fn read_body_handler(req: Request<Body>) -> impl IntoResponse {
+            let body = req.into_body();
+            // reason: usize::MAX 让 to_bytes 不加额外限制——只有 Limited wrap 控制字节上限。
+            match axum::body::to_bytes(body, usize::MAX).await {
+                Ok(bytes) => (StatusCode::OK, bytes.len().to_string()),
+                Err(_) => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    String::from("body limit exceeded"),
+                ),
+            }
+        }
+
+        let cap = 10usize;
+        let app = Router::new().route("/", post(read_body_handler)).layer(
+            // reason: cap = 10, known non-zero constant.
+            middleware::from_fn_with_state(
+                crate::protect::BodyLimit::new(std::num::NonZeroUsize::new(cap).unwrap()),
+                body_limit,
+            ),
+        );
+
+        // 超 limit 的 body（无 content-length header → CL fast-reject 不触发；Limited wrap 生效）。
+        let req_large = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            // 故意省略 content-length header，测 stream-level cap（层2防护）。
+            .body(Body::from(vec![0u8; cap + 100]))
+            .unwrap();
+        let resp = app.clone().oneshot(req_large).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "超 limit 无 CL body → 读取被 Limited 钳住，非 200"
+        );
+
+        // limit 内的小 body → 200。
+        let req_small = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(Body::from(vec![0u8; cap - 1]))
+            .unwrap();
+        let resp_small = app.oneshot(req_small).await.unwrap();
+        assert_eq!(resp_small.status(), StatusCode::OK, "limit 内的 body → 200");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn body_limit_non_numeric_content_length_passes_through() {
+        let app = body_limit_app(100);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("content-length", "not-a-number")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "非数字 Content-Length 放行");
+    }
+
+    // ── rate_limit 测试 ──────────────────────────────────────────────────────────────────────────
+
+    struct AllowLimiter;
+    impl diport::RateLimiter for AllowLimiter {
+        async fn check(
+            &self,
+            _key: RateLimitKey,
+        ) -> Result<RateLimitDecision, diport::RateLimitError> {
+            Ok(RateLimitDecision::Allowed)
+        }
+        async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+            Ok(())
+        }
+    }
+
+    struct LimitedLimiter {
+        retry_after: std::time::Duration,
+    }
+    impl diport::RateLimiter for LimitedLimiter {
+        async fn check(
+            &self,
+            _key: RateLimitKey,
+        ) -> Result<RateLimitDecision, diport::RateLimitError> {
+            Ok(RateLimitDecision::Limited {
+                retry_after: self.retry_after,
+            })
+        }
+        async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+            Ok(())
+        }
+    }
+
+    struct ErrorLimiter;
+    impl diport::RateLimiter for ErrorLimiter {
+        async fn check(
+            &self,
+            _key: RateLimitKey,
+        ) -> Result<RateLimitDecision, diport::RateLimitError> {
+            Err(diport::RateLimitError::new(std::io::Error::other(
+                "backend-down",
+            )))
+        }
+        async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+            Ok(())
+        }
+    }
+
+    /// F2：recording limiter — `check` 把收到的 key.as_str() 追加入 shared Vec，再返回 Allowed。
+    /// 用于断言 rate_limit 中间件实际传入的 key 字符串（peer IP / "unknown"），而非仅断言响应码。
+    struct RecordingLimiter {
+        recorded_keys: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingLimiter {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+            let keys = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            (
+                Self {
+                    recorded_keys: Arc::clone(&keys),
+                },
+                keys,
+            )
+        }
+    }
+
+    impl diport::RateLimiter for RecordingLimiter {
+        async fn check(
+            &self,
+            key: RateLimitKey,
+        ) -> Result<RateLimitDecision, diport::RateLimitError> {
+            // reason: test-only recording — single-threaded test, lock cannot fail.
+            #[allow(clippy::unwrap_used)]
+            self.recorded_keys
+                .lock()
+                .unwrap()
+                .push(key.as_str().to_owned());
+            Ok(RateLimitDecision::Allowed)
+        }
+        async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn rate_limit_app<S>(limiter: Arc<S>) -> Router
+    where
+        S: diport::RateLimiter + Send + Sync + 'static,
+    {
+        Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(limiter, rate_limit::<S>))
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn rate_limit_allowed_returns_200() {
+        let app = rate_limit_app(Arc::new(AllowLimiter));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn rate_limit_limited_returns_429_with_retry_after() {
+        let app = rate_limit_app(Arc::new(LimitedLimiter {
+            retry_after: std::time::Duration::from_secs(5),
+        }));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = resp.headers().get("retry-after").unwrap().to_str().unwrap();
+        assert_eq!(retry_after, "5", "5s → Retry-After: 5");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn rate_limit_provider_error_fail_open_returns_200() {
+        // reason: fail-open — provider 故障不阻塞正常请求。
+        let app = rate_limit_app(Arc::new(ErrorLimiter));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "provider 故障 fail-open → 200"
+        );
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn rate_limit_no_connect_info_uses_unknown_key() {
+        // 无 ConnectInfo extension → key = "unknown"，仍正常工作（不 panic / 不 500）。
+        // reason: oneshot 测试环境缺 ConnectInfo，fallback "unknown" 合法。
+        let app = rate_limit_app(Arc::new(AllowLimiter));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// F2：ConnectInfo 存在 → key == peer IP（非退化 "unknown"）。
+    ///
+    /// RecordingLimiter 捕获 `check()` 收到的 key 字符串，断言等于 ConnectInfo 中的 IP。
+    /// AllowLimiter 测试无法证明这一点——实现退化成 `RateLimitKey::new("unknown")` 时 AllowLimiter 仍返回 200。
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试层 unwrap：Mutex lock（单线程测试不竞争）和 oneshot Result（输入已控制）均不可失败。
+    #[tokio::test]
+    async fn rate_limit_with_connect_info_uses_peer_ip() {
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let (recorder, keys) = RecordingLimiter::new();
+        let app =
+            Router::new()
+                .route("/", get(|| async { "ok" }))
+                .layer(middleware::from_fn_with_state(
+                    Arc::new(recorder),
+                    rate_limit::<RecordingLimiter>,
+                ));
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 12345);
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "携带 ConnectInfo 正常放行");
+        // 关键断言：key == peer IP（而非退化 "unknown"）。
+        let recorded = keys.lock().unwrap();
+        assert_eq!(
+            recorded.as_slice(),
+            &["192.168.1.1"],
+            "ConnectInfo IPv4 192.168.1.1:12345 → key 须为 \"192.168.1.1\""
+        );
+    }
+
+    /// F2：无 ConnectInfo → key == "unknown"（录制验证，非仅状态码断言）。
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试层 unwrap：Mutex lock 和 oneshot Result 均不可失败。
+    #[tokio::test]
+    async fn rate_limit_no_connect_info_key_is_unknown() {
+        let (recorder, keys) = RecordingLimiter::new();
+        let app =
+            Router::new()
+                .route("/", get(|| async { "ok" }))
+                .layer(middleware::from_fn_with_state(
+                    Arc::new(recorder),
+                    rate_limit::<RecordingLimiter>,
+                ));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "无 ConnectInfo fallback → 200"
+        );
+        let recorded = keys.lock().unwrap();
+        assert_eq!(
+            recorded.as_slice(),
+            &["unknown"],
+            "无 ConnectInfo → key 须为 \"unknown\""
+        );
+    }
+
+    /// F2（彻底）：IPv6 ConnectInfo → key == IPv6 字符串（"::1"）。
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试层 unwrap：Mutex lock 和 oneshot Result 均不可失败。
+    #[tokio::test]
+    async fn rate_limit_ipv6_connect_info_key() {
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+        let (recorder, keys) = RecordingLimiter::new();
+        let app =
+            Router::new()
+                .route("/", get(|| async { "ok" }))
+                .layer(middleware::from_fn_with_state(
+                    Arc::new(recorder),
+                    rate_limit::<RecordingLimiter>,
+                ));
+
+        // [::1]:8080 → "::1"
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080);
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "IPv6 ConnectInfo 放行");
+        let recorded = keys.lock().unwrap();
+        assert_eq!(
+            recorded.as_slice(),
+            &["::1"],
+            "IPv6 [::1]:8080 → key 须为 \"::1\""
+        );
+    }
 }

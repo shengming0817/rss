@@ -16,6 +16,8 @@ pub enum CoreErrorKind {
     Forbidden,
     Conflict,
     Validation,
+    PayloadTooLarge,
+    TooManyRequests,
     Internal,
 }
 
@@ -28,6 +30,8 @@ impl CoreErrorKind {
             CoreErrorKind::Forbidden => "forbidden",
             CoreErrorKind::Conflict => "conflict",
             CoreErrorKind::Validation => "validation error",
+            CoreErrorKind::PayloadTooLarge => "payload too large",
+            CoreErrorKind::TooManyRequests => "too many requests",
             CoreErrorKind::Internal => "internal error",
         }
     }
@@ -44,6 +48,8 @@ impl CoreErrorKind {
             CoreErrorKind::Forbidden => "ERR_CORE_FORBIDDEN",
             CoreErrorKind::Conflict => "ERR_CORE_CONFLICT",
             CoreErrorKind::Validation => "ERR_CORE_VALIDATION",
+            CoreErrorKind::PayloadTooLarge => "ERR_CORE_PAYLOAD_TOO_LARGE",
+            CoreErrorKind::TooManyRequests => "ERR_CORE_TOO_MANY_REQUESTS",
             CoreErrorKind::Internal => "ERR_CORE_INTERNAL",
         }
     }
@@ -145,6 +151,8 @@ mod tests {
             (CoreErrorKind::Forbidden, "forbidden"),
             (CoreErrorKind::Conflict, "conflict"),
             (CoreErrorKind::Validation, "validation error"),
+            (CoreErrorKind::PayloadTooLarge, "payload too large"),
+            (CoreErrorKind::TooManyRequests, "too many requests"),
             (CoreErrorKind::Internal, "internal error"),
         ];
         for (kind, expected) in cases {
@@ -161,6 +169,8 @@ mod tests {
             (CoreErrorKind::Forbidden, "ERR_CORE_FORBIDDEN"),
             (CoreErrorKind::Conflict, "ERR_CORE_CONFLICT"),
             (CoreErrorKind::Validation, "ERR_CORE_VALIDATION"),
+            (CoreErrorKind::PayloadTooLarge, "ERR_CORE_PAYLOAD_TOO_LARGE"),
+            (CoreErrorKind::TooManyRequests, "ERR_CORE_TOO_MANY_REQUESTS"),
             (CoreErrorKind::Internal, "ERR_CORE_INTERNAL"),
         ];
         for (kind, expected) in cases {

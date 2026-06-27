@@ -9,3 +9,12 @@ consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
+
+[[diportProviders]]
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"

@@ -135,6 +135,7 @@ dynosaur = "=0.3.0"
 trait-variant = "=0.1.2"
 # HTTP / gRPC（服务层前瞻）
 axum = "0.8"
+http-body-util = "0.1"  # stream-level body cap（Limited wrap，#1106 FIX-1）；axum 0.8 生态同版本
 tower = "0.5"
 tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
 # 限流 provider（adapters/ratelimit，#1011）：keyed GCRA 限流器，x/time/rate（token bucket）的 Rust 工业等价。
