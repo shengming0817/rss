@@ -1,6 +1,12 @@
-//! AEAD 加解密接缝。
+//! AEAD 加解密接缝（**pre-AAD v1**）。当前 `seal`/`open` 无 AAD 参数。字段级数据保护边界——observe-redaction
+//! vs storage-encryption 分层、AAD 必填 envelope、deterministic opt-in、no-decrypt-in-debug——的设计单源见
+//! **ADR-011**；AEAD v2（`seal`/`open` 带 `aad`，`FIELDPROT-AAD-MANDATORY-01`）基础类型落地 #1465，
+//! provider / 持久化落地 #1466 / #1467。
 
 /// AEAD 原语（sync）。
+///
+/// **v1 接缝**：`seal`/`open` 暂无 AAD 参数；v2 必填 `aad` 的设计见 ADR-011 §D2/§D7（#1465 落地），
+/// 届时 AAD = tenant/config-key/field/schema-version 复合绑定，防跨租 / 跨字段重放。
 pub trait Aead {
     /// 加密明文。
     fn seal(&self, plaintext: &[u8]) -> Result<Ciphertext, AeadError>;

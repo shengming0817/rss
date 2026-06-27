@@ -16,6 +16,11 @@ request、tenant、domain、correlation 在对应上下文存在时必须透传�
 
 ## Redaction
 
+> **作用面 = observe-time（可观测面）**：本节的 redaction 只把明文挡在 Debug / 日志 / trace / `last_error` 等「被人或外部看见」
+> 的输出面之外，**不是静态存储加密**。at-rest 字段加密（envelope / KeyProvider / AAD / deterministic）是**独立关注点**，
+> 设计单源见 **ADR-011（字段级数据保护边界）** + Feature #1465/#1466/#1467。redaction ≠ encryption：脱敏过的值仍可能以明文落库，
+> 加密的值在 Debug 面仍不解密（ADR-011 D1/D5）。
+
 errcode 的 Message、Public Details、Internal Details 三层分工见 `.claude/rules/rss/error-handling.md` §Message 与 PII。
 
 trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redaction：

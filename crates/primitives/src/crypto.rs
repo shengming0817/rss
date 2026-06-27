@@ -3,7 +3,8 @@
 //! 与 `secure` 边界划分：`secure` 持有 **密值封装 + provider 式 codec**（`Aead` seal/open、
 //! `CookieCodec`、redaction）；`primitives::crypto` 只放**无密钥状态、provider-无关的纯计算**
 //! ——digest / HMAC 验签 + 定长常数时间比较。
-//! `KeyProvider` / `ValueTransformer`（provider-可换、持密钥）是 DI port → diport，不在此。
+//! `KeyProvider` / `ValueTransformer`（provider-可换、持密钥）是 DI port → diport（设计单源 ADR-011
+//! §D6，port 落地 #1466），不在此。
 
 use subtle::ConstantTimeEq;
 
