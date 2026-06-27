@@ -353,7 +353,7 @@ mod tests {
         route_incoming(&publish("rss/t", b"hi"), &routing, "test");
 
         let msg = rx.try_recv().expect("stream has a message");
-        assert_eq!(msg.payload, b"hi".to_vec());
+        assert_eq!(msg.payload.as_bytes(), b"hi");
         // 投递成功后 entry 仍在（receiver 存活）。
         assert!(routing.lock().expect("lock").contains_key("rss/t"));
     }

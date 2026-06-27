@@ -12,6 +12,7 @@ members = [
   "rss_authplan_callsite",
   "rss_authenticated_callsite",
   "rss_diport_error_debug_redacted",
+  "rss_diport_dto_debug_redacted",
   "rss_pdp_impl_adapter_only",
   "rss_projection_append_only",
   "rss_partition_serial_allowlist",

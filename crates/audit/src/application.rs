@@ -185,17 +185,17 @@ impl SubscriberHandler for SessionCreatedAuditHandler {
             // 审计管道失败不可静默（合规/运维盲点）：各失败路径结构化记录后再冒泡（Err→驱动侧 Nack）。
             // source 错误不进 Display（PII 边界），但 message_id 进日志便于关联。
             let msg_id = message.id.clone();
-            let payload: IdentitySessionCreatedPayload = serde_json::from_slice(&message.payload)
-                .map_err(|e| {
-                // serde_json::Error Display 含 payload 值片段（PII 边界）；用 classify() 取无 PII 的错误类别。
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    category = ?e.classify(),
-                    "audit handler: session-created payload decode failed"
-                );
-                // 永久：malformed payload 重投无意义（F2/C2）。
-                SubscriberHandlerError::permanent(e)
-            })?;
+            let payload: IdentitySessionCreatedPayload =
+                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
+                    // serde_json::Error Display 含 payload 值片段（PII 边界）；用 classify() 取无 PII 的错误类别。
+                    tracing::error!(
+                        message_id = msg_id.as_str(),
+                        category = ?e.classify(),
+                        "audit handler: session-created payload decode failed"
+                    );
+                    // 永久：malformed payload 重投无意义（F2/C2）。
+                    SubscriberHandlerError::permanent(e)
+                })?;
             // tenant fail-closed：非 canonical UUID 即拒（tenancy.md），不静默落空租户。
             let tenant = vocab::TenantId::parse(&payload.tenant_id).map_err(|e| {
                 tracing::error!(

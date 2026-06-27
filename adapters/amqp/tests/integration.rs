@@ -75,7 +75,7 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
     let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
-    assert_eq!(delivery.message.payload, b"hello-amqp".to_vec());
+    assert_eq!(delivery.message.payload.as_bytes(), b"hello-amqp");
     // EventId 跨 broker 传播：message_id 经 envelope 流回 Message.id（消费侧幂等键源）。
     assert_eq!(
         delivery.message.id.as_str(),
@@ -147,7 +147,7 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
         .await?
         .ok_or_else(|| anyhow!("b stream closed without a message"))?;
-    assert_eq!(delivery_b.message.payload, b"to-b".to_vec());
+    assert_eq!(delivery_b.message.payload.as_bytes(), b"to-b");
     // 负向：A 在短超时内无投递（隔离——B 的消息没串到 A）。timeout Err = 无消息。
     // 1s 余量（原 500ms 在 CI 高负载下偶发 flaky；正向已先成功，负向只需等隔离窗口）。
     let a_result = tokio::time::timeout(Duration::from_secs(1), stream_a.next()).await;
@@ -194,7 +194,10 @@ async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<()
     let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
         .await?
         .ok_or_else(|| anyhow!("B 流在 A 取消后关闭（回归：共享 channel 被连带关闭）"))?;
-    assert_eq!(delivery_b.message.payload, b"to-b-after-a-cancel".to_vec());
+    assert_eq!(
+        delivery_b.message.payload.as_bytes(),
+        b"to-b-after-a-cancel"
+    );
     delivery_b
         .acker
         .settle(AckAction::Ack)
@@ -241,7 +244,7 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     let delivery_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next())
         .await?
         .ok_or_else(|| anyhow!("vhost-a stream closed without a message"))?;
-    assert_eq!(delivery_a.message.payload, b"only-a".to_vec());
+    assert_eq!(delivery_a.message.payload.as_bytes(), b"only-a");
     // 负向：vhost-b 订阅者超时内无投递（vhost 硬命名空间边界——跨 vhost 不路由）。
     // 1s 余量（原 500ms 在 CI 高负载下偶发 flaky；正向已先成功，负向只需等隔离窗口）。
     let b_result = tokio::time::timeout(Duration::from_secs(1), stream_b.next()).await;
@@ -303,7 +306,7 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
         .await
         .map_err(|_| anyhow!("timeout waiting for ackable delivery"))?
         .ok_or_else(|| anyhow!("stream closed without delivery"))?;
-    assert_eq!(delivery.message.payload, b"ack-payload".to_vec());
+    assert_eq!(delivery.message.payload.as_bytes(), b"ack-payload");
     delivery
         .acker
         .settle(AckAction::Ack)
@@ -377,7 +380,7 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
         .await
         .map_err(|_| anyhow!("timeout waiting for redelivery"))?
         .ok_or_else(|| anyhow!("redelivery stream closed without message"))?;
-    assert_eq!(redelivery.message.payload, b"requeue-payload".to_vec());
+    assert_eq!(redelivery.message.payload.as_bytes(), b"requeue-payload");
     // ack 清理，避免残留影响后续测试。
     redelivery
         .acker
@@ -436,7 +439,7 @@ async fn integration_ackable_crash_without_settle_redelivers() -> Result<(), Fix
         .await
         .map_err(|_| anyhow!("timeout waiting for crash-redelivery (at-least-once)"))?
         .ok_or_else(|| anyhow!("crash-redelivery stream closed without message"))?;
-    assert_eq!(redelivery.message.payload, b"crash-payload".to_vec());
+    assert_eq!(redelivery.message.payload.as_bytes(), b"crash-payload");
     // ack 清理。
     redelivery
         .acker
@@ -493,7 +496,7 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
         .await
         .map_err(|_| anyhow!("timeout waiting for token-cancel redelivery"))?
         .ok_or_else(|| anyhow!("token-cancel redelivery stream closed"))?;
-    assert_eq!(redelivery.message.payload, b"cancel-payload".to_vec());
+    assert_eq!(redelivery.message.payload.as_bytes(), b"cancel-payload");
     redelivery
         .acker
         .settle(AckAction::Ack)

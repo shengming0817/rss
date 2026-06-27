@@ -94,6 +94,9 @@ pub mod rate_limiter;
 // （`ObjectStoreError`）变体字段恒 public，须持 public 类型避免 privacy leak（#1120 merge：PR215 RedactedSource
 // pub(crate) 与 PR214 pub-enum 错误不兼容）。
 mod redacted;
+// DTO 字节 payload 脱敏 newtype（`Debug`/`Display` 恒 `<redacted>`，经 `as_bytes`/`into_bytes` 受控访问）。
+// `pub`（经下方 re-export 进公开 API 面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
+mod redacted_bytes;
 pub mod revocation_store;
 pub mod saga_journal;
 pub mod secret_resolver;
@@ -146,6 +149,7 @@ pub use rate_limiter::{
     DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
 };
 pub use redacted::RedactedSource;
+pub use redacted_bytes::RedactedBytes;
 pub use revocation_store::{
     CertScope, CertSerial, CertSerialError, DynRevocationStore, RevocationStore,
     RevocationStoreError,

@@ -89,7 +89,7 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
     let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
-    assert_eq!(msg.payload, b"hello-mqtt".to_vec());
+    assert_eq!(msg.payload.as_bytes(), b"hello-mqtt");
     // event_id 跨 broker 传播：correlation_data 经 envelope 流回 Message.id（消费侧幂等键源）。
     assert_eq!(
         msg.id.as_str(),
@@ -130,7 +130,7 @@ async fn integration_topic_isolation_same_connection() -> Result<(), FixtureErro
     let msg_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
         .await?
         .ok_or_else(|| anyhow!("b stream closed without a message"))?;
-    assert_eq!(msg_b.payload, b"to-b".to_vec());
+    assert_eq!(msg_b.payload.as_bytes(), b"to-b");
     // 负向：A 在短超时内无投递（精确 topic 路由——B 的消息没串到 A）。timeout Err = 无消息。
     let a_result = tokio::time::timeout(Duration::from_secs(1), stream_a.next()).await;
     assert!(

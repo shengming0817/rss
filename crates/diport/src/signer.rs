@@ -3,6 +3,7 @@
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 
 /// 签名失败。
 ///
@@ -62,27 +63,22 @@ impl SigningPurpose {
 
 /// 签名结果字节。
 ///
-/// PII 边界（类型层 Hard，对标 `primitives::crypto::{Mac,Digest}` opaque Debug）：手写 `Debug` 只输出固定
-/// `Signature(<redacted>)`，不展开原始字节——密码学物料不进 Debug / tracing。
+/// PII 边界（类型层 Hard，对标 `primitives::crypto::{Mac,Digest}` opaque Debug）：字节经 [`RedactedBytes`] 持有
+/// （`Debug` / `Display` 恒 `<redacted>`、不展开原始字节——密码学物料不进 Debug / tracing），故 struct
+/// `derive(Debug)` 即安全：`Signature(<redacted>)`。
 ///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-#[derive(Clone, PartialEq, Eq)]
-pub struct Signature(Vec<u8>);
-
-impl std::fmt::Debug for Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Signature(<redacted>)")
-    }
-}
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01（脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature(RedactedBytes);
 
 impl Signature {
     /// 由字节构造签名。
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        Self(bytes.into())
+        Self(RedactedBytes::new(bytes))
     }
     /// 借出签名字节。
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        self.0.as_bytes()
     }
 }
 
@@ -92,28 +88,15 @@ impl Signature {
 /// **租户 / 调用者**经 ambient [`runctx::RequestCtx`] 解析（tenant / principal 是请求级 context 值，
 /// 非 sign-request 字段；provider 从 ctx 取做 RLS / ABAC），不重复进本请求。字段集随消费域（deviceloop
 /// 证书签发）细化——pre-GA 窗口可原地加字段（algorithm / correlation），是可演进接缝，非 production-final 冻结面。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SignRequest {
     /// 目标签名 key。
     pub key: KeyId,
     /// 签名用途（fail-closed 归因）。
     pub purpose: SigningPurpose,
-    /// 待签字节。
-    pub message: Vec<u8>,
-}
-
-/// PII 边界（类型层 Hard，同 [`Signature`]）：手写 `Debug` 对 `message`（待签字节，可能是 CSR / nonce /
-/// token 等敏感体）输出 `<redacted>`；`key` / `purpose` 是归因元数据，可观测。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for SignRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SignRequest")
-            .field("key", &self.key)
-            .field("purpose", &self.purpose)
-            .field("message", &"<redacted>")
-            .finish()
-    }
+    /// 待签字节（[`RedactedBytes`] 持有：可能是 CSR / nonce / token 等敏感体，`Debug` 恒 `<redacted>`；
+    /// `key` / `purpose` 是归因元数据，可观测）。
+    pub message: RedactedBytes,
 }
 
 /// 签名 provider DI port（async）。
@@ -166,7 +149,7 @@ mod smoke {
         SignRequest {
             key: KeyId::new("key-1"),
             purpose: SigningPurpose::new("device-cert"),
-            message: b"payload".to_vec(),
+            message: b"payload".to_vec().into(),
         }
     }
 
@@ -216,7 +199,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `SignRequest.message`（待签名体）/ `Signature`（密码学物料）字节 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（对标 `primitives::crypto::{Mac,Digest,MacKey}` opaque Debug）。
+    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（字节经 `RedactedBytes` 脱敏，对标 `primitives::crypto::{Mac,Digest,MacKey}` opaque Debug）。
     use super::{KeyId, SignRequest, Signature, SigningPurpose};
 
     #[test]
@@ -229,7 +212,7 @@ mod pii_debug {
         let req = SignRequest {
             key: KeyId::new("key-1"),
             purpose: SigningPurpose::new("device-cert"),
-            message: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            message: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
         };
         let dbg = format!("{req:?}");
         assert!(!dbg.contains("222"), "message 字节泄漏(0xDE=222): {dbg}");

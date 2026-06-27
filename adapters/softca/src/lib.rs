@@ -233,7 +233,7 @@ impl Signer for SoftCaSigner {
         // ring 内部 SHA-256(message) 后 ECDSA-P256 签名，输出 DER（ASN.1）签名字节。
         let signature = self
             .key_pair
-            .sign(&self.rng, &request.message)
+            .sign(&self.rng, request.message.as_bytes())
             .map_err(|_| {
                 tracing::error!("softca: signing operation failed");
                 SignerError::new(SoftCaError::SignFailed)
@@ -453,7 +453,7 @@ mod backend_tests {
         SignRequest {
             key: KeyId::new(key),
             purpose: SigningPurpose::new(purpose),
-            message: message.to_vec(),
+            message: message.to_vec().into(),
         }
     }
 

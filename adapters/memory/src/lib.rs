@@ -676,7 +676,7 @@ impl CasStore for MemCasStore {
                 // 仅 expected==None（create-if-absent）命中；否则期望某值但键不存在 → Conflict{None}。
                 if request.expected.is_none() {
                     let token = vocab::Epoch::new(1);
-                    map.insert(request.key, (request.new_value, token));
+                    map.insert(request.key, (request.new_value.into_bytes(), token));
                     Ok(CasStoreOutcome::Applied { token })
                 } else {
                     Ok(CasStoreOutcome::Conflict { current: None })
@@ -688,13 +688,13 @@ impl CasStore for MemCasStore {
                     return Ok(CasStoreOutcome::Fenced { current_token });
                 }
                 // 再判值：匹配 → 写入 + token.next()；不符 → Conflict{当前值}。
-                if request.expected.as_deref() == Some(current.as_slice()) {
+                if request.expected.as_ref().map(|b| b.as_bytes()) == Some(current.as_slice()) {
                     let token = current_token.next();
-                    map.insert(request.key, (request.new_value, token));
+                    map.insert(request.key, (request.new_value.into_bytes(), token));
                     Ok(CasStoreOutcome::Applied { token })
                 } else {
                     Ok(CasStoreOutcome::Conflict {
-                        current: Some(current),
+                        current: Some(current.into()),
                     })
                 }
             }
@@ -1057,7 +1057,7 @@ mod tests {
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.payload, b"hello".to_vec());
+        assert_eq!(msg.payload.as_bytes(), b"hello");
         // EventId 传播：event_id 须作 Message.id（消费侧幂等键源）。
         assert_eq!(
             msg.id.as_str(),
@@ -1089,8 +1089,8 @@ mod tests {
             ))
             .await
             .expect("publish");
-        assert_eq!(a.next().await.expect("a msg").payload, b"x".to_vec());
-        assert_eq!(b.next().await.expect("b msg").payload, b"x".to_vec());
+        assert_eq!(a.next().await.expect("a msg").payload.as_bytes(), b"x");
+        assert_eq!(b.next().await.expect("b msg").payload.as_bytes(), b"x");
     }
 
     #[tokio::test]
@@ -1144,7 +1144,7 @@ mod tests {
             .expect("emit");
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(msg.id.as_str(), "evt-session-77", "EventId 应作 Message.id");
-        assert_eq!(msg.payload, b"payload".to_vec());
+        assert_eq!(msg.payload.as_bytes(), b"payload");
         assert_eq!(
             msg.metadata.tenant_id(),
             Some(vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
@@ -1244,7 +1244,7 @@ mod tests {
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.payload, b"with-meta".to_vec());
+        assert_eq!(msg.payload.as_bytes(), b"with-meta");
         assert_eq!(
             msg.metadata.occurred_at_secs(),
             Some(1_700_000_003_i64),
@@ -1566,7 +1566,7 @@ mod tests {
         let req = |k: &str, e: u64| FencedWriteRequest {
             key: FencedWriteKey::new(k),
             epoch: vocab::Epoch::new(e),
-            data: b"state".to_vec(),
+            data: b"state".to_vec().into(),
         };
 
         // key A 首写（高水位未设）→ 提交，高水位=2。
@@ -1601,7 +1601,7 @@ mod tests {
         let req = |k: &str, e: u64| FencedWriteRequest {
             key: FencedWriteKey::new(k),
             epoch: vocab::Epoch::new(e),
-            data: b"x".to_vec(),
+            data: b"x".to_vec().into(),
         };
         // key A 推到 epoch 5。
         assert_eq!(
@@ -1637,7 +1637,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: CasStoreKey::new("k1"),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1661,7 +1661,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1670,8 +1670,8 @@ mod tests {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v1".to_vec()),
-                new_value: b"v2".to_vec(),
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v2".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1695,7 +1695,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"actual".to_vec(),
+                new_value: b"actual".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1703,8 +1703,8 @@ mod tests {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"wrong".to_vec()),
-                new_value: b"new".to_vec(),
+                expected: Some(b"wrong".to_vec().into()),
+                new_value: b"new".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1712,7 +1712,7 @@ mod tests {
         assert_eq!(
             outcome,
             CasStoreOutcome::Conflict {
-                current: Some(b"actual".to_vec())
+                current: Some(b"actual".to_vec().into())
             }
         );
     }
@@ -1727,7 +1727,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1737,7 +1737,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v2".to_vec(),
+                new_value: b"v2".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1745,7 +1745,7 @@ mod tests {
         assert_eq!(
             outcome,
             CasStoreOutcome::Conflict {
-                current: Some(b"v1".to_vec())
+                current: Some(b"v1".to_vec().into())
             }
         );
     }
@@ -1760,7 +1760,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1768,8 +1768,8 @@ mod tests {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v1".to_vec()),
-                new_value: b"v2".to_vec(),
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v2".to_vec().into(),
                 expected_token: Some(vocab::Epoch::new(0)), // stale < 当前 Epoch(1)
             })
             .await
@@ -1793,7 +1793,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1808,8 +1808,8 @@ mod tests {
         let r2 = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v1".to_vec()),
-                new_value: b"v2".to_vec(),
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v2".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1824,8 +1824,8 @@ mod tests {
         let r3 = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v2".to_vec()),
-                new_value: b"v3".to_vec(),
+                expected: Some(b"v2".to_vec().into()),
+                new_value: b"v3".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1849,7 +1849,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1858,8 +1858,8 @@ mod tests {
         store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v1".to_vec()),
-                new_value: b"v2".to_vec(),
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v2".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1868,8 +1868,8 @@ mod tests {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v1".to_vec()),
-                new_value: b"v3".to_vec(),
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v3".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1877,7 +1877,7 @@ mod tests {
         assert_eq!(
             outcome,
             CasStoreOutcome::Conflict {
-                current: Some(b"v2".to_vec())
+                current: Some(b"v2".to_vec().into())
             },
             "写新值后旧 expected 必 Conflict"
         );
@@ -1891,8 +1891,8 @@ mod tests {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: CasStoreKey::new("absent-key"),
-                expected: Some(b"something".to_vec()),
-                new_value: b"new".to_vec(),
+                expected: Some(b"something".to_vec().into()),
+                new_value: b"new".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1915,7 +1915,7 @@ mod tests {
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
                 expected: None,
-                new_value: b"v1".to_vec(),
+                new_value: b"v1".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -1924,8 +1924,8 @@ mod tests {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
-                expected: Some(b"v1".to_vec()),
-                new_value: b"v2".to_vec(),
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v2".to_vec().into(),
                 expected_token: Some(vocab::Epoch::new(1)),
             })
             .await

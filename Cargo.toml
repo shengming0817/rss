@@ -80,6 +80,7 @@ libraries = [
   { path = "lints/rss_authplan_callsite" },
   { path = "lints/rss_authenticated_callsite" },
   { path = "lints/rss_diport_error_debug_redacted" },
+  { path = "lints/rss_diport_dto_debug_redacted" },
   { path = "lints/rss_pdp_impl_adapter_only" },
   { path = "lints/rss_projection_append_only" },
   { path = "lints/rss_partition_serial_allowlist" },

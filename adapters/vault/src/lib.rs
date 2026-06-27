@@ -435,7 +435,7 @@ mod integration {
             .sign(SignRequest {
                 key: KeyId::new(key),
                 purpose: SigningPurpose::new("integration-test"),
-                message: b"hello-rss".to_vec(),
+                message: b"hello-rss".to_vec().into(),
             })
             .await
             .expect("transit sign");

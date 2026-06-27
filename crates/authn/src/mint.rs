@@ -327,7 +327,7 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
             .sign(diport::SignRequest {
                 key: self.config.key.clone(),
                 purpose: self.config.purpose.clone(),
-                message: signing_input.as_bytes().to_vec(),
+                message: signing_input.as_bytes().to_vec().into(),
             })
             .await
             .map_err(JwtIssueError::Sign)?;
@@ -640,7 +640,7 @@ mod tests {
         // 签名 message == signing input == 段0.段1
         let parts = segments(&jwt);
         let expected_input = format!("{}.{}", parts[0], parts[1]);
-        assert_eq!(captured.message, expected_input.into_bytes());
+        assert_eq!(captured.message.as_bytes(), expected_input.as_bytes());
     }
 
     #[tokio::test]

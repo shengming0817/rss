@@ -116,8 +116,8 @@ pub(crate) async fn sign_impl(
     }
     // reason: serde_json::Value 序列化理论上不失败（无非序列化字段）；用 map_err 而非 expect 符合库错误规范
     // （error-handling.md），无需 item-level #[allow]。
-    let payload =
-        serde_json::to_vec(&build_sign_body(&request.message)).map_err(SignerError::new)?;
+    let payload = serde_json::to_vec(&build_sign_body(request.message.as_bytes()))
+        .map_err(SignerError::new)?;
 
     let response = client
         .post(url)
@@ -392,7 +392,7 @@ mod sign_impl_tests {
         SignRequest {
             key: KeyId::new(key),
             purpose: SigningPurpose::new("unit-test"),
-            message: b"hello-rss".to_vec(),
+            message: b"hello-rss".to_vec().into(),
         }
     }
 

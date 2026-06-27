@@ -79,8 +79,8 @@ impl StateCas {
             .store
             .compare_and_swap(diport::CasStoreRequest {
                 key,
-                expected,
-                new_value,
+                expected: expected.map(diport::RedactedBytes::new),
+                new_value: diport::RedactedBytes::new(new_value),
                 expected_token,
             })
             .await
@@ -96,8 +96,10 @@ impl StateCas {
             diport::CasStoreOutcome::Conflict { current } => {
                 let current = match current {
                     Some(bytes) => Some(
-                        serde_json::from_slice::<T>(&bytes).map_err(|e| {
-                            tracing::warn!(error = %e, "cas facade: deserialize conflict current failed");
+                        serde_json::from_slice::<T>(bytes.as_bytes()).map_err(|e| {
+                            // serde_json::Error Display 含出错位置的 payload 片段（PII 边界，#1155 安全 review）；
+                            // 用 classify() 取无 PII 的错误类别（Data/Syntax/Eof/Io），对齐 audit handler 范式。
+                            tracing::warn!(category = ?e.classify(), "cas facade: deserialize conflict current failed");
                             DistError::Fatal
                         })?,
                     ),
@@ -147,7 +149,10 @@ mod tests {
                 None => {
                     if request.expected.is_none() {
                         let token = vocab::Epoch::new(1);
-                        m.insert(request.key.as_str().to_owned(), (request.new_value, token));
+                        m.insert(
+                            request.key.as_str().to_owned(),
+                            (request.new_value.into_bytes(), token),
+                        );
                         Ok(diport::CasStoreOutcome::Applied { token })
                     } else {
                         Ok(diport::CasStoreOutcome::Conflict { current: None })
@@ -159,13 +164,16 @@ mod tests {
                             current_token: *current_token,
                         });
                     }
-                    if request.expected.as_deref() == Some(current.as_slice()) {
+                    if request.expected.as_ref().map(|b| b.as_bytes()) == Some(current.as_slice()) {
                         let token = current_token.next();
-                        m.insert(request.key.as_str().to_owned(), (request.new_value, token));
+                        m.insert(
+                            request.key.as_str().to_owned(),
+                            (request.new_value.into_bytes(), token),
+                        );
                         Ok(diport::CasStoreOutcome::Applied { token })
                     } else {
                         Ok(diport::CasStoreOutcome::Conflict {
-                            current: Some(current.clone()),
+                            current: Some(current.clone().into()),
                         })
                     }
                 }

@@ -4,6 +4,7 @@ use dynosaur::dynosaur;
 
 use crate::envelope::EnvelopeMetadata;
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 use crate::subscriber::MessageId;
 
 /// 发布失败的处置类别——决定 relay 是有界退避重试还是首投即 DLX。
@@ -106,11 +107,11 @@ impl Topic {
 /// **非** `runctx::RequestCtx`——后者只承载授权用 tenant / principal）；**租户**经 `runctx::RequestCtx` 解析。
 /// 跨域 wire 类型单源仍是 contract——`payload` 由 `eventexec`/outbox 层按 contract envelope 预编码后传入，
 /// DI-infra port **不**引 `generated`（ADR-003 §6 偏离 2）。字段集随消费域细化（pre-GA 可原地加 content-type 等）。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PublishRequest {
     topic: Topic,
     event_id: MessageId,
-    payload: Vec<u8>,
+    payload: RedactedBytes,
     metadata: EnvelopeMetadata,
 }
 
@@ -120,7 +121,7 @@ impl PublishRequest {
         Self {
             topic,
             event_id,
-            payload,
+            payload: RedactedBytes::new(payload),
             metadata: EnvelopeMetadata::empty(),
         }
     }
@@ -146,7 +147,7 @@ impl PublishRequest {
 
     /// provider-agnostic 事件字节（已按 contract envelope 编码）。
     pub fn payload(&self) -> &[u8] {
-        &self.payload
+        self.payload.as_bytes()
     }
 
     /// 统一 delivery envelope metadata（occurred_at / subjectId / correlation … → broker header）。
@@ -156,23 +157,7 @@ impl PublishRequest {
 
     /// move 出 payload（adapter publish 避 clone）。
     pub fn into_payload(self) -> Vec<u8> {
-        self.payload
-    }
-}
-
-/// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（事件序列化体，可能含
-/// PII——如审计事件本身被编码进 payload）输出 `<redacted>`；`topic` / `event_id` 是路由元数据，可观测；
-/// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 已脱敏）。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for PublishRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublishRequest")
-            .field("topic", &self.topic)
-            .field("event_id", &self.event_id)
-            .field("payload", &"<redacted>")
-            .field("metadata", &self.metadata)
-            .finish()
+        self.payload.into_bytes()
     }
 }
 
@@ -325,7 +310,7 @@ mod metadata_carry {
 #[cfg(test)]
 mod pii_debug {
     //! `PublishRequest.payload`（事件序列化体，可能含 PII）字节 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
     use super::{MessageId, PublishRequest, Topic};
     use crate::envelope::{EnvelopeMetadata, KEY_SUBJECT_ID};
 

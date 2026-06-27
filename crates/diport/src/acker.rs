@@ -211,7 +211,7 @@ mod smoke {
     fn delivery_constructs_and_destructures() {
         let Delivery { message, acker } = sample_delivery();
         assert_eq!(message.id.as_str(), "evt-1");
-        assert_eq!(message.payload, b"payload".to_vec());
+        assert_eq!(message.payload.as_bytes(), b"payload");
         // acker 是 Box<DynAcker>——存在即证 Delivery 携结算句柄（消费 acker 防 unused 警告）。
         let _ = acker;
     }

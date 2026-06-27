@@ -5,7 +5,7 @@
 //! resume（crash recovery）。主键 `(saga_id, seq)`——`append` 须幂等（重投同 `(saga_id, seq)` no-op），
 //! 故崩溃后重 append 安全。
 //!
-//! `JournalEntry.output`（step 输出字节，可能含 PII）经手写 `Debug` 脱敏；`read` 路径**不回传**
+//! `JournalEntry.output`（step 输出字节，可能含 PII）经 [`RedactedBytes`] 脱敏；`read` 路径**不回传**
 //! `output`/`error_summary`（resume 只需 `seq`/`step_name`/`status` 重建栈与阶段；output/error_summary
 //! 仅落库供运维巡检）。
 //!
@@ -16,6 +16,7 @@ use dynosaur::dynosaur;
 use consistency::StepName;
 
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 
 // ── saga id newtype funnel ────────────────────────────────────────────────────
 
@@ -92,13 +93,16 @@ impl JournalStatus {
 
 /// 一条 journal 记录（append 写形态）。
 ///
-/// `output`（step 输出字节，可能含 PII）经手写 `Debug` 脱敏（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01）。
+/// `output`（step 输出字节，可能含 PII）经 [`RedactedBytes`] 脱敏（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
 /// `error_summary` 是 `&'static str` const literal（补偿失败原因摘要，非 runtime 数据；对齐
 /// [`crate::DeadLetterSummary`] 的 PII 边界）。
 ///
 /// **read 路径字段有效性**：`read` 回传的条目仅 `seq` / `step_name` / `status` 有意义，
 /// `output` / `error_summary` 恒 `None`（resume 不需；二者仅落库供运维巡检）。
-#[derive(Clone)]
+///
+/// PII 边界（类型层 Hard，对标 `DeadLetterRecord` / `FencedWriteRequest`）：`output`（step 输出字节，可能含 PII）
+/// 经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
+#[derive(Debug, Clone)]
 pub struct JournalEntry {
     /// append 序号（主键 `(saga_id, seq)` 的第二段；单调 0..）。
     pub seq: u64,
@@ -106,25 +110,10 @@ pub struct JournalEntry {
     pub step_name: StepName,
     /// 条目状态。
     pub status: JournalStatus,
-    /// step 输出字节（仅 `Completed` 条目携带；`read` 回传恒 `None`）。
-    pub output: Option<Vec<u8>>,
+    /// step 输出字节（仅 `Completed` 条目携带，[`RedactedBytes`] 持有；`read` 回传恒 `None`）。
+    pub output: Option<RedactedBytes>,
     /// 补偿失败安全摘要（`&'static str` const literal；仅 `Failed` 条目携带；`read` 回传恒 `None`）。
     pub error_summary: Option<&'static str>,
-}
-
-// PII 边界（类型层 Hard，对标 `DeadLetterRecord` / `FencedWriteRequest`）：手写 `Debug` 对 `output`
-// 输出 `<redacted>`——step 输出字节可能含 PII，不进 Debug / tracing。
-// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for JournalEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JournalEntry")
-            .field("seq", &self.seq)
-            .field("step_name", &self.step_name)
-            .field("status", &self.status)
-            .field("output", &self.output.as_ref().map(|_| "<redacted>"))
-            .field("error_summary", &self.error_summary)
-            .finish()
-    }
 }
 
 impl JournalEntry {
@@ -144,7 +133,7 @@ impl JournalEntry {
             seq,
             step_name,
             status: JournalStatus::Completed,
-            output: Some(output),
+            output: Some(RedactedBytes::new(output)),
             error_summary: None,
         }
     }

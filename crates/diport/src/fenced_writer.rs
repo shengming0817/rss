@@ -19,6 +19,7 @@
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 
 /// 防护写结论（typed outcome，非 error——fence 是预期控制流，对标 `consistency::SeenState`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,28 +48,19 @@ impl FencedWriteKey {
 }
 
 /// typed 防护写请求：`key` 被保护资源 + `epoch` 当前任期 token + `data` payload。
-#[derive(Clone)]
+///
+/// PII 边界（类型层 Hard，同 [`crate::SignRequest`]）：`data`（待写 payload，可能含敏感设备状态 / 凭据）经
+/// [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全；`key` / `epoch` 是路由 / 版本元数据，可观测。
+///
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01。
+#[derive(Debug, Clone)]
 pub struct FencedWriteRequest {
     /// 被保护资源（fencing 高水位按 key 隔离）。
     pub key: FencedWriteKey,
     /// 当前任期 epoch（来自 `LeaseToken.epoch` / `Context::epoch()`）；provider 按 key CAS 比对高水位。
     pub epoch: vocab::Epoch,
-    /// 待写 payload（provider-agnostic 字节）。
-    pub data: Vec<u8>,
-}
-
-/// PII 边界（类型层 Hard，同 [`crate::SignRequest`]）：手写 `Debug` 对 `data`（待写 payload，可能含敏感
-/// 设备状态 / 凭据）输出 `<redacted>`；`key` / `epoch` 是路由 / 版本元数据，可观测。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01。
-impl std::fmt::Debug for FencedWriteRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FencedWriteRequest")
-            .field("key", &self.key)
-            .field("epoch", &self.epoch)
-            .field("data", &"<redacted>")
-            .finish()
-    }
+    /// 待写 payload（provider-agnostic 字节，[`RedactedBytes`] 持有）。
+    pub data: RedactedBytes,
 }
 
 /// 防护写失败（infra 故障，**非** fence——fence 是 [`WriteOutcome::Fenced`] 的 `Ok`）。
@@ -141,7 +133,7 @@ mod smoke {
         let req = FencedWriteRequest {
             key: FencedWriteKey::new("cert-3"),
             epoch: vocab::Epoch::new(3),
-            data: vec![0xDE, 0xAD],
+            data: vec![0xDE, 0xAD].into(),
         };
         let dbg = format!("{req:?}");
         assert!(!dbg.contains("222"), "data 字节泄漏: {dbg}");
@@ -171,7 +163,7 @@ mod smoke {
                 .write(FencedWriteRequest {
                     key: FencedWriteKey::new("res-1"),
                     epoch: vocab::Epoch::new(1),
-                    data: b"x".to_vec(),
+                    data: b"x".to_vec().into(),
                 })
                 .await;
             matches!(outcome, Ok(WriteOutcome::Committed)) && writer.shutdown().await.is_ok()

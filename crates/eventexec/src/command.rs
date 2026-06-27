@@ -146,7 +146,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
             let contract_id_s = Arc::clone(&contract_id_s);
             let topic_s = Arc::clone(&topic_s);
             Box::pin(async move {
-                match serde_json::from_slice::<R>(&msg.payload) {
+                match serde_json::from_slice::<R>(msg.payload.as_bytes()) {
                     Ok(req) => handler(req).await,
                     Err(_) => {
                         // 坏 wire = 永久 reject（不可恢复 → DLX）；warn 记录解码失败原因（无 payload 字节，PII 边界）。

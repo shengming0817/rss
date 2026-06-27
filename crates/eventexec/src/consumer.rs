@@ -570,7 +570,7 @@ async fn dead_letter<S>(
         meta.domain(),
         meta.contract_id(),
         meta.topic(),
-        msg.payload.clone(),
+        msg.payload.as_bytes().to_vec(),
         // 类型层收口：摘要只能是编译期 const literal（SUMMARY_* 常量），不可由 runtime 数据伪造
         // （review #216 F7，INVARIANT DIPORT-DLX-SUMMARY-STATIC-01）。
         DeadLetterSummary::new(error_summary),

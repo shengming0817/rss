@@ -8,6 +8,7 @@
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 
 // ── DeadLetterSummary ─────────────────────────────────────────────────────────
 
@@ -38,40 +39,22 @@ impl DeadLetterSummary {
 
 /// 死信写入记录（值类型，单一 funnel 构造）。
 ///
-/// `original_payload` 是原始消息字节，可能含 PII；
-/// **Debug 手写**，对该字段输出 `<redacted>`（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01）。
+/// `original_payload` 是原始消息字节，可能含 PII；经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`、经
+/// `original_payload()` 受控读取），故 `derive(Debug)` 即安全（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
 /// 其余字段（`domain` / `contract_id` / `topic` / `error_summary` / `num_attempts`）均为
 /// 运维归因元数据，可观测。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DeadLetterRecord {
     domain: String,
     contract_id: String,
     topic: String,
     tenant: vocab::TenantId,
     message_id: String,
-    original_payload: Vec<u8>,
+    original_payload: RedactedBytes,
     /// 安全摘要——类型层强制 `&'static str` const literal（经 [`DeadLetterSummary`] funnel），
     /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01）。
     error_summary: &'static str,
     num_attempts: u32,
-}
-
-// PII 边界（类型层 Hard，对标 `SignRequest` / `Message`）：手写 `Debug` 对 `original_payload`
-// 输出 `<redacted>`——原始消息字节可能含 PII，不进 Debug / tracing。
-// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for DeadLetterRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeadLetterRecord")
-            .field("domain", &self.domain)
-            .field("contract_id", &self.contract_id)
-            .field("topic", &self.topic)
-            .field("tenant", &self.tenant)
-            .field("message_id", &self.message_id)
-            .field("original_payload", &"<redacted>")
-            .field("error_summary", &self.error_summary)
-            .field("num_attempts", &self.num_attempts)
-            .finish()
-    }
 }
 
 impl DeadLetterRecord {
@@ -101,7 +84,7 @@ impl DeadLetterRecord {
             topic: topic.into(),
             tenant,
             message_id: message_id.into(),
-            original_payload,
+            original_payload: RedactedBytes::new(original_payload),
             error_summary: error_summary.as_str(),
             num_attempts,
         }
@@ -134,9 +117,9 @@ impl DeadLetterRecord {
 
     /// 借出原始 payload 字节。
     ///
-    /// **调用方有责任不将此值直接输出到 Debug / 日志**；PII 边界在 [`DeadLetterRecord::fmt`] 守护。
+    /// PII 边界由 [`RedactedBytes`] 类型保证（`Debug` 恒 `<redacted>`），本访问器仅供 provider 持久化收发字节。
     pub fn original_payload(&self) -> &[u8] {
-        &self.original_payload
+        self.original_payload.as_bytes()
     }
 
     /// 原始 payload 长度（可观测，不含内容）。

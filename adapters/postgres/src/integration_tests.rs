@@ -1156,6 +1156,8 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
 
     // old 死信：写入 → 回拨 last_attempt_at 过期（2h 前）。
     dl.write_dead_letter(DeadLetterRecord::new(
+        vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
+        "msg-dl-old",
         domain.as_str(),
         "contract-x",
         "dl.old",
@@ -1176,6 +1178,8 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
 
     // recent 死信（anti-vacuity）：写入，不回拨。
     dl.write_dead_letter(DeadLetterRecord::new(
+        vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
+        "msg-dl-recent",
         domain.as_str(),
         "contract-x",
         "dl.recent",

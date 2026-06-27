@@ -1433,6 +1433,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_diport_dto_debug_redacted"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+]
+
+[[package]]
 name = "rss_diport_envelope_reserved_writer"
 version = "0.0.0"
 dependencies = [

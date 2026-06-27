@@ -23,6 +23,7 @@
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 
 /// CAS 操作 key（fencing/版本维度）。provider 按 key **各自**维护 revision token。
 /// newtype funnel（私有字段，单一构造入口）——独立语义不复用裸 `String`。
@@ -43,67 +44,40 @@ impl CasStoreKey {
 
 /// typed CAS 请求：`key` 目标状态 + `expected` 期望当前值（`None` = 期望键不存在）+ `new_value` 待写值
 /// + 可选 `expected_token`（fencing 防 stale）。
-#[derive(Clone)]
+///
+/// PII 边界（类型层 Hard，同 [`crate::SignRequest`] / [`crate::FencedWriteRequest`]）：`expected` / `new_value`
+/// （状态 payload，可能含敏感设备状态 / 凭据）经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故
+/// `derive(Debug)` 即安全；`key` / `expected_token` 是路由 / 版本元数据，可观测。
+///
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01。
+#[derive(Debug, Clone)]
 pub struct CasStoreRequest {
     /// 目标状态 key（revision token 按 key 隔离）。
     pub key: CasStoreKey,
-    /// 期望当前值（provider-agnostic 字节）；`None` = 期望键不存在（create-if-absent）。
-    pub expected: Option<Vec<u8>>,
-    /// 待写新值（provider-agnostic 字节）。
-    pub new_value: Vec<u8>,
+    /// 期望当前值（provider-agnostic 字节，[`RedactedBytes`] 持有）；`None` = 期望键不存在（create-if-absent）。
+    pub expected: Option<RedactedBytes>,
+    /// 待写新值（provider-agnostic 字节，[`RedactedBytes`] 持有）。
+    pub new_value: RedactedBytes,
     /// 可选 fencing token：`Some(t)` 且 `t` 低于该 key 当前 token ⇒ Fenced（旧 leader stale 写被挡）。
     pub expected_token: Option<vocab::Epoch>,
 }
 
-/// PII 边界（类型层 Hard，同 [`crate::SignRequest`] / [`crate::FencedWriteRequest`]）：手写 `Debug` 对
-/// `expected` / `new_value`（状态 payload，可能含敏感设备状态 / 凭据）输出 `<redacted>`；`key` / `expected_token`
-/// 是路由 / 版本元数据，可观测。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01。
-impl std::fmt::Debug for CasStoreRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CasStoreRequest")
-            .field("key", &self.key)
-            .field("expected", &"<redacted>")
-            .field("new_value", &"<redacted>")
-            .field("expected_token", &self.expected_token)
-            .finish()
-    }
-}
-
 /// CAS 操作结论（typed outcome，非 error——conflict / fence 是预期控制流，对标 `consistency::SeenState` /
 /// [`crate::WriteOutcome`]）。
-#[derive(Clone, PartialEq, Eq)]
+///
+/// PII 边界（同 [`CasStoreRequest`]）：`Conflict.current`（当前状态 payload）经 [`RedactedBytes`] 持有
+/// （`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全；`Applied.token` / `Fenced.current_token` 是版本元数据，可观测。
+///
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01。
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CasStoreOutcome {
     /// swap 成功落地，返回该 key 推进后的 revision token（单调 `+1`）。
     Applied { token: vocab::Epoch },
     /// 值不符（含 expected!=None 但键不存在）——回当前值供调用方重读重试。
-    Conflict { current: Option<Vec<u8>> },
+    Conflict { current: Option<RedactedBytes> },
     /// `expected_token` 低于该 key 当前 token——旧 leader stale 写被挡，回当前 token；调用方应停写、重选举。
     Fenced { current_token: vocab::Epoch },
-}
-
-/// PII 边界（同 [`CasStoreRequest`]）：手写 `Debug` 对 `Conflict.current`（当前状态 payload）输出 `<redacted>`；
-/// `Applied.token` / `Fenced.current_token` 是版本元数据，可观测。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01。
-impl std::fmt::Debug for CasStoreOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CasStoreOutcome::Applied { token } => {
-                f.debug_struct("Applied").field("token", token).finish()
-            }
-            CasStoreOutcome::Conflict { .. } => f
-                .debug_struct("Conflict")
-                .field("current", &"<redacted>")
-                .finish(),
-            CasStoreOutcome::Fenced { current_token } => f
-                .debug_struct("Fenced")
-                .field("current_token", current_token)
-                .finish(),
-        }
-    }
 }
 
 /// CAS 写失败（infra 故障，**非** conflict/fence——后两者是 [`CasStoreOutcome`] 的 `Ok`）。
@@ -186,8 +160,8 @@ mod smoke {
         assert!(format!("{:?}", vec![0xDE_u8]).contains("222"));
         let req = CasStoreRequest {
             key: CasStoreKey::new("state-1"),
-            expected: Some(vec![0xDE, 0xAD]),
-            new_value: vec![0xBE, 0xEF],
+            expected: Some(vec![0xDE, 0xAD].into()),
+            new_value: vec![0xBE, 0xEF].into(),
             expected_token: Some(vocab::Epoch::new(7)),
         };
         let dbg = format!("{req:?}");
@@ -202,11 +176,22 @@ mod smoke {
     fn cas_store_outcome_conflict_debug_redacts_current() {
         assert!(format!("{:?}", vec![0xDE_u8]).contains("222"));
         let outcome = CasStoreOutcome::Conflict {
-            current: Some(vec![0xDE, 0xAD]),
+            current: Some(vec![0xDE, 0xAD].into()),
         };
         let dbg = format!("{outcome:?}");
         assert!(!dbg.contains("222"), "current 字节泄漏: {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
+        // `current: None`（expected!=None 但键不存在）路径：derive(Debug) 渲染 `None`、无 `<redacted>`、不泄漏。
+        let none = CasStoreOutcome::Conflict { current: None };
+        let none_dbg = format!("{none:?}");
+        assert!(
+            none_dbg.contains("None"),
+            "current=None 应渲染 None: {none_dbg}"
+        );
+        assert!(
+            !none_dbg.contains("<redacted>"),
+            "current=None 不应有 <redacted>: {none_dbg}"
+        );
         // Applied/Fenced 的 token 可观测（版本元数据）。
         let applied = CasStoreOutcome::Applied {
             token: vocab::Epoch::new(9),
@@ -230,7 +215,10 @@ mod smoke {
                 None => {
                     if request.expected.is_none() {
                         let token = vocab::Epoch::new(1);
-                        m.insert(request.key.as_str().to_owned(), (request.new_value, token));
+                        m.insert(
+                            request.key.as_str().to_owned(),
+                            (request.new_value.into_bytes(), token),
+                        );
                         Ok(CasStoreOutcome::Applied { token })
                     } else {
                         Ok(CasStoreOutcome::Conflict { current: None })
@@ -242,13 +230,16 @@ mod smoke {
                             current_token: *current_token,
                         });
                     }
-                    if request.expected.as_deref() == Some(current.as_slice()) {
+                    if request.expected.as_ref().map(|b| b.as_bytes()) == Some(current.as_slice()) {
                         let token = current_token.next();
-                        m.insert(request.key.as_str().to_owned(), (request.new_value, token));
+                        m.insert(
+                            request.key.as_str().to_owned(),
+                            (request.new_value.into_bytes(), token),
+                        );
                         Ok(CasStoreOutcome::Applied { token })
                     } else {
                         Ok(CasStoreOutcome::Conflict {
-                            current: Some(current.clone()),
+                            current: Some(current.clone().into()),
                         })
                     }
                 }
@@ -269,8 +260,8 @@ mod smoke {
         let outcome = store
             .compare_and_swap(CasStoreRequest {
                 key: CasStoreKey::new("absent"),
-                expected: Some(b"expect-something".to_vec()),
-                new_value: b"new".to_vec(),
+                expected: Some(b"expect-something".to_vec().into()),
+                new_value: b"new".to_vec().into(),
                 expected_token: None,
             })
             .await
@@ -291,7 +282,7 @@ mod smoke {
                 .compare_and_swap(CasStoreRequest {
                     key: CasStoreKey::new("k"),
                     expected: None,
-                    new_value: b"v1".to_vec(),
+                    new_value: b"v1".to_vec().into(),
                     expected_token: None,
                 })
                 .await?;
@@ -306,15 +297,15 @@ mod smoke {
             let conflict = store
                 .compare_and_swap(CasStoreRequest {
                     key: CasStoreKey::new("k"),
-                    expected: Some(b"v-wrong".to_vec()),
-                    new_value: b"v2".to_vec(),
+                    expected: Some(b"v-wrong".to_vec().into()),
+                    new_value: b"v2".to_vec().into(),
                     expected_token: None,
                 })
                 .await?;
             assert_eq!(
                 conflict,
                 CasStoreOutcome::Conflict {
-                    current: Some(b"v1".to_vec())
+                    current: Some(b"v1".to_vec().into())
                 }
             );
 
@@ -322,8 +313,8 @@ mod smoke {
             let fenced = store
                 .compare_and_swap(CasStoreRequest {
                     key: CasStoreKey::new("k"),
-                    expected: Some(b"v1".to_vec()),
-                    new_value: b"v2".to_vec(),
+                    expected: Some(b"v1".to_vec().into()),
+                    new_value: b"v2".to_vec().into(),
                     expected_token: Some(vocab::Epoch::new(0)),
                 })
                 .await?;

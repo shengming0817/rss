@@ -195,7 +195,7 @@ fn main() {
     let _req = SignRequest {
         key: KeyId::new("k"),
         purpose: SigningPurpose::new("p"),
-        message: Vec::new(),
+        message: Vec::new().into(),
     };
 
     // AuditSink：async DI port，dyn(box) wrapper 可 Box/Arc 注入。

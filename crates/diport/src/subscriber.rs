@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::envelope::EnvelopeMetadata;
 use crate::publisher::Topic;
 use crate::redacted::RedactedSource;
+use crate::redacted_bytes::RedactedBytes;
 
 // ── 消息原语（对齐 watermill Message UUID/Metadata/Payload）─────────────────────
 
@@ -38,28 +39,19 @@ impl MessageId {
 /// （[`EnvelopeMetadata`]）：reserved key（trace / correlation / principal / occurred_at）由 adapter
 /// subscriber 从 broker header 经 [`EnvelopeMetadata::insert_wire_pair`] 透传（来源已 sealed），业务不得伪造
 /// （writer 两层强度见 [`EnvelopeMetadata`] rustdoc + dylint DIPORT-ENVELOPE-WIRE-WRITER-01）。
-#[derive(Clone)]
+/// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：`payload`（消息体，可能含 PII）经 [`RedactedBytes`] 持有
+/// （`Debug` 恒 `<redacted>`、经 `as_bytes` 受控读取），故 struct `derive(Debug)` 即安全；`id`（路由）可观测；
+/// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
+///
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01（payload 脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
+#[derive(Debug, Clone)]
 pub struct Message {
     /// 消息唯一标识。
     pub id: MessageId,
     /// 统一 delivery envelope metadata（occurred_at / subjectId / correlation … 从 broker header 透传）。
     pub metadata: EnvelopeMetadata,
-    /// provider-agnostic 消息字节。
-    pub payload: Vec<u8>,
-}
-
-/// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：手写 `Debug` 对 `payload`（消息体，可能含 PII）输出
-/// `<redacted>`；`id`（路由）可观测；`metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
-///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for Message {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Message")
-            .field("id", &self.id)
-            .field("metadata", &self.metadata)
-            .field("payload", &"<redacted>")
-            .finish()
-    }
+    /// provider-agnostic 消息字节（[`RedactedBytes`] 持有：`Debug` 恒 `<redacted>`，经 `payload.as_bytes()` 读取）。
+    pub payload: RedactedBytes,
 }
 
 impl Message {
@@ -68,7 +60,7 @@ impl Message {
         Self {
             id: MessageId::new(id),
             metadata: EnvelopeMetadata::empty(),
-            payload,
+            payload: RedactedBytes::new(payload),
         }
     }
 
@@ -81,7 +73,7 @@ impl Message {
         Self {
             id: MessageId::new(id),
             metadata,
-            payload,
+            payload: RedactedBytes::new(payload),
         }
     }
 }
@@ -245,7 +237,7 @@ mod smoke {
         // Message::new 默认空 envelope（无 metadata 路径）。
         assert_eq!(msg.metadata.get("trace"), None);
         assert!(msg.metadata.is_empty());
-        assert_eq!(msg.payload, b"payload".to_vec());
+        assert_eq!(msg.payload.as_bytes(), b"payload");
     }
 
     #[test]
@@ -296,7 +288,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `Message.payload`（消息体，可能含 PII）字节 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
     use super::Message;
 
     #[test]

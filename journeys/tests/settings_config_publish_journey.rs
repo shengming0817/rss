@@ -75,7 +75,8 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("expected config-version-changed event"))?;
-    let payload: SettingsConfigVersionChangedPayload = serde_json::from_slice(&message.payload)?;
+    let payload: SettingsConfigVersionChangedPayload =
+        serde_json::from_slice(message.payload.as_bytes())?;
     assert_eq!(payload.key, "app.timeout");
     assert_eq!(payload.version, 1);
     assert_eq!(payload.change_kind, SettingsConfigChangeKind::Published);
@@ -138,7 +139,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
             .await?
             .ok_or_else(|| anyhow!("expected config-version-changed event"))?;
         let payload: SettingsConfigVersionChangedPayload =
-            serde_json::from_slice(&message.payload)?;
+            serde_json::from_slice(message.payload.as_bytes())?;
         last_payload = Some(payload);
     }
 
