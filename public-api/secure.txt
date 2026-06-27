@@ -36,54 +36,40 @@ impl<T> core::convert::From<T> for secure::aead::AeadError
 pub fn secure::aead::AeadError::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::aead::AeadError
 pub type secure::aead::AeadError::Output = T
-pub struct secure::aead::Ciphertext(_)
-impl secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::as_bytes(&self) -> &[u8]
-pub fn secure::aead::Ciphertext::from_bytes(alloc::vec::Vec<u8>) -> Self
-impl core::clone::Clone for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::clone(&self) -> secure::aead::Ciphertext
-impl core::cmp::Eq for secure::aead::Ciphertext
-impl core::cmp::PartialEq for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::eq(&self, &secure::aead::Ciphertext) -> bool
-impl core::fmt::Debug for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
-impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl core::marker::Freeze for secure::aead::Ciphertext
-impl core::marker::Send for secure::aead::Ciphertext
-impl core::marker::Sync for secure::aead::Ciphertext
-impl core::marker::Unpin for secure::aead::Ciphertext
-impl core::marker::UnsafeUnpin for secure::aead::Ciphertext
-impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Ciphertext
-impl core::panic::unwind_safe::UnwindSafe for secure::aead::Ciphertext
-impl<T, U> core::convert::Into<U> for secure::aead::Ciphertext where U: core::convert::From<T>
-pub fn secure::aead::Ciphertext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::aead::Ciphertext where U: core::convert::Into<T>
-pub type secure::aead::Ciphertext::Error = core::convert::Infallible
-pub fn secure::aead::Ciphertext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::aead::Ciphertext where U: core::convert::TryFrom<T>
-pub type secure::aead::Ciphertext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::aead::Ciphertext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::aead::Ciphertext where T: core::clone::Clone
-pub type secure::aead::Ciphertext::Owned = T
-pub fn secure::aead::Ciphertext::clone_into(&self, &mut T)
-pub fn secure::aead::Ciphertext::to_owned(&self) -> T
-impl<T> core::any::Any for secure::aead::Ciphertext where T: 'static + ?core::marker::Sized
-pub fn secure::aead::Ciphertext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
-pub fn secure::aead::Ciphertext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
-pub fn secure::aead::Ciphertext::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::aead::Ciphertext where T: core::clone::Clone
-pub unsafe fn secure::aead::Ciphertext::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::aead::Ciphertext
-pub type secure::aead::Ciphertext::Output = T
+pub struct secure::aead::Plaintext(_)
+impl secure::aead::Plaintext
+pub fn secure::aead::Plaintext::expose(&self) -> &[u8]
+pub fn secure::aead::Plaintext::new(alloc::vec::Vec<u8>) -> Self
+impl core::fmt::Debug for secure::aead::Plaintext
+pub fn secure::aead::Plaintext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::aead::Plaintext
+impl core::marker::Send for secure::aead::Plaintext
+impl core::marker::Sync for secure::aead::Plaintext
+impl core::marker::Unpin for secure::aead::Plaintext
+impl core::marker::UnsafeUnpin for secure::aead::Plaintext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Plaintext
+impl core::panic::unwind_safe::UnwindSafe for secure::aead::Plaintext
+impl<T, U> core::convert::Into<U> for secure::aead::Plaintext where U: core::convert::From<T>
+pub fn secure::aead::Plaintext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::aead::Plaintext where U: core::convert::Into<T>
+pub type secure::aead::Plaintext::Error = core::convert::Infallible
+pub fn secure::aead::Plaintext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::aead::Plaintext where U: core::convert::TryFrom<T>
+pub type secure::aead::Plaintext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::aead::Plaintext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::aead::Plaintext where T: 'static + ?core::marker::Sized
+pub fn secure::aead::Plaintext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::aead::Plaintext where T: ?core::marker::Sized
+pub fn secure::aead::Plaintext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::aead::Plaintext where T: ?core::marker::Sized
+pub fn secure::aead::Plaintext::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::aead::Plaintext
+pub fn secure::aead::Plaintext::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::aead::Plaintext
+pub type secure::aead::Plaintext::Output = T
 pub trait secure::aead::Aead
-pub fn secure::aead::Aead::open(&self, &secure::aead::Ciphertext) -> core::result::Result<alloc::vec::Vec<u8>, secure::aead::AeadError>
-pub fn secure::aead::Aead::seal(&self, &[u8]) -> core::result::Result<secure::aead::Ciphertext, secure::aead::AeadError>
+pub fn secure::aead::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>
+pub fn secure::aead::Aead::seal(&self, &[u8], &secure::protection::DerivedAad) -> core::result::Result<secure::envelope::CiphertextEnvelope, secure::aead::AeadError>
 pub mod secure::cookie
 #[non_exhaustive] pub enum secure::cookie::CookieError
 pub secure::cookie::CookieError::Malformed
@@ -203,6 +189,182 @@ pub type secure::cookie::CookieValue::Output = T
 pub trait secure::cookie::CookieCodec
 pub fn secure::cookie::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
 pub fn secure::cookie::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
+pub mod secure::envelope
+#[non_exhaustive] pub enum secure::envelope::CipherAlg
+pub secure::envelope::CipherAlg::Aes256Gcm
+pub secure::envelope::CipherAlg::Aes256Siv
+impl core::clone::Clone for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::clone(&self) -> secure::envelope::CipherAlg
+impl core::cmp::Eq for secure::envelope::CipherAlg
+impl core::cmp::PartialEq for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::eq(&self, &secure::envelope::CipherAlg) -> bool
+impl core::fmt::Debug for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::envelope::CipherAlg
+impl core::marker::StructuralPartialEq for secure::envelope::CipherAlg
+impl core::marker::Freeze for secure::envelope::CipherAlg
+impl core::marker::Send for secure::envelope::CipherAlg
+impl core::marker::Sync for secure::envelope::CipherAlg
+impl core::marker::Unpin for secure::envelope::CipherAlg
+impl core::marker::UnsafeUnpin for secure::envelope::CipherAlg
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CipherAlg
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CipherAlg
+impl<T, U> core::convert::Into<U> for secure::envelope::CipherAlg where U: core::convert::From<T>
+pub fn secure::envelope::CipherAlg::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::CipherAlg where U: core::convert::Into<T>
+pub type secure::envelope::CipherAlg::Error = core::convert::Infallible
+pub fn secure::envelope::CipherAlg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::CipherAlg where U: core::convert::TryFrom<T>
+pub type secure::envelope::CipherAlg::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::CipherAlg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::envelope::CipherAlg where T: core::clone::Clone
+pub type secure::envelope::CipherAlg::Owned = T
+pub fn secure::envelope::CipherAlg::clone_into(&self, &mut T)
+pub fn secure::envelope::CipherAlg::to_owned(&self) -> T
+impl<T> core::any::Any for secure::envelope::CipherAlg where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::CipherAlg::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
+pub fn secure::envelope::CipherAlg::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
+pub fn secure::envelope::CipherAlg::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::envelope::CipherAlg where T: core::clone::Clone
+pub unsafe fn secure::envelope::CipherAlg::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::CipherAlg
+pub type secure::envelope::CipherAlg::Output = T
+#[non_exhaustive] pub enum secure::envelope::EncryptionMode
+pub secure::envelope::EncryptionMode::Deterministic
+pub secure::envelope::EncryptionMode::Randomized
+impl core::clone::Clone for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::clone(&self) -> secure::envelope::EncryptionMode
+impl core::cmp::Eq for secure::envelope::EncryptionMode
+impl core::cmp::PartialEq for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::eq(&self, &secure::envelope::EncryptionMode) -> bool
+impl core::fmt::Debug for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::envelope::EncryptionMode
+impl core::marker::StructuralPartialEq for secure::envelope::EncryptionMode
+impl core::marker::Freeze for secure::envelope::EncryptionMode
+impl core::marker::Send for secure::envelope::EncryptionMode
+impl core::marker::Sync for secure::envelope::EncryptionMode
+impl core::marker::Unpin for secure::envelope::EncryptionMode
+impl core::marker::UnsafeUnpin for secure::envelope::EncryptionMode
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EncryptionMode
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EncryptionMode
+impl<T, U> core::convert::Into<U> for secure::envelope::EncryptionMode where U: core::convert::From<T>
+pub fn secure::envelope::EncryptionMode::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::EncryptionMode where U: core::convert::Into<T>
+pub type secure::envelope::EncryptionMode::Error = core::convert::Infallible
+pub fn secure::envelope::EncryptionMode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::EncryptionMode where U: core::convert::TryFrom<T>
+pub type secure::envelope::EncryptionMode::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::EncryptionMode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::envelope::EncryptionMode where T: core::clone::Clone
+pub type secure::envelope::EncryptionMode::Owned = T
+pub fn secure::envelope::EncryptionMode::clone_into(&self, &mut T)
+pub fn secure::envelope::EncryptionMode::to_owned(&self) -> T
+impl<T> core::any::Any for secure::envelope::EncryptionMode where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::EncryptionMode::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
+pub fn secure::envelope::EncryptionMode::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
+pub fn secure::envelope::EncryptionMode::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::envelope::EncryptionMode where T: core::clone::Clone
+pub unsafe fn secure::envelope::EncryptionMode::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::EncryptionMode
+pub type secure::envelope::EncryptionMode::Output = T
+#[non_exhaustive] pub enum secure::envelope::EnvelopeError
+pub secure::envelope::EnvelopeError::AlgModeMismatch
+pub secure::envelope::EnvelopeError::EmptyKeyId
+impl core::error::Error for secure::envelope::EnvelopeError
+impl core::fmt::Debug for secure::envelope::EnvelopeError
+pub fn secure::envelope::EnvelopeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::envelope::EnvelopeError
+pub fn secure::envelope::EnvelopeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::envelope::EnvelopeError
+impl core::marker::Send for secure::envelope::EnvelopeError
+impl core::marker::Sync for secure::envelope::EnvelopeError
+impl core::marker::Unpin for secure::envelope::EnvelopeError
+impl core::marker::UnsafeUnpin for secure::envelope::EnvelopeError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EnvelopeError
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EnvelopeError
+impl<T, U> core::convert::Into<U> for secure::envelope::EnvelopeError where U: core::convert::From<T>
+pub fn secure::envelope::EnvelopeError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::EnvelopeError where U: core::convert::Into<T>
+pub type secure::envelope::EnvelopeError::Error = core::convert::Infallible
+pub fn secure::envelope::EnvelopeError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::EnvelopeError where U: core::convert::TryFrom<T>
+pub type secure::envelope::EnvelopeError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::EnvelopeError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::envelope::EnvelopeError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::envelope::EnvelopeError where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::envelope::EnvelopeError
+pub fn secure::envelope::EnvelopeError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::EnvelopeError
+pub type secure::envelope::EnvelopeError::Output = T
+pub struct secure::envelope::CiphertextEnvelope
+impl secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::aad(&self) -> &secure::protection::ProtectionAad
+pub fn secure::envelope::CiphertextEnvelope::alg(&self) -> secure::envelope::CipherAlg
+pub fn secure::envelope::CiphertextEnvelope::ciphertext(&self) -> &[u8]
+pub fn secure::envelope::CiphertextEnvelope::key_version(&self) -> u32
+pub fn secure::envelope::CiphertextEnvelope::kid(&self) -> &str
+pub fn secure::envelope::CiphertextEnvelope::mode(&self) -> secure::envelope::EncryptionMode
+pub fn secure::envelope::CiphertextEnvelope::new(secure::envelope::CipherAlg, secure::envelope::EncryptionMode, &str, u32, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>, secure::protection::ProtectionAad) -> core::result::Result<Self, secure::envelope::EnvelopeError>
+pub fn secure::envelope::CiphertextEnvelope::nonce(&self) -> &[u8]
+pub fn secure::envelope::CiphertextEnvelope::tag(&self) -> &[u8]
+pub fn secure::envelope::CiphertextEnvelope::version(&self) -> u8
+impl core::clone::Clone for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::clone(&self) -> secure::envelope::CiphertextEnvelope
+impl core::cmp::Eq for secure::envelope::CiphertextEnvelope
+impl core::cmp::PartialEq for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::eq(&self, &secure::envelope::CiphertextEnvelope) -> bool
+impl core::fmt::Debug for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::envelope::CiphertextEnvelope
+impl secure::redaction::Redact for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for secure::envelope::CiphertextEnvelope
+impl core::marker::Send for secure::envelope::CiphertextEnvelope
+impl core::marker::Sync for secure::envelope::CiphertextEnvelope
+impl core::marker::Unpin for secure::envelope::CiphertextEnvelope
+impl core::marker::UnsafeUnpin for secure::envelope::CiphertextEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CiphertextEnvelope
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CiphertextEnvelope
+impl<T, U> core::convert::Into<U> for secure::envelope::CiphertextEnvelope where U: core::convert::From<T>
+pub fn secure::envelope::CiphertextEnvelope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::CiphertextEnvelope where U: core::convert::Into<T>
+pub type secure::envelope::CiphertextEnvelope::Error = core::convert::Infallible
+pub fn secure::envelope::CiphertextEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::CiphertextEnvelope where U: core::convert::TryFrom<T>
+pub type secure::envelope::CiphertextEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::CiphertextEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
+pub type secure::envelope::CiphertextEnvelope::Owned = T
+pub fn secure::envelope::CiphertextEnvelope::clone_into(&self, &mut T)
+pub fn secure::envelope::CiphertextEnvelope::to_owned(&self) -> T
+impl<T> core::any::Any for secure::envelope::CiphertextEnvelope where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::CiphertextEnvelope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
+pub fn secure::envelope::CiphertextEnvelope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
+pub fn secure::envelope::CiphertextEnvelope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
+pub unsafe fn secure::envelope::CiphertextEnvelope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::CiphertextEnvelope
+pub type secure::envelope::CiphertextEnvelope::Output = T
+pub const secure::envelope::ENVELOPE_VERSION: u8
 pub mod secure::password
 #[non_exhaustive] pub enum secure::password::PasswordError
 pub secure::password::PasswordError::Hash
@@ -288,6 +450,166 @@ pub fn secure::password::verify_password(&str, &secure::password::PasswordHash) 
 pub fn secure::password::verify_password_constant_time(&str, core::option::Option<&secure::password::PasswordHash>) -> bool
 pub mod secure::pathsafe
 pub fn secure::pathsafe::is_safe_segment(&str) -> bool
+pub mod secure::protection
+#[non_exhaustive] pub enum secure::protection::AadError
+pub secure::protection::AadError::EmptyDimension
+impl core::error::Error for secure::protection::AadError
+impl core::fmt::Debug for secure::protection::AadError
+pub fn secure::protection::AadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::protection::AadError
+pub fn secure::protection::AadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::protection::AadError
+impl core::marker::Send for secure::protection::AadError
+impl core::marker::Sync for secure::protection::AadError
+impl core::marker::Unpin for secure::protection::AadError
+impl core::marker::UnsafeUnpin for secure::protection::AadError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::AadError
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::AadError
+impl<T, U> core::convert::Into<U> for secure::protection::AadError where U: core::convert::From<T>
+pub fn secure::protection::AadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::AadError where U: core::convert::Into<T>
+pub type secure::protection::AadError::Error = core::convert::Infallible
+pub fn secure::protection::AadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::AadError where U: core::convert::TryFrom<T>
+pub type secure::protection::AadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::AadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::protection::AadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::protection::AadError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::protection::AadError where T: 'static + ?core::marker::Sized
+pub fn secure::protection::AadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::AadError where T: ?core::marker::Sized
+pub fn secure::protection::AadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::AadError where T: ?core::marker::Sized
+pub fn secure::protection::AadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::protection::AadError
+pub fn secure::protection::AadError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::AadError
+pub type secure::protection::AadError::Output = T
+pub struct secure::protection::DerivedAad
+impl secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::as_canonical_bytes(&self) -> &[u8]
+pub fn secure::protection::DerivedAad::coordinates(&self) -> &secure::protection::ProtectionAad
+impl core::clone::Clone for secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::clone(&self) -> secure::protection::DerivedAad
+impl core::fmt::Debug for secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::protection::DerivedAad
+impl core::marker::Send for secure::protection::DerivedAad
+impl core::marker::Sync for secure::protection::DerivedAad
+impl core::marker::Unpin for secure::protection::DerivedAad
+impl core::marker::UnsafeUnpin for secure::protection::DerivedAad
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
+impl<T, U> core::convert::Into<U> for secure::protection::DerivedAad where U: core::convert::From<T>
+pub fn secure::protection::DerivedAad::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::DerivedAad where U: core::convert::Into<T>
+pub type secure::protection::DerivedAad::Error = core::convert::Infallible
+pub fn secure::protection::DerivedAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::DerivedAad where U: core::convert::TryFrom<T>
+pub type secure::protection::DerivedAad::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::DerivedAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::protection::DerivedAad where T: core::clone::Clone
+pub type secure::protection::DerivedAad::Owned = T
+pub fn secure::protection::DerivedAad::clone_into(&self, &mut T)
+pub fn secure::protection::DerivedAad::to_owned(&self) -> T
+impl<T> core::any::Any for secure::protection::DerivedAad where T: 'static + ?core::marker::Sized
+pub fn secure::protection::DerivedAad::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
+pub fn secure::protection::DerivedAad::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
+pub fn secure::protection::DerivedAad::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::protection::DerivedAad where T: core::clone::Clone
+pub unsafe fn secure::protection::DerivedAad::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::DerivedAad
+pub type secure::protection::DerivedAad::Output = T
+pub struct secure::protection::ProtectionAad
+impl secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+impl core::clone::Clone for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::clone(&self) -> secure::protection::ProtectionAad
+impl core::cmp::Eq for secure::protection::ProtectionAad
+impl core::cmp::PartialEq for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::eq(&self, &secure::protection::ProtectionAad) -> bool
+impl core::fmt::Debug for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::protection::ProtectionAad
+impl core::marker::Freeze for secure::protection::ProtectionAad
+impl core::marker::Send for secure::protection::ProtectionAad
+impl core::marker::Sync for secure::protection::ProtectionAad
+impl core::marker::Unpin for secure::protection::ProtectionAad
+impl core::marker::UnsafeUnpin for secure::protection::ProtectionAad
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionAad
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionAad
+impl<T, U> core::convert::Into<U> for secure::protection::ProtectionAad where U: core::convert::From<T>
+pub fn secure::protection::ProtectionAad::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionAad where U: core::convert::Into<T>
+pub type secure::protection::ProtectionAad::Error = core::convert::Infallible
+pub fn secure::protection::ProtectionAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionAad where U: core::convert::TryFrom<T>
+pub type secure::protection::ProtectionAad::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::ProtectionAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionAad where T: core::clone::Clone
+pub type secure::protection::ProtectionAad::Owned = T
+pub fn secure::protection::ProtectionAad::clone_into(&self, &mut T)
+pub fn secure::protection::ProtectionAad::to_owned(&self) -> T
+impl<T> core::any::Any for secure::protection::ProtectionAad where T: 'static + ?core::marker::Sized
+pub fn secure::protection::ProtectionAad::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionAad::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionAad::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::protection::ProtectionAad where T: core::clone::Clone
+pub unsafe fn secure::protection::ProtectionAad::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::ProtectionAad
+pub type secure::protection::ProtectionAad::Output = T
+pub struct secure::protection::ProtectionContext
+impl secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::authenticated_request(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::authorized_maintenance(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::derive(&self) -> secure::protection::DerivedAad
+impl core::clone::Clone for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::clone(&self) -> secure::protection::ProtectionContext
+impl core::cmp::Eq for secure::protection::ProtectionContext
+impl core::cmp::PartialEq for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::eq(&self, &secure::protection::ProtectionContext) -> bool
+impl core::fmt::Debug for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::protection::ProtectionContext
+impl core::marker::Freeze for secure::protection::ProtectionContext
+impl core::marker::Send for secure::protection::ProtectionContext
+impl core::marker::Sync for secure::protection::ProtectionContext
+impl core::marker::Unpin for secure::protection::ProtectionContext
+impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
+impl<T, U> core::convert::Into<U> for secure::protection::ProtectionContext where U: core::convert::From<T>
+pub fn secure::protection::ProtectionContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionContext where U: core::convert::Into<T>
+pub type secure::protection::ProtectionContext::Error = core::convert::Infallible
+pub fn secure::protection::ProtectionContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionContext where U: core::convert::TryFrom<T>
+pub type secure::protection::ProtectionContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::ProtectionContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionContext where T: core::clone::Clone
+pub type secure::protection::ProtectionContext::Owned = T
+pub fn secure::protection::ProtectionContext::clone_into(&self, &mut T)
+pub fn secure::protection::ProtectionContext::to_owned(&self) -> T
+impl<T> core::any::Any for secure::protection::ProtectionContext where T: 'static + ?core::marker::Sized
+pub fn secure::protection::ProtectionContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::protection::ProtectionContext where T: core::clone::Clone
+pub unsafe fn secure::protection::ProtectionContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::ProtectionContext
+pub type secure::protection::ProtectionContext::Output = T
 pub mod secure::redaction
 #[non_exhaustive] pub enum secure::redaction::PiiKind
 pub secure::redaction::PiiKind::Address
@@ -652,10 +974,10 @@ impl<T> typenum::type_operators::Same for secure::redaction::Redacted
 pub type secure::redaction::Redacted::Output = T
 pub trait secure::redaction::Redact
 pub fn secure::redaction::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl secure::redaction::Redact for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 pub trait secure::redaction::RedactField
@@ -710,6 +1032,40 @@ pub fn secure::refresh::OpaqueToken::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::refresh::OpaqueToken
 pub type secure::refresh::OpaqueToken::Output = T
 pub fn secure::refresh::digest(&str) -> [u8; 32]
+#[non_exhaustive] pub enum secure::AadError
+pub secure::AadError::EmptyDimension
+impl core::error::Error for secure::protection::AadError
+impl core::fmt::Debug for secure::protection::AadError
+pub fn secure::protection::AadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::protection::AadError
+pub fn secure::protection::AadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::protection::AadError
+impl core::marker::Send for secure::protection::AadError
+impl core::marker::Sync for secure::protection::AadError
+impl core::marker::Unpin for secure::protection::AadError
+impl core::marker::UnsafeUnpin for secure::protection::AadError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::AadError
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::AadError
+impl<T, U> core::convert::Into<U> for secure::protection::AadError where U: core::convert::From<T>
+pub fn secure::protection::AadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::AadError where U: core::convert::Into<T>
+pub type secure::protection::AadError::Error = core::convert::Infallible
+pub fn secure::protection::AadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::AadError where U: core::convert::TryFrom<T>
+pub type secure::protection::AadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::AadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::protection::AadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::protection::AadError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::protection::AadError where T: 'static + ?core::marker::Sized
+pub fn secure::protection::AadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::AadError where T: ?core::marker::Sized
+pub fn secure::protection::AadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::AadError where T: ?core::marker::Sized
+pub fn secure::protection::AadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::protection::AadError
+pub fn secure::protection::AadError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::AadError
+pub type secure::protection::AadError::Output = T
 #[non_exhaustive] pub enum secure::AeadError
 pub secure::AeadError::Open
 pub secure::AeadError::Seal
@@ -745,6 +1101,49 @@ impl<T> core::convert::From<T> for secure::aead::AeadError
 pub fn secure::aead::AeadError::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::aead::AeadError
 pub type secure::aead::AeadError::Output = T
+#[non_exhaustive] pub enum secure::CipherAlg
+pub secure::CipherAlg::Aes256Gcm
+pub secure::CipherAlg::Aes256Siv
+impl core::clone::Clone for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::clone(&self) -> secure::envelope::CipherAlg
+impl core::cmp::Eq for secure::envelope::CipherAlg
+impl core::cmp::PartialEq for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::eq(&self, &secure::envelope::CipherAlg) -> bool
+impl core::fmt::Debug for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::envelope::CipherAlg
+impl core::marker::StructuralPartialEq for secure::envelope::CipherAlg
+impl core::marker::Freeze for secure::envelope::CipherAlg
+impl core::marker::Send for secure::envelope::CipherAlg
+impl core::marker::Sync for secure::envelope::CipherAlg
+impl core::marker::Unpin for secure::envelope::CipherAlg
+impl core::marker::UnsafeUnpin for secure::envelope::CipherAlg
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CipherAlg
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CipherAlg
+impl<T, U> core::convert::Into<U> for secure::envelope::CipherAlg where U: core::convert::From<T>
+pub fn secure::envelope::CipherAlg::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::CipherAlg where U: core::convert::Into<T>
+pub type secure::envelope::CipherAlg::Error = core::convert::Infallible
+pub fn secure::envelope::CipherAlg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::CipherAlg where U: core::convert::TryFrom<T>
+pub type secure::envelope::CipherAlg::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::CipherAlg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::envelope::CipherAlg where T: core::clone::Clone
+pub type secure::envelope::CipherAlg::Owned = T
+pub fn secure::envelope::CipherAlg::clone_into(&self, &mut T)
+pub fn secure::envelope::CipherAlg::to_owned(&self) -> T
+impl<T> core::any::Any for secure::envelope::CipherAlg where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::CipherAlg::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
+pub fn secure::envelope::CipherAlg::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
+pub fn secure::envelope::CipherAlg::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::envelope::CipherAlg where T: core::clone::Clone
+pub unsafe fn secure::envelope::CipherAlg::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::envelope::CipherAlg
+pub fn secure::envelope::CipherAlg::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::CipherAlg
+pub type secure::envelope::CipherAlg::Output = T
 #[non_exhaustive] pub enum secure::CookieError
 pub secure::CookieError::Malformed
 pub secure::CookieError::Signature
@@ -815,6 +1214,84 @@ impl<T> core::convert::From<T> for secure::cookie::CookieValueError
 pub fn secure::cookie::CookieValueError::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::cookie::CookieValueError
 pub type secure::cookie::CookieValueError::Output = T
+#[non_exhaustive] pub enum secure::EncryptionMode
+pub secure::EncryptionMode::Deterministic
+pub secure::EncryptionMode::Randomized
+impl core::clone::Clone for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::clone(&self) -> secure::envelope::EncryptionMode
+impl core::cmp::Eq for secure::envelope::EncryptionMode
+impl core::cmp::PartialEq for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::eq(&self, &secure::envelope::EncryptionMode) -> bool
+impl core::fmt::Debug for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::envelope::EncryptionMode
+impl core::marker::StructuralPartialEq for secure::envelope::EncryptionMode
+impl core::marker::Freeze for secure::envelope::EncryptionMode
+impl core::marker::Send for secure::envelope::EncryptionMode
+impl core::marker::Sync for secure::envelope::EncryptionMode
+impl core::marker::Unpin for secure::envelope::EncryptionMode
+impl core::marker::UnsafeUnpin for secure::envelope::EncryptionMode
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EncryptionMode
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EncryptionMode
+impl<T, U> core::convert::Into<U> for secure::envelope::EncryptionMode where U: core::convert::From<T>
+pub fn secure::envelope::EncryptionMode::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::EncryptionMode where U: core::convert::Into<T>
+pub type secure::envelope::EncryptionMode::Error = core::convert::Infallible
+pub fn secure::envelope::EncryptionMode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::EncryptionMode where U: core::convert::TryFrom<T>
+pub type secure::envelope::EncryptionMode::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::EncryptionMode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::envelope::EncryptionMode where T: core::clone::Clone
+pub type secure::envelope::EncryptionMode::Owned = T
+pub fn secure::envelope::EncryptionMode::clone_into(&self, &mut T)
+pub fn secure::envelope::EncryptionMode::to_owned(&self) -> T
+impl<T> core::any::Any for secure::envelope::EncryptionMode where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::EncryptionMode::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
+pub fn secure::envelope::EncryptionMode::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
+pub fn secure::envelope::EncryptionMode::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::envelope::EncryptionMode where T: core::clone::Clone
+pub unsafe fn secure::envelope::EncryptionMode::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::envelope::EncryptionMode
+pub fn secure::envelope::EncryptionMode::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::EncryptionMode
+pub type secure::envelope::EncryptionMode::Output = T
+#[non_exhaustive] pub enum secure::EnvelopeError
+pub secure::EnvelopeError::AlgModeMismatch
+pub secure::EnvelopeError::EmptyKeyId
+impl core::error::Error for secure::envelope::EnvelopeError
+impl core::fmt::Debug for secure::envelope::EnvelopeError
+pub fn secure::envelope::EnvelopeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::envelope::EnvelopeError
+pub fn secure::envelope::EnvelopeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::envelope::EnvelopeError
+impl core::marker::Send for secure::envelope::EnvelopeError
+impl core::marker::Sync for secure::envelope::EnvelopeError
+impl core::marker::Unpin for secure::envelope::EnvelopeError
+impl core::marker::UnsafeUnpin for secure::envelope::EnvelopeError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EnvelopeError
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EnvelopeError
+impl<T, U> core::convert::Into<U> for secure::envelope::EnvelopeError where U: core::convert::From<T>
+pub fn secure::envelope::EnvelopeError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::EnvelopeError where U: core::convert::Into<T>
+pub type secure::envelope::EnvelopeError::Error = core::convert::Infallible
+pub fn secure::envelope::EnvelopeError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::EnvelopeError where U: core::convert::TryFrom<T>
+pub type secure::envelope::EnvelopeError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::EnvelopeError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::envelope::EnvelopeError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::envelope::EnvelopeError where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
+pub fn secure::envelope::EnvelopeError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::envelope::EnvelopeError
+pub fn secure::envelope::EnvelopeError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::EnvelopeError
+pub type secure::envelope::EnvelopeError::Output = T
 #[non_exhaustive] pub enum secure::PasswordError
 pub secure::PasswordError::Hash
 impl core::error::Error for secure::password::PasswordError
@@ -1076,51 +1553,59 @@ impl<T> core::convert::From<T> for secure::redaction::Sensitivity
 pub fn secure::redaction::Sensitivity::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::Sensitivity
 pub type secure::redaction::Sensitivity::Output = T
-pub struct secure::Ciphertext(_)
-impl secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::as_bytes(&self) -> &[u8]
-pub fn secure::aead::Ciphertext::from_bytes(alloc::vec::Vec<u8>) -> Self
-impl core::clone::Clone for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::clone(&self) -> secure::aead::Ciphertext
-impl core::cmp::Eq for secure::aead::Ciphertext
-impl core::cmp::PartialEq for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::eq(&self, &secure::aead::Ciphertext) -> bool
-impl core::fmt::Debug for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
-impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl core::marker::Freeze for secure::aead::Ciphertext
-impl core::marker::Send for secure::aead::Ciphertext
-impl core::marker::Sync for secure::aead::Ciphertext
-impl core::marker::Unpin for secure::aead::Ciphertext
-impl core::marker::UnsafeUnpin for secure::aead::Ciphertext
-impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Ciphertext
-impl core::panic::unwind_safe::UnwindSafe for secure::aead::Ciphertext
-impl<T, U> core::convert::Into<U> for secure::aead::Ciphertext where U: core::convert::From<T>
-pub fn secure::aead::Ciphertext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::aead::Ciphertext where U: core::convert::Into<T>
-pub type secure::aead::Ciphertext::Error = core::convert::Infallible
-pub fn secure::aead::Ciphertext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::aead::Ciphertext where U: core::convert::TryFrom<T>
-pub type secure::aead::Ciphertext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::aead::Ciphertext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::aead::Ciphertext where T: core::clone::Clone
-pub type secure::aead::Ciphertext::Owned = T
-pub fn secure::aead::Ciphertext::clone_into(&self, &mut T)
-pub fn secure::aead::Ciphertext::to_owned(&self) -> T
-impl<T> core::any::Any for secure::aead::Ciphertext where T: 'static + ?core::marker::Sized
-pub fn secure::aead::Ciphertext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
-pub fn secure::aead::Ciphertext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::aead::Ciphertext where T: ?core::marker::Sized
-pub fn secure::aead::Ciphertext::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::aead::Ciphertext where T: core::clone::Clone
-pub unsafe fn secure::aead::Ciphertext::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::aead::Ciphertext
-pub type secure::aead::Ciphertext::Output = T
+pub struct secure::CiphertextEnvelope
+impl secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::aad(&self) -> &secure::protection::ProtectionAad
+pub fn secure::envelope::CiphertextEnvelope::alg(&self) -> secure::envelope::CipherAlg
+pub fn secure::envelope::CiphertextEnvelope::ciphertext(&self) -> &[u8]
+pub fn secure::envelope::CiphertextEnvelope::key_version(&self) -> u32
+pub fn secure::envelope::CiphertextEnvelope::kid(&self) -> &str
+pub fn secure::envelope::CiphertextEnvelope::mode(&self) -> secure::envelope::EncryptionMode
+pub fn secure::envelope::CiphertextEnvelope::new(secure::envelope::CipherAlg, secure::envelope::EncryptionMode, &str, u32, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>, secure::protection::ProtectionAad) -> core::result::Result<Self, secure::envelope::EnvelopeError>
+pub fn secure::envelope::CiphertextEnvelope::nonce(&self) -> &[u8]
+pub fn secure::envelope::CiphertextEnvelope::tag(&self) -> &[u8]
+pub fn secure::envelope::CiphertextEnvelope::version(&self) -> u8
+impl core::clone::Clone for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::clone(&self) -> secure::envelope::CiphertextEnvelope
+impl core::cmp::Eq for secure::envelope::CiphertextEnvelope
+impl core::cmp::PartialEq for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::eq(&self, &secure::envelope::CiphertextEnvelope) -> bool
+impl core::fmt::Debug for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::envelope::CiphertextEnvelope
+impl secure::redaction::Redact for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for secure::envelope::CiphertextEnvelope
+impl core::marker::Send for secure::envelope::CiphertextEnvelope
+impl core::marker::Sync for secure::envelope::CiphertextEnvelope
+impl core::marker::Unpin for secure::envelope::CiphertextEnvelope
+impl core::marker::UnsafeUnpin for secure::envelope::CiphertextEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CiphertextEnvelope
+impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CiphertextEnvelope
+impl<T, U> core::convert::Into<U> for secure::envelope::CiphertextEnvelope where U: core::convert::From<T>
+pub fn secure::envelope::CiphertextEnvelope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::envelope::CiphertextEnvelope where U: core::convert::Into<T>
+pub type secure::envelope::CiphertextEnvelope::Error = core::convert::Infallible
+pub fn secure::envelope::CiphertextEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::envelope::CiphertextEnvelope where U: core::convert::TryFrom<T>
+pub type secure::envelope::CiphertextEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::envelope::CiphertextEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
+pub type secure::envelope::CiphertextEnvelope::Owned = T
+pub fn secure::envelope::CiphertextEnvelope::clone_into(&self, &mut T)
+pub fn secure::envelope::CiphertextEnvelope::to_owned(&self) -> T
+impl<T> core::any::Any for secure::envelope::CiphertextEnvelope where T: 'static + ?core::marker::Sized
+pub fn secure::envelope::CiphertextEnvelope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
+pub fn secure::envelope::CiphertextEnvelope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
+pub fn secure::envelope::CiphertextEnvelope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
+pub unsafe fn secure::envelope::CiphertextEnvelope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::envelope::CiphertextEnvelope
+pub type secure::envelope::CiphertextEnvelope::Output = T
 pub struct secure::CookieValue(_)
 impl secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::as_str(&self) -> &str
@@ -1166,6 +1651,45 @@ impl<T> core::convert::From<T> for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::cookie::CookieValue
 pub type secure::cookie::CookieValue::Output = T
+pub struct secure::DerivedAad
+impl secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::as_canonical_bytes(&self) -> &[u8]
+pub fn secure::protection::DerivedAad::coordinates(&self) -> &secure::protection::ProtectionAad
+impl core::clone::Clone for secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::clone(&self) -> secure::protection::DerivedAad
+impl core::fmt::Debug for secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::protection::DerivedAad
+impl core::marker::Send for secure::protection::DerivedAad
+impl core::marker::Sync for secure::protection::DerivedAad
+impl core::marker::Unpin for secure::protection::DerivedAad
+impl core::marker::UnsafeUnpin for secure::protection::DerivedAad
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
+impl<T, U> core::convert::Into<U> for secure::protection::DerivedAad where U: core::convert::From<T>
+pub fn secure::protection::DerivedAad::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::DerivedAad where U: core::convert::Into<T>
+pub type secure::protection::DerivedAad::Error = core::convert::Infallible
+pub fn secure::protection::DerivedAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::DerivedAad where U: core::convert::TryFrom<T>
+pub type secure::protection::DerivedAad::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::DerivedAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::protection::DerivedAad where T: core::clone::Clone
+pub type secure::protection::DerivedAad::Owned = T
+pub fn secure::protection::DerivedAad::clone_into(&self, &mut T)
+pub fn secure::protection::DerivedAad::to_owned(&self) -> T
+impl<T> core::any::Any for secure::protection::DerivedAad where T: 'static + ?core::marker::Sized
+pub fn secure::protection::DerivedAad::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
+pub fn secure::protection::DerivedAad::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
+pub fn secure::protection::DerivedAad::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::protection::DerivedAad where T: core::clone::Clone
+pub unsafe fn secure::protection::DerivedAad::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::protection::DerivedAad
+pub fn secure::protection::DerivedAad::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::DerivedAad
+pub type secure::protection::DerivedAad::Output = T
 pub struct secure::FieldRedaction<'a>
 pub secure::FieldRedaction::mode: secure::redaction::RedactionMode
 pub secure::FieldRedaction::name: core::option::Option<&'static str>
@@ -1330,6 +1854,123 @@ impl<T> core::convert::From<T> for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::password::PasswordHash
 pub type secure::password::PasswordHash::Output = T
+pub struct secure::Plaintext(_)
+impl secure::aead::Plaintext
+pub fn secure::aead::Plaintext::expose(&self) -> &[u8]
+pub fn secure::aead::Plaintext::new(alloc::vec::Vec<u8>) -> Self
+impl core::fmt::Debug for secure::aead::Plaintext
+pub fn secure::aead::Plaintext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::aead::Plaintext
+impl core::marker::Send for secure::aead::Plaintext
+impl core::marker::Sync for secure::aead::Plaintext
+impl core::marker::Unpin for secure::aead::Plaintext
+impl core::marker::UnsafeUnpin for secure::aead::Plaintext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Plaintext
+impl core::panic::unwind_safe::UnwindSafe for secure::aead::Plaintext
+impl<T, U> core::convert::Into<U> for secure::aead::Plaintext where U: core::convert::From<T>
+pub fn secure::aead::Plaintext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::aead::Plaintext where U: core::convert::Into<T>
+pub type secure::aead::Plaintext::Error = core::convert::Infallible
+pub fn secure::aead::Plaintext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::aead::Plaintext where U: core::convert::TryFrom<T>
+pub type secure::aead::Plaintext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::aead::Plaintext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::aead::Plaintext where T: 'static + ?core::marker::Sized
+pub fn secure::aead::Plaintext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::aead::Plaintext where T: ?core::marker::Sized
+pub fn secure::aead::Plaintext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::aead::Plaintext where T: ?core::marker::Sized
+pub fn secure::aead::Plaintext::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::aead::Plaintext
+pub fn secure::aead::Plaintext::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::aead::Plaintext
+pub type secure::aead::Plaintext::Output = T
+pub struct secure::ProtectionAad
+impl secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+impl core::clone::Clone for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::clone(&self) -> secure::protection::ProtectionAad
+impl core::cmp::Eq for secure::protection::ProtectionAad
+impl core::cmp::PartialEq for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::eq(&self, &secure::protection::ProtectionAad) -> bool
+impl core::fmt::Debug for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::protection::ProtectionAad
+impl core::marker::Freeze for secure::protection::ProtectionAad
+impl core::marker::Send for secure::protection::ProtectionAad
+impl core::marker::Sync for secure::protection::ProtectionAad
+impl core::marker::Unpin for secure::protection::ProtectionAad
+impl core::marker::UnsafeUnpin for secure::protection::ProtectionAad
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionAad
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionAad
+impl<T, U> core::convert::Into<U> for secure::protection::ProtectionAad where U: core::convert::From<T>
+pub fn secure::protection::ProtectionAad::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionAad where U: core::convert::Into<T>
+pub type secure::protection::ProtectionAad::Error = core::convert::Infallible
+pub fn secure::protection::ProtectionAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionAad where U: core::convert::TryFrom<T>
+pub type secure::protection::ProtectionAad::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::ProtectionAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionAad where T: core::clone::Clone
+pub type secure::protection::ProtectionAad::Owned = T
+pub fn secure::protection::ProtectionAad::clone_into(&self, &mut T)
+pub fn secure::protection::ProtectionAad::to_owned(&self) -> T
+impl<T> core::any::Any for secure::protection::ProtectionAad where T: 'static + ?core::marker::Sized
+pub fn secure::protection::ProtectionAad::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionAad::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionAad::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::protection::ProtectionAad where T: core::clone::Clone
+pub unsafe fn secure::protection::ProtectionAad::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::protection::ProtectionAad
+pub fn secure::protection::ProtectionAad::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::ProtectionAad
+pub type secure::protection::ProtectionAad::Output = T
+pub struct secure::ProtectionContext
+impl secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::authenticated_request(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::authorized_maintenance(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::derive(&self) -> secure::protection::DerivedAad
+impl core::clone::Clone for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::clone(&self) -> secure::protection::ProtectionContext
+impl core::cmp::Eq for secure::protection::ProtectionContext
+impl core::cmp::PartialEq for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::eq(&self, &secure::protection::ProtectionContext) -> bool
+impl core::fmt::Debug for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::protection::ProtectionContext
+impl core::marker::Freeze for secure::protection::ProtectionContext
+impl core::marker::Send for secure::protection::ProtectionContext
+impl core::marker::Sync for secure::protection::ProtectionContext
+impl core::marker::Unpin for secure::protection::ProtectionContext
+impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
+impl<T, U> core::convert::Into<U> for secure::protection::ProtectionContext where U: core::convert::From<T>
+pub fn secure::protection::ProtectionContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionContext where U: core::convert::Into<T>
+pub type secure::protection::ProtectionContext::Error = core::convert::Infallible
+pub fn secure::protection::ProtectionContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionContext where U: core::convert::TryFrom<T>
+pub type secure::protection::ProtectionContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::protection::ProtectionContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionContext where T: core::clone::Clone
+pub type secure::protection::ProtectionContext::Owned = T
+pub fn secure::protection::ProtectionContext::clone_into(&self, &mut T)
+pub fn secure::protection::ProtectionContext::to_owned(&self) -> T
+impl<T> core::any::Any for secure::protection::ProtectionContext where T: 'static + ?core::marker::Sized
+pub fn secure::protection::ProtectionContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
+pub fn secure::protection::ProtectionContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::protection::ProtectionContext where T: core::clone::Clone
+pub unsafe fn secure::protection::ProtectionContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::protection::ProtectionContext
+pub fn secure::protection::ProtectionContext::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::protection::ProtectionContext
+pub type secure::protection::ProtectionContext::Output = T
 pub struct secure::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
@@ -1376,18 +2017,19 @@ impl<T> core::convert::From<T> for secure::redaction::Redacted
 pub fn secure::redaction::Redacted::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::Redacted
 pub type secure::redaction::Redacted::Output = T
+pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
-pub fn secure::Aead::open(&self, &secure::aead::Ciphertext) -> core::result::Result<alloc::vec::Vec<u8>, secure::aead::AeadError>
-pub fn secure::Aead::seal(&self, &[u8]) -> core::result::Result<secure::aead::Ciphertext, secure::aead::AeadError>
+pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>
+pub fn secure::Aead::seal(&self, &[u8], &secure::protection::DerivedAad) -> core::result::Result<secure::envelope::CiphertextEnvelope, secure::aead::AeadError>
 pub trait secure::CookieCodec
 pub fn secure::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
 pub fn secure::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
 pub trait secure::Redact
 pub fn secure::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl secure::redaction::Redact for secure::envelope::CiphertextEnvelope
+pub fn secure::envelope::CiphertextEnvelope::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 pub trait secure::RedactField

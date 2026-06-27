@@ -1,0 +1,23 @@
+error[E0599]: no method named `tenant` found for reference `&ProtectionAad` in the current scope
+  --> tests/ui/open_rejects_stored_aad_rederived.rs:10:16
+   |
+10 |         stored.tenant(),
+   |                ^^^^^^ private field, not a method
+
+error[E0599]: no method named `config_key` found for reference `&ProtectionAad` in the current scope
+  --> tests/ui/open_rejects_stored_aad_rederived.rs:11:16
+   |
+11 |         stored.config_key(),
+   |                ^^^^^^^^^^ private field, not a method
+
+error[E0599]: no method named `field` found for reference `&ProtectionAad` in the current scope
+  --> tests/ui/open_rejects_stored_aad_rederived.rs:12:16
+   |
+12 |         stored.field(),
+   |                ^^^^^ private field, not a method
+
+error[E0599]: no method named `schema_version` found for reference `&ProtectionAad` in the current scope
+  --> tests/ui/open_rejects_stored_aad_rederived.rs:13:16
+   |
+13 |         stored.schema_version(),
+   |                ^^^^^^^^^^^^^^ private field, not a method

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/open_rejects_stored_aad.rs:8:28
+  |
+8 |     let _ = aead.open(env, env.aad());
+  |                  ----      ^^^^^^^^^ expected `&DerivedAad`, found `&ProtectionAad`
+  |                  |
+  |                  arguments to this method are incorrect
+  |
+  = note: expected reference `&DerivedAad`
+             found reference `&ProtectionAad`
+note: method defined here
+ --> src/aead.rs
+  |
+  |     fn open(&self, envelope: &CiphertextEnvelope, aad: &DerivedAad)
+  |        ^^^^

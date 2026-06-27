@@ -181,6 +181,10 @@ reqwest = { version = "0.12", default-features = false }
 # Vault token 内存清零（adapters/vault，#1011 F5）：Zeroizing<String> drop 时清零密钥物料。
 # default-features=false + alloc：只取 String Zeroize impl，不拉 std/derive（Apache-2.0 OR MIT，deny allow-list 内）。
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# 解密产物明文封装（secure::aead::Plaintext，#1469）：SecretSlice<u8> Debug=[REDACTED] + Drop-zeroize，
+# 承载 ADR-011 D5 no-decrypt-in-debug（FIELDPROT-NODBG-DECRYPT-01）。0.10 已去掉 alloc/std feature gate，
+# 默认即提供 SecretBox/SecretSlice/ExposeSecret + 传递 zeroize；serde 默认 off（不给 secret 类型上 serde，Apache-2.0 OR MIT）。
+secrecy = { version = "0.10" }
 # aws-sdk-s3 客户端测试 mock（dev-only，adapters/s3）：canned 响应规则注入确定性单测。经 test-util 传递
 # 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
 # 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。

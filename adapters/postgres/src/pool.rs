@@ -96,7 +96,8 @@ impl PgPassword {
 
 impl std::fmt::Debug for PgPassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // reason: 密码字段 Debug 恒输出占位常量，杜绝明文泄漏（对齐 secure::aead::Ciphertext 范式）。
+        // reason: 密码字段 Debug 恒输出占位常量，杜绝明文泄漏（对齐 secure 的 `<redacted>` Debug 范式，如
+        // secure::Plaintext / secure::OpaqueToken）。
         f.write_str("PgPassword(<redacted>)")
     }
 }
