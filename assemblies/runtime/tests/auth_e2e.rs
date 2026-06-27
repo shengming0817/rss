@@ -249,7 +249,7 @@ async fn status(
 }
 
 // ── BODYLIMIT-BEFORE-AUTH-01 tripwire ───────────────────────────────────────────
-/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 tripwire（FIX-2）：
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 tripwire：
 /// JWT-scheme listener + 超大 Content-Length + 无 Authorization → 413（非 401）。
 /// 证 body-limit（sealed_router 叠）outer 于验签桥 enforce——超大请求在 auth 验证前已被拦截。
 #[tokio::test]
@@ -302,7 +302,7 @@ impl diport::RateLimiter for AlwaysLimitedRateLimiter {
     }
 }
 
-/// INVARIANT: RATELIMIT-BEFORE-AUTH-01 tripwire（FIX-3）：
+/// INVARIANT: RATELIMIT-BEFORE-AUTH-01 tripwire：
 /// JWT-scheme listener + 已耗尽限流器 + 无 Authorization → 429（非 401）。
 /// 证 rate-limit（verify-bridge 后 .layer ⇒ outer 于桥）在 auth 计算前已拦截请求。
 #[tokio::test]

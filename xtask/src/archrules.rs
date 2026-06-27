@@ -675,6 +675,7 @@ fn is_invariant_carrier_line(path: &Path, line: &str) -> bool {
 fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
     match rel(root, path).as_str() {
         "xtask/src/archrules.rs"
+        | "xtask/src/assembly.rs"
         | "xtask/src/codegen.rs"
         | "xtask/src/command_symmetry.rs"
         | "xtask/src/defergate.rs"
@@ -1153,6 +1154,18 @@ members = ["rss_demo", "rss_orphan"]
         );
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/contract/breaking.rs")),
+            Some("verify,ci")
+        );
+    }
+
+    #[test]
+    fn assembly_carrier_has_verify_ci_gate() {
+        // assembly validate 在 verify.rs 的 verify 与 ci step 列表中均运行 ⇒ assembly.rs
+        // 的 INVARIANT 锚点（ASSEMBLY-PROVIDER-CRATE-01）必须登记 `verify,ci` gate，否则
+        // archrules 判 MissingGate（#1572）。
+        let root = Path::new("/repo");
+        assert_eq!(
+            xtask_gate(root, &root.join("xtask/src/assembly.rs")),
             Some("verify,ci")
         );
     }
