@@ -3,7 +3,7 @@
 //!
 //! **完整生命周期均 durable 交付**（#1278，原 #1116 session 闭合）：创建（co-tx）+ 查询 `find`（tenant-scope
 //! SELECT + `revoked = false` 过滤 + `Session::hydrate` 重建）+ 软撤销 `revoke`（tenant-scoped tx
-//! `UPDATE ... SET revoked = true`，幂等）。`revoked` 列由 `0009_add_sessions_revoked.sql` 迁移引入。
+//! `UPDATE ... SET revoked = true`，幂等）。`revoked` 列由 `0011_add_sessions_revoked.sql` 迁移引入。
 //! 合并为单一 `SessionLifecycle` 后 postgres provider **不留 `todo!()` 半实现**——`LoginService::logout` 经
 //! `revoke` 落到真实软撤销路径（消除「trait 看似完整、生产 read/revoke panic」的接缝，PR #273 codex F1）。
 //!

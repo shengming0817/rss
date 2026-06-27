@@ -16,12 +16,12 @@
 -- 索引设计：PRIMARY KEY (tenant_id, seq)——按租户 + seq 唯一，是 append 尾读（ORDER BY seq DESC LIMIT 1）
 -- 与分页（seq >= $cursor ORDER BY seq ASC LIMIT n）的高效路径，无需额外索引（pre-GA 空表，PK 已足）。
 --
--- RLS 三件套（与 0009_enable_tenant_rls.sql + 0012_create_credentials.sql 同范式）：
+-- RLS 三件套（与 0012_enable_tenant_rls.sql + 0015_create_credentials.sql 同范式）：
 --   ENABLE ROW LEVEL SECURITY — 开启行级安全。
 --   FORCE ROW LEVEL SECURITY  — owner 亦受 policy 约束（纵深防御）。
 --   CREATE POLICY tenant_isolation — USING/WITH CHECK：current_setting('rss.tenant_id',true)::uuid；
 --     未设 rss.tenant_id → NULL → fail-closed（全行过滤/拒写）。
--- rss_app 角色由 0009 创建（NOLOGIN NOBYPASSRLS）；SELECT+INSERT only（无 UPDATE/DELETE）。
+-- rss_app 角色由 0012 创建（NOLOGIN NOBYPASSRLS）；SELECT+INSERT only（无 UPDATE/DELETE）。
 
 CREATE TABLE audit_entries (
     tenant_id           uuid        NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE audit_entries (
 GRANT SELECT, INSERT ON audit_entries TO rss_app;
 REVOKE UPDATE, DELETE ON audit_entries FROM PUBLIC;
 
--- RLS 三件套（同 0009 / 0012 / 0013 范式）。
+-- RLS 三件套（同 0012 / 0015 / 0017 范式）。
 ALTER TABLE audit_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_entries FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON audit_entries

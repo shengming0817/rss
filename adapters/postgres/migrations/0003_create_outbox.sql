@@ -1,4 +1,4 @@
--- 0002_create_outbox.sql — outbox durable store（L2 OutboxFact，P4/#1117）。
+-- 0003_create_outbox.sql — outbox durable store（L2 OutboxFact，P4/#1117）。
 --
 -- event_id 用 text（绑不透明 IdemKey；IdemKey 本质 opaque string，不强绑 UUID 格式，避免格式耦合）。
 -- id 列用 gen_random_uuid()（PG 13+ core，无需扩展；若需兼容 PG < 13 可加 CREATE EXTENSION IF NOT EXISTS pgcrypto）。

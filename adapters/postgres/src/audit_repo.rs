@@ -4,7 +4,7 @@
 //! durable provider（替换 in-mem `InMemAuditRepo` 于生产路径）。adapter→域 DIP 内向边（postgres 依赖 audit，
 //! 经 deny.toml audit wrapper + `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）。
 //!
-//! 持久化模型（`0014_create_audit_entries.sql`）：audit_entries 表 PK (tenant_id, seq)；
+//! 持久化模型（`0018_create_audit_entries.sql`）：audit_entries 表 PK (tenant_id, seq)；
 //! **append-only**（rss_app 仅 SELECT+INSERT，无 UPDATE/DELETE；DB 层阻止覆写）。
 //! **recorded_at 两列**（`recorded_at_secs bigint` + `recorded_at_nanos integer`，非 timestamptz）：
 //! timestamptz 截断 ns 精度，canonical HMAC message 含 secs(u64 BE)+nanos(u32 BE)（AUDIT-LEDGER-BYTES-01），

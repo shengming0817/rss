@@ -1,0 +1,54 @@
+# RSS 演示栈（#1134 验收 harness）：postgres + server，闭环验 `docker run → /readyz 200`。
+#
+# 用途：本地证明镜像「能起进程 + 连 PG + 跑迁移 + readyz 就绪 + 非 root + 只读 rootfs 兼容」。
+# 非生产编排（生产用 k8s + 私有 CA TLS + 真 OIDC/Vault，见 docs/ops/202606271438-003-container-image.md）。
+#
+# 跑：  docker compose -f deploy/docker-compose.yml up --build -d
+# 验：  curl -fsS http://localhost:8083/health/v1/readyz   # → HTTP 200 overall healthy
+# 关：  docker compose -f deploy/docker-compose.yml down -v
+#
+# 两个 service 共享 .env.example 作演示值单源：postgres 读 POSTGRES_*，server 读 RSS_*，
+# 各自忽略不认的变量 ⇒ demo 口令两边自动一致（无需手抄两遍）。
+
+services:
+  postgres:
+    image: postgres:16-alpine # 演示用；生产钉 digest（see 部署文档 §复现性）。
+    env_file: [.env.example]
+    # reason: server 启动期 connect + run_migrations 是 fail-fast；postgres 须先 healthy 再起 server，
+    # 否则 readyz 初值 Down（fail-closed）会让 server 在迁移阶段直接退出。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    # 仅演示期暴露，便于宿主 psql 排查；**绑 127.0.0.1**（仅本机可达，不上局域网）；生产 PG 不对外。
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  server:
+    build:
+      context: .. # 仓库根 = 构建上下文（Dockerfile 在根；.dockerignore 裁剪）。
+      dockerfile: Dockerfile
+    image: rss-server:dev
+    env_file: [.env.example]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 全部端口绑 127.0.0.1（仅本机演示可达，不暴露到局域网/所有网卡）。宿主 smoke 经 localhost 验证不受影响。
+    # Internal/Admin 是控制/管理面：即便本机演示也不应对外，loopback 绑定收紧默认暴露面。
+    ports:
+      - "127.0.0.1:8080:8080" # Primary（业务 API；scaffold 期无路由）
+      - "127.0.0.1:8081:8081" # Internal（服务间控制面）
+      - "127.0.0.1:8082:8082" # Admin（管理面：audit route，按 Admin listener 鉴权）
+      - "127.0.0.1:8083:8083" # Health（healthz / readyz）
+    # ── 运行时加固：非 root + 只读 rootfs + 丢能力（证明 acceptance「read-only rootfs compatible」）──
+    user: "65532:65532" # distroless:nonroot 内置 uid；显式声明便于审计。
+    read_only: true # 只读根文件系统；server 不写盘（日志走 stdout，TLS 走 rustls 无磁盘状态）。
+    tmpfs:
+      - /tmp # 唯一可写：临时目录兜底（当前进程不依赖，留作安全网）。
+    cap_drop:
+      - ALL # 不需任何 Linux capability（仅 bind 高位端口 8080-8083，无需 NET_BIND_SERVICE）。
+    security_opt:
+      - no-new-privileges:true # 禁 setuid 提权。
+    restart: on-failure

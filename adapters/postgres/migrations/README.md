@@ -9,9 +9,11 @@
 
 `{序号}_{动词}_{对象}.sql`（`rust-standards.md` §数据库迁移）。
 
-- `序号`：4 位零填充、单调递增（`0001`、`0002`…）。sqlx 解析 `{version}_{description}`，`version` 须能 parse 为正 `i64`。
+- `序号`：4 位零填充、单调递增、**全局唯一**（`0001`、`0002`…）。sqlx 解析 `{version}_{description}`，`version` 须能 parse 为正 `i64`。
+  序号唯一性由 `cargo xtask migrations`（接入 `cargo xtask verify` / `ci`，Medium，INVARIANT `MIGRATION-SERIAL-UNIQUE-01`）机器守——
+  两文件同序号即门红（sqlx 按 `version` 键迁移，重号会让 `run_migrations` 在任意 fresh DB 上 `VersionMismatch`／重复主键，#1134 修复）。
 - `动词_对象`：如 `create_outbox`、`add_lease_token_to_outbox`。下划线在 sqlx 展示时转空格。
-- 例：`0002_create_outbox.sql`、`0003_add_retry_after_to_outbox.sql`。
+- 例：`0003_create_outbox.sql`、`0016_add_seq_and_partition_to_outbox.sql`。
 
 本仓只用**前向**迁移（不写 `.up.sql` / `.down.sql` 可逆对）——pre-GA、无外部消费方、回滚靠新前向迁移修正。
 
@@ -21,6 +23,12 @@
 
 机器守卫：sqlx 在 `_sqlx_migrations` 表记每个已应用迁移的 `checksum`；改动已应用文件的内容会在下次
 `run_migrations` 触发 `VersionMismatch` 报错（Medium，运行期 fail-fast）。改顺序 / 删文件触发 `VersionMissing`。
+
+> **例外（#1134，pre-GA append-only carve-out）**：本次把 4 对历史重复序号（旧 `0002`/`0008`/`0009`/`0013`，
+> 各两文件同号）整体重编为唯一连续 `0001`–`0018`。依据：pre-GA 无外部消费方、无已部署 DB（`_sqlx_migrations`
+> 无历史 checksum 可冲突），重号本就让迁移在任意 fresh DB 上无法应用（非「只增不改」要保护的演进，而是 bug 修复）。
+> 同批新增 `cargo xtask migrations` 唯一性门（见 §命名），杜绝再发生。ADR 见
+> `docs/architecture/202606271500-011-migration-serial-renumber.md`。
 
 ## 索引形态（阶段约定）
 
@@ -39,11 +47,11 @@
 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
 Medium）扫描 schema 快照，缺三件套即门红。
 
-`0004` / `0005` / `0008` 建表时注释「预 GA 不建 RLS」；依「只增不改」规则不可回改——
-`0009_enable_tenant_rls.sql` 补齐三张 tenant 表（sessions / config_entries / roles）的 RLS，
-0009 起三表均受 policy 保护。
+`0005` / `0006` / `0009` 建表时注释「预 GA 不建 RLS」；依「只增不改」规则不可回改——
+`0012_enable_tenant_rls.sql` 补齐四张 tenant 表（sessions / config_entries / roles / secret_refs）的 RLS，
+0012 起四表均受 policy 保护。
 
-非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS，仅三张 tenant 表的 DML grant）由 `0009`
+非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS，仅四张 tenant 表的 DML grant）由 `0012`
 provision；生产 LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。
 
 ## Append-only 表（REVOKE 强制）

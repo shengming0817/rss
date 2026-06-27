@@ -1,4 +1,4 @@
--- 0013: refresh token 持久化表（identity refresh token store；L1 LocalTx 哈希存储 + CAS rotation + RLS 隔离，#1325）。
+-- 0017: refresh token 持久化表（identity refresh token store；L1 LocalTx 哈希存储 + CAS rotation + RLS 隔离，#1325）。
 -- CHECK 约束（DB 层 defense-in-depth，Rust hydrate fail-close 之外；review #284 F4）：
 --   status  — 闭值集静态守（'active'/'consumed'/'revoked'），防非法状态行入库。
 --   kind    — 与 identity `kind_to_db` 闭值集一致，防无效 kind 落库导致 hydrate 失败。
@@ -17,12 +17,12 @@
 --   idx_refresh_tokens_hash    — (tenant_id, token_hash) UNIQUE：find_by_hash 唯一查找键（单次呈递精确匹配）。
 --   idx_refresh_tokens_lineage — (tenant_id, lineage_id)：revoke_lineage 批量撤销扫描。
 --
--- RLS 三件套（同 0009_enable_tenant_rls.sql 范式）：
+-- RLS 三件套（同 0012_enable_tenant_rls.sql 范式）：
 --   ENABLE ROW LEVEL SECURITY — 开启行级安全。
 --   FORCE ROW LEVEL SECURITY  — owner 亦受 policy 约束（纵深防御；superuser 绕过 FORCE，生产需切 rss_app 连接）。
 --   CREATE POLICY tenant_isolation — USING/WITH CHECK：当前 SET LOCAL rss.tenant_id 之外行不可见/拒写；
 --     未设 rss.tenant_id → NULL → fail-closed（全行过滤）。
--- rss_app 角色由 0009 创建（NOLOGIN NOBYPASSRLS）；此处直接 GRANT DML，无需重建角色。
+-- rss_app 角色由 0012 创建（NOLOGIN NOBYPASSRLS）；此处直接 GRANT DML，无需重建角色。
 
 CREATE TABLE refresh_tokens (
     id          uuid        NOT NULL,
@@ -43,12 +43,12 @@ CREATE UNIQUE INDEX idx_refresh_tokens_hash ON refresh_tokens (tenant_id, token_
 -- revoke_lineage 批量撤销扫描（按 lineage_id 家族全量 UPDATE）。
 CREATE INDEX idx_refresh_tokens_lineage ON refresh_tokens (tenant_id, lineage_id);
 
--- RLS 三件套（同 0009 范式：ENABLE + FORCE + tenant_isolation policy）。
+-- RLS 三件套（同 0012 范式：ENABLE + FORCE + tenant_isolation policy）。
 ALTER TABLE refresh_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE refresh_tokens FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON refresh_tokens
     USING (tenant_id = current_setting('rss.tenant_id', true)::uuid)
     WITH CHECK (tenant_id = current_setting('rss.tenant_id', true)::uuid);
 
--- rss_app（0009 创建，NOLOGIN NOBYPASSRLS）：授 DML（无 DDL / 无 BYPASSRLS，app 被攻陷也无法关 RLS / 跨租读）。
+-- rss_app（0012 创建，NOLOGIN NOBYPASSRLS）：授 DML（无 DDL / 无 BYPASSRLS，app 被攻陷也无法关 RLS / 跨租读）。
 GRANT SELECT, INSERT, UPDATE, DELETE ON refresh_tokens TO rss_app;

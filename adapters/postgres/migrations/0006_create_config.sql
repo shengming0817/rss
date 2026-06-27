@@ -19,14 +19,14 @@
 --   tombstone 自身**不发**删除事件——consumer 感知删除的 `config-version-deleted` 留订阅缓存单元 #1120。
 --
 -- config_key 用 `text`（绑域内 `SettingKey` newtype，opaque 不透明串，namespace 校验在域层；不强绑 PG 类型，
---   同 outbox.event_id / sessions.session_id 范式见 0002/0004）。
+--   同 outbox.event_id / sessions.session_id 范式见 0003/0005）。
 -- value 用 `text`（opaque 配置值原始串——`ConfigValue` 不保证合法 JSON 故非 jsonb；可能含 secret，redaction
 --   在域 `ConfigValue` Debug + 日志层，落库为脱敏边界外的持久态，tenant scope 隔离读取）。
 -- version 用 `bigint`（域 u64 版本号 wire i64；从 1 单调递增）。
 -- tenant_id `uuid NOT NULL`：每行租户戳记——SET LOCAL 注入锚点 + 未来 RLS policy current_setting 比对锚点。
 -- created_at `DEFAULT now()`：落库兜底时间戳（版本号即业务时序，应用不显式写 created_at）。
 --
--- 本表预 GA **不**建 RLS policy（同 sessions 0004：仓内尚无 RLS infra）；tenant_id 列 + 写路径 SET LOCAL +
+-- 本表预 GA **不**建 RLS policy（同 sessions 0005：仓内尚无 RLS infra）；tenant_id 列 + 写路径 SET LOCAL +
 --   读路径显式 `WHERE tenant_id` 已保证 tenant-correct，RLS policy 由后续前向迁移按 tenancy.md 叠加（零数据迁移）。
 
 CREATE TABLE config_entries (

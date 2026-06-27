@@ -4,7 +4,7 @@
 -- 材料（密文/明文/密钥字节）存于外部 secret store（如 Vault/K8s Secrets），本表记录「到哪里取」的坐标，
 -- 持久化后读者须自行经 SecretRef 坐标去 store 拉取材料——review-critical，禁止在此表新增材料列。
 --
--- 版本历史模型（同 config_entries 0005 范式）：每 (tenant_id, secret_key) 保留**全部**版本行
+-- 版本历史模型（同 config_entries 0006 范式）：每 (tenant_id, secret_key) 保留**全部**版本行
 -- （append-only，不 update-in-place）；当前活跃 = max(version) 且非 tombstone；
 -- find_version 取精确版本（回滚/审计用）。PRIMARY KEY (tenant_id, secret_key, version) 防重复版本写，
 -- 服务全部读路径（max via 反向扫描 / 精确等值），无需额外索引。

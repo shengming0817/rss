@@ -1034,7 +1034,7 @@ mod tests {
     // reason: 测试解析编译期 include_str! 的已知 migration 文本，CHECK 子句缺失即应 fail（测试本身的断言），
     // item-level carve-out（error-handling.md §Carve-out）。
     fn status_consts_match_migration_check() {
-        const MIGRATION: &str = include_str!("../migrations/0002_create_outbox.sql");
+        const MIGRATION: &str = include_str!("../migrations/0003_create_outbox.sql");
         let in_pos = MIGRATION
             .find("status IN (")
             .expect("migration must declare status CHECK IN clause");

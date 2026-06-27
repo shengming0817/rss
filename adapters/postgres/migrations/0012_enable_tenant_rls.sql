@@ -1,7 +1,7 @@
 -- DB 层租户隔离：sessions / config_entries / roles / secret_refs 四表落地 RLS + FORCE RLS + tenant-isolation policy +
 -- 非 owner serving role（#1298）。tenancy.md §RLS 与 PG scope（目标态单源）。
 --
--- 0004/0005/0008 落地起 pre-GA 推迟 RLS infra（「仓内尚无 RLS infra」）；本前向迁移补齐 DB 强制层（只增不改：
+-- 0005/0006/0009 落地起 pre-GA 推迟 RLS infra（「仓内尚无 RLS infra」）；本前向迁移补齐 DB 强制层（只增不改：
 -- 不编辑既有迁移，旧文件「预 GA 不建 RLS policy」注释为历史态，转换点见本文件 + tenancy.md / migrations/README.md）。
 --
 -- 每表三件套：

@@ -1,7 +1,7 @@
 -- projection_events：append-only CQRS 投影事件日志（changelog 源，被投影 harness replay）。
 -- 全局表（无租户列 / 无 RLS，对标 outbox/saga_journal/checkpoint）。
 -- 角色边界（least privilege，对齐 outbox/saga_journal/checkpoint）：**不授任何 serving role**。
---   projection_events 是全局事件日志、payload 可含跨租户业务数据；rss_app（0009）是 tenant 表 serving role，
+--   projection_events 是全局事件日志、payload 可含跨租户业务数据；rss_app（0012）是 tenant 表 serving role，
 --   授其 SELECT 会让被攻陷的 app 连接跨租读全局 payload，故不授。全局表的 serving-role grant 随 dual-pool
 --   接线补（follow-up，同 outbox 注释）；当前由 owner pool 写入。
 -- append-only（INVARIANT PROJECTION-APPEND-ONLY-01）：当前由 dylint rss_projection_append_only（Medium，

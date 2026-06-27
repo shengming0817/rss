@@ -49,8 +49,8 @@ CREATE TABLE credentials (
 -- 留事务型 migration；非 CONCURRENTLY）。
 CREATE UNIQUE INDEX idx_credentials_tenant_user ON credentials (tenant_id, user_id);
 
--- RLS 三件套 + GRANT（与 0009_enable_tenant_rls.sql 同范式；新表须自建——0009 已 committed 只增不改、不可回改纳入本表；
--- 非 owner serving role rss_app 由 0009 provision，本迁移在其先行 ⇒ 已存在，仅补 credentials 表 DML grant + policy）。
+-- RLS 三件套 + GRANT（与 0012_enable_tenant_rls.sql 同范式；新表须自建——0012 已 committed 只增不改、不可回改纳入本表；
+-- 非 owner serving role rss_app 由 0012 provision，本迁移在其先行 ⇒ 已存在，仅补 credentials 表 DML grant + policy）。
 GRANT SELECT, INSERT, UPDATE, DELETE ON credentials TO rss_app;
 ALTER TABLE credentials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credentials FORCE ROW LEVEL SECURITY;

@@ -5,7 +5,7 @@
 //! （postgres 依赖 identity、native AFIT impl 其域形 port，经 deny.toml identity wrapper + `allows(Adapter,Domain)`
 //! 放行；adapter 仍不被域依赖）。
 //!
-//! 持久化模型（`0012_create_credentials.sql`）：credentials 表 PK (tenant_id, login) + UNIQUE (tenant_id, user_id)；
+//! 持久化模型（`0015_create_credentials.sql`）：credentials 表 PK (tenant_id, login) + UNIQUE (tenant_id, user_id)；
 //! **锁定态折叠进同一行**（failure_count / lockout_window_start / locked_until）——未知主体无行 ⇒ 无法建锁定态
 //! （#1277 F2「未知主体不可预置锁定、不撑大 lockout 表」**结构层**天然成立，无独立锁定表）。明文密码**永不落库**，
 //! 仅 `password_hash`（argon2 PHC，经 `secure::PasswordHash`）。

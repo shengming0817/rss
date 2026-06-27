@@ -14,12 +14,15 @@
 #                     postgres/redis/rabbitmq 跑 --features integration 测试。**docker-gated**（无 docker 且未设
 #                     env URL 即 fail-closed）；设 PGHOST/REDIS_TEST_URL/RSS_AMQP_TEST_URL 指向长存服务可免 docker。
 #                     azure-pipelines 接线待 #1145（需 docker-enabled agent）——CI 激活前本 lane 仅本地/手动跑。
+#   make docker-build server 多阶段镜像构建（#1134）：cargo-chef + distroless/cc:nonroot → rss-server:dev。
+#   make docker-smoke 容器冒烟验收（#1134，**docker-gated**）：build → compose up → /readyz 200 → 非 root /
+#                     只读 rootfs 断言 → down -v。逻辑在 deploy/smoke.sh（机器可判定 acceptance harness）。
 #
 # CI lane = azure-pipelines.yml（issue #1132）：PR 触发 + 失败阻断合入经 Azure 分支策略 build validation。
 # 激活前（AZURE_HAS_CI=false，见 hack/automation/forge.conf 激活 runbook）`make ci` 本地即等价门——azure
 # CI 未启用期间它是治理门的实际 gate。门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci audit integration
+.PHONY: verify verify-fast ci audit integration docker-build docker-smoke
 
 verify:
 	cargo xtask verify
@@ -35,3 +38,9 @@ audit:
 
 integration:
 	cargo xtask integration
+
+docker-build:
+	docker build -t rss-server:dev .
+
+docker-smoke:
+	./deploy/smoke.sh

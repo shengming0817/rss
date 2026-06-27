@@ -6,7 +6,7 @@
 -- `append_outbox`，单 commit（INVARIANT OUTBOX-COTX-SESSION-01；both-or-neither）。
 --
 -- session_id 用 `text`（绑域内 `SessionId` newtype，本质 opaque UUID 串，不强绑 PG `uuid` 类型——避免
---   格式耦合 + 不给 sqlx 加 uuid feature，同 `outbox.event_id` 范式见 0002）。PRIMARY KEY ⇒ 重试登录
+--   格式耦合 + 不给 sqlx 加 uuid feature，同 `outbox.event_id` 范式见 0003）。PRIMARY KEY ⇒ 重试登录
 --   `ON CONFLICT (session_id) DO NOTHING` 幂等（同 append_outbox 范式）。
 -- subject 是 **opaque** 主体标识（FR-020；非完整 Principal / email / 姓名等 PII，observability.md §PII 边界）。
 -- tenant_id `uuid NOT NULL`：每行租户戳记——SET LOCAL 注入锚点 + 未来 RLS policy 的 current_setting 比对锚点。
@@ -27,5 +27,5 @@ CREATE TABLE sessions (
 
 -- 租户内枚举索引（pre-GA 新空表 → 普通 CREATE INDEX，事务型迁移，README §索引形态）。
 CREATE INDEX idx_sessions_tenant ON sessions (tenant_id);
--- 过期会话清理（sweep）扫描索引（未来 session GC，对齐 outbox sweep 索引 0002）。
+-- 过期会话清理（sweep）扫描索引（未来 session GC，对齐 outbox sweep 索引 0003）。
 CREATE INDEX idx_sessions_expiry ON sessions (expires_at);

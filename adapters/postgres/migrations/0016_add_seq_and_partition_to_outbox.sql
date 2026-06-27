@@ -1,4 +1,4 @@
--- 0013_add_seq_and_partition_to_outbox.sql — outbox 分区有序投递支持（#1211）。
+-- 0016_add_seq_and_partition_to_outbox.sql — outbox 分区有序投递支持（#1211）。
 --
 -- seq：表级单调序（GENERATED ALWAYS ⇒ 应用不可写/伪造、隐式 NOT NULL、允许 gap）= partition 内投递顺序锚。
 -- partition_key：NULL = 无序并行（与现有行为兼容）；NOT NULL = 同 (domain, partition_key) 串行有序。

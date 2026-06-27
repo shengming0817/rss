@@ -40,7 +40,9 @@ use crypto::RustCryptoMacVerifier;
 use diport::{DynManagedResource, DynSecretResolver};
 use httpd::HttpServer;
 use oidc::OidcProvider;
-use postgres::{PgConfig, PgDbReadiness, PgPassword, PgRuntimeDeps, PoolReadiness, caps};
+use postgres::{
+    PgConfig, PgDbReadiness, PgPassword, PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
+};
 use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
     RequiredScheme,
@@ -239,8 +241,9 @@ pub fn assemble_authed_routers(
 /// - `RSS_PG_USERNAME` — 连接用户（非空）。
 /// - `RSS_PG_PASSWORD` — 连接密码（非空）。
 ///
-/// TLS 默认 `VerifyFull`（零信任）；生产须配私有 CA 证书（`PgConfig::with_ssl_root_cert` 待后续 TLS 切片，
-/// rustls+ring，pg/vault/listener 同批——非本运行时入口 #1320 范围）。
+/// TLS 默认 `VerifyFull`（零信任）；可选 `RSS_PG_SSL_MODE` 经 [`parse_pg_ssl_mode`] 显式降级（容器内连
+/// 未启 TLS 的 dev postgres 时用 `prefer` / `disable`）。生产私有 CA 根证书经 `PgConfig::with_ssl_root_cert`
+/// 注入（待后续 TLS 切片，rustls+ring，pg/vault/listener 同批——非本运行时入口 #1320 范围）。
 /// **禁止 localhost fallback**（生产配置规范，rust-standards §安全检查点）。
 pub(crate) fn build_pg_config_from(
     get: impl Fn(&str) -> Option<String>,
@@ -261,13 +264,42 @@ pub(crate) fn build_pg_config_from(
 
     // PgConfig::new 存储参数；validate 在 PgStore::connect 内调用（pub(crate)）。
     // 这里只做构造，连接时再 fail-fast（组合根在 wire_settings 中 connect）。
-    Ok(PgConfig::new(
-        host,
-        port,
-        database,
-        username,
-        PgPassword::new(password),
-    ))
+    Ok(
+        PgConfig::new(host, port, database, username, PgPassword::new(password))
+            .with_ssl_mode(parse_pg_ssl_mode(get("RSS_PG_SSL_MODE"))),
+    )
+}
+
+/// 解析可选 `RSS_PG_SSL_MODE` → [`PgSslMode`]（libpq 拼写：`disable` / `allow` / `prefer` / `require` /
+/// `verify-ca` / `verify-full`，大小写与前后空白不敏感）。
+///
+/// - 未配置 → `VerifyFull`（零信任默认，强制 TLS + 校验证书链/主机名）。
+/// - 显式合法值 → 对应模式（容器内 dev postgres 无 TLS 时经 `prefer` / `disable` 显式降级，不静默）。
+/// - 显式非法值 / 空串 → `tracing::warn!` + **fail-closed 回退 `VerifyFull`**（误配不降级安全姿态）。
+///
+/// 安全姿态非强依赖配置，故误配 fail-soft（warn + 安全默认）而非 fail-fast——与 [`build_readiness_interval_from`]
+/// 同范式；但回退方向恒为**更严**的 `VerifyFull`，绝不因误配静默放宽。
+pub(crate) fn parse_pg_ssl_mode(raw: Option<String>) -> PgSslMode {
+    let Some(raw) = raw else {
+        return PgSslMode::VerifyFull;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "disable" => PgSslMode::Disable,
+        "allow" => PgSslMode::Allow,
+        "prefer" => PgSslMode::Prefer,
+        "require" => PgSslMode::Require,
+        "verify-ca" => PgSslMode::VerifyCa,
+        "verify-full" => PgSslMode::VerifyFull,
+        _ => {
+            tracing::warn!(
+                env = "RSS_PG_SSL_MODE",
+                raw = %raw,
+                "invalid pg ssl mode (need disable|allow|prefer|require|verify-ca|verify-full); \
+                 falling back to verify-full (zero-trust)"
+            );
+            PgSslMode::VerifyFull
+        }
+    }
 }
 
 /// 从 `std::env` 构造 `PgConfig`。
@@ -355,6 +387,8 @@ pub(crate) fn build_vault_resolver_from(
 
     // pre-GA 空 allowlist：无生产 secret reader → 所有 resolve fail-closed Forbidden（网络前拦截）。
     // 待后续 issue 填充 TenantStoreAllowlist（per-store mount + prefix，#1272 follow-up）。
+    // 安全入场条件（#1272）：填充非空 allowlist 的 PR 必须同批配置 rustls-tls client（上方 TLS 切片）——
+    // 否则 vault token 经无 TLS backend 的 Client 明文出网。当前空 allowlist 下 Client 从不发请求，故安全。
     let stores = TenantStoreAllowlist::new(std::iter::empty())
         .map_err(|e| anyhow::anyhow!("vault store allowlist config error: {e}"))?;
 
@@ -1173,6 +1207,29 @@ mod tests {
         );
         // 通过 fn-pointer smoke 绑定确认 PgSslMode::VerifyFull 变体可构造（Anti-vacuity）。
         let _mode: PgSslMode = PgSslMode::VerifyFull;
+    }
+
+    /// `RSS_PG_SSL_MODE` 解析：未配置 / 非法 / 空 → fail-closed VerifyFull；合法 libpq 拼写 → 对应模式。
+    ///
+    /// `PgSslMode`（sqlx 上游）未实现 `PartialEq`，故表驱动用 `Debug` 变体名断言（fieldless enum 的 derive
+    /// `Debug` 恒等于变体名，与 [`build_pg_config_defaults_ssl_verify_full`] 同范式）。
+    #[test]
+    fn parse_pg_ssl_mode_maps_and_falls_back_to_verify_full() {
+        let cases = [
+            (None, "VerifyFull"), // 未配置 → 零信任默认（强制 TLS + 校验证书链/主机名）
+            (Some("disable"), "Disable"), // 合法 libpq 拼写 → 对应模式
+            (Some("PREFER"), "Prefer"), // 大小写不敏感
+            (Some("  require "), "Require"), // 前后空白不敏感
+            (Some("verify-ca"), "VerifyCa"),
+            (Some("verify-full"), "VerifyFull"),
+            (Some("allow"), "Allow"),
+            (Some("bogus"), "VerifyFull"), // 非法值 → fail-closed 回退（恒向更严）
+            (Some(""), "VerifyFull"),      // 空串 → fail-closed 回退
+        ];
+        for (raw, expected) in cases {
+            let got = format!("{:?}", parse_pg_ssl_mode(raw.map(str::to_owned)));
+            assert_eq!(got, expected, "RSS_PG_SSL_MODE={raw:?}");
+        }
     }
 
     // ── ConfigsReadyProbe / readiness_to_health 测试 ─────────────────────────────────────

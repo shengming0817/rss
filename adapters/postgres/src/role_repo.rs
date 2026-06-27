@@ -4,7 +4,7 @@
 //! 的纯编译证明）。adapter→域 DIP 内向边（postgres 依赖 identity、native AFIT impl 其域形 port，经 deny.toml
 //! identity wrapper + `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）。
 //!
-//! 持久化模型（`0008_create_roles.sql`）：roles 表 PK (tenant_id, id)，permissions 序列化为 `text[]`。
+//! 持久化模型（`0009_create_roles.sql`）：roles 表 PK (tenant_id, id)，permissions 序列化为 `text[]`。
 //! `find` = [`tenant_scoped_read`] tenant-scoped 事务（SET LOCAL 注入 RLS policy `current_setting` 锚点，#1298）+
 //! 显式 `WHERE tenant_id`（双重隔离）；`save` = tenant-scoped
 //! 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert（`ON CONFLICT (tenant_id, id) DO UPDATE`）。

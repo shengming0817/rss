@@ -1,0 +1,35 @@
+# 构建上下文裁剪：只送 cargo 解析整个 workspace + 编译 `--bin server` 子图所需的输入。
+# 关键不变量：所有 workspace member 目录（crates/ adapters/ assemblies/ bins/ xtask/ generated/
+# journeys/）的 Cargo.toml 必须在上下文内——cargo 须解析整个 workspace 才能编译任一 bin。
+# 成员清单单源 = 根 Cargo.toml [workspace.members]（docs/rules/architecture.md §扁平 workspace 结构）。
+
+# ── VCS / 工作树 ───────────────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+worktrees/
+
+# ── 构建产物（最大头：务必排除，否则上下文暴涨 + 缓存失效）──────────────────────────────────────
+target/
+**/target/
+**/*.profraw
+
+# ── 独立 workspace（根 Cargo.toml `exclude = ["lints"]`，自带 Cargo.lock，非 server 依赖）──────────
+lints/
+
+# ── 非 cargo 构建输入（无 build.rs 消费这些；codegen 是 `cargo xtask` 离线步骤，不在镜像构建期）──────
+# 注：contracts/ 仅被 `cargo xtask codegen` 读取派生 generated/（已提交）；若将来 codegen 迁 build.rs，
+#     须把 contracts/ 移出本排除（否则镜像内构建缺 schema 源）。
+contracts/
+docs/
+specs/
+public-api/
+hack/
+
+# ── 部署清单自身（compose/env/smoke 非构建输入；排除避免编辑它们时 bust 构建缓存）─────────────────
+deploy/
+
+# ── 编辑器 / OS / agent ────────────────────────────────────────────────────────────────────────
+.claude/
+.vscode/
+.idea/
+.DS_Store

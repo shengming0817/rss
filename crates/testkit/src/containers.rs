@@ -156,7 +156,7 @@ pub async fn env_or_postgres() -> Result<PgFixture> {
         });
     }
     // 默认：self-provision 容器（fail-closed）。
-    // PG 镜像 tag 固定 16-alpine：迁移刻意要求 PG 13+ core（`0002_create_outbox.sql` 用 `gen_random_uuid()`
+    // PG 镜像 tag 固定 16-alpine：迁移刻意要求 PG 13+ core（`0003_create_outbox.sql` 用 `gen_random_uuid()`
     // 无 pgcrypto 扩展）；testcontainers-modules `Postgres::default()` 的默认 tag < 13 缺该内置函数，会令
     // run_migrations 在 0002 处 42883 失败。固定 13+ 让容器与迁移的 PG 版本前提对齐（修 latent 测试 harness
     // 漂移：集成 lane opt-in 不入 CI，此前未暴露）。

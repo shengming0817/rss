@@ -10,6 +10,7 @@
 //!                                      破坏退出码 1）。详见 `contract::breaking`。
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
+//!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract
 //!                                      validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
@@ -43,6 +44,7 @@ mod diagnostic;
 mod diffcov;
 mod layerdeps;
 mod layers;
+mod migrations;
 mod pathsafe;
 mod pdpallow;
 mod publicapi;
@@ -96,6 +98,7 @@ enum Command {
     },
     SchemaRls,
     DeferGate,
+    Migrations,
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -117,9 +120,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["integration", rest @ ..] => parse_integration(rest),
         ["schema-rls"] => Ok(Command::SchemaRls),
         ["defer-gate"] => Ok(Command::DeferGate),
+        ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | schema-rls | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | migrations | schema-rls | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -297,6 +301,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         } => verify::run_integration(allow_missing_tools),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
+        Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
     }
 }
 
@@ -674,5 +679,18 @@ mod tests {
     fn parse_command_defer_gate_rejects_trailing_args() {
         assert!(parse_command(&s(&["defer-gate", "--bogus"])).is_err());
         assert!(parse_command(&s(&["defer-gate", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_migrations() -> anyhow::Result<()> {
+        assert_eq!(parse_command(&s(&["migrations"]))?, Command::Migrations);
+        Ok(())
+    }
+
+    /// migrations fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_migrations_rejects_trailing_args() {
+        assert!(parse_command(&s(&["migrations", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["migrations", "extra"])).is_err());
     }
 }

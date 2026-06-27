@@ -70,6 +70,8 @@ enum InternalCheck {
     PdpAllowGuard,
     /// tenant 表 RLS 三件套守卫（TENANCY-RLS-FORCE-01；内容扫描迁移 SQL，no-compile）。
     SchemaRlsGuard,
+    /// migration 文件序号唯一性 + 连续性守卫（MIGRATION-SERIAL-UNIQUE-01；内容扫描文件名，no-compile）。
+    MigrationsSerial,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
     CommandSymmetry,
     /// governed scope（docs/rules + docs/architecture + .claude/rules + 根 config）结构化 defer 完整性 + 经典注解门
@@ -195,6 +197,15 @@ fn step_schema_rls_guard() -> Step {
         label: "schema-rls",
         args: &[],
         kind: StepKind::Internal(InternalCheck::SchemaRlsGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_migrations_serial() -> Step {
+    Step {
+        label: "migrations-serial",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::MigrationsSerial),
         env: &[],
         needs_compile: false,
     }
@@ -601,6 +612,7 @@ fn full_plan() -> Vec<Step> {
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
+        step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
         step_build_workspace(),
@@ -628,6 +640,7 @@ fn ci_plan() -> Vec<Step> {
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
+        step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
         step_build_all_features(),
@@ -850,6 +863,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
+        InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
         InternalCheck::Coverage => crate::coverage::run(),
@@ -944,6 +958,7 @@ mod tests {
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
+                "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
                 "build",
@@ -962,7 +977,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(9) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(10) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -977,6 +992,7 @@ mod tests {
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
+                "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
                 "deny"
@@ -987,8 +1003,8 @@ mod tests {
         }
     }
 
-    /// meta 九项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
-    /// pdp-allow-guard / schema-rls / command-symmetry / defer-gate）在两种模式恒在。
+    /// meta 十项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
+    /// pdp-allow-guard / schema-rls / migrations-serial / command-symmetry / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -1008,6 +1024,7 @@ mod tests {
                     "codegen-check",
                     "pdp-allow-guard",
                     "schema-rls",
+                    "migrations-serial",
                     "command-symmetry",
                     "defer-gate"
                 ],
@@ -1112,6 +1129,7 @@ mod tests {
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
+                "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
                 "build",
@@ -1197,6 +1215,7 @@ mod tests {
             "codegen-check",
             "pdp-allow-guard",
             "schema-rls",
+            "migrations-serial",
             "command-symmetry",
             "defer-gate",
             "deny",

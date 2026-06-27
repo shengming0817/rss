@@ -157,7 +157,7 @@ mod smoke {
     // reason: 测试解析编译期 include_str! 的已知 migration 文本，CHECK 子句缺失即应 fail；
     // item-level carve-out（error-handling.md §Carve-out）。
     fn saga_journal_status_consts_match_migration_check() {
-        const MIGRATION: &str = include_str!("../migrations/0006_create_saga_journal.sql");
+        const MIGRATION: &str = include_str!("../migrations/0007_create_saga_journal.sql");
         let in_pos = MIGRATION
             .find("status IN (")
             .expect("migration must declare status CHECK IN clause");

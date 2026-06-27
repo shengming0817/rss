@@ -282,7 +282,7 @@ mod smoke {
     // reason: 测试解析编译期 include_str! 的已知 migration 文本，缺关键子句应 fail；
     // item-level carve-out（error-handling.md §Carve-out）。
     fn projection_events_migration_append_only_and_no_rls() {
-        const MIGRATION: &str = include_str!("../migrations/0010_create_projection_events.sql");
+        const MIGRATION: &str = include_str!("../migrations/0013_create_projection_events.sql");
 
         // append-only 强制：必须含 REVOKE UPDATE, DELETE（PROJECTION-APPEND-ONLY-01）。
         // anti-vacuity：migration 文本非空，此断言可失败（若去掉 REVOKE 子句即红）。

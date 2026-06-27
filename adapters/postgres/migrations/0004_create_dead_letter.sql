@@ -1,4 +1,4 @@
--- 0003_create_dead_letter.sql — 死信持久化表（DLX，eventexec ConsumerBase，#1120）。
+-- 0004_create_dead_letter.sql — 死信持久化表（DLX，eventexec ConsumerBase，#1120）。
 --
 -- 仅 INSERT（immutable append）；不执行 UPDATE / DELETE——死信记录是不可变审计物料，
 -- 运维巡检 / 重放通过 SELECT 读取，不修改原记录。
