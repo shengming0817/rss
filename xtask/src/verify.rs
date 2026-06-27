@@ -70,6 +70,8 @@ enum InternalCheck {
     PdpAllowGuard,
     /// tenant 表 RLS 三件套守卫（TENANCY-RLS-FORCE-01；内容扫描迁移 SQL，no-compile）。
     SchemaRlsGuard,
+    /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01；内容扫描 Rust 源，no-compile）。
+    SetLocalFunnel,
     /// migration 文件序号唯一性 + 连续性守卫（MIGRATION-SERIAL-UNIQUE-01；内容扫描文件名，no-compile）。
     MigrationsSerial,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
@@ -197,6 +199,15 @@ fn step_schema_rls_guard() -> Step {
         label: "schema-rls",
         args: &[],
         kind: StepKind::Internal(InternalCheck::SchemaRlsGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_setlocal_funnel() -> Step {
+    Step {
+        label: "setlocal-funnel",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::SetLocalFunnel),
         env: &[],
         needs_compile: false,
     }
@@ -612,6 +623,7 @@ fn full_plan() -> Vec<Step> {
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
+        step_setlocal_funnel(),
         step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
@@ -640,6 +652,7 @@ fn ci_plan() -> Vec<Step> {
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
+        step_setlocal_funnel(),
         step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
@@ -863,6 +876,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
+        InternalCheck::SetLocalFunnel => run_check(&crate::setlocal_funnel::SetLocalFunnelGuard),
         InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
@@ -958,6 +972,7 @@ mod tests {
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
+                "setlocal-funnel",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -992,6 +1007,7 @@ mod tests {
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
+                "setlocal-funnel",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1003,8 +1019,9 @@ mod tests {
         }
     }
 
-    /// meta 十项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
-    /// pdp-allow-guard / schema-rls / migrations-serial / command-symmetry / defer-gate）在两种模式恒在。
+    /// meta 十一项（contract validate / contract breaking / layer-deps / wsdeps-drift / codegen /
+    /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
+    /// defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -1024,6 +1041,7 @@ mod tests {
                     "codegen-check",
                     "pdp-allow-guard",
                     "schema-rls",
+                    "setlocal-funnel",
                     "migrations-serial",
                     "command-symmetry",
                     "defer-gate"
@@ -1129,6 +1147,7 @@ mod tests {
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
+                "setlocal-funnel",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1215,6 +1234,7 @@ mod tests {
             "codegen-check",
             "pdp-allow-guard",
             "schema-rls",
+            "setlocal-funnel",
             "migrations-serial",
             "command-symmetry",
             "defer-gate",

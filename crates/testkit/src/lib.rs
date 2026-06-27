@@ -37,6 +37,11 @@ pub use containers::{
     env_or_mosquitto, env_or_postgres, env_or_rabbitmq, env_or_redis,
 };
 
+// tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
+// 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。
+#[cfg(feature = "containers")]
+pub mod tenant_conformance;
+
 /// testkit harness 错误。harness 自身不 panic（workspace `panic`/`unwrap_used` deny）——
 /// 失败一律走 `Result`，调用方在测试侧 `?` / `expect`（item-level carve-out）暴露。
 #[derive(Debug, thiserror::Error)]

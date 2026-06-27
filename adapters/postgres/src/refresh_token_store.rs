@@ -124,11 +124,10 @@ async fn do_rotate_tx(
 impl RefreshTokenStore for PgRefreshTokenStore {
     /// 持久化新签发记录（tenant-scoped 事务，SET LOCAL 锚点，`do_insert` 写体）。
     async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError> {
-        let tenant_uuid = record.tenant().as_uuid().to_string();
+        let tenant = record.tenant();
+        let tenant_uuid = tenant.as_uuid().to_string();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, &tenant_uuid)
-            .await
-            .map_err(storage)?;
+        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
         match do_insert(&mut tx, &record).await {
             Ok(()) => tx.commit().await.map_err(|e| {
                 tracing::warn!(
@@ -167,7 +166,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         let tenant_uuid_q = tenant_uuid.clone();
         let hash_bytes = *hash.as_bytes();
 
-        let raw = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
             Box::pin(async move {
                 let row = sqlx::query(
                     r#"
@@ -259,9 +258,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         let tenant = new.tenant();
         let tenant_uuid = tenant.as_uuid().to_string();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, &tenant_uuid)
-            .await
-            .map_err(storage)?;
+        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
         match do_rotate_tx(&tenant_uuid, &mut tx, old_id, new).await {
             Err(e) => {
                 if let Err(rb) = tx.rollback().await {
@@ -301,9 +298,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     ) -> Result<(), IdentityError> {
         let tenant_uuid = tenant.as_uuid().to_string();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, &tenant_uuid)
-            .await
-            .map_err(storage)?;
+        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
         let result = sqlx::query(
             "UPDATE refresh_tokens SET status = $3 \
              WHERE tenant_id = $1::uuid AND lineage_id = $2::uuid",

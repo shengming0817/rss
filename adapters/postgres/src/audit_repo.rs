@@ -280,11 +280,12 @@ async fn insert_entry(
 async fn append_in_tx<M: MacVerifier>(
     tx: &mut Transaction<'_, Postgres>,
     tenant_uuid: &str,
+    tenant: TenantId,
     lock_key: i64,
     record: &AuditRecord,
     hasher: &AuditChainHasher<M>,
 ) -> Result<(), AuditError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
 
     // 串行化同租户并发 append（xact-level advisory lock，commit/rollback 自动释放）。
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -350,7 +351,7 @@ async fn list_in_tx<M: MacVerifier>(
     limit: usize,
     hasher: &AuditChainHasher<M>,
 ) -> Result<AuditListResult, AuditError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
 
     let start_seq_i64 = i64::try_from(start_seq).map_err(AuditError::storage)?;
     let fetch_limit = i64::try_from(limit + 1).unwrap_or(i64::MAX);
@@ -411,7 +412,7 @@ async fn verify_tail_in_tx<M: MacVerifier>(
     limit: u32,
     hasher: &AuditChainHasher<M>,
 ) -> Result<(), AuditError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
 
     let limit_i64 = i64::from(limit);
 
@@ -458,7 +459,15 @@ impl<M: MacVerifier + Send + Sync> AuditRepo for PgAuditRepo<M> {
         let tenant_uuid = tenant_str(record.tenant);
         let lock_key = advisory_lock_key(record.tenant);
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = append_in_tx(&mut tx, &tenant_uuid, lock_key, &record, &self.hasher).await;
+        let result = append_in_tx(
+            &mut tx,
+            &tenant_uuid,
+            record.tenant,
+            lock_key,
+            &record,
+            &self.hasher,
+        )
+        .await;
         match result {
             Ok(()) => tx.commit().await.map_err(|e| {
                 tracing::warn!(

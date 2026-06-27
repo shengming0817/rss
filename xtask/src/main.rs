@@ -50,6 +50,7 @@ mod pathsafe;
 mod pdpallow;
 mod publicapi;
 mod schema_rls;
+mod setlocal_funnel;
 mod src_scan;
 #[cfg(test)]
 mod testutil;
@@ -98,6 +99,8 @@ enum Command {
         allow_missing_tools: bool,
     },
     SchemaRls,
+    /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01）。
+    SetLocalFunnel,
     DeferGate,
     Migrations,
 }
@@ -120,11 +123,12 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["audit", rest @ ..] => parse_audit(rest),
         ["integration", rest @ ..] => parse_integration(rest),
         ["schema-rls"] => Ok(Command::SchemaRls),
+        ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
         ["defer-gate"] => Ok(Command::DeferGate),
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | migrations | schema-rls | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -302,6 +306,7 @@ fn dispatch(args: &[String]) -> Result<()> {
             allow_missing_tools,
         } => verify::run_integration(allow_missing_tools),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
+        Command::SetLocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
         Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
     }
@@ -681,6 +686,22 @@ mod tests {
     fn parse_command_schema_rls_rejects_trailing_args() {
         assert!(parse_command(&s(&["schema-rls", "--bogus"])).is_err());
         assert!(parse_command(&s(&["schema-rls", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_setlocal_funnel() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["setlocal-funnel"]))?,
+            Command::SetLocalFunnel
+        );
+        Ok(())
+    }
+
+    /// setlocal-funnel fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_setlocal_funnel_rejects_trailing_args() {
+        assert!(parse_command(&s(&["setlocal-funnel", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["setlocal-funnel", "extra"])).is_err());
     }
 
     #[test]

@@ -30,3 +30,37 @@ pub(crate) async fn connect_pg()
     let store = PgStore::connect(&config).await?;
     Ok((fixture, store))
 }
+
+/// 在已连接的（owner/superuser）`store` 上创建一个 NOBYPASSRLS LOGIN 角色，并以该角色连一个新 `PgStore`。
+///
+/// 供 RLS 能力门「非绕过角色」路径测试用——serving 连接须为非 superuser（tenancy.md §RLS 与 PG scope），
+/// 故能力门的 ok / table-offender 路径只有在非绕过角色下才可达（superuser 会先触发 `RlsBypassRole`）。
+/// 角色名 / 口令为测试固定字面量（非注入面）；幂等：先 `DROP ROLE IF EXISTS` 清同库重跑残留。
+/// 该角色不授任何表 DML——能力门只读 `pg_catalog` / `pg_policies` + set GUC，无需表权限（pg_catalog 不受权限过滤）。
+pub(crate) async fn connect_pg_nobypass_role(
+    fixture: &PgFixture,
+    store: &PgStore,
+) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
+    const ROLE: &str = "rss_rls_test_app";
+    const PW: &str = "rls_test_pw";
+    sqlx::query(&format!("DROP ROLE IF EXISTS {ROLE}"))
+        .execute(&store.pool)
+        .await
+        .ok();
+    sqlx::query(&format!(
+        "CREATE ROLE {ROLE} LOGIN PASSWORD '{PW}' NOBYPASSRLS"
+    ))
+    .execute(&store.pool)
+    .await?;
+    let p = fixture.params();
+    let config = PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        ROLE.to_string(),
+        PgPassword::new(PW.to_string()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(Duration::from_secs(5));
+    Ok(PgStore::connect(&config).await?)
+}

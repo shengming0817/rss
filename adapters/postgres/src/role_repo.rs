@@ -59,7 +59,7 @@ impl RoleRepo for PgRoleRepo {
         let tenant_uuid_q = tenant_uuid.clone();
         let id_str_q = id_str.clone();
 
-        let raw = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
             Box::pin(async move {
                 let row = sqlx::query(
                     r#"
@@ -101,9 +101,7 @@ impl RoleRepo for PgRoleRepo {
         // tenant-scoped 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert。
         // save 是本 adapter **唯一**写路径（find 为 plain read）⇒ 不抽 `tenant_scoped` helper，直接 inline。
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, &tenant_uuid)
-            .await
-            .map_err(storage)?;
+        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
         let result = sqlx::query(
             r#"
             INSERT INTO roles (tenant_id, id, name, permissions)

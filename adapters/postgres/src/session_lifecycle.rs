@@ -22,8 +22,8 @@
 //! `t11`（真实 method commit 两行皆在）↔ 负向 `t12`（co-tx SQL 序列强制 Err 两写共回滚）+ `t14`（**直测真实
 //! method** rollback 分支：session INSERT 溢出 → 两行皆无）。
 //!
-//! tenant scope（tenancy.md §RLS 与 PG scope）：INSERT 前在同一 tx 内 `set_config('rss.tenant_id', $1, true)`
-//! （= SET LOCAL，参数化绑 typed [`TenantId`]，防注入；SET LOCAL 不接 bind 故用 set_config(is_local=true)）。
+//! tenant scope（tenancy.md §RLS 与 PG scope）：INSERT 前在同一 tx 内经 cotx [`set_local_tenant`] 注入
+//! `rss.tenant_id` GUC（= SET LOCAL，参数化绑 typed [`TenantId`]，防注入；GUC 注入 literal 收口 cotx.rs）。
 //! 预 GA 仓内尚无 RLS policy，故此刻 SET LOCAL 为前向兼容锚点；session 行 `tenant_id` 列显式写入已保证写入
 //! tenant-correct。
 //!
@@ -36,7 +36,7 @@ use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, Tenan
 use sqlx::{PgPool, Row};
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::{set_local_tenant, tenant_scoped_read};
 use crate::outbox::{
     OutboxEnvelope, append_outbox, epoch_secs_to_time, metadata_with_ambient, unix_secs,
 };
@@ -92,41 +92,53 @@ impl SessionLifecycle for PgSessionLifecycle {
         tenant: TenantId,
         session_id: SessionId,
     ) -> Result<Option<Session>, IdentityError> {
-        // 读经 pool 直查 + 显式 `WHERE tenant_id`（pre-GA 无 RLS policy，读路径不注入 SET LOCAL——同
-        // `PgRoleRepo::find` / `PgConfigRepo::find` 仓库范围一致约定）；跨租 → 0 行 → None（fail-closed）。
-        // `revoked = false` 过滤软撤销。**不**过滤过期：expiry 是下游 / JWT-TTL 关注，与 in-mem
-        // `InMemSessionLifecycle` / demo `MemSessionLifecycle` 的 find 语义对齐（provider 行为一致；硬吊销延 #1003）。
-        // 时刻经持久化 epoch 列还原（`extract(epoch ...)::bigint`，与写路径 `to_timestamp(unix_secs)` 编码对称，
-        // 不加 sqlx 时间 feature）。
-        let row = sqlx::query(
-            r#"
-            SELECT subject,
-                   extract(epoch from expires_at)::bigint AS expires_at,
-                   extract(epoch from created_at)::bigint AS created_at
-            FROM sessions
-            WHERE tenant_id = $1::uuid AND session_id = $2 AND revoked = false
-            "#,
-        )
-        .bind(tenant.as_uuid().to_string())
-        .bind(session_id.as_str())
-        .fetch_optional(&self.pool)
+        // 读经 cotx [`tenant_scoped_read`] 注入 SET LOCAL（与 `PgRoleRepo` / `PgConfigRepo` / `PgSecretRepo` /
+        // `PgCredentialRepo` / `PgRefreshTokenStore` 读路径**统一收口**，对齐 0009 RLS policy current_setting
+        // 锚点）+ 显式 `WHERE tenant_id` 双保险；跨租 → 0 行 → None（fail-closed）。`revoked = false` 过滤软撤销。
+        // **不**过滤过期：expiry 是下游 / JWT-TTL 关注，与 in-mem `InMemSessionLifecycle` / demo
+        // `MemSessionLifecycle` 的 find 语义对齐（provider 行为一致；硬吊销延 #1003）。读闭包仅 fetch + try_get
+        // 返 owned 原始值（不借连接）；`Session::hydrate` 在 tx 外执行（域错误不依赖 sqlx）。时刻经持久化 epoch 列
+        // 还原（`extract(epoch ...)::bigint`，与写路径 `to_timestamp(unix_secs)` 编码对称，不加 sqlx 时间 feature）。
+        let tenant_uuid = tenant.as_uuid().to_string();
+        let session_id_q = session_id.as_str().to_owned();
+        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
+            Box::pin(async move {
+                let row = sqlx::query(
+                    r#"
+                    SELECT subject,
+                           extract(epoch from expires_at)::bigint AS expires_at,
+                           extract(epoch from created_at)::bigint AS created_at
+                    FROM sessions
+                    WHERE tenant_id = $1::uuid AND session_id = $2 AND revoked = false
+                    "#,
+                )
+                .bind(tenant_uuid)
+                .bind(session_id_q)
+                .fetch_optional(&mut *conn)
+                .await?;
+                match row {
+                    None => Ok(None),
+                    Some(r) => {
+                        let subject: String = r.try_get("subject")?;
+                        let expires_at: i64 = r.try_get("expires_at")?;
+                        let created_at: i64 = r.try_get("created_at")?;
+                        Ok(Some((subject, expires_at, created_at)))
+                    }
+                }
+            })
+        })
         .await
         .map_err(storage)?;
-        match row {
+        match raw {
             None => Ok(None),
-            Some(r) => {
-                let subject: String = r.try_get("subject").map_err(storage)?;
-                let expires_at: i64 = r.try_get("expires_at").map_err(storage)?;
-                let created_at: i64 = r.try_get("created_at").map_err(storage)?;
-                // 受控重建（WHERE 已锁 session_id / tenant = 入参，复用即存储值，同 `Role::hydrate` 复用 id）。
-                Ok(Some(Session::hydrate(
-                    session_id.as_str(),
-                    subject,
-                    tenant,
-                    epoch_secs_to_time(expires_at),
-                    epoch_secs_to_time(created_at),
-                )))
-            }
+            // 受控重建（WHERE 已锁 session_id / tenant = 入参，复用即存储值，同 `Role::hydrate` 复用 id）。
+            Some((subject, expires_at, created_at)) => Ok(Some(Session::hydrate(
+                session_id.as_str(),
+                subject,
+                tenant,
+                epoch_secs_to_time(expires_at),
+                epoch_secs_to_time(created_at),
+            ))),
         }
     }
 
@@ -136,9 +148,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         // `Ok(())`（与 in-mem / demo provider 的幂等 no-op 语义对齐）。软撤销不删行（保留审计 + 幂等）。
         let tenant_uuid = tenant.as_uuid().to_string();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, &tenant_uuid)
-            .await
-            .map_err(storage)?;
+        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
         let result = sqlx::query(
             "UPDATE sessions SET revoked = true WHERE tenant_id = $1::uuid AND session_id = $2",
         )
@@ -217,11 +227,9 @@ async fn write_session_and_outbox(
     env: &OutboxEnvelope,
 ) -> Result<(), sqlx::Error> {
     let tenant = session.tenant().as_uuid().to_string();
-    // tenant scope（事务级，commit/rollback 自动失效）。SET LOCAL 不接 bind ⇒ 用 set_config(is_local=true)。
-    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-        .bind(&tenant)
-        .execute(&mut **tx)
-        .await?;
+    // tenant scope（事务级，commit/rollback 自动失效）：经统一 funnel `set_local_tenant` 注入
+    // `rss.tenant_id` GUC（TENANCY-SETLOCAL-FUNNEL-01：GUC 注入 literal 仅 cotx.rs::set_local_tenant）。
+    set_local_tenant(tx, session.tenant()).await?;
     // session 行（同 tx；ON CONFLICT 幂等——重试登录安全，同 append_outbox 范式）。
     sqlx::query(
         r#"

@@ -155,21 +155,19 @@ fn hydrate_active(
 /// （未来 RLS policy 锚点）。错误已是域 [`ConfigRepoError`]（业务写闭包内 map），骨架 sqlx 错误经 `storage` 收口。
 async fn tenant_scoped<F>(
     pool: &sqlx::PgPool,
-    tenant_uuid: &str,
+    tenant: TenantId,
     write: F,
 ) -> Result<(), ConfigRepoError>
 where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), ConfigRepoError>> + Send,
 {
     let mut tx = pool.begin().await.map_err(storage)?;
-    set_local_tenant(&mut tx, tenant_uuid)
-        .await
-        .map_err(storage)?;
+    set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
     match write(&mut tx).await {
         Ok(()) => tx.commit().await.map_err(|e| {
             tracing::warn!(
                 target: "postgres",
-                tenant_id = tenant_uuid,
+                tenant_id = %tenant,
                 error = %secure::redact_error(&e),
                 "tenant_scoped: commit failed"
             );
@@ -179,7 +177,7 @@ where
             if let Err(rb) = tx.rollback().await {
                 tracing::warn!(
                     target: "postgres",
-                    tenant_id = tenant_uuid,
+                    tenant_id = %tenant,
                     error = %secure::redact_error(&rb),
                     "tenant_scoped: rollback failed after write error"
                 );
@@ -202,7 +200,7 @@ impl ConfigRepo for PgConfigRepo {
         let key_str = key.as_str().to_owned();
         let tenant_uuid_q = tenant_uuid.clone();
 
-        let row = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+        let row = tenant_scoped_read(&self.pool, tenant, move |conn| {
             Box::pin(async move {
                 sqlx::query(
                     r#"
@@ -237,7 +235,7 @@ impl ConfigRepo for PgConfigRepo {
         let tenant_uuid_q = tenant_uuid.clone();
         let version_i = version_param(version);
 
-        let row = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+        let row = tenant_scoped_read(&self.pool, tenant, move |conn| {
             Box::pin(async move {
                 sqlx::query(
                     r#"
@@ -273,7 +271,7 @@ impl ConfigRepo for PgConfigRepo {
 
         let (mv,): (Option<i64>,) = tenant_scoped_read(
             &self.pool,
-            &tenant_uuid,
+            tenant,
             move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
@@ -293,8 +291,7 @@ impl ConfigRepo for PgConfigRepo {
 
     async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError> {
         // F3：plain CAS 写经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致。
-        let tenant_uuid = tenant_param(tenant);
-        tenant_scoped(&self.pool, &tenant_uuid, move |conn| {
+        tenant_scoped(&self.pool, tenant, move |conn| {
             Box::pin(async move { cas_insert(conn, tenant, &entry).await })
         })
         .await
@@ -303,10 +300,9 @@ impl ConfigRepo for PgConfigRepo {
     async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError> {
         // F1 软删：仅当 latest 非 tombstone 时在 max+1 追加 tombstone（幂等；version 单调不重置，防 event_id
         // 复用）。F3：经 tenant-scoped 事务（SET LOCAL）。
-        let tenant_uuid = tenant_param(tenant);
-        let tu = tenant_uuid.clone();
+        let tu = tenant_param(tenant);
         let key_str = key.as_str().to_string();
-        tenant_scoped(&self.pool, &tenant_uuid, move |conn| {
+        tenant_scoped(&self.pool, tenant, move |conn| {
             Box::pin(async move {
                 sqlx::query(
                     r#"
@@ -352,12 +348,11 @@ impl ConfigUnitOfWork for PgConfigRepo {
             metadata_with_ambient(unix_secs(self.clock.now())).with_subject_id(subject_id),
         )
         .with_partition_key_opt(partition_key);
-        let tenant_uuid = tenant_param(tenant);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。
         co_tx_with_outbox(
             &self.pool,
-            &tenant_uuid,
+            tenant,
             &outbox_entry,
             &env,
             move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),

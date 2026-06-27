@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use vocab::TenantId;
 
 use crate::PgStore;
+use crate::cotx::set_local_tenant;
 
 /// 默认连接池上限（与 sqlx 缺省同值）。tuning 参数（非安全必填依赖），故可有默认。
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -54,6 +56,23 @@ pub enum PgError {
     /// 迁移应用失败。
     #[error("postgres migration failed")]
     Migrate(#[source] sqlx::migrate::MigrateError),
+    /// RLS 能力自检的探测 SQL 失败（acquire / set_config / catalog 查询）。
+    #[error("postgres rls capability probe failed")]
+    RlsCapability(#[source] sqlx::Error),
+    /// RLS 能力门：发现含 `tenant_id` 列却未 FORCE RLS / 缺 policy 的 tenant 表（fail-closed，拒绝启动）。
+    /// 具体表名经 `tracing::error!` 输出（PII 边界：Display 仅 const literal）。
+    #[error("postgres tenant table missing FORCE RLS or policy")]
+    RlsNotEnforced,
+    /// RLS 能力门 anti-vacuity：durable 模式下未发现任何 tenant 表（schema 未迁移 / 库不符预期）。
+    #[error("postgres rls capability: no tenant tables found")]
+    RlsNoTenantTables,
+    /// RLS 能力门：`rss.tenant_id` GUC set/current_setting roundtrip 未回显预期值（GUC 基础设施异常）。
+    #[error("postgres rls capability: tenant guc roundtrip mismatch")]
+    RlsGucRoundtrip,
+    /// RLS 能力门：连接角色为 superuser 或 `BYPASSRLS`——绕过 FORCE RLS，serving 连接须用非 superuser
+    /// NOBYPASSRLS 角色（fail-closed，拒绝启动；tenancy.md「生产 owner 须为非 superuser」）。
+    #[error("postgres rls capability: connection role bypasses RLS (superuser or BYPASSRLS)")]
+    RlsBypassRole,
 }
 
 /// postgres 连接密码：私有字段 + redacted `Debug`，杜绝明文进日志 / panic message / `PgConfig` 派生 Debug。
@@ -295,6 +314,155 @@ impl PgStore {
         let result = tokio::time::timeout(PROBE_READINESS_TIMEOUT, db_select_one(&self.pool)).await;
         probe_timeout_result(result)
     }
+}
+
+/// RLS 能力自检的固定探测租户（canonical 非-nil UUID，仅用于 GUC roundtrip；不写任何业务行）。
+const RLS_PROBE_TENANT: &str = "00000000-0000-0000-0000-000000000001";
+
+/// 不达标 tenant 表查询：动态派生（含 `tenant_id` 列的 public 表）后逐表判不达标——
+/// (a) 缺 `relrowsecurity AND relforcerowsecurity`（ENABLE+FORCE）；或
+/// (b) **无**任一 policy 的 `qual` 形如规范谓词 `tenant_id … current_setting … rss.tenant_id`
+///     （`LIKE '%tenant_id%current_setting%rss.tenant_id%'` 要求 tenant_id 与 GUC 在谓词内同现、
+///     非仅 "提到 GUC"——`USING (true)` 之类宽泛 policy 不满足）；或
+/// (c) **存在** allow-all 的 **PERMISSIVE** policy（`qual` normalize 后 ∈ {`true`,`(true)`}）——PostgreSQL
+///     permissive policy 默认 OR 合并，额外 allow-all 会放宽 SELECT（F3：拒 OR-widening）。
+/// 返回不达标表名。不硬编码表清单。pg_policies.qual 渲染含 `(tenant_id = (current_setting('rss.tenant_id'::text,
+/// ..))::uuid)`，与上述 LIKE 对齐（经真实 PG 直证）。**分工**：本 runtime 门守"实际 DB 有规范 tenant policy +
+/// 无 widening"；policy DDL 全文规范性（含 `WITH CHECK` 写侧）由静态 `cargo xtask schema-rls`（TENANCY-RLS-FORCE-01）
+/// 守，纵深互补（runtime 不重复全量 normalizer——抽共享 normalizer 是 refactor 档 follow-up）。
+const OFFENDING_TENANT_TABLES_SQL: &str = "\
+SELECT c.relname \
+FROM pg_class c \
+JOIN pg_namespace n ON n.oid = c.relnamespace \
+WHERE n.nspname = 'public' AND c.relkind = 'r' \
+  AND EXISTS (SELECT 1 FROM pg_attribute a \
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped) \
+  AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity \
+       OR NOT EXISTS (SELECT 1 FROM pg_policies p \
+                      WHERE p.schemaname = 'public' AND p.tablename = c.relname \
+                        AND p.qual LIKE '%tenant_id%current_setting%rss.tenant_id%') \
+       OR EXISTS (SELECT 1 FROM pg_policies p \
+                  WHERE p.schemaname = 'public' AND p.tablename = c.relname \
+                    AND p.permissive = 'PERMISSIVE' \
+                    AND btrim(lower(coalesce(p.qual, 'true'))) IN ('true', '(true)')))";
+
+/// 当前连接角色是否会绕过 RLS（superuser 或 `BYPASSRLS`）——绕过则 FORCE RLS / policy 全失效，能力门必须 fail-fast。
+const CONNECTION_BYPASSES_RLS_SQL: &str = "\
+SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user";
+
+/// 含 `tenant_id` 列的 public 表总数（anti-vacuity：durable 库应至少有迁移建出的 tenant 表）。
+/// 用 `pg_catalog`（非 `information_schema`——后者按当前角色权限过滤，非 superuser serving 角色会漏看
+/// 未授权的 tenant 表导致门控盲区；pg_class/pg_attribute 不受权限过滤，确保门看到全部 tenant 表）。
+const TENANT_TABLE_COUNT_SQL: &str = "\
+SELECT count(*) FROM pg_class c \
+JOIN pg_namespace n ON n.oid = c.relnamespace \
+WHERE n.nspname = 'public' AND c.relkind = 'r' \
+  AND EXISTS (SELECT 1 FROM pg_attribute a \
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)";
+
+impl PgStore {
+    /// durable 启动 RLS 能力门（schema 门控，**fail-fast**：缺能力即拒绝启动）。
+    ///
+    /// 四段校验（任一不过 → `Err`，组合根冒泡使进程不进入服务态）：
+    /// 0. **连接角色不绕过 RLS**——`current_user` 非 superuser 且非 `BYPASSRLS`（否则 FORCE RLS / policy 全
+    ///    失效，后续校验形同虚设；tenancy.md「生产 owner 须为非 superuser」的运行期强制，最先 fail-fast）。
+    /// 1. `rss.tenant_id` GUC roundtrip——经统一 funnel [`set_local_tenant`] 注入探测租户后
+    ///    `current_setting` 回显比对（验证 GUC 基础设施可用，dogfood funnel）。
+    /// 2. anti-vacuity——至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移）。
+    /// 3. 逐 tenant 表断言 FORCE RLS + 规范 tenant policy + 无 allow-all permissive widening（动态派生，不硬编码）。
+    ///
+    /// 对标 omicron `DataStore::check_schema_and_access`（对象返回前于构造器级别校验 schema/access；
+    /// `ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/mod.rs@14d89dca`）。偏离：RSS 迁移在
+    /// 独立 `run_migrations` 步、不并入本校验的 retry 环。仅供 [`crate::PgRuntimeDeps::setup`] 调用。
+    pub(crate) async fn verify_rls_capability(&self) -> Result<(), PgError> {
+        // 直线编排：四段校验各为低复杂度 helper（任一 Err 经 `?` 冒泡，tx drop 即 rollback 自检事务）。
+        let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
+        ensure_not_bypass_role(&mut tx).await?; // 0. 连接角色不绕过 RLS（最先 fail-fast）
+        verify_tenant_guc_roundtrip(&mut tx).await?; // 1. GUC roundtrip
+        ensure_tenant_tables_present(&mut tx).await?; // 2. anti-vacuity
+        let offenders = offending_tenant_tables(&mut tx).await?; // 3. 逐表 FORCE RLS + 规范 policy + 无 widening
+        // 只读 + SET LOCAL 自检事务无副作用，显式 rollback 释放（失败不覆盖判定，仅 best-effort）。
+        let _ = tx.rollback().await;
+        ensure_no_offenders(offenders)
+    }
+}
+
+/// 0. 连接角色绕过 RLS（superuser/BYPASSRLS）→ fail-fast：绕过下 FORCE RLS 与 policy 全失效，后续 schema
+///    校验无意义（PostgreSQL ddl-rowsecurity：superuser/BYPASSRLS 永远绕过含 FORCE 的 RLS）。
+async fn ensure_not_bypass_role(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (bypass,): (bool,) = sqlx::query_as(CONNECTION_BYPASSES_RLS_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::RlsCapability)?;
+    if !bypass {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        "rls capability gate: connection role is superuser or BYPASSRLS — RLS not enforceable; \
+         serving connection must use a non-superuser NOBYPASSRLS role (tenancy.md §RLS 与 PG scope)"
+    );
+    Err(PgError::RlsBypassRole)
+}
+
+/// 2. anti-vacuity：至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移 / 库不符预期）。
+async fn ensure_tenant_tables_present(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (n,): (i64,) = sqlx::query_as(TENANT_TABLE_COUNT_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(PgError::RlsCapability)?;
+    if n == 0 {
+        return Err(PgError::RlsNoTenantTables);
+    }
+    Ok(())
+}
+
+/// 3 判定：不达标表非空 → `RlsNotEnforced`（记 offender 表名，PII-safe）。
+fn ensure_no_offenders(offenders: Vec<String>) -> Result<(), PgError> {
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        tables = %offenders.join(","),
+        "rls capability gate: tenant tables missing FORCE RLS / 规范 policy 或存在 allow-all permissive widening"
+    );
+    Err(PgError::RlsNotEnforced)
+}
+
+/// GUC roundtrip 自检：经 funnel 注入探测租户 → `current_setting` 回显比对（不等 → `RlsGucRoundtrip`）。
+async fn verify_tenant_guc_roundtrip(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let probe = TenantId::parse(RLS_PROBE_TENANT).map_err(|_| PgError::RlsGucRoundtrip)?;
+    set_local_tenant(tx, probe)
+        .await
+        .map_err(PgError::RlsCapability)?;
+    let (echoed,): (Option<String>,) =
+        sqlx::query_as("SELECT current_setting('rss.tenant_id', true)")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::RlsCapability)?;
+    if echoed.as_deref() == Some(RLS_PROBE_TENANT) {
+        Ok(())
+    } else {
+        Err(PgError::RlsGucRoundtrip)
+    }
+}
+
+/// 不达标（缺 FORCE RLS / 规范 policy 或存在 allow-all permissive widening）的 tenant 表名列表。
+async fn offending_tenant_tables(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<Vec<String>, PgError> {
+    let rows: Vec<(String,)> = sqlx::query_as(OFFENDING_TENANT_TABLES_SQL)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(PgError::RlsCapability)?;
+    Ok(rows.into_iter().map(|(t,)| t).collect())
 }
 
 impl PgStore {

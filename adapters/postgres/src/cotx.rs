@@ -20,6 +20,7 @@
 use consistency::Entry;
 use futures::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use vocab::TenantId;
 
 use crate::outbox::{OutboxEnvelope, append_outbox};
 
@@ -30,7 +31,9 @@ use crate::outbox::{OutboxEnvelope, append_outbox};
 /// （`Option<PgRow>` / 标量 / tuple），hydrate（域类型转换 / 域错误映射）在 tx 外执行，保持域错误
 /// 语义不变且不依赖 sqlx。失败时 rollback（不覆盖原错误）。
 ///
-/// `tenant_uuid`：已 stringify 的租户 UUID（`set_config` 参数化绑定防注入）。
+/// `tenant`：类型化租户标识（`vocab::TenantId`）；funnel 内部 stringify 成 canonical UUID 后
+/// 经 `set_config` 参数化绑定（防注入）。非 `TenantId` 的裸字符串无法进入 funnel（Hard 收口，
+/// INVARIANT TENANCY-SETLOCAL-FUNNEL-01）。
 ///
 /// # INVARIANT: RLS-TENANT-SCOPE-READ-01
 ///
@@ -40,7 +43,7 @@ use crate::outbox::{OutboxEnvelope, append_outbox};
 /// rss_app（dual-pool follow-up）后 DB 层 RLS 方强制生效；t20–t22 验证 rss_app 角色下的强制力。
 pub(crate) async fn tenant_scoped_read<T, F>(
     pool: &PgPool,
-    tenant_uuid: &str,
+    tenant: TenantId,
     read: F,
 ) -> Result<T, sqlx::Error>
 where
@@ -49,7 +52,7 @@ where
 {
     let mut tx = pool.begin().await?;
     // SET LOCAL 注入 tenant scope（事务内有效，commit/rollback 自动失效；与写侧 set_local_tenant 共享锚点）。
-    set_local_tenant(&mut tx, tenant_uuid).await?;
+    set_local_tenant(&mut tx, tenant).await?;
     let result = read(&mut tx).await;
     // 读事务：成功 commit（RLS fail-closed 时 `read` 已 Err）；失败 rollback（warn 定位，不覆盖原错误）。
     match result {
@@ -61,7 +64,7 @@ where
             if let Err(rb) = tx.rollback().await {
                 tracing::warn!(
                     target: "postgres",
-                    tenant_id = tenant_uuid,
+                    tenant_id = %tenant,
                     error = %secure::redact_error(&rb),
                     "tenant_scoped_read: rollback failed after read error"
                 );
@@ -74,11 +77,18 @@ where
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
 /// co-tx 写（[`co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）共享，
 /// 保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
+///
+/// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01
+///
+/// 这是 postgres 生产路径**唯一**注入 `rss.tenant_id` GUC 的位置——funnel 入参类型化为
+/// `vocab::TenantId`（Hard：裸 `&str` 无法进入），`set_config('rss.tenant_id', ..)` literal 仅此一处出现
+/// （xtask `setlocal-funnel` 守卫，Medium：禁止该 literal 出现在 cotx.rs 之外的生产源；测试代码豁免）。
 pub(crate) async fn set_local_tenant(
     conn: &mut PgConnection,
-    tenant_uuid: &str,
+    tenant: TenantId,
 ) -> Result<(), sqlx::Error> {
-    // SET LOCAL 不接 bind ⇒ 用 set_config(is_local=true) 参数化绑定。
+    // SET LOCAL 不接 bind ⇒ 用 set_config(is_local=true) 参数化绑定；canonical UUID 字符串。
+    let tenant_uuid = tenant.as_uuid().to_string();
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
         .bind(tenant_uuid)
         .execute(conn)
@@ -90,7 +100,7 @@ pub(crate) async fn set_local_tenant(
 ///
 /// `business_write(&mut PgConnection) -> Result<(), E>`：在同一事务内执行业务写（如 CAS INSERT），可返回业务
 /// 错误 `E`（如 `VersionConflict`）使整事务回滚。骨架自身 sqlx 错误经 `map_storage` 映射为 `E`。任一步 Err ⇒
-/// rollback（失败仅 warn，不覆盖原错误）。`tenant_uuid` 为已 stringify 的租户 UUID（SET LOCAL 参数化绑定）。
+/// rollback（失败仅 warn，不覆盖原错误）。`tenant` 为类型化租户标识（funnel 内 stringify + SET LOCAL 绑定）。
 ///
 /// # Examples
 ///
@@ -98,14 +108,14 @@ pub(crate) async fn set_local_tenant(
 /// // 调用方在 `business_write` 闭包内执行业务写（HRTB + BoxFuture 绕过异步闭包借用规则）；
 /// // sqlx 错误经 `map_storage` 收口为域错误 E（绕开 `E: From<sqlx::Error>` 跨 crate 约束）。
 /// co_tx_with_outbox(
-///     &pool, &tenant_uuid, &outbox_entry, &env,
+///     &pool, tenant, &outbox_entry, &env,
 ///     move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
 ///     |e| ConfigRepoError::Storage(Box::new(e)),
 /// ).await
 /// ```
 pub(crate) async fn co_tx_with_outbox<F, E>(
     pool: &PgPool,
-    tenant_uuid: &str,
+    tenant: TenantId,
     entry: &Entry,
     env: &OutboxEnvelope,
     business_write: F,
@@ -116,16 +126,7 @@ where
     E: Send,
 {
     let mut tx = pool.begin().await.map_err(&map_storage)?;
-    match write_in_tx(
-        &mut tx,
-        tenant_uuid,
-        entry,
-        env,
-        business_write,
-        &map_storage,
-    )
-    .await
-    {
+    match write_in_tx(&mut tx, tenant, entry, env, business_write, &map_storage).await {
         Ok(()) => tx.commit().await.map_err(|e| {
             tracing::warn!(
                 target: "postgres",
@@ -158,7 +159,7 @@ where
 /// 事务体：SET LOCAL tenant → 业务写 → `append_outbox`（任一步 Err 即冒泡，由调用方 rollback）。
 async fn write_in_tx<F, E>(
     tx: &mut Transaction<'_, Postgres>,
-    tenant_uuid: &str,
+    tenant: TenantId,
     entry: &Entry,
     env: &OutboxEnvelope,
     business_write: F,
@@ -168,9 +169,7 @@ where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
 {
     // tenant scope（事务级，commit/rollback 自动失效；与 plain 写共享 set_local_tenant，F3）。
-    set_local_tenant(tx, tenant_uuid)
-        .await
-        .map_err(map_storage)?;
+    set_local_tenant(tx, tenant).await.map_err(map_storage)?;
     // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。`tx: &mut Transaction` 经 DerefMut 自动强制成
     // 闭包参数 `&mut PgConnection`（reborrow，非 move——append_outbox 仍可再借）。
     business_write(tx).await?;

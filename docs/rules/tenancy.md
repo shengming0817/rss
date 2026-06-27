@@ -76,6 +76,43 @@ typed `PartitionKey::for_tenant(TenantId, ..)` 让 tenant scope 进类型层）�
 > tenant-scoped key（如 `<tenantId>:<sessionId>`）可能含**凭据级** bearer 标识，故 `PartitionKey` 的 `Debug`
 > 脱敏（`<redacted>`），不以明文进日志（F3，#1211 review；同 `SessionId`）——见 `observability.md` §Outbox Envelope。
 
+## 持久化模式 tenant 作用域合约（PERSIST-016 / #1437 RLS 解锁器）
+
+**作用域来源**：`TenantId`（`vocab`，fail-closed 解析，空值 / nil / 非 canonical UUID 非法）
+从已认证通道（JWT tenant claim 或 service-token MAC 的 `X-Tenant-ID` header，见 §Tenant source）
+流入，经 `adapters/postgres/src/cotx.rs` 的类型化 funnel
+（`set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox`）注入当前 PG 事务；
+永不从 HTTP request body 读取。
+
+**缺失 SET LOCAL 的行为（预期 default-deny）**：若 `SET LOCAL rss.tenant_id` 未注入，
+`current_setting('rss.tenant_id', true)` 返回 NULL，`tenant_id = NULL` 永不匹配任何行——
+所有 tenant 表**行不可见、写操作被拒**。这是设计预期的 fail-closed 默认拒绝，不是故障；
+无隐式 fallback 或 anonymous 租户。
+
+**单 funnel 强制**：postgres 生产路径所有 `SET LOCAL rss.tenant_id` 注入只经 `cotx.rs` 三个
+helper 进行；`INVARIANT TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`，Medium
+内容扫描）机器强制：字面量 `set_config('rss.tenant_id'` 仅允许出现在
+`adapters/postgres/src/cotx.rs`（测试代码豁免）。类型化参数 `tenant: TenantId` 是 Hard 载体
+——非 `TenantId` 类型无法通过编译进入 funnel。
+
+**启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用
+`PgStore::verify_rls_capability()`，动态派生含 `tenant_id` 列的表集合，断言每张表满足
+`relrowsecurity AND relforcerowsecurity`、至少一条 tenant isolation policy，且
+`rss.tenant_id` GUC 可正确 round-trip；任一断言失败则 durable 模式**启动 fail-fast**（数据库
+RLS 状态无法在编译期校验，载体为 Medium 运行期门）。`RlsReadyProbe` 是对应的 readyz
+backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过标记 `Unhealthy`（→ 503）。
+
+**解锁器边界说明（#1437 是 PERSIST-016 解锁器）**：本 issue 落地统一的 typed cotx funnel
+（Hard）与 xtask setlocal-funnel 守卫（Medium）及启动能力门控（Medium），为以下同批
+issue 提供稳定底座：
+
+- **#1405**：outbox / inbox tenant 注入（outbox 当前为无 `tenant_id` 的全局表，见上文全局表注，其 tenant 硬化超出本 issue 范围）。
+- **#1426**：完整 repo 一致性 conformance testkit（CAS / rollback / co-tx 跨场景验收）。
+- **#1436**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
+
+dual-pool（`rss_app` serving 非 superuser 角色）接线见上文 §RLS 与 PG scope；`rss_app
+NOBYPASSRLS` 已 provision，dual-pool bootstrap 接线是独立 follow-up。
+
 ## ABAC authz 接线（permission-based）
 
 业务端点授权走 PDP 决策，不在 handler 硬编 role-name 字面量。

@@ -181,7 +181,7 @@ impl CredentialRepo for PgCredentialRepo {
 
         // 经 tenant_scoped_read 注入 SET LOCAL（与 0009 RLS policy current_setting 锚点对齐）；读闭包仅 fetch +
         // try_get 返回 owned 原始值，hydrate（PHC 复核 / Credential 重建）在 tx 外（域错误不依赖 sqlx）。
-        let raw = tenant_scoped_read(&self.pool, &tenant_uuid, move |conn| {
+        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
             Box::pin(async move {
                 let row = sqlx::query(
                     r#"
@@ -237,14 +237,15 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = authenticate_in_tx(&mut tx, &tenant_uuid, &login_str, &candidate, now).await;
+        let result =
+            authenticate_in_tx(&mut tx, &tenant_uuid, tenant, &login_str, &candidate, now).await;
         finish_write(tx, result, &tenant_uuid, "authenticate").await
     }
 
     async fn save(&self, credential: Credential) -> Result<(), IdentityError> {
         let tenant_uuid = tenant_param(credential.tenant());
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = save_in_tx(&mut tx, &tenant_uuid, &credential).await;
+        let result = save_in_tx(&mut tx, &tenant_uuid, credential.tenant(), &credential).await;
         finish_write(tx, result, &tenant_uuid, "save").await
     }
 
@@ -252,7 +253,15 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant_uuid = tenant_param(next.tenant());
         let login_str = next.login().as_str().to_owned();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = bump_version_in_tx(&mut tx, &tenant_uuid, &login_str, expected, &next).await;
+        let result = bump_version_in_tx(
+            &mut tx,
+            &tenant_uuid,
+            next.tenant(),
+            &login_str,
+            expected,
+            &next,
+        )
+        .await;
         finish_write(tx, result, &tenant_uuid, "bump_version").await
     }
 
@@ -265,7 +274,7 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = lockout_status_in_tx(&mut tx, &tenant_uuid, &login_str, now).await;
+        let result = lockout_status_in_tx(&mut tx, &tenant_uuid, tenant, &login_str, now).await;
         finish_write(tx, result, &tenant_uuid, "lockout_status").await
     }
 }
@@ -277,11 +286,12 @@ type AuthRow = (String, String, i64, Option<i64>, Option<i64>);
 async fn authenticate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_uuid: &str,
+    tenant: TenantId,
     login: &str,
     candidate: &str,
     now: SystemTime,
 ) -> Result<AuthOutcome, IdentityError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
     let found = auth_row(tx, tenant_uuid, login).await?;
     // PHC parse（已知主体）。损坏 PHC = 存储完整性问题 → fail-closed `Storage`，但**先跑等价 KDF 再早退**：
     // 否则「已知主体 + 损坏 PHC」走 ~0 成本早退，与「未知主体」跑满 argon2 KDF 的耗时可区分，泄漏主体存在性
@@ -361,9 +371,10 @@ async fn auth_row(
 async fn save_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_uuid: &str,
+    tenant: TenantId,
     credential: &Credential,
 ) -> Result<(), IdentityError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
     sqlx::query(
         r#"
         INSERT INTO credentials (tenant_id, user_id, login, password_hash, version)
@@ -390,11 +401,12 @@ async fn save_in_tx(
 async fn bump_version_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_uuid: &str,
+    tenant: TenantId,
     login: &str,
     expected: u32,
     next: &Credential,
 ) -> Result<(), IdentityError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
     let row = sqlx::query(
         "SELECT version FROM credentials WHERE tenant_id = $1::uuid AND login = $2 FOR UPDATE",
     )
@@ -430,10 +442,11 @@ async fn bump_version_in_tx(
 async fn lockout_status_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_uuid: &str,
+    tenant: TenantId,
     login: &str,
     now: SystemTime,
 ) -> Result<bool, IdentityError> {
-    set_local_tenant(tx, tenant_uuid).await.map_err(storage)?;
+    set_local_tenant(tx, tenant).await.map_err(storage)?;
     let row = sqlx::query(
         r#"
         SELECT failure_count,

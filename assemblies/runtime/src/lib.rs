@@ -455,6 +455,46 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
     }
 }
 
+// ── RlsReadyProbe ──────────────────────────────────────────────────────────────────────────────
+
+/// RLS 能力门 readyz 兜底探针稳定名（underscore_case，与 prometheus 约定一致）。
+pub const RLS_READY_PROBE_NAME: &str = "rls_ready";
+
+/// RLS 能力门 readyz 兜底探针——读 [`PgRuntimeDeps::rls_ready_handle`] 的启动核验镜像（非 pool）。
+///
+/// 启动期 `verify_rls_capability` 失败时 `setup` 直接 fail-fast（进程不进入服务态），故进程在跑 ⇒ 此探针
+/// 恒 `Healthy`；其价值是把「durable RLS 能力已就绪」这一不变式**显式暴露**到 readyz（运维可见），并为
+/// 后续周期性再核验留接线点（届时改为写采样状态即可，探针形态不变）。
+///
+/// `check`（sync，non-blocking）：读 `AtomicBool`（Acquire），`true → Healthy("ready")` /
+/// `false → Unhealthy("not-enforced")`（fail-closed）。`detail` 固定 `&'static str` const（禁夹带 PII）。
+pub struct RlsReadyProbe {
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    name: ProbeName,
+}
+
+impl RlsReadyProbe {
+    /// 构造 `RlsReadyProbe`（读 RLS 能力门镜像）。`name` 应使用 [`RLS_READY_PROBE_NAME`] 常量。
+    #[allow(clippy::expect_used)]
+    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        // reason: RLS_READY_PROBE_NAME 是 underscore_case const literal，ProbeName::parse 仅失败于非法
+        // 字符；const 已手工验证，expect 是构造期 programmer error（不可恢复，同 ConfigsReadyProbe）。
+        let name = ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
+        Self { ready, name }
+    }
+}
+
+impl bootstrap::HealthProbe for RlsReadyProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+            (HealthStatus::Healthy, "ready")
+        } else {
+            (HealthStatus::Unhealthy, "not-enforced")
+        };
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
 // ── settings + secret wiring ─────────────────────────────────────────────────────────────────
 
 /// 接线 settings 域（[PERSIST-001] #1422）：构造 `SettingsService` + `SecretService`，产出
@@ -858,6 +898,16 @@ pub async fn run() -> anyhow::Result<()> {
             .probe(name, probe)
             .with_context(|| format!("register domain probe '{probe_label}'"))?;
     }
+    // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
+    // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
+    let rls_probe_name =
+        ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
+    registry
+        .probe(
+            rls_probe_name,
+            Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
+        )
+        .context("register rls_ready probe")?;
     // 域 detached 资源 / 后台 worker（settings 今为空；路径为后续域就位）——移出供 serve 闭包排空。
     let domain_resources = module.resources;
     let domain_workers = module.workers;
@@ -921,6 +971,25 @@ mod tests {
         assert_eq!(result.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
         assert!(result.resources.is_empty(), "settings 今无 detached 资源");
         assert!(result.workers.is_empty(), "settings 今无后台 worker");
+    }
+
+    /// RlsReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("not-enforced")`（fail-closed）。
+    #[test]
+    fn rls_ready_probe_maps_flag_to_health() {
+        use bootstrap::HealthProbe;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let flag = Arc::new(AtomicBool::new(true));
+        let probe = RlsReadyProbe::new(Arc::clone(&flag));
+        let ready = probe.check();
+        assert_eq!(ready.status(), HealthStatus::Healthy);
+        assert_eq!(ready.detail(), "ready");
+        assert_eq!(ready.name().as_str(), RLS_READY_PROBE_NAME);
+
+        flag.store(false, Ordering::Release);
+        let down = probe.check();
+        assert_eq!(down.status(), HealthStatus::Unhealthy);
+        assert_eq!(down.detail(), "not-enforced");
     }
 
     #[test]
@@ -1297,6 +1366,29 @@ mod tests {
         // 重复注册同名 probe → Err（bootstrap registry 守唯一性）。
         let result = registry.probe(probe_name_b, Box::new(NullProbe));
         assert!(result.is_err(), "duplicate probe name should be rejected");
+    }
+
+    /// `RLS_READY_PROBE_NAME` 是合法 `ProbeName`；真实 `RlsReadyProbe` 可注册 + 重名拒绝（与 configs_ready 对称）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rls_ready_registers_and_is_unique() {
+        use std::sync::atomic::AtomicBool;
+        // reason: RLS_READY_PROBE_NAME 是 const literal，parse 只可能在字符非法时失败。
+        let name_a =
+            primitives::ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
+        let name_b =
+            primitives::ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
+        let mut registry = bootstrap::compose(&[&SettingsDomain]).expect("compose settings");
+        let flag = Arc::new(AtomicBool::new(true));
+
+        registry
+            .probe(name_a, Box::new(RlsReadyProbe::new(Arc::clone(&flag))))
+            .expect("first register ok");
+        let result = registry.probe(name_b, Box::new(RlsReadyProbe::new(flag)));
+        assert!(
+            result.is_err(),
+            "duplicate rls_ready probe name should be rejected"
+        );
     }
 
     // ── build_readiness_interval_from 测试 ────────────────────────────────────────────────

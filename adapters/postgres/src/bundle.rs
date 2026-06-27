@@ -36,6 +36,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use diport::{Clock, DynPublisher};
@@ -88,19 +89,26 @@ impl PgDomain for caps::Audit {}
 pub struct PgRuntimeDeps {
     store: Arc<PgStore>,
     readiness: Arc<PgDbReadiness>,
+    /// 启动期 RLS 能力门结果（true = `verify_rls_capability` 通过）；供 readyz 兜底探针读。setup 失败时进程
+    /// 根本不返回 `Self`（fail-fast），故 `Self` 存在即此值为 true——探针把该不变式显式暴露到 readyz。
+    rls_ready: Arc<AtomicBool>,
 }
 
 impl PgRuntimeDeps {
-    /// 唯一公开构造路径：连接 + 跑迁移 + 新建 readiness handle（初值 `Down`，fail-closed）。
+    /// 唯一公开构造路径：连接 + 跑迁移 + RLS 能力门 + 新建 readiness handle（初值 `Down`，fail-closed）。
     ///
-    /// 缺配 / 连不上 / 迁移失败均 fail-fast 返 [`PgError`]（区分 `Connect` / `Migrate` 阶段）；组合根在边界
-    /// `.context(..)` 成 anyhow。对标 omicron `DataStore::new_with_timeout`（构造器集中 + schema 门控）。
+    /// 缺配 / 连不上 / 迁移失败 / **RLS 能力缺失**均 fail-fast 返 [`PgError`]（区分 `Connect` / `Migrate` /
+    /// `Rls*` 阶段）；组合根在边界 `.context(..)` 成 anyhow。对标 omicron `DataStore::new_with_timeout`
+    /// （构造器集中 + schema/能力门控，对象返回前校验）。
     pub async fn setup(config: &PgConfig) -> Result<Self, PgError> {
         let store = Arc::new(PgStore::connect(config).await?);
         store.run_migrations().await?;
+        // durable RLS 能力门（fail-fast）：tenant 表须 FORCE RLS + policy 且 GUC roundtrip 通过，否则拒绝启动。
+        store.verify_rls_capability().await?;
         Ok(Self {
             store,
             readiness: Arc::new(PgDbReadiness::new()),
+            rls_ready: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -130,6 +138,13 @@ impl PgRuntimeDeps {
         Arc::clone(&self.readiness)
     }
 
+    /// 启动期 RLS 能力门结果句柄（**非** pool）：readyz 兜底探针读它（`rls_ready` probe）。
+    /// 当前为 setup 期一次性核验的不变式镜像（`Self` 存在 ⇒ true）；周期性再核验为后续扩展点。
+    #[must_use]
+    pub fn rls_ready_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.rls_ready)
+    }
+
     /// 包装私有 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard——**不**泄漏 `Arc<PgStore>` 本身。
     ///
     /// LIFO 注册：guard 先注册 ⇒ 最后关池（listener drain → sampler 停 → pool close）。
@@ -156,11 +171,13 @@ impl PgRuntimeDeps {
     }
 
     /// 测试构造：从已建 `Arc<PgStore>`（lazy pool）旁路 `setup`（免真连 DB）。
+    /// reason: 旁路 `verify_rls_capability`，测试假定能力已就绪（`rls_ready = true`）。
     #[cfg(test)]
     pub(crate) fn from_store_for_test(store: Arc<PgStore>) -> Self {
         Self {
             store,
             readiness: Arc::new(PgDbReadiness::new()),
+            rls_ready: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -417,6 +434,15 @@ mod tests {
         assert!(
             Arc::ptr_eq(&d.readiness_handle(), &d.readiness),
             "readiness_handle 返回内部同一 Arc"
+        );
+    }
+
+    #[tokio::test]
+    async fn rls_ready_handle_returns_same_arc() {
+        let d = deps();
+        assert!(
+            Arc::ptr_eq(&d.rls_ready_handle(), &d.rls_ready),
+            "rls_ready_handle 返回内部同一 Arc"
         );
     }
 

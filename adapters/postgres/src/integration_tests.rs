@@ -20,7 +20,7 @@ use crate::PgStore;
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-use crate::test_pg::connect_pg;
+use crate::test_pg::{connect_pg, connect_pg_nobypass_role};
 
 /// 测试用固定事件发生时刻（unix 秒）——t10/t11 断言 envelope `occurred_at`（#1129）。
 const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
@@ -63,6 +63,89 @@ async fn migrator_applies_and_is_idempotent() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?; // 应用 0001 占位
     store.run_migrations().await?; // 再跑：checksum 命中 → 幂等 no-op
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RLS 能力门反例（**连接角色绕过**，最先 fail-fast）：superuser 连接（容器默认 `postgres`）→
+/// `Err(RlsBypassRole)`。superuser / BYPASSRLS 绕过 FORCE RLS，能力门须先拒（tenancy.md「生产 owner 须为
+/// 非 superuser」的运行期强制）。本测试**用默认 superuser 连接**直证绕过检测。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_bypass_role() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let verdict = store.verify_rls_capability().await; // superuser → 角色绕过门最先命中
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsBypassRole)),
+        "superuser/BYPASSRLS 连接应使能力门 fail-fast，实得: {verdict:?}"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RLS 能力门正例：迁移后所有 tenant 表均 FORCE RLS + 规范 policy + GUC roundtrip，且**非绕过角色**连接 →
+/// `verify_rls_capability` 放行。serving 连接须为非 superuser（superuser 会先触发 `RlsBypassRole`），故正例
+/// 经 [`connect_pg_nobypass_role`] 建的 NOBYPASSRLS 角色驱动。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_ok_after_migrations() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?; // 迁移经 owner/superuser
+    let app = connect_pg_nobypass_role(&_pg, &store).await?;
+    app.verify_rls_capability().await?; // 非绕过角色 + FORCE RLS + 规范 policy + GUC roundtrip 全通过
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RLS 能力门反例（fail-closed）：存在含 `tenant_id` 列却**无** RLS 的表 → `Err(RlsNotEnforced)`。
+/// throwaway 表经 owner 建，能力门经**非绕过角色**判定（pg_catalog 不受权限过滤、仍可见该表）；DROP 还原。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_tenant_table_without_rls() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS _rls_probe_bad (tenant_id uuid NOT NULL, x int)")
+        .execute(&store.pool)
+        .await?;
+    let app = connect_pg_nobypass_role(&_pg, &store).await?;
+    let verdict = app.verify_rls_capability().await;
+    sqlx::query("DROP TABLE IF EXISTS _rls_probe_bad")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        "含 tenant_id 列却无 FORCE RLS 的表应使能力门 fail-closed，实得: {verdict:?}"
+    );
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RLS 能力门反例（policy 内容校验 + OR-widening）：tenant 表 FORCE RLS 但 policy 为 `USING (true)`（不引用
+/// `rss.tenant_id` GUC）→ 仍 `Err(RlsNotEnforced)`。守「policy 存在但表达式错误 / allow-all permissive 放宽」
+/// 的运行时隔离静默失效路径（能力门校验 policy 内容、非仅存在性；与 xtask schema-rls 静态扫描互补）。
+/// 经**非绕过角色**判定；throwaway 表隔离 + DROP 还原。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    for stmt in [
+        "CREATE TABLE IF NOT EXISTS _rls_probe_permissive (tenant_id uuid NOT NULL, x int)",
+        "ALTER TABLE _rls_probe_permissive ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE _rls_probe_permissive FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY allow_all ON _rls_probe_permissive USING (true)",
+    ] {
+        sqlx::query(stmt).execute(&store.pool).await?;
+    }
+    let app = connect_pg_nobypass_role(&_pg, &store).await?;
+    let verdict = app.verify_rls_capability().await;
+    sqlx::query("DROP TABLE IF EXISTS _rls_probe_permissive")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        "FORCE RLS 但 policy 为 USING(true)（不引用 rss.tenant_id）应 fail-closed，实得: {verdict:?}"
+    );
+    app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -1088,6 +1171,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     );
     assert!(
         row.5
+            .replace(' ', "")
             .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
         row.5
@@ -1196,6 +1280,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
         .await?;
     assert!(
         meta.0
+            .replace(' ', "")
             .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "co-tx outbox metadata 应含 sealed 注入的 occurred_at: {}",
         meta.0
@@ -1318,6 +1403,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
         .await?;
     assert!(
         meta.0
+            .replace(' ', "")
             .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "幂等重写不应覆盖首次 occurred_at: {}",
         meta.0
@@ -2593,6 +2679,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     assert!(
         cfg_meta
             .0
+            .replace(' ', "")
             .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
         "config co-tx outbox metadata 应含构造期注入的 occurred_at: {}",
         cfg_meta.0
@@ -2617,7 +2704,6 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
     let tenant = config_tenant();
-    let tenant_uuid = tenant.as_uuid().to_string();
     let event_id = unique_event_id("cfg-tc6-evt");
     let entry = config_outbox_entry(&event_id);
     let env = OutboxEnvelope::new(
@@ -2629,7 +2715,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
     let result = co_tx_with_outbox(
         &store.pool,
-        &tenant_uuid,
+        tenant,
         &entry,
         &env,
         move |conn| {
@@ -2810,6 +2896,42 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
     Ok(())
 }
 
+/// tc9b：`PgConfigRepo` 接入 #1437 最小 tenant-scope **conformance 骨架**（#1426 种子的首个 enroll
+/// 消费方 + anti-vacuity 真实 repo 驱动）：round-trip / 跨租不可见 / 跨租不干扰 三断言一次过。
+/// 与 tc9（手写逐断言）互补——本测试证骨架对真实 RLS-scoped repo 可用，#1426 在骨架上扩 CAS/rollback 等。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let tenant_a = config_tenant();
+    let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
+    let key = SettingKey::parse("app.conformance").unwrap();
+
+    testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |t| {
+            let repo = &repo;
+            async move {
+                let entry =
+                    ConfigEntry::hydrate(SettingKey::parse("app.conformance").unwrap(), "v1", t, 1);
+                repo.save(t, entry).await
+            }
+        },
+        |t| {
+            let repo = &repo;
+            let key = &key;
+            async move { repo.find(t, key).await.map(|o| o.is_some()) }
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 构造 application 同款 event_id（`{topic}:{tenant}:{key}:v{version}`）——tc10 验 delete+republish 不复用。
 fn config_event_id(tenant: TenantId, key: &str, version: u64) -> String {
     format!("{CONFIG_VERSION_CHANGED_TOPIC}:{tenant}:{key}:v{version}")
@@ -2948,7 +3070,7 @@ async fn ts1_secret_save_find_roundtrip() -> TestResult {
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
     let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp/db-password").unwrap();
+    let key = SecretKey::parse("myapp.db-password").unwrap();
 
     // 未写入 → None。
     assert!(repo.find(tenant, &key).await?.is_none(), "未写入 → None");
@@ -2956,7 +3078,7 @@ async fn ts1_secret_save_find_roundtrip() -> TestResult {
     repo.save(
         tenant,
         make_secret_entry(
-            "myapp/db-password",
+            "myapp.db-password",
             "vault",
             "secret/data/myapp",
             Some("v2"),
@@ -2967,7 +3089,7 @@ async fn ts1_secret_save_find_roundtrip() -> TestResult {
     .await?;
 
     let found = repo.find(tenant, &key).await?.unwrap();
-    assert_eq!(found.key().as_str(), "myapp/db-password", "key 回环");
+    assert_eq!(found.key().as_str(), "myapp.db-password", "key 回环");
     assert_eq!(
         found.secret_ref().store_id().as_str(),
         "vault",
@@ -3002,7 +3124,7 @@ async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
     repo.save(
         tenant,
         make_secret_entry(
-            "myapp/api-key",
+            "myapp.api-key",
             "k8s-secrets",
             "ns/my-secret",
             None,
@@ -3013,7 +3135,7 @@ async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
     .await?;
 
     let found = repo
-        .find(tenant, &SecretKey::parse("myapp/api-key").unwrap())
+        .find(tenant, &SecretKey::parse("myapp.api-key").unwrap())
         .await?
         .unwrap();
     assert_eq!(
@@ -3034,17 +3156,17 @@ async fn ts2_secret_find_version_history() -> TestResult {
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
     let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp/db-pass").unwrap();
+    let key = SecretKey::parse("myapp.db-pass").unwrap();
 
     repo.save(
         tenant,
-        make_secret_entry("myapp/db-pass", "vault", "secret/v1", None, 1, tenant),
+        make_secret_entry("myapp.db-pass", "vault", "secret/v1", None, 1, tenant),
     )
     .await?;
     repo.save(
         tenant,
         make_secret_entry(
-            "myapp/db-pass",
+            "myapp.db-pass",
             "vault",
             "secret/v2",
             Some("rev-2"),
@@ -3090,7 +3212,7 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
 
     repo.save(
         tenant,
-        make_secret_entry("myapp/token", "vault", "secret/tok", None, 1, tenant),
+        make_secret_entry("myapp.token", "vault", "secret/tok", None, 1, tenant),
     )
     .await?;
 
@@ -3099,7 +3221,7 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
         matches!(
             repo.save(
                 tenant,
-                make_secret_entry("myapp/token", "vault", "secret/tok-b", None, 1, tenant),
+                make_secret_entry("myapp.token", "vault", "secret/tok-b", None, 1, tenant),
             )
             .await,
             Err(SecretRepoError::VersionConflict)
@@ -3112,7 +3234,7 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
         matches!(
             repo.save(
                 tenant,
-                make_secret_entry("myapp/token", "vault", "secret/tok-c", None, 3, tenant),
+                make_secret_entry("myapp.token", "vault", "secret/tok-c", None, 3, tenant),
             )
             .await,
             Err(SecretRepoError::VersionConflict)
@@ -3123,11 +3245,11 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
     // 恰 max+1：v2 成功。
     repo.save(
         tenant,
-        make_secret_entry("myapp/token", "vault", "secret/tok-v2", None, 2, tenant),
+        make_secret_entry("myapp.token", "vault", "secret/tok-v2", None, 2, tenant),
     )
     .await?;
     assert_eq!(
-        repo.find(tenant, &SecretKey::parse("myapp/token").unwrap())
+        repo.find(tenant, &SecretKey::parse("myapp.token").unwrap())
             .await?
             .unwrap()
             .secret_ref()
@@ -3148,17 +3270,17 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
     let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp/cred").unwrap();
+    let key = SecretKey::parse("myapp.cred").unwrap();
 
     repo.save(
         tenant,
-        make_secret_entry("myapp/cred", "vault", "secret/cred", None, 1, tenant),
+        make_secret_entry("myapp.cred", "vault", "secret/cred", None, 1, tenant),
     )
     .await?;
     repo.save(
         tenant,
         make_secret_entry(
-            "myapp/cred",
+            "myapp.cred",
             "vault",
             "secret/cred-v2",
             Some("r2"),
@@ -3213,7 +3335,7 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
     );
 
     // 不存在 key → no-op（无 panic / 无错误）。
-    let phantom = SecretKey::parse("myapp/nonexistent").unwrap();
+    let phantom = SecretKey::parse("myapp.nonexistent").unwrap();
     repo.delete(tenant, &phantom).await?;
 
     store.shutdown().await?;
@@ -3232,7 +3354,7 @@ async fn ts5_secret_find_maps_storage_error() -> TestResult {
     // 关池（PgSecretRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 → Storage。
     store.shutdown().await?;
     let result = repo
-        .find(tenant, &SecretKey::parse("myapp/k").unwrap())
+        .find(tenant, &SecretKey::parse("myapp.k").unwrap())
         .await;
     assert!(
         matches!(result, Err(SecretRepoError::Storage(_))),
@@ -3251,12 +3373,12 @@ async fn ts6_secret_cross_tenant_isolation() -> TestResult {
     let repo = PgSecretRepo::new(&store);
     let tenant_a = secret_tenant_a();
     let tenant_b = TenantId::parse(SECRET_TENANT_B).unwrap();
-    let key = SecretKey::parse("shared/key").unwrap();
+    let key = SecretKey::parse("shared.key").unwrap();
 
     // tenant A 写 v1。
     repo.save(
         tenant_a,
-        make_secret_entry("shared/key", "vault-a", "secret/a", None, 1, tenant_a),
+        make_secret_entry("shared.key", "vault-a", "secret/a", None, 1, tenant_a),
     )
     .await?;
 
@@ -3273,7 +3395,7 @@ async fn ts6_secret_cross_tenant_isolation() -> TestResult {
     // tenant B 写同 key v1（独立版本空间，不受 A 的 v1 影响）→ 成功。
     repo.save(
         tenant_b,
-        make_secret_entry("shared/key", "vault-b", "secret/b", None, 1, tenant_b),
+        make_secret_entry("shared.key", "vault-b", "secret/b", None, 1, tenant_b),
     )
     .await?;
     assert_eq!(
@@ -3328,13 +3450,13 @@ async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
     let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp/rotate-key").unwrap();
+    let key = SecretKey::parse("myapp.rotate-key").unwrap();
 
     // 写 v1。
     repo.save(
         tenant,
         make_secret_entry(
-            "myapp/rotate-key",
+            "myapp.rotate-key",
             "vault",
             "secret/rotate",
             None,
@@ -3362,7 +3484,7 @@ async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
     repo.save(
         tenant,
         make_secret_entry(
-            "myapp/rotate-key",
+            "myapp.rotate-key",
             "vault",
             "secret/rotate-new",
             Some("v3"),
