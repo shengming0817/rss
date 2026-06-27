@@ -485,6 +485,35 @@ pub fn build_vault_runtime_deps(
     Ok(VaultRuntimeDeps::new(build_vault_resolver_from(get)?))
 }
 
+/// 组合根级 redis capability bundle 构造：`RSS_REDIS_URL` → deadpool redis pool + PING → [`redis::RedisRuntimeDeps`].
+///
+/// 缺 `RSS_REDIS_URL` 或 Redis 不可达均 fail-fast；错误上下文只含 env/resource 名，不含 URL 值。
+/// 生命周期关闭经 `RedisRuntimeDeps::runtime_resources()` 单源进入
+/// [`DomainModuleResult::resources`]。
+pub async fn build_redis_runtime_deps(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<redis::RedisRuntimeDeps> {
+    let url = get("RSS_REDIS_URL")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_REDIS_URL"))?;
+    let pool = deadpool_redis::Config::from_url(url)
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .context("create redis pool")?;
+    verify_redis_pool(&pool)
+        .await
+        .context("verify redis connectivity for RSS_REDIS_URL")?;
+    Ok(redis::RedisRuntimeDeps::setup(pool))
+}
+
+async fn verify_redis_pool(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+    let mut conn = pool.get().await.context("connect redis resource")?;
+    let pong: String = deadpool_redis::redis::cmd("PING")
+        .query_async(&mut *conn)
+        .await
+        .context("ping redis resource")?;
+    anyhow::ensure!(pong == "PONG", "redis resource returned non-PONG ping");
+    Ok(())
+}
+
 // ── ConfigsReadyProbe ─────────────────────────────────────────────────────────────────────────
 
 /// probe 探针稳定名（`ProbeName::parse` 校验合法字符；underscore_case，与 prometheus metric 约定一致）。
@@ -1056,10 +1085,26 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
     let vault =
         build_vault_runtime_deps(|name| std::env::var(name).ok()).context("setup vault deps")?;
+    // redis capability bundle 是 demo-optional（#332 F2）：分布式 lock/CAS provider 当前为 draft、组合根无
+    // consumer（见 assembly.toml 注释），故未配 `RSS_REDIS_URL` 即跳过、不打断默认 demo 路径；配了则照常
+    // PING + fail-fast（durable 部署仍 fail-closed）。go-live（active + wire_distributed）落地时改回必配。
+    let redis = if std::env::var_os("RSS_REDIS_URL").is_some() {
+        Some(
+            build_redis_runtime_deps(|name| std::env::var(name).ok())
+                .await
+                .context("setup redis deps")?,
+        )
+    } else {
+        tracing::warn!(
+            "RSS_REDIS_URL 未配置：跳过 redis capability bundle（distributed lock/CAS provider 为 draft、组合根无 consumer）"
+        );
+        None
+    };
 
     // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
     let deps = SharedRuntimeDeps {
         pg: pg.clone(),
+        redis,
         vault,
     };
 
@@ -1088,7 +1133,11 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let mut module = DomainModuleResult::default();
     module.merge(settings_module);
     // provider capability bundle 单源装配（#1498）：vault resolver guard 经 runtime_resources() 单源排进
-    // module.resources，组合根不再逐 channel 手写 register_detached（D5）。redis/amqp 待各自 durable body 接入。
+    // module.resources，组合根不再逐 channel 手写 register_detached（D5）。redis 为 demo-optional（未配
+    // RSS_REDIS_URL 时 None），仅在已装配时排入 pool guard（#332 F2）；amqp 待各自 durable body 接入。
+    if let Some(redis) = &deps.redis {
+        module.resources.extend(redis.runtime_resources());
+    }
     module.resources.extend(deps.vault.runtime_resources());
 
     // 排空域产物探针进 registry（须先于 take_health_reporter，readyz 才聚合 configs_ready）。
@@ -1161,6 +1210,8 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "integration")]
+    use diport::ManagedResource as _;
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1412,6 +1463,48 @@ mod tests {
         assert!(deps.is_ok(), "有效 vault env 须构造成功");
         let resources = deps.expect("valid vault deps").runtime_resources();
         assert_eq!(resources.len(), 1, "vault bundle 单源派生 resolver guard");
+    }
+
+    #[tokio::test]
+    async fn build_redis_runtime_deps_missing_url_fails_fast() {
+        let result = build_redis_runtime_deps(|_| None).await;
+        assert!(
+            matches!(&result, Err(e) if format!("{e:#}").contains("RSS_REDIS_URL")),
+            "缺 redis url env 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn build_redis_runtime_deps_unreachable_url_fails_fast() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        let result = build_redis_runtime_deps(|name| {
+            (name == "RSS_REDIS_URL").then(|| format!("redis://{addr}"))
+        })
+        .await;
+        assert!(
+            matches!(&result, Err(e) if format!("{e:#}").contains("RSS_REDIS_URL")),
+            "不可达 redis url 须启动期 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn build_redis_runtime_deps_valid_env_single_sources_pool_guard() {
+        let fixture = testkit::env_or_redis().await.expect("redis fixture");
+        let url = fixture.url().to_string();
+        let deps =
+            build_redis_runtime_deps(|name| (name == "RSS_REDIS_URL").then(|| url.clone())).await;
+        assert!(deps.is_ok(), "有效 redis url 须构造成功");
+        let resources = deps.expect("valid redis deps").runtime_resources();
+        assert_eq!(resources.len(), 1, "redis bundle 单源派生 pool guard");
+        assert_eq!(resources[0].name(), "redis", "redis resource 即 pool guard");
     }
 
     #[test]

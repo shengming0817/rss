@@ -19,29 +19,94 @@
 use std::time::Duration;
 
 use diport::ManagedResource;
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
+use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode};
 use runtime::{
-    CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_vault_runtime_deps, wire_settings,
+    CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_redis_runtime_deps,
+    build_vault_runtime_deps, wire_settings,
 };
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+const TEST_APP_ROLE: &str = "rss_wire_contract_e2e_app";
+const TEST_APP_PASSWORD: &str = "wire_contract_e2e_pw";
 
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations）。
 async fn connect_pg()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
-    let config = PgConfig::new(
+    let owner_config = pg_config(p, &p.username, &p.password);
+    match PgRuntimeDeps::setup(&owner_config).await {
+        Ok(deps) => return Ok((fixture, deps)),
+        Err(PgError::RlsBypassRole) => {
+            provision_nobypass_app_role(p).await?;
+        }
+        Err(e) => return Err(Box::new(e)),
+    }
+    let deps = PgRuntimeDeps::setup(&pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD)).await?;
+    Ok((fixture, deps))
+}
+
+fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+    PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        p.username.clone(),
-        PgPassword::new(p.password.clone()),
+        username.to_string(),
+        PgPassword::new(password.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5));
-    let deps = PgRuntimeDeps::setup(&config).await?;
-    Ok((fixture, deps))
+    .with_acquire_timeout(Duration::from_secs(5))
+}
+
+async fn provision_nobypass_app_role(
+    p: &testkit::PgConnParams,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let options = PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(SqlxPgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    sqlx::query(&format!(
+        r#"
+        DO $$
+        BEGIN
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        "#
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, CREATE ON SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
 }
 
 /// 正向集成：pg testcontainer + stub vault bundle（测试内固定 addr/token，无 ambient env）→ `wire_settings`
@@ -58,8 +123,17 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
         _ => None,
     })?;
+    let redis_fixture = testkit::env_or_redis().await?;
+    let redis = build_redis_runtime_deps(|name| {
+        (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
+    })
+    .await?;
 
-    let deps = SharedRuntimeDeps { pg, vault };
+    let deps = SharedRuntimeDeps {
+        pg,
+        redis: Some(redis),
+        vault,
+    };
 
     // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回 (SettingsDomain, DomainModuleResult)；
     // module 半边产物恰一条 configs_ready 探针（#1430：domain 半边经 run() compose 挂业务路由，此处只验 module 出向）。
@@ -85,5 +159,12 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         "vault-secret-resolver",
         "vault 单源 resource 即 resolver guard"
     );
+    // redis 为 demo-optional（#332 F2）；本 fixture 配了 RSS_REDIS_URL，故 Some——取 pool guard 单源验收。
+    let redis = deps
+        .redis
+        .as_ref()
+        .ok_or("redis configured in this wire_contract e2e fixture")?;
+    let redis_resources = redis.runtime_resources();
+    assert_eq!(redis_resources.len(), 1, "redis 单源派生 pool guard");
     Ok(())
 }

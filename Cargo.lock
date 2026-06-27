@@ -4016,6 +4016,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "vocab",
 ]
 
 [[package]]
@@ -4276,6 +4277,7 @@ dependencies = [
  "base64",
  "bootstrap",
  "crypto-adapter",
+ "deadpool-redis",
  "diport",
  "futures",
  "generated",
@@ -4291,6 +4293,7 @@ dependencies = [
  "primitives",
  "prometheus-adapter",
  "ratelimit",
+ "redis-adapter",
  "reqwest",
  "runctx",
  "secure",

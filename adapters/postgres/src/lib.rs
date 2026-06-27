@@ -19,6 +19,7 @@
 mod audit_repo;
 mod auth_audit_sink;
 mod bundle;
+mod cas_store;
 mod checkpoint;
 mod config_repo;
 mod cotx;
@@ -42,6 +43,7 @@ pub use audit_repo::PgAuditRepo;
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, PgSettingsBundle, caps};
+pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
 pub use config_repo::PgConfigRepo;
 pub use credential_repo::PgCredentialRepo;
@@ -138,7 +140,7 @@ mod smoke {
     //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
-    //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal +
+    //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
@@ -159,6 +161,7 @@ mod smoke {
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
+    fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
     fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
@@ -182,6 +185,7 @@ mod smoke {
         assert_config_uow(PhantomData::<super::PgConfigRepo>);
         // `PgSagaJournal: SagaJournal` + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
         assert_saga_journal(PhantomData::<super::PgSagaJournal>);
+        assert_cas_store(PhantomData::<super::PgCasStore>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
         // `PgSecretRepo: SecretRepo` 真实 impl（非 edge proof）——secret 引用坐标仓储（#1274）。
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);

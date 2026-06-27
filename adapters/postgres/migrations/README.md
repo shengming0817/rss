@@ -29,6 +29,11 @@
 > 无历史 checksum 可冲突），重号本就让迁移在任意 fresh DB 上无法应用（非「只增不改」要保护的演进，而是 bug 修复）。
 > 同批新增 `cargo xtask migrations` 唯一性门（见 §命名），杜绝再发生。ADR 见
 > `docs/architecture/202606271500-011-migration-serial-renumber.md`。
+>
+> **例外扩展（#1255，pre-GA residual duplicate carve-out）**：PR329 后 `develop` 再次残留两个 `0020`
+>（`0020_add_inbox_dedup_sweep_index.sql` / `0020_harden_dead_letter_rls.sql`）。本 PR 仅重编号后者及其后续
+> dead-letter sweep migration（`0021`/`0022`），不改 SQL 语义；RLS predicate 修复改用新的 `0024` 前向迁移。
+> 依据同 ADR-011：pre-GA 且重号本身已让 fresh DB migration 不可应用。
 
 ## 索引形态（阶段约定）
 
@@ -42,17 +47,24 @@
 
 1. `ENABLE ROW LEVEL SECURITY`
 2. `FORCE ROW LEVEL SECURITY`（使 owner 连接亦受 policy 约束）
-3. tenant-isolation policy：`USING/WITH CHECK (tenant_id = current_setting('rss.tenant_id', true)::uuid)`
+3. tenant-isolation policy：`USING/WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`
 
 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
 Medium）扫描 schema 快照，缺三件套即门红。
 
 `0005` / `0006` / `0009` 建表时注释「预 GA 不建 RLS」；依「只增不改」规则不可回改——
-`0012_enable_tenant_rls.sql` 补齐四张 tenant 表（sessions / config_entries / roles / secret_refs）的 RLS，
-0012 起四表均受 policy 保护。
+`0012_enable_tenant_rls.sql` 补齐四张 tenant 表（sessions / config_entries / roles / secret_refs）的 RLS；
+`0024_harden_tenant_rls_empty_setting.sql` 将旧 policy 前向升级为 NULLIF 形态，避免空 GUC cast 在 policy 判定前报错。
 
-非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS，仅四张 tenant 表的 DML grant）由 `0012`
-provision；生产 LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。
+非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS）由 `0012` provision，并随各表落地按最小权限
+**forward-only 增量授权**（不回改历史迁移，新增表在其建表迁移内补 grant）：
+
+- `0012`：原四张 tenant 表（`sessions` / `config_entries` / `roles` / `secret_refs`）DML（SELECT/INSERT/UPDATE/DELETE）。
+- `0015` `credentials`、`0017` `refresh_tokens`：补全 DML（tenant 表）。
+- append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。
+
+生产 LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。后续新增 tenant / append-only 表须在其建表迁移内
+为 `rss_app` 补最小授权（tenant 表 DML、append-only 表 SELECT+INSERT），与上表同范式。
 
 ## Append-only 表（REVOKE 强制）
 

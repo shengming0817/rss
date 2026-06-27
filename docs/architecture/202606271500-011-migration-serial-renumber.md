@@ -38,7 +38,19 @@ outbox 在其 ALTER 之前、被建表在 `enable_tenant_rls` 之前等），仅
 
 窗口边界：GA 或出现已部署 DB 后，本例外即失效，迁移恢复严格 append-only。
 
-### 2.2 新增序号唯一性治理门（堵住根因）
+### 2.2 #1255 扩展：修复 PR329 后残留的 `0020` 重号
+
+PR329 合并后的 `develop` 再次出现两个 `0020`：
+`0020_add_inbox_dedup_sweep_index.sql` 与 `0020_harden_dead_letter_rls.sql`。该状态同样会让
+fresh DB 上的 `run_migrations` 在版本记账处 fail-fast。
+
+#1255 只做必要重编号：保留 `0020_add_inbox_dedup_sweep_index.sql`，将 dead-letter RLS 迁移与 sweep 索引顺延为
+`0021`/`0022`，新增 distributed CAS 为 `0023`，RLS 空 GUC policy 修复为新的前向迁移 `0024`。重编号文件不改 SQL
+语义；任何 policy 语义修正均用新迁移表达，避免把内容 rewrite 混入序号修复。
+
+依据仍是本 ADR 的 pre-GA carve-out：重复序号本身已破坏 fresh DB 迁移；在 GA 或已有部署 DB 后不得再扩展本例外。
+
+### 2.3 新增序号唯一性治理门（堵住根因）
 
 重编只修存量；根因是**无机器门挡住两 PR 加同号**。新增 `cargo xtask migrations`（接入 `cargo xtask verify`
 / `ci`，Medium，INVARIANT `MIGRATION-SERIAL-UNIQUE-01`）：扫描 `migrations/*.sql` 文件名，序号重复或非连续即

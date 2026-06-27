@@ -3011,7 +3011,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
 async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let repo = PgConfigRepo::new(&store, fixed_clock().into());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5b-evt");
     let envelope = OutboxEnvelopeParts::new(

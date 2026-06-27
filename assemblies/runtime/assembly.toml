@@ -10,6 +10,7 @@ lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
 
+# edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
 port = "diport::RateLimiter"
 provider = "ratelimit::GovernorLimiter"
@@ -18,3 +19,34 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+
+# distributed lock/CAS providers（#1255 Join 接线）：redis/postgres 后端已实现并通过集成测试，但组合根尚无
+# consumer——`distributed::Locker` / `StateCas` 全仓零构造、声明 `distributed` 依赖的域均未使用，run() 也无
+# `wire_distributed`。故声明为 draft（诚实反映「后端就绪、消费者未接」），go-live（active 翻转 + wire_distributed
+# 注入 + redis readiness + distributed_cas GRANT + deploy/docs + e2e）随真正接入分布式锁/CAS 的消费者 PR 落地（#332 F4）。
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "draft"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+
+[[diportProviders]]
+port = "diport::CasStore"
+provider = "postgres::PgCasStore"
+providerCrate = "postgres"
+consumer = "distributed"
+lifecycle = "draft"
+durability = "persistent"
+purpose = "distributed-state-cas"
+
+[[diportProviders]]
+port = "diport::CasStore"
+provider = "redis::RedisCasStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "draft"
+durability = "persistent"
+purpose = "distributed-state-cas-redis-alternative"

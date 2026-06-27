@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use diport::{Clock, DynPublisher};
+use diport::{Clock, DynCasStore, DynPublisher};
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
@@ -368,7 +368,7 @@ impl PgDomainDeps<caps::Audit> {
 /// framework/global postgres 基建能力句柄（`Clone`，provider-agnostic、非单域）。
 ///
 /// 私有持 `Arc<PgStore>`，经 [`PgRuntimeDeps::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
-/// saga_journal / projection_events——这些是跨域基建（非绑某个 `caps::*` 域），故独立于 [`PgDomainDeps`]。
+/// saga_journal / projection_events / cas_store——这些是跨域基建（非绑某个 `caps::*` 域），故独立于 [`PgDomainDeps`]。
 /// 与 `PgDomainDeps` 一样不返回 `&PgStore` / `PgPool`（PG-BUNDLE-POOL-03）。
 ///
 /// infra/domain 能力面**互斥**（typed function choice）：`PgInfraDeps` 上没有域 repo（编译期被拒）：
@@ -434,6 +434,12 @@ impl PgInfraDeps {
     #[must_use]
     pub fn projection_events(&self) -> PgProjectionEvents {
         self.store.projection_events()
+    }
+
+    /// distributed state CAS store（全局 per-key revision token）。
+    #[must_use]
+    pub fn cas_store(&self) -> Box<DynCasStore<'static>> {
+        DynCasStore::new_box(self.store.cas_store())
     }
 }
 
@@ -583,6 +589,7 @@ mod tests {
         let _ = infra.checkpoint();
         let _ = infra.saga_journal();
         let _ = infra.projection_events();
+        let _ = infra.cas_store();
     }
 
     #[tokio::test]

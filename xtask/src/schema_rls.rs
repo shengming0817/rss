@@ -45,16 +45,18 @@ pub(crate) enum Rule {
     ForceRls,
     /// TENANCY-RLS-FORCE-01：tenant 表无任何 `CREATE POLICY ... ON <t>`。
     PolicyAbsent,
-    /// TENANCY-RLS-FORCE-01：tenant 表 policy 体 normalize 后未含规范等值谓词，或含 OR true 重言旁路（形同 allow-all）。
+    /// TENANCY-RLS-FORCE-01：tenant 表 policy 最终态（CREATE 经 ALTER 覆盖后）未含规范 NULLIF 等值谓词，
+    /// 或含 OR true 重言旁路（形同 allow-all）。旧裸谓词未经 `ALTER POLICY` 升级为 NULLIF 形态亦属此类。
     PolicyWeak,
 }
 
 /// 搜索关键词（已小写，配合 `to_lowercase()` 后的内容匹配）。
 const ENABLE_RLS: &str = "enable row level security";
 const FORCE_RLS: &str = "force row level security";
-/// tenant-isolation policy 体规范等值谓词（normalize 后 substring 比对；容忍 `=`/`::` 两侧空白——折叠后与此串对比）。
-const POLICY_PREDICATE: &str = "tenant_id = current_setting('rss.tenant_id', true)::uuid";
-/// tenant-isolation policy 体规范等值谓词（空 custom GUC 经 NULLIF 转 NULL，避免 unset GUC cast 空串报错）。
+/// tenant-isolation policy 体规范等值谓词（**目标态**，#332 F6）：空 custom GUC 经 NULLIF 转 NULL，避免 unset
+/// GUC cast 空串在 policy 判定前报错。normalize 后 substring 比对；容忍 `=`/`::` 两侧空白（折叠后与此串对比）。
+/// 旧裸谓词 `tenant_id = current_setting('rss.tenant_id', true)::uuid` 不再被接受为最终态——须经 forward-only
+/// `ALTER POLICY` 升级为本形态，否则 schema-rls 判 `PolicyWeak`（只新增旧谓词不 harden 即门红）。
 const POLICY_PREDICATE_NULLIF: &str =
     "tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid";
 /// 明显重言旁路 — OR true（normalize 后子串；含此则 policy 体视为 PolicyWeak 无效）。
@@ -137,7 +139,7 @@ fn strip_and_lowercase(files: &[(String, String)]) -> Vec<(String, String)> {
 
 /// 生成 findings：对每个 tenant 表检查 ENABLE / FORCE / POLICY 三件套（含 policy 体谓词校验）。
 ///
-/// `policies`：`table → bool`；`true` = 该表至少一条 policy 体 normalize 后含 [`POLICY_PREDICATE`] 且无重言旁路；
+/// `policies`：`table → bool`；`true` = 该表至少一条 policy 最终态 normalize 后含 [`POLICY_PREDICATE_NULLIF`] 且无重言旁路；
 /// `false` = 有 policy 但无合规谓词或含重言旁路（形同 allow-all，报 `PolicyWeak`）；不存在 = 无任何 policy（`PolicyAbsent`）。
 fn build_findings(
     tenant_tables: &BTreeMap<String, String>,
@@ -171,7 +173,7 @@ fn build_findings(
                 Rule::PolicyWeak,
                 table,
                 format!(
-                    "{fname}: CREATE POLICY ON {table} policy 体未含规范等值谓词或含 OR true 重言旁路（形同 allow-all）"
+                    "{fname}: POLICY ON {table} 最终态未含规范 NULLIF 等值谓词（须 `tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid`；旧裸谓词须经 ALTER POLICY 升级）或含 OR true 重言旁路（形同 allow-all）"
                 ),
             )),
             Some(true) => {}
@@ -367,46 +369,61 @@ fn normalize_whitespace(s: &str) -> String {
     out
 }
 
+/// policy 谓词体**最终态**合规判定（#332 F6）：必须含 [`POLICY_PREDICATE_NULLIF`] 规范谓词且无 `OR true`
+/// 重言旁路。旧裸谓词不再被接受为最终态——只新增旧谓词而不经 forward-only `ALTER POLICY` 升级即 `PolicyWeak`。
 fn policy_body_is_valid(norm_body: &str) -> bool {
-    (norm_body.contains(POLICY_PREDICATE) || norm_body.contains(POLICY_PREDICATE_NULLIF))
+    norm_body.contains(POLICY_PREDICATE_NULLIF)
         && !norm_body.contains(TAUTOLOGY_OR_TRUE)
         && !norm_body.contains(TAUTOLOGY_OR_TRUE_PAREN)
 }
 
-/// 收集 `CREATE POLICY <policy_name> ON <t>` 的表→policy 体合规性映射。
+/// 收集 tenant policy 的**最终态**合规性：按迁移文件顺序 apply `CREATE POLICY`，再用同名 `ALTER POLICY`
+/// 覆盖谓词体（#332 F6——forward-only RLS hardening 经 `ALTER POLICY` 前滚，门必须按最终态判定而非 CREATE
+/// 时刻，否则旧裸谓词被 ALTER 升级为 NULLIF 后门仍误判 CREATE 时刻形态）。
 ///
 /// 返回 `BTreeMap<table, bool>`：
-/// - `true`  = 该表至少一条 policy 体 normalize 后含 [`POLICY_PREDICATE`] 且无明显重言旁路（合规）。
-/// - `false` = 该表有 policy 但**所有** policy 体均不满足合规谓词检查（形同 allow-all）。
+/// - `true`  = 该表至少一条 policy 的**最终态** normalize 后含 [`POLICY_PREDICATE_NULLIF`] 且无重言旁路（合规）。
+/// - `false` = 该表有 policy 但**所有** policy 最终态均不满足规范谓词（旧裸谓词未 harden、列错、仅提及、或含
+///   `OR true` 重言旁路——形同 allow-all 或空 GUC cast 失败）。
 /// - 不存在 = 该表无任何 `CREATE POLICY ... ON <t>`（`PolicyAbsent`）。
 fn collect_policy_tables(files: &[(String, String)]) -> BTreeMap<String, bool> {
-    let mut tables: BTreeMap<String, bool> = BTreeMap::new();
+    // (table, policy_name) → 最新 normalize 后的谓词体；CREATE 建、ALTER 覆盖。SQL 语义保证 `ALTER POLICY`
+    // 必在同名 `CREATE POLICY` 之后，故按文件顺序先扫 CREATE pass 再扫 ALTER pass 即得最终态。
+    let mut final_bodies: BTreeMap<(String, String), String> = BTreeMap::new();
     for (_, content) in files {
-        let mut pos = 0;
-        while pos < content.len() {
-            let Some(rel) = content[pos..].find("create policy ") else {
-                break;
-            };
-            let kw_end = pos + rel + "create policy ".len();
-            let (_, rest) = split_token(&content[kw_end..]); // skip policy name
-            if let Some(after_on) = rest.trim_start().strip_prefix("on ") {
-                let (table, after_table) = split_token(after_on);
-                if !table.is_empty() {
-                    // 取 policy 体：从 ON <table> 之后到最近的 `;`（或文件末）。
-                    let body = if let Some(semi) = after_table.find(';') {
-                        &after_table[..semi]
-                    } else {
-                        after_table
-                    };
-                    let norm_body = normalize_whitespace(body);
-                    let has_predicate = policy_body_is_valid(&norm_body);
-                    let entry = tables.entry(table.to_string()).or_insert(false);
-                    if has_predicate {
-                        *entry = true;
+        for kw in ["create policy ", "alter policy "] {
+            let mut pos = 0;
+            while pos < content.len() {
+                let Some(rel) = content[pos..].find(kw) else {
+                    break;
+                };
+                let kw_end = pos + rel + kw.len();
+                let (policy_name, rest) = split_token(&content[kw_end..]);
+                if let Some(after_on) = rest.trim_start().strip_prefix("on ") {
+                    let (table, after_table) = split_token(after_on);
+                    if !table.is_empty() && !policy_name.is_empty() {
+                        // 取 policy 体：从 ON <table> 之后到最近的 `;`（或文件末）。
+                        let body = if let Some(semi) = after_table.find(';') {
+                            &after_table[..semi]
+                        } else {
+                            after_table
+                        };
+                        final_bodies.insert(
+                            (table.to_string(), policy_name.to_string()),
+                            normalize_whitespace(body),
+                        );
                     }
                 }
+                pos = kw_end;
             }
-            pos = kw_end;
+        }
+    }
+    // 折叠到 table → 任一 policy 最终态合规。
+    let mut tables: BTreeMap<String, bool> = BTreeMap::new();
+    for ((table, _policy), body) in &final_bodies {
+        let entry = tables.entry(table.clone()).or_insert(false);
+        if policy_body_is_valid(body) {
+            *entry = true;
         }
     }
     tables
@@ -439,7 +456,7 @@ CREATE TABLE sessions (
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON sessions
-    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 "#;
         let (count, findings) = scan_rls(&files(sql));
         assert_eq!(count, 1, "应识别 1 个 tenant 表");
@@ -499,7 +516,7 @@ ALTER TABLE dead_letter ADD COLUMN tenant_id uuid;
         let sql = r#"
 CREATE TABLE sessions (tenant_id uuid NOT NULL);
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON sessions USING (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+CREATE POLICY p ON sessions USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 "#;
         let (_, findings) = scan_rls(&files(sql));
         assert_eq!(
@@ -518,7 +535,7 @@ CREATE POLICY p ON sessions USING (tenant_id = current_setting('rss.tenant_id', 
         let sql = r#"
 CREATE TABLE sessions (tenant_id uuid NOT NULL);
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON sessions USING (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+CREATE POLICY p ON sessions USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 "#;
         let (_, findings) = scan_rls(&files(sql));
         assert_eq!(
@@ -603,7 +620,7 @@ CREATE TABLE sessions (tenant_id uuid NOT NULL);
         let c2 = r#"
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON sessions USING (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+CREATE POLICY p ON sessions USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 "#;
         let (count, findings) = scan_rls(&two_files(c1, c2));
         assert_eq!(count, 1);
@@ -726,7 +743,7 @@ CREATE POLICY tenant_isolation ON sessions
 CREATE TABLE sessions (tenant_id uuid NOT NULL);
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON sessions USING (store_id = current_setting('rss.tenant_id', true)::uuid);
+CREATE POLICY p ON sessions USING (store_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 "#;
         let (count, findings) = scan_rls(&files(sql));
         assert_eq!(count, 1, "应识别 1 个 tenant 表");
@@ -747,7 +764,7 @@ CREATE TABLE sessions (tenant_id uuid NOT NULL);
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 CREATE POLICY p ON sessions
-    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid OR true);
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid OR true);
 "#;
         let (count, findings) = scan_rls(&files(sql));
         assert_eq!(count, 1, "应识别 1 个 tenant 表");
@@ -758,6 +775,99 @@ CREATE POLICY p ON sessions
         );
         assert_eq!(findings[0].rule, Rule::PolicyWeak, "应报 PolicyWeak");
         assert_eq!(findings[0].subject, "sessions");
+    }
+
+    // ---- #332 F6：建模 ALTER POLICY 最终态 + 要求 NULLIF 目标谓词 ----
+
+    /// red（核心）：CREATE POLICY 用旧裸谓词且未经 ALTER 升级 → 最终态非 NULLIF → PolicyWeak。
+    /// 只新增旧谓词不 harden 即门红，对齐 `docs/rules/tenancy.md` 目标态。
+    #[test]
+    fn red_bare_predicate_without_alter_is_weak() {
+        let sql = r#"
+CREATE TABLE sessions (tenant_id uuid NOT NULL);
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON sessions
+    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid)
+    WITH CHECK (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "应识别 1 个 tenant 表");
+        assert_eq!(
+            findings.len(),
+            1,
+            "旧裸谓词未经 ALTER 升级为 NULLIF → 应报 1 条 PolicyWeak: {findings:?}"
+        );
+        assert_eq!(findings[0].rule, Rule::PolicyWeak);
+        assert_eq!(findings[0].subject, "sessions");
+    }
+
+    /// green：CREATE 旧裸谓词后经同名 ALTER POLICY 前滚升级为 NULLIF → 最终态合规 → 0 findings
+    /// （对齐真实迁移 0012 CREATE → 0024 ALTER 的 forward-only hardening；证明门按最终态而非 CREATE 时刻判定）。
+    #[test]
+    fn green_create_bare_then_alter_nullif_is_valid() {
+        let sql = r#"
+CREATE TABLE sessions (tenant_id uuid NOT NULL);
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON sessions
+    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid)
+    WITH CHECK (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+ALTER POLICY tenant_isolation ON sessions
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "应识别 1 个 tenant 表");
+        assert!(
+            findings.is_empty(),
+            "CREATE 旧谓词经 ALTER 升级 NULLIF 后最终态合规，不应有 findings: {findings:?}"
+        );
+    }
+
+    /// green：CREATE（file1）与 ALTER 升级 NULLIF（file2）跨文件——按文件顺序建模最终态 → 0 findings
+    /// （对齐 0012_enable_tenant_rls.sql + 0024_harden_tenant_rls_empty_setting.sql 真实分文件形态）。
+    #[test]
+    fn green_create_bare_then_alter_nullif_cross_file() {
+        let c1 = r#"
+CREATE TABLE sessions (tenant_id uuid NOT NULL);
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON sessions
+    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+"#;
+        let c2 = r#"
+ALTER POLICY tenant_isolation ON sessions
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+"#;
+        let (count, findings) = scan_rls(&two_files(c1, c2));
+        assert_eq!(count, 1);
+        assert!(
+            findings.is_empty(),
+            "跨文件 CREATE→ALTER 升级 NULLIF 应聚合为合规最终态: {findings:?}"
+        );
+    }
+
+    /// red：CREATE NULLIF 后 ALTER 又改回旧裸谓词 → 最终态退化 → PolicyWeak（证明最终态优先、ALTER 漂移可被捕获）。
+    #[test]
+    fn red_alter_drift_back_to_bare_is_weak() {
+        let sql = r#"
+CREATE TABLE sessions (tenant_id uuid NOT NULL);
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON sessions
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+ALTER POLICY tenant_isolation ON sessions
+    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "应识别 1 个 tenant 表");
+        assert_eq!(
+            findings.len(),
+            1,
+            "ALTER 把 NULLIF 改回旧裸谓词 → 最终态非 NULLIF → 应报 PolicyWeak: {findings:?}"
+        );
+        assert_eq!(findings[0].rule, Rule::PolicyWeak);
     }
 
     // ---- normalize_whitespace 单元测试 ----

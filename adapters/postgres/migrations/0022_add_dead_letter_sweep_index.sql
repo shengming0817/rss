@@ -1,4 +1,4 @@
--- 0021_add_dead_letter_sweep_index.sql — dead_letter 保留期清理索引（#1210）。
+-- 0022_add_dead_letter_sweep_index.sql — dead_letter 保留期清理索引（#1210）。
 --
 -- 覆盖 PgDeadLetterStore 的 sweep 谓词 `last_attempt_at <= now()-interval`（全域删除超保留期死信，膨胀控制）。
 -- 现有 idx_dead_letter_scan (domain, last_attempt_at) 以 domain 为前导列，不适合本全域（无 domain 过滤）sweep；

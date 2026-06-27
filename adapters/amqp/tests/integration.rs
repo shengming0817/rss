@@ -604,7 +604,7 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
     let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("bundle stream closed without yielding a message"))?;
-    assert_eq!(delivery.message.payload, b"hello-bundle".to_vec());
+    assert_eq!(delivery.message.payload.as_bytes(), b"hello-bundle");
     delivery
         .acker
         .settle(AckAction::Ack)

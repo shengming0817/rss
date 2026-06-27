@@ -1,6 +1,7 @@
 //! `assembly validate` —— assembly-level DI provider 声明治理。
 //!
-//! DI-infra port（如 `diport::RevocationStore`）不是跨域 wire contract，不放进 `contracts/**/contract.toml`。
+//! DI-infra port（如 `diport::RevocationStore` / `diport::LockStore` / `diport::CasStore`）不是跨域 wire
+//! contract，不放进 `contracts/**/contract.toml`。
 //! 但 provider 选择属于组合根部署事实：哪个 assembly 注入哪个 provider、是否持久、是否已 active，必须有机器可读
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
@@ -16,6 +17,8 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 const REVOCATION_STORE_PORT: &str = "diport::RevocationStore";
 const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
+const LOCK_STORE_PORT: &str = "diport::LockStore";
+const CAS_STORE_PORT: &str = "diport::CasStore";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -100,6 +103,10 @@ pub(crate) enum DiportPort {
     RevocationStore,
     #[serde(rename = "diport::RateLimiter")]
     RateLimiter,
+    #[serde(rename = "diport::LockStore")]
+    Lock,
+    #[serde(rename = "diport::CasStore")]
+    Cas,
 }
 
 impl DiportPort {
@@ -107,6 +114,8 @@ impl DiportPort {
         match self {
             Self::RevocationStore => REVOCATION_STORE_PORT,
             Self::RateLimiter => RATE_LIMITER_PORT,
+            Self::Lock => LOCK_STORE_PORT,
+            Self::Cas => CAS_STORE_PORT,
         }
     }
 }
@@ -346,6 +355,24 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             durability: ProviderDurability::EphemeralMemory,
             required_features: &[],
             provider_crate: "ratelimit",
+        }),
+        "redis::RedisLockStore" => Some(ProviderSpec {
+            port: DiportPort::Lock,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "redis",
+        }),
+        "redis::RedisCasStore" => Some(ProviderSpec {
+            port: DiportPort::Cas,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "redis",
+        }),
+        "postgres::PgCasStore" => Some(ProviderSpec {
+            port: DiportPort::Cas,
+            durability: ProviderDurability::Persistent,
+            required_features: &[],
+            provider_crate: "postgres",
         }),
         _ => None,
     }
@@ -772,6 +799,53 @@ ratelimit = { path = "../../adapters/ratelimit" }
         assert!(
             findings.is_empty(),
             "active ratelimit::GovernorLimiter provider (no required_features) must pass: {findings:?}"
+        );
+        Ok(())
+    }
+
+    /// distributed Lock（redis, backend feature）+ Cas（postgres）provider 矩阵识别 + feature/crate 绑定绿测。
+    /// 实 assembly.toml 现声明为 draft（#332 F4 无 consumer），本测以合成 active manifest 验证 validator 对
+    /// Lock/CasStore active provider 的识别路径（go-live 翻转 active 时复用）。
+    #[test]
+    fn active_distributed_lock_cas_providers_pass() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-distributed-lock-cas-active");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+
+[[diportProviders]]
+port = "diport::CasStore"
+provider = "postgres::PgCasStore"
+providerCrate = "postgres"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-state-cas"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+redis = { path = "../../adapters/redis", features = ["backend"] }
+postgres = { path = "../../adapters/postgres" }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.is_empty(),
+            "active distributed Lock/Cas providers (feature + providerCrate bound) must pass: {findings:?}"
         );
         Ok(())
     }

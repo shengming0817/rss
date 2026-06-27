@@ -21,12 +21,15 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 // `ManagedResource` 提供 `PgReadinessSampler::shutdown`（trait 方法，须在 scope 内才可调）。
 use diport::ManagedResource as _;
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
+use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode};
 use primitives::ProbeName;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+const TEST_APP_ROLE: &str = "rss_configs_ready_e2e_app";
+const TEST_APP_PASSWORD: &str = "configs_ready_e2e_pw";
 
 // `/metrics` 渲染替身共享自 tests/common——本测试只经 oneshot 验 readyz，metrics 用 noop 替身满足必填参数。
 mod common;
@@ -36,17 +39,77 @@ async fn connect_pg()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
-    let config = PgConfig::new(
+    let owner_config = pg_config(p, &p.username, &p.password);
+    match PgRuntimeDeps::setup(&owner_config).await {
+        Ok(deps) => return Ok((fixture, deps)),
+        Err(PgError::RlsBypassRole) => {
+            provision_nobypass_app_role(p).await?;
+        }
+        Err(e) => return Err(Box::new(e)),
+    }
+    let deps = PgRuntimeDeps::setup(&pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD)).await?;
+    Ok((fixture, deps))
+}
+
+fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+    PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        p.username.clone(),
-        PgPassword::new(p.password.clone()),
+        username.to_string(),
+        PgPassword::new(password.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5));
-    let deps = PgRuntimeDeps::setup(&config).await?;
-    Ok((fixture, deps))
+    .with_acquire_timeout(Duration::from_secs(5))
+}
+
+async fn provision_nobypass_app_role(
+    p: &testkit::PgConnParams,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let options = PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(SqlxPgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    sqlx::query(&format!(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        "#
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, CREATE ON SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
 }
 
 /// Ready 路径：`spawn_readiness_sampler`（短 period，真实 DB）→ readyz 200。

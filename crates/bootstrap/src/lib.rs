@@ -19,6 +19,9 @@
 //!   零 adapter 依赖；adapter 构造 + in-mem sealing 落组合根（见模块 rustdoc，INVARIANT
 //!   TOPO-FAILCLOSED-01 / TOPO-INMEM-SEAL-01）。
 //!
+//! - [`domaintransport`]：topology-gated 同步 domain transport 选型——复用 [`Topology`]，但使用独立
+//!   typed config / URL newtype，防事件传输配置和同步 RPC endpoint 混用。
+//!
 //! - [`replaydeps`]：topology-gated 幂等 claimer 选型——demo 拓扑用 in-mem claimer，
 //!   durable 拓扑用 Redis claimer；[`replaydeps::resolve`] 是纯策略函数，不构造 adapter。
 //!
@@ -34,6 +37,7 @@
 //! [`Registry::finalize_routes`]: registry::Registry::finalize_routes
 
 pub mod domain;
+pub mod domaintransport;
 pub mod eventtransport;
 pub mod module;
 pub mod refreshstoredeps;
@@ -44,6 +48,9 @@ pub mod shutdown;
 pub mod topology;
 
 pub use domain::{Domain, KernelError, compose};
+pub use domaintransport::{
+    DomainTransportConfig, DomainTransportResolveError, DomainTransportUrl, ResolvedDomainTransport,
+};
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use module::{DomainModule, DomainModuleResult, ModuleFactory, WorkerSpec};
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};

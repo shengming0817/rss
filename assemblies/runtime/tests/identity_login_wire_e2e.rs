@@ -140,7 +140,16 @@ async fn wire_identity_primary_router_serves_public_login() -> TestResult {
         "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
         _ => None,
     })?;
-    let deps = SharedRuntimeDeps { pg, vault };
+    let redis_fixture = testkit::env_or_redis().await?;
+    let redis = runtime::build_redis_runtime_deps(|name| {
+        (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
+    })
+    .await?;
+    let deps = SharedRuntimeDeps {
+        pg,
+        redis: Some(redis),
+        vault,
+    };
     let identity_domain = wire_identity(&deps)?;
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     let mut primary = None;

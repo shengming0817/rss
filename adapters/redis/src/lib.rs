@@ -12,25 +12,26 @@ mod claimer;
 
 #[cfg(feature = "backend")]
 mod bundle;
+#[cfg(feature = "backend")]
+mod cas;
+#[cfg(feature = "backend")]
+mod lock;
 
 #[cfg(feature = "backend")]
-pub use bundle::{RedisInfraDeps, RedisRuntimeDeps};
+pub use bundle::{
+    RedisCasStore, RedisIdempotencyStore, RedisInfraDeps, RedisLockStore, RedisRuntimeDeps,
+};
 
 use diport::{ManagedResource, ShutdownError};
 
-/// Redis 幂等 claimer adapter（sealed-marker）。
+/// Redis adapter store（sealed-marker）。
 ///
-/// `backend` feature 关时为空壳（仅供 freeze smoke 类型断言）；开时持有 deadpool-redis Pool + TTL
-/// + 构造期绑定的 `ConsumerGroup`（幂等去重 PK 第二维度，见 [`RedisStore::new`]）。
+/// `backend` feature 关时为空壳（仅供 freeze smoke 类型断言）；开时只持有 deadpool-redis Pool。具体能力
+/// （幂等 claimer / distlock / CAS）由 bundle 派发的 typed handle 绑定其自身配置，避免把某个能力的
+/// `ConsumerGroup`/TTL 污染到整个 redis runtime bundle。
 pub struct RedisStore {
     #[cfg(feature = "backend")]
     pool: deadpool_redis::Pool,
-    #[cfg(feature = "backend")]
-    ttl: core::time::Duration,
-    /// 消费者组——claim key 的组维度段（`_runtime:idem:<group>:<key>`，见 `claimer` 模块 §组维度）。
-    /// 构造期绑定，对标 `PgInboxStore::group` / `InMemClaimer::group`（review #216 F5）。
-    #[cfg(feature = "backend")]
-    group: consistency::ConsumerGroup,
 }
 
 /// 无效 claim TTL（构造期 fail-fast，不静默钳制）。
@@ -41,35 +42,16 @@ pub struct InvalidClaimTtl;
 
 #[cfg(feature = "backend")]
 impl RedisStore {
-    /// 由连接池 + claim TTL + 消费者组构造（无 Clock：TTL 由 redis 服务端 `PX` 管过期）。
-    ///
-    /// `group` 是幂等去重 PK 的第二维度（同一 `IdemKey` 在不同组各自首见），构造期绑定后纳入 claim key
-    /// 命名空间（`_runtime:idem:<group>:<key>`）——对标 `PgStore::inbox(group)` 的双列 PK，杜绝跨组误去重
-    /// （review #216 F5）。
-    ///
-    /// **fail-fast**：拒绝 `< 1ms` 的 TTL（亚毫秒丢精度、零非法）——错误配置在组合根接线期即暴露，
-    /// 不在运行期命令层静默钳制（review F2）。
+    /// 由连接池构造 redis store。
     ///
     /// `pub(crate)`：唯一公开构造路径是 [`RedisRuntimeDeps::setup`]（funnel，REDIS-BUNDLE-FUNNEL-01）；
     /// 外部 crate 不能直接 mint `RedisStore`，须经 bundle 装配出口。
-    pub(crate) fn new(
-        pool: deadpool_redis::Pool,
-        ttl: core::time::Duration,
-        group: consistency::ConsumerGroup,
-    ) -> Result<Self, InvalidClaimTtl> {
-        if ttl.as_millis() == 0 {
-            return Err(InvalidClaimTtl);
-        }
-        Ok(Self { pool, ttl, group })
+    pub(crate) fn new(pool: deadpool_redis::Pool) -> Self {
+        Self { pool }
     }
-}
 
-#[cfg(feature = "backend")]
-impl RedisStore {
-    /// 供组合根派生 `eventexec::LeaseConfig::from_ttl(store.lease_ttl())`，使续租间隔与后端 claim TTL
-    /// 同源（杜绝 mismatch footgun，#1213 review #3）。
-    pub fn lease_ttl(&self) -> core::time::Duration {
-        self.ttl
+    pub(crate) fn pool(&self) -> &deadpool_redis::Pool {
+        &self.pool
     }
 }
 
@@ -83,45 +65,6 @@ impl ManagedResource for RedisStore {
         self.pool.close(); // 关闭连接池（释放后端连接）
         // reason: feature-off 无 infra 资源，关闭无需释放。
         Ok(())
-    }
-}
-
-#[cfg(feature = "backend")]
-impl consistency::IdempotencyStore for RedisStore {
-    async fn try_claim(
-        &self,
-        key: &consistency::IdemKey,
-        lease: &consistency::LeaseToken,
-    ) -> Result<consistency::SeenState, consistency::EngineError> {
-        // 逻辑拆出到 claimer::try_claim_impl 控制认知复杂度。group 构造期绑定，纳入 claim key 组维度段。
-        claimer::try_claim_impl(&self.pool, self.ttl, &self.group, key, lease).await
-    }
-
-    async fn extend(
-        &self,
-        key: &consistency::IdemKey,
-        lease: &consistency::LeaseToken,
-    ) -> Result<consistency::LeaseOutcome, consistency::EngineError> {
-        // 逻辑拆出到 claimer::extend_impl 控制认知复杂度。
-        claimer::extend_impl(&self.pool, self.ttl, &self.group, key, lease).await
-    }
-
-    async fn commit(
-        &self,
-        key: &consistency::IdemKey,
-        lease: &consistency::LeaseToken,
-    ) -> Result<consistency::LeaseOutcome, consistency::EngineError> {
-        // 逻辑拆出到 claimer::commit_impl 控制认知复杂度。
-        claimer::commit_impl(&self.pool, &self.group, key, lease).await
-    }
-
-    async fn release(
-        &self,
-        key: &consistency::IdemKey,
-        lease: &consistency::LeaseToken,
-    ) -> Result<(), consistency::EngineError> {
-        // 逻辑拆出到 claimer::release_impl 控制认知复杂度。
-        claimer::release_impl(&self.pool, &self.group, key, lease).await
     }
 }
 
@@ -143,18 +86,24 @@ mod smoke {
 
     #[cfg(feature = "backend")]
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
+    #[cfg(feature = "backend")]
+    fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
+    #[cfg(feature = "backend")]
+    fn assert_lock_store<T: diport::LockStore>(_: PhantomData<T>) {}
 
     #[cfg(feature = "backend")]
     #[test]
     fn impls_idempotency_store() {
-        assert_idempotency_store(PhantomData::<super::RedisStore>);
+        assert_idempotency_store(PhantomData::<super::RedisIdempotencyStore>);
+        assert_cas_store(PhantomData::<super::RedisCasStore>);
+        assert_lock_store(PhantomData::<super::RedisLockStore>);
     }
 }
 
 // F2：构造期 TTL fail-fast（lazy pool 无需 live redis）。
 #[cfg(all(test, feature = "backend"))]
 mod backend_tests {
-    use super::RedisStore;
+    use super::{InvalidClaimTtl, RedisRuntimeDeps};
     use core::time::Duration;
     use deadpool_redis::{Config, Runtime};
 
@@ -166,25 +115,24 @@ mod backend_tests {
             .expect("lazy pool build")
     }
 
-    #[allow(clippy::expect_used)]
-    // reason: 非空组名 parse 必过；item-level carve-out。
-    fn group() -> consistency::ConsumerGroup {
-        consistency::ConsumerGroup::parse("test-group").expect("non-empty group")
+    fn validate_ttl(ttl: Duration) -> Result<(), InvalidClaimTtl> {
+        RedisRuntimeDeps::validate_ttl(ttl)
     }
 
     #[test]
     fn new_rejects_zero_ttl() {
-        assert!(RedisStore::new(lazy_pool(), Duration::ZERO, group()).is_err());
+        assert!(validate_ttl(Duration::ZERO).is_err());
     }
 
     #[test]
     fn new_rejects_subms_ttl() {
         // 亚毫秒（500µs）as_millis()==0 → 拒绝（不静默钳成 1ms）。
-        assert!(RedisStore::new(lazy_pool(), Duration::from_micros(500), group()).is_err());
+        assert!(validate_ttl(Duration::from_micros(500)).is_err());
     }
 
     #[test]
     fn new_accepts_1ms_ttl() {
-        assert!(RedisStore::new(lazy_pool(), Duration::from_millis(1), group()).is_ok());
+        let _pool = lazy_pool();
+        assert!(validate_ttl(Duration::from_millis(1)).is_ok());
     }
 }

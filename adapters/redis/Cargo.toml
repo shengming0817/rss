@@ -19,6 +19,7 @@ workspace = true
 [dependencies]
 diport = { path = "../../crates/diport" }
 consistency = { path = "../../crates/consistency" }
+vocab = { path = "../../crates/vocab", optional = true }
 deadpool-redis = { workspace = true, optional = true }
 # redacted 结构化日志（仅 backend）：`secure::redact_error` funnel + `tracing`（observability.md：错误经 redact）。
 secure = { path = "../../crates/secure", optional = true }
@@ -28,7 +29,7 @@ thiserror = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror"]
+backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror", "dep:vocab"]
 # 集成测试需真实 redis 后端（#[cfg(feature = "integration")]，nextest 按名串行）；
 # testkit/containers 经此传递激活 testcontainers（self-provision 容器，无需手工预置）。
 integration = ["backend", "testkit/containers"]

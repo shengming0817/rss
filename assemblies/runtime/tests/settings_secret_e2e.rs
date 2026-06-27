@@ -21,14 +21,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use diport::{Clock, DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolverError};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use settings::SecretService;
 use settings::ports::{SecretKey, SecretRef, StoreId, TenantId};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 
 // ── 测试用常量 ────────────────────────────────────────────────────────────────
 
 const TENANT_STR: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const STORE_ID: &str = "mem-vault";
+const TEST_APP_ROLE: &str = "rss_settings_secret_e2e_app";
+const TEST_APP_PASSWORD: &str = "settings_secret_e2e_pw";
 
 // ── inline MemResolver（deny.toml 禁 rss→memory，故在本文件内直接实现）──────────
 
@@ -103,7 +106,7 @@ fn unique_key(prefix: &str) -> SecretKey {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     #[allow(clippy::expect_used)]
-    SecretKey::parse(&format!("{prefix}-{nanos}")).expect("valid unique key")
+    SecretKey::parse(&format!("e2e.{prefix}-{nanos}")).expect("valid unique key")
 }
 
 #[allow(clippy::expect_used)]
@@ -117,17 +120,78 @@ async fn connect_pg_and_setup()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
-    let config = PgConfig::new(
+    let owner_config = pg_config(p, &p.username, &p.password);
+    match PgRuntimeDeps::setup(&owner_config).await {
+        Ok(deps) => return Ok((fixture, deps)),
+        Err(PgError::RlsBypassRole) => {
+            provision_nobypass_app_role(p).await?;
+        }
+        Err(e) => return Err(Box::new(e)),
+    }
+    let deps = PgRuntimeDeps::setup(&pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD)).await?;
+    Ok((fixture, deps))
+}
+
+fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+    PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        p.username.clone(),
-        PgPassword::new(p.password.clone()),
+        username.to_string(),
+        PgPassword::new(password.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5));
-    let deps = PgRuntimeDeps::setup(&config).await?;
-    Ok((fixture, deps))
+    .with_acquire_timeout(Duration::from_secs(5))
+}
+
+async fn provision_nobypass_app_role(
+    p: &testkit::PgConnParams,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let options = PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(SqlxPgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    sqlx::query(&format!(
+        r#"
+        DO $$
+        BEGIN
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        "#
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, CREATE ON SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
 }
 
 /// 构造 SecretService（真 PgSecretRepo via settings 域受控句柄 + InlineMemResolver + FixedClock）。

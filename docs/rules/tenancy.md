@@ -59,11 +59,12 @@ PG tenant scope 使用 `SET LOCAL` 注入当前事务，读路径（`tenant_scop
 
 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
 Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` +
-`FORCE ROW LEVEL SECURITY` + tenant-isolation policy（`USING/WITH CHECK (tenant_id =
-current_setting('rss.tenant_id', true)::uuid)`）；缺失即门红。
+`FORCE ROW LEVEL SECURITY` + tenant-isolation policy（目标态 `USING/WITH CHECK (tenant_id =
+NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前向迁移升级）；缺失即门红。
 
-app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，仅授三张 tenant 表
-（sessions / config_entries / roles）的 DML；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受
+app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
+（sessions / config_entries / roles / secret_refs / credentials / refresh_tokens；audit_entries 仅
+SELECT+INSERT；dead_letter 仅 SELECT+INSERT）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受
 policy 约束。业务池以 rss_app 连接的 dual-pool 接线是 follow-up（bootstrap 接线未落地）。
 注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
 生产 owner 须为非 superuser。
