@@ -11,10 +11,10 @@
 //!   request-property-type-changed / enum-value-removed / became-not-nullable。
 //! ref: getsentry/json-schema-diff@main —— 集合论 permissive/restrictive：type 收紧 = newType 须为 oldType 超集。
 //!
-//! INVARIANT: WIRE-BREAKING-01 —— 首版 8 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
+//! INVARIANT: WIRE-BREAKING-01 —— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
 //!   FIELD_FORMAT_CHANGED / ENUM_VALUE_DELETED / ADDITIONAL_PROPS_TIGHTENED / NULLABLE_REMOVED /
-//!   REDACTION_POLICY_CHANGED）对 base↔working
-//!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧**（新增可选字段不报，向后兼容语义）。后 3 条
+//!   REDACTION_POLICY_CHANGED / PROTECTION_POLICY_CHANGED）对 base↔working
+//!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。后 3 条
 //!   manifest 依赖规则（HTTP_STATUS_CODE_CHANGED / AUTH_REQUIREMENT_CHANGED / IDEMPOTENCY_LEVEL_CHANGED）依赖
 //!   扩 manifest schema，登记第三期（ADR-008 §3.1）。首版不覆盖 `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
 //! INVARIANT: WIRE-BREAKING-WINDOW-01 —— 窗口分级 **配置驱动、不读墙上时钟**（clippy 全 workspace 禁
@@ -35,6 +35,7 @@ use serde_json::Value;
 
 use super::discover;
 use super::manifest::{ContractManifest, Lifecycle};
+use super::protection;
 use super::redaction;
 
 /// base ref 默认值（`--against` 缺省）：与 ADR-008 §3.2 一致（PR 基准分支）。
@@ -69,6 +70,9 @@ pub(crate) enum BreakingRule {
     NullableRemoved,
     /// 既有字段的 `x-pii` / `x-redaction` 隐私语义改变。
     RedactionPolicyChanged,
+    /// 既有字段的 `x-protection`（at-rest 加密）或 schema 级 `x-at-rest` 保护语义改变（#1468，
+    /// ADR-011 D1b：保护策略漂移须作审查材料，防 wire 隐私语义静默漂移）。
+    ProtectionPolicyChanged,
 }
 
 impl BreakingRule {
@@ -83,6 +87,7 @@ impl BreakingRule {
             BreakingRule::AdditionalPropsTightened => "ADDITIONAL_PROPS_TIGHTENED",
             BreakingRule::NullableRemoved => "NULLABLE_REMOVED",
             BreakingRule::RedactionPolicyChanged => "REDACTION_POLICY_CHANGED",
+            BreakingRule::ProtectionPolicyChanged => "PROTECTION_POLICY_CHANGED",
         }
     }
 }
@@ -158,6 +163,7 @@ pub(crate) fn compare_schemas(old: &Value, new: &Value) -> Vec<RawBreak> {
     let mut out = Vec::new();
     compare_node(old, new, "", &mut out);
     check_redaction_policy(old, new, &mut out);
+    check_protection_policy(old, new, &mut out);
     out
 }
 
@@ -208,6 +214,17 @@ fn check_redaction_policy(old: &Value, new: &Value, out: &mut Vec<RawBreak>) {
     for violation in redaction::compare_policy_changes(old, new) {
         out.push(RawBreak {
             rule: BreakingRule::RedactionPolicyChanged,
+            pointer: violation.pointer,
+            detail: violation.detail,
+        });
+    }
+}
+
+/// `x-protection` / `x-at-rest` 既有字段保护策略漂移（#1468，与 redaction 同款但走 `protection` 模块）。
+fn check_protection_policy(old: &Value, new: &Value, out: &mut Vec<RawBreak>) {
+    for violation in protection::compare_policy_changes(old, new) {
+        out.push(RawBreak {
+            rule: BreakingRule::ProtectionPolicyChanged,
             pointer: violation.pointer,
             detail: violation.detail,
         });
@@ -976,6 +993,60 @@ mod tests {
                 "redaction policy drift under {want_pointer} should be reported: {breaks:?}"
             );
         }
+    }
+
+    /// PROTECTION_POLICY_CHANGED：既有字段 `x-protection` 漂移报破坏；纯新增字段不报（细粒度语义在
+    /// `protection.rs` 单测，此处验装配进 `compare_schemas`）。
+    #[test]
+    fn protection_policy_changed_reports_drift() {
+        let old = json!({"properties": {"v": {"type":"string","x-protection":{"atRest":"plain"}}}});
+        let changed = json!({"properties": {"v": {"type":"string","x-protection":{"atRest":"encrypt","keyScope":"tenant","aad":["tenant","field","schemaVersion"]}}}});
+        let breaks = compare_schemas(&old, &changed);
+        assert_eq!(rules(&breaks), vec![BreakingRule::ProtectionPolicyChanged]);
+        assert_eq!(breaks[0].pointer, "v");
+
+        let add = json!({
+            "properties": {
+                "v": {"type":"string","x-protection":{"atRest":"plain"}},
+                "w": {"type":"string"}
+            }
+        });
+        assert!(compare_schemas(&old, &add).is_empty());
+    }
+
+    /// PROTECTION_POLICY_CHANGED id 稳定（输出行 + 断言单源）。
+    #[test]
+    fn protection_policy_changed_id_stable() {
+        assert_eq!(
+            BreakingRule::ProtectionPolicyChanged.id(),
+            "PROTECTION_POLICY_CHANGED"
+        );
+    }
+
+    /// 既有字段首次获得 x-protection（旧无→新有）亦是保护策略漂移（审查材料）。
+    #[test]
+    fn protection_policy_changed_detects_first_time_declaration() {
+        let old = json!({"properties": {"v": {"type": "string"}}});
+        let new =
+            json!({"properties": {"v": {"type": "string", "x-protection": {"atRest": "plain"}}}});
+        let breaks = compare_schemas(&old, &new);
+        assert_eq!(rules(&breaks), vec![BreakingRule::ProtectionPolicyChanged]);
+        assert_eq!(breaks[0].pointer, "v");
+    }
+
+    /// root 级 x-at-rest 翻转（撤销 schema 持久化 opt-in）经 compare_schemas 汇合到 PROTECTION_POLICY_CHANGED。
+    #[test]
+    fn protection_policy_changed_from_root_at_rest_flip() {
+        let old = json!({"title": "T", "x-at-rest": true, "properties": {"v": {"type": "string"}}});
+        let new =
+            json!({"title": "T", "x-at-rest": false, "properties": {"v": {"type": "string"}}});
+        let breaks = compare_schemas(&old, &new);
+        assert!(
+            breaks
+                .iter()
+                .any(|b| b.rule == BreakingRule::ProtectionPolicyChanged),
+            "{breaks:?}"
+        );
     }
 
     /// C3：JSON Schema 类型包含关系——`integer → number`（放宽）green；`number → integer`（收紧）red。

@@ -120,7 +120,7 @@ impl，不被域依赖。本 ADR 即修正 `primitives/crypto.rs` / `secure/aead
 - [ ] redaction↔encryption 职责边界有 ADR / rules 单源（**=本 ADR-011 + observability.md 同步**）。
 - [ ] `secure` 具备 AAD / ciphertext envelope / **AEAD v2** 基础类型（`seal`/`open` 带 `aad`，`FIELDPROT-AAD-MANDATORY-01`）。
 - [ ] `open(aad)` 的 AAD 经 `ProtectionContext`（已鉴权请求 + 经授权维护/迁移两类受信源）派生、不可裸拼 stored bytes（`FIELDPROT-AAD-DERIVE-FROM-CTX-01`）。
-- [ ] contract authoring 支持 `x-protection` + `validate` / `breaking` gate。
+- [x] contract authoring 支持 `x-protection` + `validate` / `breaking` gate。（delivered by #1468——单独立项的 authoring+gate 切片：contract validate R17 `SchemaProtection` + breaking `PROTECTION_POLICY_CHANGED` + `x-at-rest` 强制覆盖 + 文档）
 - [ ] generated 携带保护元数据但**不触发真实加解密**。
 
 **#1466 KeyProvider 与 Vault Transit 加解密**（provider 层）

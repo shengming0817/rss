@@ -69,6 +69,13 @@ codegen` 派生 `#[derive(secure::Redact)]` 和字段 `#[redact(...)]`。`cargo 
 `x-sensitive`、未知枚举、高风险字段未声明、`x-pii + hash` fail-closed；`contract breaking` 对既有字段策略漂移报
 `REDACTION_POLICY_CHANGED`。
 
+> **observe-redaction ≠ storage-encryption（ADR-011 D1，两条正交面）**：上文 `x-pii`/`x-redaction` 守
+> **observe 面**（值被人/外部看见时脱敏）。**at-rest storage 加密**走**正交**的 `x-protection`（property object）+
+> `x-at-rest`（schema 级 opt-in）声明面，由 `contract validate` R17 `SchemaProtection` 守、`contract breaking`
+> 报 `PROTECTION_POLICY_CHANGED`（authoring 词汇与规则见 `contracts/README.md`，语义单源见
+> `docs/architecture/202606271536-011-field-protection-boundary.md`）。两面**不混用、不互相替代**——「日志看不见」
+> 不等于「存储安全」。framework 底座（#1468）只立声明层、不接真实加解密（真实 AAD/AEAD-v2 + KeyProvider 归 #1465/#1466）。
+
 ## Readyz Probe
 
 - 依赖可用性 probe 用 `_ready` 后缀。

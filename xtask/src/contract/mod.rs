@@ -1,6 +1,7 @@
 //! 契约声明源（`contracts/`）的发现 / 解析 / 校验。
 pub(crate) mod breaking;
 pub(crate) mod manifest;
+pub(crate) mod protection;
 pub(crate) mod redaction;
 pub(crate) mod validate;
 

@@ -426,7 +426,10 @@ fn is_protective_redaction(redaction: Option<RedactionToken>) -> bool {
     )
 }
 
-fn is_high_risk_field(field_name: &str) -> bool {
+/// 「高风险敏感字段名」判据——observe 面（R16 redaction 强制策略）与 storage 面（R17 `x-at-rest`
+/// 强制 `x-protection` 覆盖，`protection.rs`）共用同一判据，避免关键词表两处漂移（DRY，ADR-011 D1
+/// 两面正交但「哪些字段名敏感」是同一概念）。
+pub(crate) fn is_high_risk_field(field_name: &str) -> bool {
     let lower = field_name.to_ascii_lowercase();
     [
         "password",

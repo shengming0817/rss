@@ -22,6 +22,10 @@
 //! INVARIANT: CONTRACT-REDACTION-POLICY-01 — declared schema property 上的 `x-pii` / `x-redaction`
 //! 是 generated 安全 `Debug` 的单源（R16）。遗留 `x-sensitive`、未知枚举、高风险字段未标注、
 //! `x-pii + hash` 均 fail-closed。
+//! INVARIANT: CONTRACT-PROTECTION-POLICY-01 — declared schema 的 `x-protection`（at-rest 加密声明）+
+//! `x-at-rest`（持久化 opt-in）合法且完整（R17，#1468，ADR-011 D1b 声明层）。block 内部一致、AAD 维度
+//! 完整（D2）、deterministic/blindIndex 须 reason 且 aad 稳定子集（D4）、`x-at-rest` schema 高风险字段
+//! 须显式 `x-protection`，均 fail-closed。与 R16 observe redaction **正交不混用**（ADR-011 D1）。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -32,7 +36,7 @@
 //!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
 //!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
 //!   → R9 PerKindFieldScope → R10 SagaBlock → R11 ActiveDeliverySupported → R13 SchemaTitle
-//!   → R16 SchemaRedaction → R14 ActiveSubscriber
+//!   → R16 SchemaRedaction → R17 SchemaProtection → R14 ActiveSubscriber
 //!   跨契约（validate_cross，需全局视图）：R12 DuplicateId
 
 use anyhow::Result;
@@ -44,6 +48,7 @@ use super::manifest::{
     FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, Lifecycle,
     SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
+use super::protection;
 use super::redaction;
 use super::{DiscoveredContract, discover};
 use crate::diagnostic::{self, GovernanceCheck, finding};
@@ -106,6 +111,14 @@ pub(crate) enum Rule {
     /// INVARIANT: CONTRACT-REDACTION-POLICY-01 — generated wire DTO 的安全 `Debug` 从 contract JSON
     /// Schema 单源派生。遗留 `x-sensitive`、未知枚举、PII hash、以及高风险字段未声明策略均拒绝。
     SchemaRedaction,
+    /// R17：schema property 的 `x-protection`（at-rest storage 加密声明）+ schema 级 `x-at-rest`
+    /// opt-in 须合法且完整。
+    ///
+    /// INVARIANT: CONTRACT-PROTECTION-POLICY-01 — at-rest 加密声明面单源（#1468，ADR-011 D1b 声明层）。
+    /// `x-protection` block 内部一致（atRest:encrypt 须 keyScope+完整 aad；deterministic/blindIndex 须
+    /// reason 且 aad 稳定子集排除 schemaVersion；plain 不携带 encrypt 参数），`x-at-rest:true` 的 schema
+    /// 内高风险字段缺 `x-protection` 均拒绝。与 R16（observe redaction）正交不混用。
+    SchemaProtection,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -183,6 +196,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_active_delivery_supported(&c.manifest, &label));
     findings.extend(rule_schema_title(c, &label));
     findings.extend(rule_schema_redaction(c, &label));
+    findings.extend(rule_schema_protection(c, &label));
     findings.extend(rule_active_subscriber(&c.manifest, &label));
     findings
 }
@@ -766,6 +780,31 @@ fn rule_schema_redaction(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
     out
 }
 
+/// R17：字段级 storage-protection 扩展校验（`x-protection` / `x-at-rest`）。按 manifest 声明的完整
+/// schema slot 扫描，与 R16（observe redaction）同款遍历但两面正交（ADR-011 D1）。
+fn rule_schema_protection(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for file in c.manifest.declared_schema_files() {
+        if pathsafe::is_unsafe_segment(file) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(c.dir.join(file)) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        for violation in protection::validate_schema(&value) {
+            out.push(finding(
+                Rule::SchemaProtection,
+                label,
+                format!("{file} {}: {}", violation.pointer, violation.detail),
+            ));
+        }
+    }
+    out
+}
+
 /// 下钻一个 object-of-subschemas（如 `properties` / `$defs`）的各 value；非 object ⇒ no-op。
 fn recurse_map_values(value: Option<&serde_json::Value>, out: &mut Vec<String>) {
     if let Some(serde_json::Value::Object(children)) = value {
@@ -937,6 +976,58 @@ mod tests {
             http_schemas(),
         );
         let findings = validate_contract(&discovered(m, dir.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    /// R17 wiring：声明 schema 内非法 `x-protection` block → `Rule::SchemaProtection` finding，
+    /// detail 携文件名 + JSON 指针（细粒度 block 语义在 `protection.rs` 单测覆盖，此处只验装配）。
+    #[test]
+    fn r17_invalid_protection_block_reports_schema_protection() -> anyhow::Result<()> {
+        let dir = unique_tmp("validate-protection");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{"title":"Req","type":"object","properties":{"value":{"type":"string","x-protection":{"atRest":"encrypt"}}}}"#,
+        )?;
+        std::fs::write(dir.join("response.schema.json"), r#"{"title":"Resp"}"#)?;
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        let findings = rule_schema_protection(&discovered(m, dir.clone()), "http/_seed/v1");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().all(|f| f.rule == Rule::SchemaProtection),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.detail.contains("keyScope")),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    /// R17 anti-vacuity：合法 `x-protection` block → 零 R17 finding（守卫真会沉默）。
+    #[test]
+    fn r17_valid_protection_block_is_clean() -> anyhow::Result<()> {
+        let dir = unique_tmp("validate-protection-ok");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{"title":"Req","type":"object","properties":{"value":{"type":"string","x-protection":{"atRest":"encrypt","keyScope":"tenant","aad":["tenant","configKey","field","schemaVersion"]}}}}"#,
+        )?;
+        std::fs::write(dir.join("response.schema.json"), r#"{"title":"Resp"}"#)?;
+        let m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        let findings = rule_schema_protection(&discovered(m, dir.clone()), "http/_seed/v1");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(findings.is_empty(), "{findings:?}");
         Ok(())
