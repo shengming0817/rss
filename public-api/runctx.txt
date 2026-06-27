@@ -9,7 +9,7 @@ impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
 impl<T, P> secure::redaction::Redact for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::redact(&self) -> alloc::string::String
+pub fn runctx::ctx::RequestCtx<T, P>::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
@@ -150,7 +150,7 @@ impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
 impl<T, P> secure::redaction::Redact for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::redact(&self) -> alloc::string::String
+pub fn runctx::ctx::RequestCtx<T, P>::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
 pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
 impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>

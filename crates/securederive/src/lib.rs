@@ -1,9 +1,11 @@
 //! `securederive` —— 字段级脱敏 `#[derive(Redact)]` proc-macro（#1360）。
 //!
 //! 从每字段的 `#[redact(...)]` 策略派生两个 impl：
-//! - `impl ::secure::Redact`：调 `::secure::redact_struct` 公开 funnel 产出 `Redacted`
-//!   （`Redacted::new` 仍 `pub(crate)` 封闭——脱敏逻辑在 `secure` 内单源，外部不可伪造安全值）。
-//! - `impl ::core::fmt::Debug`：`write!(f, "{}", self.redact())`——替换手写 Debug，杜绝 `{:?}` 泄漏。
+//! - `impl ::secure::Redact`：`redact_scoped(scope)` 调 `::secure::redact_struct` 公开 funnel 产出脱敏 `String`
+//!   （`Redacted::new` 仍 `pub(crate)` 封闭——脱敏逻辑在 `secure` 内单源，外部不可伪造安全值）。`scope`
+//!   （`RedactScope::Wire`/`ServerLog`，#1361）穿透给 funnel 决定 pii/部分泄露 mode 的渲染严格度。
+//! - `impl ::core::fmt::Debug`：`write!(f, "{}", self.redact_scoped(RedactScope::ServerLog))`——替换手写
+//!   Debug、杜绝 `{:?}` 泄漏（默认 `ServerLog` = 受信进程内诊断渲染，保留掩码）。
 //!
 //! **fail-closed（Hard）**：每个字段必须显式带 `#[redact(...)]`（public/internal/secret/pii 四选一）；
 //! 缺标注 / 重复敏感度 / 未知 mode / `secret|pii|internal` 又 `mode = "show"` 均编译错误——「忘标脱敏的
@@ -128,14 +130,18 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         impl #impl_generics ::secure::Redact for #ident #ty_generics #where_clause {
-            fn redact(&self) -> ::std::string::String {
-                ::secure::redact_struct(#type_name, #is_tuple, &[ #(#field_inits),* ])
+            fn redact_scoped(&self, scope: ::secure::RedactScope) -> ::std::string::String {
+                ::secure::redact_struct(#type_name, #is_tuple, scope, &[ #(#field_inits),* ])
             }
         }
 
         impl #impl_generics ::core::fmt::Debug for #ident #ty_generics #where_clause {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                ::core::write!(f, "{}", ::secure::Redact::redact(self))
+                ::core::write!(
+                    f,
+                    "{}",
+                    ::secure::Redact::redact_scoped(self, ::secure::RedactScope::ServerLog)
+                )
             }
         }
     })

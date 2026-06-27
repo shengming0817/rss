@@ -72,12 +72,26 @@ pub enum InternalAttr {
 /// 跨域核心错误（私有字段 record；runtime 数据经 `with_details` / `with_internal` typed 通道）。
 ///
 /// `Display` 只输出 `kind` 的 const message——绝不拼 public/internal 明细，避免 PII 误入日志/wire。
-#[derive(Debug, thiserror::Error)]
+///
+/// `Debug` 手写实现：只输出 kind 与 public/internal 条目**数量**，永不渲染任何属性键或值
+/// （`tracing::error!(?err)` 等 `?` 展开路径与 HTTP wire 路径同等安全）。
+#[derive(thiserror::Error)]
 #[error("{}", .kind.message())]
 pub struct CoreError {
     kind: CoreErrorKind,
     public: Vec<PublicDetail>,
     internal: Vec<InternalAttr>,
+}
+
+impl std::fmt::Debug for CoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 只输出 kind 与条目数量，永不渲染键或值——防止内部属性经 `?err` span 路径泄露。
+        f.debug_struct("CoreError")
+            .field("kind", &self.kind)
+            .field("public", &self.public.len())
+            .field("internal", &self.internal.len())
+            .finish()
+    }
 }
 
 impl CoreError {
@@ -205,5 +219,45 @@ mod tests {
         let _bool = PublicDetail::Bool("k", true);
         let _dur = PublicDetail::Duration("k", Duration::from_secs(5));
         let _time = PublicDetail::Time("k", SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn debug_never_renders_internal_or_public_values() {
+        // INVARIANT: DEBUG-NO-ATTR-VALUES-01
+        // `tracing::error!(?err)` 展开为 Debug；手写 impl 确保内部属性和公开明细的键/值
+        // 永不出现在 Debug 输出中，与 HTTP wire strip 路径等价安全。
+        let err = CoreError::new(CoreErrorKind::Forbidden)
+            .with_internal(InternalAttr::Str(
+                "authorization",
+                "Bearer s3cr3t".to_string(),
+            ))
+            .with_details(PublicDetail::Str("field", "name".to_string()));
+        let debug_str = format!("{err:?}");
+        assert!(
+            !debug_str.contains("s3cr3t"),
+            "internal value leaked in Debug: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("name"),
+            "public value leaked in Debug: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("authorization"),
+            "internal key leaked in Debug: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("field"),
+            "public key leaked in Debug: {debug_str}"
+        );
+        // 只输出 kind 与数量
+        assert!(debug_str.contains("Forbidden"), "kind missing: {debug_str}");
+        assert!(
+            debug_str.contains("public: 1"),
+            "public count wrong: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("internal: 1"),
+            "internal count wrong: {debug_str}"
+        );
     }
 }

@@ -30,6 +30,23 @@ trace span、tracing sink 和持久化 `last_error` 都必须 fail-closed redact
 - tracing subscriber 对敏感 field 做统一清洗。
 - `last_error` 持久化走同一 `secure` crate（redaction 模块）。
 
+**字段级输出入口 `secure::safe(value, scope)`（#1361）**：带 `#[derive(secure::Redact)]` 声明的值进 tracing
+field / 日志 / wire / `last_error` 前，经 `secure::safe(&value, scope)` 按**声明的字段策略**渲染——这是字段级
+输出的**单一命名入口**（sink funnel `redact_error`/`redact_field`/`redact_url_credentials` 的 typed-value 兄弟）。
+「字段声明优先于 key 猜测」由此落地：值在变成字符串**之前**已按策略脱敏，OTel exporter 的 key-sweep 退化为
+**defense-in-depth 兜底**（它只见类型擦除后的 `String`，且 `Sensitivity::from_key` 的敏感 key 白名单不含
+`email`/`subject`/`dsn`，只有字段策略能拦这些）。
+
+- `secure::RedactScope`（`ctx`）= 输出通道：`ServerLog`（受信进程内诊断 / `last_error` 持久化，= 派生 `Debug`
+  默认，保留 `last4`/`email_mask`/`hash` 掩码）与 `Wire`（外部不可信 sink：导出 trace / API 响应 / 外发日志——
+  部分泄露 mode 塌缩 `<redacted>`，敏感值不部分泄露）。`safe(v, ServerLog) == format!("{v:?}")`（同源）。
+- `internal` / `secret` 两通道均 `Fixed`（值在 derive 侧根本不捕获）；`public` 两通道原样。
+- **`last_error` 脱敏安全载体 `secure::LastError`（sealed）**：构造只经 `LastError::from_error(&dyn Error)`
+  （顶层 `Display`，`redact_error` 收口、不遍历 source 链）或 `LastError::from_redactable(value, scope)`
+  （`safe` 字段策略）——「未经脱敏的 last_error 不可构造/持久化」类型层 Hard。`redact_error` 已内置 URL 凭据
+  剥离（belt-and-suspenders）：顶层 `Display` 内联的 DSN 凭据自动剥，无需调用方手动清洗。持久化列 / 域字段 /
+  writer 待落地（落地时列写入取 `LastError`）。`error = %e` span 日志统一经 `secure::redact_error` 收口（funnel 优先于裸打印）。
+
 **字段级脱敏策略模型（#1359/#1360）**：任意 struct 字段经 `#[derive(secure::Redact)]` + 字段属性显式声明策略，
 派生安全 `Debug`（替换各 crate 手写脱敏 `Debug`，从输入类型层声明而非仅输出边界清洗）：
 

@@ -10,7 +10,7 @@
 | **authn** | jwt/session/refresh 值类型、`Principal`（RowScope 派生）类型；ctx 遵 ADR-002 显式传 `&RequestCtx` | type + 函数；**PDP/session store dyn port → diport** | authplan 类型在 primitives::authplan |
 | **bootstrap** | `Domain::init(&self,&mut Registry)->Result<(),KernelError>`、`Registry`、`module()->DomainModule`、shutdown 编排（持 `ManagedResource` LIFO） | init=sync 不 I/O/spawn；`ManagedResource` 遵 **ADR-001**（待 diport 拍板是否迁 + 是否 dynosaur 化，见 data-model 待决项#4） | shutdown ADR-001；ref: kube-rs/fx |
 | **eventexec** | `Disposition`(Ack/Nack/Requeue 穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型别名、saga executor·tailer/command 接缝 | type/enum/函数；**Publisher dyn port + `Subscriber`/`SubscribeInitializer` dyn port + `Message` 原语已迁 diport（#1075）** | ref: watermill |
-| **observ** | metrics(label 闭值集)/logging(`SpanField`) 值类型 | type/enum；**audit sink port（`AuditSink`/`AuditEvent`/`AuditOutcome`）已迁 diport（#1075）** | metrics label 闭值集 |
+| **observ** | metrics label 值类型（`HttpLabel`/`EventLabel`/`CertLabel`/`MetricLabel`，闭值集） | type/enum；**audit sink port（`AuditSink`/`AuditEvent`/`AuditOutcome`）已迁 diport（#1075）**；结构化 tracing 字段脱敏由 `secure::safe`/`#[derive(secure::Redact)]` 承载（本 PR 删除零使用的 `SpanField`） | metrics label 闭值集 |
 | **distributed** | distlock/cas/transport 值类型 | **dyn port → diport** | — |
 | **deviceloop** | cert lifecycle·signing（L4）状态机类型 | 态机 type；**signer dyn port → diport** | L4 reconcile |
 

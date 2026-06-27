@@ -513,7 +513,7 @@ async fn settle_publish_failure(
 /// `PublisherError::Display` 是受控安全摘要（diport PII 边界）；`permanent` 字段（#1212）让单条日志即可
 /// 区分「瞬态退避重试」与「永久即将首投 DLX」，无需关联后续 `log_dlx`（便于 metric 聚合 / alert）。
 fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &PublisherError) {
-    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent = err.is_permanent(), error = %err, "outbox: publish failed");
+    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent = err.is_permanent(), error = %secure::redact_error(err), "outbox: publish failed");
 }
 
 /// 进 dlx（运维须感知）。`permanent`：`true`=错误本身永久（首投即 DLX，跳过预算）；`false`=瞬态重试预算耗尽。

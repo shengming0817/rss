@@ -10,6 +10,11 @@
 
 `requestId` 由框架注入。wire 字段 camelCase，日志字段 snake_case。
 
+`vocab::CoreError` → wire envelope 经 `httpserve::core_error_response(&CoreError, request_id)`（#1361）：
+**4xx 下发 `public_details`、5xx 强制 strip**；`internal_attrs` 永不进 wire。`details` 为单键对象数组，
+typed 值形固定（golden 锁）：`Duration`→毫秒 `u64`、`Time`→epoch 秒 `i64`。kind→status 单源
+`status_for`（与 `code` 同出 `kind`，杜绝 code/status 错配；未知 `#[non_exhaustive]` kind fail-closed 映射 5xx）。
+
 ## errcode
 
 - 对外错误使用 `vocab`（库错误枚举 `thiserror`，错误码经 `vocab` 命名空间）；
@@ -26,10 +31,13 @@
 runtime 数据。runtime 数据进入两条 typed 通道：
 
 - `with_details(PublicString/PublicInt/PublicBool/PublicDuration/PublicTime)`：
-  4xx 可下发，5xx 强制 strip。
+  4xx 可下发，5xx 强制 strip（由 `httpserve::core_error_response` 按 status class 落地，#1361）。
 - `with_internal(InternalAttr)`：只进服务端日志，永不进 wire。
 
 由 const literal 检查（编译期 `&'static str` 类型约束，Hard）与 sealed 字段冻结（类型系统，Hard）守。
+typed 通道分流（`PublicDetail` vs `InternalAttr`）**本身即脱敏决策**——wire mapper 只读 `public_details()`、
+不对其二次 `redact`（`PublicDetail` 已是 vetted 公开值）。字段级值进日志 / trace / wire 前经 `secure::safe(value,
+scope)` 按声明策略渲染（见 `docs/rules/observability.md` §Redaction）。
 
 ## Panic
 

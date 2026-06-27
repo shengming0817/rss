@@ -4,7 +4,7 @@
 //! - **sink/key funnel**：[`redact_error`]（顶层 `Display`-only）/ [`redact_field`]（按 key 判敏感）/
 //!   [`redact_url_credentials`]（剥 URL userinfo）——span error / tracing sink / last_error 一律经此收口
 //!   （`docs/rules/observability.md` §redaction），敏感 key 判定与 free-form scrub 不散落各 consumer。
-//! - **字段级策略模型**（#1360）：[`Sensitivity`] / [`PiiKind`] / [`RedactionMode`] / [`RedactionCtx`] /
+//! - **字段级策略模型**（#1360）：[`Sensitivity`] / [`PiiKind`] / [`RedactionMode`] / `RedactionCtx` /
 //!   [`Redact`] + 公开 funnel [`redact_struct`]。配 `#[derive(Redact)]`（securederive）让任意 struct
 //!   字段**显式声明** public / internal / pii / secret 与脱敏模式，派生安全 `Debug`——替换各 crate 手写 `Debug`。
 //!
@@ -70,9 +70,12 @@ impl Redacted {
     /// [`redact_error`] / [`redact_field`] / [`redact_url_credentials`] 这些**固定语义** `pub` sink
     /// funnel 取得 `Redacted`——它们均**先施加脱敏**再 wrap，外部不可伪造任意「安全值」。
     ///
-    /// 注意 [`redact_struct`] / [`Redact::redact`] / [`RedactionCtx::apply`] 返回**裸 `String`** 而非
+    /// 注意 [`redact_struct`] / [`Redact::redact_scoped`] / `RedactionCtx::apply` 返回**裸 `String`** 而非
     /// `Redacted`（#1360 F1）：它们的 mode 由调用方 / 类型作者选择（含 `Show`），不享「已脱敏安全值」语义，
     /// 故不经本封闭构造口——避免 `Show + 任意明文` 成外部 mint `Redacted` 的旁路。
+    ///
+    /// INVARIANT: REDACT-SEALED-NEW-01 —— `Redacted` 唯一构造口；`pub(crate)` 封闭使 crate 外无法把未脱敏值
+    /// mint 成可 `Display` 的「安全值」，只能经固定语义 sink funnel 取得（先脱敏再 wrap）。
     pub(crate) fn new(redacted: impl Into<String>) -> Self {
         Self(redacted.into())
     }
@@ -235,7 +238,10 @@ impl<T: RedactField> RedactField for Option<T> {
 impl RedactionMode {
     /// 把字段原值按本模式脱敏成可安全记录的片段。`Fixed`/`Drop` 不读 `value`；其余 fail-closed——
     /// 非适用输入（如 `Last4` 遇 `Bytes`/`Absent`）退回固定占位。
-    pub fn mask(self, value: RedactValue<'_>) -> String {
+    ///
+    /// `pub(crate)`（#1361 review A-F1）：直调 `mask()` 会绕过 `safe`/`redact_struct` 的 [`RedactScope`]
+    /// Wire 塌缩（funnel 旁路）。字段级输出经 [`safe`]（单一命名入口）；本方法仅 crate 内渲染原语。
+    pub(crate) fn mask(self, value: RedactValue<'_>) -> String {
         match self {
             RedactionMode::Show => mask_show(value),
             RedactionMode::Fixed => REDACTED_PLACEHOLDER.to_string(),
@@ -307,29 +313,22 @@ fn mask_hash(value: RedactValue<'_>) -> String {
 }
 
 /// 字段脱敏策略：绑定 [`Sensitivity`] 与最终 [`RedactionMode`]。
+///
+/// `pub(crate)`（#1361 review A-F1/C-F5）：`apply` 不应用 [`RedactScope`] Wire 塌缩，crate 外直用会绕过
+/// 字段级 funnel；仅 [`redact_field`] 等 sink funnel 内部消费。字段级输出走 [`safe`]（单一命名入口）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RedactionCtx {
+pub(crate) struct RedactionCtx {
     sensitivity: Sensitivity,
     mode: RedactionMode,
 }
 
 impl RedactionCtx {
     /// 由 sensitivity（+可选显式 mode override）构造策略；`mode` 缺省取 [`Sensitivity::default_mode`]。
-    pub fn new(sensitivity: Sensitivity, mode: Option<RedactionMode>) -> Self {
+    pub(crate) fn new(sensitivity: Sensitivity, mode: Option<RedactionMode>) -> Self {
         Self {
             sensitivity,
             mode: mode.unwrap_or(sensitivity.default_mode()),
         }
-    }
-
-    /// 声明的敏感度。
-    pub fn sensitivity(self) -> Sensitivity {
-        self.sensitivity
-    }
-
-    /// 最终生效的脱敏 mode。
-    pub fn mode(self) -> RedactionMode {
-        self.mode
     }
 
     /// 应用策略脱敏字段原值，产出**已脱敏的 `String` 片段**（非 [`Redacted`]）。
@@ -339,7 +338,9 @@ impl RedactionCtx {
     /// `Redacted` 仅由固定语义的 sink funnel（[`redact_error`]/[`redact_field`]/[`redact_url_credentials`]）
     /// 经 `pub(crate)` [`Redacted::new`] 产出——类型层封闭，外部不可 mint。`String` 无「已脱敏」语义契约，
     /// 仅是 derive Debug 渲染与 key funnel 的内部片段。
-    pub fn apply(self, value: RedactValue<'_>) -> String {
+    ///
+    /// 注意：本方法**不应用** [`RedactScope`] Wire 塌缩（scope-unaware）；scope-aware 字段级渲染走 [`safe`]。
+    pub(crate) fn apply(self, value: RedactValue<'_>) -> String {
         self.mode.mask(value)
     }
 }
@@ -355,15 +356,69 @@ pub struct FieldRedaction<'a> {
     pub value: RedactValue<'a>,
 }
 
-/// 字段级脱敏上游模型：类型声明自身字段策略，产出已脱敏的 `Debug` 渲染 `String`。由 `#[derive(Redact)]`
-/// 实现（生成的 `Debug` 委托 `self.redact()`）。
+/// 字段级输出目标通道（issue #1361 的 `ctx`）——决定 pii / 部分泄露 mode 的渲染严格度。
 ///
-/// 返回 `String` 而非 [`Redacted`]（#1360 F1）：`redact` 是 `Debug` 渲染 helper，非「安全值」产出口——
+/// 唯一通道差异：**部分泄露** mode（[`Last4`](RedactionMode::Last4) / [`EmailMask`](RedactionMode::EmailMask)
+/// / [`Hash`](RedactionMode::Hash)）在 [`Wire`](Self::Wire) 塌缩为 [`Fixed`](RedactionMode::Fixed)，在
+/// [`ServerLog`](Self::ServerLog) 保留声明 mode（诊断掩码 / 关联令牌）。`internal` / `secret` 两通道均 `Fixed`
+/// （值在 derive 侧根本不捕获，见 [`Redact`]），`public` / `Show` 两通道均原样。
+///
+/// 对标 `iqlusioninc/crates` secrecy `ExposeSecret`（受控暴露语义）：[`ServerLog`](Self::ServerLog) 是受信
+/// 进程内诊断通道（派生 `Debug` 默认即此），[`Wire`](Self::Wire) 是外部不可信 sink（导出 trace / API 响应 /
+/// 外发日志聚合）的更严渲染——敏感值不部分泄露。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RedactScope {
+    /// 受信服务端日志 / `last_error` 持久化 / 进程内诊断：保留声明 mode（含 `Last4`/`EmailMask`/`Hash` 掩码）。
+    ServerLog,
+    /// 外部不可信输出（导出 trace / API 响应 / 外发日志聚合）：部分泄露 mode 塌缩 `Fixed`，不部分泄露敏感值。
+    Wire,
+}
+
+/// 字段级脱敏上游模型：类型声明自身字段策略，按输出 [`RedactScope`] 产出已脱敏的 `Debug` 渲染 `String`。
+/// 由 `#[derive(Redact)]` 实现（生成的 `Debug` 委托 `self.redact_scoped(RedactScope::ServerLog)`）。
+///
+/// 返回 `String` 而非 [`Redacted`]（#1360 F1）：`redact_scoped` 是 `Debug` 渲染 helper，非「安全值」产出口——
 /// 字段 mode 由类型作者声明（含 `Show`），若返回 `Redacted` 则任意类型经 `Show` 字段即可 mint 可 Display
-/// 的 `Redacted`，绕开封闭面。`Redacted` 仅由固定语义 sink funnel 产出（见 [`RedactionCtx::apply`]）。
+/// 的 `Redacted`，绕开封闭面。`Redacted` 仅由固定语义 sink funnel 产出（见 `RedactionCtx::apply`）。
 pub trait Redact {
-    /// 按字段策略脱敏自身，返回 `Debug` 渲染片段。
-    fn redact(&self) -> String;
+    /// 按字段策略 + 输出 [`RedactScope`] 脱敏自身，返回 `Debug` 渲染片段。
+    fn redact_scoped(&self, scope: RedactScope) -> String;
+}
+
+/// 字段级安全输出 funnel：按值**自身声明的字段策略**（`#[derive(Redact)]`）+ 输出 `scope`，产出可安全
+/// 记录的 `String`——tracing field / 日志 / wire / `last_error` 字段级输出的**单一命名入口**（sink funnel
+/// [`redact_error`] / [`redact_field`] / [`redact_url_credentials`] 的 typed-value 兄弟）。
+///
+/// 「字段声明优先于 key 猜测」的落点（#1361）：在值变成 `tracing` 字段字符串**之前**按声明策略渲染（与派生
+/// `Debug` 同源——`safe(v, RedactScope::ServerLog) == format!("{v:?}")`）；OTel exporter 的 key-sweep 退化为
+/// defense-in-depth 兜底（它只见擦除后的 `String`，无从读类型策略）。
+///
+/// 返回裸 `String` 而非 [`Redacted`]（#1360 F1，保 [`Redacted::new`] 封闭面）。
+///
+/// 用例：`tracing::warn!(subject = %secure::safe(&subj, secure::RedactScope::Wire), "rejected");`
+pub fn safe<R: Redact + ?Sized>(value: &R, scope: RedactScope) -> String {
+    value.redact_scoped(scope)
+}
+
+/// 按输出 [`RedactScope`] 解析字段有效 mode：[`Wire`](RedactScope::Wire) 把**部分泄露** mode
+/// （`Last4`/`EmailMask`/`Hash`）塌缩为 `Fixed`（外部 sink 不部分泄露敏感值）；[`ServerLog`](RedactScope::ServerLog)
+/// 原样保留声明 mode。`Show`/`Fixed`/`Drop` 两 scope 一致。
+///
+/// （不按 sensitivity 区分 public：`public` 字段几乎不会声明 `Last4`/`EmailMask`/`Hash`〔非敏感无需掩码〕，
+/// 即便偶现、外部 sink 上塌缩为 `Fixed` 亦无害——故无需把 sensitivity 抬进 [`FieldRedaction`] 公开面。）
+///
+/// INVARIANT: REDACT-WIRE-COLLAPSE-01 —— `Wire` scope 下部分泄露 mode（Last4/EmailMask/Hash）必塌缩 `Fixed`；
+/// 由 `safe_wire_collapses_partial_reveal_to_fixed` + `redact_struct_wire_collapses_partial_reveal`（anti-vacuity:
+/// 同值两 scope 输出不同）守。`mask` 已 `pub(crate)`、`safe` 是唯一字段级输出入口 ⇒ 旁路收敛。
+fn scope_effective_mode(mode: RedactionMode, scope: RedactScope) -> RedactionMode {
+    match (scope, mode) {
+        (
+            RedactScope::Wire,
+            RedactionMode::Last4 | RedactionMode::EmailMask | RedactionMode::Hash,
+        ) => RedactionMode::Fixed,
+        _ => mode,
+    }
 }
 
 /// 字段级脱敏渲染 funnel（`#[derive(Redact)]` 调用）。对每字段 apply 声明的 mode、按 tuple / named
@@ -392,12 +447,16 @@ fn render_field(mode: RedactionMode, value: RedactValue<'_>) -> String {
 pub fn redact_struct(
     type_name: &'static str,
     is_tuple: bool,
+    scope: RedactScope,
     fields: &[FieldRedaction<'_>],
 ) -> String {
     let rendered: Vec<(Option<&'static str>, String)> = fields
         .iter()
-        .filter(|f| f.mode != RedactionMode::Drop)
-        .map(|f| (f.name, render_field(f.mode, f.value)))
+        .filter_map(|f| {
+            // 按输出 scope 解析有效 mode（Wire 塌缩部分泄露 mode），再剔除 Drop、渲染。
+            let mode = scope_effective_mode(f.mode, scope);
+            (mode != RedactionMode::Drop).then(|| (f.name, render_field(mode, f.value)))
+        })
         .collect();
 
     if rendered.is_empty() {
@@ -443,15 +502,27 @@ pub fn redact_struct(
 /// 经 error 链泄漏（也顺带消除 source 链循环遍历风险）。RSS 自有 `vocab::CoreError` 的 message 是
 /// `&'static str` const（安全），顶层摘要已足够定位；需要链路诊断的调用方走显式 verbose 通道，
 /// 不在本默认安全 funnel。
+///
+/// **belt-and-suspenders（#1361 review F2）**：顶层 `Display` 再经 [`redact_url_credentials`] 剥 URL
+/// 内联凭据——第三方驱动错误常把 DSN（`postgres://u:p@host/db ...`）拼进顶层 message，本 funnel 统一
+/// 兜住；无 `://` 时原样。调用方无需在每个 error-log callsite 记得手动清洗 DSN。
 pub fn redact_error(error: &dyn std::error::Error) -> Redacted {
-    Redacted::new(error.to_string())
+    redact_url_credentials(&error.to_string())
 }
 
 /// 统一脱敏 funnel：按敏感 key 判定清洗单个字段值（敏感 key → 脱敏，否则原样）。
 ///
 /// 重构为字段级模型的一行入口（#1360）：key 判敏感经 [`Sensitivity::from_key`] 单源、脱敏经
-/// [`RedactionCtx`]——非第二份实现，无双路径。敏感 key → `Secret`→`Fixed`→`<redacted>`；普通 key →
+/// `RedactionCtx`——非第二份实现，无双路径。敏感 key → `Secret`→`Fixed`→`<redacted>`；普通 key →
 /// `Public`→`Show`→原样。
+///
+/// # ⚠️ key-sweep 盲区（#1361）
+///
+/// 本 funnel 只按 key 名猜敏感；敏感 key 白名单 **不含** `email` / `subject` / `dsn` 等——这些
+/// key 返回 `Public`→`Show`→**原值**（`Redacted::Display` 仍是明文！类型名 `Redacted` 在此不代表已脱敏）。
+/// 这类字段须经字段级声明覆盖：`#[derive(secure::Redact)]` + `#[redact(pii = "email")]` 等，再用
+/// [`safe`]（声明优先于 key 猜测）；DSN 用 [`redact_url_credentials`]。**勿**把 `email` 加进 key 白名单
+/// （违 declaration-over-key-guessing 设计）。
 pub fn redact_field(key: &str, value: &str) -> Redacted {
     // apply 产出已脱敏 String 片段；本 sink funnel 经 pub(crate) Redacted::new 封装为安全值
     //（key 判敏感固定语义，非调用方选 mode，故可信地产出 Redacted）。
@@ -485,11 +556,59 @@ pub fn redact_url_credentials(url: &str) -> Redacted {
     ))
 }
 
+// ===== last_error 脱敏安全载体（#1361）=====
+
+/// 持久化 `last_error` 的脱敏安全载体（sealed：内层 `String` 私有、仅经受控构造口产出已脱敏内容）。
+///
+/// **类型层 Hard 保证**：「未经脱敏的 last_error 不可构造 / 持久化」——业务无法 mint 携原始错误文本的
+/// `LastError`，只能经 [`from_error`](Self::from_error)（顶层 `Display`，经 [`redact_error`] 收口、不遍历
+/// source 链）或 [`from_redactable`](Self::from_redactable)（字段策略，经 [`safe`]）产出。`Display` / `Debug`
+/// 输出已脱敏内容（安全可记录）。
+///
+/// 持久化列 / 域字段 / writer 待落地（本轮仅交付安全载体——落地时列写入取 `LastError`，redaction 由构造口
+/// 强制；见 `docs/rules/observability.md` §Redaction）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct LastError(String);
+
+impl LastError {
+    /// 由 error 构造：取**顶层** `Display`，经 [`redact_error`] 收口（不遍历 source 链，fail-closed）。
+    /// [`redact_error`] 已内置 URL 凭据剥离（#1361 belt-and-suspenders）——顶层 `Display` 内联的 DSN 凭据
+    /// 自动剥，调用方无需手动 [`redact_url_credentials`]；source 链（常是第三方驱动 PII）默认不展开。
+    pub fn from_error(error: &dyn std::error::Error) -> Self {
+        Self(redact_error(error).as_str().to_owned())
+    }
+
+    /// 由带字段策略的值构造：经 [`safe`] 按值声明策略 + `scope` 渲染（last_error 持久化通常用
+    /// [`RedactScope::ServerLog`]——受信进程内诊断）。
+    pub fn from_redactable<R: Redact + ?Sized>(value: &R, scope: RedactScope) -> Self {
+        Self(safe(value, scope))
+    }
+
+    /// 借出已脱敏内容。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LastError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // reason: 内容已脱敏（经 redact_error / safe funnel），可安全记录。
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Debug for LastError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LastError({})", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldRedaction, PiiKind, RedactField, RedactValue, Redacted, RedactionCtx, RedactionMode,
-        Sensitivity, redact_error, redact_field, redact_struct, redact_url_credentials,
+        FieldRedaction, LastError, PiiKind, RedactField, RedactScope, RedactValue, Redacted,
+        RedactionCtx, RedactionMode, Sensitivity, redact_error, redact_field, redact_struct,
+        redact_url_credentials, safe,
     };
     use rstest::rstest;
 
@@ -698,10 +817,9 @@ mod tests {
 
     #[test]
     fn redaction_ctx_defaults_mode_from_sensitivity() {
+        // 默认 mode 由 sensitivity 解析（Secret→Fixed）；经 apply() 输出验证（accessor 已收为 pub(crate) 内部）。
         let ctx = RedactionCtx::new(Sensitivity::Secret, None);
-        assert_eq!(ctx.mode(), RedactionMode::Fixed);
-        assert_eq!(ctx.sensitivity(), Sensitivity::Secret);
-        assert_eq!(ctx.apply(RedactValue::Str("k")).as_str(), "<redacted>");
+        assert_eq!(ctx.apply(RedactValue::Str("k")), "<redacted>");
     }
 
     #[test]
@@ -710,12 +828,7 @@ mod tests {
             Sensitivity::Pii(PiiKind::Generic),
             Some(RedactionMode::Hash),
         );
-        assert_eq!(ctx.mode(), RedactionMode::Hash);
-        assert!(
-            ctx.apply(RedactValue::Str("x"))
-                .as_str()
-                .starts_with("sha256:")
-        );
+        assert!(ctx.apply(RedactValue::Str("x")).starts_with("sha256:"));
     }
 
     // --- RedactField ---
@@ -743,6 +856,7 @@ mod tests {
         let r = redact_struct(
             "Ct",
             true,
+            RedactScope::ServerLog,
             &[FieldRedaction {
                 name: None,
                 mode: RedactionMode::Fixed,
@@ -757,6 +871,7 @@ mod tests {
         let r = redact_struct(
             "Coord",
             false,
+            RedactScope::ServerLog,
             &[
                 FieldRedaction {
                     name: Some("store_id"),
@@ -782,6 +897,7 @@ mod tests {
         let r = redact_struct(
             "T",
             false,
+            RedactScope::ServerLog,
             &[
                 FieldRedaction {
                     name: Some("shown"),
@@ -807,6 +923,7 @@ mod tests {
         let r = redact_struct(
             "T",
             false,
+            RedactScope::ServerLog,
             &[FieldRedaction {
                 name: Some("note"),
                 mode: RedactionMode::Show,
@@ -822,6 +939,7 @@ mod tests {
         let r = redact_struct(
             "T",
             true,
+            RedactScope::ServerLog,
             &[FieldRedaction {
                 name: None,
                 mode: RedactionMode::Drop,
@@ -904,10 +1022,152 @@ mod tests {
 
     #[test]
     fn derive_impls_redact_trait() {
-        // 派生同时实现 trait `Redact`（Debug 委托它）；redact 返回脱敏 String（非 Redacted，#1360 F1）。
+        // 派生实现 trait `Redact::redact_scoped`（Debug 委托它）；返回脱敏 String（非 Redacted，#1360 F1）。
         let v = DerivedNewtype(vec![1]);
-        let r: String = secure::Redact::redact(&v);
+        let r: String = secure::Redact::redact_scoped(&v, RedactScope::ServerLog);
         assert_eq!(r, "DerivedNewtype(<redacted>)");
+    }
+
+    // --- secure::safe + RedactScope（#1361 字段级输出 funnel + 输出通道）---
+
+    #[test]
+    fn safe_serverlog_eq_debug() {
+        // ServerLog scope = 派生 Debug 默认（同源，零第二份脱敏逻辑）。
+        let v = DerivedMixed {
+            visible: "ok".to_string(),
+            secret: "topsecret".to_string(),
+            card: "4242424242424242".to_string(),
+            email: "alice@example.com".to_string(),
+            gone: "vanish".to_string(),
+        };
+        assert_eq!(safe(&v, RedactScope::ServerLog), format!("{v:?}"));
+    }
+
+    #[test]
+    fn safe_wire_collapses_partial_reveal_to_fixed() {
+        // Wire scope：pii 部分泄露 mode（email_mask / last4）塌缩 Fixed，不向外部 sink 部分泄露；
+        // ServerLog 保留掩码诊断。secret 两 scope 均 Fixed；public(show) 两 scope 均原样。
+        let v = DerivedMixed {
+            visible: "ok".to_string(),
+            secret: "topsecret".to_string(),
+            card: "4242424242424242".to_string(),
+            email: "alice@example.com".to_string(),
+            gone: "vanish".to_string(),
+        };
+        let server = safe(&v, RedactScope::ServerLog);
+        let wire = safe(&v, RedactScope::Wire);
+        // ServerLog：掩码可见（诊断）。
+        assert!(server.contains("card: ****4242"), "server={server}");
+        assert!(
+            server.contains("email: a***@example.com"),
+            "server={server}"
+        );
+        // Wire：部分泄露塌缩 Fixed，原值 / 掩码片段一律不泄漏。
+        assert!(wire.contains("card: <redacted>"), "wire={wire}");
+        assert!(wire.contains("email: <redacted>"), "wire={wire}");
+        assert!(!wire.contains("4242"), "wire 不得含卡号尾段: {wire}");
+        assert!(!wire.contains("@example.com"), "wire 不得含邮箱域: {wire}");
+        // 两 scope 均不泄漏全量 secret / 原始邮箱；public(show) 两 scope 均原样。
+        for s in [&server, &wire] {
+            assert!(s.contains("secret: <redacted>"), "{s}");
+            assert!(!s.contains("topsecret"), "{s}");
+            assert!(!s.contains("alice@example.com"), "{s}");
+            assert!(s.contains("visible: \"ok\""), "{s}");
+        }
+        // anti-vacuity：含 pii 字段时两 scope 输出必须不同。
+        assert_ne!(server, wire);
+    }
+
+    #[test]
+    fn safe_works_on_unsized_dyn_redact() {
+        let v = DerivedNewtype(vec![0xAB]);
+        let r: &dyn super::Redact = &v;
+        assert_eq!(safe(r, RedactScope::Wire), "DerivedNewtype(<redacted>)");
+    }
+
+    #[test]
+    fn redact_struct_wire_collapses_partial_reveal() {
+        // 直调 redact_struct 验证 Wire scope 塌缩部分泄露 mode（不经派生路径）；REDACT-WIRE-COLLAPSE-01。
+        let fields = [
+            FieldRedaction {
+                name: Some("card"),
+                mode: RedactionMode::Last4,
+                value: RedactValue::Str("4242424242424242"),
+            },
+            FieldRedaction {
+                name: Some("email"),
+                mode: RedactionMode::EmailMask,
+                value: RedactValue::Str("alice@example.com"),
+            },
+        ];
+        let server = redact_struct("T", false, RedactScope::ServerLog, &fields);
+        let wire = redact_struct("T", false, RedactScope::Wire, &fields);
+        assert_eq!(server, "T { card: ****4242, email: a***@example.com }");
+        assert_eq!(wire, "T { card: <redacted>, email: <redacted> }");
+        assert_ne!(
+            server, wire,
+            "anti-vacuity：含部分泄露字段时两 scope 必不同"
+        );
+    }
+
+    // --- LastError（#1361 持久化 last_error 脱敏安全载体）---
+
+    #[test]
+    fn last_error_from_error_top_level_only_not_source_chain() {
+        // source 链（可能含第三方 DSN/PII）不进 last_error，只取顶层 Display。
+        let e = WrappedError {
+            msg: "reconcile failed".to_string(),
+            cause: SimpleError("postgres://u:p@db/app connect refused".to_string()),
+        };
+        let le = LastError::from_error(&e);
+        assert_eq!(le.as_str(), "reconcile failed");
+        assert!(!le.as_str().contains("postgres://"));
+        assert!(!le.as_str().contains("u:p"));
+        // Display / Debug 输出已脱敏内容。
+        assert_eq!(le.to_string(), "reconcile failed");
+        assert_eq!(format!("{le:?}"), "LastError(reconcile failed)");
+    }
+
+    #[test]
+    fn last_error_from_redactable_applies_field_policy() {
+        // 带字段策略的值经 from_redactable + scope 渲染——Wire 塌缩 pii，原始邮箱不入 last_error。
+        let v = DerivedMixed {
+            visible: "ctx".to_string(),
+            secret: "topsecret".to_string(),
+            card: "4242424242424242".to_string(),
+            email: "alice@example.com".to_string(),
+            gone: "vanish".to_string(),
+        };
+        let le = LastError::from_redactable(&v, RedactScope::Wire);
+        assert!(!le.as_str().contains("alice@example.com"));
+        assert!(!le.as_str().contains("topsecret"));
+        assert!(le.as_str().contains("email: <redacted>"));
+    }
+
+    #[test]
+    fn redact_error_strips_inline_dsn_in_top_level_display() {
+        // #1361 F2 belt-and-suspenders：顶层 Display 内联 DSN 凭据经 redact_error 自动剥（无需调用方手动清洗）。
+        let e =
+            SimpleError("connect postgres://svc:s3cr3t@db.internal:5432/app refused".to_string());
+        let r = redact_error(&e);
+        assert!(
+            !r.as_str().contains("s3cr3t"),
+            "DSN 凭据应被剥: {}",
+            r.as_str()
+        );
+        assert!(
+            r.as_str()
+                .contains("postgres://<redacted>@db.internal:5432/app")
+        );
+    }
+
+    #[test]
+    fn last_error_from_error_strips_inline_dsn() {
+        // LastError::from_error 经 redact_error（含 URL-cred 剥离）⇒ 顶层 Display 的 DSN 凭据不入 last_error。
+        let e = SimpleError("pool create failed: postgres://svc:s3cr3t@db/app".to_string());
+        let le = LastError::from_error(&e);
+        assert!(!le.as_str().contains("s3cr3t"), "le={}", le.as_str());
+        assert!(le.as_str().contains("<redacted>@db/app"));
     }
 
     // --- redact_url_credentials（AMQP / DSN 内联凭据脱敏）---

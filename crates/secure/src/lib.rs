@@ -23,9 +23,9 @@ pub use pathsafe::is_safe_segment;
 // `serde::Serialize` trait+derive 范式）+ 策略类型 + 公开 funnel `redact_struct`（封闭 `Redacted::new`
 // 的外部替身）。`Redactor` 是旧 sink 接缝；三个 key/error/url funnel 保留。
 pub use redaction::{
-    FieldRedaction, PiiKind, Redact, RedactField, RedactValue, Redacted, RedactionCtx,
+    FieldRedaction, LastError, PiiKind, Redact, RedactField, RedactScope, RedactValue, Redacted,
     RedactionMode, Redactor, Sensitivity, redact_error, redact_field, redact_struct,
-    redact_url_credentials,
+    redact_url_credentials, safe,
 };
 pub use refresh::{OpaqueToken, digest};
 pub use securederive::Redact;

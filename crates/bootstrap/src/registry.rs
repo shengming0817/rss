@@ -221,13 +221,13 @@ pub fn adapt_subscriber_handler(handler: Box<dyn SubscriberHandler>) -> Consumer
                 Ok(()) => consistency::HandleResult::ack(),
                 Err(e) => match e.disposition() {
                     SubscriberErrorDisposition::Transient => {
-                        tracing::warn!(error = %e, "consumer: subscriber handler transient failure, requeueing");
+                        tracing::warn!(error = %secure::redact_error(&e), "consumer: subscriber handler transient failure, requeueing");
                         consistency::HandleResult::requeue(consistency::EngineError::new(
                             consistency::EngineErrorKind::Transient,
                         ))
                     }
                     SubscriberErrorDisposition::Permanent => {
-                        tracing::warn!(error = %e, "consumer: subscriber handler permanent failure, rejecting (DLX)");
+                        tracing::warn!(error = %secure::redact_error(&e), "consumer: subscriber handler permanent failure, rejecting (DLX)");
                         consistency::HandleResult::reject(consistency::PermanentError::new(
                             consistency::PermanentErrorKind::Permanent,
                         ))
@@ -467,7 +467,7 @@ impl Registry {
                 tracing::error!(
                     listener = ?listener,
                     prefix,
-                    error = %e,
+                    error = %secure::redact_error(&e),
                     "route group register closure failed"
                 );
             })?;

@@ -49,7 +49,7 @@ impl core::fmt::Debug for secure::aead::Ciphertext
 pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
 impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
+pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for secure::aead::Ciphertext
 impl core::marker::Send for secure::aead::Ciphertext
 impl core::marker::Sync for secure::aead::Ciphertext
@@ -168,7 +168,7 @@ impl core::fmt::Debug for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::cookie::CookieValue
 impl secure::redaction::Redact for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
+pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for secure::cookie::CookieValue
 impl core::marker::Send for secure::cookie::CookieValue
 impl core::marker::Sync for secure::cookie::CookieValue
@@ -251,7 +251,7 @@ impl core::fmt::Debug for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::password::PasswordHash
 impl secure::redaction::Redact for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
+pub fn secure::password::PasswordHash::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for secure::password::PasswordHash
 impl core::marker::Send for secure::password::PasswordHash
 impl core::marker::Sync for secure::password::PasswordHash
@@ -337,6 +337,49 @@ impl<T> core::convert::From<T> for secure::redaction::PiiKind
 pub fn secure::redaction::PiiKind::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::PiiKind
 pub type secure::redaction::PiiKind::Output = T
+#[non_exhaustive] pub enum secure::redaction::RedactScope
+pub secure::redaction::RedactScope::ServerLog
+pub secure::redaction::RedactScope::Wire
+impl core::clone::Clone for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::clone(&self) -> secure::redaction::RedactScope
+impl core::cmp::Eq for secure::redaction::RedactScope
+impl core::cmp::PartialEq for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::eq(&self, &secure::redaction::RedactScope) -> bool
+impl core::fmt::Debug for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::redaction::RedactScope
+impl core::marker::StructuralPartialEq for secure::redaction::RedactScope
+impl core::marker::Freeze for secure::redaction::RedactScope
+impl core::marker::Send for secure::redaction::RedactScope
+impl core::marker::Sync for secure::redaction::RedactScope
+impl core::marker::Unpin for secure::redaction::RedactScope
+impl core::marker::UnsafeUnpin for secure::redaction::RedactScope
+impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactScope
+impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactScope
+impl<T, U> core::convert::Into<U> for secure::redaction::RedactScope where U: core::convert::From<T>
+pub fn secure::redaction::RedactScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactScope where U: core::convert::Into<T>
+pub type secure::redaction::RedactScope::Error = core::convert::Infallible
+pub fn secure::redaction::RedactScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactScope where U: core::convert::TryFrom<T>
+pub type secure::redaction::RedactScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::redaction::RedactScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::redaction::RedactScope where T: core::clone::Clone
+pub type secure::redaction::RedactScope::Owned = T
+pub fn secure::redaction::RedactScope::clone_into(&self, &mut T)
+pub fn secure::redaction::RedactScope::to_owned(&self) -> T
+impl<T> core::any::Any for secure::redaction::RedactScope where T: 'static + ?core::marker::Sized
+pub fn secure::redaction::RedactScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
+pub fn secure::redaction::RedactScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
+pub fn secure::redaction::RedactScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::redaction::RedactScope where T: core::clone::Clone
+pub unsafe fn secure::redaction::RedactScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::redaction::RedactScope
+pub type secure::redaction::RedactScope::Output = T
 pub enum secure::redaction::RedactValue<'a>
 pub secure::redaction::RedactValue::Absent
 pub secure::redaction::RedactValue::Bytes(&'a [u8])
@@ -385,8 +428,6 @@ pub secure::redaction::RedactionMode::Fixed
 pub secure::redaction::RedactionMode::Hash
 pub secure::redaction::RedactionMode::Last4
 pub secure::redaction::RedactionMode::Show
-impl secure::redaction::RedactionMode
-pub fn secure::redaction::RedactionMode::mask(self, secure::redaction::RedactValue<'_>) -> alloc::string::String
 impl core::clone::Clone for secure::redaction::RedactionMode
 pub fn secure::redaction::RedactionMode::clone(&self) -> secure::redaction::RedactionMode
 impl core::cmp::Eq for secure::redaction::RedactionMode
@@ -515,6 +556,54 @@ impl<T> core::convert::From<T> for secure::redaction::FieldRedaction<'a>
 pub fn secure::redaction::FieldRedaction<'a>::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::FieldRedaction<'a>
 pub type secure::redaction::FieldRedaction<'a>::Output = T
+pub struct secure::redaction::LastError(_)
+impl secure::redaction::LastError
+pub fn secure::redaction::LastError::as_str(&self) -> &str
+pub fn secure::redaction::LastError::from_error(&dyn core::error::Error) -> Self
+pub fn secure::redaction::LastError::from_redactable<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> Self
+impl core::clone::Clone for secure::redaction::LastError
+pub fn secure::redaction::LastError::clone(&self) -> secure::redaction::LastError
+impl core::cmp::Eq for secure::redaction::LastError
+impl core::cmp::PartialEq for secure::redaction::LastError
+pub fn secure::redaction::LastError::eq(&self, &secure::redaction::LastError) -> bool
+impl core::fmt::Debug for secure::redaction::LastError
+pub fn secure::redaction::LastError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::redaction::LastError
+pub fn secure::redaction::LastError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::redaction::LastError
+impl core::marker::Freeze for secure::redaction::LastError
+impl core::marker::Send for secure::redaction::LastError
+impl core::marker::Sync for secure::redaction::LastError
+impl core::marker::Unpin for secure::redaction::LastError
+impl core::marker::UnsafeUnpin for secure::redaction::LastError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::LastError
+impl core::panic::unwind_safe::UnwindSafe for secure::redaction::LastError
+impl<T, U> core::convert::Into<U> for secure::redaction::LastError where U: core::convert::From<T>
+pub fn secure::redaction::LastError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::redaction::LastError where U: core::convert::Into<T>
+pub type secure::redaction::LastError::Error = core::convert::Infallible
+pub fn secure::redaction::LastError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::redaction::LastError where U: core::convert::TryFrom<T>
+pub type secure::redaction::LastError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::redaction::LastError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::redaction::LastError where T: core::clone::Clone
+pub type secure::redaction::LastError::Owned = T
+pub fn secure::redaction::LastError::clone_into(&self, &mut T)
+pub fn secure::redaction::LastError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::redaction::LastError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::redaction::LastError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::redaction::LastError where T: 'static + ?core::marker::Sized
+pub fn secure::redaction::LastError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::redaction::LastError where T: ?core::marker::Sized
+pub fn secure::redaction::LastError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::redaction::LastError where T: ?core::marker::Sized
+pub fn secure::redaction::LastError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::redaction::LastError where T: core::clone::Clone
+pub unsafe fn secure::redaction::LastError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::redaction::LastError
+pub fn secure::redaction::LastError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::redaction::LastError
+pub type secure::redaction::LastError::Output = T
 pub struct secure::redaction::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
@@ -561,60 +650,14 @@ impl<T> core::convert::From<T> for secure::redaction::Redacted
 pub fn secure::redaction::Redacted::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::Redacted
 pub type secure::redaction::Redacted::Output = T
-pub struct secure::redaction::RedactionCtx
-impl secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::apply(self, secure::redaction::RedactValue<'_>) -> alloc::string::String
-pub fn secure::redaction::RedactionCtx::mode(self) -> secure::redaction::RedactionMode
-pub fn secure::redaction::RedactionCtx::new(secure::redaction::Sensitivity, core::option::Option<secure::redaction::RedactionMode>) -> Self
-pub fn secure::redaction::RedactionCtx::sensitivity(self) -> secure::redaction::Sensitivity
-impl core::clone::Clone for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::clone(&self) -> secure::redaction::RedactionCtx
-impl core::cmp::Eq for secure::redaction::RedactionCtx
-impl core::cmp::PartialEq for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::eq(&self, &secure::redaction::RedactionCtx) -> bool
-impl core::fmt::Debug for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for secure::redaction::RedactionCtx
-impl core::marker::StructuralPartialEq for secure::redaction::RedactionCtx
-impl core::marker::Freeze for secure::redaction::RedactionCtx
-impl core::marker::Send for secure::redaction::RedactionCtx
-impl core::marker::Sync for secure::redaction::RedactionCtx
-impl core::marker::Unpin for secure::redaction::RedactionCtx
-impl core::marker::UnsafeUnpin for secure::redaction::RedactionCtx
-impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionCtx
-impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionCtx
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionCtx where U: core::convert::From<T>
-pub fn secure::redaction::RedactionCtx::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionCtx where U: core::convert::Into<T>
-pub type secure::redaction::RedactionCtx::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionCtx where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionCtx::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactionCtx where T: core::clone::Clone
-pub type secure::redaction::RedactionCtx::Owned = T
-pub fn secure::redaction::RedactionCtx::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactionCtx::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactionCtx where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionCtx::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionCtx where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionCtx::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionCtx where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionCtx::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactionCtx where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactionCtx::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionCtx
-pub type secure::redaction::RedactionCtx::Output = T
 pub trait secure::redaction::Redact
-pub fn secure::redaction::Redact::redact(&self) -> alloc::string::String
+pub fn secure::redaction::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
+pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
+pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
+pub fn secure::password::PasswordHash::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 pub trait secure::redaction::RedactField
 pub fn secure::redaction::RedactField::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
 impl secure::redaction::RedactField for [u8]
@@ -631,8 +674,9 @@ pub trait secure::redaction::Redactor
 pub fn secure::redaction::Redactor::redact(&self, &str) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_field(&str, &str) -> secure::redaction::Redacted
-pub fn secure::redaction::redact_struct(&'static str, bool, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
+pub fn secure::redaction::redact_struct(&'static str, bool, secure::redaction::RedactScope, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
 pub fn secure::redaction::redact_url_credentials(&str) -> secure::redaction::Redacted
+pub fn secure::redaction::safe<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> alloc::string::String
 pub mod secure::refresh
 pub struct secure::refresh::OpaqueToken(_)
 impl secure::refresh::OpaqueToken
@@ -853,6 +897,49 @@ impl<T> core::convert::From<T> for secure::redaction::PiiKind
 pub fn secure::redaction::PiiKind::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::PiiKind
 pub type secure::redaction::PiiKind::Output = T
+#[non_exhaustive] pub enum secure::RedactScope
+pub secure::RedactScope::ServerLog
+pub secure::RedactScope::Wire
+impl core::clone::Clone for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::clone(&self) -> secure::redaction::RedactScope
+impl core::cmp::Eq for secure::redaction::RedactScope
+impl core::cmp::PartialEq for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::eq(&self, &secure::redaction::RedactScope) -> bool
+impl core::fmt::Debug for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::redaction::RedactScope
+impl core::marker::StructuralPartialEq for secure::redaction::RedactScope
+impl core::marker::Freeze for secure::redaction::RedactScope
+impl core::marker::Send for secure::redaction::RedactScope
+impl core::marker::Sync for secure::redaction::RedactScope
+impl core::marker::Unpin for secure::redaction::RedactScope
+impl core::marker::UnsafeUnpin for secure::redaction::RedactScope
+impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactScope
+impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactScope
+impl<T, U> core::convert::Into<U> for secure::redaction::RedactScope where U: core::convert::From<T>
+pub fn secure::redaction::RedactScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactScope where U: core::convert::Into<T>
+pub type secure::redaction::RedactScope::Error = core::convert::Infallible
+pub fn secure::redaction::RedactScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactScope where U: core::convert::TryFrom<T>
+pub type secure::redaction::RedactScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::redaction::RedactScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::redaction::RedactScope where T: core::clone::Clone
+pub type secure::redaction::RedactScope::Owned = T
+pub fn secure::redaction::RedactScope::clone_into(&self, &mut T)
+pub fn secure::redaction::RedactScope::to_owned(&self) -> T
+impl<T> core::any::Any for secure::redaction::RedactScope where T: 'static + ?core::marker::Sized
+pub fn secure::redaction::RedactScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
+pub fn secure::redaction::RedactScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
+pub fn secure::redaction::RedactScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::redaction::RedactScope where T: core::clone::Clone
+pub unsafe fn secure::redaction::RedactScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::redaction::RedactScope
+pub fn secure::redaction::RedactScope::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::redaction::RedactScope
+pub type secure::redaction::RedactScope::Output = T
 pub enum secure::RedactValue<'a>
 pub secure::RedactValue::Absent
 pub secure::RedactValue::Bytes(&'a [u8])
@@ -901,8 +988,6 @@ pub secure::RedactionMode::Fixed
 pub secure::RedactionMode::Hash
 pub secure::RedactionMode::Last4
 pub secure::RedactionMode::Show
-impl secure::redaction::RedactionMode
-pub fn secure::redaction::RedactionMode::mask(self, secure::redaction::RedactValue<'_>) -> alloc::string::String
 impl core::clone::Clone for secure::redaction::RedactionMode
 pub fn secure::redaction::RedactionMode::clone(&self) -> secure::redaction::RedactionMode
 impl core::cmp::Eq for secure::redaction::RedactionMode
@@ -1004,7 +1089,7 @@ impl core::fmt::Debug for secure::aead::Ciphertext
 pub fn secure::aead::Ciphertext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::aead::Ciphertext
 impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
+pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for secure::aead::Ciphertext
 impl core::marker::Send for secure::aead::Ciphertext
 impl core::marker::Sync for secure::aead::Ciphertext
@@ -1049,7 +1134,7 @@ impl core::fmt::Debug for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::cookie::CookieValue
 impl secure::redaction::Redact for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
+pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for secure::cookie::CookieValue
 impl core::marker::Send for secure::cookie::CookieValue
 impl core::marker::Sync for secure::cookie::CookieValue
@@ -1121,6 +1206,54 @@ impl<T> core::convert::From<T> for secure::redaction::FieldRedaction<'a>
 pub fn secure::redaction::FieldRedaction<'a>::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::FieldRedaction<'a>
 pub type secure::redaction::FieldRedaction<'a>::Output = T
+pub struct secure::LastError(_)
+impl secure::redaction::LastError
+pub fn secure::redaction::LastError::as_str(&self) -> &str
+pub fn secure::redaction::LastError::from_error(&dyn core::error::Error) -> Self
+pub fn secure::redaction::LastError::from_redactable<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> Self
+impl core::clone::Clone for secure::redaction::LastError
+pub fn secure::redaction::LastError::clone(&self) -> secure::redaction::LastError
+impl core::cmp::Eq for secure::redaction::LastError
+impl core::cmp::PartialEq for secure::redaction::LastError
+pub fn secure::redaction::LastError::eq(&self, &secure::redaction::LastError) -> bool
+impl core::fmt::Debug for secure::redaction::LastError
+pub fn secure::redaction::LastError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::redaction::LastError
+pub fn secure::redaction::LastError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::redaction::LastError
+impl core::marker::Freeze for secure::redaction::LastError
+impl core::marker::Send for secure::redaction::LastError
+impl core::marker::Sync for secure::redaction::LastError
+impl core::marker::Unpin for secure::redaction::LastError
+impl core::marker::UnsafeUnpin for secure::redaction::LastError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::LastError
+impl core::panic::unwind_safe::UnwindSafe for secure::redaction::LastError
+impl<T, U> core::convert::Into<U> for secure::redaction::LastError where U: core::convert::From<T>
+pub fn secure::redaction::LastError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::redaction::LastError where U: core::convert::Into<T>
+pub type secure::redaction::LastError::Error = core::convert::Infallible
+pub fn secure::redaction::LastError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::redaction::LastError where U: core::convert::TryFrom<T>
+pub type secure::redaction::LastError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::redaction::LastError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::redaction::LastError where T: core::clone::Clone
+pub type secure::redaction::LastError::Owned = T
+pub fn secure::redaction::LastError::clone_into(&self, &mut T)
+pub fn secure::redaction::LastError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::redaction::LastError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::redaction::LastError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::redaction::LastError where T: 'static + ?core::marker::Sized
+pub fn secure::redaction::LastError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::redaction::LastError where T: ?core::marker::Sized
+pub fn secure::redaction::LastError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::redaction::LastError where T: ?core::marker::Sized
+pub fn secure::redaction::LastError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::redaction::LastError where T: core::clone::Clone
+pub unsafe fn secure::redaction::LastError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::redaction::LastError
+pub fn secure::redaction::LastError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::redaction::LastError
+pub type secure::redaction::LastError::Output = T
 pub struct secure::OpaqueToken(_)
 impl secure::refresh::OpaqueToken
 pub fn secure::refresh::OpaqueToken::expose(&self) -> &str
@@ -1165,7 +1298,7 @@ impl core::fmt::Debug for secure::password::PasswordHash
 pub fn secure::password::PasswordHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for secure::password::PasswordHash
 impl secure::redaction::Redact for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
+pub fn secure::password::PasswordHash::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for secure::password::PasswordHash
 impl core::marker::Send for secure::password::PasswordHash
 impl core::marker::Sync for secure::password::PasswordHash
@@ -1243,52 +1376,6 @@ impl<T> core::convert::From<T> for secure::redaction::Redacted
 pub fn secure::redaction::Redacted::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::Redacted
 pub type secure::redaction::Redacted::Output = T
-pub struct secure::RedactionCtx
-impl secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::apply(self, secure::redaction::RedactValue<'_>) -> alloc::string::String
-pub fn secure::redaction::RedactionCtx::mode(self) -> secure::redaction::RedactionMode
-pub fn secure::redaction::RedactionCtx::new(secure::redaction::Sensitivity, core::option::Option<secure::redaction::RedactionMode>) -> Self
-pub fn secure::redaction::RedactionCtx::sensitivity(self) -> secure::redaction::Sensitivity
-impl core::clone::Clone for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::clone(&self) -> secure::redaction::RedactionCtx
-impl core::cmp::Eq for secure::redaction::RedactionCtx
-impl core::cmp::PartialEq for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::eq(&self, &secure::redaction::RedactionCtx) -> bool
-impl core::fmt::Debug for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for secure::redaction::RedactionCtx
-impl core::marker::StructuralPartialEq for secure::redaction::RedactionCtx
-impl core::marker::Freeze for secure::redaction::RedactionCtx
-impl core::marker::Send for secure::redaction::RedactionCtx
-impl core::marker::Sync for secure::redaction::RedactionCtx
-impl core::marker::Unpin for secure::redaction::RedactionCtx
-impl core::marker::UnsafeUnpin for secure::redaction::RedactionCtx
-impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionCtx
-impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionCtx
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionCtx where U: core::convert::From<T>
-pub fn secure::redaction::RedactionCtx::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionCtx where U: core::convert::Into<T>
-pub type secure::redaction::RedactionCtx::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionCtx where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionCtx::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactionCtx where T: core::clone::Clone
-pub type secure::redaction::RedactionCtx::Owned = T
-pub fn secure::redaction::RedactionCtx::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactionCtx::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactionCtx where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionCtx::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionCtx where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionCtx::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionCtx where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionCtx::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactionCtx where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactionCtx::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactionCtx
-pub fn secure::redaction::RedactionCtx::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionCtx
-pub type secure::redaction::RedactionCtx::Output = T
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::aead::Ciphertext) -> core::result::Result<alloc::vec::Vec<u8>, secure::aead::AeadError>
 pub fn secure::Aead::seal(&self, &[u8]) -> core::result::Result<secure::aead::Ciphertext, secure::aead::AeadError>
@@ -1296,13 +1383,13 @@ pub trait secure::CookieCodec
 pub fn secure::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
 pub fn secure::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
 pub trait secure::Redact
-pub fn secure::Redact::redact(&self) -> alloc::string::String
+pub fn secure::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::aead::Ciphertext
-pub fn secure::aead::Ciphertext::redact(&self) -> alloc::string::String
+pub fn secure::aead::Ciphertext::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::redact(&self) -> alloc::string::String
+pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::redact(&self) -> alloc::string::String
+pub fn secure::password::PasswordHash::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 pub trait secure::RedactField
 pub fn secure::RedactField::as_redact_value(&self) -> secure::redaction::RedactValue<'_>
 impl secure::redaction::RedactField for [u8]
@@ -1322,7 +1409,8 @@ pub fn secure::hash_password(&str) -> core::result::Result<secure::password::Pas
 pub fn secure::is_safe_segment(&str) -> bool
 pub fn secure::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redact_field(&str, &str) -> secure::redaction::Redacted
-pub fn secure::redact_struct(&'static str, bool, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
+pub fn secure::redact_struct(&'static str, bool, secure::redaction::RedactScope, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
 pub fn secure::redact_url_credentials(&str) -> secure::redaction::Redacted
+pub fn secure::safe<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> alloc::string::String
 pub fn secure::verify_password(&str, &secure::password::PasswordHash) -> bool
 pub fn secure::verify_password_constant_time(&str, core::option::Option<&secure::password::PasswordHash>) -> bool

@@ -3,7 +3,6 @@
 //! 提供：
 //! - metrics label 闭值集（HttpLabel / EventLabel / CertLabel），编译期防高基数扩散
 //! - provider-agnostic MetricLabel 出口（adapters/otel 负责映射 KeyValue；本 crate 不引 otel）
-//! - SpanField 结构化日志字段闭值集
 //!
 //! 注：审计 sink（`AuditEvent` / `AuditOutcome` / `AuditSink`）是可替换-provider DI 注入端口，
 //! 已迁 `diport`（issue #1075，ADR-003 DI port 收敛）——消费方经 `diport::AuditSink` 注入。
@@ -189,18 +188,6 @@ impl MetricLabel for CertLabel {
     }
 }
 
-// ─── 结构化日志字段闭值集 ────────────────────────────────────────────────────
-
-/// tracing span 结构化字段闭值集（限制 high-cardinality key 扩散）。
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum SpanField {
-    Domain(&'static str),
-    RequestId(String),
-    TenantId(String),
-    EntityId { kind: &'static str, id: String },
-}
-
 // ─── 行为测试（W 阶段：穷举 MetricLabel::key()/value() 全分支） ──────────────
 
 #[cfg(test)]
@@ -297,18 +284,6 @@ mod tests {
         let label = CertLabel::TenantClass("enterprise");
         assert_eq!(label.key(), "tenant_class");
         assert_eq!(label.value(), LabelValue::Static("enterprise"));
-    }
-
-    // ── 数据类型构造性 smoke（SpanField / LabelValue 无行为，仅证可达） ──────
-    #[test]
-    fn span_field_variants_constructible() {
-        let _d = SpanField::Domain("identity");
-        let _r = SpanField::RequestId("req-123".to_owned());
-        let _t = SpanField::TenantId("tenant-456".to_owned());
-        let _e = SpanField::EntityId {
-            kind: "session",
-            id: "sess-789".to_owned(),
-        };
     }
 
     // F10：Owned 已移除，只保留 Static compile-time literal
