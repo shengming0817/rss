@@ -197,17 +197,23 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let (audit_domain_inst, audit) = audit_domain();
 
     // identity 域：with_seed_credential 注入 in-mem 凭据 + PgSessionLifecycle durable co-tx。
-    let identity_domain = IdentityDomain::new(Arc::new(LoginService::with_seed_credential(
+    let refresh_identity = identity::seed_refresh_service(
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    );
+    let login_identity = Arc::new(LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(
             id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
+        Arc::clone(&refresh_identity),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
         ids::UserId::parse(CANON_USER)?,
         PASSWORD,
         TenantId::parse(CANON_TENANT)?,
-    )?));
+    )?);
+    let identity_domain = IdentityDomain::new(login_identity, refresh_identity);
 
     // ── 步骤 4：compose + drain subscribers（audit 的 session-created 订阅绑定）────────────────
 
@@ -254,10 +260,15 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     let tenant = TenantId::parse(CANON_TENANT)?;
     // 第二个 LoginService 实例（同种子凭据），用于直接调用 .login()。
+    let refresh_for_login = identity::seed_refresh_service(
+        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+    );
     let login_svc = LoginService::with_seed_credential(
         Arc::from(DynSessionLifecycle::new_box(
             id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
         )),
+        refresh_for_login,
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
