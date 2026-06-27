@@ -55,14 +55,15 @@ impl OutboxEmitError {
 /// outbox envelope 的 **opaque** 字段集（域传，adapter 组装成 provider 私有 envelope）。
 ///
 /// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain + contract_id
-/// 同源契约归属，#1193——business 不再裸 string 分别 author，杜绝 domain/contract_id 漂移）、`subject_id` 是
+/// 同源契约归属，#1193——business 不再裸 string 分别 author，杜绝 domain/contract_id 漂移）、`tenant` 是
+/// typed 租户 scope（adapter 盖章进 reserved `tenantId`）、`subject_id` 是
 /// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`
 /// 取注入 `Clock`，#1129；trace 已接线 #1224（`tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397）。
 ///
 /// 字段私有 + 构造器 [`OutboxEnvelopeParts::new`]（input-struct-field-exclusion，**Hard**）：business 不能绕过
-/// 构造器分别 set domain/contract_id 字段，只能给 `(contract, subject_id)`。`contract` 的**预期**来源是
+/// 构造器分别 set domain/contract_id 字段，只能给 `(contract, tenant, subject_id)`。`contract` 的**预期**来源是
 /// `generated::event::{domain}_v1::CONTRACT`（契约派生常量 + golden 锁，CONTRACT-BINDING-FUNNEL-01，**Medium**）——
 /// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
 /// 同 `ContractOwner::of_domain`，统一守卫见 #1327 / #1091）。
@@ -75,6 +76,8 @@ impl OutboxEmitError {
 pub struct OutboxEnvelopeParts {
     /// 契约绑定（domain + contract_id 同源；`generated::…::CONTRACT`）。
     contract: vocab::ContractBinding,
+    /// 租户标识（canonical UUID；adapter 将其盖章进 reserved `tenantId` envelope）。
+    tenant: vocab::TenantId,
     /// opaque 主体标识（无 PII）。
     subject_id: String,
     /// 可选有序投递分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。
@@ -82,11 +85,17 @@ pub struct OutboxEnvelopeParts {
 }
 
 impl OutboxEnvelopeParts {
-    /// 构造 envelope parts——`contract` 经契约派生常量绑定（非裸 string），`subject_id` 是 opaque 主体标识。
+    /// 构造 envelope parts——`contract` 经契约派生常量绑定（非裸 string），`tenant` 是 typed RLS scope，
+    /// `subject_id` 是 opaque 主体标识。
     /// `partition_key` 默认 `None`（无序并行）；需有序投递时经 [`OutboxEnvelopeParts::with_partition_key`] 设置。
-    pub fn new(contract: vocab::ContractBinding, subject_id: impl Into<String>) -> Self {
+    pub fn new(
+        contract: vocab::ContractBinding,
+        tenant: vocab::TenantId,
+        subject_id: impl Into<String>,
+    ) -> Self {
         Self {
             contract,
+            tenant,
             subject_id: subject_id.into(),
             partition_key: None,
         }
@@ -117,22 +126,33 @@ impl OutboxEnvelopeParts {
         &self.contract
     }
 
+    /// 借出租户标识。
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
     /// 借出 opaque 主体标识（无 PII；只读检视——生产组装走 [`OutboxEnvelopeParts::into_parts`]）。
     pub fn subject_id(&self) -> &str {
         &self.subject_id
     }
 
-    /// 拆出 `(contract, subject_id, partition_key)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
+    /// 拆出 `(contract, tenant, subject_id, partition_key)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
     ///
     /// `partition_key` 为 `None` 时 adapter 写 `NULL`（无序并行）；`Some(key)` 时写非空字符串（串行有序）。
     pub fn into_parts(
         self,
     ) -> (
         vocab::ContractBinding,
+        vocab::TenantId,
         String,
         Option<consistency::PartitionKey>,
     ) {
-        (self.contract, self.subject_id, self.partition_key)
+        (
+            self.contract,
+            self.tenant,
+            self.subject_id,
+            self.partition_key,
+        )
     }
 }
 
@@ -141,6 +161,7 @@ impl std::fmt::Debug for OutboxEnvelopeParts {
         f.debug_struct("OutboxEnvelopeParts")
             .field("domain", &self.contract.domain())
             .field("contract_id", &self.contract.contract_id())
+            .field("tenant", &self.tenant)
             .field("subject_id", &"<redacted>")
             // partition_key 可能凭据级（推荐 tenant-scoped 含 sessionId）：仅渲染 presence（Some/None），
             // 值经 `PartitionKey` 的脱敏 Debug 收口为 `<redacted>`，不泄漏明文（F3，#1211 review）。
@@ -173,6 +194,13 @@ mod pii_debug {
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
     use super::OutboxEnvelopeParts;
 
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    }
+
     #[test]
     fn outbox_envelope_parts_debug_redacts_subject_id() {
         // anti-vacuity：证明 "SECRET-SUBJECT" 会出现在普通 String Debug 中（前提不成立则检测无意义）。
@@ -182,6 +210,7 @@ mod pii_debug {
         );
         let parts = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            tenant(),
             "SECRET-SUBJECT",
         );
         let dbg = format!("{parts:?}");
@@ -202,6 +231,7 @@ mod pii_debug {
 
         let parts = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            tenant(),
             "subj",
         )
         .with_partition_key(PartitionKey::parse("tenant-7:session-secret").unwrap());
@@ -217,6 +247,7 @@ mod pii_debug {
         // None 路径。
         let parts_none = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            tenant(),
             "subj",
         );
         let dbg_none = format!("{parts_none:?}");
@@ -235,6 +266,13 @@ mod partition_key_tests {
 
     use super::OutboxEnvelopeParts;
 
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    }
+
     #[allow(clippy::unwrap_used)]
     // reason: 测试构造已知合法 PartitionKey，item-level carve-out。
     #[test]
@@ -242,10 +280,12 @@ mod partition_key_tests {
         let key = PartitionKey::parse("aggregate-123").unwrap();
         let parts = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            tenant(),
             "subj",
         )
         .with_partition_key(key);
-        let (_contract, _subject, pk) = parts.into_parts();
+        let (_contract, got_tenant, _subject, pk) = parts.into_parts();
+        assert_eq!(got_tenant.to_string(), TENANT);
         assert!(pk.is_some(), "with_partition_key 后 into_parts 应透出 Some");
         assert_eq!(pk.unwrap().as_str(), "aggregate-123");
     }
@@ -254,9 +294,11 @@ mod partition_key_tests {
     fn without_partition_key_into_parts_gives_none() {
         let parts = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            tenant(),
             "subj",
         );
-        let (_contract, _subject, pk) = parts.into_parts();
+        let (_contract, got_tenant, _subject, pk) = parts.into_parts();
+        assert_eq!(got_tenant.to_string(), TENANT);
         assert!(pk.is_none(), "未设 partition_key 时 into_parts 应透出 None");
     }
 }
@@ -267,6 +309,13 @@ mod smoke {
     use consistency::{Entry, IdemKey, Topic};
 
     use super::{DynOutboxEmitter, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
+
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    }
 
     #[test]
     fn outbox_emit_error_wraps_source() {
@@ -294,6 +343,7 @@ mod smoke {
         );
         let env = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            tenant(),
             "subject-opaque",
         );
         (entry, env)

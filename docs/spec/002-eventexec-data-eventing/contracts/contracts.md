@@ -9,7 +9,7 @@
 - `*.schema.json`：command Request payload schema（typify 消费；R4 命令 kind 仅需 request）。
 
 **codegen 产物**（generated/）：
-- producer wrapper `pub async fn emit_async<E: CommandEmit>(emitter: &E, request: <Cmd>Request, subject_id: String, idempotency_key: Option<String>) -> Result<(), E::Error>`。baked `CONTRACT_ID`/`TOPIC`；`subject_id` = 不透明主体标识（**runtime 必填**，落 outbox envelope.subject）；`idempotency_key` = 可选业务幂等键（`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被 claimer 拒；`None` ⇒ bridge mint 随机 `DispatchId`）。返回 `Result<()>` 而非 `DispatchId`（`DispatchId` 由 runtime 层 `eventexec::command` mint + seal，不返回给业务）。无 `ctx` 参数。
+- producer wrapper `pub async fn emit_async<E: CommandEmit>(emitter: &E, request: <Cmd>Request, tenant: vocab::TenantId, subject_id: String, idempotency_key: Option<String>) -> Result<(), E::Error>`。baked `CONTRACT_ID`/`TOPIC`；`tenant` = typed RLS scope（**runtime 必填**，落 reserved `tenantId` envelope）；`subject_id` = 不透明主体标识（**runtime 必填**，落 outbox envelope.subject）；`idempotency_key` = 可选业务幂等键（`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被 claimer 拒；`None` ⇒ bridge mint 随机 `DispatchId`）。返回 `Result<()>` 而非 `DispatchId`（`DispatchId` 由 runtime 层 `eventexec::command` mint + seal，不返回给业务）。无 `ctx` 参数。
 - consumer wrapper `pub fn register_handler<Reg: CommandRegister, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output`。baked `CONTRACT_ID`/`TOPIC`（无显式 group-name 绑定参数；group 由 registrar 内部携带）。无 `ctx` 参数。
 - **triple funnel**：业务 → 生成 wrapper → 组合根 bridge impl `CommandEmit`/`CommandRegister` → runtime `command::emit_async` / `register_command_handler` → `outbox::Entry::new`。禁裸调 runtime emit（codegen 锁出口）。
 

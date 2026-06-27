@@ -42,7 +42,7 @@
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
-use crate::{assembly, codegen, contract, layerdeps, wsdeps};
+use crate::{assembly, codegen, contract, doc_contracts, layerdeps, wsdeps};
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::Stdio;
@@ -67,6 +67,8 @@ enum InternalCheck {
     ContractBreaking,
     LayerDeps,
     WsDepsDrift,
+    /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
+    DocContracts,
     CodegenCheck,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
@@ -183,6 +185,15 @@ fn step_wsdeps_drift() -> Step {
         label: "wsdeps-drift",
         args: &[],
         kind: StepKind::Internal(InternalCheck::WsDepsDrift),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_doc_contracts() -> Step {
+    Step {
+        label: "doc-contracts",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::DocContracts),
         env: &[],
         needs_compile: false,
     }
@@ -632,6 +643,7 @@ fn full_plan() -> Vec<Step> {
         step_contract_breaking(),
         step_layer_deps(),
         step_wsdeps_drift(),
+        step_doc_contracts(),
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
@@ -662,6 +674,7 @@ fn ci_plan() -> Vec<Step> {
         step_contract_breaking(),
         step_layer_deps(),
         step_wsdeps_drift(),
+        step_doc_contracts(),
         step_codegen_check(),
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
@@ -887,6 +900,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         ),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
+        InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
@@ -984,6 +998,7 @@ mod tests {
                 "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
+                "doc-contracts",
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
@@ -1007,7 +1022,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(12) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta(13) + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -1020,6 +1035,7 @@ mod tests {
                 "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
+                "doc-contracts",
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",
@@ -1035,7 +1051,8 @@ mod tests {
         }
     }
 
-    /// meta 十二项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift / codegen /
+    /// meta 十三项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
+    /// doc-contracts / codegen /
     /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
     /// defer-gate）在两种模式恒在。
     #[test]
@@ -1055,6 +1072,7 @@ mod tests {
                     "contract-breaking",
                     "layer-deps",
                     "wsdeps-drift",
+                    "doc-contracts",
                     "codegen-check",
                     "pdp-allow-guard",
                     "schema-rls",
@@ -1162,6 +1180,7 @@ mod tests {
                 "contract-breaking",
                 "layer-deps",
                 "wsdeps-drift",
+                "doc-contracts",
                 "codegen-check",
                 "pdp-allow-guard",
                 "schema-rls",

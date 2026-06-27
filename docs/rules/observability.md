@@ -232,8 +232,10 @@ ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、C
 
 envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed `vocab::ContractBinding`** 承载（#1193）：
 两字段同源一份 `contract.toml`，经 `cargo xtask codegen` 派生为 `generated::event::{domain}_v1::CONTRACT`
-（golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, subject)` 传入。domain + contract_id 收进
-**单一绑定值**，故二者之间无法漂移；`OutboxEnvelopeParts` 字段私有（input-struct-field-exclusion，Hard）。
+（golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, tenant, subject)` 传入。domain +
+contract_id 收进**单一绑定值**，tenant 是 `vocab::TenantId` typed scope（adapter 盖章进 reserved `tenantId`
+envelope），故 contract 归属与 tenant scope 都不从裸 string / payload 重新派生；`OutboxEnvelopeParts`
+字段私有（input-struct-field-exclusion，Hard）。
 
 可选 `partition_key`（#1211）是 envelope 的有序投递路由列（不透明聚合根键，非 metadata、非 reserved
 funnel）：经 `OutboxEnvelopeParts::with_partition_key(key)`（未设即 `None`，无序并行）落 outbox 列，决定投递顺序分区（语义见

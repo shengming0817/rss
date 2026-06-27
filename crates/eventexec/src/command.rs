@@ -78,12 +78,13 @@ pub async fn emit_async(
     dispatch_id: DispatchId,
     topic: &str,
     contract: vocab::ContractBinding,
+    tenant: vocab::TenantId,
     payload: Vec<u8>,
     subject_id: String,
 ) -> Result<(), CommandEmitError> {
     let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
     let entry = Entry::new(parsed_topic, dispatch_id.into_idem_key(), payload);
-    let envelope = OutboxEnvelopeParts::new(contract, subject_id);
+    let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id);
     emitter
         .emit(entry, envelope)
         .await
@@ -182,7 +183,10 @@ mod tests {
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
-    use diport::{DynOutboxEmitter, Message, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
+    use diport::{
+        DynOutboxEmitter, EnvelopeMetadata, KEY_TENANT_ID, Message, OutboxEmitError, OutboxEmitter,
+        OutboxEnvelopeParts,
+    };
 
     use super::{DispatchId, LeaseConfig, emit_async, register_command_handler};
     use crate::MAX_REDELIVERY;
@@ -192,6 +196,11 @@ mod tests {
         LeaseConfig::from_ttl(std::time::Duration::from_secs(60))
     }
 
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    }
+
     // ── producer 侧 fake：捕获 emit 的 Entry topic/idem_key/payload + envelope ──────
 
     struct CapturedEmit {
@@ -199,6 +208,7 @@ mod tests {
         idem_key: String,
         payload: Vec<u8>,
         contract_id: String,
+        tenant_id: String,
     }
 
     struct CapturingEmitter {
@@ -226,6 +236,7 @@ mod tests {
                 idem_key: entry.idem_key().as_str().to_string(),
                 payload: entry.payload().to_vec(),
                 contract_id: envelope.contract().contract_id().to_string(),
+                tenant_id: envelope.tenant().to_string(),
             });
             Ok(())
         }
@@ -256,6 +267,7 @@ mod tests {
             dispatch,
             "seed.commands.do-thing",
             vocab::ContractBinding::from_static("seed", "seed.do-thing"),
+            tenant(),
             b"{\"amount\":7}".to_vec(),
             "subject-opaque".to_string(),
         )
@@ -274,6 +286,10 @@ mod tests {
             "payload 回显（runtime serde-free）"
         );
         assert_eq!(c.contract_id, "seed.do-thing", "envelope.contract_id 回显");
+        assert_eq!(
+            c.tenant_id, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "envelope tenant 回显"
+        );
     }
 
     /// 非 canonical dotted topic → CommandEmitError::Topic（fail-closed，不构造 Entry）。
@@ -288,6 +304,7 @@ mod tests {
             dispatch,
             "Not A Topic",
             vocab::ContractBinding::from_static("seed", "seed.do-thing"),
+            tenant(),
             b"{}".to_vec(),
             "s".to_string(),
         )
@@ -422,7 +439,11 @@ mod tests {
     fn stream_of(items: &[(&str, &[u8])]) -> diport::MessageStream {
         let msgs: Vec<Message> = items
             .iter()
-            .map(|(id, p)| Message::new(*id, p.to_vec()))
+            .map(|(id, p)| {
+                let mut md = EnvelopeMetadata::empty();
+                md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+                Message::new_with_metadata(*id, p.to_vec(), md)
+            })
             .collect();
         Box::pin(futures::stream::iter(msgs))
     }
@@ -544,6 +565,7 @@ mod tests {
             dispatch,
             "seed.commands.fail",
             vocab::ContractBinding::from_static("seed", "seed.fail"),
+            tenant(),
             b"{}".to_vec(),
             "subject-opaque".to_string(),
         )

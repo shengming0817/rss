@@ -13,7 +13,9 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/dyn_compatible_pass.rs");
+    t.pass("tests/ui/dead_letter_record_tenant_pass.rs");
     t.compile_fail("tests/ui/dyn_incompatible_fail.rs");
     t.compile_fail("tests/ui/unsafe_forbid_fail.rs");
     t.compile_fail("tests/ui/arc_dyn_ports_not_send.rs");
+    t.compile_fail("tests/ui/dead_letter_record_tenant_fail.rs");
 }

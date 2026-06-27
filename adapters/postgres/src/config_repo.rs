@@ -58,6 +58,12 @@ fn storage(e: sqlx::Error) -> ConfigRepoError {
     ConfigRepoError::Storage(Box::new(e))
 }
 
+fn tenant_mismatch_storage_error(path: &'static str) -> ConfigRepoError {
+    ConfigRepoError::Storage(Box::new(std::io::Error::other(format!(
+        "{path}: outbox envelope tenant does not match transaction tenant"
+    ))))
+}
+
 /// `TenantId` → SQL bind 参数（stringify UUID，绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature，
 /// 同 `session_lifecycle` / outbox.event_id 范式）。收口此处避免 `as_uuid().to_string()` 在各查询点漂移。
 fn tenant_param(tenant: TenantId) -> String {
@@ -341,11 +347,14 @@ impl ConfigUnitOfWork for PgConfigRepo {
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
         // occurred_at；漏接编译期不可表达）。
-        let (contract, subject_id, partition_key) = envelope.into_parts();
+        let (contract, env_tenant, subject_id, partition_key) = envelope.into_parts();
+        if env_tenant != tenant {
+            return Err(tenant_mismatch_storage_error("config co-tx"));
+        }
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now())).with_subject_id(subject_id),
+            metadata_with_ambient(unix_secs(self.clock.now()), tenant).with_subject_id(subject_id),
         )
         .with_partition_key_opt(partition_key);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整

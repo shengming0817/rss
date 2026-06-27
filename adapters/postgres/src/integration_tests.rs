@@ -22,6 +22,11 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 use crate::test_pg::{connect_pg, connect_pg_nobypass_role};
 
+#[allow(clippy::unwrap_used)]
+fn test_tenant() -> vocab::TenantId {
+    vocab::TenantId::parse(COTX_TENANT_A).unwrap()
+}
+
 /// 测试用固定事件发生时刻（unix 秒）——t10/t11 断言 envelope `occurred_at`（#1129）。
 const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
 
@@ -359,7 +364,7 @@ fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
         "contract-1".to_string(),
-        OutboxMetadata::new(0).with_subject_id(event_id),
+        OutboxMetadata::new(0, test_tenant()).with_subject_id(event_id),
     )
 }
 
@@ -368,7 +373,7 @@ fn make_test_env(domain: &str, contract_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
         contract_id.to_string(),
-        OutboxMetadata::new(0),
+        OutboxMetadata::new(0, test_tenant()),
     )
 }
 
@@ -465,7 +470,7 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0).with_subject_id(event_id.as_str()),
+                OutboxMetadata::new(0, test_tenant()).with_subject_id(event_id.as_str()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -508,7 +513,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0).with_subject_id(event_id.as_str()),
+                OutboxMetadata::new(0, test_tenant()).with_subject_id(event_id.as_str()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -554,7 +559,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0),
+                OutboxMetadata::new(0, test_tenant()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -602,7 +607,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
             let env = OutboxEnvelope::new(
                 "t4-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(0),
+                OutboxMetadata::new(0, test_tenant()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -673,7 +678,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
             let env = OutboxEnvelope::new(
                 "t5-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(0),
+                OutboxMetadata::new(0, test_tenant()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -732,7 +737,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
             let env = OutboxEnvelope::new(
                 "t5b-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(0),
+                OutboxMetadata::new(0, test_tenant()),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -1146,6 +1151,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
             entry,
             OutboxEnvelopeParts::new(
                 vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                test_tenant(),
                 "subj-opaque-77",
             ),
         )
@@ -1223,6 +1229,7 @@ fn session_entry(event_id: &str) -> Entry {
 fn session_envelope() -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
         vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+        test_tenant(),
         "subj-opaque-cotx",
     )
 }
@@ -1290,6 +1297,50 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
     Ok(())
 }
 
+/// t11b：session tenant 与 envelope tenant 不一致 → fail-closed，session / outbox 均不落库。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn t11b_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t11b-sess");
+    let event_id = unique_event_id("t11b-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let envelope_tenant = TenantId::parse("00000000-0000-4000-8000-000000000abc").unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
+    let envelope = OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+        envelope_tenant,
+        "subj-opaque-cotx",
+    );
+
+    let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
+        .persist_session_and_emit(session, session_entry(&event_id), envelope)
+        .await;
+    assert!(
+        result.is_err(),
+        "session/envelope tenant mismatch must fail closed"
+    );
+
+    let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(sess_cnt.0, 0, "mismatch 不得写 session 行");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 0, "mismatch 不得写 outbox 行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// t12：co-tx 写序列在单事务内执行后强制 Err → session 行 + outbox 行**共**回滚（both-or-neither）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -1304,7 +1355,7 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let env = OutboxEnvelope::new(
         "identity".to_string(),
         SESSION_CREATED_TOPIC.to_string(),
-        OutboxMetadata::new(0).with_subject_id("subj-12"),
+        OutboxMetadata::new(0, test_tenant()).with_subject_id("subj-12"),
     );
     let tenant = COTX_TENANT_A.to_string();
     let sid = session_id.clone();
@@ -1642,7 +1693,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
             .await?;
         if stale {
             sqlx::query(
-                "UPDATE outbox SET status='publishing', updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+                "UPDATE outbox SET status='publishing', created_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
             )
             .bind(lease_ttl + 10)
             .bind(&eid)
@@ -2223,6 +2274,7 @@ async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
             entry,
             OutboxEnvelopeParts::new(
                 vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                test_tenant(),
                 "subj-opaque-30",
             )
             .with_partition_key(PartitionKey::parse(pk).unwrap()),
@@ -2477,6 +2529,7 @@ fn config_outbox_entry(event_id: &str) -> Entry {
 fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
         vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
+        config_tenant(),
         subject,
     )
 }
@@ -2697,6 +2750,50 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     Ok(())
 }
 
+/// tc5b：config 事务 tenant 与 envelope tenant 不一致 → fail-closed，config / outbox 均不落库。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock());
+    let tenant = config_tenant();
+    let event_id = unique_event_id("cfg-tc5b-evt");
+    let envelope = OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
+        TenantId::parse(CONFIG_TENANT_B).unwrap(),
+        "app.mismatch",
+    );
+
+    let result = repo
+        .save_and_append_outbox(
+            tenant,
+            config_entry("app.mismatch", "v1", 1),
+            config_outbox_entry(&event_id),
+            envelope,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::Storage(_))),
+        "config/envelope tenant mismatch must fail closed as storage boundary error"
+    );
+
+    let cfg_cnt: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind("app.mismatch")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cfg_cnt.0, 0, "mismatch 不得写 config 行");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 0, "mismatch 不得写 outbox 行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc6：co-tx 业务写后强制 Err → config 行 + outbox 行**共回滚**（both-or-neither，真实 `co_tx_with_outbox`）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -2709,7 +2806,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     let env = OutboxEnvelope::new(
         "settings".to_string(),
         CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-        OutboxMetadata::new(0).with_subject_id("app.rollback".to_string()),
+        OutboxMetadata::new(0, test_tenant()).with_subject_id("app.rollback".to_string()),
     );
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。

@@ -20,6 +20,7 @@ use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
 use sqlx::PgPool;
 
 use crate::PgStore;
+use crate::cotx::set_local_tenant;
 
 /// PostgreSQL 死信写入 adapter。
 ///
@@ -58,22 +59,31 @@ impl DeadLetterStore for PgDeadLetterStore {
             .collect();
         let original_entry = serde_json::json!({"bytes": bytes_arr});
 
+        let mut tx = self.pool.begin().await.map_err(DeadLetterStoreError::new)?;
+        set_local_tenant(&mut tx, record.tenant())
+            .await
+            .map_err(DeadLetterStoreError::new)?;
+
         sqlx::query(
             r#"
             INSERT INTO dead_letter
-                (domain, contract_id, topic, original_entry, error_summary, num_attempts)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
+        .bind(record.tenant().to_string())
+        .bind(record.message_id())
         .bind(record.domain())
         .bind(record.contract_id())
         .bind(record.topic())
         .bind(sqlx::types::Json(&original_entry))
         .bind(record.error_summary())
         .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(DeadLetterStoreError::new)?;
+
+        tx.commit().await.map_err(DeadLetterStoreError::new)?;
 
         Ok(())
     }
@@ -125,7 +135,10 @@ mod integration_tests {
 
         let dl = store.dead_letter();
         let payload = b"original message payload".to_vec();
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let record = diport::DeadLetterRecord::new(
+            tenant,
+            "msg-session-created-1",
             "identity",
             "contract-session",
             "session.created",
@@ -137,8 +150,8 @@ mod integration_tests {
         dl.write_dead_letter(record).await?;
 
         // SELECT 最新一条（唯一写入）断言各字段。
-        let row: (String, String, String, serde_json::Value, String, i32) = sqlx::query_as(
-            r#"SELECT domain, contract_id, topic, original_entry, error_summary, num_attempts
+        let row: (String, String, String, String, String, serde_json::Value, String, i32) = sqlx::query_as(
+            r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts
                FROM dead_letter
                WHERE domain = 'identity' AND topic = 'session.created'
                ORDER BY first_attempt_at DESC
@@ -147,12 +160,17 @@ mod integration_tests {
         .fetch_one(&store.pool)
         .await?;
 
-        assert_eq!(row.0, "identity", "domain should match");
-        assert_eq!(row.1, "contract-session", "contract_id should match");
-        assert_eq!(row.2, "session.created", "topic should match");
+        assert_eq!(
+            row.0, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "tenant_id should match"
+        );
+        assert_eq!(row.1, "msg-session-created-1", "message_id should match");
+        assert_eq!(row.2, "identity", "domain should match");
+        assert_eq!(row.3, "contract-session", "contract_id should match");
+        assert_eq!(row.4, "session.created", "topic should match");
 
         // original_entry 是 {"bytes": [u8, ...]}；还原原始字节验证往返。
-        let bytes_arr = row.3["bytes"].as_array().unwrap();
+        let bytes_arr = row.5["bytes"].as_array().unwrap();
         let decoded: Vec<u8> = bytes_arr
             .iter()
             .map(|v| v.as_u64().unwrap() as u8)
@@ -160,10 +178,153 @@ mod integration_tests {
         assert_eq!(decoded, payload, "original_payload roundtrip should match");
 
         assert_eq!(
-            row.4, "max retries exhausted after 10 attempts",
+            row.6, "max retries exhausted after 10 attempts",
             "error_summary should match"
         );
-        assert_eq!(row.5, 10, "num_attempts should match");
+        assert_eq!(row.7, 10, "num_attempts should match");
+
+        store.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dead_letter_rls_isolates_tenants() -> TestResult {
+        let (_pg, store) = crate::test_pg::connect_pg().await?;
+        store.run_migrations().await?;
+
+        sqlx::query("GRANT rss_app TO CURRENT_USER")
+            .execute(&store.pool)
+            .await?;
+
+        let tenant_a = uuid::Uuid::new_v4().to_string();
+        let tenant_b = uuid::Uuid::new_v4().to_string();
+        let msg_id = format!("dlx-msg-{}", uuid::Uuid::new_v4());
+
+        {
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
+            sqlx::query(
+                r#"INSERT INTO dead_letter
+                   (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
+                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created', '{"bytes":[]}'::jsonb, 'permanent error', 1)"#,
+            )
+            .bind(&tenant_a)
+            .bind(&msg_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+
+        {
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
+            let cnt: (i64,) =
+                sqlx::query_as("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+                    .bind(&msg_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            assert_eq!(cnt.0, 1, "tenant_a scope should see its DLX row");
+            tx.rollback().await?;
+        }
+
+        {
+            let legacy_msg_id = format!("dlx-legacy-null-{}", uuid::Uuid::new_v4());
+            // Simulate a pre-0020 row that existed before tenant_id was introduced. New rows cannot
+            // normally do this because the NOT VALID CHECK still applies to future writes.
+            sqlx::query("ALTER TABLE dead_letter DROP CONSTRAINT chk_dead_letter_tenant_required")
+                .execute(&store.pool)
+                .await?;
+            sqlx::query("ALTER TABLE dead_letter DISABLE ROW LEVEL SECURITY")
+                .execute(&store.pool)
+                .await?;
+            sqlx::query(
+                r#"INSERT INTO dead_letter
+                   (message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
+                   VALUES ($1, 'identity', 'contract-session', 'session.created', '{"bytes":[]}'::jsonb, 'legacy row', 1)"#,
+            )
+            .bind(&legacy_msg_id)
+            .execute(&store.pool)
+            .await?;
+            sqlx::query("ALTER TABLE dead_letter ENABLE ROW LEVEL SECURITY")
+                .execute(&store.pool)
+                .await?;
+            sqlx::query("ALTER TABLE dead_letter FORCE ROW LEVEL SECURITY")
+                .execute(&store.pool)
+                .await?;
+
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
+            let cnt: (i64,) =
+                sqlx::query_as("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+                    .bind(&legacy_msg_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            assert_eq!(
+                cnt.0, 0,
+                "tenant-scoped rss_app must not see historical tenant_id NULL DLX rows"
+            );
+            tx.rollback().await?;
+        }
+
+        {
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_b)?).await?;
+            let cnt: (i64,) =
+                sqlx::query_as("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+                    .bind(&msg_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            assert_eq!(cnt.0, 0, "tenant_b scope must not see tenant_a DLX row");
+            tx.rollback().await?;
+        }
+
+        {
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            let cnt: (i64,) =
+                sqlx::query_as("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+                    .bind(&msg_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            assert_eq!(cnt.0, 0, "unset tenant scope must not see DLX rows");
+            tx.rollback().await?;
+        }
+
+        {
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
+            let err = sqlx::query(
+                r#"INSERT INTO dead_letter
+                   (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
+                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created', '{"bytes":[]}'::jsonb, 'permanent error', 1)"#,
+            )
+            .bind(&tenant_b)
+            .bind(format!("dlx-msg-{}", uuid::Uuid::new_v4()))
+            .execute(&mut *tx)
+            .await;
+            assert!(
+                err.is_err(),
+                "tenant_a scope must reject tenant_b DLX insert"
+            );
+            tx.rollback().await?;
+        }
 
         store.shutdown().await?;
         Ok(())

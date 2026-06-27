@@ -1,9 +1,11 @@
 //! `schema-rls` —— schema RLS 守卫（AI-robust **Medium** 内容扫描门）。
 //!
-//! 扫 `adapters/postgres/migrations/*.sql`，禁止 tenant 表（含 `tenant_id` 列的 `CREATE TABLE`）
-//! 缺 RLS 三件套：`ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + 该表的 `CREATE POLICY`。
+//! 扫 `adapters/postgres/migrations/*.sql`，禁止 tenant 表（含 `tenant_id` 列的 `CREATE TABLE`，或后续
+//! `ALTER TABLE ... ADD COLUMN tenant_id`）缺 RLS 三件套：`ENABLE ROW LEVEL SECURITY` +
+//! `FORCE ROW LEVEL SECURITY` + 该表的 `CREATE POLICY`。
 //! 同时校验 policy 体文本（normalize：小写 + 折叠空白）须含规范等值谓词
-//! `tenant_id = current_setting('rss.tenant_id', true)::uuid` 且无明显 ` OR true` 重言旁路；
+//! `tenant_id = current_setting('rss.tenant_id', true)::uuid`（或空 GUC fail-closed 的 NULLIF 形态）
+//! 且无明显 ` OR true` 重言旁路；
 //! 仅有形同 allow-all 的 policy 亦报错（`PolicyWeak`）。把 `docs/rules/tenancy.md` §RLS
 //! 「RLS policy shape 由 schema guard 检查」从规划落成机器门。
 //!
@@ -11,7 +13,7 @@
 //!   ① `ALTER TABLE <t> ENABLE ROW LEVEL SECURITY`
 //!   ② `ALTER TABLE <t> FORCE ROW LEVEL SECURITY`
 //!   ③ 至少一条 `CREATE POLICY ... ON <t>`，且 policy 体 normalize 后含规范等值谓词
-//!      `tenant_id = current_setting('rss.tenant_id', true)::uuid` 且无明显 OR true 重言旁路
+//!      `tenant_id = current_setting('rss.tenant_id', true)::uuid`（或 NULLIF 形态）且无明显 OR true 重言旁路
 //!
 //! **评级**：Medium（内容扫描门，接入 `cargo xtask verify`，no-compile meta 步）。
 //!
@@ -19,7 +21,7 @@
 //!   - 不处理 dollar-quoted 字符串（`$$...$$`）；PL/pgSQL 块内的关键词若误触匹配属静默误判。
 //!   - CREATE TABLE 体内含 `)` 的字符串字面量会使 `parens_body` 提前截断（漏判 tenant_id）。
 //!   - policy 体经文本 normalize（小写 + 折叠空白）后校验含规范等值谓词
-//!     `tenant_id = current_setting('rss.tenant_id', true)::uuid` 且无明显 ` OR true` 重言；
+//!     `tenant_id = current_setting('rss.tenant_id', true)::uuid`（或 NULLIF 形态）且无明显 ` OR true` 重言；
 //!     **不解析完整 SQL 语义**——任意等价重言 / 列别名 / 函数包裹变形超出文本扫描载体边界
 //!     （残留盲区，需 review 兜底）。
 //!   - 以上场景在现有 migrations 实际不存在；引入新 migration 前须人工复核。
@@ -52,6 +54,9 @@ const ENABLE_RLS: &str = "enable row level security";
 const FORCE_RLS: &str = "force row level security";
 /// tenant-isolation policy 体规范等值谓词（normalize 后 substring 比对；容忍 `=`/`::` 两侧空白——折叠后与此串对比）。
 const POLICY_PREDICATE: &str = "tenant_id = current_setting('rss.tenant_id', true)::uuid";
+/// tenant-isolation policy 体规范等值谓词（空 custom GUC 经 NULLIF 转 NULL，避免 unset GUC cast 空串报错）。
+const POLICY_PREDICATE_NULLIF: &str =
+    "tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid";
 /// 明显重言旁路 — OR true（normalize 后子串；含此则 policy 体视为 PolicyWeak 无效）。
 const TAUTOLOGY_OR_TRUE: &str = " or true";
 /// 明显重言旁路 — OR (true)（normalize 后子串；含此则 policy 体视为 PolicyWeak 无效）。
@@ -278,7 +283,21 @@ fn extract_tenant_table(after_kw: &str) -> Option<String> {
     body.contains("tenant_id").then(|| name.to_string())
 }
 
-/// 收集含 `tenant_id` 列的 `CREATE TABLE` 表名 → 声明所在文件名（跨文件聚合）。
+/// 从 `alter table ` 关键词之后提取 `ADD COLUMN tenant_id` 的表名。
+fn extract_alter_add_tenant_table(after_kw: &str) -> Option<String> {
+    let s = after_kw.trim_start();
+    let s = s.strip_prefix("if exists").map_or(s, |r| r.trim_start());
+    let (name, rest) = split_token(s);
+    if name.is_empty() {
+        return None;
+    }
+    let rest = rest.trim_start();
+    (rest.starts_with("add column tenant_id") || rest.starts_with("add tenant_id"))
+        .then(|| name.to_string())
+}
+
+/// 收集含 `tenant_id` 列的表名 → 声明所在文件名（跨文件聚合）。
+/// 支持建表时声明 tenant_id，也支持后续 migration 通过 `ALTER TABLE ... ADD COLUMN tenant_id` 租户化旧表。
 fn collect_tenant_tables(files: &[(String, String)]) -> BTreeMap<String, String> {
     let mut tables: BTreeMap<String, String> = BTreeMap::new();
     for (fname, content) in files {
@@ -289,6 +308,17 @@ fn collect_tenant_tables(files: &[(String, String)]) -> BTreeMap<String, String>
             };
             let kw_end = pos + rel + "create table ".len();
             if let Some(name) = extract_tenant_table(&content[kw_end..]) {
+                tables.entry(name).or_insert_with(|| fname.clone());
+            }
+            pos = kw_end;
+        }
+        let mut pos = 0;
+        while pos < content.len() {
+            let Some(rel) = content[pos..].find("alter table ") else {
+                break;
+            };
+            let kw_end = pos + rel + "alter table ".len();
+            if let Some(name) = extract_alter_add_tenant_table(&content[kw_end..]) {
                 tables.entry(name).or_insert_with(|| fname.clone());
             }
             pos = kw_end;
@@ -337,6 +367,12 @@ fn normalize_whitespace(s: &str) -> String {
     out
 }
 
+fn policy_body_is_valid(norm_body: &str) -> bool {
+    (norm_body.contains(POLICY_PREDICATE) || norm_body.contains(POLICY_PREDICATE_NULLIF))
+        && !norm_body.contains(TAUTOLOGY_OR_TRUE)
+        && !norm_body.contains(TAUTOLOGY_OR_TRUE_PAREN)
+}
+
 /// 收集 `CREATE POLICY <policy_name> ON <t>` 的表→policy 体合规性映射。
 ///
 /// 返回 `BTreeMap<table, bool>`：
@@ -363,9 +399,7 @@ fn collect_policy_tables(files: &[(String, String)]) -> BTreeMap<String, bool> {
                         after_table
                     };
                     let norm_body = normalize_whitespace(body);
-                    let has_predicate = norm_body.contains(POLICY_PREDICATE)
-                        && !norm_body.contains(TAUTOLOGY_OR_TRUE)
-                        && !norm_body.contains(TAUTOLOGY_OR_TRUE_PAREN);
+                    let has_predicate = policy_body_is_valid(&norm_body);
                     let entry = tables.entry(table.to_string()).or_insert(false);
                     if has_predicate {
                         *entry = true;
@@ -413,6 +447,49 @@ CREATE POLICY tenant_isolation ON sessions
             findings.is_empty(),
             "三件套齐备不应有 findings: {findings:?}"
         );
+    }
+
+    #[test]
+    fn green_alter_add_tenant_column_with_nullif_policy() {
+        let sql = r#"
+CREATE TABLE dead_letter (
+    id bigserial PRIMARY KEY,
+    message_id text NOT NULL
+);
+ALTER TABLE dead_letter
+    ADD COLUMN tenant_id uuid,
+    ADD COLUMN message_id text NOT NULL DEFAULT '';
+ALTER TABLE dead_letter ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dead_letter FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dead_letter
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "ALTER ADD COLUMN tenant_id 应识别为 tenant 表");
+        assert!(
+            findings.is_empty(),
+            "ALTER tenant 表具备 RLS 三件套不应有 findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_alter_add_tenant_column_missing_rls() {
+        let sql = r#"
+CREATE TABLE dead_letter (id bigserial PRIMARY KEY);
+ALTER TABLE dead_letter ADD COLUMN tenant_id uuid;
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "ALTER ADD COLUMN tenant_id 应识别为 tenant 表");
+        assert_eq!(
+            findings.len(),
+            3,
+            "ALTER tenant 表缺 RLS 三件套应产生 3 条 finding: {findings:?}"
+        );
+        let rules: Vec<Rule> = findings.iter().map(|f| f.rule).collect();
+        assert!(rules.contains(&Rule::EnableRls));
+        assert!(rules.contains(&Rule::ForceRls));
+        assert!(rules.contains(&Rule::PolicyAbsent));
     }
 
     // ---- red 缺 ENABLE ----

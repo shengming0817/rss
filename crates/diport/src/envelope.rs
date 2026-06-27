@@ -24,8 +24,13 @@ use std::collections::BTreeMap;
 
 /// envelope reserved key 单源（producer funnel + wire funnel + adapter 映射共用，消除漂移）。
 /// 业务 [`EnvelopeMetadata::try_insert`] 对这些 key fail-closed 拒；只 adapter 受控注入点可写。
-pub const RESERVED_METADATA_KEYS: [&str; 4] =
-    [KEY_TRACE, KEY_CORRELATION, KEY_PRINCIPAL, KEY_OCCURRED_AT];
+pub const RESERVED_METADATA_KEYS: [&str; 5] = [
+    KEY_TRACE,
+    KEY_CORRELATION,
+    KEY_PRINCIPAL,
+    KEY_OCCURRED_AT,
+    KEY_TENANT_ID,
+];
 
 /// reserved：事件发生时刻（unix 秒，十进制 string）。producer 经注入 `Clock` 必填（#1129）。
 pub const KEY_OCCURRED_AT: &str = "occurredAt";
@@ -35,6 +40,8 @@ pub const KEY_TRACE: &str = "trace";
 pub const KEY_CORRELATION: &str = "correlation";
 /// reserved：opaque principal（源待安全决策，本轮仅留 slot）。
 pub const KEY_PRINCIPAL: &str = "principal";
+/// reserved：canonical tenant id（认证 / co-tx 边界盖章，消费 DLX / RLS scope 使用）。
+pub const KEY_TENANT_ID: &str = "tenantId";
 /// 非-reserved 但 PII：opaque 主体标识（业务可经 envelope 携带；`Debug` 脱敏）。
 pub const KEY_SUBJECT_ID: &str = "subjectId";
 
@@ -82,6 +89,11 @@ impl EnvelopeMetadata {
         self.get(KEY_OCCURRED_AT)?.parse().ok()
     }
 
+    /// typed 读：canonical tenant id。缺失或非 canonical 值均 fail-closed 为 `None`。
+    pub fn tenant_id(&self) -> Option<vocab::TenantId> {
+        vocab::TenantId::parse(self.get(KEY_TENANT_ID)?).ok()
+    }
+
     /// **业务 free-form 写入口**——命中 [`RESERVED_METADATA_KEYS`] fail-closed 拒（Hard：业务经此伪造
     /// reserved key 类型层不可表达）。
     pub fn try_insert(
@@ -127,7 +139,7 @@ impl std::fmt::Debug for EnvelopeMetadata {
 mod tests {
     use super::{
         EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
-        KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
+        KEY_TENANT_ID, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
     };
 
     #[test]
@@ -142,7 +154,7 @@ mod tests {
 
     #[test]
     fn try_insert_rejects_every_reserved_key() {
-        // 4 reserved key 全覆盖 fail-closed（anti-vacuity：上面 accepts 证明非恒拒）。
+        // reserved key 全覆盖 fail-closed（anti-vacuity：上面 accepts 证明非恒拒）。
         for key in RESERVED_METADATA_KEYS {
             let mut md = EnvelopeMetadata::empty();
             assert_eq!(
@@ -187,12 +199,33 @@ mod tests {
     }
 
     #[test]
-    fn reserved_keys_single_source_is_exactly_four() {
-        // drift-lock：reserved 集恰为 trace/correlation/principal/occurredAt（与 postgres OutboxMetadata
+    fn reserved_keys_single_source_is_exactly_five() {
+        // drift-lock：reserved 集恰为 trace/correlation/principal/occurredAt/tenantId（与 postgres OutboxMetadata
         // funnel + migration CHECK 同源；下游 import 本 const，不另立第二真源）。
         assert_eq!(
             RESERVED_METADATA_KEYS,
-            [KEY_TRACE, KEY_CORRELATION, KEY_PRINCIPAL, KEY_OCCURRED_AT]
+            [
+                KEY_TRACE,
+                KEY_CORRELATION,
+                KEY_PRINCIPAL,
+                KEY_OCCURRED_AT,
+                KEY_TENANT_ID
+            ]
+        );
+    }
+
+    #[test]
+    fn tenant_id_parses_canonical_wire_value() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TENANT_ID, "f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        assert_eq!(
+            md.tenant_id().map(|t| t.to_string()).as_deref(),
+            Some("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        );
+        md.insert_wire_pair(KEY_TENANT_ID, "F47AC10B-58CC-4372-A567-0E02B2C3D479");
+        assert!(
+            md.tenant_id().is_none(),
+            "non-canonical tenant must fail closed"
         );
     }
 }

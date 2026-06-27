@@ -117,8 +117,8 @@ pub use dead_letter_store::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
 };
 pub use envelope::{
-    EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID, KEY_TRACE,
-    MetadataError, RESERVED_METADATA_KEYS,
+    EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
+    KEY_TENANT_ID, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
 };
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,

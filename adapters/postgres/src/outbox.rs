@@ -23,8 +23,9 @@ use consistency::{
     OutboxSource, OutboxSweeper, Topic,
 };
 use diport::{
-    DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID, KEY_TRACE,
-    MetadataError, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
+    DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID,
+    KEY_TENANT_ID, KEY_TRACE, MetadataError, PublishRequest, Publisher, PublisherError,
+    RESERVED_METADATA_KEYS,
 };
 use sqlx::PgConnection;
 
@@ -50,7 +51,7 @@ pub(crate) const STATUS_DLX: &str = "dlx";
 //
 // reserved key / subject key 常量已迁至 diport 单源（#1160 A4）：
 // `diport::{RESERVED_METADATA_KEYS, KEY_OCCURRED_AT, KEY_TRACE, KEY_CORRELATION,
-//           KEY_SUBJECT_ID}`。本 adapter funnel 逻辑不变，key 字面量引 diport 单源。
+//           KEY_TENANT_ID, KEY_SUBJECT_ID}`。本 adapter funnel 逻辑不变，key 字面量引 diport 单源。
 
 /// Outbox envelope metadata——**sealed typed funnel**（私有内层 `Map`，仅经受控入口构造）。
 ///
@@ -66,22 +67,25 @@ pub(crate) const STATUS_DLX: &str = "dlx";
 pub(crate) struct OutboxMetadata(serde_json::Map<String, serde_json::Value>);
 
 impl OutboxMetadata {
-    /// 由 reserved `occurred_at`（unix 秒 i64，producer 端事件发生时刻）构造——**occurred_at 构造期必填**
-    /// （#1129/#262 F1）。
+    /// 由 reserved `occurred_at`（unix 秒 i64，producer 端事件发生时刻）+ typed `tenantId` 构造。
     ///
-    /// occurred_at 注入折叠进构造器 ⇒「无 occurred_at 的 outbox metadata」**类型层不可表达**（Hard），杜绝
+    /// occurred_at / tenantId 注入折叠进构造器 ⇒「无 occurred_at/tenantId 的 outbox metadata」**类型层不可表达**（Hard），杜绝
     /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）各从注入 `Clock`
     /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
     /// `occurredAt` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace 经
     /// #1224 接线（emit 侧 `tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397。
-    pub(crate) fn new(occurred_at_secs: i64) -> Self {
+    pub(crate) fn new(occurred_at_secs: i64, tenant: vocab::TenantId) -> Self {
         // KEY_OCCURRED_AT = diport 单源（#1160 A4）。
         let mut map = serde_json::Map::new();
         map.insert(
             KEY_OCCURRED_AT.to_string(),
             serde_json::Value::from(occurred_at_secs),
+        );
+        map.insert(
+            KEY_TENANT_ID.to_string(),
+            serde_json::Value::String(tenant.to_string()),
         );
         Self(map)
     }
@@ -179,8 +183,11 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 ///   经 relay → broker header → consumer `tracewire::restore_parent` 还原，使 handler span 与 producer 同 trace_id。
 ///
 /// 全部缺失（worker 任务 / 批次未绑 correlation、无 otel）→ 仅含 occurred_at，不 panic（fail-open，不阻投递）。
-pub(crate) fn metadata_with_ambient(occurred_at_secs: i64) -> OutboxMetadata {
-    let mut m = OutboxMetadata::new(occurred_at_secs);
+pub(crate) fn metadata_with_ambient(
+    occurred_at_secs: i64,
+    tenant: vocab::TenantId,
+) -> OutboxMetadata {
+    let mut m = OutboxMetadata::new(occurred_at_secs, tenant);
     if let Some(c) = diagctx::correlation() {
         m = m.with_correlation(c.as_str());
     }
@@ -827,6 +834,17 @@ mod tests {
         KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
     };
 
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    }
+
+    fn metadata(occurred_at_secs: i64) -> OutboxMetadata {
+        OutboxMetadata::new(occurred_at_secs, tenant())
+    }
+
     // #1212 dlx 分流谓词表驱动：permanent 首投（new_count=1）即 dlx；transient 仅预算耗尽
     // （new_count >= MAX_PUBLISH_ATTEMPTS）才 dlx。anti-vacuity：transient 未到预算返 false（仍退避）。
     #[test]
@@ -855,14 +873,14 @@ mod tests {
         let env = OutboxEnvelope::new(
             "identity".to_string(),
             "contract-1".to_string(),
-            OutboxMetadata::new(1_700_000_000).with_subject_id("tenant-42"),
+            metadata(1_700_000_000).with_subject_id("tenant-42"),
         );
         assert_eq!(env.domain(), "identity");
         assert_eq!(env.contract_id(), "contract-1");
         // serde_json::Map 默认 BTreeMap（键序字母）：occurredAt < subjectId。
         assert_eq!(
             env.metadata_json(),
-            r#"{"occurredAt":1700000000,"subjectId":"tenant-42"}"#
+            r#"{"occurredAt":1700000000,"subjectId":"tenant-42","tenantId":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#
         );
     }
 
@@ -870,23 +888,32 @@ mod tests {
     #[test]
     fn metadata_new_always_carries_occurred_at() {
         use super::OutboxEnvelope;
-        let env = OutboxEnvelope::new("d".to_string(), "c".to_string(), OutboxMetadata::new(0));
-        assert_eq!(env.metadata_json(), r#"{"occurredAt":0}"#);
+        let env = OutboxEnvelope::new("d".to_string(), "c".to_string(), metadata(0));
+        assert_eq!(
+            env.metadata_json(),
+            r#"{"occurredAt":0,"tenantId":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#
+        );
     }
 
     // F1 负向（anti-vacuity，INVARIANT OUTBOX-METADATA-FUNNEL-01）：reserved key 经 try_insert
     // fail-closed 拒；非 reserved key 接受并经 funnel 序列化（occurredAt 由 new 构造期注入）。
     #[test]
     fn metadata_try_insert_rejects_reserved_key() {
-        for reserved in ["trace", "correlation", "principal", "occurredAt"] {
-            let mut m = OutboxMetadata::new(0);
+        for reserved in [
+            "trace",
+            "correlation",
+            "principal",
+            "occurredAt",
+            "tenantId",
+        ] {
+            let mut m = metadata(0);
             assert_eq!(
                 m.try_insert(reserved, serde_json::Value::Bool(true)),
                 Err(MetadataError::ReservedKey),
                 "reserved key must be rejected: {reserved}"
             );
         }
-        let mut ok = OutboxMetadata::new(0);
+        let mut ok = metadata(0);
         assert!(
             ok.try_insert("tenantTier", serde_json::Value::String("gold".into()))
                 .is_ok()
@@ -895,7 +922,7 @@ mod tests {
         // 键序字母：occurredAt < tenantTier。
         assert_eq!(
             env.metadata_json(),
-            r#"{"occurredAt":0,"tenantTier":"gold"}"#
+            r#"{"occurredAt":0,"tenantId":"f47ac10b-58cc-4372-a567-0e02b2c3d479","tenantTier":"gold"}"#
         );
     }
 
@@ -908,7 +935,7 @@ mod tests {
         let env = super::OutboxEnvelope::new(
             "identity".to_string(),
             "c".to_string(),
-            OutboxMetadata::new(1_700_000_000).with_subject_id("subj-1"),
+            metadata(1_700_000_000).with_subject_id("subj-1"),
         );
         let json = env.metadata_json();
         assert!(
@@ -932,11 +959,11 @@ mod tests {
     #[test]
     fn occurred_at_construct_writes_but_free_form_rejects() {
         // 构造期注入成功。
-        let sealed = OutboxMetadata::new(42);
+        let sealed = metadata(42);
         let env = super::OutboxEnvelope::new("d".to_string(), "c".to_string(), sealed);
         assert!(env.metadata_json().contains(r#""occurredAt":42"#));
         // 业务 free-form 路径仍拒同名 reserved key。
-        let mut free = OutboxMetadata::new(0);
+        let mut free = metadata(0);
         assert_eq!(
             free.try_insert(KEY_OCCURRED_AT, serde_json::Value::from(42)),
             Err(MetadataError::ReservedKey),
@@ -961,7 +988,7 @@ mod tests {
         let env = super::OutboxEnvelope::new(
             "identity".to_string(),
             "identity.session-created".to_string(),
-            OutboxMetadata::new(1_700_000_000)
+            metadata(1_700_000_000)
                 .with_subject_id("subj-1")
                 .with_trace("trace-abc")
                 .with_correlation("corr-xyz"),
@@ -985,7 +1012,7 @@ mod tests {
     #[test]
     fn sealed_setter_keys_rejected_on_free_form() {
         for reserved in [KEY_TRACE, KEY_CORRELATION] {
-            let mut free = OutboxMetadata::new(0);
+            let mut free = metadata(0);
             assert_eq!(
                 free.try_insert(reserved, serde_json::Value::String("x".into())),
                 Err(MetadataError::ReservedKey),
@@ -1178,7 +1205,7 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let ctx = diagctx::DiagnosticCtx::new(diagctx::CorrelationId::parse("corr-x").unwrap());
         let json = diagctx::scope(ctx, async {
-            let m = metadata_with_ambient(42);
+            let m = metadata_with_ambient(42, tenant());
             OutboxEnvelope::new("d".to_string(), "c".to_string(), m).metadata_json()
         })
         .await;
@@ -1196,7 +1223,7 @@ mod tests {
     // anti-vacuity：无 scope 不 panic、不 Err（fail-open 契约）。
     #[tokio::test]
     async fn metadata_with_ambient_omits_correlation_outside_scope() {
-        let m = metadata_with_ambient(42);
+        let m = metadata_with_ambient(42, tenant());
         let json = OutboxEnvelope::new("d".to_string(), "c".to_string(), m).metadata_json();
         assert!(
             !json.contains("correlation"),
@@ -1217,8 +1244,12 @@ mod tests {
     fn metadata_with_ambient_stamps_trace_inside_span() {
         let json = tracewire::with_test_subscriber(|| {
             tracing::info_span!("producer").in_scope(|| {
-                OutboxEnvelope::new("d".to_string(), "c".to_string(), metadata_with_ambient(7))
-                    .metadata_json()
+                OutboxEnvelope::new(
+                    "d".to_string(),
+                    "c".to_string(),
+                    metadata_with_ambient(7, tenant()),
+                )
+                .metadata_json()
             })
         });
         assert!(
@@ -1235,8 +1266,12 @@ mod tests {
     // anti-vacuity：缺 otel 不 panic、不写 trace 键（与 inside-span 正路互证分支）。
     #[test]
     fn metadata_with_ambient_omits_trace_without_otel() {
-        let json = OutboxEnvelope::new("d".to_string(), "c".to_string(), metadata_with_ambient(7))
-            .metadata_json();
+        let json = OutboxEnvelope::new(
+            "d".to_string(),
+            "c".to_string(),
+            metadata_with_ambient(7, tenant()),
+        )
+        .metadata_json();
         assert!(
             !json.contains(r#""trace""#),
             "无 otel 时不应含 trace 键: {json}"

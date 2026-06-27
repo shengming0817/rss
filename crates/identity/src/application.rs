@@ -239,7 +239,7 @@ impl LoginService {
             bytes,
         );
         // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；business 只给 opaque subject。
-        let envelope = OutboxEnvelopeParts::new(CONTRACT, subject.clone());
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject.clone());
 
         // 5. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
         let session = Session::new(session_id.clone(), subject, tenant, expires_at, now);

@@ -237,7 +237,7 @@ impl SettingsService {
             bytes,
         );
         // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；subject = opaque 配置 key。
-        let envelope = OutboxEnvelopeParts::new(CONTRACT, key.as_str().to_string());
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, key.as_str().to_string());
         Ok((entry, envelope))
     }
 

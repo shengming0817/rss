@@ -163,19 +163,28 @@ impl MemEmitter {
     }
 }
 
+/// Envelope metadata emitted by in-mem outbox paths. Keep `MemEmitter` and
+/// `MemSessionLifecycle` aligned so demo providers exercise the same tenant
+/// envelope shape as the durable postgres path.
+fn envelope_metadata(envelope: &OutboxEnvelopeParts) -> diport::EnvelopeMetadata {
+    let mut metadata = diport::EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, envelope.tenant().to_string());
+    metadata.insert_wire_pair(diport::KEY_SUBJECT_ID, envelope.subject_id().to_string());
+    metadata
+}
+
 impl OutboxEmitter for MemEmitter {
     async fn emit(
         &self,
         entry: Entry,
-        _envelope: OutboxEnvelopeParts,
+        envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
-        // reason: in-mem 替身无持久化载体，envelope（domain/contract_id/subject_id）无落库处——
-        // 消费侧从 payload 解码 subject/tenant，故 demo 路径忽略 envelope（durable PgEmitter 才落 metadata）。
         let request = PublishRequest::new(
             Topic::new(entry.topic().as_str()),
             MessageId::new(entry.idem_key().as_str()),
             entry.payload().to_vec(),
-        );
+        )
+        .with_metadata(envelope_metadata(&envelope));
         self.bus
             .publisher()
             .publish(request)
@@ -198,8 +207,8 @@ impl OutboxEmitter for MemEmitter {
 /// durable 会话存储。需验 durable「session 跨进程可读 / 撤销」的验收**勿用本替身**——走 postgres 路径。
 ///
 /// co-tx 原子性（both-or-neither：session 行 + outbox 行同事务）与 durable 持久化由 postgres
-/// `PgSessionLifecycle`（INVARIANT OUTBOX-COTX-SESSION-01）+ 集成测试守。envelope 同 `MemEmitter` 忽略
-/// （消费侧从 payload 解码）。
+/// `PgSessionLifecycle`（INVARIANT OUTBOX-COTX-SESSION-01）+ 集成测试守。envelope metadata 经 `MemEmitter`
+/// 同一 helper 注入，保证 demo consumer DLX 路径也能读取 tenantId。
 pub struct MemSessionLifecycle {
     bus: MemBus,
     /// `SessionId` → `(Session, revoked_flag)`：进程内会话 store（demo logout/查询可见 login 写入）。
@@ -221,12 +230,12 @@ impl SessionLifecycle for MemSessionLifecycle {
         &self,
         session: Session,
         entry: Entry,
-        _envelope: OutboxEnvelopeParts,
+        envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         // demo：把 session 存入进程内 store（demo logout/查询可见），再复用 MemPublisher 把 entry fan 到总线
         // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
         // reason: 真实 co-tx both-or-neither + durable 持久化由 PgSessionLifecycle 的 OUTBOX-COTX-SESSION-01
-        // 守；本替身重启即丢、envelope 不落库（消费侧从 payload 解码），DEMO-ONLY。
+        // 守；本替身重启即丢，envelope 只作为 Message metadata 透传，DEMO-ONLY。
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -235,7 +244,8 @@ impl SessionLifecycle for MemSessionLifecycle {
             Topic::new(entry.topic().as_str()),
             MessageId::new(entry.idem_key().as_str()),
             entry.payload().to_vec(),
-        );
+        )
+        .with_metadata(envelope_metadata(&envelope));
         self.bus
             .publisher()
             .publish(request)
@@ -1125,6 +1135,7 @@ mod tests {
         );
         let env = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", TOPIC),
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
             "subj-opaque",
         );
         MemEmitter::new(bus.clone())
@@ -1134,6 +1145,63 @@ mod tests {
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(msg.id.as_str(), "evt-session-77", "EventId 应作 Message.id");
         assert_eq!(msg.payload, b"payload".to_vec());
+        assert_eq!(
+            msg.metadata.tenant_id(),
+            Some(vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
+            "MemEmitter 应透传 tenantId metadata"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_SUBJECT_ID),
+            Some("subj-opaque"),
+            "MemEmitter 应透传 subjectId metadata"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_session_lifecycle_emits_tenant_metadata() {
+        let bus = MemBus::new();
+        let token = CancellationToken::new();
+        let mut stream = bus
+            .subscriber()
+            .subscribe(Topic::new(TOPIC), token.clone())
+            .await
+            .expect("subscribe");
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let session = Session::hydrate(
+            "sess-mem-tenant",
+            "subj-opaque-session",
+            tenant,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
+            SystemTime::UNIX_EPOCH,
+        );
+        let entry = Entry::new(
+            consistency::Topic::parse(TOPIC).expect("topic"),
+            IdemKey::parse("evt-session-mem-tenant").expect("idem"),
+            b"payload".to_vec(),
+        );
+        let envelope = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", TOPIC),
+            tenant,
+            "subj-opaque-session",
+        );
+
+        MemSessionLifecycle::new(bus.clone())
+            .persist_session_and_emit(session, entry, envelope)
+            .await
+            .expect("persist session and emit");
+
+        let msg = stream.next().await.expect("message delivered");
+        assert_eq!(
+            msg.metadata.tenant_id(),
+            Some(tenant),
+            "MemSessionLifecycle co-tx path must carry tenantId metadata"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_SUBJECT_ID),
+            Some("subj-opaque-session"),
+            "MemSessionLifecycle co-tx path must carry subjectId metadata"
+        );
     }
 
     #[tokio::test]
@@ -2174,6 +2242,8 @@ mod tests {
         assert!(store.is_empty());
 
         let record = DeadLetterRecord::new(
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            "msg-1",
             "identity",
             "contract-session",
             "session.created",

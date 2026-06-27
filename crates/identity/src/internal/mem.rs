@@ -405,7 +405,11 @@ mod tests {
     }
 
     fn dummy_envelope() -> OutboxEnvelopeParts {
-        OutboxEnvelopeParts::new(generated::event::identity_v1::CONTRACT, "subject-1")
+        OutboxEnvelopeParts::new(
+            generated::event::identity_v1::CONTRACT,
+            tid(TENANT_A),
+            "subject-1",
+        )
     }
 
     // ---------------------------------------------------------------------------

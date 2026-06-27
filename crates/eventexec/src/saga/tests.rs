@@ -23,6 +23,12 @@ use std::sync::Arc;
 
 const OWNER: &str = "billing";
 const CONTRACT: &str = "billing.checkout";
+const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+#[allow(clippy::unwrap_used)]
+fn tenant() -> vocab::TenantId {
+    vocab::TenantId::parse(TENANT).unwrap()
+}
 
 fn saga_id() -> SagaId {
     SagaId::new(uuid::Uuid::from_u128(0x1121))
@@ -315,8 +321,8 @@ impl OwnerCheckpointStore for FakeCheckpointStore {
 
 // ── FakeDeadLetterStore ───────────────────────────────────────────────────────
 
-/// 捕获的 DLX 记录字段：(domain, contract_id, topic, payload, error_summary, num_attempts)。
-type DlxRecord = (String, String, String, String, String, u32);
+/// 捕获的 DLX 记录字段：(tenant_id, message_id, domain, contract_id, topic, payload, error_summary, num_attempts)。
+type DlxRecord = (String, String, String, String, String, String, String, u32);
 
 #[derive(Default)]
 struct FakeDeadLetterStore {
@@ -337,6 +343,8 @@ impl DeadLetterStore for FakeDeadLetterStore {
         record: DeadLetterRecord,
     ) -> Result<(), DeadLetterStoreError> {
         self.written.lock().unwrap().push((
+            record.tenant().to_string(),
+            record.message_id().to_string(),
             record.domain().to_string(),
             record.contract_id().to_string(),
             record.topic().to_string(),
@@ -366,6 +374,7 @@ fn executor(
         cp,
         dlx,
         factory,
+        tenant(),
         CheckpointOwner::new(OWNER),
         CONTRACT,
     )
@@ -557,7 +566,14 @@ async fn compensation_failure_writes_dead_letter() {
     }
     let records = dlx.records();
     assert_eq!(records.len(), 1, "应写恰一条 dead-letter");
-    let (domain, contract_id, topic, payload, summary, attempts) = &records[0];
+    let (tenant_id, message_id, domain, contract_id, topic, payload, summary, attempts) =
+        &records[0];
+    assert_eq!(tenant_id, TENANT, "DLX tenant_id = executor tenant");
+    assert_eq!(
+        message_id,
+        &saga_id().as_uuid().to_string(),
+        "DLX message_id = saga_id"
+    );
     assert_eq!(domain, OWNER, "DLX domain = saga owner（SC-006）");
     assert_eq!(
         contract_id, CONTRACT,
@@ -626,6 +642,7 @@ async fn run_with_executing_append_failure_fails_closed() {
         cp,
         dlx,
         Arc::new(EmptyFactory),
+        tenant(),
         CheckpointOwner::new(OWNER),
         CONTRACT,
     );
@@ -802,22 +819,23 @@ fn compensation_failure_logs_fields() {
     let subscriber = CapSubscriber {
         captured: captured.clone(),
     };
-    // set_global_default：消除 callsite interest cache flake（与 consumer.rs TC5 同理；nextest 进程隔离）。
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    let dispatch = tracing::Dispatch::new(subscriber);
 
     #[allow(clippy::unwrap_used)] // reason: 测试 runtime 构造，item-level carve-out
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(async {
-        let journal = Arc::new(FakeJournal::default());
-        let cp = Arc::new(FakeCheckpointStore::default());
-        let dlx = Arc::new(FakeDeadLetterStore::default());
-        let exec = executor(journal, cp, dlx, Arc::new(EmptyFactory));
-        let (a1, _c1) = mk_action("step1", false, true);
-        let (a2, _c2) = mk_action("step2", true, false);
-        let _ = exec.run(saga_id(), vec![a1, a2]).await;
+    tracing::dispatcher::with_default(&dispatch, || {
+        rt.block_on(async {
+            let journal = Arc::new(FakeJournal::default());
+            let cp = Arc::new(FakeCheckpointStore::default());
+            let dlx = Arc::new(FakeDeadLetterStore::default());
+            let exec = executor(journal, cp, dlx, Arc::new(EmptyFactory));
+            let (a1, _c1) = mk_action("step1", false, true);
+            let (a2, _c2) = mk_action("step2", true, false);
+            let _ = exec.run(saga_id(), vec![a1, a2]).await;
+        });
     });
 
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out

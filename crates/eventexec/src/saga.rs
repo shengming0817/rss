@@ -203,6 +203,7 @@ pub struct SagaExecutorImpl<J, C, D> {
     checkpoint: Arc<C>,
     dead_letter: Arc<D>,
     factory: Arc<dyn SagaActionFactory>,
+    tenant: vocab::TenantId,
     owner: CheckpointOwner,
     contract_id: String,
 }
@@ -222,6 +223,7 @@ where
         checkpoint: Arc<C>,
         dead_letter: Arc<D>,
         factory: Arc<dyn SagaActionFactory>,
+        tenant: vocab::TenantId,
         owner: CheckpointOwner,
         contract_id: impl Into<String>,
     ) -> Self {
@@ -230,6 +232,7 @@ where
             checkpoint,
             dead_letter,
             factory,
+            tenant,
             owner,
             contract_id: contract_id.into(),
         }
@@ -250,6 +253,7 @@ where
         let journal = self.journal.clone();
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
+        let tenant = self.tenant;
         let owner = self.owner.clone();
         let contract_id = self.contract_id.clone();
         Box::pin(async move {
@@ -257,6 +261,7 @@ where
                 journal: &*journal,
                 checkpoint: &*checkpoint,
                 dead_letter: &*dead_letter,
+                tenant,
                 owner: &owner,
                 contract_id: &contract_id,
                 saga_id,
@@ -270,6 +275,7 @@ where
         let journal = self.journal.clone();
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
+        let tenant = self.tenant;
         let owner = self.owner.clone();
         let contract_id = self.contract_id.clone();
         let factory = self.factory.clone();
@@ -279,6 +285,7 @@ where
                 journal: &*journal,
                 checkpoint: &*checkpoint,
                 dead_letter: &*dead_letter,
+                tenant,
                 owner: &owner,
                 contract_id: &contract_id,
                 saga_id,
@@ -324,6 +331,7 @@ struct ExecCtx<'a, J, C, D> {
     journal: &'a J,
     checkpoint: &'a C,
     dead_letter: &'a D,
+    tenant: vocab::TenantId,
     owner: &'a CheckpointOwner,
     contract_id: &'a str,
     saga_id: SagaId,
@@ -525,6 +533,8 @@ where
         )
         .into_bytes();
         let record = DeadLetterRecord::new(
+            self.tenant,
+            self.saga_id.as_uuid().to_string(),
             self.owner.as_str(),
             self.contract_id,
             self.saga_id.as_uuid().to_string(),

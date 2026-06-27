@@ -545,12 +545,28 @@ async fn dead_letter<S>(
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
+    let Some(tenant) = msg.metadata.tenant_id() else {
+        record_dead_letter_skip(meta, "tenant_missing");
+        log_dead_letter_tenant_missing(meta, msg.id.as_str());
+        release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
+        settle(
+            acker,
+            diport::AckAction::Reject,
+            meta.domain(),
+            msg.id.as_str(),
+        )
+        .await;
+        return;
+    };
+
     // T007.5：结构化 error，五字段全部出现（domain/contract_id/topic/num_attempts/error_summary）；
     // message_id 额外提供关联维度（DLX 表无该列，log 是唯一关联路径）。
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs 范式）。
     log_dead_lettered(meta, num_attempts, error_summary, msg.id.as_str());
 
     let record = DeadLetterRecord::new(
+        tenant,
+        msg.id.as_str(),
         meta.domain(),
         meta.contract_id(),
         meta.topic(),
@@ -631,6 +647,19 @@ async fn settle(
     .increment(1);
 }
 
+/// DLX skip metric for fail-closed paths where the app DLX write is intentionally suppressed.
+///
+/// Closed labels: `reason` is emitted from module-owned literals; `domain` is bounded by `ConsumerMeta`.
+/// This keeps alerts separate from broker settle metrics, which only describe final broker disposition.
+fn record_dead_letter_skip(meta: &ConsumerMeta, reason: &'static str) {
+    metrics::counter!(
+        "consumer_dlx_skip_total",
+        "domain" => meta.domain().to_owned(),
+        "reason" => reason,
+    )
+    .increment(1);
+}
+
 // ── 日志 helper（tracing 宏收口，控制调用方认知复杂度 ≤15；同 lib.rs::log_dropped_* 范式）──
 
 /// IdemKey parse 失败（malformed id，fail-closed 不重投）。
@@ -703,6 +732,17 @@ fn log_dead_lettered(
         num_attempts,
         error_summary,
         "consumer: message dead-lettered"
+    );
+}
+
+/// DLX tenant 信封缺失 / 非法：不写 app DLX，避免把 tenantless 行落入持久层。
+fn log_dead_letter_tenant_missing(meta: &ConsumerMeta, message_id: &str) {
+    tracing::warn!(
+        message_id,
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        "consumer: dead-letter skipped because tenantId metadata is missing or invalid"
     );
 }
 
@@ -813,13 +853,15 @@ mod tests {
     use consistency::idempotency::{
         IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
     };
-    use diport::Message;
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{AckAction, Acker, DeliveryStream, DynAcker};
+    use diport::{EnvelopeMetadata, KEY_TENANT_ID, Message};
 
-    use super::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
+    use super::{
+        ConsumerMeta, LeaseConfig, record_dead_letter_skip, run_consumer, run_consumer_ackable,
+    };
     use crate::MAX_REDELIVERY;
 
     /// 测试用 lease 配置：续租间隔大（60s/3=20s），普通快测中续租永不触发（不干扰原终态断言）。
@@ -836,11 +878,18 @@ mod tests {
 
     /// 构造单条消息流（复用 lib.rs 范式）。
     fn stream_of(payloads: &[(&str, &[u8])]) -> diport::MessageStream {
-        let msgs: Vec<Message> = payloads
-            .iter()
-            .map(|(id, p)| Message::new(*id, p.to_vec()))
-            .collect();
+        let msgs: Vec<Message> = payloads.iter().map(|(id, p)| message(id, p)).collect();
         Box::pin(futures::stream::iter(msgs))
+    }
+
+    fn tenant_metadata() -> EnvelopeMetadata {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TENANT_ID, "f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        md
+    }
+
+    fn message(id: &str, payload: &[u8]) -> Message {
+        Message::new_with_metadata(id, payload.to_vec(), tenant_metadata())
     }
 
     fn meta() -> ConsumerMeta {
@@ -1048,8 +1097,16 @@ mod tests {
     // ── FakeDeadLetterStore ──────────────────────────────────────────────────
 
     /// fake DLX store：捕获写入的 DeadLetterRecord 字段。
+    #[derive(Clone)]
+    struct CapturedDlxRecord {
+        tenant_id: String,
+        message_id: String,
+        error_summary: String,
+        num_attempts: u32,
+    }
+
     struct FakeDeadLetterStore {
-        written: Mutex<Vec<(String, u32)>>, // (error_summary, num_attempts)
+        written: Mutex<Vec<CapturedDlxRecord>>,
     }
 
     impl FakeDeadLetterStore {
@@ -1065,7 +1122,7 @@ mod tests {
             self.written.lock().unwrap().len()
         }
 
-        fn last_record(&self) -> Option<(String, u32)> {
+        fn last_record(&self) -> Option<CapturedDlxRecord> {
             #[allow(clippy::unwrap_used)]
             // reason: 测试 happy-path，item-level carve-out
             self.written.lock().unwrap().last().cloned()
@@ -1079,10 +1136,12 @@ mod tests {
         ) -> Result<(), DeadLetterStoreError> {
             #[allow(clippy::unwrap_used)]
             // reason: 测试 happy-path，item-level carve-out
-            self.written
-                .lock()
-                .unwrap()
-                .push((record.error_summary().to_string(), record.num_attempts()));
+            self.written.lock().unwrap().push(CapturedDlxRecord {
+                tenant_id: record.tenant().to_string(),
+                message_id: record.message_id().to_string(),
+                error_summary: record.error_summary().to_string(),
+                num_attempts: record.num_attempts(),
+            });
             Ok(())
         }
 
@@ -1208,7 +1267,7 @@ mod tests {
         let mut deliveries = Vec::with_capacity(payloads.len());
         for (id, p) in payloads {
             let (arc, boxed) = FakeAcker::new();
-            let msg = Message::new(*id, p.to_vec());
+            let msg = message(id, p);
             deliveries.push(diport::Delivery::new(msg, boxed));
             ackers.push(arc);
         }
@@ -1333,16 +1392,25 @@ mod tests {
         assert_eq!(dlx_store.write_count(), 1, "dlx 应写 1 次");
         #[allow(clippy::unwrap_used)]
         // reason: 测试断言前置 assert_eq 已验证 write_count==1，last_record 必然 Some；item-level carve-out。
-        let (summary, attempts) = dlx_store.last_record().unwrap();
+        let record = dlx_store.last_record().unwrap();
         // #1125：requeue 耗尽后 DLX 摘要反映 handler 的 EngineError kind（Transient），
         // 而非旧通用常量 "requeue budget exhausted"。
         assert_eq!(
-            summary, "transient engine error",
-            "summary 应为 requeue kind 的 const message: {summary}"
+            record.error_summary, "transient engine error",
+            "summary 应为 requeue kind 的 const message: {}",
+            record.error_summary
         );
         assert_eq!(
-            attempts, MAX_REDELIVERY,
+            record.num_attempts, MAX_REDELIVERY,
             "num_attempts 应 == MAX_REDELIVERY"
+        );
+        assert_eq!(
+            record.message_id, "msg-requeue",
+            "message_id 应来自 Message.id"
+        );
+        assert_eq!(
+            record.tenant_id, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "tenant_id 应来自 Message.metadata.tenantId"
         );
         assert_eq!(idem.commit_count(), 1, "commit 应调 1 次（dlx 终态收口）");
     }
@@ -1375,14 +1443,52 @@ mod tests {
         assert_eq!(dlx_store.write_count(), 1, "dlx 应写 1 次");
         #[allow(clippy::unwrap_used)]
         // reason: 测试断言前置 assert_eq 已验证 write_count==1，last_record 必然 Some；item-level carve-out。
-        let (summary, _attempts) = dlx_store.last_record().unwrap();
+        let record = dlx_store.last_record().unwrap();
         // #1125：DLX 摘要为 handler 的 PermanentError kind（Permanent）const message，
         // 而非旧通用常量 "permanent rejection"。
         assert_eq!(
-            summary, "permanent error",
-            "summary 应为 reject kind 的 const message: {summary}"
+            record.error_summary, "permanent error",
+            "summary 应为 reject kind 的 const message: {}",
+            record.error_summary
         );
         assert_eq!(idem.commit_count(), 1, "commit 应调 1 次");
+    }
+
+    #[tokio::test]
+    async fn tc3b_reject_missing_tenant_skips_app_dlx_and_settles_reject() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (acker, boxed) = FakeAcker::new();
+        let stream: DeliveryStream = Box::pin(futures::stream::iter(vec![diport::Delivery::new(
+            Message::new("msg-no-tenant", b"payload".to_vec()),
+            boxed,
+        )]));
+
+        run_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx,
+            meta(),
+            handler_reject(handler_count.clone()),
+            lease_cfg_test(),
+        )
+        .await;
+
+        assert_eq!(
+            handler_count.load(Ordering::Relaxed),
+            1,
+            "handler 应调 1 次"
+        );
+        assert_eq!(dlx_store.write_count(), 0, "缺 tenant 不得写 app DLX");
+        assert_eq!(idem.commit_count(), 0, "未写 DLX 不得 commit done");
+        assert_eq!(idem.release_count(), 1, "缺 tenant 应释放 claim");
+        assert_eq!(
+            acker.settled_actions(),
+            vec![AckAction::Reject],
+            "ackable 缺 tenant 应 settle Reject"
+        );
     }
 
     // ── TC9：reject(Invariant) → DLX 摘要反映 Invariant kind（#1125 anti-vacuity）──
@@ -1409,10 +1515,11 @@ mod tests {
         assert_eq!(dlx_store.write_count(), 1, "dlx 应写 1 次");
         #[allow(clippy::unwrap_used)]
         // reason: 前置 assert_eq 已验证 write_count==1，last_record 必然 Some；item-level carve-out。
-        let (summary, _attempts) = dlx_store.last_record().unwrap();
+        let record = dlx_store.last_record().unwrap();
         assert_eq!(
-            summary, "invariant violated",
-            "Invariant kind 摘要应为 'invariant violated'（随 kind 变化，非硬编码）: {summary}"
+            record.error_summary, "invariant violated",
+            "Invariant kind 摘要应为 'invariant violated'（随 kind 变化，非硬编码）: {}",
+            record.error_summary
         );
     }
 
@@ -2060,6 +2167,29 @@ mod tests {
         assert!(
             rendered.contains("outcome=\"ok\""),
             "缺 outcome=ok label: {rendered}"
+        );
+    }
+
+    /// Missing/invalid tenant on DLX path emits a dedicated skip metric so it is visible independently from Reject settle.
+    #[test]
+    fn dead_letter_tenant_missing_emits_skip_metric() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_dead_letter_skip(&meta(), "tenant_missing");
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("consumer_dlx_skip_total"),
+            "缺 metric consumer_dlx_skip_total: {rendered}"
+        );
+        assert!(
+            rendered.contains("domain=\"identity\""),
+            "缺 domain label: {rendered}"
+        );
+        assert!(
+            rendered.contains("reason=\"tenant_missing\""),
+            "缺 reason=tenant_missing label: {rendered}"
         );
     }
 

@@ -73,12 +73,13 @@ pub const TOPIC: &str = "seed.commands.do-thing";
 
 /// Producer wrapper（triple funnel 顶层）：把 typed [`SeedDoThingRequest`] 经注入的 [`super::CommandEmit`] 落
 /// durable outbox。baked `CONTRACT` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
-/// `subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
+/// `tenant` 是 typed RLS scope（必填）；`subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
 /// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
 /// 由 `cargo xtask codegen` 派生；勿手改。
 pub async fn emit_async<E: super::CommandEmit>(
     emitter: &E,
     request: SeedDoThingRequest,
+    tenant: ::vocab::TenantId,
     subject_id: ::std::string::String,
     idempotency_key: ::core::option::Option<::std::string::String>,
 ) -> ::core::result::Result<(), E::Error> {
@@ -87,6 +88,7 @@ pub async fn emit_async<E: super::CommandEmit>(
             CONTRACT,
             TOPIC,
             &request,
+            tenant,
             &subject_id,
             idempotency_key.as_deref(),
         )

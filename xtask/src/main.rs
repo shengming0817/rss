@@ -11,6 +11,7 @@
 //!                                      破坏退出码 1）。详见 `contract::breaking`。
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
+//!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract
@@ -45,6 +46,7 @@ mod coverage;
 mod defergate;
 mod diagnostic;
 mod diffcov;
+mod doc_contracts;
 mod layerdeps;
 mod layers;
 mod migrations;
@@ -83,6 +85,7 @@ enum Command {
     },
     LayerDeps,
     WsDepsDrift,
+    DocContracts,
     Verify {
         fast: bool,
         allow_missing_tools: bool,
@@ -121,6 +124,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["assembly", rest @ ..] => parse_assembly(rest),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
+        ["doc-contracts"] => Ok(Command::DocContracts),
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
@@ -132,7 +136,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -300,6 +304,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         }
         Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
         Command::WsDepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
+        Command::DocContracts => diagnostic::run_check(&doc_contracts::DocContracts),
         Command::Verify {
             fast,
             allow_missing_tools,
@@ -445,11 +450,26 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn parse_command_doc_contracts() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["doc-contracts"]))?,
+            Command::DocContracts
+        );
+        Ok(())
+    }
+
     /// wsdeps-drift fail-closed：未知尾参即 `Err`。
     #[test]
     fn parse_command_wsdeps_drift_rejects_trailing_args() {
         assert!(parse_command(&s(&["wsdeps-drift", "--bogus"])).is_err());
         assert!(parse_command(&s(&["wsdeps-drift", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_doc_contracts_rejects_trailing_args() {
+        assert!(parse_command(&s(&["doc-contracts", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["doc-contracts", "extra"])).is_err());
     }
 
     #[test]

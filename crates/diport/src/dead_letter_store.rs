@@ -1,8 +1,8 @@
 //! `DeadLetterStore` —— 死信持久化 DI port（可替换：prod postgres / test in-mem）。
 //!
 //! 消费方在重试预算耗尽后调用 `write_dead_letter` 持久化死信记录，供运维巡检 / 重放。
-//! `DeadLetterRecord.original_payload` 是原始消息字节，**完整存入** `dead_letter.original_entry`
-//! 供重放 / 巡检（无 DB 侧脱敏）；PII 保留策略属后续治理（backlog 跟踪）。
+//! `DeadLetterRecord.tenant` 是 DLX RLS scope 的 typed 锚点；`original_payload` 是原始消息字节，
+//! **完整存入** `dead_letter.original_entry` 供重放 / 巡检（无 DB 侧脱敏）；PII 保留策略属后续治理（backlog 跟踪）。
 //! Debug 输出一律隐藏（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01）。
 
 use dynosaur::dynosaur;
@@ -47,6 +47,8 @@ pub struct DeadLetterRecord {
     domain: String,
     contract_id: String,
     topic: String,
+    tenant: vocab::TenantId,
+    message_id: String,
     original_payload: Vec<u8>,
     /// 安全摘要——类型层强制 `&'static str` const literal（经 [`DeadLetterSummary`] funnel），
     /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01）。
@@ -63,6 +65,8 @@ impl std::fmt::Debug for DeadLetterRecord {
             .field("domain", &self.domain)
             .field("contract_id", &self.contract_id)
             .field("topic", &self.topic)
+            .field("tenant", &self.tenant)
+            .field("message_id", &self.message_id)
             .field("original_payload", &"<redacted>")
             .field("error_summary", &self.error_summary)
             .field("num_attempts", &self.num_attempts)
@@ -78,7 +82,12 @@ impl DeadLetterRecord {
     /// `error_summary: DeadLetterSummary` 只能由编译期 const literal 构造（见 [`DeadLetterSummary`]）——
     /// 任意 runtime `String` / handler 错误原文 / payload 片段**无法**流入死信摘要字段（不再靠调用方
     /// 脱敏纪律，review #216 F7）。`consumer.rs` 经 `SUMMARY_*` 常量构造，天然满足。
+    #[allow(clippy::too_many_arguments)]
+    // reason: DLX 记录的 tenant/message/domain/contract/topic/payload/summary/attempts 均为必填审计字段；
+    // 聚合 builder 会重新引入 tenantless 中间态，本构造器刻意保持一次性完整信封。
     pub fn new(
+        tenant: vocab::TenantId,
+        message_id: impl Into<String>,
         domain: impl Into<String>,
         contract_id: impl Into<String>,
         topic: impl Into<String>,
@@ -90,6 +99,8 @@ impl DeadLetterRecord {
             domain: domain.into(),
             contract_id: contract_id.into(),
             topic: topic.into(),
+            tenant,
+            message_id: message_id.into(),
             original_payload,
             error_summary: error_summary.as_str(),
             num_attempts,
@@ -109,6 +120,16 @@ impl DeadLetterRecord {
     /// 借出 topic。
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    /// 借出租户标识（DLX RLS scope）。
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// 借出消息标识（broker / producer 关联键）。
+    pub fn message_id(&self) -> &str {
+        &self.message_id
     }
 
     /// 借出原始 payload 字节。
@@ -201,6 +222,8 @@ mod smoke {
 
     fn sample_record() -> DeadLetterRecord {
         DeadLetterRecord::new(
+            tenant(),
+            "message-1",
             "identity",
             "contract-session",
             "session.created",
@@ -221,6 +244,11 @@ mod smoke {
         async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
             Ok(())
         }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
     }
 
     // multi_thread + spawn：boxed future 须 Send（trait_variant Send 变体）才能跨 worker 调度——
@@ -260,6 +288,11 @@ mod pii_debug {
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（对标 `SignRequest.message` / `Message.payload`）。
     use super::{DeadLetterRecord, DeadLetterSummary};
 
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
+    }
+
     #[test]
     fn dead_letter_record_debug_redacts_payload() {
         // anti-vacuity：原始 Vec<u8> Debug 把 0xDE 渲染成 "222"，证明 "!contains(222)" 检测非空转。
@@ -268,6 +301,8 @@ mod pii_debug {
             "前提失效：检测字节不在原始 Debug"
         );
         let record = DeadLetterRecord::new(
+            tenant(),
+            "message-1",
             "identity",
             "contract-session",
             "session.created",
@@ -280,6 +315,11 @@ mod pii_debug {
         assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains("identity"), "domain 应可见: {dbg}");
+        assert!(
+            dbg.contains("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+            "tenant 应可见: {dbg}"
+        );
+        assert!(dbg.contains("message-1"), "message_id 应可见: {dbg}");
         assert!(dbg.contains("session.created"), "topic 应可见: {dbg}");
         assert!(
             dbg.contains("max retries exhausted"),
@@ -303,6 +343,31 @@ mod summary {
         // const 上下文构造（消费方 SUMMARY_* 常量同款用法）。
         const S: DeadLetterSummary = DeadLetterSummary::new("requeue budget exhausted");
         assert_eq!(S.as_str(), "requeue budget exhausted");
+    }
+}
+
+#[cfg(test)]
+mod tenant_scope {
+    //! `DeadLetterRecord` 必须携 typed tenant + message_id。
+    use super::{DeadLetterRecord, DeadLetterSummary};
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn tenant_and_message_id_round_trip() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        let record = DeadLetterRecord::new(
+            tenant,
+            "msg-tenant-1",
+            "identity",
+            "contract-session",
+            "session.created",
+            b"payload".to_vec(),
+            DeadLetterSummary::new("max retries exhausted"),
+            10,
+        );
+        assert_eq!(record.tenant(), tenant);
+        assert_eq!(record.message_id(), "msg-tenant-1");
     }
 }
 
