@@ -1,7 +1,7 @@
 //! Outbox 持久化实现——L2 OutboxFact adapter（#1117 P4）。
 //!
 //! [`PgOutbox`] impl [`consistency::OutboxSource`] / [`consistency::OutboxRelay`] /
-//! [`consistency::OutboxSweeper`]——三个 native AFIT trait（泛型静态分发，非 dyn，不引 dynosaur）。
+//! [`consistency::RetentionSweeper`]——三个 native AFIT trait（泛型静态分发，非 dyn，不引 dynosaur）。
 //!
 //! **`append_outbox`**（`pub(crate)` free fn，收 `&mut sqlx::PgConnection`）是 L1 原子性的编译期硬约束：
 //! 只能在已有事务内调用，不能脱离事务双写；调用方（域 crate 业务写路径）经 `PgStore::run_in_transaction`
@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 
 use consistency::{
     BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxRelay,
-    OutboxSource, OutboxSweeper, Topic,
+    OutboxSource, RetentionSweeper, Topic,
 };
 use diport::{
     DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID,
@@ -301,7 +301,7 @@ pub(crate) async fn append_outbox(
 
 // ── PgOutbox ──────────────────────────────────────────────────────────────────
 
-/// PostgreSQL outbox adapter：impl [`OutboxSource`] + [`OutboxRelay`] + [`OutboxSweeper`]。
+/// PostgreSQL outbox adapter：impl [`OutboxSource`] + [`OutboxRelay`] + [`RetentionSweeper`]。
 ///
 /// 持 `PgPool`（clone 自 [`PgStore`]）+ `Box<DynPublisher>`（Send 变体，跨 await 安全）。
 /// 构造必填两个参数，缺一编译报错（构造器必填参数 Hard 约束）。
@@ -539,9 +539,9 @@ fn log_lost_lease(event_id: &str, operation: &str) {
     tracing::warn!(target: "postgres", event_id, operation, "outbox: settle hit lost lease (0 rows); row owned by another lease");
 }
 
-// ── OutboxSweeper impl ────────────────────────────────────────────────────────
+// ── RetentionSweeper impl ────────────────────────────────────────────────────────
 
-impl OutboxSweeper for PgOutbox {
+impl RetentionSweeper for PgOutbox {
     /// 删除 `status='published'` 且早于保留期的行，返回删除条数。
     /// dlx 行不删（留运维巡检）。
     ///
@@ -805,8 +805,9 @@ fn dlx_decision(is_permanent: bool, new_count: i32) -> bool {
 
 /// 指数退避（秒），上限 3600。`retry_count` 是当前已重试次数（0-based，即 UPDATE 前的值）。
 ///
-/// backoff = min(2^retry_count, 3600)。
-pub(crate) fn backoff_seconds(retry_count: i32) -> i64 {
+/// backoff = min(2^retry_count, 3600)。`const fn` ⇒ 可在 [`max_redelivery_window_secs`] 的 const
+/// 求值与下游 `const { assert!(..) }` 编译期断言中复用（`.min()` 非 const，故展开成显式 `if`）。
+pub(crate) const fn backoff_seconds(retry_count: i32) -> i64 {
     const MAX_BACKOFF: i64 = 3600;
     if retry_count < 0 {
         // DB retry_count 理论恒 ≥0（DEFAULT 0，只递增）；防御负值左移 panic（debug）/ 掩码异常（release）。
@@ -817,7 +818,23 @@ pub(crate) fn backoff_seconds(retry_count: i32) -> i64 {
         return MAX_BACKOFF;
     }
     let val = 1i64 << retry_count; // 2^retry_count
-    val.min(MAX_BACKOFF)
+    if val < MAX_BACKOFF { val } else { MAX_BACKOFF }
+}
+
+/// outbox 发布侧最坏重投窗口（秒）：`Σ backoff_seconds(0..MAX_PUBLISH_ATTEMPTS)`——一条 entry 从首投到
+/// 耗尽重试预算（转 dlx）期间所有退避之和（当前策略 = 1+2+…+512 = 1023s）。
+///
+/// `inbox_dedup` 保留期下限校验引用此窗口（NServiceBus 去重铁律：去重保留期必须 > 重投窗口，否则迟到重投被
+/// 误判 Fresh 重复执行；见 `inbox.rs` INVARIANT INBOX-DEDUP-RETENTION-FLOOR-01）。`const fn` ⇒ 可在
+/// `const { assert!(..) }` 编译期断言中求值（把铁律上移到常量层，违反即编译失败，非运行期治理测试）。
+pub(crate) const fn max_redelivery_window_secs() -> i64 {
+    let mut total = 0i64;
+    let mut rc = 0i32;
+    while rc < MAX_PUBLISH_ATTEMPTS {
+        total += backoff_seconds(rc);
+        rc += 1;
+    }
+    total
 }
 
 // ── 单测 ──────────────────────────────────────────────────────────────────────
@@ -828,7 +845,7 @@ mod tests {
     use super::{
         LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, STATUS_DLX,
         STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, dlx_decision,
-        hydrate_envelope_metadata, metadata_with_ambient, unix_secs,
+        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient, unix_secs,
     };
     use diport::{
         KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
@@ -1132,6 +1149,20 @@ mod tests {
             assert!(cur <= 3600, "exceeds cap at retry_count={rc}");
             prev = cur;
         }
+    }
+
+    // max_redelivery_window_secs = Σ backoff_seconds(0..MAX_PUBLISH_ATTEMPTS)。当前策略 10 次：
+    // 1+2+4+8+16+32+64+128+256+512 = 1023s。anti-vacuity：窗口 > 0（供 inbox 保留期下限编译期断言引用）。
+    #[test]
+    fn max_redelivery_window_secs_sums_backoffs() {
+        let expected: i64 = (0..MAX_PUBLISH_ATTEMPTS).map(backoff_seconds).sum();
+        assert_eq!(
+            max_redelivery_window_secs(),
+            expected,
+            "window must equal Σ backoff over the retry budget"
+        );
+        assert_eq!(max_redelivery_window_secs(), 1023, "current policy = 1023s");
+        assert!(max_redelivery_window_secs() > 0, "window must be positive");
     }
 
     // ── hydrate_envelope_metadata 表驱动（#1160 A4）──────────────────────────

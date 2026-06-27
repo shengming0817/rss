@@ -3,8 +3,10 @@
 //! [`PgDeadLetterStore`] impl [`diport::DeadLetterStore`]——native AFIT（泛型静态分发或
 //! `Box<DynDeadLetterStore>` 组合根注入）。
 //!
-//! **immutable append**：只 INSERT，不 UPDATE / DELETE。死信记录是不可变审计物料，运维经
-//! SELECT 巡检，不修改原记录。
+//! **保留期内不可变**：写路径只 INSERT、不 UPDATE。死信是审计物料，运维经 SELECT 巡检、不改原记录；
+//! 超 [`DEAD_LETTER_RETENTION_SECONDS`]（默认 30 天）的旧记录由 [`RetentionSweeper`] 清理（膨胀控制，#1210）。
+//! `dead_letter` 是**约定** append-only（非 REVOKE 强制，与 `projection_events` 不同），DB 层允许保留期 DELETE；
+//! 冷存储导出（合规归档）为 out-of-scope。
 //!
 //! **`original_entry` jsonb** 存 `{"bytes": [u8, ...]}` —— JSON 数字数组完整保留原始
 //! payload 字节供重放 / 巡检，往返无损，仅用已有的 `serde_json`（不引入额外 base64 依赖）。
@@ -16,11 +18,18 @@
 //! **错误 PII 边界**：sqlx 错误不进 Display（经 `DeadLetterStoreError::new` 包成 source，
 //! `error-handling.md §Message 与 PII`）。
 
+use consistency::{EngineError, EngineErrorKind, RetentionSweeper};
 use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
 use sqlx::PgPool;
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
+
+/// `dead_letter` 旧死信记录保留期（秒，默认 30 天）。超期由 [`PgDeadLetterStore`] 的 [`RetentionSweeper`]
+/// 清理（合规导向膨胀控制，对标 gocell 死信 30 天清理，#1210）。
+///
+/// `pub` 暴露供组合根读取构造 `eventexec::SweeperConfig`；不应被业务代码直接使用。
+pub const DEAD_LETTER_RETENTION_SECONDS: u64 = 30 * 24 * 3600;
 
 /// PostgreSQL 死信写入 adapter。
 ///
@@ -97,22 +106,83 @@ impl DeadLetterStore for PgDeadLetterStore {
     }
 }
 
+impl RetentionSweeper for PgDeadLetterStore {
+    /// 删除 `last_attempt_at` 早于保留期的死信行，返回删除条数（**全域**，所有死信均终结，无状态谓词）。
+    ///
+    /// 时间谓词用 PostgreSQL `now()`（DB 事务时间），刻意不注入 `Clock`——与 outbox/inbox sweep 同范式
+    /// （单一无偏移时间源）。`last_attempt_at == first_attempt_at`（immutable INSERT，二者同写入时刻），
+    /// 用 `last_attempt_at` 对齐既有 `idx_dead_letter_scan` 语义；专用 `idx_dead_letter_sweep (last_attempt_at)`
+    /// 覆盖本全域谓词（迁移 0021）。
+    async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
+        // u64→i64：超 i64::MAX 的保留期是非法输入（负 interval 会反向清空全表），fail-closed。
+        let secs = i64::try_from(retain_seconds)
+            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM dead_letter
+            WHERE last_attempt_at <= now() - make_interval(secs => $1)
+            "#,
+        )
+        .bind(secs)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "dead_letter: sweep db error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
+
+        Ok(result.rows_affected())
+    }
+}
+
 // ── 单测 ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod smoke {
-    //! 编译期类型证明：`PgDeadLetterStore: DeadLetterStore`（via trait bound）。
+    //! 编译期类型证明：`PgDeadLetterStore: DeadLetterStore + RetentionSweeper`（via trait bound）。
     //! INVARIANT: ADAPTER-PORT-FREEZE-07 —— DeadLetterStore on PgDeadLetterStore；
-    //! 去掉 impl 即编译失败（anti-vacuity）。
+    //! 去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
+    use consistency::RetentionSweeper;
     use diport::DeadLetterStore;
 
     fn assert_dead_letter_store<T: DeadLetterStore>(_: PhantomData<T>) {}
+    fn assert_retention_sweeper<T: RetentionSweeper>(_: PhantomData<T>) {}
 
     #[test]
     fn pg_dead_letter_store_impl_frozen() {
         assert_dead_letter_store(PhantomData::<super::PgDeadLetterStore>);
+        assert_retention_sweeper(PhantomData::<super::PgDeadLetterStore>);
+    }
+}
+
+#[cfg(test)]
+mod sweep_fail_closed {
+    //! sweep 入口 u64→i64 溢出 fail-closed 守卫单测（免 PG，#327 review F4）。
+    use consistency::{EngineErrorKind, RetentionSweeper};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    use crate::PgStore;
+
+    // u64::MAX 溢出 i64 → Invariant（先于触 pool 返回，故 lazy pool 免 DB）。`#[tokio::test]`：sqlx 池构造需
+    // Tokio context。anti-vacuity 由集成测试 `t_dead_letter_sweep_*`（合法保留期走完整 DELETE 路径）配对。
+    #[tokio::test]
+    async fn sweep_rejects_oversized_retain_seconds() {
+        let opts = PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(5999)
+            .database("rss_test")
+            .username("u")
+            .password("p");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(opts);
+        let r = PgStore { pool }.dead_letter().sweep(u64::MAX).await;
+        assert!(
+            matches!(r, Err(e) if e.kind() == EngineErrorKind::Invariant),
+            "超 i64::MAX 的保留期必须 fail-closed 拒"
+        );
     }
 }
 

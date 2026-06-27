@@ -1,0 +1,11 @@
+-- 0021_add_dead_letter_sweep_index.sql — dead_letter 保留期清理索引（#1210）。
+--
+-- 覆盖 PgDeadLetterStore 的 sweep 谓词 `last_attempt_at <= now()-interval`（全域删除超保留期死信，膨胀控制）。
+-- 现有 idx_dead_letter_scan (domain, last_attempt_at) 以 domain 为前导列，不适合本全域（无 domain 过滤）sweep；
+-- 故新建专用单列索引。
+--
+-- 语义变更说明：0004_create_dead_letter.sql 注释「仅 INSERT（immutable append）；不执行 UPDATE / DELETE」自
+-- #1210 起被保留期策略取代——dead_letter 转为「保留期内不可变、超 DEAD_LETTER_RETENTION_SECONDS（默认 30 天）
+-- 清理」。0004 是已提交迁移（只增不改），故在此新迁移澄清；详见 adapters/postgres/src/dead_letter.rs 模块 doc。
+-- pre-GA 空表，普通 CREATE INDEX（migrations README §索引形态）。
+CREATE INDEX idx_dead_letter_sweep ON dead_letter (last_attempt_at);

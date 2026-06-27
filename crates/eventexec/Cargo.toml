@@ -18,7 +18,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，observability.md §日志）。
 tracing = { workspace = true }
-# outbox relay/sweeper 引擎接缝（OutboxSource/OutboxRelay/OutboxSweeper/Entry/Disposition）。
+# outbox relay/sweeper 引擎接缝（OutboxSource/OutboxRelay/RetentionSweeper/Entry/Disposition）。
 consistency = { path = "../consistency" }
 # command consumer 侧 typed decode（serde_json::from_slice::<R>）——runtime 职责归位 eventexec（#1124）；
 # producer 侧 command::emit_async 仍收已编码 Vec<u8>（编码在组合根 bridge），emit 路径不经 eventexec serde。

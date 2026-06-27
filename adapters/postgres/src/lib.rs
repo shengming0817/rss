@@ -45,7 +45,7 @@ pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, caps};
 pub use checkpoint::PgCheckpointStore;
 pub use config_repo::PgConfigRepo;
 pub use credential_repo::PgCredentialRepo;
-pub use dead_letter::PgDeadLetterStore;
+pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
 // NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
@@ -63,7 +63,7 @@ mod integration_tests;
 #[cfg(all(test, feature = "integration"))]
 mod test_pg;
 
-pub use inbox::PgInboxStore;
+pub use inbox::{INBOX_DEDUP_RETENTION_SECONDS, PgInboxStore, PgInboxSweeper};
 pub use pool::{PgConfig, PgError, PgPassword, PoolReadiness};
 // `pg_readiness_sampling_loop` 降 `pub(crate)`（经 `PgRuntimeDeps::spawn_readiness_sampler` 收口，#1423），
 // 不再 re-export；类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / bundle 返回类型）。

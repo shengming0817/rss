@@ -38,7 +38,7 @@ pub use idempotency::{
 };
 pub use outbox::{
     BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxRelay, OutboxSource,
-    OutboxSweeper, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind, Topic,
+    PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind, RetentionSweeper, Topic,
     TopicError,
 };
 pub use projection::{
@@ -56,7 +56,7 @@ mod static_dispatch_smoke {
     //! 方法体 todo!() 永不调用（无 `.await`），故无 panic 实际触发。
 
     use super::idempotency::IdempotencyStore;
-    use super::outbox::{OutboxBacklog, OutboxRelay, OutboxSource, OutboxSweeper};
+    use super::outbox::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use super::projection::{
         PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrderGuarantor,
     };
@@ -72,8 +72,8 @@ mod static_dispatch_smoke {
     fn _drives_relay<R: OutboxRelay>(_r: &R) {}
     #[allow(dead_code)] // reason: 同上，证 OutboxSource 读侧端口可泛型静态分发消费。
     fn _drives_source<S: OutboxSource>(_s: &S) {}
-    #[allow(dead_code)] // reason: 同上，证 OutboxSweeper 清理端口可泛型静态分发消费。
-    fn _drives_sweeper<S: OutboxSweeper>(_s: &S) {}
+    #[allow(dead_code)] // reason: 同上，证 RetentionSweeper 清理端口可泛型静态分发消费。
+    fn _drives_sweeper<S: RetentionSweeper>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上，证 OutboxBacklog 采样端口可泛型静态分发消费。
     fn _drives_backlog<B: OutboxBacklog>(_b: &B) {}
     #[allow(dead_code)] // reason: 同上。

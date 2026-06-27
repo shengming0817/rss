@@ -83,7 +83,22 @@ funnel，未校验 config 类型层不可表达）：
 | `sample_interval` | [1s, 60s] | 0 → 采样聚合查询热轮询；>60s → 5min SLO 窗口采样不足 |
 | `domains` | 1..=64 + canonical | 空 → relay 空转；过多/非法 → metrics label 基数失控 |
 | `sweep_interval` | ≥1s | 0 → DELETE 热轮询 |
-| `retain_seconds` | ≠0 | 0 → 删除 just-published 行 |
+| `retain_seconds` | ≠0（per-table 下限见下） | 0 → 删除 just-published 行；inbox_dedup 低于重投窗口 → 迟到重投误判 Fresh 重复执行 |
+
+## 保留期清理（三张 durable 表，#1210）
+
+同一泛化 `consistency::RetentionSweeper` / `sweeper_loop<S>` 驱动三张表的保留期清理（删除超期**已终结**行，
+防无界膨胀）；各表终结谓词 + 时间列 + 默认保留期 + 误配风险：
+
+| 表 | 终结谓词（删除目标） | 时间列 | 默认保留期 | 误配风险 |
+|----|---------------------|--------|-----------|----------|
+| `outbox` | `status='published'`（dlx 保留供巡检） | `created_at` | 组合根配置（无硬下限） | retain=0 → 删 just-published 行 |
+| `inbox_dedup` | `status='done'`（claimed 行不删） | `claimed_at` | **7 天**（`INBOX_DEDUP_RETENTION_SECONDS`） | **必须严格大于** outbox 最坏重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律）——低于/等于即迟到重投被误判 Fresh 重复执行；编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-DEDUP-RETENTION-FLOOR-01，单源谓词 `retention_meets_redelivery_floor`） |
+| `dead_letter` | 全部行（死信均终结） | `last_attempt_at` | **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向） | 过短 → 合规审计物料过早灭失（清理前冷存储导出见 #1536） |
+
+- 删除时间谓词均用 DB `now()`（不注入 Clock，多实例无跨进程偏移）；sweeper 日志带 `target_table` 区分清理目标（per-target readyz 名见 `SweeperWorker::adopt`）。
+- 三表 sweeper worker spawn + env/assembly 读保留期 + per-target readyz 探针注册 = Feature #1208 接线（见下）。
+- 无界 DELETE → post-GA 批量分页 / 分区见 #1539；inbox_dedup/dead_letter 多租户分租清理见 #1537；sweeper 删除条数 metrics 见 #1538。
 
 ## 接线（范围外，独立 issue）
 

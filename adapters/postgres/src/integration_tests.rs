@@ -299,7 +299,7 @@ async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
 
 use std::sync::{Arc, Mutex};
 
-use consistency::{Disposition, Entry, OutboxRelay, OutboxSource, OutboxSweeper, Topic};
+use consistency::{Disposition, Entry, OutboxRelay, OutboxSource, RetentionSweeper, Topic};
 use diport::{DynPublisher, PublishRequest, Publisher, PublisherError};
 
 use crate::outbox::{
@@ -1040,6 +1040,165 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
             .await?;
         assert_eq!(cnt.0, 1, "in-retention row must survive sweep: {eid}");
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── #1210 inbox_dedup 保留期清理：done 超期被删；claimed + 保留期内 done 存活（anti-vacuity）。──
+// sweep 是**全表** DELETE（无 group 过滤），故全局只断言「≥1」+ per-row event_id-scoped 精确断言（跨轮/并发稳健，同 t8）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult {
+    use consistency::LeaseOutcome;
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let grp = unique_domain("inbox-sweep-grp");
+    let inbox = store.inbox(ConsumerGroup::parse(&grp).unwrap());
+
+    // 回拨 claimed_at 过期的 helper（2h 前）。
+    async fn backdate(store: &PgStore, event_id: &str, grp: &str) -> TestResult {
+        sqlx::query(
+            "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
+             WHERE event_id = $2 AND consumer_group = $3",
+        )
+        .bind(7200i64)
+        .bind(event_id)
+        .bind(grp)
+        .execute(&store.pool)
+        .await?;
+        Ok(())
+    }
+
+    // 1) old done：claim → commit（done）→ 回拨过期。
+    let key_old = unique_event_id("inbox-sweep-old");
+    let k_old = IdemKey::parse(&key_old).unwrap();
+    let lease_old = LeaseToken::mint();
+    assert_eq!(
+        inbox.try_claim(&k_old, &lease_old).await.unwrap(),
+        SeenState::Fresh
+    );
+    assert_eq!(
+        inbox.commit(&k_old, &lease_old).await.unwrap(),
+        LeaseOutcome::Held
+    );
+    backdate(&store, &key_old, &grp).await?;
+
+    // 2) recent done（anti-vacuity）：claim → commit，不回拨。
+    let key_recent = unique_event_id("inbox-sweep-recent");
+    let k_recent = IdemKey::parse(&key_recent).unwrap();
+    let lease_recent = LeaseToken::mint();
+    assert_eq!(
+        inbox.try_claim(&k_recent, &lease_recent).await.unwrap(),
+        SeenState::Fresh
+    );
+    assert_eq!(
+        inbox.commit(&k_recent, &lease_recent).await.unwrap(),
+        LeaseOutcome::Held
+    );
+
+    // 3) claimed（anti-vacuity）：claim 但不 commit，回拨过期——sweep 只删 done，不删 claimed。
+    let key_claimed = unique_event_id("inbox-sweep-claimed");
+    let k_claimed = IdemKey::parse(&key_claimed).unwrap();
+    let lease_claimed = LeaseToken::mint();
+    assert_eq!(
+        inbox.try_claim(&k_claimed, &lease_claimed).await.unwrap(),
+        SeenState::Fresh
+    );
+    backdate(&store, &key_claimed, &grp).await?;
+
+    // sweep 保留期 1h：仅 old done（2h 前）被删。
+    let deleted = store.inbox_sweeper().sweep(3600).await?;
+    assert!(deleted >= 1, "至少删除老 done 行: deleted={deleted}");
+
+    let cnt = |event_id: String| {
+        let pool = store.pool.clone();
+        let grp = grp.clone();
+        async move {
+            let row: (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+            )
+            .bind(event_id)
+            .bind(grp)
+            .fetch_one(&pool)
+            .await?;
+            Ok::<i64, Box<dyn std::error::Error + Send + Sync>>(row.0)
+        }
+    };
+    assert_eq!(cnt(key_old).await?, 0, "超保留期 done 行必须被 sweep 删");
+    assert_eq!(cnt(key_recent).await?, 1, "保留期内 done 行不应被 sweep 删");
+    assert_eq!(
+        cnt(key_claimed).await?,
+        1,
+        "claimed 行（非 done）不应被 sweep 删"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── #1210 dead_letter 保留期清理：超期死信被删；保留期内死信存活（anti-vacuity）。──
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
+    use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterSummary};
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let dl = store.dead_letter();
+    let domain = unique_domain("dl-sweep");
+
+    // old 死信：写入 → 回拨 last_attempt_at 过期（2h 前）。
+    dl.write_dead_letter(DeadLetterRecord::new(
+        domain.as_str(),
+        "contract-x",
+        "dl.old",
+        b"payload".to_vec(),
+        DeadLetterSummary::new("aged dead letter"),
+        10,
+    ))
+    .await?;
+    sqlx::query(
+        "UPDATE dead_letter SET last_attempt_at = now() - make_interval(secs => $1) \
+         WHERE domain = $2 AND topic = $3",
+    )
+    .bind(7200i64)
+    .bind(&domain)
+    .bind("dl.old")
+    .execute(&store.pool)
+    .await?;
+
+    // recent 死信（anti-vacuity）：写入，不回拨。
+    dl.write_dead_letter(DeadLetterRecord::new(
+        domain.as_str(),
+        "contract-x",
+        "dl.recent",
+        b"payload".to_vec(),
+        DeadLetterSummary::new("recent dead letter"),
+        10,
+    ))
+    .await?;
+
+    // sweep 保留期 1h：仅 old（2h 前）被删。
+    let deleted = dl.sweep(3600).await?;
+    assert!(deleted >= 1, "至少删除老死信: deleted={deleted}");
+
+    let cnt_old: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM dead_letter WHERE domain = $1 AND topic = $2")
+            .bind(&domain)
+            .bind("dl.old")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cnt_old.0, 0, "超保留期死信必须被 sweep 删");
+
+    let cnt_recent: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM dead_letter WHERE domain = $1 AND topic = $2")
+            .bind(&domain)
+            .bind("dl.recent")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cnt_recent.0, 1, "保留期内死信不应被 sweep 删");
 
     store.shutdown().await?;
     Ok(())

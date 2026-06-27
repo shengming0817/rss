@@ -756,8 +756,8 @@ pub trait consistency::outbox::OutboxRelay
 pub async fn consistency::outbox::OutboxRelay::relay(&self, &consistency::outbox::Entry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
 pub trait consistency::outbox::OutboxSource
 pub async fn consistency::outbox::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::Entry>, consistency::error::EngineError>
-pub trait consistency::outbox::OutboxSweeper
-pub async fn consistency::outbox::OutboxSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
+pub trait consistency::outbox::RetentionSweeper
+pub async fn consistency::outbox::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub mod consistency::projection
 pub struct consistency::projection::Lsn(_)
 impl consistency::projection::Lsn
@@ -2486,8 +2486,6 @@ pub trait consistency::OutboxRelay
 pub async fn consistency::OutboxRelay::relay(&self, &consistency::outbox::Entry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
 pub trait consistency::OutboxSource
 pub async fn consistency::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::Entry>, consistency::error::EngineError>
-pub trait consistency::OutboxSweeper
-pub async fn consistency::OutboxSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub trait consistency::PartitionSerialDelivery
 pub trait consistency::ProjectionEvent
 pub fn consistency::ProjectionEvent::lsn(&self) -> consistency::projection::Lsn
@@ -2497,6 +2495,8 @@ pub trait consistency::Projector
 pub async fn consistency::Projector::apply<E: consistency::projection::ProjectionEvent>(&self, &E) -> core::result::Result<(), consistency::error::EngineError>
 pub trait consistency::Reconciler
 pub async fn consistency::Reconciler::reconcile(&self, &consistency::reconcile::Context, consistency::reconcile::Request) -> core::result::Result<consistency::reconcile::Outcome, consistency::reconcile::ReconcileError>
+pub trait consistency::RetentionSweeper
+pub async fn consistency::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub trait consistency::SagaStep
 pub async fn consistency::SagaStep::compensate(&self) -> core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>
 pub async fn consistency::SagaStep::execute(&self) -> core::result::Result<consistency::saga::SagaOutcome, consistency::error::EngineError>

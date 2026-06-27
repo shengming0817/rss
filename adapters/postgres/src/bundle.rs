@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo,
-    PgDbReadiness, PgDeadLetterStore, PgEmitter, PgError, PgInboxStore, PgOutbox,
+    PgDbReadiness, PgDeadLetterStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper, PgOutbox,
     PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo, PgSagaJournal,
     PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
 };
@@ -337,10 +337,20 @@ impl PgInfraDeps {
         PgEmitter::new(&self.store, clock)
     }
 
-    /// dead-letter store（DLX 终态）。
+    /// dead-letter store（DLX 终态）。同时 impl `consistency::RetentionSweeper`——组合根可经此句柄取死信
+    /// 保留期 sweeper（`DEAD_LETTER_RETENTION_SECONDS` 默认 30 天，#1210）。
     #[must_use]
     pub fn dead_letter(&self) -> PgDeadLetterStore {
         self.store.dead_letter()
+    }
+
+    /// inbox_dedup 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
+    ///
+    /// impl `consistency::RetentionSweeper`——删除超 `INBOX_DEDUP_RETENTION_SECONDS`（默认 7 天）的 `done`
+    /// 去重记录。全域语义 ⇒ 归 framework/global infra 句柄（非 per-domain `PgDomainDeps`）。
+    #[must_use]
+    pub fn inbox_sweeper(&self) -> PgInboxSweeper {
+        self.store.inbox_sweeper()
     }
 
     /// owner checkpoint store（reconcile/saga 进度）。
@@ -489,6 +499,7 @@ mod tests {
         let infra = deps().infra();
         let _ = infra.emitter(Box::new(EpochClock));
         let _ = infra.dead_letter();
+        let _ = infra.inbox_sweeper();
         let _ = infra.checkpoint();
         let _ = infra.saga_journal();
         let _ = infra.projection_events();

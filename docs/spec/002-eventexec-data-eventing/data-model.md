@@ -54,6 +54,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | claimed_at | timestamptz | |
 
 - PK: `(event_id, consumer_group)`。claim = INSERT ON CONFLICT DO NOTHING → 首见 Fresh，冲突 Duplicate。
+- 保留期清理（#1210）：`PgInboxSweeper` 删 `status='done' AND claimed_at ≤ now()-retain` 的去重记录（`claimed` 行不删）；默认 **7 天**（`INBOX_DEDUP_RETENTION_SECONDS`），**必须严格大于**最大重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律——低于/等于即迟到重投误判 Fresh 重复执行），编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-DEDUP-RETENTION-FLOOR-01）。清理索引 `(status, claimed_at)`（migration 0020）。完整三表保留期契约见 `docs/ops/…-outbox-relay-observability.md §保留期清理`。
 - Redis 等价：按 observability.md §Redis Namespace 当前登记的 outbox 消费幂等 claimer key `_runtime:{eventID}:lease|done` 扩 consumer-group 维度为 `_runtime:{eventID}:{group}:lease|done`。**该扩展格式须由 T005 在 observability.md §Redis Namespace 登记**（与既有 `_runtime:{eventID}` 形态结构性互斥），否则违反「新增 `_runtime` shared-infra 原语必须登记」规则。EventId 全局唯一（UUID）保证跨租户不冲突；key 不加 tenant 段属显式决策（见 spec.md §Assumptions 租户隔离立场）。
 
 ### dead_letter（P7）
@@ -65,6 +66,8 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | error_summary | text | 安全摘要（经 `secure` redaction + 长度截断约 512 chars，不直接写 handler 的 Display/Debug 原文、不含原始 payload 片段；runtime 数据只经 `with_internal` 进服务端 tracing） |
 | num_attempts | int | |
 | first_attempt_at/last_attempt_at | timestamptz | |
+
+- 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——约定 append-only（非 REVOKE 强制，DB 层允许保留期 DELETE）；清理前冷存储导出（合规归档）见 #1536。
 
 ### saga_journal（P9）
 | 列 | 类型 | 说明 |

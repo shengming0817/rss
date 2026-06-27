@@ -2,7 +2,7 @@
 //!
 //! # 设计摘要
 //!
-//! `consistency` 的三个 AFIT trait（`OutboxSource`/`OutboxRelay`/`OutboxSweeper`）是 native AFIT、
+//! `consistency` 的三个 AFIT trait（`OutboxSource`/`OutboxRelay`/`RetentionSweeper`）是 native AFIT、
 //! **无 Send 变体**。`tokio::spawn` 要求 future Send，而泛型 `<A: OutboxSource>` 下 `A::poll_pending(..)`
 //! 的 future 在 stable Rust 上无法证明 Send（RTN 未稳定）。因此：
 //! - 泛型 `relay_loop` / `sweeper_loop`：纯 loop 体，**不 spawn**——泛型 async fn 不要求 Send，能编过。
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use consistency::{Disposition, Entry, OutboxBacklog, OutboxRelay, OutboxSource, OutboxSweeper};
+use consistency::{Disposition, Entry, OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
 use primitives::healthz::HealthStatus;
 use vocab::DomainName;
 
@@ -38,7 +38,9 @@ pub const OUTBOX_SAMPLER_PROBE: &str = "outbox_sampler";
 
 // worker 名常量（≥3 处使用抽 const）
 const RELAY_WORKER_NAME: &str = "outbox-relay";
-const SWEEPER_WORKER_NAME: &str = "outbox-sweeper";
+/// outbox 保留期 sweeper 的 readyz worker 名（per-target sweeper 默认名；组合根 #1208 可对 inbox_dedup /
+/// dead_letter 传各自名，#327 review F2）。`pub`：[`SweeperWorker::adopt`] 的 `name` 参数由组合根/测试传入。
+pub const SWEEPER_WORKER_NAME: &str = "outbox-sweeper";
 const SAMPLER_WORKER_NAME: &str = "outbox-sampler";
 
 /// worker 关闭超时：重 I/O drain，覆盖默认 30s（relay/sweeper 同值）。
@@ -306,50 +308,63 @@ fn log_polled(domain: &str, polled: usize) {
 
 // ── sweeper_loop（泛型，不 spawn）────────────────────────────────────────────
 
-/// Outbox sweeper 驱动循环（泛型，**不** spawn；spawn 在具体类型 call site）。
+/// 保留期 sweeper 驱动循环（泛型，**不** spawn；spawn 在具体类型 call site）。
 ///
-/// 每轮 tick 调 `store.sweep(config.retain_seconds())`，删除超保留期已投递行。`config` 经
+/// 每轮 tick 调 `store.sweep(config.retain_seconds())`，删除超保留期已终结行。`config` 经
 /// [`SweeperConfig`] funnel 已校验（`sweep_interval`≠0、`retain_seconds`≠0，SWEEPER-CONFIG-01）。
 /// 取消/错误处理与 `relay_loop` 同骨架。
+///
+/// 泛型 `S: RetentionSweeper` ⇒ 可驱动任一 durable 表的保留清理（outbox / inbox_dedup / dead_letter）；
+/// 各表的终结谓词 + 时间列由对应 adapter impl 决定，本 loop 只负责 tick 调度与健康/取消骨架。
+///
+/// `target`（低基数 `&'static str`，如 `outbox` / `inbox_dedup` / `dead_letter`）= 本 loop 驱动的清理目标——
+/// 泛型 store 自身无表身份，故由 spawn 端显式传入并写入每轮成功/失败日志，使多表 sweeper 的日志可归因（#327
+/// review F2）。worker 身份见 [`SweeperWorker::adopt`] 的 `name` 参数（per-target readyz 命名）。
 pub async fn sweeper_loop<S>(
     store: Arc<S>,
     config: SweeperConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
+    target: &'static str,
 ) where
-    S: OutboxSweeper,
+    S: RetentionSweeper,
 {
     let mut ticker = tokio::time::interval(config.sweep_interval());
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
-            _ = ticker.tick() => sweeper_tick(&store, config.retain_seconds(), &health).await,
+            _ = ticker.tick() => sweeper_tick(&store, config.retain_seconds(), &health, target).await,
         }
     }
     health.mark_stopped();
 }
 
-/// sweeper 单轮 tick（抽出控制认知复杂度 ≤15）。
-async fn sweeper_tick<S>(store: &Arc<S>, retain_seconds: u64, health: &Arc<WorkerHealth>)
-where
-    S: OutboxSweeper,
+/// sweeper 单轮 tick（抽出控制认知复杂度 ≤15）。`target` 写入日志使清理目标可归因。
+async fn sweeper_tick<S>(
+    store: &Arc<S>,
+    retain_seconds: u64,
+    health: &Arc<WorkerHealth>,
+    target: &'static str,
+) where
+    S: RetentionSweeper,
 {
     match store.sweep(retain_seconds).await {
         Ok(deleted) => {
-            tracing::debug!(deleted, "sweeper: tick completed");
+            tracing::debug!(target_table = target, deleted, "sweeper: tick completed");
             health.mark_healthy(); // 干净一轮 → 恢复 Healthy（F5：瞬态故障自愈，非单向 latch）。
         }
         Err(e) => {
-            log_sweep_failed(&e);
+            log_sweep_failed(target, &e);
             health.mark_degraded();
         }
     }
 }
 
-/// sweep 失败：标记 worker degraded 前结构化记录（抽出 tracing 宏展开）。
-fn log_sweep_failed(e: &impl std::fmt::Display) {
+/// sweep 失败：标记 worker degraded 前结构化记录（抽出 tracing 宏展开）。`target` 标识清理目标表。
+fn log_sweep_failed(target: &'static str, e: &impl std::fmt::Display) {
     tracing::warn!(
+        target_table = target,
         error = %e,
         "sweeper: sweep failed, marking worker degraded; backing off to next tick"
     );
@@ -526,13 +541,58 @@ adopt_worker!(
     RelayWorker => RELAY_WORKER_NAME
 );
 adopt_worker!(
-    /// Outbox sweeper 后台 worker（结构与 [`RelayWorker`] 同构）。
-    SweeperWorker => SWEEPER_WORKER_NAME
-);
-adopt_worker!(
     /// Outbox backlog 采样后台 worker（结构与 [`RelayWorker`] 同构）。
     SamplerWorker => SAMPLER_WORKER_NAME
 );
+
+/// 保留期 sweeper 后台 worker（结构与 [`RelayWorker`] 同构，但 **readyz name 运行期携带**）。
+///
+/// 同一泛化 `sweeper_loop` 可服务多张 durable 表（outbox / inbox_dedup / dead_letter），故 worker 身份不再是
+/// 编译期常量——由 [`SweeperWorker::adopt`] 的 `name` 参数（per-target，如 [`SWEEPER_WORKER_NAME`]）决定，使
+/// readyz 聚合能区分各表 sweeper（#327 review F2）。adopt 式：先在具体类型处 `tokio::spawn(sweeper_loop::<S>(..))` 再 `adopt`。
+pub struct SweeperWorker {
+    inner: AdoptedWorker,
+    name: &'static str,
+}
+
+impl SweeperWorker {
+    /// 组合根/测试：先 spawn `sweeper_loop`(具体类型)，再 adopt JoinHandle + 同一 health/token + per-target `name`
+    /// （readyz 命名，如 `outbox-sweeper` / `inbox-dedup-sweeper` / `dead-letter-sweeper`）。
+    pub fn adopt(
+        name: &'static str,
+        handle: JoinHandle<()>,
+        health: Arc<WorkerHealth>,
+        token: CancellationToken,
+    ) -> Self {
+        Self {
+            inner: AdoptedWorker::adopt(handle, health, token),
+            name,
+        }
+    }
+
+    /// 读 worker health（readyz 聚合用）。
+    pub fn health(&self) -> Arc<WorkerHealth> {
+        self.inner.health()
+    }
+}
+
+// reason(rss_diport_impl_allowlist): 同 adopt_worker! 宏——sweeper 后台 worker 归属 eventexec 服务层并 impl
+// `ManagedResource`（经组合根 ShutdownStack 注入两阶段关闭）；worker 持 loop spawn 的 JoinHandle、是引擎驱动产物
+// 而非 adapter provider，不迁 adapter。allowlist 外 item-level 例外（DIPORT-IMPL-ALLOWLIST-01 逃生门，根治见 #1153）。
+#[allow(unknown_lints, rss_diport_impl_allowlist)]
+impl diport::ManagedResource for SweeperWorker {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn shutdown_timeout(&self) -> Duration {
+        WORKER_SHUTDOWN_TIMEOUT
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        self.inner.shutdown().await
+    }
+}
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
@@ -543,14 +603,14 @@ mod tests {
     use std::time::Duration;
 
     use consistency::outbox::{BacklogSample, Disposition, Entry, Topic};
-    use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, OutboxSweeper};
+    use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use diport::ManagedResource;
     use primitives::healthz::{HealthStatus, ProbeName};
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, SamplerWorker,
-        SweeperWorker, WorkerHealth, backlog_sampler_loop, sweeper_loop,
+        OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
+        SamplerWorker, SweeperWorker, WorkerHealth, backlog_sampler_loop, sweeper_loop,
     };
     use crate::relay::{RelayWorker, relay_loop};
     use crate::relay_config::{RelayConfig, SweeperConfig};
@@ -808,7 +868,7 @@ mod tests {
         }
     }
 
-    /// Fake sweeper：impl OutboxSweeper，计数调用并按策略返结果。
+    /// Fake sweeper：impl RetentionSweeper，计数调用并按策略返结果。
     struct FakeSweeper {
         sweep_count: AtomicUsize,
         sweep_err: Option<consistency::error::EngineErrorKind>,
@@ -836,7 +896,7 @@ mod tests {
         }
     }
 
-    impl OutboxSweeper for FakeSweeper {
+    impl RetentionSweeper for FakeSweeper {
         async fn sweep(
             &self,
             _retain_seconds: u64,
@@ -946,9 +1006,11 @@ mod tests {
             sweeper_config(86400, Duration::from_secs(60)),
             token.clone(),
             health.clone(),
+            "outbox",
         ));
 
-        let worker = SweeperWorker::adopt(handle, health.clone(), token.clone());
+        let worker =
+            SweeperWorker::adopt(SWEEPER_WORKER_NAME, handle, health.clone(), token.clone());
 
         assert_eq!(
             worker.shutdown_timeout(),
@@ -1194,6 +1256,7 @@ mod tests {
             sweeper_config(86400, Duration::from_secs(1)),
             token.clone(),
             health.clone(),
+            "outbox",
         ));
 
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
@@ -1287,20 +1350,32 @@ mod tests {
         let _ = worker.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
     }
 
+    // #327 review F2：SweeperWorker readyz name 运行期 per-target——adopt 传入名即 `name()` 返回名，使多表
+    // sweeper 身份可区分（不再硬编码 outbox）。同时覆盖默认常量 SWEEPER_WORKER_NAME 与自定义 inbox 名两路。
     #[tokio::test]
-    async fn sweeper_worker_name_is_outbox_sweeper() {
-        let sweeper = FakeSweeper::new();
-        let health = Arc::new(WorkerHealth::healthy());
-        let token = CancellationToken::new();
-        let handle = tokio::spawn(sweeper_loop(
-            sweeper,
-            sweeper_config(86400, Duration::from_secs(60)),
-            token.clone(),
-            health.clone(),
-        ));
-        let worker = SweeperWorker::adopt(handle, health, token);
-        assert_eq!(worker.name(), "outbox-sweeper");
-        let _ = worker.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
+    async fn sweeper_worker_name_is_per_target() {
+        async fn adopt_named(name: &'static str) -> SweeperWorker {
+            let health = Arc::new(WorkerHealth::healthy());
+            let token = CancellationToken::new();
+            let handle = tokio::spawn(sweeper_loop(
+                FakeSweeper::new(),
+                sweeper_config(86400, Duration::from_secs(60)),
+                token.clone(),
+                health.clone(),
+                name,
+            ));
+            SweeperWorker::adopt(name, handle, health, token)
+        }
+        let outbox = adopt_named(SWEEPER_WORKER_NAME).await;
+        assert_eq!(outbox.name(), "outbox-sweeper", "默认常量 = outbox-sweeper");
+        let inbox = adopt_named("inbox-dedup-sweeper").await;
+        assert_eq!(
+            inbox.name(),
+            "inbox-dedup-sweeper",
+            "per-target：adopt 传入名即 readyz name"
+        );
+        let _ = outbox.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
+        let _ = inbox.shutdown().await;
     }
 
     // ── #1209 sampler worker name ────────────────────────────────────────────

@@ -26,7 +26,8 @@
 //! ref: serverlesstechnology/cqrs（postgres persistence 幂等消费，INSERT ON CONFLICT 范式）。
 
 use consistency::{
-    EngineError, EngineErrorKind, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
+    EngineError, EngineErrorKind, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
+    RetentionSweeper, SeenState,
 };
 use sqlx::PgPool;
 
@@ -36,6 +37,49 @@ use crate::PgStore;
 ///
 /// `pub` 暴露供组合根读取——不应被业务代码直接使用；通过 [`PgInboxStore::lease_ttl`] 取类型化值。
 pub const INBOX_LEASE_TTL_SECONDS: i64 = 60;
+
+/// `inbox_dedup` 的 `done` 去重记录保留期（秒，默认 7 天）。超期由 [`PgInboxSweeper`] 清理（膨胀控制，#1210）。
+///
+/// **NServiceBus 去重铁律**：保留期必须 > 最大重投窗口，否则迟到重投（broker / outbox relay 重发）落到
+/// 已被清理的去重表上会被误判 [`SeenState::Fresh`]、重复执行。下方 `const` 断言把该铁律上移到编译期。
+///
+/// `pub` 暴露供组合根读取构造 `eventexec::SweeperConfig`；不应被业务代码直接使用。
+pub const INBOX_DEDUP_RETENTION_SECONDS: u64 = 7 * 24 * 3600;
+
+/// 去重保留期是否满足 NServiceBus 下限——**严格大于** outbox 最坏重投窗口
+/// （[`crate::outbox::max_redelivery_window_secs`]）。
+///
+/// **单源谓词**（#327 review F1）：编译期 `const` 断言、运行期 [`PgInboxSweeper::sweep`] fail-closed guard、
+/// 单测三处共用此一函数表达「严格大于」，杜绝比较符（`>` vs `<`/`<=`）在三处漂移——等值 `retain == window`
+/// 在三处一致被拒（边界相等时迟到重投可能恰好落在窗口外沿，不安全）。`const fn` ⇒ 可在 `const { assert!() }` 求值。
+const fn retention_meets_redelivery_floor(retain_seconds: u64) -> bool {
+    retain_seconds > crate::outbox::max_redelivery_window_secs() as u64
+}
+
+/// # INVARIANT: INBOX-DEDUP-RETENTION-FLOOR-01
+///
+/// 两档守卫（NServiceBus 去重铁律：去重保留期必须 **严格大于** 最大重投窗口）共用单源谓词
+/// [`retention_meets_redelivery_floor`]（杜绝比较符漂移）：
+/// - **第一档（Hard，编译期）**：下方 `const { assert!() }` 锁住**默认常量** [`INBOX_DEDUP_RETENTION_SECONDS`]
+///   过谓词且 ≥ 1 天绝对下限；违反即**编译失败**（非运行期治理测试）。
+/// - **第二档（Medium，运行期 fail-closed）**：[`PgInboxSweeper::sweep`] 入口对**任意** caller 传入的
+///   `retain_seconds` 过同一谓词，不过即返 `Invariant`、不删（堵住 #1208 组合根传非默认值绕过编译期常量的盲区）。
+const _: () = {
+    assert!(
+        retention_meets_redelivery_floor(INBOX_DEDUP_RETENTION_SECONDS),
+        "inbox_dedup 去重保留期必须 > outbox 最坏重投窗口（NServiceBus 去重铁律）"
+    );
+    // 绝对下限：即便 outbox 窗口极小，去重保留期也不应短于 1 天（容纳 broker 侧重投 / 消费者重试余量）。
+    assert!(
+        INBOX_DEDUP_RETENTION_SECONDS >= 24 * 3600,
+        "inbox_dedup 去重保留期绝对下限 ≥ 1 天"
+    );
+    // anti-vacuity：重投窗口求值 > 0（杜绝「窗口恒 0 ⇒ 上界断言真空恒真」）。
+    assert!(
+        crate::outbox::max_redelivery_window_secs() > 0,
+        "重投窗口求值必须为正（anti-vacuity）"
+    );
+};
 
 /// postgres inbox_dedup 幂等去重 store（claim-or-reclaim-or-skip + 租约 CAS + TTL 重捞，#1213）。
 ///
@@ -64,6 +108,62 @@ impl PgInboxStore {
     /// 同源（杜绝 mismatch footgun，#1213 review #3）。
     pub fn lease_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(INBOX_LEASE_TTL_SECONDS as u64)
+    }
+}
+
+/// postgres `inbox_dedup` 保留期清理 sweeper（**全域**，与 consumer_group 无关，#1210）。
+///
+/// 去重写路径 [`PgInboxStore`] 按 `consumer_group` 绑定，但保留清理是跨所有组的全表操作——故独立类型
+/// 持裸 `pool`（避免「sweep 只影响本组」的语义陷阱）。经 [`PgStore::inbox_sweeper`] 构造。
+pub struct PgInboxSweeper {
+    pool: PgPool,
+}
+
+impl PgStore {
+    /// 构造全域 [`PgInboxSweeper`]（pool clone 自 `PgStore`，轻量）。
+    ///
+    /// `pub(crate)`（PG-BUNDLE-FUNNEL-01）：经组合根 bundle 收口注入保留期 sweeper worker。
+    pub(crate) fn inbox_sweeper(&self) -> PgInboxSweeper {
+        PgInboxSweeper {
+            pool: self.pool.clone(),
+        }
+    }
+}
+
+impl RetentionSweeper for PgInboxSweeper {
+    /// 删除 `status='done'` 且 `claimed_at` 早于保留期的去重记录，返回删除条数。
+    /// `claimed` 行（活跃 claim / 进行中）不删；保留期内的 `done` 行不删。
+    ///
+    /// 时间谓词用 PostgreSQL `now()`（DB 事务时间），刻意不注入 `Clock`——多实例并发下需单一无偏移时间源
+    /// （同本文件顶注既定理由）。`claimed_at` 是 done 行唯一时间锚（`commit` 只 `SET status='done'`、不刷新
+    /// `claimed_at`，故保留期实际从「最后 claim 时刻」起算，较「done 时刻」略保守、可忽略）。
+    async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
+        // NServiceBus 去重铁律的**运行期 fail-closed 下限**（INBOX-DEDUP-RETENTION-FLOOR-01 第二档）：编译期
+        // `const { assert!() }` 只锁默认常量；此处对**任意** caller 传入的 retain_seconds 过**同一单源谓词**
+        // [`retention_meets_redelivery_floor`]（严格大于，等值亦拒），不过即拒、不删（degraded 而非静默过度清理），
+        // 堵住 #1208 组合根误配绕过编译期常量的盲区。不满足下限时迟到重投会落到已清理去重表、被误判 Fresh 重复执行。
+        if !retention_meets_redelivery_floor(retain_seconds) {
+            return Err(EngineError::new(EngineErrorKind::Invariant));
+        }
+        // u64→i64：超 i64::MAX 的保留期是非法输入（负 interval 会反向清空全表），fail-closed。
+        let secs = i64::try_from(retain_seconds)
+            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM inbox_dedup
+            WHERE status = 'done'
+              AND claimed_at <= now() - make_interval(secs => $1)
+            "#,
+        )
+        .bind(secs)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "inbox: sweep db error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
+
+        Ok(result.rows_affected())
     }
 }
 
@@ -190,6 +290,73 @@ impl IdempotencyStore for PgInboxStore {
             EngineError::new(EngineErrorKind::Transient)
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sweep_smoke {
+    //! `PgInboxSweeper: RetentionSweeper` 编译期冻结 + sweep 入口 fail-closed 守卫单测（免 PG，#327 review F1/F4）。
+    //! INVARIANT: ADAPTER-PORT-FREEZE-08 —— RetentionSweeper on PgInboxSweeper；去掉 impl 即编译失败（anti-vacuity）。
+    use core::marker::PhantomData;
+
+    use consistency::{EngineErrorKind, RetentionSweeper};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    use super::PgInboxSweeper;
+    use crate::PgStore;
+
+    fn assert_retention_sweeper<T: RetentionSweeper>(_: PhantomData<T>) {}
+
+    #[test]
+    fn pg_inbox_sweeper_impl_frozen() {
+        assert_retention_sweeper(PhantomData::<PgInboxSweeper>);
+    }
+
+    /// lazy pool（`connect_lazy_with`，不发真实连接）——两条 fail-closed 守卫均在**触 pool 前**返回，故免 DB。
+    fn lazy_sweeper() -> PgInboxSweeper {
+        let opts = PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(5999)
+            .database("rss_test")
+            .username("u")
+            .password("p");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(opts);
+        PgStore { pool }.inbox_sweeper()
+    }
+
+    // INBOX-DEDUP-RETENTION-FLOOR-01 第二档（运行期 fail-closed，#327 review F1）：retain_seconds < 重投窗口
+    // （1023s）即拒、不触 DELETE。`#[tokio::test]`：sqlx 池构造需 Tokio context（同 bundle smoke 范式）。
+    #[tokio::test]
+    async fn sweep_rejects_retain_below_redelivery_floor() {
+        let r = lazy_sweeper().sweep(100).await;
+        assert!(
+            matches!(r, Err(e) if e.kind() == EngineErrorKind::Invariant),
+            "保留期低于重投窗口必须 fail-closed 拒"
+        );
+    }
+
+    // **等值边界**（#327 review F1 漂移核心）：retain_seconds == 重投窗口 必须**也**被拒——单源谓词是「严格大于」，
+    // 故等值不满足。守 const 断言（`>`）与运行期 guard 同号，杜绝 `<` 把等值放行的旧漂移复现。
+    #[tokio::test]
+    async fn sweep_rejects_retain_equal_to_redelivery_floor() {
+        let window = crate::outbox::max_redelivery_window_secs() as u64;
+        let r = lazy_sweeper().sweep(window).await;
+        assert!(
+            matches!(r, Err(e) if e.kind() == EngineErrorKind::Invariant),
+            "保留期等于重投窗口必须 fail-closed 拒（严格大于，等值不安全）"
+        );
+    }
+
+    // u64→i64 溢出 fail-closed（#327 review F4）：u64::MAX 越过 floor 但溢出 i64 → Invariant（先于触 pool）。
+    #[tokio::test]
+    async fn sweep_rejects_oversized_retain_seconds() {
+        let r = lazy_sweeper().sweep(u64::MAX).await;
+        assert!(
+            matches!(r, Err(e) if e.kind() == EngineErrorKind::Invariant),
+            "超 i64::MAX 的保留期必须 fail-closed 拒"
+        );
     }
 }
 
