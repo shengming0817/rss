@@ -41,7 +41,7 @@ services:
       - "127.0.0.1:8080:8080" # Primary（业务 API；scaffold 期无路由）
       - "127.0.0.1:8081:8081" # Internal（服务间控制面）
       - "127.0.0.1:8082:8082" # Admin（管理面：audit route，按 Admin listener 鉴权）
-      - "127.0.0.1:8083:8083" # Health（healthz / readyz）
+      - "127.0.0.1:8083:8083" # Health（healthz / readyz / metrics）— 匿名 NoAuth 面，loopback-only 落实内部网络边界（#1253）
     # ── 运行时加固：非 root + 只读 rootfs + 丢能力（证明 acceptance「read-only rootfs compatible」）──
     user: "65532:65532" # distroless:nonroot 内置 uid；显式声明便于审计。
     read_only: true # 只读根文件系统；server 不写盘（日志走 stdout，TLS 走 rustls 无磁盘状态）。

@@ -4,6 +4,6 @@
 //! 勿误删其一——两个 binary 的差异在进程名，不在代码逻辑。
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    runtime::init_tracing();
-    runtime::run().await
+    let trace_export = runtime::init_tracing()?;
+    runtime::run(trace_export).await
 }

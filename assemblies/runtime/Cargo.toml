@@ -55,9 +55,14 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sig
 tokio-util = { workspace = true }
 # HTTP 传输 adapter：HttpServer bind + axum::serve + ManagedResource（经 ShutdownStack 托管）。
 httpd = { path = "../../adapters/httpd" }
-# 生产 tracing subscriber（init_tracing：fmt + RUST_LOG env filter）——否则运行时入口日志全 no-op。
-# 同时供 dev e2e 捕获 tracing 输出断言（auth_e2e 埋点）。
+# 生产 tracing subscriber（init_tracing：fmt + RUST_LOG env filter + 可选 otel 桥接 Layer）——否则运行时入口日志全 no-op。
+# 同时供 dev e2e 捕获 tracing 输出断言（auth_e2e 埋点）。registry()/fmt::layer() 经默认 fmt feature（fmt→registry）可用。
 tracing-subscriber = { workspace = true }
+# 可观测性导出 adapter（#1253 Join 接线）：otel = OTLP/gRPC trace 导出 + tracing 桥接 Layer；
+# prometheus-adapter（[lib] name = "prometheus"）= 进程级 metrics recorder + /metrics exposition 渲染。
+# 二者 backend feature 引真实后端（feature-off 为空壳，组合根需真身故启 backend）。
+otel = { path = "../../adapters/otel", features = ["backend"] }
+prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"] }
 
 [features]
 # 需要真实 postgres 的集成测试（无 docker 时只需能编译；不运行），经 testkit/containers 激活 testcontainers。

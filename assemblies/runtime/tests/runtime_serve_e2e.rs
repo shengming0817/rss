@@ -17,6 +17,9 @@ use diport::ManagedResource as _;
 use httpd::HttpServer;
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 
+mod common;
+use common::{FixedMetrics, noop_metrics};
+
 /// 健康探针替身（Healthy）。
 struct HealthyProbe;
 impl bootstrap::HealthProbe for HealthyProbe {
@@ -42,7 +45,8 @@ async fn serve_health(with_healthy_probe: bool) -> HttpServer {
         .expect("register probe");
     }
     let reporter = Arc::new(reg.take_health_reporter());
-    let (_listener, authed) = runtime::health_listener(reporter).expect("health listener");
+    let (_listener, authed) =
+        runtime::health_listener(reporter, noop_metrics()).expect("health listener");
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
     HttpServer::serve("http-health", addr, authed.into_make_service())
         .await
@@ -88,6 +92,45 @@ async fn health_listener_serves_over_real_socket_then_graceful_shutdown() {
     assert!(after.is_err(), "优雅关停后 socket 已释放，后续请求应失败");
 }
 
+/// `/metrics` 经真实 socket 渲染 Prometheus exposition（200 + content-type + body 含指标名）——
+/// 验证组合根把注入的 `Arc<dyn MetricsExporter>` 接到 Health listener 的 `/health/v1/metrics` 路由。
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn metrics_endpoint_renders_exposition_over_real_socket() {
+    let mut reg = bootstrap::compose(&[]).expect("compose");
+    let reporter = Arc::new(reg.take_health_reporter());
+    // 固定 exposition 替身（含已知指标名），验证 render 出口接到了 /metrics 路由。
+    let exporter: Arc<dyn diport::MetricsExporter> = Arc::new(FixedMetrics("rss_e2e_total 7\n"));
+    let (_listener, authed) =
+        runtime::health_listener(reporter, exporter).expect("health listener");
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+    let server = HttpServer::serve("http-health", addr, authed.into_make_service())
+        .await
+        .expect("bind + serve real socket");
+    let local = server.local_addr();
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{local}/health/v1/metrics"))
+        .send()
+        .await
+        .expect("metrics request over real socket");
+    assert_eq!(resp.status().as_u16(), 200, "/metrics → 200");
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/plain; version=0.0.4; charset=utf-8"),
+        "/metrics content-type 为 Prometheus exposition media type"
+    );
+    let body = resp.text().await.expect("metrics body");
+    assert!(
+        body.contains("rss_e2e_total"),
+        "exposition body 应含注入替身的指标名: {body}"
+    );
+
+    server.shutdown().await.expect("graceful shutdown clean");
+}
+
 /// 空探针集 → readyz 503（fail-closed）跨真实 socket 生效。
 #[tokio::test]
 #[allow(clippy::expect_used)]
@@ -126,7 +169,8 @@ async fn serve_via_shutdownstack_funnel_path() {
     )
     .expect("register probe");
     let reporter = Arc::new(reg.take_health_reporter());
-    let (_listener, authed) = runtime::health_listener(reporter).expect("health listener");
+    let (_listener, authed) =
+        runtime::health_listener(reporter, noop_metrics()).expect("health listener");
     let svc = authed.into_make_service();
 
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");

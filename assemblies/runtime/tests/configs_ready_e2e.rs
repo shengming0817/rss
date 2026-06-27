@@ -28,6 +28,9 @@ use tower::ServiceExt as _;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+// `/metrics` 渲染替身共享自 tests/common——本测试只经 oneshot 验 readyz，metrics 用 noop 替身满足必填参数。
+mod common;
+
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations，#1423）。
 async fn connect_pg()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
@@ -70,7 +73,7 @@ async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult 
     )?;
     let reporter = Arc::new(reg.take_health_reporter());
 
-    let (_listener, authed) = runtime::health_listener(reporter)?;
+    let (_listener, authed) = runtime::health_listener(reporter, common::noop_metrics())?;
     let resp = authed
         .into_router_for_test()
         .oneshot(

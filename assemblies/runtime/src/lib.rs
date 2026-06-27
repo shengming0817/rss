@@ -690,6 +690,9 @@ const HEALTH_ROUTE_PREFIX: &str = "/health/v1";
 const HEALTHZ_CONTRACT_ID: &str = "framework.healthz";
 /// readiness 端点契约 ID（框架归属）。
 const READYZ_CONTRACT_ID: &str = "framework.readyz";
+/// `/metrics` scrape 端点契约 ID（框架归属基础设施导出，非域 wire 契约——同 healthz/readyz 为 inline 常量，
+/// 无 `contracts/` 条目 / `frameworkContracts` 声明）。
+const METRICS_CONTRACT_ID: &str = "framework.metrics";
 
 /// 构造 Health listener 的已认证路由（`/health/v1/healthz` liveness + `/health/v1/readyz` readiness）。
 ///
@@ -699,9 +702,18 @@ const READYZ_CONTRACT_ID: &str = "framework.readyz";
 /// `NoAuth` plan（Health listener 无验签桥）。readyz handler 闭包持 `Arc<HealthReporter>`（`Send + Sync`，
 /// 整体非 `Sync` 的 `Registry` 无法进 handler）每请求 `report`（worst-of 聚合所有已注册探针，含 `configs_ready`）。
 ///
-/// `pub`：供冒烟 e2e（`tests/runtime_serve_e2e.rs`）经真实 socket 绑定验证 serve + readyz + 优雅关停闭环。
+/// `metrics` 是组合根注入的 `Arc<dyn diport::MetricsExporter>`（生产 = Prometheus，测试 = 替身）——`/metrics`
+/// scrape handler 每请求 `render()` 取 exposition body。**必填**（非 `Option`/silent-noop，runtime-api Option 范式）。
+///
+/// **scrape 路径**：metrics 与 healthz/readyz 同组挂在 [`HEALTH_ROUTE_PREFIX`] 下，完整路径
+/// `/health/v1/metrics`（非 Prometheus 默认 `/metrics`）——运维须在 scrape target 显式配
+/// `metrics_path: /health/v1/metrics`（否则默认 `/metrics` 抓取得 404、被记空抓取）。挂 Health listener（内部
+/// 网络面）而非对外 Primary：scrape 流量与 health probe 同隔离，且非-Primary `Route` 类型层无法降级 Public。
+///
+/// `pub`：供冒烟 e2e（`tests/runtime_serve_e2e.rs`）经真实 socket 绑定验证 serve + readyz + `/metrics` + 优雅关停闭环。
 pub fn health_listener(
     reporter: Arc<bootstrap::HealthReporter>,
+    metrics: Arc<dyn diport::MetricsExporter>,
 ) -> anyhow::Result<(ListenerKind, httpserve::AuthenticatedRoutes)> {
     let routes = httpserve::UnfinalizedRoutes::empty()
         .nest_group::<httpserve::Health, core::convert::Infallible>(
@@ -723,6 +735,15 @@ pub fn health_listener(
                             contract_id: READYZ_CONTRACT_ID,
                         },
                         httpserve::health::readyz(move || reporter.report()),
+                    )
+                    .mount(
+                        // `/metrics` 在 Health listener（内部网络面）；非-Primary `Route` 无 opt-out 字段 ⇒ 不可降级 Public。
+                        httpserve::Route {
+                            method: Method::GET,
+                            path: "/metrics",
+                            contract_id: METRICS_CONTRACT_ID,
+                        },
+                        httpserve::health::metrics(move || metrics.render()),
                     ))
             },
         )
@@ -920,15 +941,62 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 装配生产 tracing subscriber（fmt + `RUST_LOG` env filter，默认 `info`）。
+/// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
+const OTEL_ENDPOINT_ENV: &str = "RSS_OTEL_ENDPOINT";
+
+/// 由注入的配置读取器构建可选 otel trace 导出 exporter（DI 核心，可测；**不**触碰全局 subscriber）。
+///
+/// **按需开启**：[`OTEL_ENDPOINT_ENV`] 未设 → `Ok(None)`（仅 fmt 日志，不导出 trace）。设了则按 scheme 派发
+/// typed [`otel::OtelEndpoint`]——`https://` → TLS（生产默认）；`http://` → 仅 loopback host 显式明文 opt-in
+/// （非 loopback 即 `Err`，零信任 fail-closed）；其它 scheme → `Err`。**fail-fast**：误配在组合根接线期即暴露，
+/// 不静默退回 fmt（值非法 ≠ 未配）。返回的 exporter 由 [`run`] 接管生命周期（注册进 `ShutdownStack` 关停时 flush）。
+fn build_trace_export(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<otel::OtelExporter>> {
+    let Some(raw) = get(OTEL_ENDPOINT_ENV) else {
+        return Ok(None);
+    };
+    let endpoint = if raw.starts_with("https://") {
+        otel::OtelEndpoint::tls(raw.as_str()).context("RSS_OTEL_ENDPOINT https (TLS) endpoint")?
+    } else if raw.starts_with("http://") {
+        otel::OtelEndpoint::insecure_localhost(raw.as_str())
+            .context("RSS_OTEL_ENDPOINT http endpoint must target a loopback host")?
+    } else {
+        // 错误只含变量名、不含 raw 值（endpoint 可携 userinfo/token，避免明文进启动日志；调试细节经
+        // OtelEndpoint::{tls,insecure_localhost} 的 error chain 上层已足够）。
+        anyhow::bail!("{OTEL_ENDPOINT_ENV} must be https:// (TLS) or http:// to a loopback host");
+    };
+    let provider = otel::build_otlp_provider(endpoint).context("build OTLP/gRPC trace provider")?;
+    Ok(Some(otel::OtelExporter::new(provider)))
+}
+
+/// 装配生产 tracing subscriber（fmt + `RUST_LOG` env filter + 可选 otel OTLP/gRPC 桥接 Layer，默认 `info`）。
 ///
 /// 组合根 binary 入口在 [`run`] **之前**调用（`main`）——否则运行时入口的全部结构化日志（bind / serve /
 /// shutdown / fail-fast）皆为 no-op、生产零可见性。仅生产入口调用；测试不调（各测试自设 subscriber，见
 /// `auth_e2e` 的 `set_default`），故本 fn 不进 `run`（避免与测试 subscriber 冲突 / 全局 init 重复 panic）。
-pub fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
+///
+/// 返回构建出的 [`otel::OtelExporter`]（若 [`OTEL_ENDPOINT_ENV`] 已配；否则 `None`）——`main` 把它交给 [`run`]，
+/// 由组合根注册进 `ShutdownStack`，关停时 flush 未导出 span。`Err` = endpoint 误配（fail-fast，见 [`build_trace_export`]）。
+///
+/// **覆盖边界**：本 fn 是薄壳（同 `listener_addr` 之于 `listener_addr_from`）——可测逻辑全在内核
+/// [`build_trace_export`]（5 态表驱动单测覆盖 endpoint 派发 / fail-fast）。薄壳本身的全局
+/// `registry().…with(otel_layer).init()` 是进程级一次性 init，仅生产 `main` 执行、无法单元测试（测试各自
+/// `set_default`，见 `auth_e2e`），故不单测；`otel_layer` 的 `Some/None` 两态由 `build_trace_export` 单测间接覆盖。
+pub fn init_tracing() -> anyhow::Result<Option<otel::OtelExporter>> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let trace_export = build_trace_export(|name| std::env::var(name).ok())?;
+    // Option<Layer> 即 no-op layer（None → 不导出 trace）：覆盖「配 / 未配 endpoint」两态，subscriber 形态恒定。
+    let otel_layer = trace_export.as_ref().map(|e| e.layer());
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer())
+        .with(otel_layer)
+        .init();
+    Ok(trace_export)
 }
 
 /// 生产组合根入口（运行时入口 Join #1320）：compose 域 → connect pg + migrations → wire_settings
@@ -941,7 +1009,7 @@ pub fn init_tracing() {
 // reason: 组合根入口顺序编排（pg setup〔connect+migrations〕 → wire_settings → F8 probe → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()> {
     let provider = Arc::new(build_provider()?);
 
     // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
@@ -960,6 +1028,16 @@ pub async fn run() -> anyhow::Result<()> {
         pg: pg.clone(),
         vault,
     };
+
+    // Prometheus 指标导出（#1253）：装进程级 `metrics` global recorder（counter!/gauge! 发射点经此写入）+ 持 render 句柄。
+    // **fail-fast**：global recorder 已装（重复 install）即 Err——误配在接线期暴露，不静默 noop。Arc<dyn> 共享给 /metrics handler。
+    // PromExporter 的 ManagedResource::shutdown 是文档化 no-op（pull exporter 无后台任务/连接），故不进 ShutdownStack。
+    //
+    // assembly.toml 治理豁免（与 oidc/vault/postgres 等 adapter 同——均在组合根注入、不在 `[[diportProviders]]` 声明）：
+    // `cargo xtask assembly validate` 的 `DiportPort` 仅 gate `diport::RevocationStore` 的「production 必须 durability=persistent」。
+    // `MetricsExporter` 是无状态 pull port，无 ephemeral/persistent 之分、无 dev/demo vs prod provider 选择，治理无可校验项 ⇒ 不入 enum。
+    let metrics_exporter: Arc<dyn diport::MetricsExporter> =
+        Arc::new(prometheus::PromExporter::install().context("install prometheus recorder")?);
 
     // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
     let audit_domain = wire_audit(&deps).context("wire audit")?;
@@ -1018,12 +1096,19 @@ pub async fn run() -> anyhow::Result<()> {
     // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
     // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
     let reporter = Arc::new(registry.take_health_reporter());
-    listeners.push(health_listener(reporter).context("build health listener")?);
+    listeners.push(health_listener(reporter, metrics_exporter).context("build health listener")?);
 
-    // LIFO 注册顺序：pool guard 先注册（最后关）→ sampler → 域 resources → 域 workers → listeners 最后注册
-    // （最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources → sampler → pool guard。
+    // LIFO 注册顺序：otel exporter 先注册（最后关，关停期 span flush）→ pool guard → sampler → 域 resources →
+    // 域 workers → listeners 最后注册（最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources
+    // → sampler → pool guard → otel exporter（trace flush 在所有组件静默后）。otel 仅在配了 RSS_OTEL_ENDPOINT 时存在。
     serve_until_signal(listeners, move |stack| {
-        // 先注册框架 pg infra（非域产物）：pool guard（LIFO 最后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
+        // otel trace 导出 exporter（若已配 RSS_OTEL_ENDPOINT）**最先**注册 → LIFO 最后 drain：span flush 在所有
+        // 组件（listeners → workers → 域 resources → sampler → pool guard）全部静默后执行，不丢失关停期 span。
+        // reason: trace flush 须在不再产生新 span 后做，故注册在最前（=最后关）；未配 endpoint 时 None，无注册。
+        if let Some(exporter) = trace_export {
+            stack.register_detached(DynManagedResource::new_box(exporter));
+        }
+        // 再注册框架 pg infra（非域产物）：pool guard（LIFO 较后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
         stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
         // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
         stack.register_with_token(move |token| {
@@ -1741,6 +1826,81 @@ mod tests {
         Arc::new(reg.take_health_reporter())
     }
 
+    /// 测试用 `/metrics` 渲染替身（固定 exposition）——不装进程级 global recorder，避免与 `PromExporter::install`
+    /// 进程单例争用。健康/serve 测试只验路由组装与 bind，不验真实指标内容。
+    #[derive(Clone)]
+    struct FixedMetrics(&'static str);
+    impl diport::MetricsExporter for FixedMetrics {
+        fn render(&self) -> String {
+            self.0.to_owned()
+        }
+    }
+    fn noop_metrics() -> Arc<dyn diport::MetricsExporter> {
+        Arc::new(FixedMetrics("# noop\n"))
+    }
+
+    // ── build_trace_export：otel 导出按需开启 + endpoint typed 安全边界（fail-fast）─────────────
+    // get 注入式（不读真实 env），覆盖 None / TLS / loopback-http / 非 loopback 明文 / 非法 scheme 五态。
+
+    #[test]
+    #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
+    fn build_trace_export_unset_endpoint_is_none() {
+        // 未配 RSS_OTEL_ENDPOINT → 仅 fmt 日志、不导出 trace（按需开启），且非 Err。
+        let out = build_trace_export(|_| None).expect("unset endpoint is Ok(None)");
+        assert!(out.is_none(), "unset endpoint must yield None");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
+    async fn build_trace_export_loopback_http_builds_exporter() {
+        // 明文 http 指向 loopback → 显式 opt-in，构建出 exporter（connect_lazy，不连真实 collector）。
+        let out = build_trace_export(|name| {
+            (name == OTEL_ENDPOINT_ENV).then(|| "http://localhost:4317".to_owned())
+        })
+        .expect("loopback http endpoint builds exporter");
+        assert!(out.is_some(), "loopback http must build Some(exporter)");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
+    async fn build_trace_export_tls_https_builds_exporter() {
+        let out = build_trace_export(|name| {
+            (name == OTEL_ENDPOINT_ENV).then(|| "https://collector.internal:4317".to_owned())
+        })
+        .expect("https TLS endpoint builds exporter");
+        assert!(out.is_some(), "https endpoint must build Some(exporter)");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
+    fn build_trace_export_nonloopback_http_is_err() {
+        // 明文 http 指向非 loopback host → fail-closed Err（不静默放行明文导出到远端）。
+        let err = build_trace_export(|name| {
+            (name == OTEL_ENDPOINT_ENV).then(|| "http://collector.internal:4317".to_owned())
+        })
+        .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
+        .expect_err("non-loopback plaintext must fail-fast");
+        assert!(
+            format!("{err:#}").contains("loopback"),
+            "err 应提示 loopback 约束: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
+    fn build_trace_export_bad_scheme_is_err() {
+        // 非 http(s) scheme → fail-fast（误配在接线期暴露，不静默退回 fmt）。
+        let err = build_trace_export(|name| {
+            (name == OTEL_ENDPOINT_ENV).then(|| "grpc://collector:4317".to_owned())
+        })
+        .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
+        .expect_err("non http(s) scheme must fail-fast");
+        assert!(
+            err.to_string().contains(OTEL_ENDPOINT_ENV),
+            "err 应含 env 变量名: {err}"
+        );
+    }
+
     /// 注入 `127.0.0.1:0` ephemeral 地址解析器（测试用）。
     fn ephemeral_addr(_l: ListenerKind) -> anyhow::Result<SocketAddr> {
         "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
@@ -1752,8 +1912,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn serve_until_binds_all_listeners_and_drains_clean() {
         let listeners = vec![
-            health_listener(test_reporter()).expect("h1"),
-            health_listener(test_reporter()).expect("h2"),
+            health_listener(test_reporter(), noop_metrics()).expect("h1"),
+            health_listener(test_reporter(), noop_metrics()).expect("h2"),
         ];
         serve_until(
             listeners,
@@ -1787,7 +1947,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn serve_until_addr_resolver_failure_propagates() {
-        let listeners = vec![health_listener(test_reporter()).expect("health")];
+        let listeners = vec![health_listener(test_reporter(), noop_metrics()).expect("health")];
         let err = serve_until(
             listeners,
             |_stack| {}, // 无后台 worker（测 serve 循环本身）
@@ -1815,7 +1975,7 @@ mod tests {
 
         let mut empty_reg = bootstrap::compose(&[]).expect("compose empty");
         let empty = Arc::new(empty_reg.take_health_reporter());
-        let (_, authed) = health_listener(empty).expect("health listener");
+        let (_, authed) = health_listener(empty, noop_metrics()).expect("health listener");
         let resp = authed
             .into_router_for_test()
             .oneshot(
@@ -1849,7 +2009,7 @@ mod tests {
         )
         .expect("register probe");
         let reporter = Arc::new(reg.take_health_reporter());
-        let (_, authed) = health_listener(reporter).expect("health listener");
+        let (_, authed) = health_listener(reporter, noop_metrics()).expect("health listener");
         let resp = authed
             .into_router_for_test()
             .oneshot(
@@ -1885,7 +2045,8 @@ mod tests {
         .expect("register probe");
         let reporter = Arc::new(reg.take_health_reporter());
 
-        let (_listener, authed) = health_listener(reporter).expect("health listener");
+        let (_listener, authed) =
+            health_listener(reporter, noop_metrics()).expect("health listener");
         let resp = authed
             .into_router_for_test()
             .oneshot(
@@ -1913,7 +2074,8 @@ mod tests {
 
         let mut reg = bootstrap::compose(&[]).expect("compose");
         let reporter = Arc::new(reg.take_health_reporter());
-        let (listener, authed) = health_listener(reporter).expect("health listener");
+        let (listener, authed) =
+            health_listener(reporter, noop_metrics()).expect("health listener");
         assert_eq!(listener, ListenerKind::Health);
         let resp = authed
             .into_router_for_test()

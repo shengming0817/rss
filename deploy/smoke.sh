@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RSS 容器镜像冒烟验收（#1134）：build → up → /readyz 200 → 加固断言 → teardown。
+# RSS 容器镜像冒烟验收（#1134）：build → up → /readyz 200 → /healthz 200 → /metrics 200 → 加固断言 → teardown。
 # 机器可判定的 acceptance harness（make docker-smoke 调用本脚本）。
 #
 # 用法:  deploy/smoke.sh           # 全流程，结尾 down -v
@@ -55,7 +55,16 @@ log "readyz 200 ✓ → $(cat "$READYZ_TMP")"
 curl -fsS "${HEALTH_URL}/healthz" >/dev/null || fail "/healthz 非 200"
 log "healthz 200 ✓"
 
-# ── 闭环 3：运行时加固断言（非 root + 只读 rootfs）────────────────────────────────────────────────
+# ── 闭环 3：/metrics Prometheus exposition（200 + content-type，#1253）────────────────────────────
+# PromExporter::install 随 run() 必装，/metrics 与 RSS_OTEL_ENDPOINT 无关恒可达；content-type 锁 exposition media type。
+metrics_ct="$(curl -fsS -o /dev/null -w '%{content_type}' "${HEALTH_URL}/metrics")" \
+    || fail "/health/v1/metrics 非 200"
+case "$metrics_ct" in
+    text/plain*version=0.0.4*) log "metrics 200 ✓（content-type=${metrics_ct}）" ;;
+    *) fail "期望 Prometheus exposition content-type（text/plain; version=0.0.4），实际 '${metrics_ct}'" ;;
+esac
+
+# ── 闭环 4：运行时加固断言（非 root + 只读 rootfs）────────────────────────────────────────────────
 cid="$($COMPOSE ps -q server)"
 [ -n "$cid" ] || fail "找不到 server 容器"
 user="$(docker inspect -f '{{.Config.User}}' "$cid")"

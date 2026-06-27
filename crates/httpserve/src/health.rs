@@ -107,6 +107,35 @@ where
     })
 }
 
+/// Prometheus exposition content-type（`metrics_exporter_prometheus` 渲染的 text exposition 标准 media type）。
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+/// `/metrics` 端点：渲染当前指标快照为 Prometheus exposition 文本（content-type [`PROMETHEUS_CONTENT_TYPE`]）。
+///
+/// `render` 是 `Fn() -> String`——每请求调用一次取 exposition body，配合 `Clone` 满足 axum Handler 语义（同
+/// [`readyz`] 范式）。渲染源（组合根注入的 `Arc<dyn diport::MetricsExporter>` 等）由调用方决定，handler 层只渲染 +
+/// 设 content-type，**不耦合** `diport`（保持 httpserve 对导出 provider 无知）。
+///
+/// 挂在 `Health` listener（health/ready/metrics 内部网络面）；非-`Primary` listener 不可声明 `Public` opt-out
+/// （`Route` 类型层无 opt-out 字段，AUTH-OPTOUT-PRIMARYONLY-01），故 `/metrics` 与 healthz/readyz 同走 listener auth plan。
+///
+/// ref: tokio-rs/axum examples/health-check.rs@main（健康/探针端点 MethodRouter 范式）
+pub fn metrics<F>(render: F) -> axum::routing::MethodRouter
+where
+    F: Fn() -> String + Clone + Send + Sync + 'static,
+{
+    axum::routing::get(move || {
+        let render = render.clone();
+        async move {
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+                render(),
+            )
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +271,30 @@ mod tests {
         assert!(json["checks"].is_array());
         assert_eq!(json["checks"][0]["name"], "db");
         assert_eq!(json["checks"][0]["status"], "healthy");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn metrics_renders_exposition_with_prometheus_content_type() {
+        // 渲染源（组合根注入的 Arc<dyn MetricsExporter> 等）经闭包注入；handler 设 Prometheus exposition content-type。
+        let app = Router::new().route("/metrics", metrics(|| "rss_unit_total 1\n".to_owned()));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            PROMETHEUS_CONTENT_TYPE // 断言绑定 const 单源，content-type 变更不漂移
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("rss_unit_total"), "body: {body}");
     }
 }

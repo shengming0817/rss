@@ -536,6 +536,21 @@ fn step_prometheus_backend_tests() -> Step {
         needs_compile: true,
     }
 }
+fn step_otel_backend_tests() -> Step {
+    // otel OTLP/gRPC trace 导出确定性单测（#1011：InMemorySpanExporter round-trip + observ::MetricLabel→KeyValue
+    // 映射 + OtelEndpoint typed 安全边界 + 导出边界脱敏）。`backend` feature 的 `#[cfg(feature)]` 测试模块默认
+    // workspace nextest 不编入，按包显式补跑——#1253 让 otel 成为 runtime 生产依赖后，确定性测试须入机器门（同 prometheus 范式）。
+    Step {
+        label: "otel-backend-tests",
+        args: &["nextest", "run", "-p", "otel", "--features", "backend"],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: "cargo install cargo-nextest --locked",
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
 fn step_grpc_backend_tests() -> Step {
     Step {
         label: "grpc-backend-tests",
@@ -570,6 +585,9 @@ fn feature_test_steps() -> Vec<Step> {
         step_redis_backend_tests(),
         step_oidc_backend_tests(),
         step_prometheus_backend_tests(),
+        // otel backend 行为测试（OTLP/gRPC trace 导出 round-trip via InMemorySpanExporter）：确定性 + hermetic
+        // （connect_lazy，无 live collector），同 prometheus 范式入机器门（#1253 otel 升为 runtime 生产依赖）。
+        step_otel_backend_tests(),
         // grpc backend 行为测试（tonic 0.14 health server）：自绑 127.0.0.1:0 ephemeral loopback、in-process
         // tonic client roundtrip，确定性 + hermetic（无 live 后端），同 s3/redis 范式入机器门（#1011）。
         step_grpc_backend_tests(),
@@ -1029,6 +1047,7 @@ mod tests {
                 "redis-backend-tests",
                 "oidc-backend-tests",
                 "prometheus-backend-tests",
+                "otel-backend-tests",
                 "grpc-backend-tests",
                 "vault-backend-tests",
                 "deny",
@@ -1229,6 +1248,7 @@ mod tests {
                 "redis-backend-tests",
                 "oidc-backend-tests",
                 "prometheus-backend-tests",
+                "otel-backend-tests",
                 "grpc-backend-tests",
                 "vault-backend-tests",
                 "deny",
