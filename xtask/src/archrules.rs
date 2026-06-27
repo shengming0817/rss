@@ -1163,6 +1163,9 @@ members = ["rss_demo", "rss_orphan"]
         // assembly validate 在 verify.rs 的 verify 与 ci step 列表中均运行 ⇒ assembly.rs
         // 的 INVARIANT 锚点（ASSEMBLY-PROVIDER-CRATE-01）必须登记 `verify,ci` gate，否则
         // archrules 判 MissingGate（#1572）。
+        // 互补侧（gate 字符串声明的 plan 成员资格）由 verify.rs 的 full_plan_order_and_count /
+        // ci_plan_order_and_count 守——删 assembly-validate plan 步即那两测试红；合起来覆盖
+        // 「gate 字符串 ↔ plan 实际成员」双向漂移（review F2）。
         let root = Path::new("/repo");
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/assembly.rs")),
