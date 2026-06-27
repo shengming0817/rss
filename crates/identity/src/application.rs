@@ -11,6 +11,7 @@
 //!
 //! ref: uber-go/fx lifecycle.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（Domain::init push 声明）
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bootstrap::{Domain, KernelError, Registry};
@@ -97,9 +98,12 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 /// 会话生命周期由**单一** [`DynSessionLifecycle`] provider 承载（合并原 `sessions` + `session_uow`，#1278）：
 /// login 经 `persist_session_and_emit` co-tx 创建、logout 经 `revoke` 软撤销、查询经 `find`——**同源**，
 /// 「创建写 与 撤销/查询落不同 store」从类型层不可表达（PR #255 F3 接缝闭合）。
+///
+/// 注入形态为 `Arc<DynCredentialRepo>` + `Arc<DynSessionLifecycle>`：域形端口基 trait 为 `Send + Sync`，
+/// 使 `LoginService` 可作为 axum handler 共享 state，且 `login().await` future 为 `Send`（#1234）。
 pub struct LoginService {
-    credentials: Box<DynCredentialRepo<'static>>,
-    lifecycle: Box<DynSessionLifecycle<'static>>,
+    credentials: Arc<DynCredentialRepo<'static>>,
+    lifecycle: Arc<DynSessionLifecycle<'static>>,
     clock: Box<dyn Clock>,
     session_ttl: Duration,
 }
@@ -108,8 +112,8 @@ impl LoginService {
     /// 组合根构造：3 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
     /// （create/find/revoke 同源，#1278）。
     pub fn new(
-        credentials: Box<DynCredentialRepo<'static>>,
-        lifecycle: Box<DynSessionLifecycle<'static>>,
+        credentials: Arc<DynCredentialRepo<'static>>,
+        lifecycle: Arc<DynSessionLifecycle<'static>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
     ) -> Self {
@@ -125,7 +129,7 @@ impl LoginService {
     /// 明文 `password` 仅入参，经 argon2 哈希入库，不存明文。
     #[cfg(any(test, feature = "seed-login"))]
     pub fn with_seed_credential(
-        lifecycle: Box<DynSessionLifecycle<'static>>,
+        lifecycle: Arc<DynSessionLifecycle<'static>>,
         clock: Box<dyn Clock>,
         session_ttl: Duration,
         login: impl Into<String>,
@@ -140,7 +144,7 @@ impl LoginService {
         // CapturingSessionLifecycle）——不再自建独立空 session store（原 InMemSessionRepo 与注入 UoW 异 store
         // 即 #1278 F3 接缝根因）；单一 lifecycle ⇒ create/find/revoke 同源。
         Ok(Self::new(
-            crate::ports::DynCredentialRepo::new_box(creds),
+            Arc::from(crate::ports::DynCredentialRepo::new_box(creds)),
             lifecycle,
             clock,
             session_ttl,
@@ -544,7 +548,7 @@ impl Domain for IdentityDomain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use diport::OutboxEmitError;
 
@@ -637,7 +641,7 @@ mod tests {
     ) -> LoginService {
         #[allow(clippy::expect_used)]
         LoginService::with_seed_credential(
-            DynSessionLifecycle::new_box(capture.clone()),
+            Arc::from(DynSessionLifecycle::new_box(capture.clone())),
             make_clock(now_secs),
             Duration::from_secs(ttl_secs),
             "alice",
@@ -646,6 +650,67 @@ mod tests {
             tid(CANON_TENANT),
         )
         .expect("seed_service ok")
+    }
+
+    #[test]
+    fn login_service_and_login_future_are_send_sync() {
+        fn assert_send<T: Send>(_: T) {}
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+
+        let capture = CapturingSessionLifecycle::default();
+        let svc = seed_service(&capture, 1_000, 3_600);
+        assert_send_sync(&svc);
+        assert_send(svc.login(
+            tid(CANON_TENANT),
+            IdentityLoginRequest {
+                username: "alice".to_string(),
+                password: "correct-horse".to_string(),
+            },
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_service_can_back_axum_handler_state() -> Result<(), Box<dyn std::error::Error>> {
+        use axum::response::IntoResponse;
+        use testkit::ContractRequest;
+
+        let capture = CapturingSessionLifecycle::default();
+        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
+        let router = axum::Router::new().route(
+            "/login",
+            axum::routing::post({
+                let svc = svc.clone();
+                move |body: axum::body::Bytes| {
+                    let svc = svc.clone();
+                    async move {
+                        let request: IdentityLoginRequest =
+                            serde_json::from_slice(&body).expect("valid login request");
+                        let response = svc
+                            .login(tid(CANON_TENANT), request)
+                            .await
+                            .expect("login ok");
+                        (axum::http::StatusCode::OK, axum::Json(response)).into_response()
+                    }
+                }
+            }),
+        );
+
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/login").json(&IdentityLoginRequest {
+                username: "alice".to_string(),
+                password: "correct-horse".to_string(),
+            }),
+        )
+        .await?;
+
+        resp.ensure_status(axum::http::StatusCode::OK)?;
+        let decoded: IdentityLoginResponse = resp.json()?;
+        assert!(!decoded.data.session_id.is_empty());
+        assert_eq!(decoded.data.expires_at, 4_600);
+        assert_eq!(capture.count(), 1, "handler login 应写入一次 co-tx");
+        Ok(())
     }
 
     // ── 测试 1：login 成功 ────────────────────────────────────────────────────
@@ -1069,8 +1134,8 @@ mod tests {
             .returning(|_expected, _next| Err(IdentityError::VersionConflict));
 
         let svc = LoginService::new(
-            DynCredentialRepo::new_box(mock),
-            DynSessionLifecycle::new_box(capture),
+            Arc::from(DynCredentialRepo::new_box(mock)),
+            Arc::from(DynSessionLifecycle::new_box(capture)),
             make_clock(1_000),
             Duration::from_secs(3_600),
         );

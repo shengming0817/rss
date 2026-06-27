@@ -4,8 +4,9 @@
 //! 在 `diport`；**域形** repo port——签名引用域内实体（`Role`/`RoleId`，域 crate `pub(crate)`/`pub` 类型）——
 //! **无法**收敛 `diport`（否则 diport→域 反向依赖、层序倒置、deny 红），故归本域 crate `ports` 模块。
 //! adapter（如 `postgres`）依赖 `identity`、以 native AFIT impl 本 port（DIP 内向边，`adapters→域` 单向）。
-//! 派发与 diport DI port 同范式：`#[trait_variant::make(X: Send)]` Send 变体 + `#[dynosaur(...)]` `DynX`，
-//! 构造器注入 `Box<DynRoleRepo>`（ADR-004 C1/C5）。
+//! 派发与 diport DI port 同范式：`#[trait_variant::make(X: Send)]` Send 变体 + `#[dynosaur(...)]` `DynX`。
+//! 需要跨 axum handler / subscriber future 共享的端口在基 trait 加 `Send + Sync`，经 `Arc<DynX>` 注入；
+//! 单 owner 端口仍可用 `Box<DynX>`。
 //!
 //! 跨 crate 可见性：repo port 须 `pub`（独立 adapter crate impl）；签名实体 `Role`/`RoleId`/`IdentityError`
 //! 经下方 `pub use` 暴露——字段私有 + 构造经 `pub(crate)` funnel，外部可命名/收发但**不可伪造**（fail-closed）。
@@ -67,8 +68,10 @@ pub trait RoleRepoLocal {
 /// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
 /// 公开 [`CredentialRepo`] 是 **Send 变体**（adapter `impl CredentialRepo for ...`），[`DynCredentialRepo`]
-/// 是其 dyn-compatible wrapper（组合根经 `Box<DynCredentialRepo>` 注入，ADR-004 C1/C5）。归属为域形 port
+/// 是其 dyn-compatible wrapper（组合根经 `Arc<DynCredentialRepo>` 注入，ADR-004 C1/C5）。归属为域形 port
 /// （签名引用 `Credential`/`LoginIdentifier`/`AuthOutcome`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
+/// 基 trait 带 `Send + Sync` supertrait：登录 handler 需 clone 共享同一 credential store，且
+/// `LoginService::login().await` future 必须为 `Send`（axum handler 要求）。
 ///
 /// **租户隔离由签名承载（fail-closed）**：所有方法接收 typed `TenantId` 位参做 RLS / store scope；跨租赁
 /// 经 tenant-keyed 查找天然失败——`find(t ≠ cred.tenant)` → `None`，`authenticate` → `InvalidUnknown`，
@@ -103,8 +106,9 @@ pub trait RoleRepoLocal {
 #[dynosaur(pub DynCredentialRepo = dyn(box) CredentialRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: 同 RoleRepo——base trait 非 Send native AFIT，Send 由 trait_variant `CredentialRepo` 变体 +
-// dynosaur `DynCredentialRepo` 承载（ADR-003/ADR-004 C1）。
-pub trait CredentialRepoLocal {
+// dynosaur `DynCredentialRepo` 承载（ADR-003/ADR-004 C1）。`Send + Sync` supertrait 使
+// `Arc<DynCredentialRepo>` 可被 axum handler 共享。
+pub trait CredentialRepoLocal: Send + Sync {
     /// 按 canonical user id 查凭据（tenant-scoped；不存在返回 `Ok(None)`）。self-scoped 操作（改密）的身份
     /// 锚点是**认证主体**的 `ids::UserId`，**非**请求可选择的登录标识——调用方不能传 login 串定位他人凭据
     /// （#1277 F2：self-scoped 端点身份锚点 = authenticated subject，类型层杜绝越权改他人密码）。
@@ -158,7 +162,9 @@ pub trait CredentialRepoLocal {
 /// **查询（L1）**、**软撤销（L1）**收敛为**单一 provider**，create / find / revoke 同源。
 ///
 /// 公开 [`SessionLifecycle`] 是 **Send 变体**（adapter `impl SessionLifecycle for ...`），
-/// [`DynSessionLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Box<DynSessionLifecycle>` 注入）。
+/// [`DynSessionLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Arc<DynSessionLifecycle>` 注入）。
+/// 基 trait 带 `Send + Sync` supertrait：登录 handler 需 clone 共享同一 lifecycle store，且
+/// `LoginService::login().await` future 必须为 `Send`（axum handler 要求）。
 ///
 /// **为何单一 provider（合并原 `SessionUnitOfWork` + `SessionRepo`，#1278）**：会话「创建写」与「查询/撤销」
 /// 分属**两个未绑定的存储端口**时，组合根可注入分属不同底座的实例（persist 写 store A、find/revoke 查 store B）
@@ -197,8 +203,9 @@ pub trait CredentialRepoLocal {
 #[dynosaur(pub DynSessionLifecycle = dyn(box) SessionLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SessionLifecycle` 变体 +
-// dynosaur `DynSessionLifecycle` 承载（DI 注入走 Send wrapper）。与 RoleRepo / diport DI port 同范式。
-pub trait SessionLifecycleLocal {
+// dynosaur `DynSessionLifecycle` 承载（DI 注入走 Send wrapper）。`Send + Sync` supertrait 使
+// `Arc<DynSessionLifecycle>` 可被 axum handler 共享。
+pub trait SessionLifecycleLocal: Send + Sync {
     /// **创建（co-tx，L2）**：把 [`Session`] 行与 outbox(`identity.session-created`) 行**同一本地事务**原子
     /// 写入（FR-003）。域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）与 `envelope`
     /// （opaque envelope 字段），并提供 `session` 业务实体；adapter 在单事务内先注入 tenant scope（SET LOCAL）、
@@ -299,6 +306,7 @@ mod smoke {
         OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionLifecycle,
         TenantId,
     };
+    use std::sync::Arc;
 
     struct NoopRoleRepo;
     impl RoleRepo for NoopRoleRepo {
@@ -315,6 +323,7 @@ mod smoke {
     }
 
     fn assert_send<T: Send>(_: &T) {}
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
     // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体
     // `DynRoleRepo` 且 wrapper `Send`（可跨 spawn 注入）。不调用方法 → 不触 `todo!()`。
@@ -363,7 +372,7 @@ mod smoke {
     // 与 RoleRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionLifecycle 的 co-tx 创建；
     // find/revoke 冻结 #1116），但本 smoke 仍只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop
     // `todo!()`）；co-tx 行为由 adapter 集成测试守。三方法（create/find/revoke）同一 trait，证明合并后仍
-    // 经单一 `Box<DynSessionLifecycle>` 注入。
+    // 经单一 `Arc<DynSessionLifecycle>` 注入。
     struct NoopSessionLifecycle;
     impl SessionLifecycle for NoopSessionLifecycle {
         async fn persist_session_and_emit(
@@ -390,24 +399,25 @@ mod smoke {
         }
     }
 
-    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 `Send`。
+    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send+Sync 变体，
+    // 可经 `Arc<DynSessionLifecycle>` 共享给 axum handler。
     #[test]
     fn session_lifecycle_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynSessionLifecycle> =
-            DynSessionLifecycle::new_box(NoopSessionLifecycle);
-        assert_send(&from_impl);
-        let from_mock: Box<DynSessionLifecycle> =
-            DynSessionLifecycle::new_box(MockTestSessionLifecycle::new());
-        assert_send(&from_mock);
+        let from_impl: Arc<DynSessionLifecycle> =
+            Arc::from(DynSessionLifecycle::new_box(NoopSessionLifecycle));
+        assert_send_sync(&from_impl);
+        let from_mock: Arc<DynSessionLifecycle> =
+            Arc::from(DynSessionLifecycle::new_box(MockTestSessionLifecycle::new()));
+        assert_send_sync(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——`Box<DynSessionLifecycle>` 作必填位置参（非 Option），
+    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——`Arc<DynSessionLifecycle>` 作必填位置参（非 Option），
     // 缺失即编译错误（ADR-004 C5；LoginService 即如此持有单一 lifecycle，见 application.rs）。
     struct SessionService {
-        _lifecycle: Box<DynSessionLifecycle<'static>>,
+        _lifecycle: Arc<DynSessionLifecycle<'static>>,
     }
     impl SessionService {
-        fn new(lifecycle: Box<DynSessionLifecycle<'static>>) -> Self {
+        fn new(lifecycle: Arc<DynSessionLifecycle<'static>>) -> Self {
             Self {
                 _lifecycle: lifecycle,
             }
@@ -416,11 +426,14 @@ mod smoke {
 
     #[test]
     fn session_lifecycle_is_required_ctor_injectable() {
-        let from_impl = SessionService::new(DynSessionLifecycle::new_box(NoopSessionLifecycle));
-        assert_send(&from_impl._lifecycle);
-        let from_mock =
-            SessionService::new(DynSessionLifecycle::new_box(MockTestSessionLifecycle::new()));
-        assert_send(&from_mock._lifecycle);
+        let from_impl = SessionService::new(Arc::from(DynSessionLifecycle::new_box(
+            NoopSessionLifecycle,
+        )));
+        assert_send_sync(&from_impl._lifecycle);
+        let from_mock = SessionService::new(Arc::from(DynSessionLifecycle::new_box(
+            MockTestSessionLifecycle::new(),
+        )));
+        assert_send_sync(&from_mock._lifecycle);
     }
 
     mockall::mock! {
@@ -449,13 +462,14 @@ mod smoke {
 #[cfg(test)]
 mod smoke_credential {
     //! build smoke：`CredentialRepo` 域形 async port 同范式（PORT-SHAPE-01/02）——native-AFIT impl +
-    //! mockall mock 均经 `Box<DynCredentialRepo>` 装入 + `Send`。`NoopCredentialRepo` body `todo!()`，
+    //! mockall mock 均经 `Arc<DynCredentialRepo>` 装入 + `Send + Sync`。`NoopCredentialRepo` body `todo!()`，
     //! 故只构造 Dyn wrapper + 断言 `Send`，**不 `.await`**（真实行为由 `internal::mem::InMemCredentialRepo`
     //! round-trip 测试覆盖）。
     use super::{
         AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, IdentityError, LoginIdentifier,
         SystemTime, TenantId,
     };
+    use std::sync::Arc;
 
     struct NoopCredentialRepo;
     impl CredentialRepo for NoopCredentialRepo {
@@ -495,35 +509,39 @@ mod smoke_credential {
         }
     }
 
-    fn assert_send<T: Send>(_: &T) {}
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
-    // PORT-SHAPE-01：impl + mock 均经 `new_box` 装入 dynosaur Send 变体 `DynCredentialRepo` 且 `Send`。
+    // PORT-SHAPE-01：impl + mock 均经 `new_box` 装入 dynosaur Send+Sync 变体，可经
+    // `Arc<DynCredentialRepo>` 共享给 axum handler。
     #[test]
     fn credential_repo_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynCredentialRepo> = DynCredentialRepo::new_box(NoopCredentialRepo);
-        assert_send(&from_impl);
-        let from_mock: Box<DynCredentialRepo> =
-            DynCredentialRepo::new_box(MockTestCredentialRepo::new());
-        assert_send(&from_mock);
+        let from_impl: Arc<DynCredentialRepo> =
+            Arc::from(DynCredentialRepo::new_box(NoopCredentialRepo));
+        assert_send_sync(&from_impl);
+        let from_mock: Arc<DynCredentialRepo> =
+            Arc::from(DynCredentialRepo::new_box(MockTestCredentialRepo::new()));
+        assert_send_sync(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧构造器必填位置参注入（`Box<DynCredentialRepo>` 非 Option，缺失即编译错误）。
+    // PORT-SHAPE-02：消费侧构造器必填位置参注入（`Arc<DynCredentialRepo>` 非 Option，缺失即编译错误）。
     struct CredentialService {
-        _repo: Box<DynCredentialRepo<'static>>,
+        _repo: Arc<DynCredentialRepo<'static>>,
     }
     impl CredentialService {
-        fn new(repo: Box<DynCredentialRepo<'static>>) -> Self {
+        fn new(repo: Arc<DynCredentialRepo<'static>>) -> Self {
             Self { _repo: repo }
         }
     }
 
     #[test]
     fn credential_repo_is_required_ctor_injectable() {
-        let from_impl = CredentialService::new(DynCredentialRepo::new_box(NoopCredentialRepo));
-        assert_send(&from_impl._repo);
-        let from_mock =
-            CredentialService::new(DynCredentialRepo::new_box(MockTestCredentialRepo::new()));
-        assert_send(&from_mock._repo);
+        let from_impl =
+            CredentialService::new(Arc::from(DynCredentialRepo::new_box(NoopCredentialRepo)));
+        assert_send_sync(&from_impl._repo);
+        let from_mock = CredentialService::new(Arc::from(DynCredentialRepo::new_box(
+            MockTestCredentialRepo::new(),
+        )));
+        assert_send_sync(&from_mock._repo);
     }
 
     mockall::mock! {

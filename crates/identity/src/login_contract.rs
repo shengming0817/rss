@@ -20,13 +20,11 @@
 //!
 //! # 桩边界（重要）
 //!
-//! `identity.login` 仍 `lifecycle = draft`、生产未挂载（axum mount + graduate active 留 W）。**当前
-//! [`LoginService`](crate::LoginService) 不可直接挂 axum handler**：它持 `Box<DynSessionLifecycle>`
-//! （dynosaur Send-only dyn）⇒ `LoginService: !Sync` ⇒ `&self.login(..).await` 使 handler future `!Send`，
-//! 而 axum handler future 须 `Send`。故本样板 handler **内联凭据判定 + 构造 generated [`IdentityLoginResponse`]**
-//! 验 testkit 维度（凭据/会话逻辑的服务层覆盖见 `application.rs` 单测 + journey）。W 真实挂载前须先使
-//! service `Sync`——即 `lifecycle` 的 dyn 类型须 `Send + Sync`（提供 `DynSessionLifecycle` 的 Send+Sync
-//! 变体，或组合根注入 `Arc<dyn SessionLifecycle + Send + Sync>`），与 axum mount 一并解决。本样板把该约束显式暴露。
+//! `identity.login` 仍 `lifecycle = draft`、生产未挂载（axum mount + graduate active 留 W）。#1234 已使
+//! [`LoginService`](crate::LoginService) 可作为 axum handler 共享 state：其 credential / session lifecycle
+//! 端口经 `Arc<Dyn...>` 注入且 `Dyn...: Send + Sync`，`login().await` future 为 `Send`（回归见
+//! `application.rs`）。本样板仍 **内联凭据判定 + 构造 generated [`IdentityLoginResponse`]**，只覆盖
+//! testkit contract 维度；W 真实挂载还需补 handler 错误映射、tenant header 接入、JWT/refresh 返回形态。
 //! 错误 envelope 为 tracer-grade（W 改用 generated typed response envelope，`domain-patterns.md §Typed response envelope`）。
 //!
 //! ref: tokio-rs/axum examples/testing/src/main.rs@3f8956dcd007070be5449dd23102b7ee7f2e1b05（fn app()->Router + oneshot）

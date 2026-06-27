@@ -5,7 +5,7 @@
 //!
 //! 接缝覆盖：
 //! - bootstrap 组装：`compose` 跑 identity/audit 的 `Domain::init` → Registry 收集 route_group + subscriber。
-//! - DI 注入：identity 经 `Box<DynSessionLifecycle>`（`MemSessionLifecycle`）co-tx 写 session + 发射 outbox
+//! - DI 注入：identity 经 `Arc<DynSessionLifecycle>`（`MemSessionLifecycle`）co-tx 写 session + 发射 outbox
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
 //!   sink）；幂等 store 经 `memory::InMemClaimer` 注入、DLX 经 `memory::MemDeadLetterStore` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
@@ -191,7 +191,9 @@ where
 #[allow(clippy::expect_used)]
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginService> {
     Ok(LoginService::with_seed_credential(
-        DynSessionLifecycle::new_box(MemSessionLifecycle::new(bus.clone())),
+        Arc::from(DynSessionLifecycle::new_box(MemSessionLifecycle::new(
+            bus.clone(),
+        ))),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
         LOGIN_USERNAME,
