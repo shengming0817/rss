@@ -29,6 +29,8 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
 settings = { path = "../../crates/settings", features = ["seed-data"] }
 # audit 域（AuditDomain + AuditChainHasher/DynAuditRepo port；#1230 wire_audit）。
 audit = { path = "../../crates/audit" }
+# identity 域（LoginService + IdentityDomain；identity.login active serving）。
+identity = { path = "../../crates/identity" }
 # 生产 MacVerifier backend（RustCrypto hmac/sha2；audit keyed-HMAC 链 verifier，#1230）。
 crypto-adapter = { path = "../../adapters/crypto" }
 # postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + PgAuditRepo + 采样组件）。
@@ -75,3 +77,7 @@ testkit = { path = "../../crates/testkit" }
 # auth_e2e 经 httpserve test-util 构造 funnel 输入（`routes::unfinalized_for_test`）+ 取回裸 Router
 # （`AuthenticatedRoutes::into_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
+generated = { path = "../../generated" }
+ids = { path = "../../crates/ids" }
+secure = { path = "../../crates/secure" }
+sqlx = { workspace = true }

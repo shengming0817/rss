@@ -271,3 +271,10 @@ pub mod defaults {
         T::try_from(::std::num::NonZeroU64::try_from(V).unwrap()).unwrap()
     }
 }
+
+/// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "audit.list-entries";
+
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("audit", "audit.list-entries");

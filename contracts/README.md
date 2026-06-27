@@ -33,12 +33,14 @@ contracts/{kind}/{domain}/{version}/
 | `[schemas]` | `request`/`response`/`payload` → schema 文件名（http 需 `request`+`response`、event/saga 需 `payload`、**command 需 `request`**） | 按 kind（R4） |
 | `path` | http 业务路径（`/api/v{N}/{domain}/…` 约定，如 `/api/v1/_seed/echo`；形态安全由 R7 守：绝对、非 `//`、无 `..`/空白） | 按 kind（active http 必填，R8） |
 | `method` | http 方法 `GET`/`POST`/`PUT`/`PATCH`/`DELETE`（闭值集，非法即解析 `Err`） | 按 kind（active http 必填，R8） |
+| `[endpoints.http.auth]` | active http serving 鉴权声明：`mode = "permission"`（需非空 `permission`，禁止 `reason`）或显式 opt-out `public`/`bootstrap`/`clientsOnly`/`serviceOwned`（需非空 `reason`，禁止 `permission`）。未知子键解析即拒 | active http 必填（R18；codegen 亦 fail-closed） |
+| `[endpoints.http.headers]` | HTTP header 声明；当前最小闭值集仅接受 `"X-Tenant-ID" = "populate-only"`，供 pre-auth login 从 header 填充 tenant scope | 按 endpoint（`identity.login` public serving 必填，R18） |
 | `topic` | event 或 command 稳定 dotted topic 名（event 如 `seed.thing-happened`，command 如 `device.commands.reboot`；点分小写形态由 R7 守，同 `id`） | 按 kind（active event 必填，R8；active command 必填，R8） |
 | `delivery` | event 投递语义 `at-least-once`/`at-most-once`/`exactly-once`（闭值集）。**当前实现路径仅 `at-least-once`**（outbox + 幂等消费者）；`at-most-once`/`exactly-once` 为前瞻保留值（broker 链路无运行时保证），**active event 经 R11 机器拒**（仅放行 at-least-once），draft/deprecated 可表达前瞻设计 | 按 kind（active event 必填，R8；值由 R11 限） |
 | `[saga]` | saga 专属 block（TOML 键名 **camelCase**）：`steps`（`{ name, outputSchema }` 数组）+ `compensationOrder = "reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，非负由类型保证）。完整示例见 `xtask` 解析测试 `VALID_SAGA` | **kind=saga 必填（R10，无条件、不论 lifecycle）**；良构 R10 |
 | `[[subscriptions]]` | event 订阅声明（#1120，TOML 数组）：每项须含 `consumer`（消费者域 DomainId，如 `audit`）+ `group`（稳定 consumer group 名，如 `audit.session-created`，broker 消费位点唯一键）。未知子键由 `deny_unknown_fields` 拒。`#[serde(default)]` ⇒ 无此字段的既有契约仍解析（空数组）。codegen 由此派生 `SUBSCRIPTIONS: &[SubscriptionSpec]` 常量，bootstrap 消费接线。示例：`[[subscriptions]]\nconsumer="audit"\ngroup="audit.session-created"` | **`lifecycle=active && kind=event` 必须非空（R14，EVENT-ACTIVE-SUB-01）**；draft/deprecated 豁免 |
 
-校验规则（`cargo xtask contract validate`，R1–R17 ↔ `Rule` 枚举）：
+校验规则（`cargo xtask contract validate`，R1–R19 ↔ `Rule` 枚举）：
 
 | 编号 | Rule 枚举名 | 描述 |
 |------|-------------|------|
@@ -59,8 +61,10 @@ contracts/{kind}/{domain}/{version}/
 | R15 | `CommandConsistency` | `kind=command` ⇒ `consistencyLevel=OutboxFact`（命令分发 = 本地事务 + outbox 发布，L2 语义） |
 | R16 | `SchemaRedaction` | declared schema property 上的 `x-pii` / `x-redaction` 字段级策略须合法且完整；拒遗留 `x-sensitive`、未知枚举、`x-pii + hash`、高风险字段未声明策略 |
 | R17 | `SchemaProtection` | declared schema 的 `x-protection`（at-rest 加密声明）+ schema 级 `x-at-rest`（持久化 opt-in）须合法且完整（#1468，ADR-011 D1b 声明层）：block 内部一致（`atRest:encrypt` 须 `keyScope`+完整 `aad`；`deterministic`/`blindIndex` 须 `reason` 且 `aad` 稳定子集排除 `schemaVersion`；`atRest:plain` 不携带 encrypt 参数），`x-at-rest:true` 的 schema 内高风险字段缺 `x-protection` 均拒。与 R16（observe redaction）**正交不混用**（ADR-011 D1） |
+| R18 | `HttpAuth` | active HTTP 必须声明 `endpoints.http.auth`；`permission` mode 需非空 permission 且禁止 reason；`public`/`bootstrap`/`clientsOnly`/`serviceOwned` 需非空 reason 且禁止 permission；当前 header 最小闭值集只接受 `X-Tenant-ID = populate-only`，且 `identity.login` public serving 必须声明该 header。codegen 对 active HTTP 同样 fail-closed，不只依赖 validate |
+| R19 | `HttpTenantSource` | HTTP request schema 不得声明 `tenantId`（含嵌套 object schema）；tenant scope 必须来自认证上下文或声明式 populate-only header。validate 与 codegen 共用 schema property walker，避免治理门漂移 |
 
-> 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs`）——`method`/`delivery`/`compensationOrder` 枚举解析拒非法 variant、`retryMillis`/`timeoutMillis` 用 `u64` 拒负、嵌套结构 `#[serde(deny_unknown_fields)]`。R8–R11/R15 是依赖 lifecycle/kind/值 组合的条件化跨字段不变式，类型层无法免费表达，与 R1–R7 同属 Medium（CI 门 + synthetic red/anti-vacuity）。R12（跨契约 id 唯一）/ R13（schema title PascalCase + 契约内唯一）/ R14（active event 须有 subscriber，EVENT-ACTIVE-SUB-01）/ R16（字段级 redaction 策略）是跨/内契约内容扫描，类型层亦无法表达，同属 Medium；R13 契约内重复**未必**被 codegen typify 兜底（同 title 不同结构可能合并 / 类型歧义），R16 在 validate 阶段早于 codegen fail-fast，避免生成不安全 `Debug`。
+> 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs`）——`method`/`delivery`/`compensationOrder`/HTTP auth mode/header mode 枚举解析拒非法 variant、`retryMillis`/`timeoutMillis` 用 `u64` 拒负、嵌套结构 `#[serde(deny_unknown_fields)]`。R8–R11/R15/R18 是依赖 lifecycle/kind/值 组合的条件化跨字段不变式，类型层无法免费表达，与 R1–R7 同属 Medium（CI 门 + synthetic red/anti-vacuity）。R12（跨契约 id 唯一）/ R13（schema title PascalCase + 契约内唯一）/ R14（active event 须有 subscriber，EVENT-ACTIVE-SUB-01）/ R16（字段级 redaction 策略）/ R17（字段级 protection 策略）/ R19（request schema tenant source）是跨/内契约内容扫描，类型层亦无法表达，同属 Medium；R13 契约内重复**未必**被 codegen typify 兜底（同 title 不同结构可能合并 / 类型歧义），R16/R17/R18/R19 在 validate/codegen 阶段早于 serving fail-fast，避免生成不安全 `Debug`、未声明 storage protection、modeless HTTP route 或 body-sourced tenant scope。
 
 ## schema.json
 
@@ -121,7 +125,7 @@ contracts/{kind}/{domain}/{version}/
 
 ### wire 破坏式变更检测门（`contract breaking`，ADR-008）
 
-`cargo xtask contract breaking [--against <git-ref>] [--deny]`：对 `*.schema.json` 做 **base ref ↔ working-tree** 的跨版本 JSON-Schema 递归 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（R1–R17 = manifest 元数据 + schema 文件存在性 + redaction/protection 策略结构 = **结构**）、`cargo public-api`（轴 A Rust 符号）互补无重叠——本门只校验 schema **内容跨版本 diff**（语义破坏）。规则与窗口分级单源见 `xtask/src/contract/breaking.rs`（INVARIANT WIRE-BREAKING-01 / WIRE-BREAKING-WINDOW-01）。
+`cargo xtask contract breaking [--against <git-ref>] [--deny]`：对 `*.schema.json` 做 **base ref ↔ working-tree** 的跨版本 JSON-Schema 递归 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（R1–R19 = manifest 元数据 + schema 文件存在性 + redaction/protection 策略结构 + HTTP AuthZ/header shape + request tenant source = **结构**）、`cargo public-api`（轴 A Rust 符号）互补无重叠——本门只校验 schema **内容跨版本 diff**（语义破坏）。规则与窗口分级单源见 `xtask/src/contract/breaking.rs`（INVARIANT WIRE-BREAKING-01 / WIRE-BREAKING-WINDOW-01）。
 
 - **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。base ref 不可解析（未 fetch）按模式分级：**warn 模式跳过整门（退出码 0）**；**deny 模式 fail-closed（退出码 1，无法读基准即无法判定破坏）**——提示 `git fetch <remote> <branch>` 或换 `--against <本地 ref>`。
 - **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
@@ -131,7 +135,7 @@ contracts/{kind}/{domain}/{version}/
 
 per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block、command 的 `topic`）已随 #1035 + #1124 落地（见上 §contract.toml 字段 + 校验规则 R8–R10 / R15）；属预期附加演进（新增 optional 字段不破坏既有契约解析），非破坏冻结。
 
-**codegen 消费面（例外）**：多数 per-kind 字段 codegen **不**消费（只读 `*.schema.json`），故 `generated/` 不受影响——**但 command 的 `topic` 是 codegen 输入**：派生 `generated/src/command/{domain}_{version}.rs` 的 `pub const TOPIC`（broker routing key 烤入 wrapper），故改 command `topic` 必须跑 `cargo xtask codegen --check`（漂移门）并更新已提交 `generated/`。event 的 `topic`/`delivery` 等仍不入 codegen。
+**codegen 消费面（例外）**：多数 per-kind 字段 codegen **不**消费（只读 `*.schema.json`），故 `generated/` 不受影响——但以下字段是 codegen 输入：① command `topic` 派生 `generated/src/command/{domain}_{version}.rs` 的 `pub const TOPIC`；② active HTTP `path`/`method`/`endpoints.http.auth`/`endpoints.http.headers` 派生 `generated/src/http/{domain}_{version}.rs` 的 `SPEC: super::HttpSpec`（含 `CONTRACT`/`PATH`/auth/header metadata），供 route code 消费。改这些字段必须跑 `cargo xtask codegen --check`（漂移门）并更新已提交 `generated/`。event 的 `topic`/`delivery` 等仍不入 codegen。
 
 ### 字段级脱敏派生（codegen 单源，`INVARIANT: CONTRACT-REDACTION-POLICY-01`）
 

@@ -29,14 +29,16 @@ audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 
 ## Tenant source（认证通道，非 request body）
 
-tenant scope 只能来自**已认证通道**：JWT tenant claim（→ ctx）或 service-token MAC 签名的
-`X-Tenant-ID` header（internal / pre-auth 路径，经 `endpoints.http.headers.X-Tenant-ID`
-populate-only 派生，adapter `tenant::parse_tenant_id` fail-closed）。**HTTP request body 不得携带
+tenant scope 只能来自**声明过的入口**：JWT tenant claim（→ ctx）或 `X-Tenant-ID` header
+（internal / pre-auth 路径，经 `endpoints.http.headers.X-Tenant-ID = "populate-only"`
+派生，handler fail-closed 解析）。当前 `identity.login` 的 pre-auth header 保证是
+contract/codegen/header-shape fail-closed，**不是** cryptographic header authenticity；service-token
+签名 header enforcement 仍是后续独立硬化项（#1503）。**HTTP request body 不得携带
 `tenantId`**——body 是唯一不被 service-token MAC 覆盖的入口，body tenant 是未认证维度。契约 codegen
-（`build_http_dtos`）在不可绕的 request 路径拒绝任何声明 `tenantId` 的 HTTP request schema：upstream
-schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned call-site 是
-**behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立 call-site
-强制）；无豁免。符号 / 评级 / 盲区见 契约 codegen 的 tenant-in-body guard 模块 rustdoc。
+schema/codegen/validate 在不可绕的 request 路径拒绝任何声明 `tenantId` 的 HTTP request schema：
+upstream schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned
+call-site 是 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立
+call-site 强制）；无豁免。符号 / 评级 / 盲区见 契约 codegen 的 tenant-in-body guard 模块 rustdoc。
 
 ## Principal claim source
 
@@ -79,7 +81,7 @@ typed `PartitionKey::for_tenant(TenantId, ..)` 让 tenant scope 进类型层）�
 ## 持久化模式 tenant 作用域合约（PERSIST-016 / #1437 RLS 解锁器）
 
 **作用域来源**：`TenantId`（`vocab`，fail-closed 解析，空值 / nil / 非 canonical UUID 非法）
-从已认证通道（JWT tenant claim 或 service-token MAC 的 `X-Tenant-ID` header，见 §Tenant source）
+从声明过的认证/预认证通道（JWT tenant claim 或 `X-Tenant-ID` populate-only header，见 §Tenant source）
 流入，经 `adapters/postgres/src/cotx.rs` 的类型化 funnel
 （`set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox`）注入当前 PG 事务；
 永不从 HTTP request body 读取。

@@ -164,3 +164,10 @@ pub struct SettingsSecretPublishResponse {
     #[redact(public)]
     pub data: SettingsSecretPublishData,
 }
+
+/// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "settings.secret-publish";
+
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("settings", "settings.secret-publish");

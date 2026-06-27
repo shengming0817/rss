@@ -125,3 +125,10 @@ pub struct SeedEchoResponse {
     #[redact(public)]
     pub data: SeedEchoData,
 }
+
+/// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "seed.echo";
+
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("_seed", "seed.echo");

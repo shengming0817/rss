@@ -26,17 +26,21 @@
 //! `x-at-rest`（持久化 opt-in）合法且完整（R17，#1468，ADR-011 D1b 声明层）。block 内部一致、AAD 维度
 //! 完整（D2）、deterministic/blindIndex 须 reason 且 aad 稳定子集（D4）、`x-at-rest` schema 高风险字段
 //! 须显式 `x-protection`，均 fail-closed。与 R16 observe redaction **正交不混用**（ADR-011 D1）。
+//! INVARIANT: CONTRACT-HTTP-SERVING-01 — active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
+//! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文或声明式 populate-only header（R19）。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
-//! （CONTRACT-FREEZE-01）；R8–R14 是条件化跨字段不变式（依赖 lifecycle/kind/值 组合），类型层无法免费表达，
+//! （CONTRACT-FREEZE-01）；R8–R15 / R17–R19 是条件化跨字段 / schema 内容不变式（依赖 lifecycle/kind/值
+//! 组合或 JSON Schema 内容），类型层无法免费表达，
 //! 故与 R1–R7 同属 Medium——「能 Hard 则 Hard、余下 Medium」的正确分层。
 //!
 //! 规则执行顺序（注释编号 = 执行先后）：
 //!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
 //!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
-//!   → R9 PerKindFieldScope → R10 SagaBlock → R11 ActiveDeliverySupported → R13 SchemaTitle
-//!   → R16 SchemaRedaction → R17 SchemaProtection → R14 ActiveSubscriber
+//!   → R9 PerKindFieldScope → R18 HttpAuth → R19 HttpTenantSource → R10 SagaBlock
+//!   → R11 ActiveDeliverySupported → R13 SchemaTitle → R16 SchemaRedaction → R17 SchemaProtection
+//!   → R14 ActiveSubscriber
 //!   跨契约（validate_cross，需全局视图）：R12 DuplicateId
 
 use anyhow::Result;
@@ -45,12 +49,13 @@ use std::path::Path;
 
 use super::manifest::{
     ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery, FIELD_DELIVERY,
-    FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, Lifecycle,
-    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_METHOD, FIELD_PATH, FIELD_SAGA,
+    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuthMode, HttpHeaderMode, Lifecycle, SCHEMA_KEY_PAYLOAD,
+    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
 use super::protection;
 use super::redaction;
-use super::{DiscoveredContract, discover};
+use super::{DiscoveredContract, discover, schema_declares_property};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
 
@@ -119,6 +124,14 @@ pub(crate) enum Rule {
     /// reason 且 aad 稳定子集排除 schemaVersion；plain 不携带 encrypt 参数），`x-at-rest:true` 的 schema
     /// 内高风险字段缺 `x-protection` 均拒绝。与 R16（observe redaction）正交不混用。
     SchemaProtection,
+    /// R18：active HTTP serving 必须声明 fail-closed auth/header metadata。
+    ///
+    /// `mode=permission` 需要 permission 且禁止 reason；public/bootstrap/clientsOnly/serviceOwned 需要
+    /// non-empty reason 且禁止 permission。当前最小 header 面只接受 `X-Tenant-ID = "populate-only"`，
+    /// identity.login public serving 必须声明该 header。
+    HttpAuth,
+    /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文或声明式 populate-only header。
+    HttpTenantSource,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -192,6 +205,8 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_ident_syntax(&c.manifest, &label));
     findings.extend(rule_perkind_active_fields(&c.manifest, &label));
     findings.extend(rule_perkind_field_scope(&c.manifest, &label));
+    findings.extend(rule_http_auth(&c.manifest, &label));
+    findings.extend(rule_http_request_tenant_source(c, &label));
     findings.extend(rule_saga_block(&c.manifest, &label));
     findings.extend(rule_active_delivery_supported(&c.manifest, &label));
     findings.extend(rule_schema_title(c, &label));
@@ -521,6 +536,141 @@ fn rule_perkind_field_scope(m: &ContractManifest, label: &str) -> Vec<Finding> {
             )
         })
         .collect()
+}
+
+fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let http_endpoint = m.endpoints.as_ref().and_then(|e| e.http.as_ref());
+    if http_endpoint.is_some() && m.kind != ContractKind::Http {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "endpoints.http 仅允许 kind=http 契约声明".to_string(),
+        ));
+    }
+    let Some(http) = http_endpoint else {
+        if m.kind == ContractKind::Http && m.lifecycle == Lifecycle::Active {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!("lifecycle=active 的 kind=http 契约缺 {FIELD_ENDPOINTS_HTTP_AUTH}"),
+            ));
+        }
+        return out;
+    };
+
+    for (name, mode) in &http.headers {
+        if name != "X-Tenant-ID" || *mode != HttpHeaderMode::PopulateOnly {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_HEADERS} 当前仅接受 \"X-Tenant-ID\" = \"populate-only\"，实为 {name:?} = {:?}",
+                    mode
+                ),
+            ));
+        }
+    }
+
+    if m.kind != ContractKind::Http || m.lifecycle != Lifecycle::Active {
+        return out;
+    }
+    let Some(auth) = &http.auth else {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            format!("lifecycle=active 的 kind=http 契约缺 {FIELD_ENDPOINTS_HTTP_AUTH}"),
+        ));
+        return out;
+    };
+    let reason_present = auth.reason.as_ref().is_some_and(|s| !s.trim().is_empty());
+    let permission_present = auth
+        .permission
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty());
+    match auth.mode {
+        HttpAuthMode::Permission => {
+            if !permission_present {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    "endpoints.http.auth mode=permission 必须声明非空 permission".to_string(),
+                ));
+            }
+            if auth.reason.is_some() {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    "endpoints.http.auth mode=permission 禁止 reason".to_string(),
+                ));
+            }
+        }
+        HttpAuthMode::Public
+        | HttpAuthMode::Bootstrap
+        | HttpAuthMode::ClientsOnly
+        | HttpAuthMode::ServiceOwned => {
+            if !reason_present {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    format!(
+                        "endpoints.http.auth mode={} 必须声明非空 reason",
+                        auth.mode.as_wire()
+                    ),
+                ));
+            }
+            if auth.permission.is_some() {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    format!(
+                        "endpoints.http.auth mode={} 禁止 permission",
+                        auth.mode.as_wire()
+                    ),
+                ));
+            }
+        }
+    }
+    if m.id == "identity.login"
+        && matches!(auth.mode, HttpAuthMode::Public)
+        && http.headers.get("X-Tenant-ID") != Some(&HttpHeaderMode::PopulateOnly)
+    {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "identity.login public serving 必须声明 X-Tenant-ID = populate-only".to_string(),
+        ));
+    }
+    out
+}
+
+fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+    let m = &c.manifest;
+    if m.kind != ContractKind::Http {
+        return Vec::new();
+    }
+    let Some(request) = m.schemas.request.as_deref() else {
+        return Vec::new();
+    };
+    if pathsafe::is_unsafe_segment(request) {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(c.dir.join(request)) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    if schema_declares_property(&value, "tenantId") {
+        return vec![finding(
+            Rule::HttpTenantSource,
+            label,
+            format!(
+                "HTTP request schema {request} 声明 tenantId；tenant scope 必须来自 X-Tenant-ID/JWT，不得来自 body"
+            ),
+        )];
+    }
+    Vec::new()
 }
 
 /// R10：saga 契约的 `[saga]` block 结构语义（saga.md governance，**无条件、不论 lifecycle**）：
@@ -872,8 +1022,8 @@ fn is_domain_name(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::contract::manifest::{
-        CompensationOrder, Delivery, HttpMethod, Lifecycle, SagaBlock, SagaStep, Schemas,
-        Subscription,
+        CompensationOrder, Delivery, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint,
+        HttpHeaderMode, HttpMethod, Lifecycle, SagaBlock, SagaStep, Schemas, Subscription,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -894,12 +1044,29 @@ mod tests {
             consistency_level: level,
             lifecycle: Lifecycle::Draft,
             schemas,
+            endpoints: None,
             path: None,
             method: None,
             topic: None,
             delivery: None,
             saga: None,
             subscriptions: Vec::new(),
+        }
+    }
+
+    fn public_http_endpoints() -> Endpoints {
+        Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Public,
+                    reason: Some("public endpoint".to_string()),
+                    permission: None,
+                }),
+                headers: BTreeMap::from([(
+                    "X-Tenant-ID".to_string(),
+                    HttpHeaderMode::PopulateOnly,
+                )]),
+            }),
         }
     }
 
@@ -1599,6 +1766,7 @@ mod tests {
         active.lifecycle = Lifecycle::Active;
         active.path = Some("/api/v1/_seed/echo".to_string());
         active.method = Some(HttpMethod::Post);
+        active.endpoints = Some(public_http_endpoints());
         assert!(rule_perkind_active_fields(&active, "x").is_empty());
         // draft 缺字段 → 豁免（种子 draft 不受约束）。
         let draft = manifest(
@@ -1625,6 +1793,161 @@ mod tests {
         cmd.lifecycle = Lifecycle::Active;
         cmd.topic = Some("identity.commands.revoke-session".to_string());
         assert!(rule_perkind_active_fields(&cmd, "x").is_empty());
+    }
+
+    #[test]
+    fn r18_active_http_without_auth_fails() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/echo".to_string());
+        m.method = Some(HttpMethod::Post);
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::HttpAuth),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_public_http_empty_reason_fails() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/echo".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Public,
+                    reason: Some(" ".to_string()),
+                    permission: None,
+                }),
+                headers: BTreeMap::from([(
+                    "X-Tenant-ID".to_string(),
+                    HttpHeaderMode::PopulateOnly,
+                )]),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("必须声明非空 reason")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_permission_mode_forbids_reason() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/echo".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: Some("not allowed".to_string()),
+                    permission: Some("identity.login".to_string()),
+                }),
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("禁止 reason")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_identity_public_login_requires_tenant_header() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        m.id = "identity.login".to_string();
+        m.domain = "identity".to_string();
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/identity/login".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Public,
+                    reason: Some("public login".to_string()),
+                    permission: None,
+                }),
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("X-Tenant-ID = populate-only")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r19_http_request_tenant_id_is_rejected() -> anyhow::Result<()> {
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"LoginRequest","type":"object","properties":{"tenantId":{"type":"string"}}}"#,
+            r#"{"title":"LoginResponse"}"#,
+        )?;
+        let findings = rule_http_request_tenant_source(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::HttpTenantSource && f.detail.contains("tenantId")),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r19_http_request_nested_tenant_id_is_rejected() -> anyhow::Result<()> {
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"LoginRequest","type":"object","properties":{"profile":{"type":"object","properties":{"tenantId":{"type":"string"}}}}}"#,
+            r#"{"title":"LoginResponse"}"#,
+        )?;
+        let findings = rule_http_request_tenant_source(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::HttpTenantSource),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r19_response_tenant_id_does_not_trip_request_rule() -> anyhow::Result<()> {
+        let (c, dir) = http_contract_with_schemas(
+            r#"{"title":"LoginRequest","type":"object","properties":{"username":{"type":"string"}}}"#,
+            r#"{"title":"LoginResponse","type":"object","properties":{"tenantId":{"type":"string"}}}"#,
+        )?;
+        let findings = rule_http_request_tenant_source(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
     }
 
     /// R8（#1124 红用例）：active command 缺 topic → 缺路由出口 = 死分发，须报 PerKindActiveFields。
@@ -2054,6 +2377,7 @@ mod tests {
         m.lifecycle = Lifecycle::Active;
         m.path = Some("/api/v1/_seed/echo".to_string());
         m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(public_http_endpoints());
         let findings = validate_contract(&discovered(m, dir.clone()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(findings.is_empty(), "{findings:?}");

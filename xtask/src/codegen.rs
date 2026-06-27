@@ -18,9 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
-use crate::contract::manifest::ContractKind;
+use crate::contract::manifest::{ContractKind, HttpAuthMode, HttpHeaderMode, Lifecycle};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
-use crate::contract::{DiscoveredContract, discover};
+use crate::contract::{DiscoveredContract, discover, schema_declares_property};
 use crate::pathsafe;
 
 /// 入口：生成（`check=false`）或校验漂移（`check=true`）真实仓的 committed 派生码。
@@ -51,6 +51,7 @@ pub(crate) fn generate(contracts_root: &Path, gen_src: &Path, check: bool) -> Re
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModKind {
     Plain,
+    Http,
     Event,
     Command,
 }
@@ -74,9 +75,10 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
             );
         }
         let mod_kind = match c.manifest.kind {
+            ContractKind::Http => ModKind::Http,
             ContractKind::Event => ModKind::Event,
             ContractKind::Command => ModKind::Command,
-            ContractKind::Http | ContractKind::Saga => ModKind::Plain,
+            ContractKind::Saga => ModKind::Plain,
         };
         let rel = PathBuf::from(&kind_dir).join(format!("{module}.rs"));
         files.push((rel, render_contract(c)?));
@@ -123,6 +125,15 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
             .with_context(|| format!("读 schema {}", path.display()))?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("解析 schema {}", path.display()))?;
+        if c.manifest.kind == ContractKind::Http
+            && c.manifest.schemas.request.as_deref() == Some(schema_file)
+            && schema_declares_property(&value, "tenantId")
+        {
+            bail!(
+                "HTTP request schema {} 声明 tenantId；tenant scope 必须来自 X-Tenant-ID/JWT，不得来自 body",
+                path.display()
+            );
+        }
         let schema_policies = redaction::collect_struct_policies(&value).map_err(|violations| {
             anyhow::anyhow!(
                 "redaction policy invalid in {}: {}",
@@ -161,9 +172,133 @@ fn render_contract(c: &DiscoveredContract) -> Result<String> {
             let glue = render_command_glue(c)?;
             Ok(format!("{}{}{}", generated_header(&source), payload, glue))
         }
-        ContractKind::Http | ContractKind::Saga => {
-            Ok(format!("{}{}", generated_header(&source), payload))
+        ContractKind::Http => {
+            let glue = render_http_glue(c)?;
+            Ok(format!("{}{}{}", generated_header(&source), payload, glue))
         }
+        ContractKind::Saga => Ok(format!("{}{}", generated_header(&source), payload)),
+    }
+}
+
+fn render_http_glue(c: &DiscoveredContract) -> Result<String> {
+    let domain = &c.manifest.domain;
+    let contract_id = &c.manifest.id;
+    for (field, value) in [("domain", domain.as_str()), ("id", contract_id.as_str())] {
+        if !is_safe_codegen_ident(value) {
+            bail!(
+                "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
+    }
+    let mut out = format!(
+        r#"
+/// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "{contract_id}";
+
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
+"#
+    );
+    if c.manifest.lifecycle != Lifecycle::Active {
+        return Ok(out);
+    }
+    let path = c
+        .manifest
+        .path
+        .as_deref()
+        .context("active http 契约缺 path（codegen fail-closed）")?;
+    let method = c
+        .manifest
+        .method
+        .context("active http 契约缺 method（codegen fail-closed）")?;
+    let http = c
+        .manifest
+        .endpoints
+        .as_ref()
+        .and_then(|e| e.http.as_ref())
+        .context("active http 契约缺 endpoints.http（codegen fail-closed）")?;
+    let auth = http
+        .auth
+        .as_ref()
+        .context("active http 契约缺 endpoints.http.auth（codegen fail-closed）")?;
+    for (field, value) in [("path", path), ("method", method.as_wire())] {
+        if !is_safe_codegen_string(value) {
+            bail!(
+                "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
+    }
+    let mode = match auth.mode {
+        HttpAuthMode::Permission => "Permission",
+        HttpAuthMode::Public => "Public",
+        HttpAuthMode::Bootstrap => "Bootstrap",
+        HttpAuthMode::ClientsOnly => "ClientsOnly",
+        HttpAuthMode::ServiceOwned => "ServiceOwned",
+    };
+    let reason = render_option_str(auth.reason.as_deref(), "reason")?;
+    let permission = render_option_str(auth.permission.as_deref(), "permission")?;
+    let mut headers = Vec::with_capacity(http.headers.len());
+    for (name, mode) in &http.headers {
+        if !is_safe_codegen_string(name) {
+            bail!(
+                "契约 {}/{}/{} 的 header name 含不安全字符（防注入生成字面量）: {name:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
+        let header_mode = match mode {
+            HttpHeaderMode::PopulateOnly => "PopulateOnly",
+        };
+        headers.push(format!(
+            "    super::HttpHeaderSpec {{ name: \"{name}\", mode: super::HttpHeaderMode::{header_mode} }}"
+        ));
+    }
+    let headers_body = if headers.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", headers.join(",\n"))
+    };
+    out.push_str(&format!(
+        r#"
+/// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PATH: &str = "{path}";
+
+/// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: super::HttpSpec = super::HttpSpec {{
+    contract_id: CONTRACT_ID,
+    contract: CONTRACT,
+    path: PATH,
+    method: "{method}",
+    auth: super::HttpAuthSpec {{
+        mode: super::HttpAuthMode::{mode},
+        reason: {reason},
+        permission: {permission},
+    }},
+    headers: &[{headers_body}],
+}};
+"#,
+        method = method.as_wire(),
+    ));
+    Ok(out)
+}
+
+fn render_option_str(value: Option<&str>, field: &str) -> Result<String> {
+    match value {
+        Some(value) => {
+            if !is_safe_codegen_string(value) {
+                bail!("{field} 含不安全字符（防注入生成字面量）: {value:?}");
+            }
+            Ok(format!("Some(\"{value}\")"))
+        }
+        None => Ok("None".to_string()),
     }
 }
 
@@ -353,6 +488,11 @@ fn is_safe_codegen_ident(s: &str) -> bool {
         })
 }
 
+fn is_safe_codegen_string(s: &str) -> bool {
+    !s.bytes()
+        .any(|b| b == b'"' || b == b'\\' || b.is_ascii_control())
+}
+
 /// generated struct 统一派生 `secure::Redact`，字段策略从 schema property 的 `x-pii` / `x-redaction`
 /// 注入为 `#[redact(...)]`。非敏感字段默认 `public`，使所有 generated DTO 都有安全 `Debug`，不再裸
 /// derive `Debug` 或把敏感类型去掉 `Debug`。
@@ -534,6 +674,46 @@ pub struct SubscriptionSpec {
 }
 "#;
 
+const HTTP_SPEC_DEF: &str = r#"
+/// HTTP serving metadata generated from `contract.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpSpec {
+    pub contract_id: &'static str,
+    pub contract: ::vocab::ContractBinding,
+    pub path: &'static str,
+    pub method: &'static str,
+    pub auth: HttpAuthSpec,
+    pub headers: &'static [HttpHeaderSpec],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpAuthSpec {
+    pub mode: HttpAuthMode,
+    pub reason: Option<&'static str>,
+    pub permission: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpAuthMode {
+    Permission,
+    Public,
+    Bootstrap,
+    ClientsOnly,
+    ServiceOwned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpHeaderSpec {
+    pub name: &'static str,
+    pub mode: HttpHeaderMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpHeaderMode {
+    PopulateOnly,
+}
+"#;
+
 /// command kind mod.rs 特化：定义 `CommandEmit` / `CommandRegister` 收口 seam（各 `{domain}_{version}.rs`
 /// 经 `super::` 引用）。generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层），故
 /// per-command wrapper 经这两个泛型 seam 注入——唯一 sanctioned 实现是组合根 bridge / registrar（委托
@@ -604,6 +784,7 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
     // event kind：定义 SubscriptionSpec POD；command kind：定义 CommandEmit/CommandRegister seam
     // （各子模块经 `super::` 引用，消除重复定义）。
     match kind {
+        ModKind::Http => s.push_str(HTTP_SPEC_DEF),
         ModKind::Event => s.push_str(SUBSCRIPTION_SPEC_DEF),
         ModKind::Command => s.push_str(COMMAND_SEAM_DEF),
         ModKind::Plain => {}
@@ -962,6 +1143,57 @@ mod tests {
         assert!(
             message.contains("redaction policy invalid") && message.contains("apiKey"),
             "错误应指向 redaction policy 与字段名:\n{message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_active_http_without_auth_mode() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"seed.echo\"\n",
+                "kind = \"http\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"LocalOnly\"\n",
+                "lifecycle = \"active\"\n",
+                "path = \"/api/v1/_seed/echo\"\n",
+                "method = \"POST\"\n",
+                "[schemas]\n",
+                "request = \"request.schema.json\"\n",
+                "response = \"response.schema.json\"\n",
+            ),
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result.is_err(),
+            "active HTTP 缺 auth 时 codegen 须 fail-closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_http_request_tenant_id() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SeedEchoRequest","type":"object","required":["tenantId"],"properties":{"tenantId":{"type":"string"}},"additionalProperties":false}"#,
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("tenantId")),
+            "HTTP request tenantId 须被 codegen 拒绝: {result:?}"
         );
         Ok(())
     }

@@ -107,7 +107,7 @@ pub trait RoleRepoLocal {
 #[allow(async_fn_in_trait)]
 // reason: 同 RoleRepo——base trait 非 Send native AFIT，Send 由 trait_variant `CredentialRepo` 变体 +
 // dynosaur `DynCredentialRepo` 承载（ADR-003/ADR-004 C1）。`Send + Sync` supertrait 使
-// `Arc<DynCredentialRepo>` 可被 axum handler 共享。
+// `Arc<DynCredentialRepo>` 可被 axum handler state 间接共享。
 pub trait CredentialRepoLocal: Send + Sync {
     /// 按 canonical user id 查凭据（tenant-scoped；不存在返回 `Ok(None)`）。self-scoped 操作（改密）的身份
     /// 锚点是**认证主体**的 `ids::UserId`，**非**请求可选择的登录标识——调用方不能传 login 串定位他人凭据
@@ -204,7 +204,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SessionLifecycle` 变体 +
 // dynosaur `DynSessionLifecycle` 承载（DI 注入走 Send wrapper）。`Send + Sync` supertrait 使
-// `Arc<DynSessionLifecycle>` 可被 axum handler 共享。
+// `Arc<DynSessionLifecycle>` 可被 axum handler state 间接共享。
 pub trait SessionLifecycleLocal: Send + Sync {
     /// **创建（co-tx，L2）**：把 [`Session`] 行与 outbox(`identity.session-created`) 行**同一本地事务**原子
     /// 写入（FR-003）。域构造 `entry`（事件语义归域：topic + opaque-UUID EventId + 编码 payload）与 `envelope`

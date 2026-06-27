@@ -209,7 +209,11 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 
     // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅 + admin 读路由组。
     let (audit_domain, audit) = audit_domain();
-    let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
+    let identity_domain = IdentityDomain::new(Arc::new(login_service(
+        &bus,
+        TenantId::parse(CANON_TENANT)?,
+    )?));
+    let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let route_groups = registry.route_groups();
     assert_eq!(
@@ -428,7 +432,11 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
     let (audit_domain, audit) = audit_domain();
-    let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
+    let identity_domain = IdentityDomain::new(Arc::new(login_service(
+        &bus,
+        TenantId::parse(CANON_TENANT)?,
+    )?));
+    let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let SubscriberBinding {
         contract_id,

@@ -136,3 +136,30 @@ pub struct IdentityLoginResponse {
     #[redact(public)]
     pub data: IdentityLoginData,
 }
+
+/// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "identity.login";
+
+/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("identity", "identity.login");
+
+/// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PATH: &str = "/api/v1/identity/login";
+
+/// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: super::HttpSpec = super::HttpSpec {
+    contract_id: CONTRACT_ID,
+    contract: CONTRACT,
+    path: PATH,
+    method: "POST",
+    auth: super::HttpAuthSpec {
+        mode: super::HttpAuthMode::Public,
+        reason: Some("login is pre-auth; tenant scope is populated from X-Tenant-ID"),
+        permission: None,
+    },
+    headers: &[super::HttpHeaderSpec {
+        name: "X-Tenant-ID",
+        mode: super::HttpHeaderMode::PopulateOnly,
+    }],
+};

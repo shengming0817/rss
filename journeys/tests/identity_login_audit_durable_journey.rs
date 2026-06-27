@@ -139,7 +139,18 @@ async fn login_audit_durable_topology() -> Result<()> {
     let (audit_domain, audit) = audit_domain();
 
     // 组装 audit 订阅（contract_id/topic/group 单源自 generated SUBSCRIPTIONS）。
-    let registry = bootstrap::compose(&[&IdentityDomain, &audit_domain])?;
+    let identity_domain = IdentityDomain::new(Arc::new(LoginService::with_seed_credential(
+        Arc::from(DynSessionLifecycle::new_box(
+            id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+        )),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+        Duration::from_secs(TTL_SECS),
+        LOGIN_USERNAME,
+        ids::UserId::parse(CANON_USER)?,
+        PASSWORD,
+        TenantId::parse(CANON_TENANT)?,
+    )?));
+    let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
     let binding = single_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
 

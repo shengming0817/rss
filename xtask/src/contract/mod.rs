@@ -89,6 +89,49 @@ pub(crate) fn path_segments(contracts_root: &Path, dir: &Path) -> Option<(String
     }
 }
 
+/// JSON Schema 文档是否在任意 object schema 的 `properties` 中声明指定字段。
+///
+/// 仅检查 schema 的 property key，不扫描 `required` / description / enum 字符串，避免把普通文本误判为字段声明。
+/// 下钻口径覆盖当前 contract schema 使用的 draft-07 承载关键字，与 codegen/validate 共用，避免治理门漂移。
+pub(crate) fn schema_declares_property(value: &serde_json::Value, property: &str) -> bool {
+    let serde_json::Value::Object(map) = value else {
+        return false;
+    };
+    if map
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|props| props.contains_key(property))
+    {
+        return true;
+    }
+    for key in ["$defs", "definitions", "properties"] {
+        if let Some(serde_json::Value::Object(children)) = map.get(key)
+            && children
+                .values()
+                .any(|child| schema_declares_property(child, property))
+        {
+            return true;
+        }
+    }
+    for key in ["items", "additionalProperties"] {
+        if let Some(child) = map.get(key)
+            && schema_declares_property(child, property)
+        {
+            return true;
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(serde_json::Value::Array(children)) = map.get(key)
+            && children
+                .iter()
+                .any(|child| schema_declares_property(child, property))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

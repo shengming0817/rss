@@ -15,6 +15,7 @@
 //! `#[serde(default)]` 保证现有无 subscriptions 的契约仍解析（空 vec），不破坏 CONTRACT-FREEZE-01。
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 /// event 订阅声明字段名常量（#1120）——DRY 于 validate R14 + codegen 订阅 glue（消除裸串重复）。
 pub(crate) const FIELD_SUBSCRIPTIONS: &str = "[[subscriptions]]";
@@ -31,6 +32,8 @@ pub(crate) const FIELD_METHOD: &str = "method";
 pub(crate) const FIELD_TOPIC: &str = "topic";
 pub(crate) const FIELD_DELIVERY: &str = "delivery";
 pub(crate) const FIELD_SAGA: &str = "[saga]";
+pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
+pub(crate) const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
 
 /// `contract.toml` 的解析目标。字段集冻结——见模块 INVARIANT。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -46,6 +49,12 @@ pub(crate) struct ContractManifest {
     pub(crate) lifecycle: Lifecycle,
     #[serde(default)]
     pub(crate) schemas: Schemas,
+    /// HTTP serving metadata. The only accepted nested shape is:
+    /// `[endpoints.http.auth]` + `[endpoints.http.headers]`; nested structs use
+    /// `deny_unknown_fields`, so typos fail at parse time instead of becoming
+    /// silently ignored governance holes.
+    #[serde(default)]
+    pub(crate) endpoints: Option<Endpoints>,
     /// http per-kind：业务路径（`/api/v{N}/{domain}/…` 约定）。active http 必填（R8）。
     #[serde(default)]
     pub(crate) path: Option<String>,
@@ -185,6 +194,72 @@ pub(crate) enum HttpMethod {
     Put,
     Patch,
     Delete,
+}
+
+impl HttpMethod {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Endpoints {
+    #[serde(default)]
+    pub(crate) http: Option<HttpEndpoint>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HttpEndpoint {
+    #[serde(default)]
+    pub(crate) auth: Option<HttpAuth>,
+    #[serde(default)]
+    pub(crate) headers: BTreeMap<String, HttpHeaderMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HttpAuth {
+    pub(crate) mode: HttpAuthMode,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) permission: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum HttpAuthMode {
+    Permission,
+    Public,
+    Bootstrap,
+    ClientsOnly,
+    ServiceOwned,
+}
+
+impl HttpAuthMode {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            HttpAuthMode::Permission => "permission",
+            HttpAuthMode::Public => "public",
+            HttpAuthMode::Bootstrap => "bootstrap",
+            HttpAuthMode::ClientsOnly => "clientsOnly",
+            HttpAuthMode::ServiceOwned => "serviceOwned",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HttpHeaderMode {
+    PopulateOnly,
 }
 
 /// 事件投递语义（event 契约 per-kind 字段）。三标准投递保证；非法值解析即 `Err`（Hard，类型层）。

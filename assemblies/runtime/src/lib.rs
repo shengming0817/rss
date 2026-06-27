@@ -39,6 +39,10 @@ use bootstrap::shutdown::ShutdownStack;
 use crypto::RustCryptoMacVerifier;
 use diport::{DynManagedResource, DynSecretResolver};
 use httpd::HttpServer;
+use identity::{
+    IdentityDomain, LoginService,
+    ports::{DynCredentialRepo, DynSessionLifecycle},
+};
 use oidc::OidcProvider;
 use postgres::{
     PgConfig, PgDbReadiness, PgPassword, PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
@@ -640,6 +644,39 @@ pub fn wire_audit(deps: &SharedRuntimeDeps) -> anyhow::Result<AuditDomain> {
     Ok(AuditDomain::new(dyn_repo))
 }
 
+const DEFAULT_IDENTITY_SESSION_TTL_SECS: u64 = 3_600;
+const MAX_IDENTITY_SESSION_TTL_SECS: u64 = 90 * 24 * 60 * 60;
+const IDENTITY_SESSION_TTL_ENV: &str = "RSS_IDENTITY_SESSION_TTL_SECS";
+
+fn identity_session_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<u64> {
+    match env(IDENTITY_SESSION_TTL_ENV) {
+        Some(raw) => {
+            let ttl = raw.parse::<u64>().with_context(|| {
+                format!("{IDENTITY_SESSION_TTL_ENV} must be an integer seconds value")
+            })?;
+            anyhow::ensure!(ttl > 0, "{IDENTITY_SESSION_TTL_ENV} must be > 0");
+            anyhow::ensure!(
+                ttl <= MAX_IDENTITY_SESSION_TTL_SECS,
+                "{IDENTITY_SESSION_TTL_ENV} must be <= {MAX_IDENTITY_SESSION_TTL_SECS}"
+            );
+            Ok(ttl)
+        }
+        None => Ok(DEFAULT_IDENTITY_SESSION_TTL_SECS),
+    }
+}
+
+/// 接线 identity 域：postgres credential repo + postgres session lifecycle + SystemClock + session TTL。
+pub fn wire_identity(deps: &SharedRuntimeDeps) -> anyhow::Result<IdentityDomain> {
+    let identity_pg = deps.pg.for_domain::<caps::Identity>();
+    let ttl = Duration::from_secs(identity_session_ttl_secs(|name| std::env::var(name).ok())?);
+    let credentials = Arc::from(DynCredentialRepo::new_box(identity_pg.credential_repo()));
+    let lifecycle = Arc::from(DynSessionLifecycle::new_box(
+        identity_pg.session_lifecycle(Box::new(SystemClock)),
+    ));
+    let service = LoginService::new(credentials, lifecycle, Box::new(SystemClock), ttl);
+    Ok(IdentityDomain::new(Arc::new(service)))
+}
+
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
 
 /// Health listener 路由组前缀（liveness/readiness 在专用 listener 上；operator 配 k8s probe 路径指向此前缀下）。
@@ -913,19 +950,18 @@ pub async fn run() -> anyhow::Result<()> {
 
     // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
     let audit_domain = wire_audit(&deps).context("wire audit")?;
+    let identity_domain = wire_identity(&deps).context("wire identity")?;
 
-    // settings domain（#1272/#1274）+ audit domain（#1230）注册（声明 routes/subscribers）；后续域随各自
-    // wire_X PR 加入 compose 列表。
-    let mut registry =
-        bootstrap::compose(&[&SettingsDomain, &audit_domain]).context("compose domains")?;
+    // settings domain（#1272/#1274）+ identity/audit domain 注册（声明 routes/subscribers）。
+    let mut registry = bootstrap::compose(&[&SettingsDomain, &identity_domain, &audit_domain])
+        .context("compose domains")?;
 
     // 聚合各域 module result（今仅 settings；后续域只需多一行 module.merge(wire_X(&deps).await?)，run() 形态恒定）。
     let mut module = DomainModuleResult::default();
     module.merge(wire_settings(&deps).await.context("wire settings")?);
     tracing::warn!(
         stage = "scaffold",
-        "business API routes not yet wired; only /health/v1/* served \
-        (settings/secret handler↔service 接线属后续域 PR)"
+        "settings/secret handler↔service wiring remains scaffolded; identity login is wired"
     );
 
     // 排空域产物探针进 registry（须先于 take_health_reporter，readyz 才聚合 configs_ready）。
@@ -1495,6 +1531,64 @@ mod tests {
             (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
         });
         assert_eq!(d, Duration::from_secs(300), "300 → 300s（合法上边界）");
+    }
+
+    // ── identity_session_ttl_secs 测试 ────────────────────────────────────────────────
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_session_ttl_defaults_when_missing() {
+        let ttl = identity_session_ttl_secs(|_| None).expect("default ttl");
+        assert_eq!(ttl, DEFAULT_IDENTITY_SESSION_TTL_SECS);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_session_ttl_accepts_valid_value() {
+        let ttl = identity_session_ttl_secs(|n| {
+            (n == IDENTITY_SESSION_TTL_ENV).then(|| "7200".to_string())
+        })
+        .expect("valid ttl");
+        assert_eq!(ttl, 7_200);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_session_ttl_rejects_non_integer() {
+        let err = identity_session_ttl_secs(|n| {
+            (n == IDENTITY_SESSION_TTL_ENV).then(|| "not-a-number".to_string())
+        })
+        .expect_err("non-integer ttl must fail");
+        assert!(
+            err.to_string().contains("integer seconds value"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_session_ttl_rejects_zero() {
+        let err =
+            identity_session_ttl_secs(|n| (n == IDENTITY_SESSION_TTL_ENV).then(|| "0".to_string()))
+                .expect_err("zero ttl must fail");
+        assert!(
+            err.to_string().contains("must be > 0"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_session_ttl_rejects_above_max() {
+        let err = identity_session_ttl_secs(|n| {
+            (n == IDENTITY_SESSION_TTL_ENV).then(|| (MAX_IDENTITY_SESSION_TTL_SECS + 1).to_string())
+        })
+        .expect_err("above max ttl must fail");
+        assert!(
+            err.to_string()
+                .contains(&format!("must be <= {MAX_IDENTITY_SESSION_TTL_SECS}")),
+            "unexpected error: {err:#}"
+        );
     }
 
     // ── listener bind 地址解析（fail-fast）─────────────────────────────────────────────

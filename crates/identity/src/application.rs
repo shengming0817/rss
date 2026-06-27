@@ -14,17 +14,25 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use axum::Json;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::{Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, Topic};
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use generated::event::identity_v1::{CONTRACT, IdentitySessionCreatedPayload, TOPIC};
 use generated::http::identity_v1::{
-    IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse,
+    IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, SPEC as LOGIN_HTTP_SPEC,
 };
-use httpserve::Primary;
+use generated::http::{HttpAuthMode, HttpHeaderMode};
+use httpserve::{Primary, PrimaryRoute};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
+use primitives::RouteAuthOptOut;
 use uuid::Uuid;
 use vocab::TenantId;
 
@@ -55,6 +63,9 @@ pub enum LoginError {
     /// outbox entry 构造失败（topic / event-id 非法——系统生成值，理论不可达，fail-closed）。
     #[error("session-created outbox entry build failed")]
     EntryBuild,
+    /// 会话过期时间计算溢出（组合根 ttl/clock 误配，fail-closed）。
+    #[error("session expiration time overflow")]
+    SessionTimeOverflow,
     /// session 持久化 + outbox append 的 **co-tx** 写失败（session INSERT / append / commit 任一步；
     /// 原始错误进 source，已 PII-redacted，不进 Display）。
     #[error("session-created co-tx write failed")]
@@ -205,7 +216,9 @@ impl LoginService {
         let subject = user_id.as_uuid().hyphenated().to_string();
 
         // 4. mint 会话
-        let expires_at = now + self.session_ttl;
+        let expires_at = now
+            .checked_add(self.session_ttl)
+            .ok_or(LoginError::SessionTimeOverflow)?;
         let session_id = SessionId::new(authn::SessionId::generate().as_str());
 
         let payload = IdentitySessionCreatedPayload {
@@ -531,16 +544,133 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     }
 }
 
+const MAX_LOGIN_BODY_BYTES: usize = 64 * 1024;
+
+fn request_id_from(req: &Request<Body>) -> String {
+    httpserve::request_id_str(req.extensions())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn login_relative_path() -> Result<&'static str, KernelError> {
+    let rel = LOGIN_HTTP_SPEC
+        .path
+        .strip_prefix(LOGIN_ROUTE_PREFIX)
+        .ok_or(KernelError::RouteGroup)?;
+    if rel.starts_with('/') && rel.len() > 1 {
+        Ok(rel)
+    } else {
+        Err(KernelError::RouteGroup)
+    }
+}
+
+fn login_method() -> Result<Method, KernelError> {
+    Method::from_bytes(LOGIN_HTTP_SPEC.method.as_bytes()).map_err(|_| KernelError::RouteGroup)
+}
+
+fn login_opt_out() -> Result<Option<RouteAuthOptOut>, KernelError> {
+    match LOGIN_HTTP_SPEC.auth.mode {
+        HttpAuthMode::Public => Ok(Some(RouteAuthOptOut::Public)),
+        HttpAuthMode::Permission
+        | HttpAuthMode::Bootstrap
+        | HttpAuthMode::ClientsOnly
+        | HttpAuthMode::ServiceOwned => Err(KernelError::RouteGroup),
+    }
+}
+
+fn tenant_header_name() -> Result<&'static str, KernelError> {
+    LOGIN_HTTP_SPEC
+        .headers
+        .iter()
+        .find(|h| h.mode == HttpHeaderMode::PopulateOnly)
+        .map(|h| h.name)
+        .ok_or(KernelError::RouteGroup)
+}
+
+async fn login_handler(State(service): State<Arc<LoginService>>, req: Request<Body>) -> Response {
+    let request_id = request_id_from(&req);
+    let tenant_header = match tenant_header_name() {
+        Ok(name) => name,
+        Err(_) => return httpserve::error::internal_error(&request_id),
+    };
+    let tenant = match req
+        .headers()
+        .get(tenant_header)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| TenantId::parse(s).ok())
+    {
+        Some(tenant) => tenant,
+        None => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let (_, body) = req.into_parts();
+    let body = match to_bytes(body, MAX_LOGIN_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    login_handler_bytes(service, tenant, body, &request_id).await
+}
+
+#[cfg(test)]
+pub(crate) fn login_router_for_test(service: Arc<LoginService>) -> axum::Router {
+    axum::Router::new().route(
+        LOGIN_HTTP_SPEC.path,
+        post(login_handler).with_state(service),
+    )
+}
+
+async fn login_handler_bytes(
+    service: Arc<LoginService>,
+    tenant: TenantId,
+    body: Bytes,
+    request_id: &str,
+) -> Response {
+    let request: IdentityLoginRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(request_id),
+    };
+    let tenant_log = tenant.to_string();
+    match service.login(tenant, request).await {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(LoginError::InvalidCredentials) => httpserve::error::unauthenticated(request_id),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                request_id,
+                tenant_id = %tenant_log,
+                contract_id = LOGIN_HTTP_SPEC.contract_id,
+                operation = "login",
+                "identity login failed"
+            );
+            httpserve::error::internal_error(request_id)
+        }
+    }
+}
+
 /// identity 域 bootstrap 生命周期：声明登录路由组。
-pub struct IdentityDomain;
+pub struct IdentityDomain {
+    login: Arc<LoginService>,
+}
+
+impl IdentityDomain {
+    pub fn new(login: Arc<LoginService>) -> Self {
+        Self { login }
+    }
+}
 
 impl Domain for IdentityDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        // 登录路由组（Primary listener，typed marker）。register 闭包追踪弹不执行：W 阶段经
-        //   rb.mount_primary(PrimaryRoute { method: POST, path: "/login",
-        //     contract_id: "identity.login", opt_out: Some(RouteAuthOptOut::Public) }, handler)
-        // 挂真实 axum 路由（登录 Public opt-out 仅 Primary listener 可降级，AUTH-OPTOUT-PRIMARYONLY-01）。
-        reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, Ok)?;
+        let service = Arc::clone(&self.login);
+        reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
+            Ok(rb.mount_primary(
+                PrimaryRoute {
+                    method: login_method()?,
+                    path: login_relative_path()?,
+                    contract_id: LOGIN_HTTP_SPEC.contract_id,
+                    opt_out: login_opt_out()?,
+                },
+                post(login_handler).with_state(service),
+            ))
+        })?;
         Ok(())
     }
 }
@@ -783,6 +913,27 @@ mod tests {
         // subject_id = canonical user id（登录标识不进 broker metadata）。
         assert_eq!(*envelope.contract(), CONTRACT);
         assert_eq!(envelope.subject_id(), CANON_USER);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn login_session_expiration_overflow_fails_before_write() {
+        let capture = CapturingSessionLifecycle::default();
+        let svc = seed_service(&capture, 1, u64::MAX);
+
+        let err = svc
+            .login(
+                tid(CANON_TENANT),
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect_err("expiration overflow must fail");
+
+        assert!(matches!(err, LoginError::SessionTimeOverflow));
+        assert_eq!(capture.count(), 0, "expiration overflow → 零 co-tx 写");
     }
 
     // ── 测试 2：login 密码错 ──────────────────────────────────────────────────
@@ -1242,11 +1393,48 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn identity_domain_declares_login_route_group() {
-        let reg = bootstrap::compose(&[&IdentityDomain]).expect("compose ok");
+        let capture = CapturingSessionLifecycle::default();
+        let domain = IdentityDomain::new(Arc::new(seed_service(&capture, 1_000, 3_600)));
+        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, LOGIN_ROUTE_PREFIX);
+    }
+
+    #[test]
+    fn login_service_and_erased_deps_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<LoginService>();
+        assert_send_sync::<Box<DynCredentialRepo<'static>>>();
+        assert_send_sync::<Box<DynSessionLifecycle<'static>>>();
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_login_route_mount_consumes_generated_spec() {
+        let capture = CapturingSessionLifecycle::default();
+        let domain = IdentityDomain::new(Arc::new(seed_service(&capture, 1_000, 3_600)));
+        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let routes = reg.finalize_routes().expect("finalize routes");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].0, ListenerKind::Primary);
+        assert_eq!(
+            login_relative_path().expect("relative path"),
+            generated::http::identity_v1::PATH
+                .strip_prefix(LOGIN_ROUTE_PREFIX)
+                .expect("generated path has prefix")
+        );
+        assert_eq!(
+            LOGIN_HTTP_SPEC.contract_id,
+            generated::http::identity_v1::CONTRACT_ID
+        );
+        assert_eq!(LOGIN_HTTP_SPEC.method, "POST");
+        assert_eq!(
+            login_opt_out().expect("opt out"),
+            Some(RouteAuthOptOut::Public)
+        );
     }
 
     // ── RefreshService 集成测试 ────────────────────────────────────────────────
