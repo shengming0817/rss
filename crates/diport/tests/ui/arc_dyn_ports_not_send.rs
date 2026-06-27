@@ -6,13 +6,13 @@
 //! 既定范式（ADR-003 amendment §注入形态收口）：多次调用 async 消费者用**泛型静态分发**
 //! （`<S: X + Send + Sync + 'static>` + `Arc<S>`），而非 `Arc<DynX>`；`Box<DynX>` 用于单 owner 注入。
 //!
-//! 本负例覆盖全部 11 个 async DI port（anti-vacuity 回归锁，与 `dyn_compatible_pass.rs` 端口集对称）：
+//! 本负例覆盖全部 12 个 async DI port（anti-vacuity 回归锁，与 `dyn_compatible_pass.rs` 端口集对称）：
 //! Signer / AuditSink / Subscriber / Publisher / RateLimiter / ManagedResource / ObjectStore / Pdp /
-//! OutboxEmitter / RevocationStore / CasStore。若任一 wrapper 改为 `Send + Sync`（ADR-003 Option A，#1152），对应
+//! OutboxEmitter / RevocationStore / CasStore / LockStore。若任一 wrapper 改为 `Send + Sync`（ADR-003 Option A，#1152），对应
 //! `assert_send` 转可编译，强制有意识更新本测试 + ADR + crate rustdoc，而非静默漂移。
 use diport::{
-    DynAuditSink, DynCasStore, DynManagedResource, DynObjectStore, DynOutboxEmitter, DynPdp,
-    DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner, DynSubscriber,
+    DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore, DynOutboxEmitter,
+    DynPdp, DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner, DynSubscriber,
 };
 use std::sync::Arc;
 
@@ -31,4 +31,5 @@ fn main() {
     assert_send::<Arc<DynOutboxEmitter<'static>>>();
     assert_send::<Arc<DynRevocationStore<'static>>>();
     assert_send::<Arc<DynCasStore<'static>>>();
+    assert_send::<Arc<DynLockStore<'static>>>();
 }

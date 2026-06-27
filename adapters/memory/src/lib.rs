@@ -27,11 +27,12 @@ use diport::{
     CasStoreRequest, Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError,
     CheckpointVersion, Clock, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
     FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError, JournalEntry,
-    LeaderElector, LeaderElectorError, LeaderId, LeaseToken, Message, MessageId, MessageStream,
-    OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest,
-    Publisher, PublisherError, SagaId, SagaJournal, SagaJournalError, SaveOutcome,
-    SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, Subscriber,
-    SubscriberError, Topic, WriteOutcome,
+    LeaderElector, LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome,
+    LockStore, LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
+    OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
+    PublisherError, SagaId, SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate,
+    SecretMaterial, SecretResolver, SecretResolverError, Subscriber, SubscriberError, Topic,
+    WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -691,6 +692,95 @@ impl CasStore for MemCasStore {
     }
 
     async fn shutdown(&self) -> Result<(), CasStoreError> {
+        // reason: in-mem 无 infra 资源，关闭无需释放。
+        Ok(())
+    }
+}
+
+// ── MemLockStore：in-mem 分布式互斥锁替身（per-key 单调 fencing token）────────────────────────────────
+
+/// `MemLockStore` 内部 per-key 锁条目：`held`=当前持有 token（`None`=空闲），`minted`=该 key 已发最高
+/// token（单调；下次授予 = `minted+1`，跨 acquire/release/evict **不回退**）。
+#[derive(Default)]
+struct LockEntry {
+    held: Option<vocab::Epoch>,
+    minted: u64,
+}
+
+/// in-mem 分布式互斥锁替身（impl [`diport::LockStore`]）：per-key fencing token、token-as-capability 互斥。
+/// **无时钟**——`ttl` 入参被忽略（TTL 过期 / holder crash 由 [`MemLockStore::evict`] 显式模拟，照
+/// [`MemLeaseStore::evict`] 先例，不触 clippy disallowed-methods 系统时钟）。生产替身走 etcd/redis/consul
+/// adapter；本 crate 仅测试/demo 用。INVARIANT: DISTLOCK-FENCE-MONO-01（per-key token 单调 + 互斥；回归见本 crate 单测）。
+#[derive(Clone, Default)]
+pub struct MemLockStore {
+    state: Arc<Mutex<HashMap<LockStoreKey, LockEntry>>>,
+}
+
+impl MemLockStore {
+    /// 新建空 store（各 key 无持有者、minted 从 0 起，首 acquire 授 token=1）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 测试钩子：模拟 lock TTL 过期 / holder crash——清该 key 持有者，使下次 `acquire` 可接管
+    /// （接管获**新**单调 token，不回退 `minted`）。照 [`MemLeaseStore::evict`]；生产走真实 TTL 过期。
+    pub fn evict(&self, key: &LockStoreKey) {
+        if let Some(entry) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(key)
+        {
+            entry.held = None;
+        }
+    }
+}
+
+impl LockStore for MemLockStore {
+    async fn acquire(
+        &self,
+        key: LockStoreKey,
+        _ttl: Duration,
+    ) -> Result<LockAcquireOutcome, LockStoreError> {
+        // reason: in-mem 无 TTL，`ttl` 被忽略（过期由测试 evict 模拟）；锁内同步无 await。
+        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(key).or_default();
+        if entry.held.is_some() {
+            Ok(LockAcquireOutcome::Held)
+        } else {
+            let token = vocab::Epoch::new(entry.minted.saturating_add(1));
+            entry.minted = token.get();
+            entry.held = Some(token);
+            Ok(LockAcquireOutcome::Acquired { token })
+        }
+    }
+
+    async fn renew(
+        &self,
+        key: LockStoreKey,
+        token: vocab::Epoch,
+        _ttl: Duration,
+    ) -> Result<LockRenewOutcome, LockStoreError> {
+        let map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // 仅当 token 是当前持有者才续租（同任期 token 不变）；否则已易手 / 过期被接管 → Lost。
+        match map.get(&key) {
+            Some(entry) if entry.held == Some(token) => Ok(LockRenewOutcome::Renewed { token }),
+            _ => Ok(LockRenewOutcome::Lost),
+        }
+    }
+
+    async fn release(&self, key: LockStoreKey, token: vocab::Epoch) -> Result<(), LockStoreError> {
+        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // 仅当 token 是当前持有者才放锁（幂等：stale / 已释放 → no-op，不误释他人锁）。
+        if let Some(entry) = map.get_mut(&key)
+            && entry.held == Some(token)
+        {
+            entry.held = None;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), LockStoreError> {
         // reason: in-mem 无 infra 资源，关闭无需释放。
         Ok(())
     }
@@ -1786,6 +1876,192 @@ mod tests {
         use core::marker::PhantomData;
         fn assert_cas_store<T: CasStore>(_: PhantomData<T>) {}
         assert_cas_store(PhantomData::<MemCasStore>);
+    }
+
+    // ── MemLockStore 测试（INVARIANT: DISTLOCK-FENCE-MONO-01）────────────────────────────────────────
+
+    fn lock_ttl() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    /// 空闲 key acquire → Acquired{token=Epoch(1)}（首授 token=1）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out（error-handling.md §Carve-out）。
+    async fn mem_lock_absent_acquires() {
+        let store = MemLockStore::new();
+        let outcome = store
+            .acquire(LockStoreKey::new("lock-1"), lock_ttl())
+            .await
+            .expect("acquire ok");
+        assert_eq!(
+            outcome,
+            LockAcquireOutcome::Acquired {
+                token: vocab::Epoch::new(1)
+            }
+        );
+    }
+
+    /// 已持有 key 再 acquire → Held（互斥）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out。
+    async fn mem_lock_held_returns_held() {
+        let store = MemLockStore::new();
+        let key = LockStoreKey::new("lock-2");
+        store
+            .acquire(key.clone(), lock_ttl())
+            .await
+            .expect("first acquire ok");
+        let outcome = store
+            .acquire(key, lock_ttl())
+            .await
+            .expect("second acquire ok");
+        assert_eq!(outcome, LockAcquireOutcome::Held);
+    }
+
+    /// 持有者 renew → Renewed，token 不变（同任期）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out。
+    async fn mem_lock_renew_keeps_same_token() {
+        let store = MemLockStore::new();
+        let key = LockStoreKey::new("lock-3");
+        store
+            .acquire(key.clone(), lock_ttl())
+            .await
+            .expect("acquire ok");
+        let outcome = store
+            .renew(key, vocab::Epoch::new(1), lock_ttl())
+            .await
+            .expect("renew ok");
+        assert_eq!(
+            outcome,
+            LockRenewOutcome::Renewed {
+                token: vocab::Epoch::new(1)
+            },
+            "续租同任期 token 不变"
+        );
+    }
+
+    /// release 后 key 空闲：可被再次 acquire，token 单调 +1。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out。
+    async fn mem_lock_release_frees_and_reacquire_bumps_token() {
+        let store = MemLockStore::new();
+        let key = LockStoreKey::new("lock-4");
+        store
+            .acquire(key.clone(), lock_ttl())
+            .await
+            .expect("acquire ok");
+        store
+            .release(key.clone(), vocab::Epoch::new(1))
+            .await
+            .expect("release ok");
+        let outcome = store.acquire(key, lock_ttl()).await.expect("reacquire ok");
+        assert_eq!(
+            outcome,
+            LockAcquireOutcome::Acquired {
+                token: vocab::Epoch::new(2)
+            },
+            "释放后重获 token 单调递增到 2"
+        );
+    }
+
+    /// anti-vacuity：evict（模拟过期）后他者 acquire 获单调 +1 token；旧 token renew→Lost、release→no-op。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out。
+    async fn mem_lock_evicted_old_token_loses_renew_and_release_is_noop() {
+        let store = MemLockStore::new();
+        let key = LockStoreKey::new("lock-5");
+        store
+            .acquire(key.clone(), lock_ttl())
+            .await
+            .expect("acquire token=1");
+
+        // 模拟 TTL 过期 → 清持有者。
+        store.evict(&key);
+
+        // 他者接管 → token 单调 +1（=2），证明 evict 不回退 minted。
+        let second = store
+            .acquire(key.clone(), lock_ttl())
+            .await
+            .expect("reacquire token=2");
+        assert_eq!(
+            second,
+            LockAcquireOutcome::Acquired {
+                token: vocab::Epoch::new(2)
+            }
+        );
+
+        // 旧 token(1) renew → Lost（已易手）。
+        let lost = store
+            .renew(key.clone(), vocab::Epoch::new(1), lock_ttl())
+            .await
+            .expect("renew ok");
+        assert_eq!(lost, LockRenewOutcome::Lost);
+
+        // 旧 token(1) release → no-op：锁仍被 token=2 持有。
+        store
+            .release(key.clone(), vocab::Epoch::new(1))
+            .await
+            .expect("release ok");
+        let still_held = store.acquire(key, lock_ttl()).await.expect("acquire ok");
+        assert_eq!(
+            still_held,
+            LockAcquireOutcome::Held,
+            "旧 token release 应 no-op，锁仍被 token=2 持有"
+        );
+    }
+
+    /// renew 不存在的 key → Lost（无持有者）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out。
+    async fn mem_lock_renew_absent_key_is_lost() {
+        let store = MemLockStore::new();
+        let outcome = store
+            .renew(
+                LockStoreKey::new("never-acquired"),
+                vocab::Epoch::new(1),
+                lock_ttl(),
+            )
+            .await
+            .expect("renew ok");
+        assert_eq!(outcome, LockRenewOutcome::Lost);
+    }
+
+    /// release 不存在的 key → no-op（Ok）+ 不向 map 插入残留条目（之后首 acquire 仍得 token=1）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path assert，item-level carve-out。
+    async fn mem_lock_release_absent_key_is_noop() {
+        let store = MemLockStore::new();
+        let key = LockStoreKey::new("never-acquired");
+        // 从未 acquire 的 key release → Ok（幂等 no-op）。
+        store
+            .release(key.clone(), vocab::Epoch::new(1))
+            .await
+            .expect("release ok");
+        // 之后仍可正常首 acquire 得 token=1——证明 release-on-absent 未插入残留条目。
+        let outcome = store.acquire(key, lock_ttl()).await.expect("acquire ok");
+        assert_eq!(
+            outcome,
+            LockAcquireOutcome::Acquired {
+                token: vocab::Epoch::new(1)
+            },
+            "release-on-absent 不应插入残留条目"
+        );
+    }
+
+    /// 编译锁：MemLockStore impl LockStore（trait 约束满足）。
+    #[test]
+    fn mem_lock_store_impl_lock_store() {
+        use core::marker::PhantomData;
+        fn assert_lock_store<T: LockStore>(_: PhantomData<T>) {}
+        assert_lock_store(PhantomData::<MemLockStore>);
     }
 
     // ── MemSagaJournal 测试 ───────────────────────────────────────────────────

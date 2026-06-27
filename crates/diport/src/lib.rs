@@ -82,6 +82,7 @@ pub mod dead_letter_store;
 pub mod envelope;
 pub mod fenced_writer;
 pub mod leader_elector;
+pub mod lock_store;
 pub mod managed_resource;
 pub mod metrics_exporter;
 pub mod object_store;
@@ -125,6 +126,9 @@ pub use fenced_writer::{
 };
 pub use leader_elector::{
     DynLeaderElector, LeaderElector, LeaderElectorError, LeaderId, LeaderIdError, LeaseToken,
+};
+pub use lock_store::{
+    DynLockStore, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey,
 };
 pub use managed_resource::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError,

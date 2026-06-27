@@ -1,17 +1,20 @@
 //! pass：dynosaur Send DI port 可 native AFIT impl + 经 `Box<DynX>` / `Arc<DynX>` 注入。
-//! 覆盖全部 11 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource / OutboxEmitter / RevocationStore / CasStore。
+//! 覆盖全部 12 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource / OutboxEmitter / RevocationStore / CasStore / LockStore。
 use consistency::{Entry, IdemKey, Topic as ConsistencyTopic};
 use diport::{
     AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, CertScope,
-    CertSerial, DynAuditSink, DynCasStore, DynManagedResource, DynObjectStore, DynOutboxEmitter,
-    DynPdp, DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner, DynSubscriber, KeyId,
-    ManagedResource, MessageStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError,
-    OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, Pdp, PdpError, PublishRequest, Publisher,
-    PublisherError, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter, RawCredential,
-    RevocationStore, RevocationStoreError, ShutdownError, SignRequest, Signature, Signer,
-    SignerError, SigningPurpose, Subscriber, SubscriberError, Topic, VerifiedClaims,
+    CertSerial, DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore,
+    DynOutboxEmitter, DynPdp, DynPublisher, DynRateLimiter, DynRevocationStore, DynSigner,
+    DynSubscriber, KeyId, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError,
+    LockStoreKey, ManagedResource, MessageStream, ObjectKey, ObjectPayload, ObjectStore,
+    ObjectStoreError, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts, Pdp, PdpError,
+    PublishRequest, Publisher, PublisherError, RateLimitDecision, RateLimitError, RateLimitKey,
+    RateLimiter, RawCredential, RevocationStore, RevocationStoreError, ShutdownError, SignRequest,
+    Signature, Signer, SignerError, SigningPurpose, Subscriber, SubscriberError, Topic,
+    VerifiedClaims,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 struct OkSigner;
@@ -160,6 +163,32 @@ impl CasStore for OkCasStore {
     }
 }
 
+struct OkLockStore;
+
+impl LockStore for OkLockStore {
+    async fn acquire(
+        &self,
+        _key: LockStoreKey,
+        _ttl: Duration,
+    ) -> Result<LockAcquireOutcome, LockStoreError> {
+        Ok(LockAcquireOutcome::Held)
+    }
+    async fn renew(
+        &self,
+        _key: LockStoreKey,
+        _token: vocab::Epoch,
+        _ttl: Duration,
+    ) -> Result<LockRenewOutcome, LockStoreError> {
+        Ok(LockRenewOutcome::Lost)
+    }
+    async fn release(&self, _key: LockStoreKey, _token: vocab::Epoch) -> Result<(), LockStoreError> {
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<(), LockStoreError> {
+        Ok(())
+    }
+}
+
 fn main() {
     let _boxed: Box<DynSigner> = DynSigner::new_box(OkSigner);
     let _arced: Arc<DynSigner> = DynSigner::new_arc(OkSigner);
@@ -209,6 +238,10 @@ fn main() {
     // CasStore：async DI port（#1007 state-CAS provider），dyn(box) wrapper 可 Box/Arc 注入。
     let _cas_boxed: Box<DynCasStore> = DynCasStore::new_box(OkCasStore);
     let _cas_arced: Arc<DynCasStore> = DynCasStore::new_arc(OkCasStore);
+
+    // LockStore：async DI port（#1007 distlock provider），dyn(box) wrapper 可 Box/Arc 注入。
+    let _lock_boxed: Box<DynLockStore> = DynLockStore::new_box(OkLockStore);
+    let _lock_arced: Arc<DynLockStore> = DynLockStore::new_arc(OkLockStore);
 
     let _ = ConsistencyTopic::parse("t");
     let _ = IdemKey::parse("k");
