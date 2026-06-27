@@ -79,7 +79,7 @@ enum InternalCheck {
     DeferGate,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
-    /// ci 专用：`public-api --check`（basis+engine 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
+    /// ci 专用：`public-api --check`（basis+engine+curated extras 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
     PublicApiCheck,
 }
 
@@ -867,7 +867,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
         InternalCheck::Coverage => crate::coverage::run(),
-        // 轴 A 封装面：basis+engine 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
+        // 轴 A 封装面：basis+engine+curated extras 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
     }
 }

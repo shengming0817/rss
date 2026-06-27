@@ -16,8 +16,9 @@
 //!                                      validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
 //!                                      `--fast` 只跑无需编译的步（fmt+meta+deny）；`--allow-missing-tools` 缺外部
 //!                                      工具时显式宽限（默认 fail-closed）。详见 `verify.rs`。
-//!   `cargo xtask public-api [--layer basis|engine] [--check] [--allow-missing]`
-//!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json）；
+//!   `cargo xtask public-api [--layer basis|engine|curated] [--check] [--allow-missing]`
+//!                                      封装面 baseline（包装 cargo-public-api，需 nightly rustdoc-json；无
+//!                                      --layer 时检查 basis + engine + curated extras）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
 //!   `cargo xtask ci [--allow-missing-tools]`
 //!                                      CI lane **超集**聚合（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
@@ -123,7 +124,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | migrations | schema-rls | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | contract <validate | breaking [--against <git-ref>] [--deny]> | layer-deps | wsdeps-drift | migrations | schema-rls | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -244,17 +245,18 @@ fn parse_public_api(args: &[&str]) -> Result<Command> {
             "--check" => check = true,
             "--allow-missing" => allow_missing = true,
             "--layer" => {
-                let val = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--layer 缺少值；用法: --layer basis|engine"))?;
+                let val = it.next().ok_or_else(|| {
+                    anyhow::anyhow!("--layer 缺少值；用法: --layer basis|engine|curated")
+                })?;
                 layer = Some(match *val {
                     "basis" => publicapi::Layer::Basis,
                     "engine" => publicapi::Layer::Engine,
-                    other => bail!("未知 layer: {other}；用法: --layer basis|engine"),
+                    "curated" => publicapi::Layer::Curated,
+                    other => bail!("未知 layer: {other}；用法: --layer basis|engine|curated"),
                 });
             }
             other => bail!(
-                "public-api 未知参数: {other}；用法: --layer basis|engine | --check | --allow-missing"
+                "public-api 未知参数: {other}；用法: --layer basis|engine|curated | --check | --allow-missing"
             ),
         }
     }
@@ -513,6 +515,19 @@ mod tests {
                 check: true,
                 allow_missing: false,
                 layer: Some(publicapi::Layer::Engine)
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_public_api_layer_curated_check() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["public-api", "--layer", "curated", "--check"]))?,
+            Command::PublicApi {
+                check: true,
+                allow_missing: false,
+                layer: Some(publicapi::Layer::Curated)
             }
         );
         Ok(())

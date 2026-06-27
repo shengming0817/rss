@@ -1,0 +1,569 @@
+pub mod authn
+#[non_exhaustive] pub enum authn::AuthnError
+pub authn::AuthnError::Forbidden
+pub authn::AuthnError::PrincipalInvalid
+pub authn::AuthnError::SessionNotFound
+pub authn::AuthnError::TokenExpired
+pub authn::AuthnError::TokenInvalid
+pub authn::AuthnError::TokenUntrusted
+impl core::convert::From<diport::pdp::PdpError> for authn::AuthnError
+pub fn authn::AuthnError::from(diport::pdp::PdpError) -> Self
+impl core::error::Error for authn::AuthnError
+impl core::fmt::Debug for authn::AuthnError
+pub fn authn::AuthnError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::AuthnError
+pub fn authn::AuthnError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::AuthnError
+impl core::marker::Send for authn::AuthnError
+impl core::marker::Sync for authn::AuthnError
+impl core::marker::Unpin for authn::AuthnError
+impl core::marker::UnsafeUnpin for authn::AuthnError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthnError
+impl core::panic::unwind_safe::UnwindSafe for authn::AuthnError
+impl<T, U> core::convert::Into<U> for authn::AuthnError where U: core::convert::From<T>
+pub fn authn::AuthnError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::AuthnError where U: core::convert::Into<T>
+pub type authn::AuthnError::Error = core::convert::Infallible
+pub fn authn::AuthnError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::AuthnError where U: core::convert::TryFrom<T>
+pub type authn::AuthnError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::AuthnError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for authn::AuthnError where T: core::fmt::Display + ?core::marker::Sized
+pub fn authn::AuthnError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for authn::AuthnError where T: 'static + ?core::marker::Sized
+pub fn authn::AuthnError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::AuthnError where T: ?core::marker::Sized
+pub fn authn::AuthnError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::AuthnError where T: ?core::marker::Sized
+pub fn authn::AuthnError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::AuthnError
+pub fn authn::AuthnError::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::AuthnError
+pub type authn::AuthnError::Output = T
+#[non_exhaustive] pub enum authn::CrossTenantAuditError
+pub authn::CrossTenantAuditError::EmptyField
+impl core::error::Error for authn::CrossTenantAuditError
+impl core::fmt::Debug for authn::CrossTenantAuditError
+pub fn authn::CrossTenantAuditError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::CrossTenantAuditError
+pub fn authn::CrossTenantAuditError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::CrossTenantAuditError
+impl core::marker::Send for authn::CrossTenantAuditError
+impl core::marker::Sync for authn::CrossTenantAuditError
+impl core::marker::Unpin for authn::CrossTenantAuditError
+impl core::marker::UnsafeUnpin for authn::CrossTenantAuditError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditError
+impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditError
+impl<T, U> core::convert::Into<U> for authn::CrossTenantAuditError where U: core::convert::From<T>
+pub fn authn::CrossTenantAuditError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::CrossTenantAuditError where U: core::convert::Into<T>
+pub type authn::CrossTenantAuditError::Error = core::convert::Infallible
+pub fn authn::CrossTenantAuditError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::CrossTenantAuditError where U: core::convert::TryFrom<T>
+pub type authn::CrossTenantAuditError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::CrossTenantAuditError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for authn::CrossTenantAuditError where T: core::fmt::Display + ?core::marker::Sized
+pub fn authn::CrossTenantAuditError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for authn::CrossTenantAuditError where T: 'static + ?core::marker::Sized
+pub fn authn::CrossTenantAuditError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::CrossTenantAuditError where T: ?core::marker::Sized
+pub fn authn::CrossTenantAuditError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::CrossTenantAuditError where T: ?core::marker::Sized
+pub fn authn::CrossTenantAuditError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::CrossTenantAuditError
+pub fn authn::CrossTenantAuditError::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::CrossTenantAuditError
+pub type authn::CrossTenantAuditError::Output = T
+#[non_exhaustive] pub enum authn::CrossTenantError
+pub authn::CrossTenantError::Audit(diport::audit_sink::AuditSinkError)
+pub authn::CrossTenantError::NotSuperAdmin
+impl core::error::Error for authn::CrossTenantError
+pub fn authn::CrossTenantError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for authn::CrossTenantError
+pub fn authn::CrossTenantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::CrossTenantError
+pub fn authn::CrossTenantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::CrossTenantError
+impl core::marker::Send for authn::CrossTenantError
+impl core::marker::Sync for authn::CrossTenantError
+impl core::marker::Unpin for authn::CrossTenantError
+impl core::marker::UnsafeUnpin for authn::CrossTenantError
+impl !core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantError
+impl !core::panic::unwind_safe::UnwindSafe for authn::CrossTenantError
+impl<T, U> core::convert::Into<U> for authn::CrossTenantError where U: core::convert::From<T>
+pub fn authn::CrossTenantError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::CrossTenantError where U: core::convert::Into<T>
+pub type authn::CrossTenantError::Error = core::convert::Infallible
+pub fn authn::CrossTenantError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::CrossTenantError where U: core::convert::TryFrom<T>
+pub type authn::CrossTenantError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::CrossTenantError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for authn::CrossTenantError where T: core::fmt::Display + ?core::marker::Sized
+pub fn authn::CrossTenantError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for authn::CrossTenantError where T: 'static + ?core::marker::Sized
+pub fn authn::CrossTenantError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::CrossTenantError where T: ?core::marker::Sized
+pub fn authn::CrossTenantError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::CrossTenantError where T: ?core::marker::Sized
+pub fn authn::CrossTenantError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::CrossTenantError
+pub fn authn::CrossTenantError::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::CrossTenantError
+pub type authn::CrossTenantError::Output = T
+pub enum authn::JwtAlg
+pub authn::JwtAlg::Es256
+pub authn::JwtAlg::Hs256
+impl core::clone::Clone for authn::JwtAlg
+pub fn authn::JwtAlg::clone(&self) -> authn::JwtAlg
+impl core::cmp::Eq for authn::JwtAlg
+impl core::cmp::PartialEq for authn::JwtAlg
+pub fn authn::JwtAlg::eq(&self, &authn::JwtAlg) -> bool
+impl core::fmt::Debug for authn::JwtAlg
+pub fn authn::JwtAlg::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::JwtAlg
+impl core::marker::StructuralPartialEq for authn::JwtAlg
+impl core::marker::Freeze for authn::JwtAlg
+impl core::marker::Send for authn::JwtAlg
+impl core::marker::Sync for authn::JwtAlg
+impl core::marker::Unpin for authn::JwtAlg
+impl core::marker::UnsafeUnpin for authn::JwtAlg
+impl core::panic::unwind_safe::RefUnwindSafe for authn::JwtAlg
+impl core::panic::unwind_safe::UnwindSafe for authn::JwtAlg
+impl<T, U> core::convert::Into<U> for authn::JwtAlg where U: core::convert::From<T>
+pub fn authn::JwtAlg::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::JwtAlg where U: core::convert::Into<T>
+pub type authn::JwtAlg::Error = core::convert::Infallible
+pub fn authn::JwtAlg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::JwtAlg where U: core::convert::TryFrom<T>
+pub type authn::JwtAlg::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::JwtAlg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for authn::JwtAlg where T: core::clone::Clone
+pub type authn::JwtAlg::Owned = T
+pub fn authn::JwtAlg::clone_into(&self, &mut T)
+pub fn authn::JwtAlg::to_owned(&self) -> T
+impl<T> core::any::Any for authn::JwtAlg where T: 'static + ?core::marker::Sized
+pub fn authn::JwtAlg::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::JwtAlg where T: ?core::marker::Sized
+pub fn authn::JwtAlg::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::JwtAlg where T: ?core::marker::Sized
+pub fn authn::JwtAlg::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for authn::JwtAlg where T: core::clone::Clone
+pub unsafe fn authn::JwtAlg::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for authn::JwtAlg
+pub fn authn::JwtAlg::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::JwtAlg
+pub type authn::JwtAlg::Output = T
+#[non_exhaustive] pub enum authn::JwtIssueError
+pub authn::JwtIssueError::AlgKindMismatch
+pub authn::JwtIssueError::ClaimsEncode(serde_json::error::Error)
+pub authn::JwtIssueError::ClockBeforeEpoch
+pub authn::JwtIssueError::EmptySubject
+pub authn::JwtIssueError::ExpiryOverflow
+pub authn::JwtIssueError::InvalidConfig
+pub authn::JwtIssueError::KindNotIssuable
+pub authn::JwtIssueError::MissingTenant
+pub authn::JwtIssueError::Sign(diport::signer::SignerError)
+impl core::error::Error for authn::JwtIssueError
+pub fn authn::JwtIssueError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for authn::JwtIssueError
+pub fn authn::JwtIssueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::JwtIssueError
+pub fn authn::JwtIssueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::JwtIssueError
+impl core::marker::Send for authn::JwtIssueError
+impl core::marker::Sync for authn::JwtIssueError
+impl core::marker::Unpin for authn::JwtIssueError
+impl core::marker::UnsafeUnpin for authn::JwtIssueError
+impl !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssueError
+impl !core::panic::unwind_safe::UnwindSafe for authn::JwtIssueError
+impl<T, U> core::convert::Into<U> for authn::JwtIssueError where U: core::convert::From<T>
+pub fn authn::JwtIssueError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::JwtIssueError where U: core::convert::Into<T>
+pub type authn::JwtIssueError::Error = core::convert::Infallible
+pub fn authn::JwtIssueError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::JwtIssueError where U: core::convert::TryFrom<T>
+pub type authn::JwtIssueError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::JwtIssueError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for authn::JwtIssueError where T: core::fmt::Display + ?core::marker::Sized
+pub fn authn::JwtIssueError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for authn::JwtIssueError where T: 'static + ?core::marker::Sized
+pub fn authn::JwtIssueError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::JwtIssueError where T: ?core::marker::Sized
+pub fn authn::JwtIssueError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::JwtIssueError where T: ?core::marker::Sized
+pub fn authn::JwtIssueError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::JwtIssueError
+pub fn authn::JwtIssueError::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::JwtIssueError
+pub type authn::JwtIssueError::Output = T
+pub struct authn::AccessToken(_)
+impl authn::AccessToken
+pub fn authn::AccessToken::as_str(&self) -> &str
+pub fn authn::AccessToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::fmt::Debug for authn::AccessToken
+pub fn authn::AccessToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::AccessToken
+impl core::marker::Send for authn::AccessToken
+impl core::marker::Sync for authn::AccessToken
+impl core::marker::Unpin for authn::AccessToken
+impl core::marker::UnsafeUnpin for authn::AccessToken
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AccessToken
+impl core::panic::unwind_safe::UnwindSafe for authn::AccessToken
+impl<T, U> core::convert::Into<U> for authn::AccessToken where U: core::convert::From<T>
+pub fn authn::AccessToken::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::AccessToken where U: core::convert::Into<T>
+pub type authn::AccessToken::Error = core::convert::Infallible
+pub fn authn::AccessToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::AccessToken where U: core::convert::TryFrom<T>
+pub type authn::AccessToken::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::AccessToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::AccessToken where T: 'static + ?core::marker::Sized
+pub fn authn::AccessToken::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::AccessToken where T: ?core::marker::Sized
+pub fn authn::AccessToken::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::AccessToken where T: ?core::marker::Sized
+pub fn authn::AccessToken::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::AccessToken
+pub fn authn::AccessToken::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::AccessToken
+pub type authn::AccessToken::Output = T
+pub struct authn::CrossTenantAuditContext
+impl authn::CrossTenantAuditContext
+pub fn authn::CrossTenantAuditContext::new(&'static str, impl core::convert::Into<alloc::string::String>, &'static str, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::CrossTenantAuditError>
+impl core::fmt::Debug for authn::CrossTenantAuditContext
+pub fn authn::CrossTenantAuditContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::CrossTenantAuditContext
+impl core::marker::Send for authn::CrossTenantAuditContext
+impl core::marker::Sync for authn::CrossTenantAuditContext
+impl core::marker::Unpin for authn::CrossTenantAuditContext
+impl core::marker::UnsafeUnpin for authn::CrossTenantAuditContext
+impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditContext
+impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditContext
+impl<T, U> core::convert::Into<U> for authn::CrossTenantAuditContext where U: core::convert::From<T>
+pub fn authn::CrossTenantAuditContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::CrossTenantAuditContext where U: core::convert::Into<T>
+pub type authn::CrossTenantAuditContext::Error = core::convert::Infallible
+pub fn authn::CrossTenantAuditContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::CrossTenantAuditContext where U: core::convert::TryFrom<T>
+pub type authn::CrossTenantAuditContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::CrossTenantAuditContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::CrossTenantAuditContext where T: 'static + ?core::marker::Sized
+pub fn authn::CrossTenantAuditContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::CrossTenantAuditContext where T: ?core::marker::Sized
+pub fn authn::CrossTenantAuditContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::CrossTenantAuditContext where T: ?core::marker::Sized
+pub fn authn::CrossTenantAuditContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::CrossTenantAuditContext
+pub fn authn::CrossTenantAuditContext::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::CrossTenantAuditContext
+pub type authn::CrossTenantAuditContext::Output = T
+pub struct authn::Jwt
+impl authn::Jwt
+pub fn authn::Jwt::as_str(&self) -> &str
+pub fn authn::Jwt::parse(&str) -> core::result::Result<Self, authn::AuthnError>
+impl core::fmt::Debug for authn::Jwt
+pub fn authn::Jwt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::Jwt
+impl core::marker::Send for authn::Jwt
+impl core::marker::Sync for authn::Jwt
+impl core::marker::Unpin for authn::Jwt
+impl core::marker::UnsafeUnpin for authn::Jwt
+impl core::panic::unwind_safe::RefUnwindSafe for authn::Jwt
+impl core::panic::unwind_safe::UnwindSafe for authn::Jwt
+impl<T, U> core::convert::Into<U> for authn::Jwt where U: core::convert::From<T>
+pub fn authn::Jwt::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::Jwt where U: core::convert::Into<T>
+pub type authn::Jwt::Error = core::convert::Infallible
+pub fn authn::Jwt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::Jwt where U: core::convert::TryFrom<T>
+pub type authn::Jwt::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::Jwt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::Jwt where T: 'static + ?core::marker::Sized
+pub fn authn::Jwt::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::Jwt where T: ?core::marker::Sized
+pub fn authn::Jwt::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::Jwt where T: ?core::marker::Sized
+pub fn authn::Jwt::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::Jwt
+pub fn authn::Jwt::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::Jwt
+pub type authn::Jwt::Output = T
+pub struct authn::JwtIssuer<S>
+impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<S>
+pub async fn authn::JwtIssuer<S>::issue(&self, &str, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub fn authn::JwtIssuer<S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig) -> core::result::Result<Self, authn::JwtIssueError>
+impl<S> core::marker::Freeze for authn::JwtIssuer<S>
+impl<S> core::marker::Send for authn::JwtIssuer<S> where S: core::marker::Sync + core::marker::Send
+impl<S> core::marker::Sync for authn::JwtIssuer<S> where S: core::marker::Sync + core::marker::Send
+impl<S> core::marker::Unpin for authn::JwtIssuer<S>
+impl<S> core::marker::UnsafeUnpin for authn::JwtIssuer<S>
+impl<S> !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuer<S>
+impl<S> !core::panic::unwind_safe::UnwindSafe for authn::JwtIssuer<S>
+impl<T, U> core::convert::Into<U> for authn::JwtIssuer<S> where U: core::convert::From<T>
+pub fn authn::JwtIssuer<S>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::JwtIssuer<S> where U: core::convert::Into<T>
+pub type authn::JwtIssuer<S>::Error = core::convert::Infallible
+pub fn authn::JwtIssuer<S>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::JwtIssuer<S> where U: core::convert::TryFrom<T>
+pub type authn::JwtIssuer<S>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::JwtIssuer<S>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::JwtIssuer<S> where T: 'static + ?core::marker::Sized
+pub fn authn::JwtIssuer<S>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::JwtIssuer<S> where T: ?core::marker::Sized
+pub fn authn::JwtIssuer<S>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::JwtIssuer<S> where T: ?core::marker::Sized
+pub fn authn::JwtIssuer<S>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::JwtIssuer<S>
+pub fn authn::JwtIssuer<S>::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::JwtIssuer<S>
+pub type authn::JwtIssuer<S>::Output = T
+pub struct authn::JwtIssuerConfig
+pub authn::JwtIssuerConfig::alg: authn::JwtAlg
+pub authn::JwtIssuerConfig::audience: alloc::string::String
+pub authn::JwtIssuerConfig::issuer: alloc::string::String
+pub authn::JwtIssuerConfig::key: diport::signer::KeyId
+pub authn::JwtIssuerConfig::purpose: diport::signer::SigningPurpose
+pub authn::JwtIssuerConfig::ttl: core::time::Duration
+impl core::marker::Freeze for authn::JwtIssuerConfig
+impl core::marker::Send for authn::JwtIssuerConfig
+impl core::marker::Sync for authn::JwtIssuerConfig
+impl core::marker::Unpin for authn::JwtIssuerConfig
+impl core::marker::UnsafeUnpin for authn::JwtIssuerConfig
+impl core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuerConfig
+impl core::panic::unwind_safe::UnwindSafe for authn::JwtIssuerConfig
+impl<T, U> core::convert::Into<U> for authn::JwtIssuerConfig where U: core::convert::From<T>
+pub fn authn::JwtIssuerConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::JwtIssuerConfig where U: core::convert::Into<T>
+pub type authn::JwtIssuerConfig::Error = core::convert::Infallible
+pub fn authn::JwtIssuerConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::JwtIssuerConfig where U: core::convert::TryFrom<T>
+pub type authn::JwtIssuerConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::JwtIssuerConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::JwtIssuerConfig where T: 'static + ?core::marker::Sized
+pub fn authn::JwtIssuerConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::JwtIssuerConfig where T: ?core::marker::Sized
+pub fn authn::JwtIssuerConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::JwtIssuerConfig where T: ?core::marker::Sized
+pub fn authn::JwtIssuerConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::JwtIssuerConfig
+pub fn authn::JwtIssuerConfig::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::JwtIssuerConfig
+pub type authn::JwtIssuerConfig::Output = T
+pub struct authn::MintedJwt(_)
+impl authn::MintedJwt
+pub fn authn::MintedJwt::as_str(&self) -> &str
+impl core::fmt::Debug for authn::MintedJwt
+pub fn authn::MintedJwt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::MintedJwt
+impl core::marker::Send for authn::MintedJwt
+impl core::marker::Sync for authn::MintedJwt
+impl core::marker::Unpin for authn::MintedJwt
+impl core::marker::UnsafeUnpin for authn::MintedJwt
+impl core::panic::unwind_safe::RefUnwindSafe for authn::MintedJwt
+impl core::panic::unwind_safe::UnwindSafe for authn::MintedJwt
+impl<T, U> core::convert::Into<U> for authn::MintedJwt where U: core::convert::From<T>
+pub fn authn::MintedJwt::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::MintedJwt where U: core::convert::Into<T>
+pub type authn::MintedJwt::Error = core::convert::Infallible
+pub fn authn::MintedJwt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::MintedJwt where U: core::convert::TryFrom<T>
+pub type authn::MintedJwt::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::MintedJwt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::MintedJwt where T: 'static + ?core::marker::Sized
+pub fn authn::MintedJwt::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::MintedJwt where T: ?core::marker::Sized
+pub fn authn::MintedJwt::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::MintedJwt where T: ?core::marker::Sized
+pub fn authn::MintedJwt::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::MintedJwt
+pub fn authn::MintedJwt::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::MintedJwt
+pub type authn::MintedJwt::Output = T
+pub struct authn::Principal
+impl authn::Principal
+pub async fn authn::Principal::audited_cross_tenant_visibility(&self, &runctx::ctx::AppCtx, &diport::audit_sink::__dynosaur_macro_dynauditsink::DynAuditSink<'_>, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<vocab::tenant::RowVisibility, authn::CrossTenantError>
+impl authn::Principal
+pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt) -> core::result::Result<Self, authn::AuthnError>
+pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken) -> core::result::Result<Self, authn::AuthnError>
+pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
+pub fn authn::Principal::matches_subject(&self, &str) -> bool
+pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
+pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+impl core::marker::Freeze for authn::Principal
+impl core::marker::Send for authn::Principal
+impl core::marker::Sync for authn::Principal
+impl core::marker::Unpin for authn::Principal
+impl core::marker::UnsafeUnpin for authn::Principal
+impl core::panic::unwind_safe::RefUnwindSafe for authn::Principal
+impl core::panic::unwind_safe::UnwindSafe for authn::Principal
+impl<T, U> core::convert::Into<U> for authn::Principal where U: core::convert::From<T>
+pub fn authn::Principal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::Principal where U: core::convert::Into<T>
+pub type authn::Principal::Error = core::convert::Infallible
+pub fn authn::Principal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::Principal where U: core::convert::TryFrom<T>
+pub type authn::Principal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::Principal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::Principal where T: 'static + ?core::marker::Sized
+pub fn authn::Principal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::Principal where T: ?core::marker::Sized
+pub fn authn::Principal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::Principal where T: ?core::marker::Sized
+pub fn authn::Principal::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::Principal
+pub fn authn::Principal::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::Principal
+pub type authn::Principal::Output = T
+pub struct authn::RefreshToken(_)
+impl authn::RefreshToken
+pub fn authn::RefreshToken::as_str(&self) -> &str
+pub fn authn::RefreshToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::fmt::Debug for authn::RefreshToken
+pub fn authn::RefreshToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::RefreshToken
+impl core::marker::Send for authn::RefreshToken
+impl core::marker::Sync for authn::RefreshToken
+impl core::marker::Unpin for authn::RefreshToken
+impl core::marker::UnsafeUnpin for authn::RefreshToken
+impl core::panic::unwind_safe::RefUnwindSafe for authn::RefreshToken
+impl core::panic::unwind_safe::UnwindSafe for authn::RefreshToken
+impl<T, U> core::convert::Into<U> for authn::RefreshToken where U: core::convert::From<T>
+pub fn authn::RefreshToken::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::RefreshToken where U: core::convert::Into<T>
+pub type authn::RefreshToken::Error = core::convert::Infallible
+pub fn authn::RefreshToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::RefreshToken where U: core::convert::TryFrom<T>
+pub type authn::RefreshToken::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::RefreshToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::RefreshToken where T: 'static + ?core::marker::Sized
+pub fn authn::RefreshToken::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::RefreshToken where T: ?core::marker::Sized
+pub fn authn::RefreshToken::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::RefreshToken where T: ?core::marker::Sized
+pub fn authn::RefreshToken::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::RefreshToken
+pub fn authn::RefreshToken::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::RefreshToken
+pub type authn::RefreshToken::Output = T
+pub struct authn::Session
+impl authn::Session
+pub fn authn::Session::expires_at(&self) -> std::time::SystemTime
+pub fn authn::Session::id(&self) -> &authn::SessionId
+pub fn authn::Session::new(authn::SessionId, authn::Principal, std::time::SystemTime) -> Self
+pub fn authn::Session::principal(&self) -> &authn::Principal
+impl core::marker::Freeze for authn::Session
+impl core::marker::Send for authn::Session
+impl core::marker::Sync for authn::Session
+impl core::marker::Unpin for authn::Session
+impl core::marker::UnsafeUnpin for authn::Session
+impl core::panic::unwind_safe::RefUnwindSafe for authn::Session
+impl core::panic::unwind_safe::UnwindSafe for authn::Session
+impl<T, U> core::convert::Into<U> for authn::Session where U: core::convert::From<T>
+pub fn authn::Session::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::Session where U: core::convert::Into<T>
+pub type authn::Session::Error = core::convert::Infallible
+pub fn authn::Session::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::Session where U: core::convert::TryFrom<T>
+pub type authn::Session::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::Session::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::Session where T: 'static + ?core::marker::Sized
+pub fn authn::Session::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::Session where T: ?core::marker::Sized
+pub fn authn::Session::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::Session where T: ?core::marker::Sized
+pub fn authn::Session::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::Session
+pub fn authn::Session::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::Session
+pub type authn::Session::Output = T
+pub struct authn::SessionId(_)
+impl authn::SessionId
+pub fn authn::SessionId::as_str(&self) -> &str
+pub fn authn::SessionId::generate() -> Self
+impl core::marker::Freeze for authn::SessionId
+impl core::marker::Send for authn::SessionId
+impl core::marker::Sync for authn::SessionId
+impl core::marker::Unpin for authn::SessionId
+impl core::marker::UnsafeUnpin for authn::SessionId
+impl core::panic::unwind_safe::RefUnwindSafe for authn::SessionId
+impl core::panic::unwind_safe::UnwindSafe for authn::SessionId
+impl<T, U> core::convert::Into<U> for authn::SessionId where U: core::convert::From<T>
+pub fn authn::SessionId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::SessionId where U: core::convert::Into<T>
+pub type authn::SessionId::Error = core::convert::Infallible
+pub fn authn::SessionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::SessionId where U: core::convert::TryFrom<T>
+pub type authn::SessionId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::SessionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::SessionId where T: 'static + ?core::marker::Sized
+pub fn authn::SessionId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::SessionId where T: ?core::marker::Sized
+pub fn authn::SessionId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::SessionId where T: ?core::marker::Sized
+pub fn authn::SessionId::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::SessionId
+pub fn authn::SessionId::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::SessionId
+pub type authn::SessionId::Output = T
+pub struct authn::VerifiedJwt
+impl authn::VerifiedJwt
+pub fn authn::VerifiedJwt::raw(&self) -> &str
+impl core::fmt::Debug for authn::VerifiedJwt
+pub fn authn::VerifiedJwt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::VerifiedJwt
+impl core::marker::Send for authn::VerifiedJwt
+impl core::marker::Sync for authn::VerifiedJwt
+impl core::marker::Unpin for authn::VerifiedJwt
+impl core::marker::UnsafeUnpin for authn::VerifiedJwt
+impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedJwt
+impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedJwt
+impl<T, U> core::convert::Into<U> for authn::VerifiedJwt where U: core::convert::From<T>
+pub fn authn::VerifiedJwt::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::VerifiedJwt where U: core::convert::Into<T>
+pub type authn::VerifiedJwt::Error = core::convert::Infallible
+pub fn authn::VerifiedJwt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::VerifiedJwt where U: core::convert::TryFrom<T>
+pub type authn::VerifiedJwt::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::VerifiedJwt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::VerifiedJwt where T: 'static + ?core::marker::Sized
+pub fn authn::VerifiedJwt::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::VerifiedJwt where T: ?core::marker::Sized
+pub fn authn::VerifiedJwt::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::VerifiedJwt where T: ?core::marker::Sized
+pub fn authn::VerifiedJwt::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::VerifiedJwt
+pub fn authn::VerifiedJwt::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::VerifiedJwt
+pub type authn::VerifiedJwt::Output = T
+pub struct authn::VerifiedServiceToken
+impl authn::VerifiedServiceToken
+pub fn authn::VerifiedServiceToken::raw(&self) -> &str
+impl core::fmt::Debug for authn::VerifiedServiceToken
+pub fn authn::VerifiedServiceToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::VerifiedServiceToken
+impl core::marker::Send for authn::VerifiedServiceToken
+impl core::marker::Sync for authn::VerifiedServiceToken
+impl core::marker::Unpin for authn::VerifiedServiceToken
+impl core::marker::UnsafeUnpin for authn::VerifiedServiceToken
+impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedServiceToken
+impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedServiceToken
+impl<T, U> core::convert::Into<U> for authn::VerifiedServiceToken where U: core::convert::From<T>
+pub fn authn::VerifiedServiceToken::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::VerifiedServiceToken where U: core::convert::Into<T>
+pub type authn::VerifiedServiceToken::Error = core::convert::Infallible
+pub fn authn::VerifiedServiceToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::VerifiedServiceToken where U: core::convert::TryFrom<T>
+pub type authn::VerifiedServiceToken::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::VerifiedServiceToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::VerifiedServiceToken where T: 'static + ?core::marker::Sized
+pub fn authn::VerifiedServiceToken::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::VerifiedServiceToken where T: ?core::marker::Sized
+pub fn authn::VerifiedServiceToken::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::VerifiedServiceToken where T: ?core::marker::Sized
+pub fn authn::VerifiedServiceToken::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::VerifiedServiceToken
+pub fn authn::VerifiedServiceToken::from(T) -> T
+impl<T> typenum::type_operators::Same for authn::VerifiedServiceToken
+pub type authn::VerifiedServiceToken::Output = T
+pub async fn authn::verify_jwt(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
+pub async fn authn::verify_service_token(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>

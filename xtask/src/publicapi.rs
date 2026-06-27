@@ -1,10 +1,11 @@
 //! `cargo xtask public-api` —— 库公开 API 面 baseline（封装外部 `cargo-public-api`）。
 //!
-//! 用途：基础/引擎层签名冻结后把 exported 符号面冻结为可 commit 的 baseline，后续 PR diff
-//! （crate 公开 API = 轴 A SemVer，见 `.claude/rules/rss/api-versioning.md`）。
+//! 用途：基础/引擎层签名冻结 + 安全敏感 curated extras 的 exported 符号面冻结为可 commit 的 baseline，
+//! 后续 PR diff（crate 公开 API = 轴 A SemVer，见 `.claude/rules/rss/api-versioning.md`）。
 //!
 //! **PR-0 仅落工具入口**；baseline 快照随 PR-1/PR-2 产出并 commit 到 `public-api/<crate>.txt`
-//! （PR-1 `--layer basis`、PR-2 `--layer engine`；无 `--layer` = 全集，收口 GATE 用）。
+//! （PR-1 `--layer basis`、PR-2 `--layer engine`、安全敏感例外 `--layer curated`；无 `--layer` =
+//! basis + engine + curated extras 全集，收口 GATE 用）。
 //!
 //! **漂移门闭环**：`--check` 对目标层任一 baseline 缺失 / 不一致 **默认 fail-fast**；仅 PR-0
 //! 自检可显式 `--allow-missing` 宽限缺失（drift 仍 fail）——对齐 cargo-public-api snapshot-gate
@@ -31,6 +32,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
+// curated extras 不是架构 layer，只是安全敏感公开 API 面的定点 golden 例外。
+const CURATED_EXTRA_CRATES: &[&str] = &["authn"];
 
 /// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
 /// 编译器即强制回退 rolling `nightly`（其 rustdoc-json 格式随日期漂移 ⇒ baseline 误报）；本 const 经
@@ -46,22 +49,29 @@ use std::process::Command;
 /// PUBLICAPI-DRIFT-GATE-01（`--check`，共用同一 pin）在 CI 直接 drift-fail 抓住。
 pub(crate) const PINNED_NIGHTLY: &str = "nightly-2026-04-16";
 
-/// 封装面 baseline 的目标层。无 `--layer` 时取 basis + engine 全集（收口 GATE 用）。
-/// 服务/域/adapters 内部接缝多变，不入 baseline。
+/// 封装面 baseline 的目标层。无 `--layer` 时取 basis + engine + curated extras 全集（收口 GATE 用）。
+/// 服务/域/adapters 内部接缝默认多变，不整体入 baseline；安全敏感 crate 需定点列入 curated extras。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Layer {
     Basis,
     Engine,
+    Curated,
 }
 
-/// 解析 layer → 目标 crate 集。`None` = basis + engine（不另列第三份 ALL，避免漂移）。
+/// 解析 layer → 目标 crate 集。`None` = basis + engine + curated extras（不另列第三份 ALL，避免漂移）。
 /// 排除 proc-macro 工具 crate（[`crate::layers::is_proc_macro`]）——其契约由 codegen golden 守，
 /// 非 SemVer 库 API 面，不入 public-api baseline。
 fn target_crates(layer: Option<Layer>) -> Vec<&'static str> {
     let select: Vec<&'static str> = match layer {
         Some(Layer::Basis) => BASIS_CRATES.to_vec(),
         Some(Layer::Engine) => ENGINE_CRATES.to_vec(),
-        None => BASIS_CRATES.iter().chain(ENGINE_CRATES).copied().collect(),
+        Some(Layer::Curated) => CURATED_EXTRA_CRATES.to_vec(),
+        None => BASIS_CRATES
+            .iter()
+            .chain(ENGINE_CRATES)
+            .chain(CURATED_EXTRA_CRATES)
+            .copied()
+            .collect(),
     };
     select
         .into_iter()
@@ -119,7 +129,7 @@ fn ensure_tool_available() -> Result<()> {
         "未找到 `cargo public-api`。安装：\n  \
          cargo install cargo-public-api@0.52.0\n  \
          rustup toolchain install {PINNED_NIGHTLY}   # rustdoc-json 需钉版 nightly（NIGHTLY-PIN-01）\n\
-         仅基础/引擎层封装面冻结需要本工具（非全 workspace 强制门）。"
+         仅基础/引擎层与 curated extras 封装面冻结需要本工具（非全 workspace 强制门）。"
     )
 }
 
@@ -241,13 +251,56 @@ mod tests {
         assert_eq!(target_crates(Some(Layer::Basis)).len(), 6);
         // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis + engine 全集，无第三份硬编码列表。
-        assert_eq!(target_crates(None).len(), 9);
+        // None = basis + engine + curated extras（安全敏感封装面例外）全集。
+        assert_eq!(target_crates(None).len(), 10);
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
+        assert_eq!(target_crates(Some(Layer::Curated)), vec!["authn"]);
+        assert!(target_crates(None).contains(&"authn"));
+        assert!(!target_crates(Some(Layer::Basis)).contains(&"authn"));
+        assert!(!target_crates(Some(Layer::Engine)).contains(&"authn"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
         assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
+    }
+
+    #[test]
+    fn target_crates_have_no_duplicates() {
+        let crates = target_crates(None);
+        let set: std::collections::BTreeSet<_> = crates.iter().copied().collect();
+        assert_eq!(set.len(), crates.len(), "public-api 目标 crate 不得重复");
+    }
+
+    #[test]
+    fn authn_public_api_golden_keeps_verified_token_seal_private() -> anyhow::Result<()> {
+        let baseline = std::fs::read_to_string(baseline_dir()?.join("authn.txt"))?;
+        for required in [
+            "pub struct authn::VerifiedJwt",
+            "pub fn authn::VerifiedJwt::raw(&self) -> &str",
+            "pub struct authn::VerifiedServiceToken",
+            "pub fn authn::VerifiedServiceToken::raw(&self) -> &str",
+            "pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt)",
+            "pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken)",
+            "pub async fn authn::verify_jwt",
+            "pub async fn authn::verify_service_token",
+        ] {
+            assert!(
+                baseline.contains(required),
+                "authn public-api golden 缺少必要公开项: {required}"
+            );
+        }
+        for forbidden in [
+            "pub fn authn::VerifiedJwt::seal",
+            "pub fn authn::VerifiedServiceToken::seal",
+            "VerifiedJwt::seal",
+            "VerifiedServiceToken::seal",
+        ] {
+            assert!(
+                !baseline.contains(forbidden),
+                "authn public-api golden 不得暴露私有 mint funnel: {forbidden}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
