@@ -70,6 +70,274 @@ pub type secure::aead::Plaintext::Output = T
 pub trait secure::aead::Aead
 pub fn secure::aead::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>
 pub fn secure::aead::Aead::seal(&self, &[u8], &secure::protection::DerivedAad) -> core::result::Result<secure::envelope::CiphertextEnvelope, secure::aead::AeadError>
+pub mod secure::blind_index
+#[non_exhaustive] pub enum secure::blind_index::BlindIndexError
+pub secure::blind_index::BlindIndexError::EmptyPlaintext
+pub secure::blind_index::BlindIndexError::EmptyScope
+pub secure::blind_index::BlindIndexError::FilterBitsOutOfRange
+pub secure::blind_index::BlindIndexError::KeyTooShort
+impl core::error::Error for secure::blind_index::BlindIndexError
+impl core::fmt::Debug for secure::blind_index::BlindIndexError
+pub fn secure::blind_index::BlindIndexError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::blind_index::BlindIndexError
+pub fn secure::blind_index::BlindIndexError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::blind_index::BlindIndexError
+impl core::marker::Send for secure::blind_index::BlindIndexError
+impl core::marker::Sync for secure::blind_index::BlindIndexError
+impl core::marker::Unpin for secure::blind_index::BlindIndexError
+impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexError
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexError
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexError where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndexError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexError where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndexError::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndexError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexError where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndexError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndexError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::blind_index::BlindIndexError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::blind_index::BlindIndexError where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndexError
+pub fn secure::blind_index::BlindIndexError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexError
+pub type secure::blind_index::BlindIndexError::Output = T
+#[non_exhaustive] pub enum secure::blind_index::Transform
+pub secure::blind_index::Transform::DigitsOnly
+pub secure::blind_index::Transform::LastN(usize)
+pub secure::blind_index::Transform::Lowercase
+pub secure::blind_index::Transform::Trim
+impl core::clone::Clone for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::clone(&self) -> secure::blind_index::Transform
+impl core::cmp::Eq for secure::blind_index::Transform
+impl core::cmp::PartialEq for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::eq(&self, &secure::blind_index::Transform) -> bool
+impl core::fmt::Debug for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::blind_index::Transform
+impl core::marker::StructuralPartialEq for secure::blind_index::Transform
+impl core::marker::Freeze for secure::blind_index::Transform
+impl core::marker::Send for secure::blind_index::Transform
+impl core::marker::Sync for secure::blind_index::Transform
+impl core::marker::Unpin for secure::blind_index::Transform
+impl core::marker::UnsafeUnpin for secure::blind_index::Transform
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::Transform
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::Transform
+impl<T, U> core::convert::Into<U> for secure::blind_index::Transform where U: core::convert::From<T>
+pub fn secure::blind_index::Transform::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::Transform where U: core::convert::Into<T>
+pub type secure::blind_index::Transform::Error = core::convert::Infallible
+pub fn secure::blind_index::Transform::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::Transform where U: core::convert::TryFrom<T>
+pub type secure::blind_index::Transform::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::Transform::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::blind_index::Transform where T: core::clone::Clone
+pub type secure::blind_index::Transform::Owned = T
+pub fn secure::blind_index::Transform::clone_into(&self, &mut T)
+pub fn secure::blind_index::Transform::to_owned(&self) -> T
+impl<T> core::any::Any for secure::blind_index::Transform where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::Transform::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::Transform where T: ?core::marker::Sized
+pub fn secure::blind_index::Transform::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::Transform where T: ?core::marker::Sized
+pub fn secure::blind_index::Transform::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::blind_index::Transform where T: core::clone::Clone
+pub unsafe fn secure::blind_index::Transform::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::Transform
+pub type secure::blind_index::Transform::Output = T
+pub struct secure::blind_index::BlindIndex<'a>
+impl<'a> secure::blind_index::BlindIndex<'a>
+pub fn secure::blind_index::BlindIndex<'a>::index(&self, &secure::blind_index::BlindIndexKey, &str) -> core::result::Result<secure::blind_index::BlindIndexValue, secure::blind_index::BlindIndexError>
+pub fn secure::blind_index::BlindIndex<'a>::lookup_set(&self, &secure::blind_index::BlindIndexKey, &[secure::blind_index::BlindIndexKey], &str) -> core::result::Result<alloc::vec::Vec<secure::blind_index::BlindIndexValue>, secure::blind_index::BlindIndexError>
+pub fn secure::blind_index::BlindIndex<'a>::new(secure::blind_index::IndexScope<'a>, &'a [secure::blind_index::Transform], secure::blind_index::FilterBits) -> Self
+impl<'a> core::marker::Freeze for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::Send for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::Sync for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::Unpin for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::UnsafeUnpin for secure::blind_index::BlindIndex<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndex<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndex<'a>
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndex<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndex<'a>::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndex<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndex<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndex<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::blind_index::BlindIndex<'a> where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndex<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndex<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndex<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndex<'a>
+pub fn secure::blind_index::BlindIndex<'a>::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndex<'a>
+pub type secure::blind_index::BlindIndex<'a>::Output = T
+pub struct secure::blind_index::BlindIndexKey(_)
+impl secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::from_bytes(impl core::convert::Into<alloc::vec::Vec<u8>>) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+impl core::fmt::Debug for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::drop(&mut self)
+impl secure::redaction::Redact for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for secure::blind_index::BlindIndexKey
+impl core::marker::Send for secure::blind_index::BlindIndexKey
+impl core::marker::Sync for secure::blind_index::BlindIndexKey
+impl core::marker::Unpin for secure::blind_index::BlindIndexKey
+impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexKey
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexKey
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexKey
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexKey where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndexKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexKey where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndexKey::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndexKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexKey where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndexKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndexKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::blind_index::BlindIndexKey where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexKey
+pub type secure::blind_index::BlindIndexKey::Output = T
+pub struct secure::blind_index::BlindIndexValue
+impl secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::as_bytes(&self) -> &[u8]
+pub fn secure::blind_index::BlindIndexValue::ct_eq(&self, &Self) -> bool
+pub fn secure::blind_index::BlindIndexValue::to_hex(&self) -> alloc::string::String
+impl core::fmt::Debug for secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl subtle::ConstantTimeEq for secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::ct_eq(&self, &Self) -> subtle::Choice
+impl core::marker::Freeze for secure::blind_index::BlindIndexValue
+impl core::marker::Send for secure::blind_index::BlindIndexValue
+impl core::marker::Sync for secure::blind_index::BlindIndexValue
+impl core::marker::Unpin for secure::blind_index::BlindIndexValue
+impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexValue
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexValue
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexValue
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexValue where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndexValue::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexValue where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndexValue::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndexValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexValue where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndexValue::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndexValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::blind_index::BlindIndexValue where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexValue::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexValue::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexValue::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexValue
+pub type secure::blind_index::BlindIndexValue::Output = T
+pub struct secure::blind_index::FilterBits(_)
+impl secure::blind_index::FilterBits
+pub const secure::blind_index::FilterBits::DEFAULT: secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::get(self) -> u16
+pub fn secure::blind_index::FilterBits::new(u16) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+impl core::clone::Clone for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::clone(&self) -> secure::blind_index::FilterBits
+impl core::cmp::Eq for secure::blind_index::FilterBits
+impl core::cmp::PartialEq for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::eq(&self, &secure::blind_index::FilterBits) -> bool
+impl core::fmt::Debug for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::blind_index::FilterBits
+impl core::marker::StructuralPartialEq for secure::blind_index::FilterBits
+impl core::marker::Freeze for secure::blind_index::FilterBits
+impl core::marker::Send for secure::blind_index::FilterBits
+impl core::marker::Sync for secure::blind_index::FilterBits
+impl core::marker::Unpin for secure::blind_index::FilterBits
+impl core::marker::UnsafeUnpin for secure::blind_index::FilterBits
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::FilterBits
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::FilterBits
+impl<T, U> core::convert::Into<U> for secure::blind_index::FilterBits where U: core::convert::From<T>
+pub fn secure::blind_index::FilterBits::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::FilterBits where U: core::convert::Into<T>
+pub type secure::blind_index::FilterBits::Error = core::convert::Infallible
+pub fn secure::blind_index::FilterBits::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::FilterBits where U: core::convert::TryFrom<T>
+pub type secure::blind_index::FilterBits::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::FilterBits::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::blind_index::FilterBits where T: core::clone::Clone
+pub type secure::blind_index::FilterBits::Owned = T
+pub fn secure::blind_index::FilterBits::clone_into(&self, &mut T)
+pub fn secure::blind_index::FilterBits::to_owned(&self) -> T
+impl<T> core::any::Any for secure::blind_index::FilterBits where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::FilterBits::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
+pub fn secure::blind_index::FilterBits::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
+pub fn secure::blind_index::FilterBits::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::blind_index::FilterBits where T: core::clone::Clone
+pub unsafe fn secure::blind_index::FilterBits::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::FilterBits
+pub type secure::blind_index::FilterBits::Output = T
+pub struct secure::blind_index::IndexScope<'a>
+impl<'a> secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::new(vocab::tenant::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+impl<'a> core::clone::Clone for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::clone(&self) -> secure::blind_index::IndexScope<'a>
+impl<'a> core::cmp::Eq for secure::blind_index::IndexScope<'a>
+impl<'a> core::cmp::PartialEq for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::eq(&self, &secure::blind_index::IndexScope<'a>) -> bool
+impl<'a> core::fmt::Debug for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Freeze for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Send for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Sync for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Unpin for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::UnsafeUnpin for secure::blind_index::IndexScope<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::IndexScope<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::IndexScope<'a>
+impl<T, U> core::convert::Into<U> for secure::blind_index::IndexScope<'a> where U: core::convert::From<T>
+pub fn secure::blind_index::IndexScope<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::IndexScope<'a> where U: core::convert::Into<T>
+pub type secure::blind_index::IndexScope<'a>::Error = core::convert::Infallible
+pub fn secure::blind_index::IndexScope<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::IndexScope<'a> where U: core::convert::TryFrom<T>
+pub type secure::blind_index::IndexScope<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::IndexScope<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
+pub type secure::blind_index::IndexScope<'a>::Owned = T
+pub fn secure::blind_index::IndexScope<'a>::clone_into(&self, &mut T)
+pub fn secure::blind_index::IndexScope<'a>::to_owned(&self) -> T
+impl<T> core::any::Any for secure::blind_index::IndexScope<'a> where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::IndexScope<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::IndexScope<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::IndexScope<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
+pub unsafe fn secure::blind_index::IndexScope<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::IndexScope<'a>
+pub type secure::blind_index::IndexScope<'a>::Output = T
 pub mod secure::cookie
 #[non_exhaustive] pub enum secure::cookie::CookieError
 pub secure::cookie::CookieError::Malformed
@@ -974,6 +1242,8 @@ impl<T> typenum::type_operators::Same for secure::redaction::Redacted
 pub type secure::redaction::Redacted::Output = T
 pub trait secure::redaction::Redact
 pub fn secure::redaction::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl secure::redaction::Redact for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::envelope::CiphertextEnvelope
@@ -1101,6 +1371,43 @@ impl<T> core::convert::From<T> for secure::aead::AeadError
 pub fn secure::aead::AeadError::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::aead::AeadError
 pub type secure::aead::AeadError::Output = T
+#[non_exhaustive] pub enum secure::BlindIndexError
+pub secure::BlindIndexError::EmptyPlaintext
+pub secure::BlindIndexError::EmptyScope
+pub secure::BlindIndexError::FilterBitsOutOfRange
+pub secure::BlindIndexError::KeyTooShort
+impl core::error::Error for secure::blind_index::BlindIndexError
+impl core::fmt::Debug for secure::blind_index::BlindIndexError
+pub fn secure::blind_index::BlindIndexError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::blind_index::BlindIndexError
+pub fn secure::blind_index::BlindIndexError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::blind_index::BlindIndexError
+impl core::marker::Send for secure::blind_index::BlindIndexError
+impl core::marker::Sync for secure::blind_index::BlindIndexError
+impl core::marker::Unpin for secure::blind_index::BlindIndexError
+impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexError
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexError
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexError where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndexError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexError where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndexError::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndexError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexError where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndexError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndexError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::blind_index::BlindIndexError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::blind_index::BlindIndexError where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndexError
+pub fn secure::blind_index::BlindIndexError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexError
+pub type secure::blind_index::BlindIndexError::Output = T
 #[non_exhaustive] pub enum secure::CipherAlg
 pub secure::CipherAlg::Aes256Gcm
 pub secure::CipherAlg::Aes256Siv
@@ -1553,6 +1860,149 @@ impl<T> core::convert::From<T> for secure::redaction::Sensitivity
 pub fn secure::redaction::Sensitivity::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::Sensitivity
 pub type secure::redaction::Sensitivity::Output = T
+#[non_exhaustive] pub enum secure::Transform
+pub secure::Transform::DigitsOnly
+pub secure::Transform::LastN(usize)
+pub secure::Transform::Lowercase
+pub secure::Transform::Trim
+impl core::clone::Clone for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::clone(&self) -> secure::blind_index::Transform
+impl core::cmp::Eq for secure::blind_index::Transform
+impl core::cmp::PartialEq for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::eq(&self, &secure::blind_index::Transform) -> bool
+impl core::fmt::Debug for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::blind_index::Transform
+impl core::marker::StructuralPartialEq for secure::blind_index::Transform
+impl core::marker::Freeze for secure::blind_index::Transform
+impl core::marker::Send for secure::blind_index::Transform
+impl core::marker::Sync for secure::blind_index::Transform
+impl core::marker::Unpin for secure::blind_index::Transform
+impl core::marker::UnsafeUnpin for secure::blind_index::Transform
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::Transform
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::Transform
+impl<T, U> core::convert::Into<U> for secure::blind_index::Transform where U: core::convert::From<T>
+pub fn secure::blind_index::Transform::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::Transform where U: core::convert::Into<T>
+pub type secure::blind_index::Transform::Error = core::convert::Infallible
+pub fn secure::blind_index::Transform::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::Transform where U: core::convert::TryFrom<T>
+pub type secure::blind_index::Transform::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::Transform::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::blind_index::Transform where T: core::clone::Clone
+pub type secure::blind_index::Transform::Owned = T
+pub fn secure::blind_index::Transform::clone_into(&self, &mut T)
+pub fn secure::blind_index::Transform::to_owned(&self) -> T
+impl<T> core::any::Any for secure::blind_index::Transform where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::Transform::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::Transform where T: ?core::marker::Sized
+pub fn secure::blind_index::Transform::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::Transform where T: ?core::marker::Sized
+pub fn secure::blind_index::Transform::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::blind_index::Transform where T: core::clone::Clone
+pub unsafe fn secure::blind_index::Transform::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::blind_index::Transform
+pub fn secure::blind_index::Transform::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::Transform
+pub type secure::blind_index::Transform::Output = T
+pub struct secure::BlindIndex<'a>
+impl<'a> secure::blind_index::BlindIndex<'a>
+pub fn secure::blind_index::BlindIndex<'a>::index(&self, &secure::blind_index::BlindIndexKey, &str) -> core::result::Result<secure::blind_index::BlindIndexValue, secure::blind_index::BlindIndexError>
+pub fn secure::blind_index::BlindIndex<'a>::lookup_set(&self, &secure::blind_index::BlindIndexKey, &[secure::blind_index::BlindIndexKey], &str) -> core::result::Result<alloc::vec::Vec<secure::blind_index::BlindIndexValue>, secure::blind_index::BlindIndexError>
+pub fn secure::blind_index::BlindIndex<'a>::new(secure::blind_index::IndexScope<'a>, &'a [secure::blind_index::Transform], secure::blind_index::FilterBits) -> Self
+impl<'a> core::marker::Freeze for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::Send for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::Sync for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::Unpin for secure::blind_index::BlindIndex<'a>
+impl<'a> core::marker::UnsafeUnpin for secure::blind_index::BlindIndex<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndex<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndex<'a>
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndex<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndex<'a>::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndex<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndex<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndex<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::blind_index::BlindIndex<'a> where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndex<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndex<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndex<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndex<'a>
+pub fn secure::blind_index::BlindIndex<'a>::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndex<'a>
+pub type secure::blind_index::BlindIndex<'a>::Output = T
+pub struct secure::BlindIndexKey(_)
+impl secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::from_bytes(impl core::convert::Into<alloc::vec::Vec<u8>>) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+impl core::fmt::Debug for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::drop(&mut self)
+impl secure::redaction::Redact for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for secure::blind_index::BlindIndexKey
+impl core::marker::Send for secure::blind_index::BlindIndexKey
+impl core::marker::Sync for secure::blind_index::BlindIndexKey
+impl core::marker::Unpin for secure::blind_index::BlindIndexKey
+impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexKey
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexKey
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexKey
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexKey where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndexKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexKey where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndexKey::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndexKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexKey where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndexKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndexKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::blind_index::BlindIndexKey where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexKey
+pub type secure::blind_index::BlindIndexKey::Output = T
+pub struct secure::BlindIndexValue
+impl secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::as_bytes(&self) -> &[u8]
+pub fn secure::blind_index::BlindIndexValue::ct_eq(&self, &Self) -> bool
+pub fn secure::blind_index::BlindIndexValue::to_hex(&self) -> alloc::string::String
+impl core::fmt::Debug for secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl subtle::ConstantTimeEq for secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::ct_eq(&self, &Self) -> subtle::Choice
+impl core::marker::Freeze for secure::blind_index::BlindIndexValue
+impl core::marker::Send for secure::blind_index::BlindIndexValue
+impl core::marker::Sync for secure::blind_index::BlindIndexValue
+impl core::marker::Unpin for secure::blind_index::BlindIndexValue
+impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexValue
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexValue
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexValue
+impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexValue where U: core::convert::From<T>
+pub fn secure::blind_index::BlindIndexValue::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexValue where U: core::convert::Into<T>
+pub type secure::blind_index::BlindIndexValue::Error = core::convert::Infallible
+pub fn secure::blind_index::BlindIndexValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexValue where U: core::convert::TryFrom<T>
+pub type secure::blind_index::BlindIndexValue::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::BlindIndexValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for secure::blind_index::BlindIndexValue where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexValue::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexValue::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
+pub fn secure::blind_index::BlindIndexValue::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::blind_index::BlindIndexValue
+pub fn secure::blind_index::BlindIndexValue::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexValue
+pub type secure::blind_index::BlindIndexValue::Output = T
 pub struct secure::CiphertextEnvelope
 impl secure::envelope::CiphertextEnvelope
 pub fn secure::envelope::CiphertextEnvelope::aad(&self) -> &secure::protection::ProtectionAad
@@ -1730,6 +2180,93 @@ impl<T> core::convert::From<T> for secure::redaction::FieldRedaction<'a>
 pub fn secure::redaction::FieldRedaction<'a>::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::FieldRedaction<'a>
 pub type secure::redaction::FieldRedaction<'a>::Output = T
+pub struct secure::FilterBits(_)
+impl secure::blind_index::FilterBits
+pub const secure::blind_index::FilterBits::DEFAULT: secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::get(self) -> u16
+pub fn secure::blind_index::FilterBits::new(u16) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+impl core::clone::Clone for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::clone(&self) -> secure::blind_index::FilterBits
+impl core::cmp::Eq for secure::blind_index::FilterBits
+impl core::cmp::PartialEq for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::eq(&self, &secure::blind_index::FilterBits) -> bool
+impl core::fmt::Debug for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::blind_index::FilterBits
+impl core::marker::StructuralPartialEq for secure::blind_index::FilterBits
+impl core::marker::Freeze for secure::blind_index::FilterBits
+impl core::marker::Send for secure::blind_index::FilterBits
+impl core::marker::Sync for secure::blind_index::FilterBits
+impl core::marker::Unpin for secure::blind_index::FilterBits
+impl core::marker::UnsafeUnpin for secure::blind_index::FilterBits
+impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::FilterBits
+impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::FilterBits
+impl<T, U> core::convert::Into<U> for secure::blind_index::FilterBits where U: core::convert::From<T>
+pub fn secure::blind_index::FilterBits::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::FilterBits where U: core::convert::Into<T>
+pub type secure::blind_index::FilterBits::Error = core::convert::Infallible
+pub fn secure::blind_index::FilterBits::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::FilterBits where U: core::convert::TryFrom<T>
+pub type secure::blind_index::FilterBits::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::FilterBits::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::blind_index::FilterBits where T: core::clone::Clone
+pub type secure::blind_index::FilterBits::Owned = T
+pub fn secure::blind_index::FilterBits::clone_into(&self, &mut T)
+pub fn secure::blind_index::FilterBits::to_owned(&self) -> T
+impl<T> core::any::Any for secure::blind_index::FilterBits where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::FilterBits::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
+pub fn secure::blind_index::FilterBits::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
+pub fn secure::blind_index::FilterBits::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::blind_index::FilterBits where T: core::clone::Clone
+pub unsafe fn secure::blind_index::FilterBits::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::blind_index::FilterBits
+pub fn secure::blind_index::FilterBits::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::FilterBits
+pub type secure::blind_index::FilterBits::Output = T
+pub struct secure::IndexScope<'a>
+impl<'a> secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::new(vocab::tenant::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+impl<'a> core::clone::Clone for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::clone(&self) -> secure::blind_index::IndexScope<'a>
+impl<'a> core::cmp::Eq for secure::blind_index::IndexScope<'a>
+impl<'a> core::cmp::PartialEq for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::eq(&self, &secure::blind_index::IndexScope<'a>) -> bool
+impl<'a> core::fmt::Debug for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Freeze for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Send for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Sync for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::Unpin for secure::blind_index::IndexScope<'a>
+impl<'a> core::marker::UnsafeUnpin for secure::blind_index::IndexScope<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::IndexScope<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::IndexScope<'a>
+impl<T, U> core::convert::Into<U> for secure::blind_index::IndexScope<'a> where U: core::convert::From<T>
+pub fn secure::blind_index::IndexScope<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::blind_index::IndexScope<'a> where U: core::convert::Into<T>
+pub type secure::blind_index::IndexScope<'a>::Error = core::convert::Infallible
+pub fn secure::blind_index::IndexScope<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::blind_index::IndexScope<'a> where U: core::convert::TryFrom<T>
+pub type secure::blind_index::IndexScope<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::blind_index::IndexScope<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
+pub type secure::blind_index::IndexScope<'a>::Owned = T
+pub fn secure::blind_index::IndexScope<'a>::clone_into(&self, &mut T)
+pub fn secure::blind_index::IndexScope<'a>::to_owned(&self) -> T
+impl<T> core::any::Any for secure::blind_index::IndexScope<'a> where T: 'static + ?core::marker::Sized
+pub fn secure::blind_index::IndexScope<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::IndexScope<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
+pub fn secure::blind_index::IndexScope<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
+pub unsafe fn secure::blind_index::IndexScope<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::blind_index::IndexScope<'a>
+pub fn secure::blind_index::IndexScope<'a>::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::blind_index::IndexScope<'a>
+pub type secure::blind_index::IndexScope<'a>::Output = T
 pub struct secure::LastError(_)
 impl secure::redaction::LastError
 pub fn secure::redaction::LastError::as_str(&self) -> &str
@@ -2026,6 +2563,8 @@ pub fn secure::CookieCodec::decode(&self, &str) -> core::result::Result<secure::
 pub fn secure::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
 pub trait secure::Redact
 pub fn secure::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl secure::redaction::Redact for secure::blind_index::BlindIndexKey
+pub fn secure::blind_index::BlindIndexKey::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::envelope::CiphertextEnvelope

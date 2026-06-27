@@ -15,22 +15,22 @@ const DOC_ROOTS: &[&str] = &["docs/rules", "docs/spec"];
 
 const FORBIDDEN: &[ForbiddenPattern] = &[
     ForbiddenPattern {
-        rule: Rule::TenantlessCommandWrapper,
+        rule: Rule::CommandWrapper,
         needle: "emit_async(emitter, request, subject_id, idempotency_key)",
         detail: "command wrapper 必须显式接收 tenant: emit_async(emitter, request, tenant, subject_id, idempotency_key)",
     },
     ForbiddenPattern {
-        rule: Rule::TenantlessRuntimeCommandEmit,
+        rule: Rule::RuntimeCommandEmit,
         needle: "eventexec::command::emit_async(emitter, dispatch_id, topic, contract_id, payload, subject)",
         detail: "runtime command emit 必须透传 typed contract + tenant: emit_async(..., contract, tenant, payload, subject_id)",
     },
     ForbiddenPattern {
-        rule: Rule::TenantlessOutboxEnvelope,
+        rule: Rule::OutboxEnvelope,
         needle: "OutboxEnvelopeParts::new(CONTRACT, subject)",
         detail: "outbox envelope parts 必须显式接收 tenant: OutboxEnvelopeParts::new(CONTRACT, tenant, subject)",
     },
     ForbiddenPattern {
-        rule: Rule::TenantlessProducerSignature,
+        rule: Rule::ProducerSignature,
         needle: "request: <Cmd>Request, subject_id: String, idempotency_key: Option<String>",
         detail: "producer wrapper spec 必须在 subject_id 前声明 tenant: vocab::TenantId",
     },
@@ -38,10 +38,10 @@ const FORBIDDEN: &[ForbiddenPattern] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
-    TenantlessCommandWrapper,
-    TenantlessRuntimeCommandEmit,
-    TenantlessOutboxEnvelope,
-    TenantlessProducerSignature,
+    CommandWrapper,
+    RuntimeCommandEmit,
+    OutboxEnvelope,
+    ProducerSignature,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,8 +148,8 @@ OutboxEnvelopeParts::new(CONTRACT, subject)
 ";
         let findings = scan_content(Path::new("docs/rules/eventbus.md"), src);
         assert_eq!(findings.len(), 2);
-        assert_eq!(findings[0].rule, Rule::TenantlessCommandWrapper);
-        assert_eq!(findings[1].rule, Rule::TenantlessOutboxEnvelope);
+        assert_eq!(findings[0].rule, Rule::CommandWrapper);
+        assert_eq!(findings[1].rule, Rule::OutboxEnvelope);
     }
 
     #[test]

@@ -4505,10 +4505,12 @@ version = "0.0.0"
 dependencies = [
  "argon2",
  "base64",
+ "hmac 0.12.1",
  "rstest",
  "secrecy",
  "securederive",
  "sha2 0.10.9",
+ "subtle",
  "thiserror",
  "trybuild",
  "vocab",

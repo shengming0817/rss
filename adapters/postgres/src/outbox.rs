@@ -868,7 +868,7 @@ mod tests {
 
     // OutboxEnvelope 构造 + 字段访问（metadata 经 OutboxMetadata funnel，F1）。
     #[test]
-    fn envelope_new_and_fields() {
+    fn envelope_new_and_fields() -> Result<(), serde_json::Error> {
         use super::OutboxEnvelope;
         let env = OutboxEnvelope::new(
             "identity".to_string(),
@@ -877,11 +877,16 @@ mod tests {
         );
         assert_eq!(env.domain(), "identity");
         assert_eq!(env.contract_id(), "contract-1");
-        // serde_json::Map 默认 BTreeMap（键序字母）：occurredAt < subjectId。
+        let parsed = serde_json::from_str::<serde_json::Value>(&env.metadata_json())?;
         assert_eq!(
-            env.metadata_json(),
-            r#"{"occurredAt":1700000000,"subjectId":"tenant-42","tenantId":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#
+            parsed,
+            serde_json::json!({
+                "occurredAt": 1_700_000_000,
+                "subjectId": "tenant-42",
+                "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            })
         );
+        Ok(())
     }
 
     // #262 F1：occurredAt 构造期必填——`new(secs)` 仅 occurredAt（无 subject）即含该 reserved key。

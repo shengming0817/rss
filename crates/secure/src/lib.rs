@@ -7,6 +7,7 @@
 extern crate self as secure;
 
 pub mod aead;
+pub mod blind_index;
 pub mod cookie;
 pub mod envelope;
 pub mod password;
@@ -16,6 +17,11 @@ pub mod redaction;
 pub mod refresh;
 
 pub use aead::{Aead, AeadError, Plaintext};
+pub use blind_index::{
+    BlindIndex, BlindIndexError, BlindIndexKey, BlindIndexValue, FilterBits, IndexScope, Transform,
+};
+// `index` / `lookup_set` / `SubKey` / `compute` 等低层原语为 crate-visible：
+// 强制消费方通过 `BlindIndex` funnel（统一 transform 链），杜绝绕过 scope/transform 绑定。
 pub use cookie::{CookieCodec, CookieError, CookieValue, CookieValueError};
 pub use envelope::{
     CipherAlg, CiphertextEnvelope, ENVELOPE_VERSION, EncryptionMode, EnvelopeError,

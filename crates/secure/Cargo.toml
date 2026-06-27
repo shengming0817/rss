@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 thiserror = { workspace = true }
+vocab = { path = "../vocab" }
 # 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + 内建 constant-time 验签 + 随机盐（OsRng）。
 argon2 = { workspace = true }
 # 字段级脱敏 derive（#[derive(Redact)]，#1360）：intra-base DAG 前向边 secure → securederive（layers.rs）。
@@ -17,13 +18,19 @@ securederive = { path = "../securederive" }
 sha2 = { workspace = true }
 # secure::refresh（#1325）：base64url 编码不透明 secret。
 base64 = { workspace = true }
-# PasswordHash PHC 字符串 drop 时清零堆内存（纵深防御，避免哈希物料残留进程内存）。
-zeroize = { workspace = true }
+# HMAC-SHA256 子密钥派生 + 盲索引计算（secure::blind_index，#1478）。
+# ref: RustCrypto/MACs hmac/README.md@master（Hmac<Sha256> new_from_slice→update→finalize）
+hmac = { workspace = true }
+# 常数时间等值比较（BlindIndexValue::ct_eq，防时序侧信道；FIELDPROT-BLINDIDX-EQUALITYONLY-01）。
+# ref: dalek-cryptography/subtle src/lib.rs@main
+subtle = { workspace = true }
+# drop 时自动清零堆内存（零信任纵深防御）：BlindIndexKey / SubKey（#1478，类型层 Hard，#[derive(ZeroizeOnDrop)]）
+# + PasswordHash PHC 字符串（#317，避免哈希物料残留进程内存）。zeroize_derive feature 启用 derive proc-macro；
+# workspace base 已开 alloc。同 crates/diport/Cargo.toml:42 范式。
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 # 解密产物明文封装（secure::aead::Plaintext，#1469）：SecretSlice<u8> 承载 ADR-011 D5 no-decrypt-in-debug
 # —— Debug=[REDACTED] + Drop-zeroize，明文永不可 {:?} 渲染（FIELDPROT-NODBG-DECRYPT-01）。
 secrecy = { workspace = true }
-# AAD tenant 坐标收敛为已校验租户 ID，避免 ProtectionContext 接受裸 tenant 字符串。
-vocab = { path = "../vocab" }
 
 [dev-dependencies]
 # 表驱动单测（脱敏模式 / key 判敏感 / URL 凭据剥离参数化，#1360）。
