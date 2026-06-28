@@ -12,8 +12,10 @@ workspace = true
 # impl diport::Signer（HashiCorp Vault Transit `sign`）。后端 HTTP 客户端经 feature 门控（default build 轻量、
 # 仍保 freeze smoke 类型断言），与 redis/s3/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守）。
 [dependencies]
-# 实现 diport 已冻 DI port trait（Signer + ManagedResource + SecretResolver，native AFIT）。
+# 实现 diport 已冻 DI port trait（Signer + KeyProvider + ManagedResource + SecretResolver，native AFIT）。
 diport = { path = "../../crates/diport" }
+# KeyProvider 明文/AAD 类型（Plaintext / DerivedAad）。Vault provider 只读受控出口，不把明文/AAD 写入日志。
+secure = { path = "../../crates/secure", optional = true }
 # SecretResolver::resolve 签名中的 TenantId（tenant 隔离位置参，Hard）。
 vocab = { path = "../../crates/vocab" }
 # Transit 签名 HTTP 客户端（TLS-agnostic）：reqwest default-features=false 不绑 crypto provider——
@@ -22,7 +24,7 @@ vocab = { path = "../../crates/vocab" }
 reqwest = { workspace = true, optional = true }
 # 结构化日志（仅 backend）：tracing instrument span + warn。失败诊断把 reqwest 错误归类为低基数静态标签
 # （classify_reqwest_error），不打印其 Display——比泛 adapter 的 secure::redact_error(Display) funnel 更保守，
-# 契合 secrets-backend 敏感度（杜绝 endpoint URL 进日志）；故本 crate 不依赖 secure。
+# 契合 secrets-backend 敏感度（杜绝 endpoint URL 进日志）；KeyProvider 类型经 backend feature 依赖 secure。
 tracing = { workspace = true, optional = true }
 # 构造期配置校验错误（fail-fast，非静默）+ transit 响应解析错误。
 thiserror = { workspace = true, optional = true }
@@ -35,12 +37,13 @@ zeroize = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:reqwest", "dep:tracing", "dep:thiserror", "dep:serde", "dep:serde_json", "dep:base64", "dep:zeroize"]
+backend = ["dep:reqwest", "dep:tracing", "dep:thiserror", "dep:serde", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:secure"]
 # live Vault round-trip 集成测试门（在 backend 之上）：#[ignore] + env fail-closed，默认不跑。
 integration = ["backend"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
 # sign_impl HTTP 编排层确定性单测（loopback mock endpoint，无 live Vault）：reqwest 真发请求 → 测真实
 # URL percent-encode / X-Vault-Token header / 非 2xx 状态分支 / 请求级 timeout。仅 backend-gated test 用
 # （对标 s3 aws-smithy-mocks dev-dep），production lib 仍 crypto-free。

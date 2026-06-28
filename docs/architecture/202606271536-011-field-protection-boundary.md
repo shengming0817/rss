@@ -170,11 +170,18 @@ impl，不被域依赖。本 ADR 即修正 `primitives/crypto.rs` / `secure/aead
 - [ ] generated 携带保护元数据但**不触发真实加解密**。
 
 **#1466 KeyProvider 与 Vault Transit 加解密**（provider 层）
-- [ ] `diport` 有 `KeyProvider` / `ValueTransformer` port（dynosaur Send 变体，错误源脱敏，`DIPORT-MACRO-CONFINE-01′` / `DIPORT-IMPL-ALLOWLIST-01`）。
-- [ ] `adapters/vault` 实现 encrypt / decrypt / **rewrap** 路径。
+- [x] `diport` 有 `KeyProvider` port（dynosaur Send 变体，错误源脱敏，`DIPORT-MACRO-CONFINE-01′` / `DIPORT-IMPL-ALLOWLIST-01`）。
+- [x] `adapters/vault` 实现 encrypt / decrypt / **rewrap** 路径：RSS `DerivedAad` 只经单一 funnel base64 编码为 Vault Transit
+  `context`，不使用 `associated_data`（Vault 非 batch `/rewrap` 不实际传递/使用 `associated_data`；`context` 才能保留原生
+  rewrap、避免 decrypt+encrypt 把明文拉回 adapter）。接口 / AAD 必填由 Rust 类型签名 Hard 保证；Vault 外部 rewrap 语义由
+  `#[ignore]` live smoke 手工证明（same-AAD decrypt 成功、changed-AAD fail-closed）；默认 CI 不把该 live smoke 作为
+  Medium 机器门，若要升级为 Medium 须接入可执行 live lane。
 - [ ] AES-GCM (DEK, nonce) 唯一性：每次加密唯一 nonce、DEK 不跨 message 重用（D3）。
 - [ ] 支持 key id / version / **current-primary + previous-read** 轮换（D3）。
-- [ ] AAD mismatch + 跨租 / 跨字段 replay 均 **fail-closed**（`FIELDPROT-AAD-MANDATORY-01`）。
+- [x] AAD mismatch fail-closed（`FIELDPROT-AAD-MANDATORY-01`；Vault provider 经 Transit derived-key `context` 绑定，
+  默认可跑测试覆盖请求构造 / context funnel / 本地错误收敛；`#[ignore]` live smoke 覆盖 changed-field AAD mismatch）。
+- [ ] 跨租 / 跨字段 replay fail-closed 具备默认可执行治理门（当前只有 changed-field live smoke；跨 tenant live / mock contract
+  lane 未接入默认验证）。
 - [ ] master-key compromise 应急运维流程记录（rewrap 仅重包裹 DEK、不覆盖此场景，须全量 DEK 重加密，D3/§5）。
 
 **#1467 settings ConfigValue 静态加密落地**（持久化层）
@@ -254,6 +261,11 @@ DETERMINISTIC / NODBG 类型）/ #1466（DIPORT-* + KEYPROV-AUDIT 守卫）/ #14
   FilterBits 截断 / Transform 规范化管道三实现要点（`crates/secure/src/blind_index.rs` 与之同形）。
 - `ref: hashicorp/vault builtin/logical/transit/path_encrypt.go@main` — envelope encryption + `context`(≈AAD) decrypt 时强制一致
   + convergent v3 PRF-derived nonce + `rewrap` 重包裹，对应 D2（AAD 强制）/ D3（envelope + 轮换）/ D4（deterministic opt-in）。
+- `ref: hashicorp/vault builtin/logical/transit/path_encrypt.go@042e17bf44393d22158e45b6b25764d415edea58`、
+  `ref: hashicorp/vault builtin/logical/transit/path_decrypt.go@042e17bf44393d22158e45b6b25764d415edea58`、
+  `ref: hashicorp/vault builtin/logical/transit/path_rewrap.go@042e17bf44393d22158e45b6b25764d415edea58` — RSS
+  `VaultKeyProvider` 对应 `encrypt` / `decrypt` / `rewrap` wire 形态；特别是 `/rewrap` 原生使用 `context`，不依赖
+  `associated_data`，对应 #1479 的 AAD→context 决策与 live integration Medium 门。
 - `ref: tink-crypto/tink-go daead/subtle/aes_siv.go@main`（https://developers.google.com/tink/deterministic-aead）— DeterministicAEAD
   = AES256-SIV（S2V + CMAC），AAD 作为 SIV 输入；文档明确 deterministic「leaks plaintext equality」代价，对应 D4 deterministic opt-in + blind index AAD 维度 + 权衡文档化。
 - `ref: awslabs/aws-encryption-sdk-specification framework/structures.md@master`（https://docs.aws.amazon.com/encryption-sdk/latest/developer-guide/concepts.html）
