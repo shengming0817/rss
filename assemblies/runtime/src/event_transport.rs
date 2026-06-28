@@ -2,11 +2,11 @@
 //!
 //! [`wire_event_transport`] 是 `run()` 事件传输单入口：根据 [`EventTransportConfig`] 中的拓扑决策
 //! 连接 AMQP（per-domain）+ Redis，spawn relay worker + consumer workers，并返回 [`EventRuntime`]
-//! 交给 `run()` 装配进 [`bootstrap::ShutdownStack`]。
+//! 交给 `run()` merge/drain 标准 [`bootstrap::DomainModuleResult`]。
 //!
 //! LIFO 注册顺序（由 `run()` 负责执行）：
 //! - `infra_guards`（AMQP 连接 + Redis pool guard）先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
-//! - `workers`（relay + consumers）后注册 ⇒ LIFO 最先 drain。
+//! - `module.resources/module.workers`（relay + consumers + outbox sampler/sweeper）后注册 ⇒ LIFO 最先 drain。
 //!
 //! Demo 拓扑：`wire_event_transport` 返回空 [`EventRuntime`]（无 env/容器即可单测）；生产 Demo
 //! 时组合根 `run()` 在此前已 `anyhow::bail!`（TOPO-INMEM-SEAL-01 组合根层保证）。
@@ -24,15 +24,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use bootstrap::{SubscriberBinding, adapt_subscriber_handler};
-use diport::{AckableSubscriber, DynDeadLetterStore, DynManagedResource, Topic};
+use bootstrap::{DomainModuleResult, SubscriberBinding, WorkerSpec, adapt_subscriber_handler};
+use diport::{DynDeadLetterStore, DynManagedResource, Topic};
 use eventexec::{
     ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE,
-    RelayConfig, WorkerHealth, spawn_consumer_ackable, spawn_relay,
+    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, SWEEPER_WORKER_NAME, SamplerWorker,
+    SweeperConfig, SweeperWorker, WorkerHealth, backlog_sampler_loop,
+    spawn_consumer_ackable_subscriber, spawn_relay, sweeper_loop,
 };
 use postgres::{PgRuntimeDeps, caps};
 use primitives::{HealthCheck, ProbeName};
-use tokio_util::sync::CancellationToken;
 
 use crate::SystemClock;
 
@@ -54,16 +55,18 @@ pub struct EventTransportConfig {
     pub relay_batch: usize,
     /// Outbox relay backlog 采样间隔。
     pub relay_sample_interval: Duration,
+    /// Outbox published-row sweeper 扫描间隔。
+    pub outbox_sweep_interval: Duration,
+    /// Outbox published-row 保留期（秒）。
+    pub outbox_retain_seconds: u64,
 }
 
 /// 事件传输接线产物（交 `run()` 装配进 [`bootstrap::ShutdownStack`]）。
 pub struct EventRuntime {
     /// infra 连接守卫（AMQP + Redis）：先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
     pub infra_guards: Vec<Box<DynManagedResource<'static>>>,
-    /// 后台 worker（relay + consumers）：后注册 ⇒ LIFO 最先 drain。
-    pub workers: Vec<Box<DynManagedResource<'static>>>,
-    /// readyz 探针（须在 `registry.take_health_reporter()` 前排入 registry）。
-    pub probes: Vec<(ProbeName, Box<dyn bootstrap::HealthProbe>)>,
+    /// 标准 module 产物：probes/resources/workers 由 runtime 统一 merge/drain。
+    pub module: DomainModuleResult,
 }
 
 impl EventRuntime {
@@ -73,8 +76,7 @@ impl EventRuntime {
     pub fn empty() -> Self {
         Self {
             infra_guards: Vec::new(),
-            workers: Vec::new(),
-            probes: Vec::new(),
+            module: DomainModuleResult::default(),
         }
     }
 }
@@ -110,6 +112,8 @@ struct RelayTiming {
     poll: Duration,
     batch: usize,
     sample: Duration,
+    sweep: Duration,
+    retain_seconds: u64,
 }
 
 // ── 公开函数 ──────────────────────────────────────────────────────────────────
@@ -191,6 +195,8 @@ pub async fn wire_event_transport(
         poll: cfg.relay_poll_interval,
         batch: cfg.relay_batch,
         sample: cfg.relay_sample_interval,
+        sweep: cfg.outbox_sweep_interval,
+        retain_seconds: cfg.outbox_retain_seconds,
     };
     match resolve_event_decision(cfg.topology, cfg.transport, cfg.idempotency, &required_refs)? {
         EventDecision::Demo => {
@@ -233,6 +239,8 @@ pub async fn wire_event_transport(
 /// - `RSS_RELAY_POLL_INTERVAL_MS`（200ms）
 /// - `RSS_RELAY_BATCH_SIZE`（16）
 /// - `RSS_RELAY_SAMPLE_INTERVAL_MS`（30000ms）
+/// - `RSS_OUTBOX_SWEEP_INTERVAL_MS`（300000ms）
+/// - `RSS_OUTBOX_RETAIN_SECONDS`（604800s）
 /// - `RSS_REDIS_CLAIM_TTL_MS`（30000ms）
 pub fn build_event_transport_config_from(
     get: impl Fn(&str) -> Option<String>,
@@ -287,6 +295,16 @@ pub fn build_event_transport_config_from(
             "RSS_RELAY_SAMPLE_INTERVAL_MS",
             30_000,
         ),
+        outbox_sweep_interval: parse_duration_ms_env(
+            get("RSS_OUTBOX_SWEEP_INTERVAL_MS"),
+            "RSS_OUTBOX_SWEEP_INTERVAL_MS",
+            300_000,
+        ),
+        outbox_retain_seconds: parse_u64_env(
+            get("RSS_OUTBOX_RETAIN_SECONDS"),
+            "RSS_OUTBOX_RETAIN_SECONDS",
+            604_800,
+        ),
     })
 }
 
@@ -308,8 +326,7 @@ async fn wire_durable(
     // saga/projection 投影重建 defer → 见 #1251 follow-up issue（executor body 仍 todo!()，#1121/#1122）
 
     let mut infra_guards: Vec<Box<DynManagedResource<'static>>> = Vec::new();
-    let mut workers: Vec<Box<DynManagedResource<'static>>> = Vec::new();
-    let mut probes: Vec<(ProbeName, Box<dyn bootstrap::HealthProbe>)> = Vec::new();
+    let mut module = DomainModuleResult::default();
 
     // 每个 required 域（[`RELAY_DOMAINS`] 发布域 ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
     // AMQP URL → 下方 amqp_map 逐域连接；relay/consumer 取连接时 `.context(...)` 兜底 fail-closed，无需额外 guard。
@@ -386,13 +403,14 @@ async fn wire_durable(
     {
         let publisher = relay_publisher(&amqp_map, "identity")?;
         let outbox = pg.for_domain::<caps::Identity>().outbox(publisher);
-        spawn_domain_relay("identity", outbox, &timing, &mut workers, &mut probes)?;
+        wire_domain_relay("identity", outbox, &timing, &mut module)?;
     }
     {
         let publisher = relay_publisher(&amqp_map, "settings")?;
         let outbox = pg.for_domain::<caps::Settings>().outbox(publisher);
-        spawn_domain_relay("settings", outbox, &timing, &mut workers, &mut probes)?;
+        wire_domain_relay("settings", outbox, &timing, &mut module)?;
     }
+    wire_outbox_maintenance(pg, &timing, &mut module)?;
 
     // Consumer workers（per binding）。
     wire_consumer_workers(
@@ -401,15 +419,12 @@ async fn wire_durable(
         &amqp_map,
         &idempotency,
         lease_cfg,
-        &mut workers,
-        &mut probes,
-    )
-    .await?;
+        &mut module,
+    )?;
 
     Ok(EventRuntime {
         infra_guards,
-        workers,
-        probes,
+        module,
     })
 }
 
@@ -425,18 +440,17 @@ fn relay_publisher(
         .publisher())
 }
 
-/// 为单个 L2 发布域起一个 outbox relay worker（`eventexec::spawn_relay`：专用 OS 线程 + `StoppedOnExit`
-/// panic-safety 守卫，与 ConsumerWorker 对称）+ 一个 per-domain readyz 探针，收进 `workers` / `probes`。
+/// 为单个 L2 发布域声明一个 outbox relay worker（`eventexec::spawn_relay`：专用 OS 线程 + `StoppedOnExit`
+/// panic-safety 守卫，与 ConsumerWorker 对称）+ 一个 per-domain readyz 探针，收进 module。
 ///
 /// `outbox` 已绑该域 vhost publisher（调用方按 `caps::*` marker 构造，编译期防跨域错插）；`PgOutbox: Send+!Sync`
 /// → `spawn_relay` 接 `store: A`（`A: Send`），在专用线程内 `Arc::new(store)`；relay_loop 经 `RelayConfig` 的
 /// domain 过滤 outbox 表行。
-fn spawn_domain_relay(
+fn wire_domain_relay(
     domain: &str,
     outbox: postgres::PgOutbox,
     timing: &RelayTiming,
-    workers: &mut Vec<Box<DynManagedResource<'static>>>,
-    probes: &mut Vec<(ProbeName, Box<dyn bootstrap::HealthProbe>)>,
+    module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let relay_cfg = RelayConfig::new(
         vec![domain.to_string()],
@@ -446,21 +460,24 @@ fn spawn_domain_relay(
     )
     .context("build relay config")?;
     let health = Arc::new(WorkerHealth::healthy());
-    let token = CancellationToken::new();
-    let worker = spawn_relay(
-        format!("outbox-relay-{domain}"),
-        outbox,
-        relay_cfg,
-        Arc::new(SystemClock),
-        token,
-        Arc::clone(&health),
-        Arc::new(MetricsOutboxMetrics),
-    );
-    workers.push(DynManagedResource::new_box(worker));
+    let worker_name = format!("outbox-relay-{domain}");
+    let worker_health = Arc::clone(&health);
+    let worker: WorkerSpec = Box::new(move |token| {
+        DynManagedResource::new_box(spawn_relay(
+            worker_name,
+            outbox,
+            relay_cfg,
+            Arc::new(SystemClock),
+            token,
+            worker_health,
+            Arc::new(MetricsOutboxMetrics),
+        ))
+    });
+    module.workers.push(worker);
     // per-domain 探针名（多 relay 各自唯一）：`{OUTBOX_RELAY_PROBE}_{domain}`。
     let probe_name = ProbeName::parse(&format!("{OUTBOX_RELAY_PROBE}_{domain}"))
         .context("parse relay probe name")?;
-    probes.push((
+    module.probes.push((
         probe_name.clone(),
         Box::new(WorkerHealthProbe {
             name: probe_name,
@@ -474,15 +491,103 @@ fn spawn_domain_relay(
     Ok(())
 }
 
+/// outbox maintenance workers：backlog sampler + published-row sweeper。
+fn wire_outbox_maintenance(
+    pg: &PgRuntimeDeps,
+    timing: &RelayTiming,
+    module: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let relay_cfg = RelayConfig::new(
+        RELAY_DOMAINS.iter().map(|d| (*d).to_string()).collect(),
+        timing.poll,
+        timing.batch,
+        timing.sample,
+    )
+    .context("build outbox sampler config")?;
+    let sweeper_cfg = SweeperConfig::new(timing.retain_seconds, timing.sweep)
+        .context("build outbox sweeper config")?;
+
+    let maintenance = pg.infra().outbox_maintenance();
+    wire_sampler_worker(maintenance.clone(), relay_cfg, module)?;
+    wire_sweeper_worker(maintenance, sweeper_cfg, module)?;
+    Ok(())
+}
+
+fn wire_sampler_worker(
+    maintenance: postgres::PgOutboxMaintenance,
+    config: RelayConfig,
+    module: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let health = Arc::new(WorkerHealth::healthy());
+    let worker_health = Arc::clone(&health);
+    let worker: WorkerSpec = Box::new(move |token| {
+        let handle = tokio::spawn(backlog_sampler_loop(
+            Arc::new(maintenance),
+            config,
+            token.clone(),
+            Arc::clone(&worker_health),
+            Arc::new(MetricsOutboxMetrics),
+        ));
+        DynManagedResource::new_box(SamplerWorker::adopt(handle, worker_health, token))
+    });
+    module.workers.push(worker);
+
+    let probe_name =
+        ProbeName::parse(OUTBOX_SAMPLER_PROBE).context("parse outbox sampler probe name")?;
+    module.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerHealthProbe {
+            name: probe_name,
+            health,
+        }),
+    ));
+    Ok(())
+}
+
+fn wire_sweeper_worker(
+    maintenance: postgres::PgOutboxMaintenance,
+    config: SweeperConfig,
+    module: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let health = Arc::new(WorkerHealth::healthy());
+    let worker_health = Arc::clone(&health);
+    let worker: WorkerSpec = Box::new(move |token| {
+        let handle = tokio::spawn(sweeper_loop(
+            Arc::new(maintenance),
+            config,
+            token.clone(),
+            Arc::clone(&worker_health),
+            "outbox",
+        ));
+        DynManagedResource::new_box(SweeperWorker::adopt(
+            SWEEPER_WORKER_NAME,
+            handle,
+            worker_health,
+            token,
+        ))
+    });
+    module.workers.push(worker);
+
+    let probe_name =
+        ProbeName::parse(OUTBOX_SWEEPER_PROBE).context("parse outbox sweeper probe name")?;
+    module.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerHealthProbe {
+            name: probe_name,
+            health,
+        }),
+    ));
+    Ok(())
+}
+
 /// Consumer workers 接线（per [`SubscriberBinding`] → `spawn_consumer_ackable` → [`ConsumerWorker`]）。
-async fn wire_consumer_workers(
+fn wire_consumer_workers(
     pg: &PgRuntimeDeps,
     subscribers: Vec<SubscriberBinding>,
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     idempotency: &Arc<redis::RedisIdempotencyStore>,
     lease_cfg: LeaseConfig,
-    workers: &mut Vec<Box<DynManagedResource<'static>>>,
-    probes: &mut Vec<(ProbeName, Box<dyn bootstrap::HealthProbe>)>,
+    module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
     for binding in subscribers {
@@ -495,34 +600,35 @@ async fn wire_consumer_workers(
         let amqp_conn = amqp_map
             .get(&owner)
             .with_context(|| format!("no amqp connection for topic owner '{owner}'"))?;
-        let consumer_token = CancellationToken::new();
-        let stream = amqp_conn
-            .infra()
-            .subscriber()
-            .subscribe_ackable(Topic::new(binding.topic), consumer_token.clone())
-            .await
-            .with_context(|| format!("subscribe_ackable topic '{}'", binding.topic))?;
+        let subscriber = amqp_conn.infra().subscriber();
+        let topic = Topic::new(binding.topic);
         let meta = ConsumerMeta::new(&owner, binding.contract_id, binding.topic);
         let handler = adapt_subscriber_handler(binding.handler);
         let consumer_health = Arc::new(WorkerHealth::healthy());
         let dlx = DynDeadLetterStore::new_box(pg.infra().dead_letter());
-        let worker = spawn_consumer_ackable(
-            format!("event-consumer:{}", binding.topic),
-            stream,
-            Arc::clone(idempotency),
-            dlx,
-            meta,
-            handler,
-            lease_cfg,
-            consumer_token,
-            Arc::clone(&consumer_health),
-        );
+        let worker_name = format!("event-consumer:{}", binding.topic);
         tracing::info!(
             topic = binding.topic,
-            "durable event transport: consumer worker spawned"
+            "durable event transport: consumer worker registered"
         );
-        workers.push(DynManagedResource::new_box(worker));
-        probes.push(make_consumer_probe(
+        let idempotency = Arc::clone(idempotency);
+        let health = Arc::clone(&consumer_health);
+        let worker: WorkerSpec = Box::new(move |token| {
+            DynManagedResource::new_box(spawn_consumer_ackable_subscriber(
+                worker_name,
+                subscriber,
+                topic,
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                lease_cfg,
+                token,
+                health,
+            ))
+        });
+        module.workers.push(worker);
+        module.probes.push(make_consumer_probe(
             binding_count,
             binding.topic,
             consumer_health,
@@ -600,6 +706,25 @@ fn parse_usize_env(raw: Option<String>, env_name: &'static str, default: usize) 
                 raw = %s,
                 default,
                 "invalid usize; falling back to default"
+            );
+            default
+        }
+    }
+}
+
+/// 可选 `u64` env var → `u64`（解析失败或缺失时 warn + 回退 default）。
+fn parse_u64_env(raw: Option<String>, env_name: &'static str, default: u64) -> u64 {
+    let Some(s) = raw else {
+        return default;
+    };
+    match s.trim().parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(
+                env = env_name,
+                raw = %s,
+                default,
+                "invalid u64; falling back to default"
             );
             default
         }
@@ -802,7 +927,41 @@ mod tests {
         assert_eq!(cfg.relay_poll_interval, Duration::from_millis(200));
         assert_eq!(cfg.relay_batch, 16);
         assert_eq!(cfg.relay_sample_interval, Duration::from_millis(30_000));
+        assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
+        assert_eq!(cfg.outbox_retain_seconds, 604_800);
         assert_eq!(cfg.redis_claim_ttl, Duration::from_millis(30_000));
+    }
+
+    #[test]
+    fn config_builder_durable_parses_outbox_maintenance_timing() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
+            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
+            "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("120000".into()),
+            "RSS_OUTBOX_RETAIN_SECONDS" => Some("86400".into()),
+            _ => None,
+        });
+        assert!(result.is_ok(), "full durable config should succeed");
+        let cfg = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(120_000));
+        assert_eq!(cfg.outbox_retain_seconds, 86_400);
+    }
+
+    #[test]
+    fn config_builder_invalid_outbox_maintenance_timing_falls_back() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
+            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
+            "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("bad-ms".into()),
+            "RSS_OUTBOX_RETAIN_SECONDS" => Some("bad-seconds".into()),
+            _ => None,
+        });
+        assert!(result.is_ok(), "invalid optional timing falls back");
+        let cfg = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
+        assert_eq!(cfg.outbox_retain_seconds, 604_800);
     }
 
     // ── EventRuntime::empty() constructor ─────────────────────────────────────
@@ -812,8 +971,9 @@ mod tests {
     fn event_runtime_empty_constructor_is_empty() {
         let runtime = EventRuntime::empty();
         assert!(runtime.infra_guards.is_empty());
-        assert!(runtime.workers.is_empty());
-        assert!(runtime.probes.is_empty());
+        assert!(runtime.module.probes.is_empty());
+        assert!(runtime.module.resources.is_empty());
+        assert!(runtime.module.workers.is_empty());
     }
 
     // ── resolve_event_decision（纯函数；无 PG/infra 依赖）────────────────────
@@ -916,6 +1076,21 @@ mod tests {
     #[test]
     fn parse_usize_env_uses_default_when_absent() {
         assert_eq!(parse_usize_env(None, "TEST_VAR", 42), 42);
+    }
+
+    #[test]
+    fn parse_u64_env_uses_default_when_absent() {
+        assert_eq!(parse_u64_env(None, "TEST_VAR", 42), 42);
+    }
+
+    #[test]
+    fn parse_u64_env_parses_valid_value() {
+        assert_eq!(parse_u64_env(Some("1234".into()), "TEST_VAR", 42), 1234);
+    }
+
+    #[test]
+    fn parse_u64_env_falls_back_on_invalid() {
+        assert_eq!(parse_u64_env(Some("bad".into()), "TEST_VAR", 42), 42);
     }
 
     #[test]

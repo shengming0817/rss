@@ -51,7 +51,7 @@ pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
-pub use outbox::PgOutbox;
+pub use outbox::{PgOutbox, PgOutboxMaintenance};
 // NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
 // sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径 read_from + PgProjectionRecord 公开。
 pub use projection_events::{PgProjectionEvents, PgProjectionRecord, ProjectionEventsError};
@@ -160,6 +160,8 @@ mod smoke {
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
+    fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
+    fn assert_retention_sweeper<T: consistency::RetentionSweeper>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
@@ -182,6 +184,8 @@ mod smoke {
         assert_session_lifecycle(PhantomData::<super::PgSessionLifecycle>);
         // `PgInboxStore: IdempotencyStore` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
         assert_idempotency_store(PhantomData::<super::PgInboxStore>);
+        assert_outbox_backlog(PhantomData::<super::PgOutboxMaintenance>);
+        assert_retention_sweeper(PhantomData::<super::PgOutboxMaintenance>);
         // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。
         assert_config_repo(PhantomData::<super::PgConfigRepo>);
         assert_config_uow(PhantomData::<super::PgConfigRepo>);

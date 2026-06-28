@@ -1298,13 +1298,6 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     }
     module.resources.extend(deps.vault.runtime_resources());
 
-    // 排空域产物探针进 registry（须先于 take_health_reporter，readyz 才聚合 configs_ready）。
-    for (name, probe) in module.probes {
-        let probe_label = name.as_str().to_owned();
-        registry
-            .probe(name, probe)
-            .with_context(|| format!("register domain probe '{probe_label}'"))?;
-    }
     // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
     // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
     let rls_probe_name =
@@ -1330,16 +1323,17 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         .await
         .context("wire event transport")?;
     let event_infra_guards = event_runtime.infra_guards;
-    let event_workers = event_runtime.workers;
-    // 排空事件传输探针进 registry（须先于 take_health_reporter；与域探针同批注册）。
-    for (name, probe) in event_runtime.probes {
+    module.merge(event_runtime.module);
+
+    // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
+    for (name, probe) in module.probes {
         let probe_label = name.as_str().to_owned();
         registry
             .probe(name, probe)
-            .with_context(|| format!("register event probe '{probe_label}'"))?;
+            .with_context(|| format!("register module probe '{probe_label}'"))?;
     }
 
-    // 域 detached 资源 / 后台 worker（settings 今为空；路径为后续域就位）——移出供 serve 闭包排空。
+    // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
     let domain_resources = module.resources;
     let domain_workers = module.workers;
     let period = build_readiness_interval();
@@ -1363,7 +1357,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     listeners.push(health_listener(reporter, metrics_exporter).context("build health listener")?);
 
     // LIFO 注册顺序：otel exporter 先注册（最后关，关停期 span flush）→ pg pool guard → sampler →
-    // event infra guards（AMQP+Redis）→ event workers（relay+consumers）→ 域 resources → 域 workers →
+    // event infra guards（AMQP+Redis）→ module resources/workers（event + 域）→
     // listeners 最后注册（最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources →
     //   event workers（relay+consumers drain）→ event infra guards（AMQP+Redis 断连）→ sampler → pg pool guard
     //   → otel exporter（trace flush 在所有组件静默后）。otel 仅在配了 RSS_OTEL_ENDPOINT 时存在。
@@ -1384,11 +1378,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         for g in event_infra_guards {
             stack.register_detached(g);
         }
-        // 事件传输 workers（relay + consumers）自带 CancellationToken，经 register_detached 注册（self-cancel）。
-        for w in event_workers {
-            stack.register_detached(w);
-        }
-        // 域产物注册在事件传输之后 → LIFO 先于事件传输排空（settings 今为空；后续域就位）。
+        // module 产物注册在事件传输 infra 之后 → LIFO 先于 AMQP/Redis 排空（relay/consumer drain 后再断连接）。
         for r in domain_resources {
             stack.register_detached(r);
         }

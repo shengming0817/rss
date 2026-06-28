@@ -331,6 +331,27 @@ impl PgOutbox {
     }
 }
 
+/// PostgreSQL outbox maintenance adapter：impl [`OutboxBacklog`] + [`RetentionSweeper`]，不持 publisher。
+///
+/// relay 需要 per-domain publisher，因此仍由 [`PgOutbox`] 承载；sampler/sweeper 只需要 DB pool，不应为了
+/// 采样/清理而构造可发布的 relay outbox（#1429）。本类型经 [`crate::PgInfraDeps::outbox_maintenance`]
+/// 暴露给组合根，用于 runtime module worker 接线。
+#[derive(Clone)]
+pub struct PgOutboxMaintenance {
+    pool: sqlx::PgPool,
+}
+
+impl PgOutboxMaintenance {
+    /// 由 [`PgStore`] 构造 outbox maintenance 能力（pool clone，轻量）。
+    ///
+    /// `pub(crate)`（PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::outbox_maintenance`] 收口。
+    pub(crate) fn new(store: &PgStore) -> Self {
+        Self {
+            pool: store.pool.clone(),
+        }
+    }
+}
+
 // ── OutboxSource impl ─────────────────────────────────────────────────────────
 
 impl OutboxSource for PgOutbox {
@@ -550,26 +571,14 @@ impl RetentionSweeper for PgOutbox {
     ///
     /// 时间谓词用 PostgreSQL `now()`（DB 事务时间）是刻意决策——见 [`PgOutbox`] 顶注。
     async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
-        // u64→i64：超 i64::MAX 的保留期是非法输入（负 interval 会反向清空全表），fail-closed。
-        let secs = i64::try_from(retain_seconds)
-            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-        let result = sqlx::query(
-            r#"
-            DELETE FROM outbox
-            WHERE status = $2
-              AND created_at <= now() - make_interval(secs => $1)
-            "#,
-        )
-        .bind(secs)
-        .bind(STATUS_PUBLISHED)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "outbox: sweep db error");
-            EngineError::new(EngineErrorKind::Transient)
-        })?;
+        sweep_published_outbox(&self.pool, retain_seconds).await
+    }
+}
 
-        Ok(result.rows_affected())
+impl RetentionSweeper for PgOutboxMaintenance {
+    /// 删除 `status='published'` 且早于保留期的行，返回删除条数。
+    async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
+        sweep_published_outbox(&self.pool, retain_seconds).await
     }
 }
 
@@ -597,41 +606,81 @@ impl OutboxBacklog for PgOutbox {
     /// partition 对 SLO 失明）。backlog 谓词刻意不含 head-of-partition gate（见 `poll_pending` INVARIANT:
     /// OUTBOX-PARTITION-ORDER-01）。
     async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
-        let row: (i64, i64) = sqlx::query_as(
-            r#"
-            SELECT count(*)                                                         AS depth,
-                   COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at)))::bigint, 0) AS oldest_age_seconds
-            FROM outbox
-            WHERE domain = $1
-              AND (
-                    (status = $2 AND (retry_after IS NULL OR retry_after <= now()))
-                 OR (status = $3 AND updated_at <= now() - make_interval(secs => $4))
-              )
-            "#,
-        )
-        .bind(domain)
-        .bind(STATUS_PENDING)
-        .bind(STATUS_PUBLISHING)
-        .bind(LEASE_TTL_SECONDS)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| {
-            tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: sample_backlog db error");
-            EngineError::new(EngineErrorKind::Transient)
-        })?;
-
-        let (raw_depth, raw_age) = row;
-
-        // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
-        let depth =
-            u64::try_from(raw_depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-
-        // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
-        let oldest_age_seconds = u64::try_from(raw_age.max(0))
-            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-
-        Ok(BacklogSample::new(depth, oldest_age_seconds))
+        sample_outbox_backlog(&self.pool, domain).await
     }
+}
+
+impl OutboxBacklog for PgOutboxMaintenance {
+    /// 采样 `domain` 的**可投递积压**（深度 + 最老积压龄）。
+    async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
+        sample_outbox_backlog(&self.pool, domain).await
+    }
+}
+
+async fn sweep_published_outbox(
+    pool: &sqlx::PgPool,
+    retain_seconds: u64,
+) -> Result<u64, EngineError> {
+    // u64→i64：超 i64::MAX 的保留期是非法输入（负 interval 会反向清空全表），fail-closed。
+    let secs =
+        i64::try_from(retain_seconds).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    let result = sqlx::query(
+        r#"
+        DELETE FROM outbox
+        WHERE status = $2
+          AND created_at <= now() - make_interval(secs => $1)
+        "#,
+    )
+    .bind(secs)
+    .bind(STATUS_PUBLISHED)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "outbox: sweep db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+
+    Ok(result.rows_affected())
+}
+
+async fn sample_outbox_backlog(
+    pool: &sqlx::PgPool,
+    domain: &str,
+) -> Result<BacklogSample, EngineError> {
+    let row: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*)                                                         AS depth,
+               COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at)))::bigint, 0) AS oldest_age_seconds
+        FROM outbox
+        WHERE domain = $1
+          AND (
+                (status = $2 AND (retry_after IS NULL OR retry_after <= now()))
+             OR (status = $3 AND updated_at <= now() - make_interval(secs => $4))
+          )
+        "#,
+    )
+    .bind(domain)
+    .bind(STATUS_PENDING)
+    .bind(STATUS_PUBLISHING)
+    .bind(LEASE_TTL_SECONDS)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: sample_backlog db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+
+    let (raw_depth, raw_age) = row;
+
+    // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
+    let depth =
+        u64::try_from(raw_depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+
+    // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
+    let oldest_age_seconds =
+        u64::try_from(raw_age.max(0)).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+
+    Ok(BacklogSample::new(depth, oldest_age_seconds))
 }
 
 // ── relay 拆分 helper fn（认知复杂度 ≤ 15）────────────────────────────────────

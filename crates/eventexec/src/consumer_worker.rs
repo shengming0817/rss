@@ -58,7 +58,10 @@ use std::time::Duration;
 
 use consistency::idempotency::IdempotencyStore;
 use consistency::{HandleResult, OutboxRelay, OutboxSource};
-use diport::{DeliveryStream, DynDeadLetterStore, Message, MessageStream};
+use diport::{
+    AckableSubscriber, DeliveryStream, DynAckableSubscriber, DynDeadLetterStore, Message,
+    MessageStream, Topic,
+};
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
@@ -292,6 +295,49 @@ where
     ConsumerWorker::adopt(name, handle, health, token)
 }
 
+/// spawn at-least-once 消费 worker，并在 worker 线程内用注入的 stack child token 完成订阅。
+///
+/// 组合根 `WorkerSpec` 闭包是同步的，但 AMQP `subscribe_ackable` 是 async。该函数把订阅放进
+/// `ConsumerWorker` 专用线程的 current-thread runtime 内执行，使 `ShutdownStack::register_with_token`
+/// 注入的 child token 同时驱动订阅 stream 取消和 worker shutdown，满足 `SHUTDOWN-TOKEN-FUNNEL-01`。
+#[allow(clippy::too_many_arguments)]
+// reason: 与 spawn_consumer_ackable 同形；subscriber/topic 是把 async subscribe 移入 worker 线程所需的
+// 最小新增参数，聚合 struct 只会增加间接层。
+pub fn spawn_consumer_ackable_subscriber<S, H>(
+    name: String,
+    subscriber: Box<DynAckableSubscriber<'static>>,
+    topic: Topic,
+    idempotency: Arc<S>,
+    dlx: Box<DynDeadLetterStore<'static>>,
+    meta: ConsumerMeta,
+    handler: H,
+    lease_cfg: LeaseConfig,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+) -> ConsumerWorker
+where
+    S: IdempotencyStore + Send + Sync + 'static,
+    H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+{
+    let token_run = token.clone();
+    let health_run = Arc::clone(&health);
+    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
+        match subscriber.subscribe_ackable(topic, token_run.clone()).await {
+            Ok(stream) => {
+                run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+            }
+            Err(err) => {
+                health_run.mark_degraded();
+                tracing::error!(
+                    error = %err,
+                    "consumer: subscribe_ackable failed; worker exiting"
+                );
+            }
+        }
+    });
+    ConsumerWorker::adopt(name, handle, health, token)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -299,7 +345,10 @@ mod tests {
     use consistency::error::EngineError;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
     use diport::dead_letter_store::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
-    use diport::{AckAction, AckError, Acker, Delivery, DynAcker, ManagedResource};
+    use diport::{
+        AckAction, AckError, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
+        ManagedResource, SubscriberError, Topic,
+    };
     use futures::StreamExt;
     use primitives::healthz::{HealthStatus, ProbeName};
 
@@ -307,7 +356,7 @@ mod tests {
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
         DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, LeaseConfig,
         Message, MessageStream, Mutex, WorkerHealth, spawn_consumer, spawn_consumer_ackable,
-        spawn_relay,
+        spawn_consumer_ackable_subscriber, spawn_relay,
     };
 
     /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
@@ -360,6 +409,28 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(action);
+            Ok(())
+        }
+    }
+
+    struct CapturingSubscriber {
+        seen_token: std::sync::mpsc::Sender<CancellationToken>,
+    }
+
+    impl AckableSubscriber for CapturingSubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            token: CancellationToken,
+        ) -> Result<DeliveryStream, SubscriberError> {
+            let _ = self.seen_token.send(token.clone());
+            Ok(Box::pin(
+                futures::stream::pending::<Delivery>()
+                    .take_until(async move { token.cancelled().await }),
+            ))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
             Ok(())
         }
     }
@@ -572,6 +643,40 @@ mod tests {
             vec![AckAction::Ack],
             "ackable 驱动终态向 broker settle Ack"
         );
+    }
+
+    /// Ackable worker 的订阅必须使用外部注入 token：这是组合根 WorkerSpec child token funnel 的前提。
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: 测试等待 worker thread 回传 token，超时即测试失败；panic 是断言失败路径。
+    async fn ackable_subscriber_worker_passes_injected_token_to_subscribe() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stack_child = CancellationToken::new();
+        let worker = spawn_consumer_ackable_subscriber(
+            "event_consumer:audit:session.created".to_string(),
+            DynAckableSubscriber::new_box(CapturingSubscriber { seen_token: tx }),
+            Topic::new("session.created"),
+            FreshStore::new(),
+            noop_dlx(),
+            meta(),
+            handler_ack(Arc::new(AtomicU32::new(0))),
+            lease_cfg(),
+            stack_child.clone(),
+            health(),
+        );
+
+        let subscribed_token = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(token) => token,
+            Err(err) => panic!("worker must subscribe with injected token: {err}"),
+        };
+        assert!(!subscribed_token.is_cancelled());
+
+        stack_child.cancel();
+        assert!(
+            subscribed_token.is_cancelled(),
+            "root/stack child cancellation must reach subscriber stream token"
+        );
+        assert!(worker.shutdown().await.is_ok());
     }
 
     /// `ConsumerWorker` 是 `Send + Sync`（经 `Box<DynManagedResource>` 注入 ShutdownStack 的前提）。

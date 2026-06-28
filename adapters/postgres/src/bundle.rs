@@ -59,8 +59,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgOutbox, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo,
-    PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
+    PgOutbox, PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
+    PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -410,6 +410,15 @@ impl PgInfraDeps {
         PgEmitter::new(&self.store, clock)
     }
 
+    /// outbox backlog/sweeper maintenance 能力（不持 publisher）。
+    ///
+    /// relay publishing 仍经 per-domain [`PgDomainDeps::outbox`] 构造；sampler/sweeper 只需要 DB pool，归
+    /// framework/global infra 句柄，避免为 maintenance worker 注入可发布能力（#1429）。
+    #[must_use]
+    pub fn outbox_maintenance(&self) -> PgOutboxMaintenance {
+        PgOutboxMaintenance::new(&self.store)
+    }
+
     /// dead-letter store（DLX 终态）。同时 impl `consistency::RetentionSweeper`——组合根可经此句柄取死信
     /// 保留期 sweeper（`DEAD_LETTER_RETENTION_SECONDS` 默认 30 天，#1210）。
     #[must_use]
@@ -599,6 +608,7 @@ mod tests {
         // PgInfraDeps：framework/global 基建能力（F1 补齐）——纯 pool clone，无 I/O。
         let infra = deps().infra();
         let _ = infra.emitter(Box::new(EpochClock));
+        let _ = infra.outbox_maintenance();
         let _ = infra.dead_letter();
         let _ = infra.inbox_sweeper();
         let _ = infra.checkpoint();

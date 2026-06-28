@@ -240,11 +240,22 @@ async fn event_transport_durable_e2e() -> Result<()> {
         relay_poll_interval: Duration::from_secs(2),
         relay_batch: 16,
         relay_sample_interval: Duration::from_secs(30),
+        outbox_sweep_interval: Duration::from_secs(60),
+        outbox_retain_seconds: 604_800,
     };
 
     // ── 步骤 6：wire_event_transport → EventRuntime（relay OS 线程 + consumer worker 启动）──────
 
     let event_runtime = wire_event_transport(&pg, subscribers, cfg).await?;
+    assert!(
+        event_runtime.module.resources.is_empty(),
+        "event transport workers must drain through DomainModuleResult::workers"
+    );
+    assert_eq!(
+        event_runtime.module.workers.len(),
+        5,
+        "identity relay + settings relay + consumer + sampler + sweeper"
+    );
 
     // ── 步骤 7：注册 ShutdownStack（infra_guards 先注册 → LIFO 最后关；workers 后注册 → LIFO 最先 drain）
 
@@ -252,8 +263,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
     for guard in event_runtime.infra_guards {
         stack.register_detached(guard);
     }
-    for worker in event_runtime.workers {
-        stack.register_detached(worker);
+    let module = event_runtime.module;
+    for resource in module.resources {
+        stack.register_detached(resource);
+    }
+    for worker in module.workers {
+        stack.register_with_token(worker);
     }
 
     // ── 步骤 8：生产侧登录（PgSessionLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──

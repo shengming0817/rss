@@ -71,10 +71,10 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   （`outbox_relay`/`outbox_sweeper`/`outbox_sampler`，未导出为 metric）暴露，权威 liveness 信号是 readyz endpoint 的
   外部监控（k8s liveness/readiness）。Prometheus 侧 worker 卡死靠 `OutboxSamplerNoData`（采样停更）+
   `OutboxBacklogOldestAgeHigh`（积压增长）间接体现。如需 worker health gauge，属 #1208 接线时决策。
-- **acceptance 边界**：#1209 验收标准 = 仪表 seam + 护栏 + feature-gated 生产实现 + 单元测试（含 facade
+- **acceptance 边界**：#1209 验收标准 = 仪表 seam + 护栏 + 生产实现 + 单元测试（含 facade
   `with_local_recorder` 渲染断言 + postgres `OutboxBacklog` 集成测试 T15–T18，testcontainers gated）。**E2E
-  metrics 经 /metrics 实采集**需 relay/sampler worker 被组合根实例化 + 启 `metrics-facade` feature，属 #1208 接线的
-  acceptance gate——#1208 issue body 须含验收项「/metrics 返回 `outbox_publish_total` / `outbox_pending_depth` 等」。
+  metrics 经 /metrics 实采集**需 runtime 装配 relay/sampler worker（#1429）并挂 HealthListener；验收项为
+  `/metrics` 返回 `outbox_publish_total` / `outbox_pending_depth` 等。
 
 ## 配置护栏（误配防护）
 
@@ -102,11 +102,19 @@ funnel，未校验 config 类型层不可表达）：
 | `dead_letter` | 全部行（死信均终结） | `last_attempt_at` | **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向） | 过短 → 合规审计物料过早灭失（清理前冷存储导出见 #1536） |
 
 - 删除时间谓词均用 DB `now()`（不注入 Clock，多实例无跨进程偏移）；sweeper 日志带 `target_table` 区分清理目标（per-target readyz 名见 `SweeperWorker::adopt`）。
-- 三表 sweeper worker spawn + env/assembly 读保留期 + per-target readyz 探针注册 = Feature #1208 接线（见下）。
+- #1429 已接 runtime `outbox` published-row sweeper（`RSS_OUTBOX_RETAIN_SECONDS`，默认 7 天）+ sampler +
+  per-domain relay；`inbox_dedup` / `dead_letter` sweeper 接线仍属后续三表清理完善项。
 - 无界 DELETE → post-GA 批量分页 / 分区见 #1539；inbox_dedup/dead_letter 多租户分租清理见 #1537；sweeper 删除条数 metrics 见 #1538。
 
-## 接线（范围外，独立 issue）
+## 接线（#1429）
 
-relay/sweeper/sampler worker 当前**未被任何组合根实例化**。本 issue 交付仪表 seam + 护栏 + feature-gated
-生产实现 + 告警/文档；组合根实例化三 worker、启 `eventexec/metrics-facade` feature 注入
-`MetricsOutboxMetrics`、`/metrics` 挂 HealthListener 属 Feature #1208 接线 issue。
+runtime durable event transport 现在把 outbox relay / sampler / sweeper 作为 `DomainModuleResult` 产物输出：
+
+- per-domain relay：`outbox_relay_identity` / `outbox_relay_settings` readyz probe，按发布域 AMQP publisher
+  中继 outbox。
+- sampler：`outbox_sampler` readyz probe，按 `RSS_RELAY_SAMPLE_INTERVAL_MS` 采样 backlog gauges。
+- sweeper：`outbox_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
+  `RSS_OUTBOX_RETAIN_SECONDS` 的 `published` outbox 行。
+
+`inbox_dedup` / `dead_letter` sweeper 未纳入 #1429；它们虽已有 `RetentionSweeper` adapter 能力与默认保留期常量，
+但 runtime worker 接线另行收口。
