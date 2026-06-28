@@ -333,6 +333,8 @@ pub vocab::error::CoreErrorKind::Conflict
 pub vocab::error::CoreErrorKind::Forbidden
 pub vocab::error::CoreErrorKind::Internal
 pub vocab::error::CoreErrorKind::NotFound
+pub vocab::error::CoreErrorKind::PayloadTooLarge
+pub vocab::error::CoreErrorKind::TooManyRequests
 pub vocab::error::CoreErrorKind::Unauthenticated
 pub vocab::error::CoreErrorKind::Validation
 impl vocab::error::CoreErrorKind
@@ -987,6 +989,8 @@ pub vocab::CoreErrorKind::Conflict
 pub vocab::CoreErrorKind::Forbidden
 pub vocab::CoreErrorKind::Internal
 pub vocab::CoreErrorKind::NotFound
+pub vocab::CoreErrorKind::PayloadTooLarge
+pub vocab::CoreErrorKind::TooManyRequests
 pub vocab::CoreErrorKind::Unauthenticated
 pub vocab::CoreErrorKind::Validation
 impl vocab::error::CoreErrorKind

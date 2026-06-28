@@ -3664,6 +3664,7 @@ dependencies = [
  "consistency",
  "diagctx",
  "diport",
+ "eventexec",
  "futures",
  "identity",
  "ids",

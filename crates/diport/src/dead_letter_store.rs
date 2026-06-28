@@ -7,6 +7,7 @@
 
 use dynosaur::dynosaur;
 
+use crate::envelope::EnvelopeMetadata;
 use crate::redacted::RedactedSource;
 use crate::redacted_bytes::RedactedBytes;
 
@@ -37,13 +38,83 @@ impl DeadLetterSummary {
 
 // ── DeadLetterRecord ─────────────────────────────────────────────────────────
 
+/// 死信来源单源。
+///
+/// `legacy` 仅用于迁移前历史行；新写入必须选择具体来源，避免 outbox relay DLX 与 consumer/saga
+/// dead-letter 在同一表内语义漂移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadLetterSource {
+    /// 迁移前历史行保留值。
+    Legacy,
+    /// 消费方重试预算耗尽后进入 DLQ。
+    Consumer,
+    /// outbox relay 发布失败进入 DLX，同时登记统一 DLQ 审计行。
+    OutboxRelay,
+    /// saga 补偿失败进入 DLQ。
+    Saga,
+}
+
+impl DeadLetterSource {
+    /// DB/API 稳定 wire 值。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Consumer => "consumer",
+            Self::OutboxRelay => "outbox_relay",
+            Self::Saga => "saga",
+        }
+    }
+
+    /// Parse DB/API stable wire value.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "legacy" => Some(Self::Legacy),
+            "consumer" => Some(Self::Consumer),
+            "outbox_relay" => Some(Self::OutboxRelay),
+            "saga" => Some(Self::Saga),
+            _ => None,
+        }
+    }
+}
+
+/// Writable dead-letter source.
+///
+/// `Legacy` is intentionally absent: legacy rows may be parsed from historical storage, but new
+/// writes must identify the concrete producer that created the DLQ record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritableDeadLetterSource {
+    /// 消费方重试预算耗尽后进入 DLQ。
+    Consumer,
+    /// outbox relay 发布失败进入 DLX，同时登记统一 DLQ 审计行。
+    OutboxRelay,
+    /// saga 补偿失败进入 DLQ。
+    Saga,
+}
+
+impl WritableDeadLetterSource {
+    pub const fn as_source(self) -> DeadLetterSource {
+        match self {
+            Self::Consumer => DeadLetterSource::Consumer,
+            Self::OutboxRelay => DeadLetterSource::OutboxRelay,
+            Self::Saga => DeadLetterSource::Saga,
+        }
+    }
+}
+
+impl From<WritableDeadLetterSource> for DeadLetterSource {
+    fn from(source: WritableDeadLetterSource) -> Self {
+        source.as_source()
+    }
+}
+
 /// 死信写入记录（值类型，单一 funnel 构造）。
 ///
 /// `original_payload` 是原始消息字节，可能含 PII；经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`、经
-/// `original_payload()` 受控读取），故 `derive(Debug)` 即安全（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
+/// `original_payload()` 受控读取）。`metadata` 来自 broker/header，可能含业务自定义 PII，`Debug` 手写为
+/// `<redacted>`（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
 /// 其余字段（`domain` / `contract_id` / `topic` / `error_summary` / `num_attempts`）均为
 /// 运维归因元数据，可观测。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeadLetterRecord {
     domain: String,
     contract_id: String,
@@ -51,10 +122,29 @@ pub struct DeadLetterRecord {
     tenant: vocab::TenantId,
     message_id: String,
     original_payload: RedactedBytes,
+    source: DeadLetterSource,
+    metadata: EnvelopeMetadata,
     /// 安全摘要——类型层强制 `&'static str` const literal（经 [`DeadLetterSummary`] funnel），
     /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01）。
     error_summary: &'static str,
     num_attempts: u32,
+}
+
+impl std::fmt::Debug for DeadLetterRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeadLetterRecord")
+            .field("domain", &self.domain)
+            .field("contract_id", &self.contract_id)
+            .field("topic", &self.topic)
+            .field("tenant", &self.tenant)
+            .field("message_id", &self.message_id)
+            .field("original_payload", &self.original_payload)
+            .field("source", &self.source)
+            .field("metadata", &"<redacted>")
+            .field("error_summary", &self.error_summary)
+            .field("num_attempts", &self.num_attempts)
+            .finish()
+    }
 }
 
 impl DeadLetterRecord {
@@ -77,6 +167,8 @@ impl DeadLetterRecord {
         original_payload: Vec<u8>,
         error_summary: DeadLetterSummary,
         num_attempts: u32,
+        source: WritableDeadLetterSource,
+        metadata: EnvelopeMetadata,
     ) -> Self {
         Self {
             domain: domain.into(),
@@ -85,6 +177,8 @@ impl DeadLetterRecord {
             tenant,
             message_id: message_id.into(),
             original_payload: RedactedBytes::new(original_payload),
+            source: source.into(),
+            metadata,
             error_summary: error_summary.as_str(),
             num_attempts,
         }
@@ -125,6 +219,16 @@ impl DeadLetterRecord {
     /// 原始 payload 长度（可观测，不含内容）。
     pub fn payload_len(&self) -> usize {
         self.original_payload.len()
+    }
+
+    /// 死信来源。
+    pub fn source(&self) -> DeadLetterSource {
+        self.source
+    }
+
+    /// 原始 delivery metadata（用于重放时保留 trace/correlation/tenant 等 envelope 信息）。
+    pub fn metadata(&self) -> &EnvelopeMetadata {
+        &self.metadata
     }
 
     /// 借出已脱敏错误摘要（`&'static str` const literal，见 [`DeadLetterSummary`]）。
@@ -200,8 +304,9 @@ mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynDeadLetterStore>` 动态注入。
     use super::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary,
-        DynDeadLetterStore,
+        DynDeadLetterStore, WritableDeadLetterSource,
     };
+    use crate::EnvelopeMetadata;
 
     fn sample_record() -> DeadLetterRecord {
         DeadLetterRecord::new(
@@ -213,6 +318,8 @@ mod smoke {
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
+            WritableDeadLetterSource::Consumer,
+            EnvelopeMetadata::empty(),
         )
     }
 
@@ -269,7 +376,8 @@ mod smoke {
 mod pii_debug {
     //! `DeadLetterRecord.original_payload`（原始消息字节，可能含 PII）Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（对标 `SignRequest.message` / `Message.payload`）。
-    use super::{DeadLetterRecord, DeadLetterSummary};
+    use super::{DeadLetterRecord, DeadLetterSummary, WritableDeadLetterSource};
+    use crate::EnvelopeMetadata;
 
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
@@ -292,6 +400,8 @@ mod pii_debug {
             vec![0xDE, 0xAD, 0xBE, 0xEF],
             DeadLetterSummary::new("max retries exhausted"),
             10,
+            WritableDeadLetterSource::Consumer,
+            EnvelopeMetadata::empty(),
         );
         let dbg = format!("{record:?}");
         assert!(!dbg.contains("222"), "payload 字节泄漏(0xDE=222): {dbg}");
@@ -308,6 +418,41 @@ mod pii_debug {
             dbg.contains("max retries exhausted"),
             "error_summary 应可见: {dbg}"
         );
+    }
+
+    #[test]
+    fn dead_letter_record_debug_redacts_metadata_values() {
+        let mut metadata = EnvelopeMetadata::empty();
+        assert!(metadata.try_insert("email", "alice@example.test").is_ok());
+        assert!(
+            metadata
+                .try_insert("customerHeader", "secret-header")
+                .is_ok()
+        );
+
+        let record = DeadLetterRecord::new(
+            tenant(),
+            "message-1",
+            "identity",
+            "contract-session",
+            "session.created",
+            b"payload".to_vec(),
+            DeadLetterSummary::new("max retries exhausted"),
+            10,
+            WritableDeadLetterSource::Consumer,
+            metadata,
+        );
+        let dbg = format!("{record:?}");
+        assert!(
+            !dbg.contains("alice@example.test"),
+            "metadata PII leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("secret-header"),
+            "metadata custom value leaked: {dbg}"
+        );
+        assert!(dbg.contains("metadata"));
+        assert!(dbg.contains("<redacted>"));
     }
 }
 
@@ -332,7 +477,8 @@ mod summary {
 #[cfg(test)]
 mod tenant_scope {
     //! `DeadLetterRecord` 必须携 typed tenant + message_id。
-    use super::{DeadLetterRecord, DeadLetterSummary};
+    use super::{DeadLetterRecord, DeadLetterSource, DeadLetterSummary, WritableDeadLetterSource};
+    use crate::EnvelopeMetadata;
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -348,9 +494,12 @@ mod tenant_scope {
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
+            WritableDeadLetterSource::Consumer,
+            EnvelopeMetadata::empty(),
         );
         assert_eq!(record.tenant(), tenant);
         assert_eq!(record.message_id(), "msg-tenant-1");
+        assert_eq!(record.source(), DeadLetterSource::Consumer);
     }
 }
 

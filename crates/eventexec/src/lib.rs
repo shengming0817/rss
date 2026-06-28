@@ -33,6 +33,13 @@ pub use relay_config::{RelayConfig, RelayConfigError, SweeperConfig, SweeperConf
 pub mod relay_metrics;
 pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetrics, RelayPhase};
 
+pub mod dlq;
+pub use dlq::{
+    DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqListQuery, DlqListResult,
+    DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqStore,
+    OperatorDlqCapability,
+};
+
 pub mod reconcile;
 pub use reconcile::{
     BackoffError, BackoffPolicy, Builder as ReconcileBuilder, RECONCILE_PROBE, ReconcileLoop,

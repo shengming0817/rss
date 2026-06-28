@@ -20,6 +20,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_pending_depth` | Gauge | `domain` | backlog 采样器（默认 ≤60s/轮） | status=pending 且到期行数 |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain` | backlog 采样器 | `now()−min(created_at)`；**无 pending ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`poll`(扫描相)/`publish`(逐条中继+adapter 内 settle 相) |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；当前 reason=`tenant_missing` |
 
 ### Label 闭值集
 
@@ -29,6 +30,8 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 - `domain`：来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式），operator 配置、
   非请求/租户派生，基数有界。**不**经 `observ` typed enum（层矩阵禁 `eventexec`→`observ`）；收敛进 `observ`
   词表统一 otel 映射是 #1076 后续项。
+- `consumer_dlx_skip_total.reason`：闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 literal 调用点；
+  禁止携带 handler error、tenant、message id 或 payload 派生值。
 
 ## SLO 与告警
 
@@ -42,6 +45,8 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | 采样器停更 | 10min 无新样本 | warning | `OutboxSamplerNoData` |
 
 告警均 `by (domain)` / `by (phase)` 聚合保来源可定位。采样器停更用 `absent_over_time`（捕捉运行后卡死，非仅首启动）。
+`consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支，实际告警面仍是 broker settle
+失败、DLX/reject 增长和业务积压。
 
 规则文件 `docs/ops/outbox-relay-alerts.rules.yaml`，`promtool check rules` 校验。
 

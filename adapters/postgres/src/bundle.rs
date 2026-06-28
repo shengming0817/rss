@@ -58,9 +58,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo,
-    PgDbReadiness, PgDeadLetterStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper, PgOutbox,
-    PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo, PgSagaJournal,
-    PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
+    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
+    PgOutbox, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore, PgRoleRepo,
+    PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -415,6 +415,13 @@ impl PgInfraDeps {
     #[must_use]
     pub fn dead_letter(&self) -> PgDeadLetterStore {
         self.store.dead_letter()
+    }
+
+    /// DLQ inspection/replay API（internal Rust surface，#1214）。`dead_letter` replay 与 `outbox` redrive
+    /// 由类型分开，避免把 consumer 重放误当 broker redrive。
+    #[must_use]
+    pub fn dlq(&self) -> PgDlqStore {
+        self.store.dlq()
     }
 
     /// inbox_dedup 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。

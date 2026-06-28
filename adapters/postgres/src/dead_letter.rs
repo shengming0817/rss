@@ -19,7 +19,7 @@
 //! `error-handling.md §Message 与 PII`）。
 
 use consistency::{EngineError, EngineErrorKind, RetentionSweeper};
-use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
+use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata};
 use sqlx::PgPool;
 
 use crate::PgStore;
@@ -60,13 +60,8 @@ impl DeadLetterStore for PgDeadLetterStore {
         &self,
         record: DeadLetterRecord,
     ) -> Result<(), DeadLetterStoreError> {
-        // 存为 {"bytes": [u8, ...]} JSON 数组——完整往返原始字节，只用已有 serde_json，不引入 base64 依赖。
-        let bytes_arr: Vec<serde_json::Value> = record
-            .original_payload()
-            .iter()
-            .map(|&b| serde_json::Value::Number(b.into()))
-            .collect();
-        let original_entry = serde_json::json!({"bytes": bytes_arr});
+        let original_entry = original_entry_json(record.original_payload());
+        let metadata = metadata_json(record.metadata());
 
         let mut tx = self.pool.begin().await.map_err(DeadLetterStoreError::new)?;
         set_local_tenant(&mut tx, record.tenant())
@@ -76,8 +71,8 @@ impl DeadLetterStore for PgDeadLetterStore {
         sqlx::query(
             r#"
             INSERT INTO dead_letter
-                (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
+                (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(record.tenant().to_string())
@@ -88,6 +83,8 @@ impl DeadLetterStore for PgDeadLetterStore {
         .bind(sqlx::types::Json(&original_entry))
         .bind(record.error_summary())
         .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
+        .bind(record.source().as_str())
+        .bind(sqlx::types::Json(&metadata))
         .execute(&mut *tx)
         .await
         .map_err(DeadLetterStoreError::new)?;
@@ -104,6 +101,43 @@ impl DeadLetterStore for PgDeadLetterStore {
     async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
         Ok(())
     }
+}
+
+/// 存为 `{"bytes": [u8, ...]}` JSON 数组——完整往返原始字节，只用已有 serde_json，不引入 base64 依赖。
+pub(crate) fn original_entry_json(payload: &[u8]) -> serde_json::Value {
+    let bytes_arr: Vec<serde_json::Value> = payload
+        .iter()
+        .map(|&b| serde_json::Value::Number(b.into()))
+        .collect();
+    serde_json::json!({"bytes": bytes_arr})
+}
+
+/// Envelope metadata → jsonb object。值保持 wire string 形态，避免 DLQ 重放时发生隐式类型漂移。
+pub(crate) fn metadata_json(metadata: &EnvelopeMetadata) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (key, value) in metadata.iter() {
+        map.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+    serde_json::Value::Object(map)
+}
+
+/// 从 `dead_letter.original_entry` 解回原始 payload 字节。
+pub(crate) fn decode_original_entry(value: &serde_json::Value) -> Result<Vec<u8>, EngineError> {
+    let bytes = value
+        .get("bytes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
+    let mut decoded = Vec::with_capacity(bytes.len());
+    for item in bytes {
+        let n = item
+            .as_u64()
+            .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
+        decoded.push(u8::try_from(n).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?);
+    }
+    Ok(decoded)
 }
 
 impl RetentionSweeper for PgDeadLetterStore {
@@ -215,13 +249,15 @@ mod integration_tests {
             payload.clone(),
             diport::DeadLetterSummary::new("max retries exhausted after 10 attempts"),
             10,
+            diport::WritableDeadLetterSource::Consumer,
+            diport::EnvelopeMetadata::empty(),
         );
 
         dl.write_dead_letter(record).await?;
 
         // SELECT 最新一条（唯一写入）断言各字段。
-        let row: (String, String, String, String, String, serde_json::Value, String, i32) = sqlx::query_as(
-            r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts
+        let row: (String, String, String, String, String, serde_json::Value, String, i32, String, serde_json::Value) = sqlx::query_as(
+            r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata
                FROM dead_letter
                WHERE domain = 'identity' AND topic = 'session.created'
                ORDER BY first_attempt_at DESC
@@ -252,6 +288,8 @@ mod integration_tests {
             "error_summary should match"
         );
         assert_eq!(row.7, 10, "num_attempts should match");
+        assert_eq!(row.8, "consumer", "source_kind should match");
+        assert_eq!(row.9, serde_json::json!({}), "metadata should match");
 
         store.shutdown().await?;
         Ok(())

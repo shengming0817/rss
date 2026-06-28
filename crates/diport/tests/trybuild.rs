@@ -18,4 +18,5 @@ fn ui() {
     t.compile_fail("tests/ui/unsafe_forbid_fail.rs");
     t.compile_fail("tests/ui/arc_dyn_ports_not_send.rs");
     t.compile_fail("tests/ui/dead_letter_record_tenant_fail.rs");
+    t.compile_fail("tests/ui/dead_letter_record_legacy_source_fail.rs");
 }

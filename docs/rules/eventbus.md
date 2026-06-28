@@ -142,9 +142,11 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
   → adapter 落库，不进 `consistency::Entry`（relay 读侧无需透传，顺序由 SQL gating 承载）。
 
 **dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽）会**阻塞**该 partition 直到运维 re-drive
-（`UPDATE outbox SET status='pending', retry_count=0, retry_after=NULL WHERE event_id=…`）——这是与「串行有序」
-一致的唯一选择（放行后继破坏 in-order 不变式）。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+
-backlog `oldest_age` 增长。**已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
+（`eventexec::DlqRedriveRequest` → `outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL`）
+——这是与「串行有序」一致的唯一选择（放行后继破坏 in-order 不变式）。`outbox.status='dlx'` 仍是 relay
+状态与 partition ordering gate；统一 DLQ 审计行写入 `dead_letter(source_kind='outbox_relay')`，不搬迁/删除
+原 outbox 行。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+ backlog `oldest_age` 增长。
+**已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
 聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 poll-only，
 被 gate 的后继仍计入 backlog depth（否则 stalled partition 对 SLO 失明）。INVARIANT: OUTBOX-PARTITION-ORDER-01。
 
@@ -202,7 +204,15 @@ webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata�
 
 ## DLX 与幂等
 
-- 永久错误进入 DLX。
+- 永久错误进入 DLX。统一审计表为 `dead_letter`，`source_kind` 闭值集为 `consumer` / `outbox_relay` / `saga`
+  （`legacy` 仅迁移前历史行）。`dead_letter.metadata` 保留 delivery envelope metadata；list API 只返回
+  payload 长度，不返回 payload 内容；返回 `DlqListResult { data, has_more, next_cursor }`，调用方必须用
+  `next_cursor` 分页，不能假设一次 `Vec` 即完整队列。
+- 当前只提供内部 Rust API：`eventexec::DlqStore` + `PgInfraDeps::dlq()`。CLI / HTTP 管控面不在本轮。
+- Consumer/saga `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
+  `IdemKey`，插入一条新的 outbox 行；不得删除原 `dead_letter`，不得重置 `inbox_dedup done`，不得直接
+  broker replay。Outbox relay DLX redrive 同样必须传 `OperatorDlqCapability`，只恢复原 outbox 行为
+  `pending`。
 - PG outbox relay claim **与** consumer inbox claim 均写入 lease/fencing token；所有状态回写（commit / extend /
   release）以 lease 做 CAS。inbox lease 带 TTL，过期可重捞（crash-recovery），长 handler 经 `extend` 续租（#1213）。
 - crash-after-claim 后消息最多延迟 `INBOX_LEASE_TTL_SECONDS`（当前 60s）才被 TTL 重捞重跑（此前是永久静默丢失）；该上界当前不可按消费者配置，低延迟工作流需关注。

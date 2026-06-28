@@ -18,7 +18,7 @@ use diport::dead_letter_store::{
     DeadLetterRecord, DeadLetterStore as _, DeadLetterStoreError, DeadLetterSummary,
     DynDeadLetterStore,
 };
-use diport::{Acker as _, Message, MessageStream};
+use diport::{Acker as _, Message, MessageStream, WritableDeadLetterSource};
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
 
@@ -575,6 +575,8 @@ async fn dead_letter<S>(
         // （review #216 F7，INVARIANT DIPORT-DLX-SUMMARY-STATIC-01）。
         DeadLetterSummary::new(error_summary),
         num_attempts,
+        WritableDeadLetterSource::Consumer,
+        msg.metadata.clone(),
     );
 
     match dlx.write_dead_letter(record).await {

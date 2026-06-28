@@ -1,19 +1,18 @@
-use diport::{DeadLetterRecord, DeadLetterSummary, EnvelopeMetadata, WritableDeadLetterSource};
+use diport::{DeadLetterRecord, DeadLetterSource, DeadLetterSummary, EnvelopeMetadata};
 
 fn main() {
     let tenant =
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
-    let record = DeadLetterRecord::new(
+    let _ = DeadLetterRecord::new(
         tenant,
         "message-1",
         "identity",
         "contract-session",
         "session.created",
         b"payload".to_vec(),
-        DeadLetterSummary::new("max retries exhausted"),
+        DeadLetterSummary::new("legacy rows are read-only"),
         10,
-        WritableDeadLetterSource::Consumer,
+        DeadLetterSource::Legacy,
         EnvelopeMetadata::empty(),
     );
-    let _ = (record.tenant(), record.message_id());
 }

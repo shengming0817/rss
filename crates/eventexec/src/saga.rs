@@ -22,7 +22,8 @@ use futures::future::BoxFuture;
 use consistency::{Lsn, StepName};
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, JournalEntry, JournalStatus, OwnerCheckpointStore, SagaJournal, SaveOutcome,
+    DeadLetterSummary, EnvelopeMetadata, JournalEntry, JournalStatus, OwnerCheckpointStore,
+    SagaJournal, SaveOutcome, WritableDeadLetterSource,
 };
 
 /// saga 实例标识（uuid newtype）。下沉 `diport`（journal/checkpoint 端口签名引用），本模块 re-export
@@ -541,6 +542,8 @@ where
             payload,
             DeadLetterSummary::new(SAGA_COMPENSATION_FAILED),
             1,
+            WritableDeadLetterSource::Saga,
+            EnvelopeMetadata::empty(),
         );
         if self.dead_letter.write_dead_letter(record).await.is_err() {
             self.error_dlx_write_failed(comp_step);

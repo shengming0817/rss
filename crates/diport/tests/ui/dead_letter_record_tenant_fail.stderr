@@ -52,7 +52,7 @@ note: required by a bound in `DeadLetterRecord::new`
   |         topic: impl Into<String>,
   |                     ^^^^^^^^^^^^ required by this bound in `DeadLetterRecord::new`
 
-error[E0061]: this function takes 8 arguments but 6 arguments were supplied
+error[E0061]: this function takes 10 arguments but 6 arguments were supplied
   --> tests/ui/dead_letter_record_tenant_fail.rs:4:13
    |
  4 |       let _ = DeadLetterRecord::new(
@@ -64,7 +64,10 @@ error[E0061]: this function takes 8 arguments but 6 arguments were supplied
 ...  |
 10 | |         10,
 11 | |     );
-   | |_____- two arguments of type `Vec<u8>` and `DeadLetterSummary` are missing
+   | |     -
+   | |     |
+   | |_____two arguments of type `Vec<u8>` and `DeadLetterSummary` are missing
+   |       two arguments of type `WritableDeadLetterSource` and `EnvelopeMetadata` are missing
    |
 note: associated function defined here
   --> src/dead_letter_store.rs
@@ -82,5 +85,7 @@ help: provide the arguments
 10 +         /* Vec<u8> */,
 11 +         /* DeadLetterSummary */,
 12 +         10,
-13 ~     );
+13 +         /* WritableDeadLetterSource */,
+14 +         /* EnvelopeMetadata */,
+15 ~     );
    |

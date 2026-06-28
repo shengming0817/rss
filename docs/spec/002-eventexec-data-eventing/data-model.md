@@ -61,12 +61,23 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | 列 | 类型 | 说明 |
 |----|------|------|
 | id | uuid PK | |
+| tenant_id | uuid | RLS scope（必填） |
+| message_id | text | 原 broker message id / outbox event id |
+| source_kind | text | `legacy` / `consumer` / `outbox_relay` / `saga` |
 | domain/contract_id/topic | text | |
 | original_entry | jsonb | 原始 entry 引用 |
+| metadata | jsonb | 原始 delivery envelope metadata（重放时保留 trace/correlation/tenant） |
 | error_summary | text | 安全摘要（经 `secure` redaction + 长度截断约 512 chars，不直接写 handler 的 Display/Debug 原文、不含原始 payload 片段；runtime 数据只经 `with_internal` 进服务端 tracing） |
 | num_attempts | int | |
 | first_attempt_at/last_attempt_at | timestamptz | |
 
+- `dead_letter` 是统一 DLQ 审计表。outbox relay 进入 `dlx` 时在同一事务登记
+  `dead_letter(source_kind='outbox_relay')`，但原 outbox 行仍保持 `status='dlx'` 作为 relay 状态与
+  partition ordering gate。
+- 内部 DLQ API 区分分页 `DlqListResult { data, has_more, next_cursor }`、`DlqReplayRequest`
+  （consumer/saga dead_letter → 新 outbox id）与 `DlqRedriveRequest`（outbox dlx → 原 outbox 行恢复
+  pending）。replay/redrive 均必须携带 `OperatorDlqCapability`；replay 的 dead_letter id 先经 typed
+  `DeadLetterId` UUID parse，非法输入不进入 SQL cast。consumer replay 不删除原死信、不重置 `inbox_dedup done`。
 - 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——约定 append-only（非 REVOKE 强制，DB 层允许保留期 DELETE）；清理前冷存储导出（合规归档）见 #1536。
 
 ### saga_journal（P9）

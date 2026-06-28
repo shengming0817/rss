@@ -1148,7 +1148,10 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
 async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
-    use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterSummary};
+    use diport::{
+        DeadLetterRecord, DeadLetterStore, DeadLetterSummary, EnvelopeMetadata,
+        WritableDeadLetterSource,
+    };
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let dl = store.dead_letter();
@@ -1164,6 +1167,8 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
         b"payload".to_vec(),
         DeadLetterSummary::new("aged dead letter"),
         10,
+        WritableDeadLetterSource::Consumer,
+        EnvelopeMetadata::empty(),
     ))
     .await?;
     sqlx::query(
@@ -1186,6 +1191,8 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
         b"payload".to_vec(),
         DeadLetterSummary::new("recent dead letter"),
         10,
+        WritableDeadLetterSource::Consumer,
+        EnvelopeMetadata::empty(),
     ))
     .await?;
 
@@ -1208,6 +1215,379 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
             .fetch_one(&store.pool)
             .await?;
     assert_eq!(cnt_recent.0, 1, "保留期内死信不应被 sweep 删");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration test fixtures use known-valid ids; assertions should fail loud.
+async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
+    use diport::{
+        DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterSummary, EnvelopeMetadata,
+        KEY_CORRELATION, KEY_TENANT_ID, WritableDeadLetterSource,
+    };
+    use eventexec::{
+        DeadLetterId, DlqCursor, DlqError, DlqListQuery, DlqReplayOutcome, DlqReplayRequest,
+        DlqStore as _, OperatorDlqCapability,
+    };
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let dl = store.dead_letter();
+    let dlq = store.dlq();
+    let domain = unique_domain("dlq-replay");
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let message_id = unique_event_id("consumer-msg");
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
+    metadata.insert_wire_pair(KEY_CORRELATION, "corr-dlq-replay");
+
+    dl.write_dead_letter(DeadLetterRecord::new(
+        tenant,
+        &message_id,
+        domain.as_str(),
+        "contract-dlq",
+        "test.event",
+        b"consumer-payload".to_vec(),
+        DeadLetterSummary::new("consumer exhausted"),
+        3,
+        WritableDeadLetterSource::Consumer,
+        metadata,
+    ))
+    .await?;
+
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let (dead_letter_id,): (String,) = sqlx::query_as(
+        "SELECT id::text FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&message_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let replay_id = IdemKey::parse(&unique_event_id("replay")).unwrap();
+    let cap = OperatorDlqCapability::issue_for_authorized_operator();
+    let outcome = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&dead_letter_id)?,
+            replay_id.clone(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(outcome, DlqReplayOutcome::Inserted);
+
+    let row: (String, String, Vec<u8>, String, String, String) = sqlx::query_as(
+        r#"
+        SELECT domain,
+               contract_id,
+               payload,
+               metadata ->> 'tenantId',
+               metadata ->> 'deadLetterId',
+               metadata ->> 'originalMessageId'
+        FROM outbox
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(replay_id.as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0, domain);
+    assert_eq!(row.1, "contract-dlq");
+    assert_eq!(row.2, b"consumer-payload".to_vec());
+    assert_eq!(row.3, COTX_TENANT_A);
+    assert_eq!(row.4, dead_letter_id);
+    assert_eq!(row.5, message_id);
+
+    let duplicate = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&dead_letter_id)?,
+            replay_id.clone(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(duplicate, DlqReplayOutcome::AlreadyExists);
+
+    let missing_id = uuid::Uuid::new_v4().to_string();
+    let missing_replay_id = IdemKey::parse(&unique_event_id("missing-replay")).unwrap();
+    let missing = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&missing_id)?,
+            missing_replay_id,
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(missing, Err(DlqError::NotFound)),
+        "missing dead_letter id must map to NotFound"
+    );
+
+    let saga_message_id = unique_event_id("saga-msg");
+    let saga_replay_id = IdemKey::parse(&unique_event_id("saga-replay")).unwrap();
+    dl.write_dead_letter(DeadLetterRecord::new(
+        tenant,
+        &saga_message_id,
+        domain.as_str(),
+        "contract-dlq",
+        "test.saga",
+        b"saga-payload".to_vec(),
+        DeadLetterSummary::new("saga compensation failed"),
+        2,
+        WritableDeadLetterSource::Saga,
+        EnvelopeMetadata::empty(),
+    ))
+    .await?;
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let (saga_dead_letter_id,): (String,) = sqlx::query_as(
+        "SELECT id::text FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&saga_message_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let saga_replay = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&saga_dead_letter_id)?,
+            saga_replay_id.clone(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(saga_replay, DlqReplayOutcome::Inserted);
+
+    let invalid_payload_id = unique_event_id("invalid-payload-dl");
+    let invalid_entry = serde_json::json!({"unexpected": true});
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let (invalid_dead_letter_id,): (String,) = sqlx::query_as(
+        r#"
+        INSERT INTO dead_letter
+            (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, 'consumer', '{}'::jsonb)
+        RETURNING id::text
+        "#,
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&invalid_payload_id)
+    .bind(domain.as_str())
+    .bind("contract-dlq")
+    .bind("test.invalid")
+    .bind(sqlx::types::Json(&invalid_entry))
+    .bind("invalid payload row")
+    .bind(1_i32)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let invalid_payload = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&invalid_dead_letter_id)?,
+            IdemKey::parse(&unique_event_id("invalid-payload-replay")).unwrap(),
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(invalid_payload, Err(DlqError::InvalidPayload)),
+        "malformed original_entry must map to InvalidPayload"
+    );
+
+    let first_page = dlq
+        .list_dlq(
+            DlqListQuery::new(tenant)
+                .with_domain(domain.as_str())
+                .with_source(DeadLetterSource::Consumer)
+                .with_limit(1),
+        )
+        .await?;
+    assert!(
+        first_page.has_more(),
+        "limit=1 over 2 consumer rows must page"
+    );
+    let cursor = first_page.next_cursor().unwrap();
+    let second_page = dlq
+        .list_dlq(
+            DlqListQuery::new(tenant)
+                .with_domain(domain.as_str())
+                .with_source(DeadLetterSource::Consumer)
+                .with_limit(1)
+                .with_cursor(DlqCursor::parse(cursor)?),
+        )
+        .await?;
+    assert_eq!(
+        second_page.data().len(),
+        1,
+        "cursor must advance to next row"
+    );
+
+    let legacy_id = unique_event_id("legacy-dl");
+    let legacy_entry = serde_json::json!({"bytes": [1, 2, 3]});
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let (legacy_dead_letter_id,): (String,) = sqlx::query_as(
+        r#"
+        INSERT INTO dead_letter
+            (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, 'legacy', '{}'::jsonb)
+        RETURNING id::text
+        "#,
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&legacy_id)
+    .bind(domain.as_str())
+    .bind("contract-dlq")
+    .bind("test.event")
+    .bind(sqlx::types::Json(&legacy_entry))
+    .bind("legacy row")
+    .bind(1_i32)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let legacy_replay_id = IdemKey::parse(&unique_event_id("legacy-replay")).unwrap();
+    let legacy_replay = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&legacy_dead_letter_id)?,
+            legacy_replay_id,
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(legacy_replay, Err(DlqError::NotReplayable)),
+        "legacy rows are audit-only and must not be replayable"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration test fixtures use known-valid ids; assertions should fail loud.
+async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> TestResult {
+    use eventexec::{
+        DeadLetterId, DlqEntryKind, DlqError, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest,
+        DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
+    };
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+    let domain = unique_domain("dlq-outbox");
+    let event_id = unique_event_id("outbox-dlx");
+    let entry = make_entry(&event_id);
+
+    store
+        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = entry.clone();
+            let env = make_test_env(&domain, "contract-dlq");
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let (publisher, calls) = RecordingPublisher::always_permanent();
+    let outbox = PgOutbox::new(&store, DynPublisher::new_box(publisher));
+    let disposition = outbox.relay(&entry).await?;
+    assert_eq!(disposition, Disposition::Reject);
+    assert_eq!(*calls.lock().unwrap(), 1);
+
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let row: (String, String, String, i32, serde_json::Value) = sqlx::query_as(
+        r#"
+        SELECT id::text, source_kind, message_id, num_attempts, metadata
+        FROM dead_letter
+        WHERE tenant_id = $1::uuid
+          AND message_id = $2
+        "#,
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&event_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    assert_eq!(row.1, "outbox_relay");
+    assert_eq!(row.2, event_id);
+    assert_eq!(row.3, 1);
+    assert_eq!(row.4["tenantId"], COTX_TENANT_A);
+
+    let dlq = store.dlq();
+    let cap = OperatorDlqCapability::issue_for_authorized_operator();
+    let replay_id = IdemKey::parse(&unique_event_id("bad-replay")).unwrap();
+    let replay = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&row.0)?,
+            replay_id,
+            cap,
+        ))
+        .await;
+    assert!(matches!(replay, Err(DlqError::NotReplayable)));
+
+    let listed = dlq
+        .list_dlq(
+            DlqListQuery::new(tenant)
+                .with_source(diport::DeadLetterSource::OutboxRelay)
+                .with_domain(domain.as_str()),
+        )
+        .await?;
+    assert_eq!(
+        listed.data().len(),
+        1,
+        "current outbox dlx should be listed"
+    );
+    assert_eq!(listed.data()[0].kind(), DlqEntryKind::OutboxDlx);
+    assert_eq!(listed.data()[0].id(), event_id);
+    assert_eq!(listed.data()[0].message_id(), event_id);
+
+    let event_key = IdemKey::parse(&event_id).unwrap();
+    let wrong_tenant = dlq
+        .redrive_outbox(DlqRedriveRequest::new(tenant_b, event_key.clone(), cap))
+        .await?;
+    assert_eq!(wrong_tenant, DlqRedriveOutcome::NotFound);
+
+    let status_after_wrong: (String,) =
+        sqlx::query_as("SELECT status FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(status_after_wrong.0, STATUS_DLX);
+
+    let redriven = dlq
+        .redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
+        .await?;
+    assert_eq!(redriven, DlqRedriveOutcome::Redriven);
+    let status_after_redrive: (String, i32) =
+        sqlx::query_as("SELECT status, retry_count FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(status_after_redrive.0, STATUS_PENDING);
+    assert_eq!(status_after_redrive.1, 0);
+
+    let listed_after_redrive = dlq
+        .list_dlq(
+            DlqListQuery::new(tenant)
+                .with_source(diport::DeadLetterSource::OutboxRelay)
+                .with_domain(domain.as_str()),
+        )
+        .await?;
+    assert!(
+        listed_after_redrive.data().is_empty(),
+        "redriven outbox rows must disappear from current DLQ list"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -1906,7 +2286,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
 // t28: crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）
 // t29: sample_backlog 计入 gated 后继（backlog poll-only by design）
 
-use crate::outbox::{LEASE_TTL_SECONDS, STATUS_DLX};
+use crate::outbox::{LEASE_TTL_SECONDS, STATUS_DLX, STATUS_PENDING};
 
 /// t24：append 3 行（同 domain，无 partition）→ SELECT seq 严格递增、互异、非空；
 /// 尝试 INSERT 显式写 seq 被 GENERATED ALWAYS 拒（应用不可伪造）。

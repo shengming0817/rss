@@ -953,16 +953,116 @@ pub mod diport::clock
 pub trait diport::clock::Clock: core::marker::Send + core::marker::Sync
 pub fn diport::clock::Clock::now(&self) -> std::time::SystemTime
 pub mod diport::dead_letter_store
+pub enum diport::dead_letter_store::DeadLetterSource
+pub diport::dead_letter_store::DeadLetterSource::Consumer
+pub diport::dead_letter_store::DeadLetterSource::Legacy
+pub diport::dead_letter_store::DeadLetterSource::OutboxRelay
+pub diport::dead_letter_store::DeadLetterSource::Saga
+impl diport::dead_letter_store::DeadLetterSource
+pub const fn diport::dead_letter_store::DeadLetterSource::as_str(self) -> &'static str
+pub fn diport::dead_letter_store::DeadLetterSource::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::clone(&self) -> diport::dead_letter_store::DeadLetterSource
+impl core::cmp::Eq for diport::dead_letter_store::DeadLetterSource
+impl core::cmp::PartialEq for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::eq(&self, &diport::dead_letter_store::DeadLetterSource) -> bool
+impl core::convert::From<diport::dead_letter_store::WritableDeadLetterSource> for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::from(diport::dead_letter_store::WritableDeadLetterSource) -> Self
+impl core::fmt::Debug for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dead_letter_store::DeadLetterSource
+impl core::marker::StructuralPartialEq for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Freeze for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Send for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Sync for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Unpin for diport::dead_letter_store::DeadLetterSource
+impl core::marker::UnsafeUnpin for diport::dead_letter_store::DeadLetterSource
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::DeadLetterSource
+impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::DeadLetterSource
+impl<T, U> core::convert::Into<U> for diport::dead_letter_store::DeadLetterSource where U: core::convert::From<T>
+pub fn diport::dead_letter_store::DeadLetterSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::dead_letter_store::DeadLetterSource where U: core::convert::Into<T>
+pub type diport::dead_letter_store::DeadLetterSource::Error = core::convert::Infallible
+pub fn diport::dead_letter_store::DeadLetterSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::dead_letter_store::DeadLetterSource where U: core::convert::TryFrom<T>
+pub type diport::dead_letter_store::DeadLetterSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::dead_letter_store::DeadLetterSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::dead_letter_store::DeadLetterSource where T: core::clone::Clone
+pub type diport::dead_letter_store::DeadLetterSource::Owned = T
+pub fn diport::dead_letter_store::DeadLetterSource::clone_into(&self, &mut T)
+pub fn diport::dead_letter_store::DeadLetterSource::to_owned(&self) -> T
+impl<T> core::any::Any for diport::dead_letter_store::DeadLetterSource where T: 'static + ?core::marker::Sized
+pub fn diport::dead_letter_store::DeadLetterSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::dead_letter_store::DeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::DeadLetterSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::dead_letter_store::DeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::DeadLetterSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::dead_letter_store::DeadLetterSource where T: core::clone::Clone
+pub unsafe fn diport::dead_letter_store::DeadLetterSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::dead_letter_store::DeadLetterSource
+pub type diport::dead_letter_store::DeadLetterSource::Output = T
+pub enum diport::dead_letter_store::WritableDeadLetterSource
+pub diport::dead_letter_store::WritableDeadLetterSource::Consumer
+pub diport::dead_letter_store::WritableDeadLetterSource::OutboxRelay
+pub diport::dead_letter_store::WritableDeadLetterSource::Saga
+impl diport::dead_letter_store::WritableDeadLetterSource
+pub const fn diport::dead_letter_store::WritableDeadLetterSource::as_source(self) -> diport::dead_letter_store::DeadLetterSource
+impl core::clone::Clone for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::clone(&self) -> diport::dead_letter_store::WritableDeadLetterSource
+impl core::cmp::Eq for diport::dead_letter_store::WritableDeadLetterSource
+impl core::cmp::PartialEq for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::eq(&self, &diport::dead_letter_store::WritableDeadLetterSource) -> bool
+impl core::convert::From<diport::dead_letter_store::WritableDeadLetterSource> for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::from(diport::dead_letter_store::WritableDeadLetterSource) -> Self
+impl core::fmt::Debug for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::StructuralPartialEq for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Freeze for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Send for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Sync for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Unpin for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::UnsafeUnpin for diport::dead_letter_store::WritableDeadLetterSource
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::WritableDeadLetterSource
+impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::WritableDeadLetterSource
+impl<T, U> core::convert::Into<U> for diport::dead_letter_store::WritableDeadLetterSource where U: core::convert::From<T>
+pub fn diport::dead_letter_store::WritableDeadLetterSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::dead_letter_store::WritableDeadLetterSource where U: core::convert::Into<T>
+pub type diport::dead_letter_store::WritableDeadLetterSource::Error = core::convert::Infallible
+pub fn diport::dead_letter_store::WritableDeadLetterSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::dead_letter_store::WritableDeadLetterSource where U: core::convert::TryFrom<T>
+pub type diport::dead_letter_store::WritableDeadLetterSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::dead_letter_store::WritableDeadLetterSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::dead_letter_store::WritableDeadLetterSource where T: core::clone::Clone
+pub type diport::dead_letter_store::WritableDeadLetterSource::Owned = T
+pub fn diport::dead_letter_store::WritableDeadLetterSource::clone_into(&self, &mut T)
+pub fn diport::dead_letter_store::WritableDeadLetterSource::to_owned(&self) -> T
+impl<T> core::any::Any for diport::dead_letter_store::WritableDeadLetterSource where T: 'static + ?core::marker::Sized
+pub fn diport::dead_letter_store::WritableDeadLetterSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::dead_letter_store::WritableDeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::WritableDeadLetterSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::dead_letter_store::WritableDeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::WritableDeadLetterSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::dead_letter_store::WritableDeadLetterSource where T: core::clone::Clone
+pub unsafe fn diport::dead_letter_store::WritableDeadLetterSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::dead_letter_store::WritableDeadLetterSource
+pub type diport::dead_letter_store::WritableDeadLetterSource::Output = T
 pub struct diport::dead_letter_store::DeadLetterRecord
 impl diport::dead_letter_store::DeadLetterRecord
 pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
+pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
+pub fn diport::dead_letter_store::DeadLetterRecord::source(&self) -> diport::dead_letter_store::DeadLetterSource
 pub fn diport::dead_letter_store::DeadLetterRecord::tenant(&self) -> vocab::tenant::TenantId
 pub fn diport::dead_letter_store::DeadLetterRecord::topic(&self) -> &str
 impl core::clone::Clone for diport::dead_letter_store::DeadLetterRecord
@@ -4711,6 +4811,56 @@ impl<T> core::convert::From<T> for diport::pdp::CredentialScheme
 pub fn diport::pdp::CredentialScheme::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::pdp::CredentialScheme
 pub type diport::pdp::CredentialScheme::Output = T
+pub enum diport::DeadLetterSource
+pub diport::DeadLetterSource::Consumer
+pub diport::DeadLetterSource::Legacy
+pub diport::DeadLetterSource::OutboxRelay
+pub diport::DeadLetterSource::Saga
+impl diport::dead_letter_store::DeadLetterSource
+pub const fn diport::dead_letter_store::DeadLetterSource::as_str(self) -> &'static str
+pub fn diport::dead_letter_store::DeadLetterSource::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::clone(&self) -> diport::dead_letter_store::DeadLetterSource
+impl core::cmp::Eq for diport::dead_letter_store::DeadLetterSource
+impl core::cmp::PartialEq for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::eq(&self, &diport::dead_letter_store::DeadLetterSource) -> bool
+impl core::convert::From<diport::dead_letter_store::WritableDeadLetterSource> for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::from(diport::dead_letter_store::WritableDeadLetterSource) -> Self
+impl core::fmt::Debug for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dead_letter_store::DeadLetterSource
+impl core::marker::StructuralPartialEq for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Freeze for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Send for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Sync for diport::dead_letter_store::DeadLetterSource
+impl core::marker::Unpin for diport::dead_letter_store::DeadLetterSource
+impl core::marker::UnsafeUnpin for diport::dead_letter_store::DeadLetterSource
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::DeadLetterSource
+impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::DeadLetterSource
+impl<T, U> core::convert::Into<U> for diport::dead_letter_store::DeadLetterSource where U: core::convert::From<T>
+pub fn diport::dead_letter_store::DeadLetterSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::dead_letter_store::DeadLetterSource where U: core::convert::Into<T>
+pub type diport::dead_letter_store::DeadLetterSource::Error = core::convert::Infallible
+pub fn diport::dead_letter_store::DeadLetterSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::dead_letter_store::DeadLetterSource where U: core::convert::TryFrom<T>
+pub type diport::dead_letter_store::DeadLetterSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::dead_letter_store::DeadLetterSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::dead_letter_store::DeadLetterSource where T: core::clone::Clone
+pub type diport::dead_letter_store::DeadLetterSource::Owned = T
+pub fn diport::dead_letter_store::DeadLetterSource::clone_into(&self, &mut T)
+pub fn diport::dead_letter_store::DeadLetterSource::to_owned(&self) -> T
+impl<T> core::any::Any for diport::dead_letter_store::DeadLetterSource where T: 'static + ?core::marker::Sized
+pub fn diport::dead_letter_store::DeadLetterSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::dead_letter_store::DeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::DeadLetterSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::dead_letter_store::DeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::DeadLetterSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::dead_letter_store::DeadLetterSource where T: core::clone::Clone
+pub unsafe fn diport::dead_letter_store::DeadLetterSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::dead_letter_store::DeadLetterSource
+pub type diport::dead_letter_store::DeadLetterSource::Output = T
 #[non_exhaustive] pub enum diport::JournalStatus
 pub diport::JournalStatus::Compensated
 pub diport::JournalStatus::Compensating
@@ -5231,6 +5381,54 @@ impl<T> core::convert::From<T> for diport::secret_resolver::SecretResolverError
 pub fn diport::secret_resolver::SecretResolverError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::secret_resolver::SecretResolverError
 pub type diport::secret_resolver::SecretResolverError::Output = T
+pub enum diport::WritableDeadLetterSource
+pub diport::WritableDeadLetterSource::Consumer
+pub diport::WritableDeadLetterSource::OutboxRelay
+pub diport::WritableDeadLetterSource::Saga
+impl diport::dead_letter_store::WritableDeadLetterSource
+pub const fn diport::dead_letter_store::WritableDeadLetterSource::as_source(self) -> diport::dead_letter_store::DeadLetterSource
+impl core::clone::Clone for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::clone(&self) -> diport::dead_letter_store::WritableDeadLetterSource
+impl core::cmp::Eq for diport::dead_letter_store::WritableDeadLetterSource
+impl core::cmp::PartialEq for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::eq(&self, &diport::dead_letter_store::WritableDeadLetterSource) -> bool
+impl core::convert::From<diport::dead_letter_store::WritableDeadLetterSource> for diport::dead_letter_store::DeadLetterSource
+pub fn diport::dead_letter_store::DeadLetterSource::from(diport::dead_letter_store::WritableDeadLetterSource) -> Self
+impl core::fmt::Debug for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::StructuralPartialEq for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Freeze for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Send for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Sync for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::Unpin for diport::dead_letter_store::WritableDeadLetterSource
+impl core::marker::UnsafeUnpin for diport::dead_letter_store::WritableDeadLetterSource
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::WritableDeadLetterSource
+impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::WritableDeadLetterSource
+impl<T, U> core::convert::Into<U> for diport::dead_letter_store::WritableDeadLetterSource where U: core::convert::From<T>
+pub fn diport::dead_letter_store::WritableDeadLetterSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::dead_letter_store::WritableDeadLetterSource where U: core::convert::Into<T>
+pub type diport::dead_letter_store::WritableDeadLetterSource::Error = core::convert::Infallible
+pub fn diport::dead_letter_store::WritableDeadLetterSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::dead_letter_store::WritableDeadLetterSource where U: core::convert::TryFrom<T>
+pub type diport::dead_letter_store::WritableDeadLetterSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::dead_letter_store::WritableDeadLetterSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::dead_letter_store::WritableDeadLetterSource where T: core::clone::Clone
+pub type diport::dead_letter_store::WritableDeadLetterSource::Owned = T
+pub fn diport::dead_letter_store::WritableDeadLetterSource::clone_into(&self, &mut T)
+pub fn diport::dead_letter_store::WritableDeadLetterSource::to_owned(&self) -> T
+impl<T> core::any::Any for diport::dead_letter_store::WritableDeadLetterSource where T: 'static + ?core::marker::Sized
+pub fn diport::dead_letter_store::WritableDeadLetterSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::dead_letter_store::WritableDeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::WritableDeadLetterSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::dead_letter_store::WritableDeadLetterSource where T: ?core::marker::Sized
+pub fn diport::dead_letter_store::WritableDeadLetterSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::dead_letter_store::WritableDeadLetterSource where T: core::clone::Clone
+pub unsafe fn diport::dead_letter_store::WritableDeadLetterSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::dead_letter_store::WritableDeadLetterSource
+pub fn diport::dead_letter_store::WritableDeadLetterSource::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::dead_letter_store::WritableDeadLetterSource
+pub type diport::dead_letter_store::WritableDeadLetterSource::Output = T
 #[non_exhaustive] pub enum diport::WriteOutcome
 pub diport::WriteOutcome::Committed
 pub diport::WriteOutcome::Fenced
@@ -5834,10 +6032,12 @@ pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
+pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
+pub fn diport::dead_letter_store::DeadLetterRecord::source(&self) -> diport::dead_letter_store::DeadLetterSource
 pub fn diport::dead_letter_store::DeadLetterRecord::tenant(&self) -> vocab::tenant::TenantId
 pub fn diport::dead_letter_store::DeadLetterRecord::topic(&self) -> &str
 impl core::clone::Clone for diport::dead_letter_store::DeadLetterRecord

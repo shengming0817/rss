@@ -2236,7 +2236,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: 测试 happy-path 断言，item-level carve-out（error-handling.md §Carve-out）。
     async fn dead_letter_store_records_entry() {
-        use diport::DeadLetterSummary;
+        use diport::{DeadLetterSummary, EnvelopeMetadata, WritableDeadLetterSource};
 
         let store = MemDeadLetterStore::new();
         assert!(store.is_empty());
@@ -2250,6 +2250,8 @@ mod tests {
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             3,
+            WritableDeadLetterSource::Consumer,
+            EnvelopeMetadata::empty(),
         );
         store
             .write_dead_letter(record)

@@ -126,7 +126,8 @@ pub use checkpoint_store::{
 };
 pub use clock::Clock;
 pub use dead_letter_store::{
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+    DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary,
+    DynDeadLetterStore, WritableDeadLetterSource,
 };
 pub use envelope::{
     EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,

@@ -25,6 +25,7 @@ mod config_repo;
 mod cotx;
 mod credential_repo;
 mod dead_letter;
+mod dlq;
 mod emitter;
 mod inbox;
 mod migrator;
@@ -48,6 +49,7 @@ pub use checkpoint::PgCheckpointStore;
 pub use config_repo::PgConfigRepo;
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
+pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
 pub use outbox::PgOutbox;
 // NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection

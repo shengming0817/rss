@@ -23,13 +23,15 @@ use consistency::{
     OutboxSource, RetentionSweeper, Topic,
 };
 use diport::{
-    DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID,
-    KEY_TENANT_ID, KEY_TRACE, MetadataError, PublishRequest, Publisher, PublisherError,
-    RESERVED_METADATA_KEYS,
+    DeadLetterSource, DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
+    KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, PublishRequest, Publisher,
+    PublisherError, RESERVED_METADATA_KEYS,
 };
 use sqlx::PgConnection;
 
 use crate::PgStore;
+use crate::cotx::set_local_tenant;
+use crate::dead_letter::original_entry_json;
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -46,6 +48,7 @@ pub(crate) const STATUS_PENDING: &str = "pending";
 pub(crate) const STATUS_PUBLISHING: &str = "publishing";
 pub(crate) const STATUS_PUBLISHED: &str = "published";
 pub(crate) const STATUS_DLX: &str = "dlx";
+const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
 
 // ── OutboxMetadata（typed sealed funnel，F1）──────────────────────────────────
 //
@@ -731,7 +734,12 @@ async fn settle_dlx(
     new_retry_count: i32,
     lease_token: &str,
 ) -> Result<SettleOutcome, EngineError> {
-    let result = sqlx::query(
+    let mut tx = pool.begin().await.map_err(|e| {
+        tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx begin db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+
+    let row: Option<(String, String, String, Vec<u8>, String)> = sqlx::query_as(
         r#"
         UPDATE outbox
         SET status = $4,
@@ -740,6 +748,7 @@ async fn settle_dlx(
         WHERE event_id = $1
           AND status = $5
           AND lease_token = $3::uuid
+        RETURNING domain, contract_id, topic, payload, metadata::text
         "#,
     )
     .bind(event_id)
@@ -747,13 +756,69 @@ async fn settle_dlx(
     .bind(lease_token)
     .bind(STATUS_DLX)
     .bind(STATUS_PUBLISHING)
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| {
         tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx db error");
         EngineError::new(EngineErrorKind::Transient)
     })?;
-    Ok(settle_outcome(result.rows_affected()))
+
+    let Some((domain, contract_id, topic, payload, metadata_json)) = row else {
+        tx.rollback().await.map_err(|e| {
+            tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx rollback db error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
+        return Ok(SettleOutcome::LostLease);
+    };
+
+    let metadata = parse_metadata_json(&metadata_json)?;
+    let tenant = hydrate_envelope_metadata(&metadata_json)
+        .tenant_id()
+        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
+    set_local_tenant(&mut tx, tenant).await.map_err(|e| {
+        tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx set tenant db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+
+    let original_entry = original_entry_json(&payload);
+    sqlx::query(
+        r#"
+        INSERT INTO dead_letter
+            (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(event_id)
+    .bind(domain)
+    .bind(contract_id)
+    .bind(topic)
+    .bind(sqlx::types::Json(&original_entry))
+    .bind(OUTBOX_RELAY_DLX_SUMMARY)
+    .bind(new_retry_count)
+    .bind(DeadLetterSource::OutboxRelay.as_str())
+    .bind(sqlx::types::Json(&metadata))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx dead_letter db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx commit db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+    Ok(SettleOutcome::Settled)
+}
+
+fn parse_metadata_json(json: &str) -> Result<serde_json::Value, EngineError> {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::Object(_)) => {
+            serde_json::from_str(json).map_err(|_| EngineError::new(EngineErrorKind::Invariant))
+        }
+        Ok(_) | Err(_) => Err(EngineError::new(EngineErrorKind::Invariant)),
+    }
 }
 
 /// 还有预算时把行退回 pending + 退避（以 `lease_token` 比对，防 stale 持租者结算；WHERE 先于 SET 求值）。

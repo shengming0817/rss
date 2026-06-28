@@ -349,9 +349,10 @@ impl<T> core::convert::From<T> for authn::JwtIssuerConfig
 pub fn authn::JwtIssuerConfig::from(T) -> T
 impl<T> typenum::type_operators::Same for authn::JwtIssuerConfig
 pub type authn::JwtIssuerConfig::Output = T
-pub struct authn::MintedJwt(_)
+pub struct authn::MintedJwt
 impl authn::MintedJwt
 pub fn authn::MintedJwt::as_str(&self) -> &str
+pub fn authn::MintedJwt::expires_at(&self) -> i64
 impl core::fmt::Debug for authn::MintedJwt
 pub fn authn::MintedJwt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for authn::MintedJwt
