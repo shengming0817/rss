@@ -55,7 +55,7 @@ pub enum CredentialScheme {
 ///
 /// 只经 [`Self::new`] 从已解析 [`TenantId`] 构造，保证进入 verifier 的 tenant header 为 canonical form。
 #[derive(Clone, secure::Redact)]
-pub struct ServiceTokenTenantBinding(#[redact(pii = "generic")] String);
+pub struct ServiceTokenTenantBinding(#[redact(sensitivity = pii)] String);
 
 impl ServiceTokenTenantBinding {
     /// 从已验证 tenant id 构造 service-token header binding。
@@ -97,7 +97,7 @@ pub struct RawCredential {
     scheme: CredentialScheme,
     #[redact(sensitivity = secret)]
     token: String,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     service_token_tenant: Option<ServiceTokenTenantBinding>,
 }
 

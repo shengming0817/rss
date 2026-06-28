@@ -545,6 +545,75 @@ pub struct CotxCase<A, B, O> {
     pub outbox_exists: O,
 }
 
+/// L2 co-tx：成功两边皆在；业务失败两边皆无。
+pub async fn assert_cotx_commit_and_failure_both_or_neither<
+    CA,
+    CB,
+    CO,
+    FA,
+    FB,
+    FO,
+    CAF,
+    CBF,
+    COF,
+    FAF,
+    FBF,
+    FOF,
+    E,
+>(
+    commit: CotxCase<CA, CB, CO>,
+    failure: CotxCase<FA, FB, FO>,
+) -> Result<(), RepoConformanceError>
+where
+    CA: FnOnce() -> CAF,
+    CB: FnOnce() -> CBF,
+    CO: FnOnce() -> COF,
+    FA: FnOnce() -> FAF,
+    FB: FnOnce() -> FBF,
+    FO: FnOnce() -> FOF,
+    CAF: Future<Output = Result<(), E>>,
+    CBF: Future<Output = Result<bool, E>>,
+    COF: Future<Output = Result<bool, E>>,
+    FAF: Future<Output = Result<(), E>>,
+    FBF: Future<Output = Result<bool, E>>,
+    FOF: Future<Output = Result<bool, E>>,
+    E: Debug,
+{
+    (commit.action)()
+        .await
+        .map_err(|e| provider("co-tx commit action", e))?;
+    expect_visible(
+        "co-tx commit business row",
+        (commit.business_exists)()
+            .await
+            .map_err(|e| provider("co-tx commit business row", e))?,
+        true,
+    )?;
+    expect_visible(
+        "co-tx commit outbox row",
+        (commit.outbox_exists)()
+            .await
+            .map_err(|e| provider("co-tx commit outbox row", e))?,
+        true,
+    )?;
+
+    expect_error("co-tx failure action", (failure.action)()).await?;
+    expect_visible(
+        "co-tx failure business row",
+        (failure.business_exists)()
+            .await
+            .map_err(|e| provider("co-tx failure business row", e))?,
+        false,
+    )?;
+    expect_visible(
+        "co-tx failure outbox row",
+        (failure.outbox_exists)()
+            .await
+            .map_err(|e| provider("co-tx failure outbox row", e))?,
+        false,
+    )
+}
+
 /// L2 co-tx：成功两边皆在；业务失败两边皆无；拒绝/冲突路径不写 outbox。
 pub async fn assert_cotx_both_or_neither<
     CA,

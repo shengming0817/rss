@@ -1752,7 +1752,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
 
 use std::time::{Duration, SystemTime};
 
-use diport::OutboxEnvelopeParts;
+use diport::{OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{SessionLifecycle, TenantId};
 
 /// co-tx 测试用 canonical 租户 UUID。
@@ -2888,6 +2888,107 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
     Ok(())
 }
 
+/// t14b：`PgSessionLifecycle` 接入 L2 co-tx conformance：成功两边皆在，真实写失败两边皆无。
+/// tenant mismatch 拒绝语义由 t11b 专项覆盖；`OutboxEmitError` 的 source 脱敏边界不暴露错误 kind，
+/// 因此不把 tenant mismatch 放进需要精确错误分类的 rejected 分支。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t14b_session_lifecycle_cotx_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let overflow_expires = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000_000);
+
+    let ok_session_id = unique_event_id("t14b-ok-sess");
+    let ok_event_id = unique_event_id("t14b-ok-evt");
+    let fail_session_id = unique_event_id("t14b-fail-sess");
+    let fail_event_id = unique_event_id("t14b-fail-evt");
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+
+    testkit::repo_conformance::assert_cotx_commit_and_failure_both_or_neither(
+        testkit::repo_conformance::CotxCase {
+            action: || async {
+                let session = identity::test_support::session(
+                    &ok_session_id,
+                    "subj-cotx-ok",
+                    tenant,
+                    expires,
+                    created,
+                );
+                lifecycle
+                    .persist_session_and_emit(
+                        session,
+                        session_entry(&ok_event_id),
+                        session_envelope(),
+                    )
+                    .await
+            },
+            business_exists: || async {
+                session_row_exists(&store, &ok_session_id)
+                    .await
+                    .map_err(OutboxEmitError::new)
+            },
+            outbox_exists: || async {
+                outbox_row_exists(&store, &ok_event_id)
+                    .await
+                    .map_err(OutboxEmitError::new)
+            },
+        },
+        testkit::repo_conformance::CotxCase {
+            action: || async {
+                let session = identity::test_support::session(
+                    &fail_session_id,
+                    "subj-cotx-fail",
+                    tenant,
+                    overflow_expires,
+                    created,
+                );
+                lifecycle
+                    .persist_session_and_emit(
+                        session,
+                        session_entry(&fail_event_id),
+                        session_envelope(),
+                    )
+                    .await
+            },
+            business_exists: || async {
+                session_row_exists(&store, &fail_session_id)
+                    .await
+                    .map_err(OutboxEmitError::new)
+            },
+            outbox_exists: || async {
+                outbox_row_exists(&store, &fail_event_id)
+                    .await
+                    .map_err(OutboxEmitError::new)
+            },
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+async fn session_row_exists(store: &PgStore, session_id: &str) -> Result<bool, sqlx::Error> {
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    Ok(count.0 == 1)
+}
+
+async fn outbox_row_exists(store: &PgStore, event_id: &str) -> Result<bool, sqlx::Error> {
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    Ok(count.0 == 1)
+}
+
 // ── T20–T22: PgSessionLifecycle durable find/revoke（合并端口后完整生命周期，#1278；原 #1116）──────────
 //
 // 第二租户（跨租隔离 t22）——与 config/secret 测试 TENANT_B 同值。
@@ -3076,6 +3177,35 @@ async fn t22b_session_lifecycle_tenant_noop_conformance() -> TestResult {
     .await?;
 
     store.shutdown().await?;
+    Ok(())
+}
+
+/// t22c：`PgSessionLifecycle` 接入 storage error conformance：底座关闭后 `find` 映射为
+/// `IdentityError::Storage`。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let session = identity::test_support::session(
+        &unique_event_id("t22c-sess"),
+        "subj-storage",
+        tenant,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+    );
+    let sid = session.id().clone();
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+
+    testkit::repo_conformance::assert_storage_error_mapping(
+        || async { store.shutdown().await },
+        || async { lifecycle.find(tenant, sid).await.map(|_| ()) },
+        |e| matches!(e, identity::ports::IdentityError::Storage(_)),
+    )
+    .await?;
+
     Ok(())
 }
 
@@ -5850,6 +5980,123 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     );
 
     store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-8：rotate CAS 命中后 new insert 失败 → 整事务回滚，old 仍 Active，new 不存在。
+///
+/// 覆盖 `PgRefreshTokenStore::rotate` 的 `UPDATE old consumed` + `INSERT new` 同事务不变量：new 的
+/// `expires_at` 故意超出 Postgres `timestamptz` 上界，触发 insert 失败；若 rollback 漏掉，old 会错误停在
+/// Consumed。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+// reason: uuid / TenantId parse 是已知合法值；集成测试 rollback 验证；item-level carve-out。
+async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = RtTenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_800_000);
+    let expires = issued + Duration::from_secs(3_600);
+    let overflow_expires = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000_000_000);
+
+    let old_record = RefreshTokenRecord::hydrate(
+        old_id.clone(),
+        tenant,
+        "rollback-subj",
+        PrincipalKind::User,
+        test_hash_for(0xD8),
+        None,
+        old_id,
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let old_hash = old_record.token_hash().clone();
+    let old_for_rotate = old_record.clone();
+
+    let new_seed = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "rollback-subj",
+        PrincipalKind::User,
+        test_hash_for(0xE8),
+        Some(old_for_rotate.id().as_str().to_string()),
+        old_for_rotate.lineage_id().as_str().to_string(),
+        RefreshStatus::Active,
+        issued + Duration::from_secs(1),
+        expires + Duration::from_secs(1),
+    );
+    let new_hash = new_seed.token_hash().clone();
+    let rotation = old_for_rotate.begin_rotation(
+        new_seed.id().clone(),
+        new_seed.token_hash().clone(),
+        issued + Duration::from_secs(1),
+        overflow_expires,
+    );
+
+    let rt_store = PgRefreshTokenStore::new(&store);
+    rt_store.insert(old_record).await?;
+
+    let result = rt_store.rotate(rotation).await;
+    assert!(
+        matches!(result, Err(identity::ports::IdentityError::Storage(_))),
+        "rt8: new insert 失败应映射为 IdentityError::Storage"
+    );
+
+    let old_found = rt_store
+        .find_by_hash(tenant, old_hash)
+        .await?
+        .expect("rt8: rollback 后 old 仍应可查");
+    assert_eq!(
+        old_found.status(),
+        RefreshStatus::Active,
+        "rt8: rotate 回滚后 old 必须保持 Active"
+    );
+    let new_found = rt_store.find_by_hash(tenant, new_hash).await?;
+    assert!(new_found.is_none(), "rt8: rotate 回滚后失败 new 不应写入");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RT-9：`PgRefreshTokenStore` 接入 storage error conformance：底座关闭后 `find_by_hash` 映射为
+/// `IdentityError::Storage`。
+#[tokio::test(flavor = "multi_thread")]
+async fn rt9_refresh_token_store_storage_error_conformance() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = RtTenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let record = RefreshTokenRecord::hydrate(
+        uuid::Uuid::new_v4().to_string(),
+        tenant,
+        "storage-subj",
+        PrincipalKind::User,
+        test_hash_for(0xF9),
+        None,
+        uuid::Uuid::new_v4().to_string(),
+        RefreshStatus::Active,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_900_000),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_903_600),
+    );
+    let hash = record.token_hash().clone();
+    let rt_store = PgRefreshTokenStore::new(&store);
+
+    testkit::repo_conformance::assert_storage_error_mapping(
+        || async { store.shutdown().await },
+        || async { rt_store.find_by_hash(tenant, hash).await.map(|_| ()) },
+        |e| matches!(e, identity::ports::IdentityError::Storage(_)),
+    )
+    .await?;
+
     Ok(())
 }
 
