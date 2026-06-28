@@ -19,19 +19,19 @@
 //! `ref: EmbarkStudios/cargo-deny src/bans/cfg.rs@main`（target-centric wrappers 无法表达
 //!   source-centric 反向边 + issue #343 path-dep bug —— 自建本 lint 的理由）。
 //!
-//! INVARIANT: LAYER-DEPS-01 —— back-path 反向边（上行 / 横向同层 / 跨界依赖）。
-//! INVARIANT: LAYER-DEPS-02 —— 兄弟域互斥（跨域只经 contract）。
-//! INVARIANT: LAYER-DEPS-03 —— adapter 仅组合根注入（不被域 / 服务依赖）。
-//! INVARIANT: LAYER-DEPS-04 —— generated 仅域 + 组合根依赖。
-//! INVARIANT: LAYER-DEPS-05 —— 每个 workspace 成员必落唯一分层（anti-drift：新增 crate 须登记层）。
-//! INVARIANT: LAYER-DEPS-06 —— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
-//! INVARIANT: LAYER-DEPS-07 —— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
+//! INVARIANT: LAYER-DEPS-01 { level = "Medium", exec = "verify", source = "code" }—— back-path 反向边（上行 / 横向同层 / 跨界依赖）。
+//! INVARIANT: LAYER-DEPS-02 { level = "Medium", exec = "verify", source = "code" }—— 兄弟域互斥（跨域只经 contract）。
+//! INVARIANT: LAYER-DEPS-03 { level = "Medium", exec = "verify", source = "code" }—— adapter 仅组合根注入（不被域 / 服务依赖）。
+//! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "verify", source = "code" }—— generated 仅域 + 组合根依赖。
+//! INVARIANT: LAYER-DEPS-05 { level = "Medium", exec = "verify", source = "code" }—— 每个 workspace 成员必落唯一分层（anti-drift：新增 crate 须登记层）。
+//! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "verify", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
+//! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "verify", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
-//! INVARIANT: LAYER-DEPS-08 —— test-support 库（`layers::TEST_SUPPORT_CRATES`，如 `testkit`）只准经
+//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "verify", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，如 `testkit`）只准经
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
-//! INVARIANT: LAYER-DEPS-09 —— `runctx` 的 `test-support` **feature** 只准经 `[dev-dependencies]` 启用，
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "verify", source = "code" }—— `runctx` 的 `test-support` **feature** 只准经 `[dev-dependencies]` 启用，
 //!   禁在任一 shipped 依赖表（`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。该 feature 暴露
 //!   `pub fn runctx::test_support::app_ctx`——生产构建启用即可不经 `impl runctx::PrincipalFacet` 直接造
 //!   `AppCtx`、绕过伪造门 dylint `rss_principal_facet_impl_allowlist`（#1105 review C-3：Soft→Medium 机器门）。
@@ -201,7 +201,7 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
 /// generated 分层 wrapper」是不同类别：目标是**外部** crate（不在 workspace 成员集），故不走 stale / 反向②
 /// 校验，改校验 deny.toml wrappers 恰等白名单（集合相等，防开洞 / 漏列 / typo）。
 ///
-/// INVARIANT: DIPORT-MACRO-CONFINE-02（Option 2 / ADR-005 把 `-01` 由「仅 diport」放宽为白名单）——
+/// INVARIANT: DIPORT-MACRO-CONFINE-02 { level = "Medium", exec = "verify", source = "code" }（Option 2 / ADR-005 把 `-01` 由「仅 diport」放宽为白名单）——
 ///   DI port 的 dyn-dispatch 宏（dynosaur）+ Send 变体生成（trait-variant）只能被 **DI port 定义点 crate**
 ///   依赖：provider-agnostic infra port 定义点 `diport`（DiPort 层），及**定义自身 repo/service DI port 的
 ///   域 crate**（Domain 层，Option 2）。provider-agnostic vs 域形 port 的归属 category line 见 ADR-005 /

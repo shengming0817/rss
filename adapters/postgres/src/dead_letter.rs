@@ -174,7 +174,7 @@ impl RetentionSweeper for PgDeadLetterStore {
 #[cfg(test)]
 mod smoke {
     //! 编译期类型证明：`PgDeadLetterStore: DeadLetterStore + RetentionSweeper`（via trait bound）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-07 —— DeadLetterStore on PgDeadLetterStore；
+    //! INVARIANT: ADAPTER-PORT-FREEZE-07 { level = "Medium", exec = "manual/opt-in", source = "code" }—— DeadLetterStore on PgDeadLetterStore；
     //! 去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

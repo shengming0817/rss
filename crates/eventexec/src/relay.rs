@@ -227,7 +227,7 @@ where
 /// 逐条中继一批 entry：发 `outbox_publish_total{status}`（含 Ack）+ 翻 [`TickOutcome`]（抽出控制
 /// [`relay_domain_once`] 认知复杂度 ≤15）。
 ///
-/// # INVARIANT: OUTBOX-RELAY-SERIAL-01
+/// # INVARIANT: OUTBOX-RELAY-SERIAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// entries **顺序**投递（for 循环线性推进）；per-partition in-order 由 SQL head-of-partition gating
 /// （adapter `poll_pending` 只拿各 partition 最旧未投条目）+ CAS settle 承载，relay 本身不感知
@@ -379,7 +379,7 @@ fn log_sweep_failed(target: &'static str, e: &impl std::fmt::Display) {
 /// 独立于 relay/sweeper 的专用 worker（独立 [`WorkerHealth`]）：gauge 新鲜度由 `config.sample_interval()`
 /// 解耦 relay 吞吐与 retention 周期（默认数十秒，远密于 5min oldest-age SLO 窗口），采样失败只降级
 /// `outbox_sampler` probe、不污染 relay readyz。取消/错误骨架同 `sweeper_loop`。
-/// `config`（domains / sample_interval）经 [`RelayConfig`] funnel 已校验（INVARIANT: RELAY-CONFIG-01，
+/// `config`（domains / sample_interval）经 [`RelayConfig`] funnel 已校验（INVARIANT: RELAY-CONFIG-01， { level = "Medium", exec = "manual/opt-in", source = "code" }
 /// 同 [`relay_loop`]），此处不再防御 0 间隔 / 越界 domain 集。
 pub async fn backlog_sampler_loop<B>(
     store: Arc<B>,

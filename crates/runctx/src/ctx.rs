@@ -64,7 +64,7 @@ impl<T, P> RequestCtx<T, P> {
 /// [`PrincipalFacet::matches_subject`]（受控比较，不泄露 subject 明文）。具体 `authn::Principal`
 /// 经 trait 擦除注入——`runctx → authn` 是 cargo 拒绝的闭环，故 runctx 永不按具体类型持有 principal。
 ///
-/// **impl 面 allowlist（INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01）**：生产唯一 impl-er 是 `authn`
+/// **impl 面 allowlist（INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）**：生产唯一 impl-er 是 `authn`
 /// （+ runctx 自身的 test facet）。跨 crate「只有 authn 能 impl」**类型层不可表达**——sealed-trait 只能
 /// 封闭到定义 crate，无法选择性放行下游 authn（ADR-003 §4.2 / ADR-006 / ADR-005 §6 已确立）。故本 trait
 /// 是 open `pub trait`，impl 面由 dylint `rss_principal_facet_impl_allowlist`（Medium，镜像

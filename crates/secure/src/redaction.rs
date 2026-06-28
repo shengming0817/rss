@@ -79,7 +79,7 @@ impl Redacted {
     /// `Redacted`（#1360 F1）：它们的 mode 由调用方 / 类型作者选择（含 `Show`），不享「已脱敏安全值」语义，
     /// 故不经本封闭构造口——避免 `Show + 任意明文` 成外部 mint `Redacted` 的旁路。
     ///
-    /// INVARIANT: REDACT-SEALED-NEW-01 —— `Redacted` 唯一构造口；`pub(crate)` 封闭使 crate 外无法把未脱敏值
+    /// INVARIANT: REDACT-SEALED-NEW-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— `Redacted` 唯一构造口；`pub(crate)` 封闭使 crate 外无法把未脱敏值
     /// mint 成可 `Display` 的「安全值」，只能经固定语义 sink funnel 取得（先脱敏再 wrap）。
     pub(crate) fn new(redacted: impl Into<String>) -> Self {
         Self(redacted.into())
@@ -592,7 +592,7 @@ pub fn safe<R: Redact + ?Sized>(value: &R, scope: RedactScope) -> String {
 /// （不按 sensitivity 区分 public：`public` 字段几乎不会声明 `Last4`/`EmailMask`〔非敏感无需掩码〕，
 /// 即便偶现、外部 sink 上塌缩为 `Fixed` 亦无害——故无需把 sensitivity 抬进 [`FieldRedaction`] 公开面。）
 ///
-/// INVARIANT: REDACT-WIRE-COLLAPSE-01 —— `Wire` scope 下部分泄露 mode（Last4/EmailMask）必塌缩 `Fixed`；
+/// INVARIANT: REDACT-WIRE-COLLAPSE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Wire` scope 下部分泄露 mode（Last4/EmailMask）必塌缩 `Fixed`；
 /// 由 `safe_wire_collapses_partial_reveal_to_fixed` + `redact_struct_wire_collapses_partial_reveal`（anti-vacuity:
 /// 同值两 scope 输出不同）守。`mask` 已 `pub(crate)`、`safe` 是唯一字段级输出入口 ⇒ 旁路收敛。
 fn scope_effective_mode(mode: RedactionMode, scope: RedactScope) -> RedactionMode {

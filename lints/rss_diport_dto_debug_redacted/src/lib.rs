@@ -3,11 +3,11 @@
 //! 字节缓冲（`Vec<u8>` / `[u8; N]` / `Box<[u8]>` 或 `Option` 包一层）；改用 `RedactedBytes`
 //! newtype（`Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）。
 //!
-//! INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01
+//! INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
 //! - 上游（Hard，`diport` 内）：`RedactedBytes` 的 `Debug`/`Display` 实现**强制脱敏**——
-//!   类型系统保证，不可绕过（INVARIANT: DIPORT-DTO-BYTES-REDACT-01，`crates/diport/src/redacted_bytes.rs`）。
+//!   类型系统保证，不可绕过（INVARIANT: DIPORT-DTO-BYTES-REDACT-01， { level = "Medium", exec = "verify", source = "dylint" }`crates/diport/src/redacted_bytes.rs`）。
 //! - 下游（本 lint，Medium）：守「`diport` crate 内 struct 的字节缓冲字段必须使用 `RedactedBytes`，
 //!   不得裸持 `Vec<u8>` / `[u8; N]` / `Box<[u8]>` 或其 `Option` 包装」——
 //!   `RedactedBytes` 字段是命名 ADT 类型，天然不命中；canonical `redacted_bytes::RedactedBytes`
@@ -61,7 +61,7 @@ dylint_linting::declare_late_lint! {
     /// 证书字节、token payload 泄入日志或 trace（PII 及密钥边界问题）。
     /// 上游 `RedactedBytes` 已用类型系统（Hard）保证 `Debug`/`Display` 恒脱敏；
     /// 本 lint 作为下游 Medium gate，确保 `diport` DTO 确实采纳该 newtype。
-    /// INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01。
+    /// INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]`

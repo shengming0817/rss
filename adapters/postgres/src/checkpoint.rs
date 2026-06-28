@@ -154,7 +154,7 @@ impl OwnerCheckpointStore for PgCheckpointStore {
 #[cfg(test)]
 mod smoke {
     //! 编译期类型证明：`PgCheckpointStore: OwnerCheckpointStore`（via trait bound）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-09 —— OwnerCheckpointStore on PgCheckpointStore；
+    //! INVARIANT: ADAPTER-PORT-FREEZE-09 { level = "Medium", exec = "manual/opt-in", source = "code" }—— OwnerCheckpointStore on PgCheckpointStore；
     //! 去掉 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

@@ -161,7 +161,7 @@ pub(crate) async fn trace(req: Request, next: Next) -> Response {
 ///    // 字节回归 unauth DoS 姿态；Limited wrap 下，未认证请求经 enforce 401 时 body **从不被读/buffer**，
 ///    // DoS 姿态更优（安全目标[内存有界]已由 Limited 达成，无需 option a）。
 ///
-/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01（精确语义）：
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（精确语义）：
 ///   · **CL-declared 超限 → before-auth clean 413**（层1 fast-reject，auth 计算 + body 读取双重开销可避免）。
 ///   · **无声明/chunked → `http_body_util::Limited` 字节硬顶（read-time）**，内存有界，非 before-auth 413。
 ///     未认证请求经 enforce 401 时 body 从不被读 ⇒ 无 pre-auth buffer（DoS 优姿态，见 reason 注释）。
@@ -233,7 +233,7 @@ fn log_rate_limited(rid: &str, retry_after: std::time::Duration) {
 /// peer IP 来自 [`axum::extract::ConnectInfo<SocketAddr>`] extension（生产经
 /// `into_make_service_with_connect_info` 注入；缺失时 fallback "unknown"——仅限 oneshot 单测环境）。
 ///
-/// # INVARIANT: RATE-LIMIT-PEER-IP-01
+/// # INVARIANT: RATE-LIMIT-PEER-IP-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 /// 生产路径经 `into_make_service_with_connect_info::<SocketAddr>()` 绑定（`routes.rs`），
 /// `ConnectInfo<SocketAddr>` 天然在场；oneshot 测试环境手动插入或留 "unknown"（均合法）。
 pub async fn rate_limit<S>(State(limiter): State<Arc<S>>, req: Request, next: Next) -> Response
@@ -542,7 +542,7 @@ mod tests {
 
     /// `diagctx::correlation()` 在 correlation 内侧中间件可见（scope 覆盖 `next.run` 全链）。
     ///
-    /// INVARIANT: ROUTE-CORRELATION-INNER-REQUESTID-01 的层序核心不变式：探针中间件运行时
+    /// INVARIANT: ROUTE-CORRELATION-INNER-REQUESTID-01 { level = "Medium", exec = "manual/opt-in", source = "code" }的层序核心不变式：探针中间件运行时
     /// `diagctx::correlation()` 须返回 `Some`，证明 diagctx scope 已由 correlation 中间件绑定。
     #[allow(clippy::unwrap_used)]
     // reason: 测试层断言 HTTP 响应/header；tower oneshot Result + header Option 输入均已控制，unwrap 等价 assert。

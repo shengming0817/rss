@@ -3,7 +3,7 @@
 //! 消费方在重试预算耗尽后调用 `write_dead_letter` 持久化死信记录，供运维巡检 / 重放。
 //! `DeadLetterRecord.tenant` 是 DLX RLS scope 的 typed 锚点；`original_payload` 是原始消息字节，
 //! **完整存入** `dead_letter.original_entry` 供重放 / 巡检（无 DB 侧脱敏）；PII 保留策略属后续治理（backlog 跟踪）。
-//! Debug 输出一律隐藏（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01）。
+//! Debug 输出一律隐藏（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 
 use dynosaur::dynosaur;
 
@@ -20,7 +20,7 @@ use crate::redacted_bytes::RedactedBytes;
 /// error-handling.md §Message 与 PII）。[`DeadLetterRecord::new`] 只经本 newtype 接收摘要，故摘要只能是
 /// 编译期作者控制的常量、不可由运行期数据伪造（input struct field exclusion + newtype funnel）——
 /// 不再靠「调用方记得脱敏」的 rustdoc 纪律（review #216 F7）。
-/// INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01（回归见 `summary` 单测；「不可传 `String`」由类型层编译期保证）。
+/// INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（回归见 `summary` 单测；「不可传 `String`」由类型层编译期保证）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeadLetterSummary(&'static str);
 
@@ -111,7 +111,7 @@ impl From<WritableDeadLetterSource> for DeadLetterSource {
 ///
 /// `original_payload` 是原始消息字节，可能含 PII；经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`、经
 /// `original_payload()` 受控读取）。`metadata` 来自 broker/header，可能含业务自定义 PII，`Debug` 手写为
-/// `<redacted>`（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
+/// `<redacted>`（INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 /// 其余字段（`domain` / `contract_id` / `topic` / `error_summary` / `num_attempts`）均为
 /// 运维归因元数据，可观测。
 #[derive(Clone)]
@@ -125,7 +125,7 @@ pub struct DeadLetterRecord {
     source: DeadLetterSource,
     metadata: EnvelopeMetadata,
     /// 安全摘要——类型层强制 `&'static str` const literal（经 [`DeadLetterSummary`] funnel），
-    /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01）。
+    /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     error_summary: &'static str,
     num_attempts: u32,
 }
@@ -248,7 +248,7 @@ impl DeadLetterRecord {
 ///
 /// PII 边界（与 [`crate::SignerError`] 同范式）：`Display` 仅输出安全摘要常量；source 经 [`RedactedSource`]
 /// 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，
-/// fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
+/// fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
 #[derive(Debug, thiserror::Error)]
 #[error("dead letter write failed")]
 pub struct DeadLetterStoreError {
@@ -375,7 +375,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `DeadLetterRecord.original_payload`（原始消息字节，可能含 PII）Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（对标 `SignRequest.message` / `Message.payload`）。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SignRequest.message` / `Message.payload`）。
     use super::{DeadLetterRecord, DeadLetterSummary, WritableDeadLetterSource};
     use crate::EnvelopeMetadata;
 
@@ -459,7 +459,7 @@ mod pii_debug {
 #[cfg(test)]
 mod summary {
     //! `DeadLetterSummary` 安全摘要 newtype——类型层强制 `&'static str` const literal。
-    //! INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01.
+    //! INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     //!
     //! 类型层「不可传 runtime `String`」由编译期保证（`DeadLetterRecord::new` 的 `error_summary`
     //! 形参类型为 `DeadLetterSummary`，无 `From<String>` / `Into` 通路）——故无运行期红用例可写；
@@ -507,7 +507,7 @@ mod tenant_scope {
 mod error_redaction {
     //! `DeadLetterStoreError` derive(Debug) 经 `RedactedSource` 不展开 source（adapter 原始错误可能携连接串/凭据），
     //! 且 `Error::source()` 恒 `None`（fail-closed source 链）。
-    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（对标 `SignerError`，PR #215 RedactedSource 统一）。
+    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SignerError`，PR #215 RedactedSource 统一）。
     use super::DeadLetterStoreError;
 
     #[test]

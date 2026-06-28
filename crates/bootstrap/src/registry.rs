@@ -291,7 +291,7 @@ impl Registry {
     /// [`ListenerRouter<L>`]，经 `mount`(非-Primary) / `mount_primary`(Primary) 追加本组 routes 后返回；
     /// 失败时返回 `Err` 冒泡为 [`KernelError`]。
     ///
-    /// INVARIANT: ROUTE-LISTENER-TYPED-01 —— 域 crate 误声明（把 Internal 路由挂 Primary）类型层不可表达：
+    /// INVARIANT: ROUTE-LISTENER-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 域 crate 误声明（把 Internal 路由挂 Primary）类型层不可表达：
     /// 路由经 `ListenerRouter<L>` 挂载、随组 fold 进 `L::KIND` listener 的 Router，且非-Primary listener 拿不到
     /// `mount_primary`（opt-out）。取代旧 `route_group(listener: ListenerKind, ..)` 的运行期值传参 + SEGREGATION-01
     /// runtime 守（Medium→Hard）。listener marker `L` 经 [`UnfinalizedRoutes::nest_group`] 擦除进 box。
@@ -443,7 +443,7 @@ impl Registry {
     ///
     /// 推荐调用顺序见 [`Registry`] struct 文档 §Finalize order。
     ///
-    /// INVARIANT: ROUTE-AUTH-FUNNEL-01 —— 产出 `UnfinalizedRoutes`（无 bindable 出口），唯有
+    /// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 产出 `UnfinalizedRoutes`（无 bindable 出口），唯有
     /// `httpserve::finalize_auth` 能换出可 bind 的 `AuthenticatedRoutes`（auth-finalize-before-bind，Hard）。
     /// listener 隔离由 [`route_group`](Self::route_group) 的 typed `L`（ROUTE-LISTENER-TYPED-01，#1103
     /// Medium→Hard）守——取代旧 BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 runtime 反例测试。

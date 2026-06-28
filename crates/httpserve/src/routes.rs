@@ -68,7 +68,7 @@ impl NonPrimaryListener for Health {}
 
 /// register 闭包内构建本组路由的 listener-typed builder（`route_group::<L>` 注入）。
 ///
-/// INVARIANT: ROUTE-LISTENER-TYPED-01 —— 路由经本 builder 挂载、随组 fold 进 `L::KIND` listener 的
+/// INVARIANT: ROUTE-LISTENER-TYPED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 路由经本 builder 挂载、随组 fold 进 `L::KIND` listener 的
 /// Router；Internal/Admin/Health 路由类型层不可能进 Primary Router（取代 SEGREGATION-01 Medium runtime
 /// 守，#1103 Medium→Hard）。`mount_primary`（opt-out）仅 `L = Primary`、`mount`（无 opt-out）仅
 /// `L: NonPrimaryListener` —— 与 AUTH-OPTOUT-PRIMARYONLY-01 在 listener 维度对齐。
@@ -129,7 +129,7 @@ impl ListenerRouter<Primary> {
 /// 单 listener 的 per-listener Router，**未** auth-finalize（#1113 funnel 入态），兼作 finalize 折叠的
 /// per-listener **累加器**。
 ///
-/// INVARIANT: ROUTE-AUTH-FUNNEL-01 —— 无 public bindable 出口（无 `into_make_service`）；唯一前进路径是
+/// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 无 public bindable 出口（无 `into_make_service`）；唯一前进路径是
 /// [`finalize_auth`]（同 crate 读私有字段）换 [`AuthenticatedRoutes`] ⇒ 未跑 auth 装配的 router 无法 bind。
 /// 经 [`empty`](Self::empty) + [`nest_group`](Self::nest_group) 累加（裸 `axum::Router` 不出 httpserve），
 /// 由 `bootstrap::finalize_routes` 经受控 `bootstrap → httpserve` 边驱动（ADR-009）。
@@ -178,11 +178,11 @@ impl UnfinalizedRoutes {
 
 /// auth-finalize 后的 per-listener Router（#1113 funnel 出态，可 bind）。
 ///
-/// INVARIANT: ROUTE-AUTH-FUNNEL-02 —— 唯一生产者 = [`finalize_auth`]（构造 `pub(crate)`，外部 crate 无法
+/// INVARIANT: ROUTE-AUTH-FUNNEL-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 唯一生产者 = [`finalize_auth`]（构造 `pub(crate)`，外部 crate 无法
 /// mint）；[`into_make_service`](Self::into_make_service) 是唯一 bindable 出口。验签桥（#1109）经
 /// [`layer`](Self::layer) 叠在外层、保持封印（产物仍是 `AuthenticatedRoutes`，只能加层不能替换）。
 ///
-/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 —— body-limit **层**（CL 闸 + Limited wrap）叠在
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— body-limit **层**（CL 闸 + Limited wrap）叠在
 /// [`sealed_router`](Self::sealed_router) 唯一 funnel ⇒ 每个 bindable router 必带且必 outer 于 auth：
 /// CL-declared 超限 → before-auth clean 413；无声明/chunked → Limited read-time 字节硬顶（内存有界，
 /// 未认证请求经 enforce 401 时 body 从不被读，无 pre-auth buffer）。详见 middleware.rs body_limit 注释。
@@ -231,16 +231,16 @@ impl AuthenticatedRoutes {
 
     /// 在唯一 bindable 出口封全局防护中间件链（请求 ID + correlation + security-headers + body-limit）。
     ///
-    /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 —— `request_id` **不**在 [`finalize_auth`] 内挂（那会被组合根
+    /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `request_id` **不**在 [`finalize_auth`] 内挂（那会被组合根
     /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 `RequestId`，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
     /// bind 的 router 都带 request_id 且**不可遗漏**（can't-forget funnel）。
     ///
-    /// INVARIANT: ROUTE-CORRELATION-INNER-REQUESTID-01 —— `correlation` 封在 `request_id` 内侧、验签桥外侧：
+    /// INVARIANT: ROUTE-CORRELATION-INNER-REQUESTID-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `correlation` 封在 `request_id` 内侧、验签桥外侧：
     ///   · `request_id` 先行（外层）确保 `RequestId` extension 在场，`correlation` 可读回作回退值；
     ///   · `diagctx::scope` 包住验签桥 + handler + application + adapter emit ⇒ outbox emit 可经
     ///     [`diagctx::correlation`] 读回 correlation id（ADR-002 §D1-bis）。
     ///
-    /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 —— body-limit **层**（CL 闸 + Limited wrap）outer 于 auth 验签桥：
+    /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— body-limit **层**（CL 闸 + Limited wrap）outer 于 auth 验签桥：
     ///   · **CL-declared 超限 → before-auth clean 413（`ERR_CORE_PAYLOAD_TOO_LARGE`）**：层1 CL fast-reject
     ///     在验签桥前拒，无 auth 开销；
     ///   · **无声明/chunked → `http_body_util::Limited` 字节硬顶（read-time，内存有界）**：未认证请求经

@@ -11,7 +11,7 @@
 //! ref: Martin Kleppmann《DDIA》§8.3 fencing token（storage 拒绝 token 低于已见高水位的写，**按被保护资源**）；
 //! kube-rs/controller-runtime `Request` 以 `ObjectRef`/`NamespacedName` 识别对象（非全局单 token）；
 //! etcd `concurrency.Mutex` 持锁后保存 revision 作 owner/version 上下文。
-//! INVARIANT: RECONCILE-FENCE-MONO-01（**per-key** 单调：跨任期 stale（epoch `<` 该 key 高水位）拒、
+//! INVARIANT: RECONCILE-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**per-key** 单调：跨任期 stale（epoch `<` 该 key 高水位）拒、
 //! 同/新任期受。回归见 `adapters/memory` per-key CAS 测试）。
 //! 该不变式是 **Medium（运行期 `#[test]`）固有**：单调性是对**运行期** epoch 值的比较（高水位在运行期才知），
 //! 无法上移编译期类型系统；故守卫是 adapter 行为测试 + anti-vacuity（write(key,e2)→write(key,e1<e2) 必 Fenced），非 Hard。
@@ -52,7 +52,7 @@ impl FencedWriteKey {
 /// PII 边界（类型层 Hard，同 [`crate::SignRequest`]）：`data`（待写 payload，可能含敏感设备状态 / 凭据）经
 /// [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全；`key` / `epoch` 是路由 / 版本元数据，可观测。
 ///
-/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01。
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, Clone)]
 pub struct FencedWriteRequest {
     /// 被保护资源（fencing 高水位按 key 隔离）。
@@ -66,7 +66,7 @@ pub struct FencedWriteRequest {
 /// 防护写失败（infra 故障，**非** fence——fence 是 [`WriteOutcome::Fenced`] 的 `Ok`）。
 ///
 /// PII 边界（与 [`crate::SignerError`] 同范式）：source 经 [`RedactedSource`] 脱敏。
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("fenced write failed")]
 pub struct FencedWriterError {

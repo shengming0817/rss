@@ -141,7 +141,7 @@ mod smoke {
     //! adapter→域 DIP 内向边（postgres impl `identity::ports::RoleRepo`，命名其 pub 实体 Role/RoleId）由生产
     //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-06 —— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
+    //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
     //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
@@ -150,7 +150,7 @@ mod smoke {
     //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
     //! AuditRepo on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）；
     //! 去掉任一即编译失败（anti-vacuity）。
-    //! INVARIANT: PG-BUNDLE-DOMAIN-02 —— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
+    //! INVARIANT: PG-BUNDLE-DOMAIN-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
     //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
     use core::marker::PhantomData;
 

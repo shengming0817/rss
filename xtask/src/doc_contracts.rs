@@ -1,6 +1,6 @@
 //! `doc-contracts` —— 文档契约片段漂移门（AI-robust Medium 内容扫描门）。
 //!
-//! INVARIANT: DOC-CONTRACTS-01 —— tenant-aware command / outbox envelope 签名已经进入 codegen 与 runtime；
+//! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code" }—— tenant-aware command / outbox envelope 签名已经进入 codegen 与 runtime；
 //! 规则 / spec 文档不得残留 tenantless 旧片段。该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文。
 
 use std::path::{Path, PathBuf};

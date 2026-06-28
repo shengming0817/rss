@@ -42,7 +42,7 @@ pub(crate) enum Rule {
     ActiveProviderFeature,
     /// manifest 声明的 providerCrate 与 xtask provider matrix 锁定的实现 crate 不符。
     ///
-    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 — provider↔providerCrate 绑定由 xtask provider
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定由 xtask provider
     /// matrix 单源锁定；manifest 声明错误 crate 名须被机器拒（Medium，red test 反恒真）。
     ProviderCrateMismatch,
 }
@@ -894,7 +894,7 @@ postgres = { path = "../../adapters/postgres" }
         Ok(())
     }
 
-    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 — provider↔providerCrate 绑定 red test（anti-vacuity）。
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定 red test（anti-vacuity）。
     /// `ratelimit::GovernorLimiter` 与 `providerCrate = "softca"` 不匹配，active 声明必须被拒。
     #[test]
     fn active_provider_with_wrong_provider_crate_is_rejected() -> anyhow::Result<()> {
@@ -932,7 +932,7 @@ softca = { path = "../../adapters/softca" }
         Ok(())
     }
 
-    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 — provider↔providerCrate 绑定正例（non-vacuous green path）。
+    /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定正例（non-vacuous green path）。
     /// `ratelimit::GovernorLimiter` + `providerCrate = "ratelimit"` 正确绑定，不应产生 ProviderCrateMismatch。
     #[test]
     fn active_provider_with_correct_provider_crate_is_allowed() -> anyhow::Result<()> {

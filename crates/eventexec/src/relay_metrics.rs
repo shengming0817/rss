@@ -14,7 +14,7 @@
 //! - `outbox_pending_depth{domain}` / `outbox_oldest_pending_age_seconds{domain}`（Gauge）—— 采样器。
 //! - `outbox_relay_tick_duration_seconds{phase}`（Histogram，phase=poll|publish）—— relay tick 分相耗时。
 //!
-//! # INVARIANT: OUTBOX-METRICS-PORT-01
+//! # INVARIANT: OUTBOX-METRICS-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! [`OutboxMetrics`] 归属 `eventexec`（Service 层）**不可迁 `diport`**：签名引 `consistency::Disposition` /
 //! `consistency::BacklogSample`（Engine 类型），按 ADR-005 category line 判据「此 port 能否在 `diport` 内

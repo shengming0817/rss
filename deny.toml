@@ -66,7 +66,7 @@ deny = [
   # DI port 收敛（ADR-003 + ADR-005）：dynosaur（dyn-dispatch 宏）+ trait-variant（Send 变体生成）只能被
   # **DI port 定义点 crate** 依赖——provider-agnostic infra port 定义点 `diport`（DI-infra 层），及**定义
   # 自身 repo/service DI port 的域 crate**（Option 2：域 repo port 必然引用域内实体，不得收敛 diport）。
-  # INVARIANT: DIPORT-MACRO-CONFINE-02（ADR-005 把原 `-01`「仅 diport / 单一依赖点」放宽为白名单——repo
+  # INVARIANT: DIPORT-MACRO-CONFINE-02 { level = "Medium", exec = "verify", source = "config" }（ADR-005 把原 `-01`「仅 diport / 单一依赖点」放宽为白名单——repo
   #   port 多点定义后「单一依赖点」前提失效；provider-agnostic vs 域形 port 的 category line 见 ADR-005）。
   # 注：实测 dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（无 unsafe 例外），
   #   故本 wrapper 是「DI port 定义点集中」架构守卫（Medium），非 unsafe 收敛——放宽白名单零安全代价。

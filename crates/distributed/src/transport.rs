@@ -92,7 +92,7 @@ const ALLOWED_TRANSPORT_HEADERS: &[&str] = &[
 /// Names are matched case-insensitively against [`ALLOWED_TRANSPORT_HEADERS`]; the first disallowed
 /// or empty name fails the whole set closed. Mirrors the crate's `LockKey::parse` fail-closed funnel.
 ///
-/// INVARIANT: TRANSPORT-HEADERS-ALLOWLIST-01 (Hard newtype boundary + fail-closed allowlist funnel):
+/// INVARIANT: TRANSPORT-HEADERS-ALLOWLIST-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard newtype boundary + fail-closed allowlist funnel):
 /// `DomainRequest` holds `TransportHeaders`, never `Vec<(String, String)>`, so `authorization` /
 /// `cookie` / `x-tenant-id` cannot reach the wire through this seam.
 ///

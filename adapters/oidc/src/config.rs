@@ -6,7 +6,7 @@
 //! ES256 = SEC1 未压缩点（JWKS `x`·`y` 拼接同形 `0x04||x||y`）；HS256 = 共享密钥字节。T003 若引入 kid
 //! 索引将以**新增可选 kid 参数**方式向下兼容，不破坏现有无-kid 调用。
 //!
-//! 路径隔离（防 alg-confusion，INVARIANT: OIDC-ALG-KEYPATH-01）：ES256 公钥集只服务 JWT 路径，HS256 密钥集
+//! 路径隔离（防 alg-confusion，INVARIANT: OIDC-ALG-KEYPATH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）：ES256 公钥集只服务 JWT 路径，HS256 密钥集
 //! 只服务 service-token 路径——[`crate::verify`] 按 scheme 选 key 集 + 校 token alg 匹配。
 
 use std::collections::HashSet;
@@ -250,7 +250,7 @@ pub struct VerifierConfig {
     tenant_claim: String,
     kind_claim: String,
     /// operator 信任本 IdP 可 assert 的 kind claim 值集。**默认空** → 空集时一律剥离 kind（→ None），杜绝
-    /// 外部 IdP 擅自 assert RSS 特权 kind（INVARIANT: OIDC-KIND-ALLOWLIST-01，secure-by-default）。
+    /// 外部 IdP 擅自 assert RSS 特权 kind（INVARIANT: OIDC-KIND-ALLOWLIST-01， { level = "Medium", exec = "manual/opt-in", source = "code" }secure-by-default）。
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: KeySource,

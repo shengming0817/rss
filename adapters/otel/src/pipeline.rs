@@ -224,7 +224,7 @@ mod tests {
         mem.get_finished_spans().unwrap()
     }
 
-    // ── OtelError 脱敏（INVARIANT: OTEL-ERR-SOURCE-REDACT-01） ──────────────
+    // ── OtelError 脱敏（INVARIANT: OTEL-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }） ──────────────
     #[test]
     fn otel_error_redacts_source() {
         let err = OtelError::new(std::io::Error::other(

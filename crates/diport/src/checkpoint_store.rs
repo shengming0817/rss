@@ -96,7 +96,7 @@ pub enum SaveOutcome {
 /// checkpoint 操作失败（infra 故障，**非** 版本竞争——竞争是 [`SaveOutcome::StaleVersion`] 的 `Ok`）。
 ///
 /// PII 边界（与 [`crate::SignerError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
-/// 脱敏。见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 脱敏。见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("checkpoint store operation failed")]
 pub struct CheckpointStoreError {
@@ -220,7 +220,7 @@ mod smoke {
 #[cfg(test)]
 mod error_redaction {
     //! `CheckpointStoreError` derive(Debug) 经 `RedactedSource` 不展开 source、`Error::source()` 恒 `None`。
-    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
     use super::CheckpointStoreError;
 
     #[test]

@@ -217,7 +217,7 @@ impl Signer for SoftCaSigner {
     async fn sign(&self, request: SignRequest) -> Result<Signature, SignerError> {
         // fail-closed：请求 key 必须精确匹配配置的 CA key——杜绝错 key 盲签。key-id 是非秘密配置标识
         // （非机密、值集有限），故 `PartialEq` 等值比较不需要常量时间；若将来 key-id 承载机密性，改用
-        // `subtle::ConstantTimeEq`。INVARIANT: SOFTCA-SIGN-FAILCLOSED-KEYID-01（Medium，runtime 测试）。
+        // `subtle::ConstantTimeEq`。INVARIANT: SOFTCA-SIGN-FAILCLOSED-KEYID-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（Medium，runtime 测试）。
         if request.key != self.key_id {
             // key-id 不匹配是潜在越权签名信号（安全相关）——warn 级留痕供运维 / 审计定位。
             tracing::warn!("softca: sign rejected — key id does not match configured ca key");
@@ -225,7 +225,7 @@ impl Signer for SoftCaSigner {
         }
         // fail-closed purpose 授权：softca 是本地 CA 私钥持有者、无 Vault ACL 那样的外部授权层，故 purpose
         // 必须由 adapter 自身按闭值集校验（`diport::Signer` port 契约：provider 据 key/purpose fail-closed
-        // 校验，杜绝裸 message 盲签）。INVARIANT: SOFTCA-SIGN-FAILCLOSED-PURPOSE-01（Medium，runtime 测试）。
+        // 校验，杜绝裸 message 盲签）。INVARIANT: SOFTCA-SIGN-FAILCLOSED-PURPOSE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（Medium，runtime 测试）。
         if !self.allowed_purposes.contains(&request.purpose) {
             tracing::warn!("softca: sign rejected — purpose not in configured allowlist");
             return Err(SignerError::new(SoftCaError::PurposeNotAllowed));
@@ -384,7 +384,7 @@ impl InMemRevocationLedger {
 mod smoke {
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait（PhantomData 绑定检查，
     //! 不构造、不执行 body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-11 —— sealed-marker impl 冻结的 diport DI port trait（`SoftCaSigner`：
+    //! INVARIANT: ADAPTER-PORT-FREEZE-11 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— sealed-marker impl 冻结的 diport DI port trait（`SoftCaSigner`：
     //! ManagedResource 始终 / Signer 于 backend；`InMemRevocationLedger`：RevocationStore + ManagedResource 于
     //! backend）；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
@@ -544,7 +544,7 @@ mod backend_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sign_rejects_key_id_mismatch() {
         // fail-closed：请求 key != 配置 CA key → Err（杜绝错 key 盲签）。
-        // INVARIANT: SOFTCA-SIGN-FAILCLOSED-KEYID-01（Medium，runtime 测试）。
+        // INVARIANT: SOFTCA-SIGN-FAILCLOSED-KEYID-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（Medium，runtime 测试）。
         let signer = dev_signer();
         let result = signer.sign(sign_request("attacker-key", b"payload")).await;
         assert!(result.is_err(), "mismatched key id must be rejected");
@@ -553,7 +553,7 @@ mod backend_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sign_rejects_purpose_not_allowed() {
         // fail-closed：purpose 不在闭值集 → Err（softca 自身承载 purpose 授权，无外部 ACL 层）。
-        // INVARIANT: SOFTCA-SIGN-FAILCLOSED-PURPOSE-01。anti-vacuity 配对：允许的 purpose 可签（见 round_trip）。
+        // INVARIANT: SOFTCA-SIGN-FAILCLOSED-PURPOSE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。anti-vacuity 配对：允许的 purpose 可签（见 round_trip）。
         let signer = dev_signer();
         let result = signer
             .sign(sign_request_for(KEY_ID, "unauthorized-purpose", b"payload"))

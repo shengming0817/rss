@@ -19,7 +19,7 @@
 //! （已实现的 idempotency/outbox/error ~100%）。故 `consistency` 暂设 ratchet 下限 85%（[`RATCHET_FLOORS`]，
 //! 留 thaw 余量）；待接缝兑现+测试落地后 restore 90%（follow-up #1146）。其余 STRICT crate 守默认 90%。
 //!
-//! INVARIANT: COVERAGE-STRICT-FLOOR-01 —— [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限
+//! INVARIANT: COVERAGE-STRICT-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限
 //!   **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。缺测量也 fail：杜绝「没跑到 = 静默绿」的 vacuity。
 //!   per-diff 增量门的不变式（COVERAGE-DIFF-FLOOR-01）见 [`crate::diffcov`]。
 

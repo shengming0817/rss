@@ -7,7 +7,7 @@
 //! 背景：此前两个 PR 各自加了同序号 `0013` 迁移（重号），sqlx 按 `version` 键迁移 →
 //! 重号让 `run_migrations` 在任意 fresh DB 上失败；本门补上该无机器门的 governance 缺口。
 //!
-//! INVARIANT: MIGRATION-SERIAL-UNIQUE-01 —— migrations 目录的 SQL 文件序号必须：
+//! INVARIANT: MIGRATION-SERIAL-UNIQUE-01 { level = "Medium", exec = "verify", source = "code" }—— migrations 目录的 SQL 文件序号必须：
 //!   ① 唯一（任意两文件序号不同）；
 //!   ② 从 0001 起、步长 1、连续到最大序号（无缺号）。
 //!   重号或缺号均让 `sqlx::migrate!` 在任意 fresh DB 上失败。

@@ -2,7 +2,7 @@
 //! `rss_crosstenant_callsite` — RSS G0.4 治理 dylint lint：限定跨租户 capability 的签发入口
 //! `vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin()` 仅 `authn` crate 可调用。
 //!
-//! INVARIANT: TENANCY-CROSSTENANT-CAP-01
+//! INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! 跨租户可见性是 super-admin 越权面：`CrossTenantCapability` 私有字段（`_seal: ()`）已让**构造**只能经
 //! funnel（type-layer Hard，上游）；但「funnel 只许 `authn` 已校验 super-admin 路径调用」无法跨 crate 真
@@ -46,7 +46,7 @@ dylint_linting::declare_late_lint! {
     /// 跨租户可见性是 super-admin 越权面。capability 的**构造**已由 vocab 私有字段封到 funnel（Hard），但
     /// 「funnel 只许 authn 已校验 super-admin 路径调用」跨 crate 不可真 seal，故由本 callsite-allowlist lint
     /// 承载（Medium）。非 authn crate 取得该 fn-item（直接调或别名后调）⇒ 绕过 super-admin 校验、跨租户越权。
-    /// INVARIANT: TENANCY-CROSSTENANT-CAP-01。
+    /// INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仍 intraprocedural：allowlist crate 内 wrapper fn（`pub fn wrap() -> Cap { …issue…() }`）被外部 `wrap()`

@@ -12,7 +12,7 @@
 //! 单事实路径——因登录现已有业务写（session）。emit-only [`crate::PgEmitter`] 仍保留，作无业务写
 //! OutboxFact 事件的通用能力（二者语义正交，#1083/#1192）。
 //!
-//! # INVARIANT: OUTBOX-COTX-SESSION-01
+//! # INVARIANT: OUTBOX-COTX-SESSION-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! session 行与 outbox 行在**同一** `PgStore` 事务内写入 → 共 commit / 共 rollback；无 API 可单提交其一。
 //! adapter 独占事务边界（`begin` → `SET LOCAL` tenant → INSERT session → `append_outbox` → 单 `commit`）；

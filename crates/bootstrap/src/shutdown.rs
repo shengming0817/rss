@@ -16,19 +16,19 @@
 //!
 //! 不变式（详见 `docs/architecture/202606212024-001-shutdown-reverse-order-orchestration.md`）：
 //!
-//! - `INVARIANT: SHUTDOWN-LIFO-ORDER-01` —— 关闭顺序 = 注册顺序的逆序（后注册的先关）。
-//! - `INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01` —— 任一资源失败/超时/panic 必须**继续**关后续，
+//! - `INVARIANT: SHUTDOWN-LIFO-ORDER-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 关闭顺序 = 注册顺序的逆序（后注册的先关）。
+//! - `INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 任一资源失败/超时/panic 必须**继续**关后续，
 //!   禁止 fail-fast（否则被依赖资源泄漏）。
-//! - `INVARIANT: SHUTDOWN-ERROR-AGGREGATE-01` —— 所有 per-resource 失败聚合返回，不丢弃。
-//! - `INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01` —— 每个资源关闭有 per-resource 超时上界。
-//! - `INVARIANT: SHUTDOWN-PANIC-ISOLATE-01` —— 下游资源 panic 被隔离，不击穿驱动循环。
-//! - `INVARIANT: SHUTDOWN-SINGLE-SHOT-01` —— `shutdown(self)` 消费 self，double-shutdown /
+//! - `INVARIANT: SHUTDOWN-ERROR-AGGREGATE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 所有 per-resource 失败聚合返回，不丢弃。
+//! - `INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 每个资源关闭有 per-resource 超时上界。
+//! - `INVARIANT: SHUTDOWN-PANIC-ISOLATE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 下游资源 panic 被隔离，不击穿驱动循环。
+//! - `INVARIANT: SHUTDOWN-SINGLE-SHOT-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— `shutdown(self)` 消费 self，double-shutdown /
 //!   关闭后注册在类型层不可表达（编译期，Hard）。
-//! - `INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` —— 后台 task 的取消 token 只能经
+//! - `INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 后台 task 的取消 token 只能经
 //!   [`ShutdownStack::register_with_token`] 由本 stack 派生并在闭包内经构造器注入；无后台 task
 //!   的资源经 [`ShutdownStack::register_detached`] 显式声明不接广播。**无 `pub child_token`**——
 //!   裸 token 发放无公开入口，杜绝注册「使用外部 / 无来源 token」的有 task 资源。
-//! - `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` —— 整体 shutdown 预算由驱动器内部
+//! - `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }—— 整体 shutdown 预算由驱动器内部
 //!   [`ShutdownStack::shutdown_within`] 承担（cancel-safe），**不**交外层 `timeout` 取消包裹
 //!   （外层取消会在 LIFO 中途 drop future、中断后续关闭、泄漏被依赖资源）。
 
@@ -80,7 +80,7 @@ pub struct ResourceShutdownError {
 /// await 每个资源关干净，保证被依赖项（先注册）在依赖它的资源（后注册）之后关闭。
 ///
 /// `shutdown` 消费 `self`——double-shutdown 与「关闭后再注册」在类型层不可表达
-/// （`INVARIANT: SHUTDOWN-SINGLE-SHOT-01`，编译期 Hard，强于运行期状态机 guard）。
+/// （`INVARIANT: SHUTDOWN-SINGLE-SHOT-01`， { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }编译期 Hard，强于运行期状态机 guard）。
 pub struct ShutdownStack {
     root_token: CancellationToken,
     resources: Vec<Box<DynManagedResource<'static>>>,
@@ -101,7 +101,7 @@ impl ShutdownStack {
     ///
     /// 这是取消 token 的**唯一**发放入口（无 `pub child_token`）：「该资源后台 task 监听本
     /// stack 关闭广播」由注册 funnel 强制——无法注册一个绑定外部 / 无来源 token 的有 task
-    /// 资源（`INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01`）。注册顺序 = 依赖顺序（先注册 = 先启动 =
+    /// 资源（`INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。注册顺序 = 依赖顺序（先注册 = 先启动 =
     /// 最后关闭）。
     ///
     /// token 在 `shutdown` 之前派生：`shutdown` 会 `cancel` root token；注册后关闭时资源 task
@@ -118,7 +118,7 @@ impl ShutdownStack {
     ///
     /// 显式 no-token 入口：声明「该资源有意不接关闭广播」，而非忘记接线。与
     /// [`register_with_token`](Self::register_with_token) 二者覆盖全部注册路径，杜绝静默绕过
-    /// 阶段 1 广播（`INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01`）。注册顺序语义同上。
+    /// 阶段 1 广播（`INVARIANT: SHUTDOWN-TOKEN-FUNNEL-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。注册顺序语义同上。
     pub fn register_detached(&mut self, resource: Box<DynManagedResource<'static>>) {
         self.resources.push(resource);
     }
@@ -152,7 +152,7 @@ impl ShutdownStack {
     /// 外层取消会在 LIFO 中途 drop 本 future、**中断后续资源关闭**（被依赖资源泄漏），违反
     /// `SHUTDOWN-CONTINUE-ON-ERROR-01`。需要整体耗时上界时改用
     /// [`shutdown_within`](Self::shutdown_within)——预算由驱动器内部承担、cancel-safe
-    /// （`INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01`）。
+    /// （`INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     #[must_use = "关闭失败列表必须检查（决定进程退出码 / 告警）；忽略将静默丢弃关闭错误"]
     pub async fn shutdown(self) -> Vec<ResourceShutdownError> {
         self.run(None).await
@@ -162,7 +162,7 @@ impl ShutdownStack {
     /// 超时之上再封顶**总**耗时。预算耗尽时，当前及剩余未关资源记为
     /// [`ShutdownFailureKind::BudgetExhausted`]——驱动器**不再 await**（cancel-safe；在飞资源的 task
     /// 经 `abort` 取消），由驱动器自身聚合，**不**把取消安全交给外层 `timeout`
-    /// （`INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01`）。
+    /// （`INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     ///
     /// 预算实现为单一共享 deadline（[`tokio::time::sleep`]），跨资源复用——不测 per-resource
     /// elapsed（clippy 禁 `Instant`，时延测量待 `primitives::Clock`）。组合根按
@@ -262,7 +262,7 @@ enum ShutdownStep {
     /// 整体预算在本资源在飞时耗尽——其 shutdown task 已 `abort`；当前 + 剩余资源记 BudgetExhausted。
     Exhausted(String),
     /// 资源关闭完成（`None` = 干净）或失败（`Some`，交 `run` 聚合，不中断循环
-    /// `INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01`）。
+    /// `INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     Done(Option<ResourceShutdownError>),
 }
 
@@ -270,7 +270,7 @@ enum ShutdownStep {
 ///
 /// `deadline` 是 `run` 持有的**共享**整体预算 future（跨资源复用同一 deadline，cancel-safe）。
 /// 预算先判（`biased`）：耗尽则 **abort 在飞 task**（非阻塞，cancel-safe，不 detach 等进程退出回收，
-/// `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01`）→ 返回 [`ShutdownStep::Exhausted`]。
+/// `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）→ 返回 [`ShutdownStep::Exhausted`]。
 async fn shutdown_one<D>(
     resource: Box<DynManagedResource<'static>>,
     deadline: Pin<&mut D>,
@@ -328,7 +328,7 @@ where
                         );
                         Some(ShutdownFailureKind::Failed(source))
                     }
-                    // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 —— 下游 panic 被 spawn 隔离，仅本资源失败。
+                    // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 下游 panic 被 spawn 隔离，仅本资源失败。
                     Ok(Err(join_err)) => {
                         // 未超时分支的 JoinError 只可能来自 panic（驱动器从不 abort 未超时 task）；
                         // is_cancelled 理论不可达，仍保守上报、不静默吞。
@@ -338,7 +338,7 @@ where
                         tracing::error!("resource shutdown panicked (state unknown)");
                         Some(ShutdownFailureKind::Panicked)
                     }
-                    // INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01 —— per-resource 超时有界，hung task abort 后继续。
+                    // INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— per-resource 超时有界，hung task abort 后继续。
                     Err(_elapsed) => {
                         handle.abort(); // 停止 hung task，避免后台泄漏。
                         tracing::error!("resource shutdown timed out (state unknown)");

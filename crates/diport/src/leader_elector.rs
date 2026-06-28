@@ -17,7 +17,7 @@ use crate::redacted::RedactedSource;
 /// leader 选举失败（infra 故障，**非**「未当选」——未当选是 [`LeaderElectorLocal::acquire`] 的 `Ok(None)`）。
 ///
 /// PII 边界（与 [`crate::SignerError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
-/// 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`）。见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`）。见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("leader election failed")]
 pub struct LeaderElectorError {

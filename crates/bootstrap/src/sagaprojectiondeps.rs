@@ -21,10 +21,10 @@
 //! postgres URL，不分叉 locker provider。journal/checkpoint 同事务（tx）由 postgres adapter 内部承担，
 //! 非注入 port（`PgStore::run_in_transaction` 是固有方法，#1116）。
 //!
-//! INVARIANT: TOPO-FAILCLOSED-01 —— durable 缺 postgres URL ⇒ [`resolve`] 返 `Err`，组合根 fail-fast
+//! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 postgres URL ⇒ [`resolve`] 返 `Err`，组合根 fail-fast
 //!   拒绝启动，**绝不静默降级回 demo/in-mem**（`Result` + bootstrap fail-fast，Medium；类型层强化：
 //!   `Durable` 路径无「降级回 Demo」可表达变体）。
-//! INVARIANT: TOPO-INMEM-SEAL-01 —— in-mem 替身**生产**不可达（生产 bin cargo-deny **Hard**，主守卫）；
+//! INVARIANT: TOPO-INMEM-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— in-mem 替身**生产**不可达（生产 bin cargo-deny **Hard**，主守卫）；
 //!   dev root 经决策 `match` 收束（Medium 纪律）。落地在组合根，非本 crate。
 //!
 //! 凭据 redaction（Medium）：postgres URL（含 `user:pass`）经 [`PostgresUrl`] 收口，其 `Debug`/`Display`
@@ -127,7 +127,7 @@ pub enum SagaProjectionResolveError {
 /// 注：saga journal + checkpoint 是单一共享 postgres（无 per-domain 隔离），故两 durable 变体都收敛为
 /// 「需 postgres」。
 ///
-/// INVARIANT: TOPO-FAILCLOSED-01（见模块 rustdoc）。
+/// INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（见模块 rustdoc）。
 pub fn resolve(
     topo: Topology,
     cfg: SagaProjectionConfig,

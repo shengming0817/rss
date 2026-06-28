@@ -64,7 +64,7 @@ pub use fallback::{MqttPublisher, MqttSubscriber};
 mod smoke {
     //! build smoke：编译期断言 adapter 已 impl 冻结的 diport DI port（PhantomData 绑定检查，不构造、
     //! 不执行 body）。两种 build 都过——默认 fallback（`todo!()`）/ `integration` 真实 rumqttc impl。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-03 —— [`MqttPublisher`] impl `Publisher`+`ManagedResource`、
+    //! INVARIANT: ADAPTER-PORT-FREEZE-03 { level = "Medium", exec = "manual/opt-in", source = "code" }—— [`MqttPublisher`] impl `Publisher`+`ManagedResource`、
     //! [`MqttSubscriber`] impl `Subscriber`+`ManagedResource`；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

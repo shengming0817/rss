@@ -92,7 +92,7 @@ impl CasKey {
 /// 故仅 [`Locker`] 能从 provider outcome mint；外部 crate 无法构造 ⇒ token-as-capability 由**类型系统封闭**
 /// （非运行期约定）：无法伪造 grant 调 `release`/`renew` 顶替持有者。外部经 getter 只读。
 ///
-/// INVARIANT: DISTLOCK-GRANT-UNFORGEABLE-01（Hard：private 字段 + crate-only 构造 funnel；外部 crate
+/// INVARIANT: DISTLOCK-GRANT-UNFORGEABLE-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard：private 字段 + crate-only 构造 funnel；外部 crate
 /// 编译期无法 mint `LockGrant`。`FencingToken::new` 虽 pub（CAS 复用），但无 `LockGrant` 构造面即无法组合成持锁凭据）。
 #[derive(Debug, Clone)]
 pub struct LockGrant {
@@ -149,7 +149,7 @@ pub enum CasOutcome<T> {
 
 /// PII 边界：手写 `Debug` 对 payload 字段（`expected`/`new_value`，可能含敏感 MDM 设备状态/凭据）输出
 /// `<redacted>`；`key`/`token` 是路由/版本元数据，可观测。与 diport 端口层 `CasStoreRequest` 脱敏纪律一致
-/// （INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 同源）。
+/// （INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }同源）。
 impl<T> std::fmt::Debug for CasRequest<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CasRequest")
@@ -431,7 +431,7 @@ mod smoke {
     }
 
     /// PII 边界：CasRequest<T>/CasOutcome<T> 手写 Debug 对 expected/new_value/Conflict.current 输出
-    /// `<redacted>`；key/token 可观测（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 同源）。
+    /// `<redacted>`；key/token 可观测（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }同源）。
     #[test]
     fn cas_request_and_outcome_debug_redacts_payload() {
         // anti-vacuity：裸 &str 的 Debug 包含原始值。

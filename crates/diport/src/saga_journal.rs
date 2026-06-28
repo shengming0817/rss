@@ -93,7 +93,7 @@ impl JournalStatus {
 
 /// 一条 journal 记录（append 写形态）。
 ///
-/// `output`（step 输出字节，可能含 PII）经 [`RedactedBytes`] 脱敏（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
+/// `output`（step 输出字节，可能含 PII）经 [`RedactedBytes`] 脱敏（INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 /// `error_summary` 是 `&'static str` const literal（补偿失败原因摘要，非 runtime 数据；对齐
 /// [`crate::DeadLetterSummary`] 的 PII 边界）。
 ///
@@ -101,7 +101,7 @@ impl JournalStatus {
 /// `output` / `error_summary` 恒 `None`（resume 不需；二者仅落库供运维巡检）。
 ///
 /// PII 边界（类型层 Hard，对标 `DeadLetterRecord` / `FencedWriteRequest`）：`output`（step 输出字节，可能含 PII）
-/// 经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全（INVARIANT: DIPORT-DTO-BYTES-REDACT-01）。
+/// 经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全（INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 #[derive(Debug, Clone)]
 pub struct JournalEntry {
     /// append 序号（主键 `(saga_id, seq)` 的第二段；单调 0..）。
@@ -174,7 +174,7 @@ impl JournalEntry {
 /// saga journal 操作失败（infra 故障）。
 ///
 /// PII 边界（与 [`crate::SignerError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
-/// 脱敏。见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 脱敏。见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("saga journal operation failed")]
 pub struct SagaJournalError {
@@ -270,7 +270,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `JournalEntry.output`（step 输出字节，可能含 PII）Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
     use super::JournalEntry;
     use consistency::StepName;
 
@@ -293,7 +293,7 @@ mod pii_debug {
 #[cfg(test)]
 mod error_redaction {
     //! `SagaJournalError` derive(Debug) 经 `RedactedSource` 不展开 source、`Error::source()` 恒 `None`。
-    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
     use super::SagaJournalError;
 
     #[test]

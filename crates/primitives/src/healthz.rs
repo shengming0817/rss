@@ -7,7 +7,7 @@
 
 /// 健康严重度（三态闭值集；Copy）。worst-of 聚合用全序：Healthy < Degraded < Unhealthy。
 ///
-/// INVARIANT: HEALTHZ-SEVERITY-ORD-01 —— variant 声明顺序即严重度全序（Healthy<Degraded<Unhealthy），worst-of 聚合依赖此序；新增 variant 须精确插位。
+/// INVARIANT: HEALTHZ-SEVERITY-ORD-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— variant 声明顺序即严重度全序（Healthy<Degraded<Unhealthy），worst-of 聚合依赖此序；新增 variant 须精确插位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum HealthStatus {
@@ -29,7 +29,7 @@ impl HealthStatus {
 
 /// 探针名 newtype（私有字段；构造经 fallible funnel）。
 ///
-/// INVARIANT: HEALTHZ-PROBE-NAME-01 —— 非空、无控制字符（fail-closed）。
+/// INVARIANT: HEALTHZ-PROBE-NAME-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 非空、无控制字符（fail-closed）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProbeName(String);
 

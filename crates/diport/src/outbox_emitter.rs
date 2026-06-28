@@ -32,7 +32,7 @@ use crate::redacted::RedactedSource;
 ///
 /// PII 边界（与 [`crate::PublisherError`] 同范式）：`Display` 仅安全摘要常量；source 经
 /// [`RedactedSource`] 脱敏（`Debug` / `Display` 固定 `<redacted>`、`Error::source()` 恒 `None`），见
-/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("outbox emit failed")]
 pub struct OutboxEmitError {
@@ -68,7 +68,7 @@ impl OutboxEmitError {
 /// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
 /// 同 `ContractOwner::of_domain`，统一守卫见 #1327 / #1091）。
 ///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 —— `Debug` 仅输出路由元数据（`contract` 的 domain / contract_id）；
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Debug` 仅输出路由元数据（`contract` 的 domain / contract_id）；
 /// `subject_id` 固定渲染为 `<redacted>`；`partition_key` 只渲染 presence（Some/None），其值经 `PartitionKey`
 /// 脱敏 Debug 收口为 `<redacted>`（可能凭据级，如 tenant-scoped 含 sessionId，F3 #1211 review）。防主体标识 /
 /// 分区键经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
@@ -191,7 +191,7 @@ pub trait OutboxEmitterLocal {
 #[cfg(test)]
 mod pii_debug {
     //! `OutboxEnvelopeParts.subject_id` Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::OutboxEnvelopeParts;
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";

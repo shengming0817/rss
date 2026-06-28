@@ -64,7 +64,7 @@ pub enum KeyProviderErrorKind {
 /// `Display` 是 provider 无关的单一安全摘要常量（不含 runtime 数据、**不泄漏 kind**、不区分失败维度，防降级探测）；
 /// source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`），原始错误不经
 /// 任何 `Error` 接口暴露（避免密钥材料 / 明文经错误链泄漏，ADR-011 §D5）。
-/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("key provider operation failed")]
 pub struct KeyProviderError {
@@ -276,7 +276,7 @@ pub trait KeyProviderLocal {
 
     /// 按 `key`（含 version → previous-read 选 key）解密 `ciphertext`，绑定 `aad`；AAD/版本不符 fail-closed。
     ///
-    /// **实现者义务（#1466 落地，`INVARIANT: FIELDPROT-KEYPROV-AUDIT-01`，对标 [`secure::Aead::open`] 调用方义务）**：
+    /// **实现者义务（#1466 落地，`INVARIANT: FIELDPROT-KEYPROV-AUDIT-01`， { level = "Medium", exec = "manual/opt-in", source = "code" }对标 [`secure::Aead::open`] 调用方义务）**：
     /// - 解密访问须发射 tracing span 审计（含 `key_name` / `key_version` / `aad.coordinates()` 维度，**不含明文/密钥材料**）。
     /// - [`KeyProviderError`] 自身不携带失败维度上下文（防降级探测），故实现须在 `Err` 分支于 span 内记录 key/version
     ///   元数据（如 `tracing::error!(key = %key, "key provider decrypt failed")`），保证生产可观测性。

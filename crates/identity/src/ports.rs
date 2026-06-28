@@ -79,7 +79,7 @@ pub trait RoleRepoLocal {
 /// commit；任一步失败整体 rollback。**唯一 binding-写 API**（域无 `save`/`emit` 分调、无半开事务句柄；co-tx
 /// 不可拆解在类型层成立，同 [`SessionLifecycle`] 的 OUTBOX-COTX-SESSION-01）。
 ///
-/// INVARIANT: OUTBOX-COTX-BINDING-01 — binding 行写/删与 role-event outbox 行 both-or-neither（Hard，
+/// INVARIANT: OUTBOX-COTX-BINDING-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }— binding 行写/删与 role-event outbox 行 both-or-neither（Hard，
 /// combined-method funnel 在类型层成立）；#1017 生产 postgres `PgRoleBindingLifecycle` impl 落地时须以此 ID
 /// 标注 same-tx 接线 + 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无），同 OUTBOX-COTX-SESSION-01。
 ///
@@ -240,7 +240,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 /// append_outbox → 单 commit）；拆成 `SessionRepo::save` + `OutboxEmitter::emit` 两 provider-agnostic 调用，域
 /// 无法绑同一事务（端口签名不容 `&mut PgConnection`，否则 `ports`→adapter 反向耦合），closure-UoW 把事务句柄
 /// 回传给域同样泄漏 provider 类型并**重开 split-tx 洞**——故保留 combined 方法（co-tx 不可拆解在类型层成立，
-/// Hard）。adapter same-tx 接线由 postgres `PgSessionLifecycle` 的 **INVARIANT: OUTBOX-COTX-SESSION-01** +
+/// Hard）。adapter same-tx 接线由 postgres `PgSessionLifecycle` 的 **INVARIANT: OUTBOX-COTX-SESSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }** +
 /// 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无）守。
 ///
 /// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `revoke` 接收 typed `TenantId`，跨租

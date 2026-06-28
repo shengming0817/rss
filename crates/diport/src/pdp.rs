@@ -222,7 +222,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `RawCredential.token` / `VerifiedClaims.subject·tenant` Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（同 `signer.rs` 的 `pii_debug`）。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（同 `signer.rs` 的 `pii_debug`）。
     use super::{CredentialScheme, RawCredential, ServiceTokenTenantBinding, VerifiedClaims};
     use vocab::tenant::TenantId;
 

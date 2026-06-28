@@ -66,7 +66,7 @@ mod sealed {
 /// 评级切分：attach 门禁（无 witness 不可构造 harness）+ witness 类型封闭 = **Hard**；witness「真实性」
 /// （铸造它的 source 真是串行）= **Medium**（见 [`PartitionSerialDelivery`]）。
 ///
-/// # INVARIANT: PROJECTION-SERIAL-WITNESS-01
+/// # INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed witness trait boundary" }
 pub trait SerialInOrderGuarantor: sealed::Sealed + Copy {}
 
 /// 唯一 blessed 串行有序 witness（ZST，零运行期成本）。
@@ -85,7 +85,7 @@ impl SerialInOrderGuarantor for SerialInOrder {}
 /// **NOT sealed**——真实 adapter（`adapters/postgres`，外部 crate）须能 impl 来铸造 witness。这层 open 是
 /// witness「真实性」的 **Medium** 边界（类型系统看不进 SQL head-of-partition gating，「此投递串行」是
 /// 实现的语义属性、非结构属性）：哪些类型可 impl 由 dylint `rss_partition_serial_allowlist`（AST 级，
-/// 仅放行 allowlist adapter/组合根类型，INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01）守，`#[cfg(test)]`
+/// 仅放行 allowlist adapter/组合根类型，INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）守，`#[cfg(test)]`
 /// 测试 fake 豁免。**in-memory 非串行 fake 禁止 impl 本 trait**。
 ///
 /// **projection 用途下的全局 lsn 升序要求**：per-partition 串行是 outbox relay 的 head-of-partition

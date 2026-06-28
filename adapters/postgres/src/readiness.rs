@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn sampler_name_is_stable() {
-        // INVARIANT: SAMPLER-NAME-01 — name 常量用于 ShutdownStack 日志，不可随意改变。
+        // INVARIANT: SAMPLER-NAME-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— name 常量用于 ShutdownStack 日志，不可随意改变。
         assert_eq!(super::SAMPLER_WORKER_NAME, "pg-readiness-sampler");
     }
 }

@@ -90,7 +90,7 @@ impl diport::ObjectStore for S3Store {
 mod smoke {
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait（PhantomData 绑定检查，
     //! 不构造、不执行 body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-10 —— sealed-marker impl 冻结的 diport DI port trait（ManagedResource
+    //! INVARIANT: ADAPTER-PORT-FREEZE-10 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— sealed-marker impl 冻结的 diport DI port trait（ManagedResource
     //! 始终；ObjectStore 于 backend）；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

@@ -17,7 +17,7 @@ use crate::redacted::RedactedSource;
 /// PII 边界（与 [`crate::SignerError`] 同范式）：`Display` 仅输出 provider 无关的安全摘要常量（不含 runtime
 /// 数据）；原始 provider 错误包入 [`RedactedSource`]——其 `Debug` / `Display` 固定 `<redacted>`、`Error::source()`
 /// 恒 `None`。故本类型经 `#[source]` 的 `Error::source()` 虽返回 `Some(&RedactedSource)`（链遍历到此即止），
-/// 原始错误仍不经任何 `Error` 接口暴露，fail-closed，见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 原始错误仍不经任何 `Error` 接口暴露，fail-closed，见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("revocation store operation failed")]
 pub struct RevocationStoreError {

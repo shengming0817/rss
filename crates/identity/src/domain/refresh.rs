@@ -272,7 +272,7 @@ impl RefreshTokenRecord {
     /// **从 self 派生**——调用方只提供新 secret 摘要 + 新 id + 时刻。tenant / parent / lineage 错位组合**类型层
     /// 不可表达**（无独立 `new_record` 入参可传），杜绝「rotate(tenant, old_id, 任意 new)」的错位写入。
     ///
-    /// # INVARIANT: REFRESH-ROTATE-LINEAGE-01
+    /// # INVARIANT: REFRESH-ROTATE-LINEAGE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
     /// 轮换子 record 的租户 / 父指针 / 谱系根恒等于源 record 的对应字段（由本 funnel 派生，非调用方组装）——
     /// store 只接收 [`RefreshRotation`]、无三参 `(tenant, old_id, new)` 重载，故跨租 / 断谱系 / 错父的轮换写入
     /// 在类型层不可表达（Hard，对标 input-struct-field-exclusion 范本）。

@@ -9,7 +9,7 @@
 //! 去重（同 DispatchId 二次投递 → `Message.id` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
 //! claimer 拒）；零新去重原语。
 //!
-//! INVARIANT: COMMAND-DISPATCHID-SEAL-01 —— [`DispatchId`] 包私有 [`IdemKey`]、无 public 裸构造（仅
+//! INVARIANT: COMMAND-DISPATCHID-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— [`DispatchId`] 包私有 [`IdemKey`]、无 public 裸构造（仅
 //! [`DispatchId::from_idempotency_key`] funnel），业务不可把任意裸 `IdemKey` 当 DispatchId 伪造。
 //!
 //! ref: debezium outbox SMT（producer 业务事实 → outbox 行 durable 落库）
@@ -32,7 +32,7 @@ use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
 /// 仅经 [`from_idempotency_key`](Self::from_idempotency_key) funnel（业务无法把任意裸 `IdemKey` 当 DispatchId
 /// 伪造绕 generated wrapper）。auto-dispatch 由组合根 bridge 传 `Uuid::new_v4().to_string()`（同 identity 范式）。
 ///
-/// INVARIANT: COMMAND-DISPATCHID-SEAL-01.
+/// INVARIANT: COMMAND-DISPATCHID-SEAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchId(IdemKey);
 
@@ -46,7 +46,7 @@ impl DispatchId {
 
     /// 解封到底层 outbox 幂等 key（仅 runtime funnel 可达；consumer 侧 claimer 以同一 `IdemKey` try_claim）。
     ///
-    /// INVARIANT: COMMAND-DISPATCHID-SEAL-01 —— 此方法 `pub(crate)` 封闭，外部 crate 无法取得裸
+    /// INVARIANT: COMMAND-DISPATCHID-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 此方法 `pub(crate)` 封闭，外部 crate 无法取得裸
     /// `IdemKey`（只有 [`emit_async`] funnel 可调用）；与 struct / module 级声明同源。
     pub(crate) fn into_idem_key(self) -> IdemKey {
         self.0

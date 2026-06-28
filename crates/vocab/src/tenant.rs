@@ -150,7 +150,7 @@ impl RowVisibility {
 
 /// 跨租户授权 capability（构造受控：仅 authn 已校验 super-admin 派生路径应签发）。
 ///
-/// INVARIANT: TENANCY-CROSSTENANT-CAP-01 —— 跨 crate 真 seal 不可达（domain-patterns.md：sealed-trait
+/// INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 跨 crate 真 seal 不可达（domain-patterns.md：sealed-trait
 /// 仅定义-crate 内封闭，vocab 无法对 authn sealing）。本类型为 **Medium 漏斗**：私有字段强制经 funnel（上游
 /// Hard），显式且 greppable；「只 authn verified super-admin 路径可调用」（下游）由 callsite-allowlist dylint
 /// `rss_crosstenant_callsite`（`lints/`，allowlist=`authn`，`-D warnings` 经 `cargo xtask verify` fail-closed）强制。

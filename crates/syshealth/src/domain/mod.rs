@@ -196,7 +196,7 @@ impl SystemInfo {
 
 /// 基于探针 criticality 分级聚合健康状态（**fail-closed**，对齐仓库 readiness 单源）。
 ///
-/// INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01
+/// INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// - `checks` 为空（无任何探针结果）→ 返回 `HealthStatus::Unhealthy`（fail-closed，对齐
 ///   `primitives::HealthReport::aggregate`：无探针即不可服务，不得放行）。
@@ -362,8 +362,7 @@ mod tests {
     // ── aggregate_with_criticality（fail-closed 分级）─────────────────────
     #[test]
     fn aggregate_empty_checks_is_unhealthy_fail_closed() {
-        // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01
-        // fail-closed：无探针结果即不可服务（对齐 primitives::HealthReport::aggregate）。
+        // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }        // fail-closed：无探针结果即不可服务（对齐 primitives::HealthReport::aggregate）。
         let reg = ProbeRegistry::new();
         assert_eq!(
             aggregate_with_criticality(&[], &reg),
@@ -428,8 +427,7 @@ mod tests {
 
     #[test]
     fn aggregate_unregistered_failing_probe_is_failclosed_unhealthy() {
-        // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01
-        // 未注册失败探针 → 视为 critical（fail-closed，注册缺失=配置错误，不静默放行）→ Unhealthy。
+        // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }        // 未注册失败探针 → 视为 critical（fail-closed，注册缺失=配置错误，不静默放行）→ Unhealthy。
         let reg = ProbeRegistry::new();
         let checks = [check("ghost", HealthStatus::Unhealthy)];
         assert_eq!(
@@ -440,8 +438,7 @@ mod tests {
 
     #[test]
     fn aggregate_unregistered_healthy_probe_is_healthy() {
-        // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01
-        // 未注册但 Healthy 的 check 不触发 fail-closed（只有失败探针才按注册缺失判 critical）→ Healthy。
+        // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }        // 未注册但 Healthy 的 check 不触发 fail-closed（只有失败探针才按注册缺失判 critical）→ Healthy。
         let reg = registry(&[("db", true)]);
         let checks = [
             check("db", HealthStatus::Healthy),

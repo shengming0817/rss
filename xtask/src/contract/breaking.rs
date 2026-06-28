@@ -11,13 +11,13 @@
 //!   request-property-type-changed / enum-value-removed / became-not-nullable。
 //! ref: getsentry/json-schema-diff@main —— 集合论 permissive/restrictive：type 收紧 = newType 须为 oldType 超集。
 //!
-//! INVARIANT: WIRE-BREAKING-01 —— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
+//! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "verify", source = "code" }—— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
 //!   FIELD_FORMAT_CHANGED / ENUM_VALUE_DELETED / ADDITIONAL_PROPS_TIGHTENED / NULLABLE_REMOVED /
 //!   REDACTION_POLICY_CHANGED / PROTECTION_POLICY_CHANGED）对 base↔working
 //!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。后 3 条
 //!   manifest 依赖规则（HTTP_STATUS_CODE_CHANGED / AUTH_REQUIREMENT_CHANGED / IDEMPOTENCY_LEVEL_CHANGED）依赖
 //!   扩 manifest schema，登记第三期（ADR-008 §3.1）。首版不覆盖 `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
-//! INVARIANT: WIRE-BREAKING-WINDOW-01 —— 窗口分级 **配置驱动、不读墙上时钟**（clippy 全 workspace 禁
+//! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "verify", source = "code" }—— 窗口分级 **配置驱动、不读墙上时钟**（clippy 全 workspace 禁
 //!   `SystemTime::now`/`chrono::Utc::now`）：默认 [`EnforcementMode::Warn`]（pre-GA，至 2026-12-31，退出码 0）；
 //!   env `RSS_WIRE_BREAKING=deny` 或 standalone `--deny` 升 [`EnforcementMode::Deny`]（窗口到期 / GA / 外部
 //!   wire 消费方提前收紧）。[`disposition`] 纯函数：仅 `(Deny, active)` → `Deny`（退出码 1），余 `Warn`（退出码 0）。

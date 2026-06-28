@@ -16,7 +16,7 @@
 //! - **sync DI port**（`Clock` / `SubscribeInitializer`）：sync trait 天然 dyn-compatible，经
 //!   `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
 //!
-//! ## 注入形态（INVARIANT: DIPORT-ASYNC-ARC-SEND-01）
+//! ## 注入形态（INVARIANT: DIPORT-ASYNC-ARC-SEND-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）
 //!
 //! async DI port 的 dynosaur Send 变体 `DynX` 是 **`Send` 但非 `Sync`**（`#[trait_variant::make(X: Send)]`
 //! 只加 `Send`，内部 `dyn ErasedX` 无 `Sync`）。推论：`Box<DynX>: Send`（`Box<T>: Send ⟸ T: Send`）成立，
@@ -72,7 +72,7 @@
 //! adapter / 组合根路径下 impl 任一 diport port trait 即报。二者互补——cargo-deny 守**定义面**（port
 //! 只在 `diport` 定义），dylint 守**impl 面**（port 只在 adapter / 组合根 impl）。#1060 闭环。
 //!
-//! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01
+//! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! ADR-003 §3 原设：dynosaur 宏注入 unsafe 到 consumer crate，须 `forbid`→`deny` 例外。**PR-diport
 //! spike 实测推翻**：dynosaur 0.3 生成的 `unsafe transmute` 经 def-site hygiene **不触发** consumer

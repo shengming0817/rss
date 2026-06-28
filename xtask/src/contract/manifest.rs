@@ -1,6 +1,6 @@
 //! 契约元数据声明（`contract.toml`）的冻结类型。
 //!
-//! INVARIANT: CONTRACT-FREEZE-01 — `ContractManifest` 字段集 + 枚举即 `contract.toml` 格式的
+//! INVARIANT: CONTRACT-FREEZE-01 { level = "Medium", exec = "verify", source = "code" }— `ContractManifest` 字段集 + 枚举即 `contract.toml` 格式的
 //! 单一事实源（Hard，类型层）：`#[serde(deny_unknown_fields)]` + 非 `Option` 枚举字段使「坏格式」
 //! 解析即 `Err`，错误不可表达。新增/删字段须同步 `contracts/README.md` 与种子 golden。
 //! Hard 类型层部分（字段冻结、枚举解析拒绝）在本文件；运行期跨字段不变式见 `validate.rs`（CONTRACT-FREEZE-01）。

@@ -98,7 +98,7 @@ impl CircuitCounts {
 
 /// 熔断阈值配置（纯值类型；构造经 fallible funnel 拒非法阈值）。
 ///
-/// INVARIANT: BREAKER-CONFIG-01 —— `max_half_open_requests >= 1`、`interval`/`timeout` 非零（fail-closed）。
+/// INVARIANT: BREAKER-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `max_half_open_requests >= 1`、`interval`/`timeout` 非零（fail-closed）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BreakerConfig {
     failure_threshold: u32,

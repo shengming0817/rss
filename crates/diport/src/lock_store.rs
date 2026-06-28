@@ -15,7 +15,7 @@
 //!   入口 + 单调任期 transition）；RSS 把全局选举推广为**按 key 互斥锁**、用 token-as-capability 替 holder identity。
 //! ref: databendlabs/openraft openraft/src/log_id/mod.rs（LogId.index 单调 derive Ord = fencing token 防脑裂）；
 //! Martin Kleppmann《DDIA》§8.3 fencing token（storage 拒绝 token 低于已见高水位的写）。
-//! INVARIANT: DISTLOCK-FENCE-MONO-01（**per-key** fencing token 单调 + 互斥语义：空闲/过期受、已持有回 Held、
+//! INVARIANT: DISTLOCK-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**per-key** fencing token 单调 + 互斥语义：空闲/过期受、已持有回 Held、
 //! 续租 token 不变、易手 `+1`、stale token renew→Lost / release→no-op。回归见 `adapters/memory` MemLockStore
 //! 测试 + 本模块 smoke reference impl）。该不变式是 **Medium（运行期 `#[test]`）固有**：单调性是对**运行期**
 //! token 值的比较（当前持有者在运行期才知），无法上移编译期类型系统；守卫 = adapter 行为测试 + anti-vacuity
@@ -68,7 +68,7 @@ pub enum LockRenewOutcome {
 /// 锁操作失败（infra 故障，**非** Held/Lost——后两者是 outcome 的 `Ok`）。
 ///
 /// PII 边界（与 [`crate::SignerError`] / `crate::CasStoreError` 同范式）：source 经 [`RedactedSource`] 脱敏。
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("lock store operation failed")]
 pub struct LockStoreError {

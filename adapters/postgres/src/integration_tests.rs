@@ -457,7 +457,7 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
 
 // ── T1: INVARIANT OUTBOX-ATOMIC-IDEM-01：回滚→无 entry ──────────────────────
 
-/// INVARIANT: OUTBOX-ATOMIC-IDEM-01
+/// INVARIANT: OUTBOX-ATOMIC-IDEM-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 /// L1 原子性：append_outbox 在事务内，业务返回 Err → 回滚 → outbox 无该行。
 #[tokio::test(flavor = "multi_thread")]
 async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
@@ -2291,7 +2291,7 @@ use crate::outbox::{LEASE_TTL_SECONDS, STATUS_DLX, STATUS_PENDING};
 /// t24：append 3 行（同 domain，无 partition）→ SELECT seq 严格递增、互异、非空；
 /// 尝试 INSERT 显式写 seq 被 GENERATED ALWAYS 拒（应用不可伪造）。
 ///
-/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
@@ -2361,7 +2361,7 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
 /// t25：同 (domain, 'p1') partition → `poll_pending` 仅返队头；relay → published → poll → 后继。
 ///
 /// 反真空：S2/S3 在 H 未 published 前缺席（head-of-partition gating 生效）。
-/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
@@ -2453,7 +2453,7 @@ async fn t25_partition_serial_in_order() -> TestResult {
 /// t26：跨 partition 不互阻 + NULL-partition 无序并行路径不变。
 ///
 /// 同 domain 下：p1-head + p2-head + 2 个 NULL-partition 行 → 一轮 poll 返 4 行。
-/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
@@ -2548,7 +2548,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
 /// append H, S2 同 partition；强制 H→dlx；poll 该 partition 空；
 /// re-drive H → relay → published → poll → S2。
 /// 反真空：NULL-partition dlx 行不阻塞任何东西。
-/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
@@ -2656,7 +2656,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
 ///
 /// append H, S2 同 partition；置 H status='publishing', updated_at 很久之前（模拟崩溃）；
 /// poll → 仅 H（stale publishing 被重捞，S2 被 gate）；relay H→published → poll → S2。
-/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
@@ -2730,7 +2730,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
 ///
 /// H + 3 后继同 partition → `sample_backlog.depth()==4`（gate 不减 depth）；
 /// `poll_pending` 返 1（仅队头）。
-/// INVARIANT: OUTBOX-PARTITION-ORDER-01
+/// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。

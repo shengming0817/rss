@@ -242,7 +242,7 @@ impl FilterBits {
 
 /// 截断 HMAC 盲索引值（等值-only；sealed 构造；无 Ord/PartialOrd/PartialEq/Eq）。
 ///
-/// **INVARIANT: FIELDPROT-BLINDIDX-EQUALITYONLY-01**（Hard，类型系统载体）——
+/// **INVARIANT: FIELDPROT-BLINDIDX-EQUALITYONLY-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }**（Hard，类型系统载体）——
 /// `Ord`/`PartialOrd`/`PartialEq`/`Eq` **故意未 derive**，完全对标 `primitives::Mac`：
 /// 等值比较唯一入口是常数时间 `ct_eq`，范围/前缀查询在类型层不可表达（无 `<`/`>` 运算符，
 /// 无 `Eq` 实现 → 不能用作 `HashMap` key / `BTreeMap` key / `==` 比较）。
@@ -305,7 +305,7 @@ impl BlindIndexValue {
     /// 常数时间等值比较（`subtle::ConstantTimeEq`；唯一合法的 in-proc 等值检查路径）。
     ///
     /// 故意命名为 `ct_eq` 而非实现 `PartialEq`——强制调用方意识到这是常数时间操作，
-    /// 不能用 `==`（INVARIANT: FIELDPROT-BLINDIDX-EQUALITYONLY-01）。
+    /// 不能用 `==`（INVARIANT: FIELDPROT-BLINDIDX-EQUALITYONLY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     ///
     /// **仅当两值来自相同 `FilterBits` 配置时调用**；跨 FilterBits 比较无意义且非常数时间。
     pub fn ct_eq(&self, other: &Self) -> bool {

@@ -233,8 +233,7 @@ mod tests {
 
     #[test]
     fn debug_never_renders_internal_or_public_values() {
-        // INVARIANT: DEBUG-NO-ATTR-VALUES-01
-        // `tracing::error!(?err)` 展开为 Debug；手写 impl 确保内部属性和公开明细的键/值
+        // INVARIANT: DEBUG-NO-ATTR-VALUES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }        // `tracing::error!(?err)` 展开为 Debug；手写 impl 确保内部属性和公开明细的键/值
         // 永不出现在 Debug 输出中，与 HTTP wire strip 路径等价安全。
         let err = CoreError::new(CoreErrorKind::Forbidden)
             .with_internal(InternalAttr::Str(

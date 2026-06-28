@@ -420,7 +420,7 @@ struct ClaimEntry {
 /// TTL 重捞有意省略（无时间源）——crash-recovery + 重捞正确性由 PG adapter 集成测试守；
 /// in-mem 仅需忠实 token-CAS 语义，使 hard-fence 在 demo/test 中可行使。
 ///
-/// INVARIANT: TOPO-INMEM-SEAL-01（拓扑封闭：生产 bin 经 cargo-deny 连 `memory` 都依赖不到 ⇒
+/// INVARIANT: TOPO-INMEM-SEAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（拓扑封闭：生产 bin 经 cargo-deny 连 `memory` 都依赖不到 ⇒
 /// in-mem claimer 不可达生产；仅 demo/dev/journeys 组合根可构造）。
 pub struct InMemClaimer {
     seen: Arc<Mutex<HashMap<(String, String), ClaimEntry>>>,
@@ -611,7 +611,7 @@ impl LeaderElector for MemLeaderElector {
 /// `epoch < 该 key 高水位` 的写被 [`WriteOutcome::Fenced`]（旧 leader 跨任期 stale 写被挡）；`epoch ≥` 提交并
 /// 推进该 key 高水位（**同任期多写 / 不同 key 互不 fence**，幂等由消费方负责）。
 ///
-/// 仅校验 fencing CAS 语义，不持久化 `data`。INVARIANT: RECONCILE-FENCE-MONO-01（per-key 单调，回归见本 crate 单测）。
+/// 仅校验 fencing CAS 语义，不持久化 `data`。INVARIANT: RECONCILE-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（per-key 单调，回归见本 crate 单测）。
 #[derive(Clone, Default)]
 pub struct MemFencedWriter {
     high_water: Arc<Mutex<HashMap<FencedWriteKey, vocab::Epoch>>>,
@@ -650,7 +650,7 @@ type CasStateMap = HashMap<CasStoreKey, (Vec<u8>, vocab::Epoch)>;
 
 /// in-mem state-CAS 替身（impl [`diport::CasStore`]）：per-key `(value, revision token)`，etcd-revision 条件写。
 /// 生产替身走 etcd/redis/postgres adapter；本 crate 仅测试/demo 用。
-/// INVARIANT: CAS-REVISION-MONO-01（per-key token 单调 + etcd-revision CAS；回归见本 crate 单测）。
+/// INVARIANT: CAS-REVISION-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（per-key token 单调 + etcd-revision CAS；回归见本 crate 单测）。
 #[derive(Clone, Default)]
 pub struct MemCasStore {
     state: Arc<Mutex<CasStateMap>>,
@@ -720,7 +720,7 @@ struct LockEntry {
 /// in-mem 分布式互斥锁替身（impl [`diport::LockStore`]）：per-key fencing token、token-as-capability 互斥。
 /// **无时钟**——`ttl` 入参被忽略（TTL 过期 / holder crash 由 [`MemLockStore::evict`] 显式模拟，照
 /// [`MemLeaseStore::evict`] 先例，不触 clippy disallowed-methods 系统时钟）。生产替身走 etcd/redis/consul
-/// adapter；本 crate 仅测试/demo 用。INVARIANT: DISTLOCK-FENCE-MONO-01（per-key token 单调 + 互斥；回归见本 crate 单测）。
+/// adapter；本 crate 仅测试/demo 用。INVARIANT: DISTLOCK-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（per-key token 单调 + 互斥；回归见本 crate 单测）。
 #[derive(Clone, Default)]
 pub struct MemLockStore {
     state: Arc<Mutex<HashMap<LockStoreKey, LockEntry>>>,
@@ -1626,7 +1626,7 @@ mod tests {
         assert_fenced_writer(PhantomData::<MemFencedWriter>);
     }
 
-    // ── MemCasStore 测试（INVARIANT: CAS-REVISION-MONO-01）──────────────────────────────────────────
+    // ── MemCasStore 测试（INVARIANT: CAS-REVISION-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）──────────────────────────────────────────
 
     /// 建空键 create-if-absent：expected=None → Applied{token=Epoch(1)}。
     #[tokio::test]
@@ -1947,7 +1947,7 @@ mod tests {
         assert_cas_store(PhantomData::<MemCasStore>);
     }
 
-    // ── MemLockStore 测试（INVARIANT: DISTLOCK-FENCE-MONO-01）────────────────────────────────────────
+    // ── MemLockStore 测试（INVARIANT: DISTLOCK-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）────────────────────────────────────────
 
     fn lock_ttl() -> Duration {
         Duration::from_secs(30)

@@ -43,7 +43,7 @@ impl MessageId {
 /// （`Debug` 恒 `<redacted>`、经 `as_bytes` 受控读取），故 struct `derive(Debug)` 即安全；`id`（路由）可观测；
 /// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
 ///
-/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01（payload 脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（payload 脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
 #[derive(Debug, Clone)]
 pub struct Message {
     /// 消息唯一标识。
@@ -87,7 +87,7 @@ pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 ///
 /// PII 边界（与 [`crate::PublisherError`] 同范式）：`Display` 仅安全摘要常量；source 经
 /// [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误
-/// 不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("subscription failed")]
 pub struct SubscriberError {
@@ -110,7 +110,7 @@ impl SubscriberError {
 /// 主题初始化失败（[`SubscribeInitializer`]）。
 ///
 /// source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——
-/// 原始错误不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 原始错误不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("subscribe initialize failed")]
 pub struct SubscribeInitError {
@@ -288,7 +288,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `Message.payload`（消息体，可能含 PII）字节 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
+    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
     use super::Message;
 
     #[test]

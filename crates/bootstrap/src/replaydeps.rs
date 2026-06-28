@@ -17,11 +17,11 @@
 //!   ResolvedIdempotency::Demo` 臂构造——**决策绑定纪律（Medium）**：`match` 把构造收束到已校验决策，
 //!   但 dev root 仍能直接绕过（类型层未封闭，dev-only 可接受）；非编译期 Hard。
 //!
-//! INVARIANT: TOPO-FAILCLOSED-01 —— durable 缺 Redis URL ⇒ [`resolve`] 返 `Err`，组合根
+//! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 Redis URL ⇒ [`resolve`] 返 `Err`，组合根
 //!   fail-fast 拒绝启动，**绝不静默降级回 demo/in-mem**（`Result` + bootstrap fail-fast，Medium；
 //!   类型层强化：`Durable` 路径无「降级回 Demo」可表达变体，唯一非 `Err` 输出是带 redis_url 的
 //!   `Durable`）。
-//! INVARIANT: TOPO-INMEM-SEAL-01 —— in-mem claimer **生产**不可达（生产 bin cargo-deny **Hard**，
+//! INVARIANT: TOPO-INMEM-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— in-mem claimer **生产**不可达（生产 bin cargo-deny **Hard**，
 //!   主守卫）；dev root 经决策 `match` 收束（Medium 纪律，非编译期封闭）。落地在组合根，非本 crate
 //!   （bootstrap 命名不到 in-mem 类型）。
 //!
@@ -118,7 +118,7 @@ pub enum IdempotencyResolveError {
 ///
 /// 注：幂等 claimer 是单一共享 Redis（无 per-domain 隔离），故两个 durable 变体都收敛为「需 redis」。
 ///
-/// INVARIANT: TOPO-FAILCLOSED-01（见模块 rustdoc）。
+/// INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（见模块 rustdoc）。
 pub fn resolve(
     topo: Topology,
     cfg: IdempotencyConfig,

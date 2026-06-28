@@ -68,7 +68,7 @@ pub trait ManagedResourceLocal {
 /// `Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed）。`secure::redact_error`
 /// funnel 取顶层 Display、不遍历 source 链；`bootstrap::ShutdownStack` 业务错误分支已采纳 `redact_error`
 /// 记录 redacted 顶层摘要。
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("resource shutdown failed")]
 pub struct ShutdownError {

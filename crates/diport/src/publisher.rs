@@ -31,7 +31,7 @@ pub enum PublishErrorKind {
 /// 脱敏。注意主语——`PublisherError::source()` 因 `#[source]` 返回 `Some(&RedactedSource)`（非 `None`），而
 /// **`RedactedSource` 自身**的 `Debug`/`Display` 固定 `<redacted>`、`RedactedSource::source()` 恒 `None`：
 /// 通用 source 链遍历在 `RedactedSource` 处终止于 `<redacted>`，原始错误不经任何 `Error` 接口暴露
-/// （fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// （fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("publish failed")]
 pub struct PublisherError {
@@ -310,7 +310,7 @@ mod metadata_carry {
 #[cfg(test)]
 mod pii_debug {
     //! `PublishRequest.payload`（事件序列化体，可能含 PII）字节 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
+    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
     use super::{MessageId, PublishRequest, Topic};
     use crate::envelope::{EnvelopeMetadata, KEY_SUBJECT_ID};
 

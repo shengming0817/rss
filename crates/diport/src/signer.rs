@@ -10,7 +10,7 @@ use crate::redacted_bytes::RedactedBytes;
 /// PII 边界（替代 `anyhow` 暴露在公共 port，与 [`crate::ShutdownError`] 同范式）：`Display` 仅输出
 /// provider 无关的安全摘要常量（不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display`
 /// 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed），
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
 #[derive(Debug, thiserror::Error)]
 #[error("signing failed")]
 pub struct SignerError {
@@ -67,7 +67,7 @@ impl SigningPurpose {
 /// （`Debug` / `Display` 恒 `<redacted>`、不展开原始字节——密码学物料不进 Debug / tracing），故 struct
 /// `derive(Debug)` 即安全：`Signature(<redacted>)`。
 ///
-/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01（脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（脱敏由 `RedactedBytes` 类型保证，回归见 `pii_debug` 单测）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature(RedactedBytes);
 
@@ -199,7 +199,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `SignRequest.message`（待签名体）/ `Signature`（密码学物料）字节 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（字节经 `RedactedBytes` 脱敏，对标 `primitives::crypto::{Mac,Digest,MacKey}` opaque Debug）。
+    //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（字节经 `RedactedBytes` 脱敏，对标 `primitives::crypto::{Mac,Digest,MacKey}` opaque Debug）。
     use super::{KeyId, SignRequest, Signature, SigningPurpose};
 
     #[test]

@@ -35,9 +35,9 @@
 //! `cargo-semver-checks`（轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒ `--workspace` 选 0 包、门
 //! 空转，故本轮不入 ci（public-api --check 已非空转兜轴 A）；待 crate 可发布后 follow-up 接入（见 PR body）。
 //!
-//! INVARIANT: VERIFY-AGGREGATE-01 —— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
-//! INVARIANT: VERIFY-TOOL-GATE-01 —— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: CI-PIPELINE-DELEGATE-01 —— azure-pipelines.yml 只调 `cargo xtask ci`、不逐条重列门 run
+//! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
+//! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
+//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— azure-pipelines.yml 只调 `cargo xtask ci`、不逐条重列门 run
 //!   命令（门逻辑单源在 xtask）；由 `azure_pipeline_delegates_to_xtask_ci` 治理测试守。
 
 use crate::diagnostic::run_check;
@@ -773,7 +773,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
 /// [`ci_plan`] 已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一 [`step_cargo_audit`] 构造。
 ///
-/// INVARIANT: CI-PIPELINE-DELEGATE-01 —— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
+/// INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
 /// 由 `azure_pipeline_has_scheduled_audit_lane` 守。
 fn audit_plan() -> Vec<Step> {
     vec![step_deny_advisories(), step_cargo_audit()]
@@ -2080,7 +2080,7 @@ mod tests {
     /// 故内嵌 nightly 版本）须含钉版 nightly `publicapi::PINNED_NIGHTLY`——**绑 `step_public_api()` 返回的真实
     /// install_hint 字段值**（非 verify.rs 源码全文）：install_hint 回退 rolling `nightly`（或漏随 const bump）
     /// 即 fail，且注释/其它字符串含 pin **不能**误满足（修复源码全文扫描的 anti-vacuity 盲区）。
-    /// INVARIANT: NIGHTLY-PIN-01.
+    /// INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "verify", source = "code" }.
     #[test]
     fn public_api_install_hint_pins_nightly() {
         let pin = crate::publicapi::PINNED_NIGHTLY;

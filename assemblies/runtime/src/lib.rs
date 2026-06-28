@@ -15,7 +15,7 @@
 //! `cargo xtask verify` 的 pdp-allow 计数门守逃生门用量）。`OidcProvider` 必填 `VerifierConfig` + `Box<dyn Clock>`
 //! ⇒ 无 key/clock 不可构造（编译期守）。
 //!
-//! INVARIANT: BINS-AUTH-SYNC-01 (Hard, #1309) — `bins/rss` + `bins/server` 均仅 `main.rs` 调
+//! INVARIANT: BINS-AUTH-SYNC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard, #1309) — `bins/rss` + `bins/server` 均仅 `main.rs` 调
 //! `runtime::run()`，组合根逻辑单一副本；auth wiring 一致性由「单一 `run()` 源」编译期保证，
 //! 原 xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 

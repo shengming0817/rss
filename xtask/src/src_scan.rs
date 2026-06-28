@@ -23,7 +23,7 @@ use anyhow::Result;
 /// - `xtask`：治理工具自身，含演示串，不扫。
 /// - `lints`：dylint crate 独立 workspace，不扫。
 ///
-/// INVARIANT: COMMAND-SYMMETRY-01 + PDP-ALLOW-CONFINE-01 的路径排除约定。
+/// INVARIANT: COMMAND-SYMMETRY-01 + PDP-ALLOW-CONFINE-01 { level = "Medium", exec = "verify", source = "code" }的路径排除约定。
 pub(crate) const SCAN_EXCLUDED_SEGMENTS: &[&str] = &["eventexec", "generated", "xtask", "lints"];
 
 /// 判断路径的末端目录段（`file_name()`）是否在显式排除列表中。

@@ -15,14 +15,14 @@
 //! 在 `RedactedSource` 处即终止于 `<redacted>`，**永不**到达原始 adapter 错误。脱敏边界是类型层 Hard
 //! 保证，不依赖「调用方不遍历 source 链」的运行期纪律。
 //!
-//! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（`Debug` / `Display` / `Error::source()` 均不暴露原始 source；
+//! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（`Debug` / `Display` / `Error::source()` 均不暴露原始 source；
 //! 回归见本模块 `redacted_source` 单测）。
 
 /// 包装 adapter 原始错误的脱敏 `#[source]` 字段。私有字段 + 受控构造（`new`），`Debug` / `Display` 恒
 /// `<redacted>`、不展开内层；`Error::source()` 恒 `None`——原始错误**不经任何 `Error` 接口暴露**（fail-closed）。
 ///
 /// 内层裸 `Box<dyn Error>` 是本 newtype 的**受控持有点**（脱敏边界本身）——`rss_diport_error_debug_redacted`
-/// lint（INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01）会标记 diport 内任何裸 Box source 字段，但对
+/// lint（INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）会标记 diport 内任何裸 Box source 字段，但对
 /// `RedactedSource` 自身**结构性豁免**（按 enclosing struct 名）：它正是该 lint 守护要采纳的「正确实现」，
 /// `Debug`/`Display` 已固定 `<redacted>`、不泄漏。结构性豁免避免在生产代码引入 `#[allow]` / cfg 噪声。
 ///
@@ -74,7 +74,7 @@ impl std::error::Error for RedactedSource {
 mod redacted_source {
     //! `RedactedSource` `Debug` / `Display` 不展开内层（adapter 原始错误可能携连接串 / 凭据），
     //! 且 `Error::source()` 恒 `None`——原始内层不经任何 `Error` 接口暴露（fail-closed）。
-    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01.
+    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::RedactedSource;
 
     fn secret() -> std::io::Error {

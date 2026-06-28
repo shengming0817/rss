@@ -56,7 +56,7 @@ const fn retention_meets_redelivery_floor(retain_seconds: u64) -> bool {
     retain_seconds > crate::outbox::max_redelivery_window_secs() as u64
 }
 
-/// # INVARIANT: INBOX-DEDUP-RETENTION-FLOOR-01
+/// # INVARIANT: INBOX-DEDUP-RETENTION-FLOOR-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// 两档守卫（NServiceBus 去重铁律：去重保留期必须 **严格大于** 最大重投窗口）共用单源谓词
 /// [`retention_meets_redelivery_floor`]（杜绝比较符漂移）：
@@ -296,7 +296,7 @@ impl IdempotencyStore for PgInboxStore {
 #[cfg(test)]
 mod sweep_smoke {
     //! `PgInboxSweeper: RetentionSweeper` 编译期冻结 + sweep 入口 fail-closed 守卫单测（免 PG，#327 review F1/F4）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-08 —— RetentionSweeper on PgInboxSweeper；去掉 impl 即编译失败（anti-vacuity）。
+    //! INVARIANT: ADAPTER-PORT-FREEZE-08 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— RetentionSweeper on PgInboxSweeper；去掉 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     use consistency::{EngineErrorKind, RetentionSweeper};

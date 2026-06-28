@@ -9,7 +9,7 @@
 //! 仅有形同 allow-all 的 policy 亦报错（`PolicyWeak`）。把 `docs/rules/tenancy.md` §RLS
 //! 「RLS policy shape 由 schema guard 检查」从规划落成机器门。
 //!
-//! INVARIANT: TENANCY-RLS-FORCE-01 —— tenant 表（含 tenant_id 列）必须同时具备：
+//! INVARIANT: TENANCY-RLS-FORCE-01 { level = "Medium", exec = "verify", source = "code" }—— tenant 表（含 tenant_id 列）必须同时具备：
 //!   ① `ALTER TABLE <t> ENABLE ROW LEVEL SECURITY`
 //!   ② `ALTER TABLE <t> FORCE ROW LEVEL SECURITY`
 //!   ③ 至少一条 `CREATE POLICY ... ON <t>`，且 policy 体 normalize 后含规范等值谓词

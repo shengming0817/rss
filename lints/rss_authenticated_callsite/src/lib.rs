@@ -2,7 +2,7 @@
 //! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据与审计 subject funnel 仅组合根可调用。
 //! `httpserve::Authenticated::new` 与 `authn::Principal::audit_subject` 仅 assembly / bin crate（组合根）可调用。
 //!
-//! INVARIANT: AUTH-EVIDENCE-MINT-01
+//! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据（INVARIANT AUTH-EVIDENCE-REQUIRE-01）：
 //! 请求携该 extension 即放行。它必须由组合根（assembly / bin）的验签桥在凭据校验通过后经外层 `.layer()`
@@ -53,7 +53,7 @@ dylint_linting::declare_late_lint! {
     /// ### Why is this bad?
     /// `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据，必须由组合根（assembly / bin crate）的验签桥
     /// 在凭据校验通过后构造并经外层 `.layer()` 注入。域 crate 直接 mint `Authenticated` 可伪造证据绕过鉴权。
-    /// INVARIANT: AUTH-EVIDENCE-MINT-01（与 AUTH-PLAN-MINT-01 同治理姿态）。
+    /// INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Medium", exec = "verify", source = "dylint" }（与 AUTH-PLAN-MINT-01 同治理姿态）。
     ///
     /// ### Known problems
     /// 仍 intraprocedural：allowlist crate 内 wrapper fn 被外部调用会**跨函数**洗白（跟踪 #1085）。

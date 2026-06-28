@@ -30,7 +30,7 @@ use crate::redacted::RedactedSource;
 /// 即安全。`Display` 仅 provider 无关安全摘要常量。`LimitExceeded` 的 `max_bytes` 是消费域设定的配置上界、**非 PII**，可观测。
 /// 需要 source 诊断时走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source 链），**不**裸 `.source()`。
 ///
-/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（source 经 `RedactedSource` 不暴露原始错误；回归见 `error_redaction` 单测）。
+/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（source 经 `RedactedSource` 不暴露原始错误；回归见 `error_redaction` 单测）。
 #[derive(Debug, thiserror::Error)]
 pub enum ObjectStoreError {
     /// provider 后端故障（不可用 / 权限 / 网络等）。原始错误内部保留，不进 `Display` / wire / source 链。
@@ -67,7 +67,7 @@ impl ObjectStoreError {
 /// PII 边界（**类型层 Hard**，对标 [`crate::Message`] 的 `payload` / [`ObjectStoreError`]）：key 可能内嵌租户 /
 /// 用户标识，`#[derive(secure::Redact)]` 只输出 `ObjectKey(<redacted>)`，使任意消费方的 `?key` /
 /// `{key:?}` 不泄漏原文（把 adapter 侧「不记录 key 原文」的 Soft 约定上移为通用类型层保证）。
-/// INVARIANT: DIPORT-OBJECTKEY-DEBUG-REDACT-01（回归见 `smoke::object_key_debug_redacts`）。
+/// INVARIANT: DIPORT-OBJECTKEY-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（回归见 `smoke::object_key_debug_redacts`）。
 ///
 /// `Clone`：dynosaur `dyn(box)` 派发要求方法签名无生命周期参数，故 key 取所有权 move 进各操作。
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
@@ -301,7 +301,7 @@ mod error_redaction {
     //! PII 边界回归：[`ObjectStoreError`] 的 `Debug` 必须**不**展开 `Backend` 内部 `source`——source 携密（如
     //! S3 endpoint / bucket / 凭据签名）时 `{err:?}` 不得泄漏。原消费侧 Soft 日志约定已上移为类型层 Hard。
     //! `LimitExceeded`（`max_bytes` 非 PII）则可见。
-    //! INVARIANT: DIPORT-OBJSTOREERR-DEBUG-REDACT-01
+    //! INVARIANT: DIPORT-OBJSTOREERR-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
     use super::ObjectStoreError;
 
     /// 模拟 S3 / network provider 错误：`Debug` 携 endpoint / 凭据（第三方 error 的 Debug 常含连接细节），

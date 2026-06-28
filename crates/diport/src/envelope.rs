@@ -11,7 +11,7 @@
 //! - **adapter 透传**（[`EnvelopeMetadata::insert_wire_pair`]）：relay 从 `outbox.metadata` 列 /
 //!   subscriber 从 broker header 逐对 rehydrate（含 reserved），来源已 sealed。`pub`（跨 crate adapter 须调），
 //!   调用站点由 dylint `rss_diport_envelope_reserved_writer` 限到 adapter / 组合根（Medium，
-//!   INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01）。
+//!   INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 //!
 //! **真正的 Hard 锚点在 emit 层**：域只经 [`crate::OutboxEmitter::emit`]（入参 [`crate::OutboxEnvelopeParts`]
 //! 无 reserved 槽）发事件，**永不**构造 wire envelope 的 reserved 面——wire 层 reserved 写仅是 relay /
@@ -112,7 +112,7 @@ impl EnvelopeMetadata {
     /// **adapter 透传写入口**——relay 从 `outbox.metadata` 列 / subscriber 从 broker header 逐对 rehydrate
     /// （含 reserved key，来源已 sealed）。仅 adapter / 组合根可调（Medium：dylint
     /// `rss_diport_envelope_reserved_writer` 限站点；真正 Hard 锚点在 emit 层，见模块 rustdoc）。
-    /// INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01.
+    /// INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     pub fn insert_wire_pair(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.0.insert(key.into(), value.into());
     }
@@ -120,7 +120,7 @@ impl EnvelopeMetadata {
 
 /// PII 边界（类型层，对标 [`crate::OutboxEnvelopeParts`]）：手写 `Debug` 对 `subjectId` / `principal`
 /// （opaque 主体，凭据级）值输出 `<redacted>`；`occurred_at` / `trace` / `correlation` 是路由 / 观测元数据，
-/// 可观测。INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
+/// 可观测。INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（回归见 `pii_debug` 单测）。
 impl std::fmt::Debug for EnvelopeMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut m = f.debug_map();
@@ -233,7 +233,7 @@ mod tests {
 #[cfg(test)]
 mod pii_debug {
     //! `EnvelopeMetadata` 的 `subjectId` / `principal`（opaque 主体）值 Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::{
         EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
     };

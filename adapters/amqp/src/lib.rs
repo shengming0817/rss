@@ -69,7 +69,7 @@ pub use fallback::{AmqpPublisher, AmqpSubscriber};
 mod smoke {
     //! build smoke：编译期断言 adapter 已 impl 冻结的 diport DI port（PhantomData 绑定检查，不构造、
     //! 不执行 body）。两种 build 都过——默认 fallback（`todo!()`）/ `integration` 真实 lapin impl。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-01 —— [`AmqpPublisher`] impl `Publisher`+`ManagedResource`、
+    //! INVARIANT: ADAPTER-PORT-FREEZE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— [`AmqpPublisher`] impl `Publisher`+`ManagedResource`、
     //! [`AmqpSubscriber`] impl `AckableSubscriber`+`ManagedResource`；去掉任一 impl 即编译失败（anti-vacuity）。
     //! `AmqpSubscriber` 不再 impl `Subscriber`（at-most-once 仅 MemBus）。
     use core::marker::PhantomData;

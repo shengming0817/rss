@@ -198,7 +198,7 @@ impl RoleBinding {
 /// 的 `g(r.sub, p.sub, r.dom)` 同时匹配 subject + domain，本函数对齐）；tenant 维度防跨租。两者均在函数体内**无条件**
 /// 强制——不依赖调用方预过滤 bindings（约定为 Soft，此处上移为 Hard 求值）。
 ///
-/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 — tenant 隔离：实现仅对 `binding.tenant() == principal.tenant()` 的
+/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— tenant 隔离：实现仅对 `binding.tenant() == principal.tenant()` 的
 /// `RoleBinding` 求值；`principal.tenant()` 为 `None`（Service/SuperAdmin 跨租场景）时返回 `Decision::Deny`
 /// （通用 RBAC 路径不放行跨租，跨租走独立管理面）。
 ///

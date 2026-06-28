@@ -1,33 +1,33 @@
 //! 契约元数据校验（规则集见下方执行顺序 + `Rule` 枚举单源）——`cargo xtask contract validate`。
 //!
-//! INVARIANT: CONTRACT-FANOUT-01 — schema 引用完整性 + kind→形态一致（R4/R5，含 saga step `outputSchema`）。
-//! INVARIANT: CONTRACT-FREEZE-01（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）、
+//! INVARIANT: CONTRACT-FANOUT-01 { level = "Medium", exec = "verify", source = "code" }— schema 引用完整性 + kind→形态一致（R4/R5，含 saga step `outputSchema`）。
+//! INVARIANT: CONTRACT-FREEZE-01 { level = "Medium", exec = "verify", source = "code" }（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）、
 //! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）、
 //! per-kind 字段（#1035）的 active 发布接线必填（R8）/ 跨 kind 卫生（R9）/ saga block 结构语义（R10）/
 //! active event 投递语义可兑现性（R11）。
-//! INVARIANT: SAGA-CONTRACT-01 — kind:saga 契约治理（docs/rules/saga.md §Governance）= R1（saga ⇒
+//! INVARIANT: SAGA-CONTRACT-01 { level = "Medium", exec = "verify", source = "code" }— kind:saga 契约治理（docs/rules/saga.md §Governance）= R1（saga ⇒
 //! consistencyLevel WorkflowEventual/L3）+ R10（非空 `[saga]` block：≥1 step、step name 合法非关键字 Rust
 //! 标识符且唯一、每步 outputSchema 非空；retry/timeout 非负 + compensationOrder=reverse 由 manifest.rs
 //! 类型层 Hard 守）。负用例见 R1/R10 synthetic reds；正用例 = `contracts/saga/billing` 经 validate 全过
 //! （Medium，CI 门，#1121）。
-//! INVARIANT: CONTRACT-IDUNIQ-01 — contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
+//! INVARIANT: CONTRACT-IDUNIQ-01 { level = "Medium", exec = "verify", source = "code" }— contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
 //! 依据 api-versioning.md：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
-//! INVARIANT: CONTRACT-TITLE-01 — declared schema（喂 codegen TypeSpace 的 request/response/payload）的
+//! INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "verify", source = "code" }— declared schema（喂 codegen TypeSpace 的 request/response/payload）的
 //! root 须有 string `title`（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部
 //! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
 //! title **未必**被 codegen 兜底（前者可能被合并 / 类型歧义、后者直接丢根类型，均非 compile error、非
 //! fail-closed）；本规则在 validate 阶段提供 fail-fast + 清晰诊断（早于 codegen）+ PascalCase 形态。
-//! INVARIANT: EVENT-ACTIVE-SUB-01 — `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
+//! INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code" }— `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
 //! active event 无 subscriber 即死事件，视为错误配置（#1120）。
-//! INVARIANT: CONTRACT-REDACTION-POLICY-01 — declared schema property 上的 `x-pii` / `x-redaction`
+//! INVARIANT: CONTRACT-REDACTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— declared schema property 上的 `x-pii` / `x-redaction`
 //! 是 generated 安全 `Debug` 的单源（R16）。遗留 `x-sensitive`、未知枚举、高风险字段未标注、
 //! `x-redaction=hash` 均 fail-closed。
-//! INVARIANT: CONTRACT-PROTECTION-POLICY-01 — declared schema 的 `x-protection`（at-rest 加密声明）+
+//! INVARIANT: CONTRACT-PROTECTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— declared schema 的 `x-protection`（at-rest 加密声明）+
 //! `x-at-rest`（持久化 opt-in）合法且完整（R17，#1468，ADR-011 D1b 声明层）。block 内部一致、AAD 维度
 //! 完整（D2）、deterministic/blindIndex 须 reason 且 aad 稳定子集（D4）、`x-at-rest` schema 高风险字段
 //! 须显式 `x-protection`、加密字段不得 nullable、blindIndex 只允许非 nullable scalar，均 fail-closed。
 //! 与 R16 observe redaction **正交不混用**（ADR-011 D1）。
-//! INVARIANT: CONTRACT-HTTP-SERVING-01 — active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
+//! INVARIANT: CONTRACT-HTTP-SERVING-01 { level = "Medium", exec = "verify", source = "code" }— active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
 //! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only header 或
 //! service-token MAC 绑定 header（R19）。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
@@ -104,7 +104,7 @@ pub(crate) enum Rule {
     SchemaTitle,
     /// R14：`lifecycle=active && kind=event` 的契约必须至少有一个 `[[subscriptions]]` 声明。
     ///
-    /// INVARIANT: EVENT-ACTIVE-SUB-01 — active event 契约无 subscriber 即"死事件"（发出无消费），
+    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code" }— active event 契约无 subscriber 即"死事件"（发出无消费），
     /// 视为错误配置（Medium，CI 门）。draft/deprecated 豁免（种子 / 前瞻 / 退役契约不受约束）。
     /// synthetic red：active event + 空 subscriptions → Finding；
     /// anti-vacuity：① active event + ≥1 subscription → 通过；② draft event + 空 subscriptions → 通过。
@@ -118,13 +118,13 @@ pub(crate) enum Rule {
     CommandConsistency,
     /// R16：schema property 的 `x-pii` / `x-redaction` 字段级策略须合法且完整。
     ///
-    /// INVARIANT: CONTRACT-REDACTION-POLICY-01 — generated wire DTO 的安全 `Debug` 从 contract JSON
+    /// INVARIANT: CONTRACT-REDACTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— generated wire DTO 的安全 `Debug` 从 contract JSON
     /// Schema 单源派生。遗留 `x-sensitive`、未知枚举、hash redaction、以及高风险字段未声明策略均拒绝。
     SchemaRedaction,
     /// R17：schema property 的 `x-protection`（at-rest storage 加密声明）+ schema 级 `x-at-rest`
     /// opt-in 须合法且完整。
     ///
-    /// INVARIANT: CONTRACT-PROTECTION-POLICY-01 — at-rest 加密声明面单源（#1468，ADR-011 D1b 声明层）。
+    /// INVARIANT: CONTRACT-PROTECTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— at-rest 加密声明面单源（#1468，ADR-011 D1b 声明层）。
     /// `x-protection` block 内部一致（atRest:encrypt 须 keyScope+完整 aad；deterministic/blindIndex 须
     /// reason 且 aad 稳定子集排除 schemaVersion；plain 不携带 encrypt 参数），`x-at-rest:true` 的 schema
     /// 内高风险字段缺 `x-protection` 均拒绝；encrypt 字段不得 nullable，blindIndex 仅支持非 nullable scalar。
@@ -143,13 +143,13 @@ pub(crate) enum Rule {
     /// generated `pub mod <slug_ident>`（见 codegen），须为合法 Rust 模块标识符前体（首 `a-z`、余 `[a-z0-9_-]`、
     /// 无首尾 `-`），杜绝坏值流入生成子模块名 / 路径。与 codegen 写盘前防逃逸守卫互为表里。
     ///
-    /// INVARIANT: CONTRACT-SLUG-SYNTAX-01 — 嵌套端点 slug 须为合法 module ident 前体（Medium，CI 门；authoring
+    /// INVARIANT: CONTRACT-SLUG-SYNTAX-01 { level = "Medium", exec = "verify", source = "code" }— 嵌套端点 slug 须为合法 module ident 前体（Medium，CI 门；authoring
     /// 上游闸门）；下游 codegen `slug_module_ident` 经 `syn::Ident` 自守（Hard），二者互为闭环 funnel。
     SlugSyntax,
     /// R21：同一 `{kind}/{domain}/{version}` 下扁平（直接 `contract.toml`，单契约）与嵌套（`<slug>/contract.toml`，
     /// 多契约）形态**不可混用**——混用使 generated `{domain}_{version}.rs` 既要裸常量又要子模块、语义二义。
     ///
-    /// INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 — 一个 `{domain}/{version}` 模块要么全扁平（恰一契约）、要么全嵌套
+    /// INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 { level = "Medium", exec = "verify", source = "code" }— 一个 `{domain}/{version}` 模块要么全扁平（恰一契约）、要么全嵌套
     /// （≥1 子契约），不得既含直接 `contract.toml` 又含子目录契约（Medium，CI 门）。跨契约规则（需 group 视图）。
     SlugMixing,
 }
@@ -188,7 +188,7 @@ fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
     out
 }
 
-/// R21：同 `{kind}/{domain}/{version}` 下扁平 / 嵌套形态不可混用（INVARIANT: CONTRACT-NEST-EXCLUSIVE-01）。
+/// R21：同 `{kind}/{domain}/{version}` 下扁平 / 嵌套形态不可混用（INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 { level = "Medium", exec = "verify", source = "code" }）。
 /// 按三段 group；某 group 同时含扁平契约（`slug=None`）与嵌套契约（`slug=Some`）即报（同根因 1 条）。
 /// synthetic red：version 目录直放 `contract.toml` 又含 `<slug>/contract.toml` → Finding；
 /// anti-vacuity：纯扁平（1×None）/ 纯嵌套（N×Some）group 均通过（见 `r21_*` 测试）。
@@ -217,7 +217,7 @@ fn rule_slug_mixing(contracts: &[DiscoveredContract]) -> Vec<Finding> {
         .collect()
 }
 
-/// R12：contract `id` 须跨全部契约全局唯一（INVARIANT: CONTRACT-IDUNIQ-01）。同根因（同一重复 id）
+/// R12：contract `id` 须跨全部契约全局唯一（INVARIANT: CONTRACT-IDUNIQ-01 { level = "Medium", exec = "verify", source = "code" }）。同根因（同一重复 id）
 /// 只报 1 条（subject = 该 id），detail 列全部冲突契约 label（排序，跨机确定性）。
 fn rule_duplicate_id(contracts: &[DiscoveredContract]) -> Vec<Finding> {
     let mut by_id: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -281,7 +281,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings
 }
 
-/// R20：嵌套 slug 段语法（INVARIANT: CONTRACT-SLUG-SYNTAX-01）。扁平契约（`slug=None`）豁免。
+/// R20：嵌套 slug 段语法（INVARIANT: CONTRACT-SLUG-SYNTAX-01 { level = "Medium", exec = "verify", source = "code" }）。扁平契约（`slug=None`）豁免。
 /// slug 经 kebab→snake 拼进 generated `pub mod <slug_ident>`，须为合法 module ident 前体。
 fn rule_slug_syntax(c: &DiscoveredContract, label: &str) -> Option<Finding> {
     let slug = c.slug.as_deref()?;
@@ -891,7 +891,7 @@ fn rule_active_subscriber(m: &ContractManifest, label: &str) -> Option<Finding> 
 }
 
 /// R13：每个喂 codegen TypeSpace 的 declared schema（`[schemas]` request/response/payload）的 `title`
-/// 须 PascalCase 且**契约内**唯一（INVARIANT: CONTRACT-TITLE-01）。title 是 typify 生成的 Rust 类型名
+/// 须 PascalCase 且**契约内**唯一（INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "verify", source = "code" }）。title 是 typify 生成的 Rust 类型名
 /// （顶层 + 嵌套对象都成类型）：非 PascalCase 产生非惯用类型名；契约内重复（一契约的全部 declared schema
 /// 喂同一 TypeSpace）产生类型冲突。
 ///
@@ -2492,7 +2492,7 @@ mod tests {
     // ── R14 ActiveSubscriber（EVENT-ACTIVE-SUB-01）────────────────────────
 
     /// synthetic red：active event + 空 subscriptions → 产生 ActiveSubscriber finding。
-    /// INVARIANT: EVENT-ACTIVE-SUB-01
+    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code" }
     #[test]
     fn r14_active_event_empty_subscriptions_rejected() {
         let mut m = manifest(

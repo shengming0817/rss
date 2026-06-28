@@ -9,7 +9,7 @@
 //! 同一 `E`——**不**要求 `E: From<sqlx::Error>`（域错误 `ConfigRepoError` 不依赖 sqlx，无法 impl `From`）。
 //! 这正是不直接复用 `PgStore::run_in_transaction`（要求 `E: From<sqlx::Error>`）的原因。
 //!
-//! # INVARIANT: OUTBOX-COTX-CONFIG-01
+//! # INVARIANT: OUTBOX-COTX-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! 业务写行与 outbox 行在**同一**事务内写入 → 共 commit / 共 rollback；业务写失败（含 CAS 冲突）⇒ 整事务
 //! 回滚 ⇒ outbox 行不落库（消除 write-without-event 窗口）。anti-vacuity 由集成测试守（正向 commit 两行皆在
@@ -35,7 +35,7 @@ use crate::outbox::{OutboxEnvelope, append_outbox};
 /// 经 `set_config` 参数化绑定（防注入）。非 `TenantId` 的裸字符串无法进入 funnel（Hard 收口，
 /// INVARIANT TENANCY-SETLOCAL-FUNNEL-01）。
 ///
-/// # INVARIANT: RLS-TENANT-SCOPE-READ-01
+/// # INVARIANT: RLS-TENANT-SCOPE-READ-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// sessions / config_entries / roles 三表所有读路径（`find` / `find_version` / `latest_version`）
 /// 经此 helper 注入 SET LOCAL，与 0009 迁移的 RLS policy `current_setting` 对齐；当前业务池可能以
@@ -78,7 +78,7 @@ where
 /// co-tx 写（[`co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）共享，
 /// 保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
-/// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01
+/// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// 这是 postgres 生产路径**唯一**注入 `rss.tenant_id` GUC 的位置——funnel 入参类型化为
 /// `vocab::TenantId`（Hard：裸 `&str` 无法进入），`set_config('rss.tenant_id', ..)` literal 仅此一处出现

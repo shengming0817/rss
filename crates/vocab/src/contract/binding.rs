@@ -7,7 +7,7 @@
 //! `pub const CONTRACT: ContractBinding`、golden 字节锁。domain 与 contract_id 收进**单一绑定值**——故二者
 //! 之间无法漂移（只有一个 `ContractBinding`，不存在两个独立可分别 author 的裸字段）。
 //!
-//! INVARIANT: CONTRACT-BINDING-FUNNEL-01（**Medium**）—— generated 的 `CONTRACT` 常量 domain/contract_id
+//! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**Medium**）—— generated 的 `CONTRACT` 常量 domain/contract_id
 //! 同源单一 manifest + golden 字节锁（`cargo xtask codegen --check`）：保证**派生常量**正确、不漂移。上游
 //! `xtask/contract/validate.rs` R7（`is_safe_segment` domain / `is_dotted_id` id 语法）+ R3（磁盘段 domain =
 //! manifest domain）背书 `from_static` 不在运行期重校验。
@@ -21,7 +21,7 @@
 ///
 /// 预期生产 mint 经 [`ContractBinding::from_static`]（`cargo xtask codegen` 从 `contract.toml` 派生为
 /// `CONTRACT` 常量 + golden 锁）；但 `from_static` 是普通 `pub` 构造器、非 Hard seal（业务伪造面 residual，
-/// 同 `ContractOwner::of_domain`，#1327 / #1091）。INVARIANT: CONTRACT-BINDING-FUNNEL-01（Medium，见 mod doc）。
+/// 同 `ContractOwner::of_domain`，#1327 / #1091）。INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（Medium，见 mod doc）。
 ///
 /// 仅持 `&'static str`（绑定值来自 codegen 字面量 / 测试字面量，无运行期 mint）⇒ `Copy` + 全 `const fn`
 /// accessor：消费方可在 const 上下文复用（如域 crate `const DOMAIN = CONTRACT.domain();` 单源 tracing 标签）。

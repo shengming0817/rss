@@ -9,7 +9,7 @@
 //! D4 deterministic 稳定子集）。本模块只做 schema 内容校验与漂移比对（Medium）；遍历范式镜像 `redaction.rs`
 //! （同形递归，刻意不抽共享 walker 以保两面正交）。
 //!
-//! INVARIANT: CONTRACT-PROTECTION-POLICY-01 — `x-protection`/`x-at-rest` 声明合法且完整（消费见 validate.rs R17）。
+//! INVARIANT: CONTRACT-PROTECTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— `x-protection`/`x-at-rest` 声明合法且完整（消费见 validate.rs R17）。
 //! validate 与 breaking 同形遍历 `properties`/`patternProperties`/`items`/`$defs`/oneOf... 子 schema 容器，两路径对称。
 
 use super::redaction::is_high_risk_field;

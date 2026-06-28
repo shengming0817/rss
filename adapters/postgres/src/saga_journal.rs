@@ -136,7 +136,7 @@ impl std::error::Error for InvariantError {}
 #[cfg(test)]
 mod smoke {
     //! 编译期类型证明：`PgSagaJournal: SagaJournal`（via trait bound）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-08 —— SagaJournal on PgSagaJournal；
+    //! INVARIANT: ADAPTER-PORT-FREEZE-08 { level = "Medium", exec = "manual/opt-in", source = "code" }—— SagaJournal on PgSagaJournal；
     //! 去掉 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

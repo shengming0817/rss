@@ -139,7 +139,7 @@ impl SecurityHeaders {
 /// 以 [`Default`] 安全值初始化；组合根可经 [`crate::routes::AuthenticatedRoutes::with_edge_hardening`]
 /// 覆盖（如调整 `body_limit` 或关闭 HSTS）。
 ///
-/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01——`EdgeHardening` 经 `sealed_router` 唯一 funnel 叠层，
+/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }——`EdgeHardening` 经 `sealed_router` 唯一 funnel 叠层，
 /// 保证每个 bindable router 都带 body-limit 且 outer 于 auth（结构性 Hard：不经 sealed_router 无法 bind）。
 #[derive(Clone, Debug, Default)]
 pub struct EdgeHardening {

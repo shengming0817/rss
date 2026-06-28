@@ -27,7 +27,7 @@ use crate::redacted::RedactedSource;
 /// source 可能携网络细节，如 Redis URL）：`RedactedSource::source()` 恒 `None`，原始 source **不经标准
 /// `Error` 链暴露**（fail-closed）；安全摘要走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source 链）。
 ///
-/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（source 经 `RedactedSource` 脱敏；回归见 `redacted.rs`
+/// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（source 经 `RedactedSource` 脱敏；回归见 `redacted.rs`
 /// `redacted_source` 单测）。
 #[derive(Debug, thiserror::Error)]
 #[error("rate limit check failed")]
@@ -171,7 +171,7 @@ mod smoke_error {
     //! `RateLimitError` wrapper 集成 `RedactedSource` 冒烟：Display 为常量安全摘要，source() 首层 =
     //! `RedactedSource`（其自身 `source()` 恒 `None`，fail-closed）。
     //! `Debug` / `Display` 不展开 source 回归见 `redacted.rs` `redacted_source` 单测
-    //! （INVARIANT: DIPORT-ERR-SOURCE-REDACT-01）。
+    //! （INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     use super::RateLimitError;
 
     #[test]
@@ -194,7 +194,7 @@ mod smoke_error {
 #[cfg(test)]
 mod pii_debug {
     //! `RateLimitKey` Debug 脱敏回归：key 可能含 per-principal 标识（email / sub / route）。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01.
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::RateLimitKey;
 
     #[test]

@@ -6,7 +6,7 @@
 //! adapters，consistency 只冻类型 + 策略接缝。
 //! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
 //!
-//! # INVARIANT: OUTBOX-ENGINE-PORT-01
+//! # INVARIANT: OUTBOX-ENGINE-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! `OutboxRelay`/`OutboxSource`/`RetentionSweeper`/`OutboxBacklog` 是**引擎策略接缝**（签名引 `Entry`/
 //! `Disposition`/`BacklogSample`/`EngineError` 等 consistency 内部类型），按 ADR-005 category line **不能**在
@@ -84,7 +84,7 @@ impl PermanentError {
 /// literal（来自 `EngineErrorKind`/`PermanentErrorKind::message()`，无 runtime 数据）⇒ PII-safe，对齐
 /// `diport::DeadLetterSummary` 的 const 收口（DIPORT-DLX-SUMMARY-STATIC-01）。
 ///
-/// # INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01
+/// # INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// `error_summary` 只能取 `*ErrorKind::message()` 的 `&'static str` const（reject/requeue 构造器内单源填入，
 /// ack 为 `None`）——类型层杜绝 runtime `String` 入摘要（PII-safe，Hard）。
@@ -314,7 +314,7 @@ pub trait OutboxSource {
     ///
     /// 若 adapter 走分区串行投递，须在此实现 head-of-partition gating：同 `(domain, partition_key)` 仅放行
     /// min(seq) 的队头行，确保同 partition 内严格按 seq 顺序投递。参见
-    /// `INVARIANT: OUTBOX-PARTITION-ORDER-01`（定义在 adapter impl，`adapters/postgres/src/outbox.rs`
+    /// `INVARIANT: OUTBOX-PARTITION-ORDER-01` { level = "Medium", exec = "manual/opt-in", source = "code" }（定义在 adapter impl，`adapters/postgres/src/outbox.rs`
     /// `OutboxSource for PgOutbox`）。
     async fn poll_pending(
         &self,
@@ -476,7 +476,7 @@ mod tests {
 
     // reject/requeue 把 error kind 的 const message 捕获进 error_summary（#1125）；ack 无 error → None。
     // 摘要恒 `&'static str` const（来自 *ErrorKind::message()），无 runtime 数据 ⇒ PII-safe。
-    // INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01
+    // INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
     #[test]
     fn handle_result_carries_error_summary() {
         // ack 无 error → None。

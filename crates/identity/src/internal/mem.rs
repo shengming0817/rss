@@ -125,7 +125,7 @@ impl CredentialRepo for InMemCredentialRepo {
     ) -> Result<AuthOutcome, IdentityError> {
         // 恒定成本验签（F3）：先克隆出 (hash, user_id) 释放 creds 锁，经 secure::verify_password_constant_time——
         // 查无凭据也跑等价 argon2 KDF，消登录枚举时序差。再据「已知/未知」+「验签成败」原子分流（F1+F2）。
-        // INVARIANT: MEM-LOCK-ORDER-01 — creds 锁与 lockouts 锁**不交叉持有**：creds guard 在下方 `.map()`
+        // INVARIANT: MEM-LOCK-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— creds 锁与 lockouts 锁**不交叉持有**：creds guard 在下方 `.map()`
         // 临时表达式结束即析构释放，KDF 在两锁之外计算，之后才取 lockouts 锁。重构勿引入同时持两锁（防死锁）。
         let key = (tenant, login);
         let found = recover(&self.creds)

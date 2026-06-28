@@ -1,6 +1,6 @@
 //! 契约 schema → committed `generated/` 派生码（typify → prettyplease → rustfmt）。
 //!
-//! INVARIANT: CODEGEN-DRIFT-01 — committed `generated/src/**` 与 `contracts/` 的派生结果字节一致、
+//! INVARIANT: CODEGEN-DRIFT-01 { level = "Medium", exec = "verify", source = "code" }— committed `generated/src/**` 与 `contracts/` 的派生结果字节一致、
 //! 且无孤儿文件（删契约残留）。Medium（CI 门，`cargo xtask codegen --check`）。
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
@@ -786,7 +786,7 @@ fn serde_rename(field: &syn::Field) -> Option<String> {
 /// `derivable_impls` 判其等价于 `#[derive(Default)]`。committed generated 勿手改（`codegen --check` 守）+
 /// 章程禁 module/crate-level allow ⇒ codegen 注入 **item-level** `#[allow(clippy::derivable_impls)]` 到每个
 /// `impl Default` 块（与 [`strip_sensitive_debug`] 同款 syn 后处理，单源在 codegen，输出由 golden 锁）。
-/// `INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01`。
+/// `INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01` { level = "Medium", exec = "verify", source = "code" }。
 fn allow_derivable_default_impls(file: &mut syn::File) {
     for item in &mut file.items {
         let syn::Item::Impl(imp) = item else {
@@ -810,7 +810,7 @@ fn allow_derivable_default_impls(file: &mut syn::File) {
 /// 无法感知 const 语义，会误报。章程禁 module-level allow ⇒ codegen 注入 **item-level**
 /// `#[allow(clippy::unwrap_used)]` 到 `defaults` 模块内的每个 `fn`（与 `allow_derivable_default_impls`
 /// 同款 syn 后处理，单源在 codegen，输出由 golden 锁）。
-/// `INVARIANT: CODEGEN-DEFAULTS-UNWRAP-ALLOW-01`。
+/// `INVARIANT: CODEGEN-DEFAULTS-UNWRAP-ALLOW-01` { level = "Medium", exec = "verify", source = "code" }。
 fn allow_unwrap_in_defaults_mod(file: &mut syn::File) {
     for item in &mut file.items {
         let syn::Item::Mod(module) = item else {
@@ -1774,7 +1774,7 @@ mod tests {
     ///
     /// anti-vacuity：无 subscriptions 的 draft event 仍生成空 SUBSCRIPTIONS 切片 + CONTRACT_ID / TOPIC（正向对照）。
     ///
-    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 —— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
+    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
     /// 同源派生（domain 取自 manifest 而非 id 前缀；`from_static("_seed", "seed.happened")`），golden 锁。
     #[test]
     fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
@@ -1826,7 +1826,7 @@ mod tests {
 
     /// event 无 subscriptions（draft）→ SUBSCRIPTIONS 为空切片，CONTRACT_ID / TOPIC 仍存在（anti-vacuity）。
     ///
-    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 —— draft event 亦发射 `CONTRACT` 绑定常量（正向对照）。
+    /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— draft event 亦发射 `CONTRACT` 绑定常量（正向对照）。
     #[test]
     fn event_glue_empty_subscriptions_draft() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_glue_empty");
@@ -1935,7 +1935,7 @@ mod tests {
     ///   `#[allow(clippy::derivable_impls)]`。
     /// - 负向控制：`impl SomethingElse for Foo {}` 不被注入该 allow 属性。
     ///
-    /// INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01（anti-vacuity，Medium）。
+    /// INVARIANT: CODEGEN-DERIVABLE-DEFAULT-ALLOW-01 { level = "Medium", exec = "verify", source = "code" }（anti-vacuity，Medium）。
     #[test]
     fn allow_derivable_default_impls_injects_only_default_impls() -> anyhow::Result<()> {
         // 构造包含 impl Default 和 impl SomethingElse 的 syn::File。

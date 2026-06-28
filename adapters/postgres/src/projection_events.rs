@@ -197,7 +197,7 @@ impl ProjectionEvent for PgProjectionRecord {
 /// `PgProjectionEvents` 是串行有序 source：`read_from` 以 `ORDER BY id ASC` 全局单调序逐行交付，
 /// 满足 [`PartitionSerialDelivery`] 契约（消费方按此 bound 铸造 `SerialInOrder` witness）。
 ///
-/// INVARIANT: ADAPTER-PORT-FREEZE-14 —— PartitionSerialDelivery on PgProjectionEvents；
+/// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionEvents；
 /// 去掉 impl 或 read_from 改为非顺序查询即编译失败（smoke 测试 anti-vacuity）。
 impl PartitionSerialDelivery for PgProjectionEvents {}
 
@@ -207,7 +207,7 @@ impl PartitionSerialDelivery for PgProjectionEvents {}
 ///
 /// PII 边界（对标 [`diport::SagaJournalError`] 范式）：`Display` 仅安全摘要常量；source 经
 /// [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`）。
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("projection_events operation failed")]
 pub struct ProjectionEventsError {
@@ -248,7 +248,7 @@ impl std::error::Error for InvariantError {}
 #[cfg(test)]
 mod smoke {
     //! 编译期类型证明：`PgProjectionRecord: ProjectionEvent`（via trait bound）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-13 —— ProjectionEvent on PgProjectionRecord；
+    //! INVARIANT: ADAPTER-PORT-FREEZE-13 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ProjectionEvent on PgProjectionRecord；
     //! 去掉 impl 即编译失败（anti-vacuity）。
 
     use core::marker::PhantomData;
@@ -262,7 +262,7 @@ mod smoke {
         assert_projection_event(PhantomData::<super::PgProjectionRecord>);
     }
 
-    /// INVARIANT: ADAPTER-PORT-FREEZE-14 —— PartitionSerialDelivery on PgProjectionEvents；
+    /// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionEvents；
     /// 去掉 impl 即编译失败（smoke anti-vacuity）。
     fn _assert_partition_serial<T: PartitionSerialDelivery>() {}
 

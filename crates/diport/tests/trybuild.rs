@@ -7,8 +7,7 @@
 //! - fail（arc-not-send）：**全部** async port 的 `Arc<DynX>: !Send`（dynosaur Send 变体非 Sync），锁 #1095
 //!   注入形态收口决策——多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`（anti-vacuity：改 Send+Sync 即破）。
 //!
-//! INVARIANT: DIPORT-DYN-COMPAT-01 · DIPORT-UNSAFE-HYGIENE-01 · DIPORT-ASYNC-ARC-SEND-01
-
+//! INVARIANT: DIPORT-DYN-COMPAT-01 · DIPORT-UNSAFE-HYGIENE-01 · DIPORT-ASYNC-ARC-SEND-01 { level = "Hard", exec = "verify", source = "trybuild" }
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();

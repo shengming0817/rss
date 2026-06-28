@@ -3,11 +3,11 @@
 //! `Box<dyn std::error::Error + Send + Sync + 'static>` source 字段；改用 `diport::RedactedSource`
 //! newtype（`Debug`/`Display` 恒 `<redacted>`，不展开内层）。
 //!
-//! INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01
+//! INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
 //! - 上游（Hard，`diport` 内）：`RedactedSource` 的 `Debug`/`Display` 实现**强制脱敏**——
-//!   类型系统保证，不可绕过（INVARIANT: DIPORT-ERR-SOURCE-REDACT-01，`crates/diport/src/redacted.rs`）。
+//!   类型系统保证，不可绕过（INVARIANT: DIPORT-ERR-SOURCE-REDACT-01， { level = "Medium", exec = "verify", source = "dylint" }`crates/diport/src/redacted.rs`）。
 //! - 下游（本 lint，Medium）：守「受守护 crate error struct 的 source 字段必须使用 RedactedSource，
 //!   不得持裸 `Box<dyn Error>`」——消费方的字段类型是命名 ADT `RedactedSource`（非 `Box<dyn Error>`
 //!   trait-object 字段），天然不命中；canonical `diport::redacted::RedactedSource`
@@ -56,7 +56,7 @@ dylint_linting::declare_late_lint! {
     /// 原始错误（redis URL、凭据、网络地址）可能经此泄入日志（PII 边界问题）。
     /// 上游 `RedactedSource` 已用类型系统（Hard）保证 `Debug`/`Display` 恒 `<redacted>`；
     /// 本 lint 作为下游 Medium gate，确保受守护 error struct 确实采纳该 newtype。
-    /// INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01。
+    /// INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]`

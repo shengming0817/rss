@@ -2,7 +2,7 @@
 //! `rss_redact_debug_required` — RSS 治理 dylint lint：高风险敏感 DTO 禁止裸
 //! `#[derive(Debug)]`，必须改用 `#[derive(secure::Redact)]` 字段级脱敏。
 //!
-//! INVARIANT: REDACT-DEBUG-REQUIRED-01
+//! INVARIANT: REDACT-DEBUG-REQUIRED-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! 守护范围是 issue #1359 本轮迁移的高风险 `(crate, type)`：`diport::AuditEvent`、
 //! `identity::RoleBinding`/`Session`/`SessionId`、`runctx::RequestCtx`、

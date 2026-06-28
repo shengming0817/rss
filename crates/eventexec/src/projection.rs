@@ -64,7 +64,7 @@ pub enum ProjectionStop {
     /// 的实际顺序由此守：遇到 `lsn < 前一已处理 lsn` 即停，乱序事件**不 apply、不推进 checkpoint**
     /// 越过它（已成功前缀的 high-water 保留）。这把 witness 的「串行有序」声明从构造期延伸到 apply 期，
     /// 使非串行 source（伪造 witness 或乱序拼 slice）无法静默乱序投影（F1，#1211 review）。
-    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01（运行期半段）。
+    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（运行期半段）。
     OutOfOrder {
         /// 首个乱序事件的 lsn。
         failed_at: Lsn,
@@ -102,7 +102,7 @@ where
     ///
     /// `_guarantor` 是串行有序 witness（[`consistency::SerialInOrderGuarantor`]）：非串行投递路径拿不到
     /// 此 witness ⇒ **编译期**挂不上 projection（fail-closed by absence，
-    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01）。witness 是 ZST，不占运行期成本（不存入 struct 字段，
+    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）。witness 是 ZST，不占运行期成本（不存入 struct 字段，
     /// `run()` 签名不变）。唯一获取入口是 [`consistency::SerialInOrder::from_source`]，须传一个
     /// [`consistency::PartitionSerialDelivery`] source——非串行投递路径无该 impl ⇒ 编译期拒绝。
     ///

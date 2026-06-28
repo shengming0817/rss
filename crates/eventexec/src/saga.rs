@@ -183,7 +183,7 @@ pub trait SagaActionFactory: Send + Sync {
 }
 
 /// 补偿失败安全摘要（`&'static str` const literal；进 journal `Failed` 行 + DLX 摘要 + tracing，不携 runtime
-/// 数据，INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01）。
+/// 数据，INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 const SAGA_COMPENSATION_FAILED: &str = "saga compensation step failed";
 
 /// resume 未知 saga（空 journal）占位 failed_node。

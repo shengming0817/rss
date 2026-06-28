@@ -11,7 +11,7 @@
 //! 不阻断字节本身的程序化访问。对标 `secrecy::SecretBox`（redacted `Debug` `[REDACTED]` + `ExposeSecret::expose_secret`
 //! 受控访问）。ref: secrecy secrecy/src/lib.rs@main。
 //!
-//! INVARIANT: DIPORT-DTO-BYTES-REDACT-01（`Debug` / `Display` 均不展开原始字节；下游
+//! INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（`Debug` / `Display` 均不展开原始字节；下游
 //! `rss_diport_dto_debug_redacted` lint（DIPORT-DTO-RAWBYTES-BAN-01）守 diport 内裸字节字段必须采纳本 newtype；
 //! 回归见本模块 `redacted_bytes` 单测）。
 
@@ -20,7 +20,7 @@
 /// （与 [`crate::RedactedSource`] 的 write-only 不同——payload 需被 adapter 合法收发）。
 ///
 /// 内层 `Vec<u8>` 是本 newtype 的**受控持有点**（脱敏边界本身）——`rss_diport_dto_debug_redacted` lint
-/// （INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01）会标记 diport 内任何裸字节字段，但对 `RedactedBytes` 自身
+/// （INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）会标记 diport 内任何裸字节字段，但对 `RedactedBytes` 自身
 /// **结构性豁免**（按 enclosing struct 名）：它正是该 lint 守护要采纳的「正确实现」，`Debug` / `Display` 已固定脱敏。
 // pub（非 pub(crate)）：`pub struct` DTO（如 `pub struct SignRequest { pub message: ... }`、`pub struct
 // Signature(...)`）的 pub 字段须持 public 类型，否则「more private than item」privacy leak。re-export 于
@@ -81,7 +81,7 @@ impl std::fmt::Display for RedactedBytes {
 #[cfg(test)]
 mod redaction {
     //! `RedactedBytes` `Debug` / `Display` 不展开内层字节（payload 可能携敏感物料），但经 `as_bytes` /
-    //! `into_bytes` 受控可读（provider 收发 payload）。INVARIANT: DIPORT-DTO-BYTES-REDACT-01.
+    //! `into_bytes` 受控可读（provider 收发 payload）。INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::RedactedBytes;
 
     // 含 0xDE 字节：裸 `Vec<u8>` 的 `Debug` 把 0xDE 渲染成 "222"（十进制），redacted 后必不含。

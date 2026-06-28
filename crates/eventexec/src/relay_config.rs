@@ -4,7 +4,7 @@
 //! `#[non_exhaustive]` thiserror + 私有字段 + accessor）；这些是**构造期配置校验**错误，非 wire 错误，
 //! 故不进 `vocab` ERR_ 命名空间。
 //!
-//! # INVARIANT: RELAY-CONFIG-01
+//! # INVARIANT: RELAY-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! `relay_loop` / `backlog_sampler_loop` 只接 [`RelayConfig`]（非裸 `Duration`/`usize`/`Vec<String>`）；
 //! 私有字段 + 唯一 [`RelayConfig::new`] funnel ⇒ **未校验的 config 不可表达**（构造器 funnel +
@@ -14,7 +14,7 @@
 //! grammar 单源）逐个校验 + 去重，同时 515 住 metrics `domain` label 基数（#1076 对齐：domain label 值集由
 //! config funnel——typed `DomainName` + 数量/去重——而非编译期枚举封边，因 domain 是 runtime 配置）。
 //!
-//! # INVARIANT: SWEEPER-CONFIG-01
+//! # INVARIANT: SWEEPER-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
 //! `sweeper_loop` 只接 [`SweeperConfig`]；同 funnel 拒 `sweep_interval=0`（同热轮询风险）与
 //! `retain_seconds=0`（删除 just-published 行）。

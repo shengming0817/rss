@@ -2,7 +2,7 @@
 //! ecdsa / HS256 = hmac+sha2 常数时间）→ claim 校验（[`crate::claims`]）→ `VerifiedClaims`。失败 fail-closed
 //! 归类 [`PdpError`]，PII 边界：只记 reason 闭值标签 + keys_tried 计数，**绝不**记 token / 签名 / claim 值。
 //!
-//! 路径隔离（INVARIANT: OIDC-ALG-KEYPATH-01，防 alg-confusion）：JWT scheme 只走 ES256 + ES256 key 集；
+//! 路径隔离（INVARIANT: OIDC-ALG-KEYPATH-01， { level = "Medium", exec = "manual/opt-in", source = "code" }防 alg-confusion）：JWT scheme 只走 ES256 + ES256 key 集；
 //! ServiceToken scheme 只走 HS256 + HS256 key 集。token header `alg` 必须匹配 scheme 选定路径的算法，否则
 //! `Untrusted`（杜绝攻击者把 HS256 token 拿 ES256 公钥当 HMAC 密钥伪造、或反之）。
 //!

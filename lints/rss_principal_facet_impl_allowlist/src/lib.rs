@@ -2,7 +2,7 @@
 //! `rss_principal_facet_impl_allowlist` — RSS 治理 dylint lint：`runctx::PrincipalFacet` 仅
 //! `authn`（+ 定义 crate `runctx` 的 test facet）可 impl（impl-site caller-crate allowlist）。
 //!
-//! INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01
+//! INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! `runctx::AppCtx` 的 principal payload 是 `Arc<dyn PrincipalFacet>`——authn 的已验证 `Principal` 经
 //! trait 擦除注入。「只有 authn 能 impl `PrincipalFacet`」是 `AppCtx` 生产**伪造门**：外部 crate impl 不了
@@ -67,7 +67,7 @@ dylint_linting::declare_late_lint! {
     /// 造出合法 principal payload、进而构造 `AppCtx`。若域 / 服务 / adapter crate 也能 impl facet，就能伪造
     /// 任意 tenant/principal 的 `AppCtx`、绕过 RLS / ABAC 越权。跨 crate「只有 authn 能 impl」类型层不可表达
     /// （sealed-trait 跨 crate 不可行，ADR-003 §4.2），故由本 AST lint 承载（Medium，最强可用载体）。
-    /// INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01。
+    /// INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]` 子树

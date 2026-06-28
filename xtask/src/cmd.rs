@@ -25,9 +25,9 @@
 //! ref: Enselic/cargo-public-api rustdoc-json/src/builder.rs cargo_rustdoc_command()@main
 //! ref: rust-lang/rustup doc/user-guide/src/overrides.md@main（toolchain 优先级表）
 //!
-//! INVARIANT: CMD-ENV-CLEAN-01 —— [`clean_cmd`] 构造的子进程恒先 `env_remove`([`STRIPPED_ENV`]) 再
+//! INVARIANT: CMD-ENV-CLEAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— [`clean_cmd`] 构造的子进程恒先 `env_remove`([`STRIPPED_ENV`]) 再
 //!   set 显式 env（显式 env 是该步该变量的唯一来源）。
-//! INVARIANT: CMD-FUNNEL-01 —— `xtask/src` 内 `Command::new(...)` 的**唯一合法构造点** = 本 `cmd.rs`
+//! INVARIANT: CMD-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `xtask/src` 内 `Command::new(...)` 的**唯一合法构造点** = 本 `cmd.rs`
 //!   的 [`clean_cmd`]；其余子进程一律须经 [`clean_cmd`]。**上游**：[`clean_cmd`] 是唯一 sanctioned 构造
 //!   点（`pub(crate)`，外部 crate 无法 `use` 绕过）；**下游**：governance 测试用 `syn` AST 扫描
 //!   `xtask/src` 每个 `.rs`（**含 cmd.rs 本体**，不豁免整文件），统计 `Command::new` 调用表达式——
@@ -69,7 +69,7 @@ pub(crate) const STRIPPED_ENV: &[&str] = &[
 ///
 /// 新增工具步：构造 cargo / rustfmt 等子进程**仅用本函数**，勿裸 `Command::new`（CMD-FUNNEL-01 守）。
 ///
-/// INVARIANT: CMD-ENV-CLEAN-01.
+/// INVARIANT: CMD-ENV-CLEAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
 pub(crate) fn clean_cmd(
     program: &str,
     args: &[&str],
@@ -112,7 +112,7 @@ mod tests {
 
     /// `clean_cmd` 须设对 program/cwd、`env_remove` 全部 ambient toolchain/flag 变量（`get_envs()`
     /// value=None）、显式 `env` 在清洗后重设为该变量唯一来源。rstest 参数化覆盖 cargo / rustfmt 两类
-    /// program（漏斗对二者同构）。INVARIANT: CMD-ENV-CLEAN-01.
+    /// program（漏斗对二者同构）。INVARIANT: CMD-ENV-CLEAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     #[rstest]
     #[case("cargo")]
     #[case("rustfmt")]
@@ -259,7 +259,7 @@ mod tests {
 
     /// CMD-FUNNEL-01 真实绿例：`xtask/src` 每个 `.rs` 的 `Command::new` 调用数 = 唯一合法点
     /// （cmd.rs 恰 1 = clean_cmd，其它文件 0）；且确扫到多个 `.rs`（非空 anti-vacuity）。
-    /// INVARIANT: CMD-FUNNEL-01.
+    /// INVARIANT: CMD-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     #[test]
     fn subprocess_funnel_only_sanctioned_command_new() -> anyhow::Result<()> {
         let xtask_src = crate::workspace_root()?.join("xtask").join("src");

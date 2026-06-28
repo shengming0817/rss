@@ -8,7 +8,7 @@
 //!
 //! # 不变式
 //!
-//! - **INVARIANT: WIRING-DEPS-NO-HANDOFF-01（Hard，签名强制）**：域接线函数签名为
+//! - **INVARIANT: WIRING-DEPS-NO-HANDOFF-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard，签名强制）**：域接线函数签名为
 //!   `wire_X(deps: &SharedRuntimeDeps) -> anyhow::Result<bootstrap::DomainModuleResult>`——只收
 //!   `&SharedRuntimeDeps`，无参数可塞别域的 `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达
 //!   （type-system 一档载体）。
@@ -35,7 +35,7 @@ use vault::VaultRuntimeDeps;
 /// 物理可命名域 service 类型，新增 `pub settings: SettingsService` 字段在类型层不会被拒，仅靠 review 约定守（Soft）。
 /// 按 `ai-robust.md` 新增 enforcement 不得停留 Soft，故此处**不**声明为现行 INVARIANT / 架构规则；升 Medium 机器门
 /// （`cargo xtask` / `dylint` 字段类型扫描断言 infra crate 白名单、禁域 crate + synthetic red + 接入 `verify`）见
-/// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` 收口。
+/// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` { level = "Medium", exec = "manual/opt-in", source = "code" }收口。
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
     /// 共享 postgres capability bundle；各域经 `for_domain::<caps::X>()` 投影受控 durable 能力句柄。

@@ -2,7 +2,7 @@
 //! `rss_spawn_missing_scope` — RSS G0.4 治理 dylint lint：拦截 `tokio::spawn` / `spawn_blocking`
 //! 出的子任务体内读 `runctx::try_with`/`try_current`，却未在外层 `runctx::scope(...)` 重绑 ctx。
 //!
-//! INVARIANT: SPAWN-CTX-REBIND-01
+//! INVARIANT: SPAWN-CTX-REBIND-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! `tokio::spawn`/`spawn_blocking`/`std::thread` 不继承 `task_local`（ADR-002 §范式 spawn 传播）。
 //! 子任务读 ctx 前必须「捕获-重绑」：`let ctx = try_current()?; spawn(scope(ctx, async {…}))`。
@@ -33,7 +33,7 @@ dylint_linting::declare_late_lint! {
     /// `tokio::spawn`/`spawn_blocking` 出的子任务**不继承** `task_local`（ADR-002 §范式）。子任务读 ctx
     /// 前必须「捕获-重绑」（`let ctx = try_current()?; spawn(scope(ctx, async {…}))`）。漏重绑 → 子任务
     /// `Err(MissingCtx)` 功能性 deny，或被 consumer `unwrap_or(anonymous)` 绕成 fail-open 越权。跨任务携
-    /// ctx 是运行时概念、类型系统不天然覆盖，故以 dylint AST lint 承载（Medium）。INVARIANT: SPAWN-CTX-REBIND-01。
+    /// ctx 是运行时概念、类型系统不天然覆盖，故以 dylint AST lint 承载（Medium）。INVARIANT: SPAWN-CTX-REBIND-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// **仅 intraprocedural**：子任务体内调用某 helper fn、helper 内部读 ctx 的跨函数情形不检测。仅认自由

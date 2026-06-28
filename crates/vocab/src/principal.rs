@@ -34,7 +34,7 @@ mod tests {
 
     /// 闭值集穷举守卫：定义 crate 内 `non_exhaustive` 仍可无 `_` 穷举——新增变体时本 match 编译失败，
     /// 强制同步全部消费方（authn 派生 / httpserve `Authenticated` 证据 / audit 分层）。
-    /// INVARIANT: PRINCIPALKIND-EXHAUSTIVE-01（Hard，编译期；anti-vacuity：移除任一变体即编译错误）。
+    /// INVARIANT: PRINCIPALKIND-EXHAUSTIVE-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard，编译期；anti-vacuity：移除任一变体即编译错误）。
     #[test]
     fn principal_kind_is_exhaustive() {
         for kind in [

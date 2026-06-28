@@ -11,7 +11,7 @@
 //! 链节点哈希 = `HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))`，经注入的
 //! [`primitives::MacVerifier`] + [`primitives::MacKey`] 计算（key 是凭据，构造器必填 ⇒ 无 key 不可造
 //! hasher，防篡改属性类型层成立；缺 key 的旧 `link_hash` 自由函数已删）。`canonical_message` 字节布局
-//! **冻结**（单源 `docs/rules/audit-ledger.md`，INVARIANT: AUDIT-LEDGER-BYTES-01），golden 字节测试守。
+//! **冻结**（单源 `docs/rules/audit-ledger.md`，INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }），golden 字节测试守。
 //! 真实 HMAC 实现（`sha2`/`hmac` adapter）+ postgres 每租户子链持久化是独立 follow-up；本模块泛型于
 //! `MacVerifier`、域单测用确定性 `#[cfg(test)]` verifier（不依赖 adapter crate）。
 
@@ -379,7 +379,7 @@ fn push_len_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
 /// `message = prev_hash(32) ‖ DOMAIN_TAG ‖ tenant(16) ‖ seq(u64 BE) ‖ actor(16) ‖ actor_kind(tag) ‖
 ///            lp(action) ‖ lp(resource.kind) ‖ lp(resource.id) ‖ outcome(tag) ‖ secs(u64 BE) ‖ nanos(u32 BE)`
 ///
-/// INVARIANT: AUDIT-LEDGER-BYTES-01（布局冻结，golden 字节测试守；改布局即破链 ⇒ 须同步 docs/rules/audit-ledger.md + golden）。
+/// INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（布局冻结，golden 字节测试守；改布局即破链 ⇒ 须同步 docs/rules/audit-ledger.md + golden）。
 fn canonical_message(prev: &EntryHash, entry: &AuditEntry) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(prev.as_bytes());
@@ -928,7 +928,7 @@ mod tests {
         assert!(!dbg.contains("5a5a"), "key 字节不应出现: {dbg}");
     }
 
-    // 17 — canonical_message 全字节 golden（冻结布局，INVARIANT: AUDIT-LEDGER-BYTES-01）。
+    // 17 — canonical_message 全字节 golden（冻结布局，INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
     #[allow(clippy::expect_used)]
     #[test]
     fn canonical_message_golden_full_bytes() {

@@ -12,7 +12,7 @@ use crate::redacted::RedactedSource;
 ///
 /// PII 边界（与 [`crate::ShutdownError`] / [`crate::SignerError`] 同范式）：`Display` 仅安全摘要常量；
 /// source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——
-/// 原始错误不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 原始错误不经任何 `Error` 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("audit sink failed")]
 pub struct AuditSinkError {
@@ -208,7 +208,7 @@ mod smoke {
 mod pii_debug {
     //! `AuditEvent` Debug 脱敏回归：`principal_id`（subject=PII）/ `resource_id` + 裸 `Option<String>`
     //! 追踪 ID（`request_id` / `correlation_id`，无 typed funnel）不进 Debug/tracing。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（derive Redact 脱敏 PII；对标 `RateLimitError` /
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（derive Redact 脱敏 PII；对标 `RateLimitError` /
     //! `identity::RoleBinding` / `audit::ResourceRef`）。
     use super::{AuditEvent, AuditOutcome};
 

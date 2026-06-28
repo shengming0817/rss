@@ -63,7 +63,7 @@ const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
 /// principal 仅允许 opaque subject id（[`OutboxMetadata::with_subject_id`]，不容完整 Principal / PII，
 /// `observability.md` §outbox envelope）。
 ///
-/// # INVARIANT: OUTBOX-METADATA-FUNNEL-01
+/// # INVARIANT: OUTBOX-METADATA-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// envelope metadata 只能经此 funnel 构造（Hard：无 raw `Value` 入口，reserved/PII 不可表达）；
 /// reserved key 拒绝由 `metadata_try_insert_rejects_reserved_key` 负向单测守 anti-vacuity。
@@ -271,7 +271,7 @@ impl OutboxEnvelope {
 /// ON CONFLICT (event_id) DO NOTHING：同 idem_key 的 entry 已在表中时幂等跳过（不报错）。
 /// uuid/timestamptz 生成全部交给 server-side SQL（不给 sqlx 加 uuid/time feature）。
 ///
-/// # INVARIANT: OUTBOX-ATOMIC-IDEM-01
+/// # INVARIANT: OUTBOX-ATOMIC-IDEM-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// outbox 双写必须在业务事务内原子执行——caller 须在 `run_in_transaction` 闭包内传入
 /// `&mut PgConnection`；裸 `PgPool::acquire()` 拿到的连接类型不同，类型系统阻止误用（Hard）。
@@ -372,7 +372,7 @@ impl OutboxSource for PgOutbox {
     /// `FOR UPDATE OF o SKIP LOCKED` 尽力去重并发扫描；at-most-once 正确性由 `acquire_lease` CAS 保证。
     /// parse 失败（topic / idem_key 无效）→ `EngineErrorKind::Invariant`（我们写入的数据不该无效）。
     ///
-    /// INVARIANT: OUTBOX-PARTITION-ORDER-01
+    /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
     async fn poll_pending(&self, domain: &str, limit: usize) -> Result<Vec<Entry>, EngineError> {
         let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
             r#"

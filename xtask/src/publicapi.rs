@@ -18,9 +18,9 @@
 //! dylint + meta）；public-api 是**库封装面 baseline 冻结门**（轴 A SemVer，需 nightly rustdoc-json 重新生成
 //! baseline），语义与触发节奏不同，故为独立可选门（单独 `cargo xtask public-api --check`）。
 //!
-//! INVARIANT: PUBLICAPI-TOOL-GATE-01 —— 工具缺失 fail-fast，不静默成功。
-//! INVARIANT: PUBLICAPI-DRIFT-GATE-01 —— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
-//! INVARIANT: NIGHTLY-PIN-01 —— rustdoc-json 用钉版 nightly（[`PINNED_NIGHTLY`]，非 rolling）；该 pin 四处
+//! INVARIANT: PUBLICAPI-TOOL-GATE-01 { level = "Medium", exec = "ci-only", source = "public-api" }—— 工具缺失 fail-fast，不静默成功。
+//! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "ci-only", source = "public-api" }—— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
+//! INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }—— rustdoc-json 用钉版 nightly（[`PINNED_NIGHTLY`]，非 rolling）；该 pin 四处
 //!   一致：`PINNED_NIGHTLY` ⇔ `lints/rust-toolchain.toml` channel ⇔ azure `RSS_NIGHTLY_PINNED`（三方功能值，
 //!   `pinned_nightly_single_source_of_truth` 守）+ `verify.rs` public-api install_hint（`verify::tests::
 //!   public_api_install_hint_pins_nightly` 守，绑真实字段值非源码全文）。漂移即 fail。
@@ -139,7 +139,7 @@ fn ensure_tool_available() -> Result<()> {
 /// 构造 `cargo public-api -p <crate>` 子进程，经 [`crate::cmd::clean_cmd`] 漏斗把 `RUSTUP_TOOLCHAIN`
 /// 显式重设为 `toolchain`（剥离后成该变量唯一来源，CMD-ENV-CLEAN-01）——等价 `cargo +<toolchain> public-api`，
 /// 让 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json（`is_probably_stable()`==false ⇒ 透传当前
-/// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01.
+/// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
 fn public_api_cmd(krate: &str, toolchain: &str) -> Command {
     crate::cmd::clean_cmd(
         "cargo",
@@ -437,7 +437,7 @@ mod tests {
     }
 
     /// 传 `PINNED_NIGHTLY` 时 `RUSTUP_TOOLCHAIN` 被经 clean_cmd 显式重设为钉版 nightly
-    /// （等价 `cargo +nightly-2026-04-16 public-api`，使 rustdoc-json 可复现）。INVARIANT: NIGHTLY-PIN-01.
+    /// （等价 `cargo +nightly-2026-04-16 public-api`，使 rustdoc-json 可复现）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
     #[test]
     fn public_api_cmd_injects_pinned_toolchain() {
         let cmd = public_api_cmd("ids", PINNED_NIGHTLY);
@@ -563,7 +563,7 @@ mod tests {
     /// anti-vacuity 真实绿例：从真实 `lints/rust-toolchain.toml` + `azure-pipelines.yml` 解析，断言
     /// 三方功能 pinned-nightly 一致（`PINNED_NIGHTLY` == lints channel == azure `RSS_NIGHTLY_PINNED`）。
     /// 第四处镜像（verify.rs public-api install_hint）由 `verify::tests::public_api_install_hint_pins_nightly`
-    /// 守——绑真实 install_hint 字段值（非源码全文，避免注释含 pin 的误绿）。INVARIANT: NIGHTLY-PIN-01.
+    /// 守——绑真实 install_hint 字段值（非源码全文，避免注释含 pin 的误绿）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
     #[test]
     fn pinned_nightly_single_source_of_truth() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;

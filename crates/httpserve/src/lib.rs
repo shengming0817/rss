@@ -55,7 +55,7 @@ pub struct Route {
 
 /// `Primary` listener 路由声明性元数据：**唯一**可携带 auth opt-out 的 route 类型。
 ///
-/// INVARIANT: AUTH-OPTOUT-PRIMARYONLY-01 —— auth opt-out（[`RouteAuthOptOut`]）仅 `PrimaryRoute`
+/// INVARIANT: AUTH-OPTOUT-PRIMARYONLY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— auth opt-out（[`RouteAuthOptOut`]）仅 `PrimaryRoute`
 /// 可携带；plain [`Route`] 类型层无此字段（input-struct-field-exclusion，Hard，取代旧裸 `bool` 字段）。
 /// 非-Primary route 经 [`ListenerRouter::mount`](routes::ListenerRouter::mount) 挂载、永远拿不到 opt-out
 /// 值；`Primary` route 经 [`ListenerRouter::mount_primary`](routes::ListenerRouter::mount_primary)

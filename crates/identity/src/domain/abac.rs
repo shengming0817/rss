@@ -221,7 +221,7 @@ impl Policy {
 
 /// ABAC 策略求值（纯函数，L0；deny-overrides + fail-closed）。
 ///
-/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 — 实现仅对 `policy.tenant() == principal.tenant()`
+/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— 实现仅对 `policy.tenant() == principal.tenant()`
 /// 的策略求值；`principal.tenant()` 为 `None`（Service/SuperAdmin 跨租场景）或租户不匹配时返回
 /// `Decision::Deny`（通用 ABAC 路径不放行跨租，跨租走独立管理面）。
 ///

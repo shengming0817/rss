@@ -196,7 +196,7 @@ impl ManagedResource for VaultResolverGuard {
 mod tests {
     //! bundle 单元测：wiremock-free（构造合法 resolver + allowlist），覆盖 funnel 派发 + 单源
     //! runtime_resources + sealed-caps 共享 Arc。
-    //! INVARIANT: VAULT-BUNDLE-DOMAIN-01 / VAULT-BUNDLE-RESOLVER-02（compile_fail doctest 见
+    //! INVARIANT: VAULT-BUNDLE-DOMAIN-01 / VAULT-BUNDLE-RESOLVER-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（compile_fail doctest 见
     //! `VaultDomainDeps` rustdoc）。
 
     use super::*;

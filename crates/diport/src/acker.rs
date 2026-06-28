@@ -59,7 +59,7 @@ impl AckAction {
 ///
 /// PII 边界（与 [`SubscriberError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`] 脱敏
 /// （`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，
-/// fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("ack settle failed")]
 pub struct AckError {
@@ -271,7 +271,7 @@ mod action_label {
 mod error_redaction {
     //! `AckError` derive(Debug) 经 `RedactedSource` 不展开 source（adapter 原始错误可能携连接串/凭据），
     //! 且 `Error::source()` 恒 `None`（fail-closed source 链）。
-    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01（对标 `SubscriberError`/`DeadLetterStoreError`）。
+    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SubscriberError`/`DeadLetterStoreError`）。
     use super::AckError;
 
     #[test]

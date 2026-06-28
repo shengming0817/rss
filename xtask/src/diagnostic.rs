@@ -7,7 +7,7 @@
 //!   - [`finding`] 构造器 + [`print_findings`] 打印
 //!   - [`GovernanceCheck`] trait（`name()` + `check()`，只供数据）+ free fn [`run_check`]（统一编排，实现者不可覆写）
 //!
-//! INVARIANT: DIAG-FINDING-01 —— 诊断壳 + 打印 + run 编排单源（不再逐校验器复制）。
+//! INVARIANT: DIAG-FINDING-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 诊断壳 + 打印 + run 编排单源（不再逐校验器复制）。
 
 use anyhow::{Result, bail};
 use std::fmt::Debug;
@@ -65,7 +65,7 @@ pub(crate) trait GovernanceCheck {
 /// 治理校验统一编排 driver（free fn，**非 trait method**——实现者无法覆写，把「统一 fail-fast 编排
 /// 不可绕过」从注释约定（Soft）上移为结构强制：校验器只经 [`GovernanceCheck`] 提供 `name()`/`check()`
 /// 数据，打印 + bail 的执行权收敛此单点）。空 findings → 打印成功摘要并 `Ok`；非空 → 打印各 finding
-/// 并 `bail`（fail-fast）。INVARIANT: DIAG-FINDING-01。
+/// 并 `bail`（fail-fast）。INVARIANT: DIAG-FINDING-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 pub(crate) fn run_check<C: GovernanceCheck>(check: &C) -> Result<()> {
     let (summary, findings) = check.check()?;
     if findings.is_empty() {

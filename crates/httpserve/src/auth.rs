@@ -7,17 +7,17 @@
 //! opt_out 存于 `EnforceLayer`（Copy 字段），不经 extension 传递——这样 enforce 在
 //! MethodRouter 层执行时可直接读捕获的 opt_out 和外层注入的 AuthPlan extension。
 //!
-//! INVARIANT: AUTH-FAILCLOSED-01 —— 缺 AuthPlan（finalize_auth 未跑） → fail-closed Deny → 403；
+//! INVARIANT: AUTH-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 缺 AuthPlan（finalize_auth 未跑） → fail-closed Deny → 403；
 //! 控制面 listener opt-out → Deny → 403（不 Allow，永不降级）。
 //!
-//! INVARIANT: AUTH-EVIDENCE-REQUIRE-01 —— `Require(required)` 路由仅在请求携 [`Authenticated`] 证据、其
+//! INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Require(required)` 路由仅在请求携 [`Authenticated`] 证据、其
 //! `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行；缺证据 / `Anonymous` 证据 /
 //! 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（`Anonymous` = 「已知未认证」；匿名可达路由走
 //! `PrimaryRoute.opt_out(Public)`，非 Require）。证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入，
 //! httpserve 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 →
 //! 所有 Require 路由仍 401，零端点放开（Medium，单测 + tests/runtime.rs 集成测试守）。
 //!
-//! INVARIANT: AUTH-EVIDENCE-MINT-01 —— [`Authenticated`] 私有字段（外部无法 struct-literal 伪造）+
+//! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— [`Authenticated`] 私有字段（外部无法 struct-literal 伪造）+
 //! `Authenticated::new` 仅组合根可调（`rss_authenticated_callsite` callsite dylint，Medium，与 `AuthPlan` 同治理
 //! 姿态），杜绝域 crate `.layer(Extension(Authenticated::new(..)))` 伪造证据绕过 enforce。
 //!
@@ -85,7 +85,7 @@ pub struct RouteMeta {
 }
 
 /// 认证证据 extension：验签桥在凭据校验通过后注入请求 extension，enforce 层据此对 `Require` 路由放行
-/// （INVARIANT: AUTH-EVIDENCE-REQUIRE-01）。
+/// （INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 ///
 /// 承载已验证主体的审计快照：已验证的 [`RequiredScheme`]（验签桥实际验证的凭据方案）+
 /// [`PrincipalKind`]（主体类别）+ principal subject + tenant。principal subject 是 PII，只允许进入

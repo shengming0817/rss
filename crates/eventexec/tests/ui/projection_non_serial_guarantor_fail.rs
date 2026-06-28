@@ -1,7 +1,7 @@
 //! compile-fail：第 5 参传 `()`（不满足 `SerialInOrderGuarantor` bound）→ E0277。
 //!
 //! anti-vacuity：证明 bound load-bearing——非 SerialInOrderGuarantor 类型无法绕过门禁
-//! （INVARIANT: PROJECTION-SERIAL-WITNESS-01 Hard）。
+//! （INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Hard", exec = "verify", source = "trybuild" }Hard）。
 
 use std::sync::Arc;
 

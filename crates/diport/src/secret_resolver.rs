@@ -10,7 +10,7 @@ use crate::redacted::RedactedSource;
 /// PII 边界（**类型层 Hard**，与 [`crate::SignerError`] / [`crate::ObjectStoreError`] 同范式）：
 /// `StoreUnreachable` 变体的 `source`（provider 错误，可能携 endpoint / 凭据细节）经 [`RedactedSource`]
 /// 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error`
-/// 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。所有 `Display` message
+/// 接口暴露，fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。所有 `Display` message
 /// 均为 const literal——无 runtime 数据拼 `format!`。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -60,7 +60,7 @@ impl SecretResolverError {
 ///
 /// `Clone`/`PartialEq`/`Eq`：坐标无状态、可安全复制 + 比较（不含材料，拷贝无 PII 泄漏风险）。
 ///
-/// INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01（回归见 `pii_debug::secret_coordinate_debug_redacts`）。
+/// INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（回归见 `pii_debug::secret_coordinate_debug_redacts`）。
 #[derive(Clone, PartialEq, Eq, secure::Redact)]
 pub struct SecretCoordinate {
     #[redact(sensitivity = secret)]
@@ -111,7 +111,7 @@ impl SecretCoordinate {
 ///   `SecretMaterial(<redacted>)`——tracing / 日志采集不得经 `{:?}` 泄漏（#1360 替换手写 `Debug`）。
 /// - `expose(&self) -> &[u8]`——唯一受控借出路径，无 `into_vec` / `as_string` / `Display` owned 逃逸。
 ///
-/// INVARIANT: DIPORT-SECRETMATERIAL-PII-REDACT-01（回归见 `pii_debug::secret_material_debug_is_opaque`）。
+/// INVARIANT: DIPORT-SECRETMATERIAL-PII-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（回归见 `pii_debug::secret_material_debug_is_opaque`）。
 #[derive(zeroize::ZeroizeOnDrop, secure::Redact)]
 pub struct SecretMaterial(#[redact(sensitivity = secret)] Vec<u8>);
 
@@ -245,7 +245,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! PII 边界回归：`SecretMaterial` / `SecretCoordinate` 字节/坐标 Debug 脱敏 + `ZeroizeOnDrop` 编译期证明。
-    //! INVARIANT: DIPORT-SECRETMATERIAL-PII-REDACT-01 / DIPORT-SECRETCOORD-DEBUG-REDACT-01。
+    //! INVARIANT: DIPORT-SECRETMATERIAL-PII-REDACT-01 / DIPORT-SECRETCOORD-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
     use super::{SecretCoordinate, SecretMaterial};
 
     #[test]
@@ -264,7 +264,7 @@ mod pii_debug {
         let coord = SecretCoordinate::new("vault-prod", "db/password", Some("v3".to_string()));
         let dbg = format!("{coord:?}");
         // #[derive(Redact)] 字段级渲染：字段名（非敏感）保留、每字段值 → <redacted>（Fixed，含 version
-        // 不泄 Some/None）。脱敏边界不变（INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01）。
+        // 不泄 Some/None）。脱敏边界不变（INVARIANT: DIPORT-SECRETCOORD-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
         assert_eq!(
             dbg,
             "SecretCoordinate { store_id: <redacted>, key: <redacted>, version: <redacted> }"

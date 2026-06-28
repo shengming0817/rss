@@ -2,7 +2,7 @@
 //! `rss_partition_serial_allowlist` — RSS 治理 dylint lint：`consistency::PartitionSerialDelivery`
 //! 仅 blessed adapter / 组合根可 impl（impl-site allowlist）。
 //!
-//! INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01
+//! INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! `PartitionSerialDelivery` 是 witness 铸造侧的**契约 trait**：impl 者须保证 read/poll 路径**全局
 //! 单调升序**逐行交付（如 `ORDER BY id ASC`）；per-partition 串行是上游 outbox relay 的
@@ -70,7 +70,7 @@ dylint_linting::declare_late_lint! {
     /// SQL head-of-partition gating + CAS settle，使得 `SerialInOrder::from_source` 铸造的 witness
     /// 真实有效（PROJECTION-SERIAL-WITNESS-01 Medium 半段）。域 / 服务 crate 直接 impl 此 trait 会
     /// 绕过 impl-site 语义审查，让非串行类型铸造 witness，使 Hard 门禁名存实亡。
-    /// INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01。
+    /// INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]`

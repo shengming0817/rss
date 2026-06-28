@@ -14,7 +14,7 @@
 //! ref: etcd-io/etcd client/v3/txn.go（`If(Compare(ModRevision)).Then(Put).Else(Get)` = compare-and-swap-by-revision）；
 //! ref: databendlabs/openraft openraft/src/lib.rs（LogId/Vote 单调 = token 防脑裂）；
 //! Martin Kleppmann《DDIA》§8.3 fencing token（storage 拒绝 token 低于已见高水位的写）。
-//! INVARIANT: CAS-REVISION-MONO-01（**per-key** revision token 单调 + etcd-revision 条件写：absent/值匹配且
+//! INVARIANT: CAS-REVISION-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**per-key** revision token 单调 + etcd-revision 条件写：absent/值匹配且
 //! token 不 stale 受、值不符回 Conflict、token stale 回 Fenced。回归见 `adapters/memory` MemCasStore 测试 +
 //! 本模块 smoke reference impl）。该不变式是 **Medium（运行期 `#[test]`）固有**：单调性是对**运行期** token 值的
 //! 比较（当前 token 在运行期才知），无法上移编译期类型系统；守卫是 adapter 行为测试 + anti-vacuity（写后用旧
@@ -49,7 +49,7 @@ impl CasStoreKey {
 /// （状态 payload，可能含敏感设备状态 / 凭据）经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故
 /// `derive(Debug)` 即安全；`key` / `expected_token` 是路由 / 版本元数据，可观测。
 ///
-/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01。
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, Clone)]
 pub struct CasStoreRequest {
     /// 目标状态 key（revision token 按 key 隔离）。
@@ -68,7 +68,7 @@ pub struct CasStoreRequest {
 /// PII 边界（同 [`CasStoreRequest`]）：`Conflict.current`（当前状态 payload）经 [`RedactedBytes`] 持有
 /// （`Debug` 恒 `<redacted>`），故 `derive(Debug)` 即安全；`Applied.token` / `Fenced.current_token` 是版本元数据，可观测。
 ///
-/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01。
+/// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CasStoreOutcome {
@@ -83,7 +83,7 @@ pub enum CasStoreOutcome {
 /// CAS 写失败（infra 故障，**非** conflict/fence——后两者是 [`CasStoreOutcome`] 的 `Ok`）。
 ///
 /// PII 边界（与 [`crate::SignerError`] / [`crate::FencedWriterError`] 同范式）：source 经 [`RedactedSource`] 脱敏。
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("cas store operation failed")]
 pub struct CasStoreError {

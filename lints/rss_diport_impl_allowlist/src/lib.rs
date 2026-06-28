@@ -2,7 +2,7 @@
 //! `rss_diport_impl_allowlist` — RSS 治理 dylint lint：`diport` DI port trait 仅 blessed
 //! adapter / 组合根可 impl（impl-site allowlist）。
 //!
-//! INVARIANT: DIPORT-IMPL-ALLOWLIST-01
+//! INVARIANT: DIPORT-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
 //! DI port trait（`Signer`/`Publisher`/`Subscriber`/`AuditSink`/`ManagedResource` 的 trait_variant
 //! Send 变体 + 基 trait `*Local` + sync `Clock`/`SubscribeInitializer`）集中在 `diport`。ADR-003 §4.2
@@ -68,7 +68,7 @@ dylint_linting::declare_late_lint! {
     /// adapter（经组合根注入），域 / 服务 crate 只**消费** `Box<DynX>` / `Arc<DynX>`。port trait 集中到独立
     /// `diport` crate 后 sealed-trait 无法跨 crate 封闭（ADR-003 §4.2 方案 ②），故「谁可 impl」由本 AST lint
     /// 承载（Medium，最强可用载体）。域 / 服务 crate 直接 `impl Signer for ...` 会绕过 provider 可替换边界。
-    /// INVARIANT: DIPORT-IMPL-ALLOWLIST-01。
+    /// INVARIANT: DIPORT-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]` 子树

@@ -19,10 +19,10 @@
 //!   ResolvedTransport::Demo` 臂构造——**决策绑定纪律（Medium）**：`match` 把构造收束到已校验决策，
 //!   但 dev root 仍能直接 `MemBus::new()` 绕过（类型层未封闭，dev-only 可接受）；非编译期 Hard。
 //!
-//! INVARIANT: TOPO-FAILCLOSED-01 —— durable 缺 broker URL ⇒ [`resolve`] 返 `Err`，组合根
+//! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 broker URL ⇒ [`resolve`] 返 `Err`，组合根
 //!   fail-fast 拒绝启动，**绝不静默降级回 demo/in-mem**（`Result` + bootstrap fail-fast，Medium；
 //!   类型层强化：`Durable` 路径无「降级回 Demo」可表达变体，唯一非 `Err` 输出是全域齐备的 `Durable`）。
-//! INVARIANT: TOPO-INMEM-SEAL-01 —— in-mem 传输**生产**不可达（生产 bin cargo-deny **Hard**，主守卫）；
+//! INVARIANT: TOPO-INMEM-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— in-mem 传输**生产**不可达（生产 bin cargo-deny **Hard**，主守卫）；
 //!   dev root 经决策 `match` 收束（Medium 纪律，非编译期封闭）。落地在组合根，非本 crate
 //!   （bootstrap 命名不到 in-mem 类型）。
 //!
@@ -156,7 +156,7 @@ pub enum TransportResolveError {
 /// 从 [`crate::Registry`] 的订阅 / 发布声明派生——使 resolver 能 per-domain fail-closed 而自身无需读
 /// env / 知道域集。
 ///
-/// INVARIANT: TOPO-FAILCLOSED-01（见模块 rustdoc）。
+/// INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（见模块 rustdoc）。
 pub fn resolve(
     topo: Topology,
     cfg: TransportConfig,

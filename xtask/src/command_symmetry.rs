@@ -1,6 +1,6 @@
 //! `command-symmetry` —— generated command 模块双侧对称性 + 裸 emit 出口封堵 + impl-site 收口（治理门）。
 //!
-//! INVARIANT: COMMAND-SYMMETRY-01（Medium，Rule 1+2）· COMMAND-IMPL-ALLOWLIST-01（Medium，Rule 3）
+//! INVARIANT: COMMAND-SYMMETRY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，Rule 1+2）· COMMAND-IMPL-ALLOWLIST-01（Medium，Rule 3）
 //!
 //! 守住三条约束：
 //!
@@ -385,7 +385,7 @@ fn file_command_impl_count(file: &syn::File) -> usize {
 
 #[cfg(test)]
 mod tests {
-    //! INVARIANT: COMMAND-SYMMETRY-01 + COMMAND-IMPL-ALLOWLIST-01 —— synthetic red + anti-vacuity green。
+    //! INVARIANT: COMMAND-SYMMETRY-01 + COMMAND-IMPL-ALLOWLIST-01 { level = "Medium", exec = "verify", source = "code" }—— synthetic red + anti-vacuity green。
 
     use super::*;
 

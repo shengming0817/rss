@@ -8,7 +8,7 @@
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
-//! INVARIANT: LAYER-DEPS-00 —— 五层 const 表与 architecture.md §分层 同源；矩阵 `allows`
+//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "verify", source = "code" }—— 五层 const 表与 architecture.md §分层 同源；矩阵 `allows`
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
@@ -66,7 +66,7 @@ pub(crate) const DOMAIN_CRATES: &[&str] =
 
 /// dev/test-only adapter（demo / in-mem provider）：**禁生产 bin 依赖**，只准 test/tooling 组合根
 /// （[`DEV_ADAPTER_ROOTS`]）依赖。普通 adapter 须被全部组合根 wrapper 覆盖（LAYER-DEPS-06）；dev adapter
-/// 例外——正向只要求 [`DEV_ADAPTER_ROOTS`]、且 wrapper **不得**含生产 bin（`INVARIANT: LAYER-DEPS-07`）。
+/// 例外——正向只要求 [`DEV_ADAPTER_ROOTS`]、且 wrapper **不得**含生产 bin（`INVARIANT: LAYER-DEPS-07` { level = "Medium", exec = "verify", source = "code" }）。
 pub(crate) const DEV_ADAPTERS: &[&str] = &["memory"];
 /// 允许消费 dev/test adapter 的组合根（验收 journey + tooling，排除 `server`/`rss` 生产 bin）。
 pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["journeys", "xtask"];
@@ -184,7 +184,7 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
     }
 }
 
-/// 基础层**内部** DAG 前向边放行（INVARIANT: BASE-INTRADAG-01）。[`BASIS_CRATES`] 的声明顺序即 DAG
+/// INVARIANT: BASE-INTRADAG-01 { level = "Medium", exec = "verify", source = "code" } —— 基础层**内部** DAG 前向边放行。[`BASIS_CRATES`] 的声明顺序即 DAG
 /// 低→高（`vocab ◁ ids ◁ secure ◁ support ◁ runctx`，ADR-002 §D3）；高 rank crate 可依赖低 rank crate
 /// （前向边，如 sanctioned `runctx → vocab`），反向 / 同 crate / 任一端非基础边一律 `false`。这是
 /// [`allows`]「基础同层横向一律禁」的**唯一**例外；`layerdeps::check_layers` 在 `!allows(Basis,Basis)`
@@ -201,7 +201,7 @@ pub(crate) fn basis_intra_dag_allows(from_crate: &str, to_crate: &str) -> bool {
     matches!((rank(from_crate), rank(to_crate)), (Some(f), Some(t)) if f > t)
 }
 
-/// 受控 `bootstrap → httpserve` **编译期路由类型边**放行（INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
+/// 受控 `bootstrap → httpserve` **编译期路由类型边**放行（INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }，ADR-009）。
 ///
 /// typed route funnel（#1113 auth-finalize-before-bind + #1103 typed per-listener route-group）要求 bootstrap
 /// 取 httpserve 的路由类型词汇（`ListenerRouter<L>` / `UnfinalizedRoutes`）——三段「produce（bootstrap
@@ -280,7 +280,7 @@ mod tests {
         );
     }
 
-    /// intra-base DAG 前向边放行 / 反向·同 crate·非基础禁（INVARIANT: BASE-INTRADAG-01 anti-vacuity）。
+    /// intra-base DAG 前向边放行 / 反向·同 crate·非基础禁（INVARIANT: BASE-INTRADAG-01 { level = "Medium", exec = "verify", source = "code" }anti-vacuity）。
     #[rstest]
     // 前向边（高 rank → 低 rank）：放行。sanctioned `runctx → vocab`。
     #[case("runctx", "vocab", true)]
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(basis_intra_dag_allows(from, to), want);
     }
 
-    /// 受控路由类型边只放行 `bootstrap → httpserve`（INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01 anti-vacuity）：
+    /// 受控路由类型边只放行 `bootstrap → httpserve`（INVARIANT: LAYER-DEPS-ROUTE-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }anti-vacuity）：
     /// 反向 / 其它 Service→Service / 任一端非该对一律 false（交回 `allows` 禁）。
     #[rstest]
     // sanctioned 唯一边：放行。

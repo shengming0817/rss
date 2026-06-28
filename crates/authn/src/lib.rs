@@ -3,7 +3,7 @@
 //! 本 crate 承载认证侧的核心值类型与错误枚举；DI port（PDP / session store）归 `diport`（ADR-003）。
 //! 所有类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
 //!
-//! ## 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）
+//! ## 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
 //!
 //! 验签（签名/MAC/exp）与身份 claims 由 verifier DI port `diport::Pdp` 负责；`Jwt::parse` 仅作 token
 //! **结构闸**（3 段 / base64url / JSON / 非空 sub），不验签、不提取身份。派生 `Principal` 的 funnel 收紧为
@@ -19,7 +19,7 @@
 //! `Principal::row_visibility` 的 `SuperAdmin`（裸同步路径）/ `Service` / `Anonymous` 分支返回
 //! `Err(runctx::MissingCtx)`，强制调用方 deny；字段私有，外部无法绕过 funnel 伪造特权主体。
 //! 跨租户 All-scope 唯一经 [`Principal::audited_cross_tenant_visibility`] 派生——派生与持久 audit ledger
-//! INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 —— All-scope 派生与持久 audit ledger 写入同址；
+//! INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— All-scope 派生与持久 audit ledger 写入同址；
 //! 无审计无 All-scope，audit 写失败 fail-closed。
 
 #![forbid(unsafe_code)]
@@ -111,7 +111,7 @@ impl Principal {
     /// `kind` / `tenant` 从**验签产物 [`diport::VerifiedClaims`]**（verifier = 信任原点）派生；外部 crate
     /// 无法构造特权主体（ADR-001）。
     ///
-    /// # 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）
+    /// # 信任边界（类型层强制，INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
     ///
     /// 入参收紧为 [`VerifiedJwt`]——其私有内层 + `pub(crate)` [`VerifiedJwt::seal`] 使外部 crate 无法 mint，
     /// 故「未经验签派生 Principal」**类型层不可表达（Hard）**。`VerifiedJwt` 内携**单一 canonical 身份源**
@@ -183,7 +183,7 @@ impl Principal {
     /// 由已验证 service-token 派生（funnel 固定 `kind=Service`）。
     ///
     /// 入参收紧为 [`VerifiedServiceToken`]（私有内层 + `pub(crate)` [`VerifiedServiceToken::seal`]，外部
-    /// 不可 mint）——与 [`Self::from_verified_jwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）。
+    /// 不可 mint）——与 [`Self::from_verified_jwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）。
     /// subject 取自载体内**单一 canonical 身份源** [`diport::VerifiedClaims`]（verifier = 信任原点，与
     /// verify→mint bridge [`verify_service_token`] 同源，无分歧）；忽略 kind / tenant（service 恒跨租户）。
     pub fn from_verified_service_token(token: &VerifiedServiceToken) -> Result<Self, AuthnError> {
@@ -281,7 +281,7 @@ impl Principal {
 
 /// `Principal` 经 [`runctx::PrincipalFacet`] 擦除注入 [`runctx::AppCtx`] 的 principal payload。
 ///
-/// 生产唯一 impl-er = authn（INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01，dylint
+/// 生产唯一 impl-er = authn（INVARIANT: PRINCIPAL-FACET-IMPL-AUTHN-01， { level = "Medium", exec = "manual/opt-in", source = "code" }dylint
 /// `rss_principal_facet_impl_allowlist` 守，Medium——跨 crate sealed-trait 不可行，ADR-003 §4.2 / ADR-002
 /// §D5）。只暴露 vetted **非-PII** facet：`kind`（分类标量）+ `matches_subject`（受控比较，不泄露明文
 /// subject）——与 [`Principal::kind`] / [`Principal::matches_subject`] 同语义，subject 明文不出 authn 边界。
@@ -313,14 +313,14 @@ pub fn app_ctx(principal: std::sync::Arc<Principal>) -> Option<runctx::AppCtx> {
 }
 
 // ---------------------------------------------------------------------------
-// 跨租户 All-scope 审计漏斗（同址强制审计，INVARIANT: TENANCY-CROSSTENANT-AUDIT-01）
+// 跨租户 All-scope 审计漏斗（同址强制审计，INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）
 // ---------------------------------------------------------------------------
 
 pub use crosstenant::{CrossTenantAuditContext, CrossTenantAuditError, CrossTenantError};
 
 /// 跨租户 All-scope 派生与持久审计「同址」漏斗。
 ///
-/// # 类型层强制（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01）
+/// # 类型层强制（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
 ///
 /// All-scope `RowVisibility` 只能由本模块 `AuditedCrossTenant` receipt 经 `into_all_scope` 产出；receipt 的
 /// `seal` / `into_all_scope` 均**模块私有**，唯一 mint 点是 [`Principal::audited_cross_tenant_visibility`]
@@ -432,7 +432,7 @@ mod crosstenant {
     ///
     /// 私有 struct + **模块私有** `seal` / `into_all_scope`：外部 crate / authn 模块外均不可 mint，唯一
     /// mint 点是本模块 [`Principal::audited_cross_tenant_visibility`]（record 成功后）。不 derive `Clone`
-    /// （一次性证据）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01
+    /// （一次性证据）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private receipt type and sealed mint funnel" }
     struct AuditedCrossTenant {
         _seal: (),
     }
@@ -455,7 +455,7 @@ mod crosstenant {
 
     impl Principal {
         /// super-admin 跨租户 All-scope 派生的【唯一】sanctioned 入口：先同址写持久 audit，record 成功
-        /// 才签发 All-scope（无审计无 All-scope）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01
+        /// 才签发 All-scope（无审计无 All-scope）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
         ///
         /// fail-closed：`record` 失败 → `Err(CrossTenantError::Audit)`，`?` 短路在 `seal` 之前，绝不签发；
         /// 非 super-admin → `Err(CrossTenantError::NotSuperAdmin)`（不静默降级）。审计「先于」签发由 `?`-链
@@ -535,7 +535,7 @@ pub mod test_support {
 // verify→mint bridge（authn-owned 验签 → 受控 mint，#1158）
 // ---------------------------------------------------------------------------
 //
-// INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01（生产端闭环）。`seal` 是 `pub(crate)`——外部 crate 无法 mint
+// INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（生产端闭环）。`seal` 是 `pub(crate)`——外部 crate 无法 mint
 // `VerifiedJwt` / `VerifiedServiceToken`（Hard，消费端见 `verified_token_seal` + `tests/ui/`）。本 bridge
 // 是 authn 内**唯一生产 mint 路径**：经注入的 [`diport::Pdp`] 验签（签名/exp/MAC）成功后，才在 crate 内
 // 调 `seal` 装箱、并据**验签产物** [`diport::VerifiedClaims`] 派生 `Principal`（验签 = 信任原点，非旁路
@@ -622,7 +622,7 @@ impl Jwt {
 
 /// 已验证 JWT 载体（私有字段；外部 crate 无法 mint；不 derive `Serialize`）。
 ///
-/// # 类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）
+/// # 类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
 ///
 /// 把「未经验签派生 Principal」收口到类型层（Hard，newtype funnel）：[`Principal::from_verified_jwt`]
 /// 只收 `&VerifiedJwt`，而 `VerifiedJwt` 仅经 `pub(crate)` [`Self::seal`] 装箱——外部 crate 既不能命名
@@ -687,7 +687,7 @@ impl AccessToken {
 
 /// 已验证 service-token 载体（私有字段；外部 crate 无法 mint；不 derive `Serialize`）。
 ///
-/// 与 [`VerifiedJwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01）+ **单一 canonical 身份源**
+/// 与 [`VerifiedJwt`] 同款类型层强制（INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）+ **单一 canonical 身份源**
 /// （F1）：[`Principal::from_verified_service_token`] 只收 `&VerifiedServiceToken`，从载体内 `claims`
 /// （验签产物 [`diport::VerifiedClaims`]）派生身份；`token` 仅是原始串（relay 用，不派生身份）。仅经
 /// `pub(crate)` [`Self::seal`] 装箱（同 [`VerifiedJwt`] 锚点，机器守见 #1151）。生产 mint 由
@@ -1397,7 +1397,7 @@ mod principal_derive_tests {
 
 #[cfg(test)]
 mod verified_token_seal {
-    //! INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 —— 「未验签派生 Principal」类型层不可表达。
+    //! INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 「未验签派生 Principal」类型层不可表达。
     //!
     //! `VerifiedJwt` / `VerifiedServiceToken` 私有内层 + `pub(crate)` `seal`：外部 crate 无法 mint，
     //! 故收紧后的 `from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`
