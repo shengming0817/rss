@@ -69,7 +69,7 @@ lint 拦下、强制采纳上游 Hard 类型。
 |------|------|
 | `redacted_bytes::RedactedBytes` | 脱敏 newtype 自身（受控持有点），内层 `Vec<u8>` 即实现载体（按 `DefId` 路径豁免，防 crate-root 同名假类型绕过） |
 | `CertSerial`（`revocation_store.rs`） | RFC5280 证书序列号是公开 CRL 字段，`derive(Debug)` **有意可见原值**（非机密，与密码学物料相反） |
-| `SecretMaterial`（`secret_resolver.rs`） | 已 `#[derive(secure::Redact)]` `#[redact(secret)]`——完整 Wire + 日志策略由 `secure` 承载（`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>` |
+| `SecretMaterial`（`secret_resolver.rs`） | 已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载（`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>` |
 
 **为何用 in-lint 名单而非生产 `#[allow]`**（error-handling.md §Carve-out）：dylint lint 未加载时（普通 `cargo clippy`），
 生产 `#[allow(rss_diport_dto_debug_redacted)]` 触发 `unknown_lints`，工作区无 `unknown_lints=allow` ⇒ `cargo clippy -D warnings` 红。

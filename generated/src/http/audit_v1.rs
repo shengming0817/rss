@@ -89,33 +89,33 @@ pub mod error {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct AuditEntryView {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub action: ::std::string::String,
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     pub actor: ::std::string::String,
     #[serde(rename = "actorKind")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub actor_kind: ::std::string::String,
     ///Opaque per-entry HMAC integrity fingerprint (base64url); not independently verifiable without the chain key.
     #[serde(rename = "entryHash")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub entry_hash: ::std::string::String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub outcome: ::std::string::String,
     ///Unix seconds (UTC)
     #[serde(rename = "recordedAt")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub recorded_at: i64,
     #[serde(rename = "resourceId")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub resource_id: ::std::string::String,
     #[serde(rename = "resourceKind")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub resource_kind: ::std::string::String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub seq: i64,
     #[serde(rename = "tenantId")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub tenant_id: ::std::string::String,
 }
 ///`AuditListEntriesRequest`
@@ -147,11 +147,11 @@ pub struct AuditEntryView {
 #[serde(deny_unknown_fields)]
 pub struct AuditListEntriesRequest {
     #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub cursor: ::std::option::Option<::std::string::String>,
     ///Page size; minimum 1, clamped to 500, default 50. Values < 1 are rejected (400).
     #[serde(default = "defaults::default_nzu64::<::std::num::NonZeroU32, 50>")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub limit: ::std::num::NonZeroU32,
 }
 #[allow(clippy::derivable_impls)]
@@ -247,17 +247,17 @@ impl ::std::default::Default for AuditListEntriesRequest {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct AuditListEntriesResponse {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub data: ::std::vec::Vec<AuditEntryView>,
     #[serde(rename = "hasMore")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub has_more: bool,
     #[serde(
         rename = "nextCursor",
         default,
         skip_serializing_if = "::std::option::Option::is_none"
     )]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub next_cursor: ::std::option::Option<::std::string::String>,
 }
 /// Generation of default values for serde.

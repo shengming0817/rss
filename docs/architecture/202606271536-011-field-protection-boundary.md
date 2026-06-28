@@ -143,8 +143,8 @@ Tink DAEAD「leaks plaintext equality」作为 AES-SIV 路径的否决论据（�
 
 ### D5 — no-decrypt-in-debug
 
-- 密文容器（`secure::Ciphertext` 已 `#[redact(secret)]` → `Ciphertext(<redacted>)`）与**解密结果**类型在 Debug / 日志 / trace 面
-  **永不渲染明文**：`ConfigValue` 加密后 Debug 仍不解密（取自 #1467）；解密产出经 `secrecy::Secret<T>` 式封装 / `#[redact(secret)]`。
+- 密文容器（`secure::Ciphertext` 已 `#[redact(sensitivity = secret)]` → `Ciphertext(<redacted>)`）与**解密结果**类型在 Debug / 日志 / trace 面
+  **永不渲染明文**：`ConfigValue` 加密后 Debug 仍不解密（取自 #1467）；解密产出经 `secrecy::Secret<T>` 式封装 / `#[redact(sensitivity = secret)]`。
 - KeyProvider 的解密访问经**审计路径**、错误源**脱敏**（取自 #1466，避免错误链泄漏密钥材料 / 明文）。INVARIANT
   `FIELDPROT-KEYPROV-AUDIT-01`（Medium，§3）；其中「错误源脱敏」同属 `FIELDPROT-NODBG-DECRYPT-01` 家族（不泄漏 secret 到可观测面）。
 - 对标 `secrecy` crate（`Secret<T>` 的 `Debug` = `[REDACTED]` + `Drop` 触发 zeroize；`ExposeSecret` trait 强制显式访问审计点）。
@@ -191,7 +191,7 @@ impl，不被域依赖。本 ADR 即修正 `primitives/crypto.rs` / `secure/aead
 | D4 deterministic 默认 off | `FIELDPROT-DETERMINISTIC-OPTIN-01` | **Hard（typed function choice）** | 确定 / 非确定拆不同 API 或 explicit opt-in 类型，默认随机；不靠 bool flag 默认值表达 |
 | D4 blind-index 等值-only（runtime，本 PR #1478） | `FIELDPROT-BLINDIDX-EQUALITYONLY-01` | **Hard（类型系统）** | `BlindIndexValue`（`crates/secure/src/blind_index.rs`）不 derive `Ord`/`PartialOrd`/`Eq`、仅 `subtle::ConstantTimeEq`；无 range/prefix API ⇒ 范围/前缀查询类型层不可表达。与 authoring 门 `CONTRACT-PROTECTION-POLICY-01`（#1468，`x-protection.mode=blindIndex` 须 reason + 稳定子集 aad）互补：authoring 声明 + runtime 类型两档共守等值边界 |
 | D2 AAD 派生来源 | `FIELDPROT-AAD-DERIVE-FROM-CTX-01` | **Hard（newtype + 构造封闭）** | `open(aad: &DerivedAad)`，`DerivedAad` 只可经受控 funnel `ProtectionContext`（已鉴权请求 + 经授权维护/迁移两类受信源）构造，外部无法用 DB stored bytes 裸拼 → 杜绝跨租重放 |
-| D5 no-decrypt-in-debug | `FIELDPROT-NODBG-DECRYPT-01` | **Hard（类型系统）** | 密文经 `#[redact(secret)]`（`Ciphertext` 已有）、解密产出经 `secrecy::Secret<T>` 封装——两种机制各封 `Debug`，类型层杜绝明文进 Debug |
+| D5 no-decrypt-in-debug | `FIELDPROT-NODBG-DECRYPT-01` | **Hard（类型系统）** | 密文经 `#[redact(sensitivity = secret)]`（`Ciphertext` 已有）、解密产出经 `secrecy::Secret<T>` 封装——两种机制各封 `Debug`，类型层杜绝明文进 Debug |
 | D5 KeyProvider 访问审计 | `FIELDPROT-KEYPROV-AUDIT-01` | **Medium（governance + tracing）** | KeyProvider 解密访问经 tracing span 审计 + 错误源脱敏（错误链不泄漏密钥/明文）；落地 #1466 由 `cargo xtask` 审计路径治理测试守 |
 | D6 KeyProvider 归属 diport | `DIPORT-MACRO-CONFINE-01′`（定义面）/ `DIPORT-IMPL-ALLOWLIST-01`（impl 面） | **Medium 定义面 + Medium impl 面** | cargo-deny 宏依赖白名单（`-01′`）守「port 只在 diport 定义」；dylint `rss_diport_impl_allowlist` 守「impl 只在 adapter / 组合根」（ADR-003 §4.2） |
 

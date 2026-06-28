@@ -72,18 +72,18 @@ pub mod role_assigned {
     #[serde(deny_unknown_fields)]
     pub struct IdentityRoleAssignedPayload {
         #[serde(rename = "assignedBy")]
-        #[redact(pii = "generic")]
+        #[redact(sensitivity = pii)]
         pub assigned_by: ::uuid::Uuid,
         #[serde(rename = "occurredAt")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub occurred_at: i64,
         #[serde(rename = "roleId")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub role_id: ::std::string::String,
-        #[redact(pii = "generic")]
+        #[redact(sensitivity = pii)]
         pub subject: ::std::string::String,
         #[serde(rename = "tenantId")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
     }
 
@@ -180,18 +180,18 @@ pub mod role_revoked {
     #[serde(deny_unknown_fields)]
     pub struct IdentityRoleRevokedPayload {
         #[serde(rename = "occurredAt")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub occurred_at: i64,
         #[serde(rename = "revokedBy")]
-        #[redact(pii = "generic")]
+        #[redact(sensitivity = pii)]
         pub revoked_by: ::uuid::Uuid,
         #[serde(rename = "roleId")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub role_id: ::std::string::String,
-        #[redact(pii = "generic")]
+        #[redact(sensitivity = pii)]
         pub subject: ::std::string::String,
         #[serde(rename = "tenantId")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
     }
 
@@ -284,15 +284,15 @@ pub mod session_created {
     #[serde(deny_unknown_fields)]
     pub struct IdentitySessionCreatedPayload {
         #[serde(rename = "occurredAt")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub occurred_at: i64,
         #[serde(rename = "sessionId")]
-        #[redact(secret)]
+        #[redact(sensitivity = secret)]
         pub session_id: ::std::string::String,
-        #[redact(pii = "generic")]
+        #[redact(sensitivity = pii)]
         pub subject: ::uuid::Uuid,
         #[serde(rename = "tenantId")]
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
     }
 

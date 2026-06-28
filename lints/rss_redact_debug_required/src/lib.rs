@@ -87,7 +87,7 @@ impl<'tcx> LateLintPass<'tcx> for RssRedactDebugRequired {
             "高风险敏感 DTO 不得裸 derive(Debug)",
             |diag| {
                 diag.help(
-                    "改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = \"...\")]`；\
+                    "改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；\
                     确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`",
                 );
             },

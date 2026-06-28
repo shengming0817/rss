@@ -4,7 +4,7 @@ use securederive::Redact;
 
 #[derive(Redact)]
 struct BadPiiHash {
-    #[redact(pii = "email", mode = "hash")]
+    #[redact(sensitivity = pii_email, mode = "hash")]
     email: String,
 }
 

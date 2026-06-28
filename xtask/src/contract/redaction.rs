@@ -32,13 +32,13 @@ pub(crate) enum PiiKind {
 }
 
 impl PiiKind {
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub(crate) fn as_sensitivity(self) -> &'static str {
         match self {
-            Self::Generic => "generic",
-            Self::Email => "email",
-            Self::Phone => "phone",
-            Self::Name => "name",
-            Self::Address => "address",
+            Self::Generic => "pii",
+            Self::Email => "pii_email",
+            Self::Phone => "pii_phone",
+            Self::Name => "pii_name",
+            Self::Address => "pii_address",
         }
     }
 }
@@ -57,7 +57,6 @@ pub(crate) enum RedactionMode {
     Last4,
     EmailMask,
     Drop,
-    Hash,
 }
 
 impl RedactionMode {
@@ -67,7 +66,6 @@ impl RedactionMode {
             Self::Last4 => "last4",
             Self::EmailMask => "email_mask",
             Self::Drop => "drop",
-            Self::Hash => "hash",
         }
     }
 }
@@ -366,9 +364,6 @@ fn parse_policy(field_name: &str, schema: &Value) -> Result<FieldPolicy, String>
             sensitivity: Sensitivity::Pii(kind),
             mode: Some(mode),
         }),
-        (Some(_), Some(RedactionToken::Mode(RedactionMode::Hash))) => {
-            Err(format!("{X_PII} 不得与 {X_REDACTION}=hash 同用"))
-        }
         (Some(_), Some(RedactionToken::Sensitivity(_))) => Err(format!(
             "{X_PII} 已声明 sensitivity，不得再用 {X_REDACTION}=public/internal/secret 改写 sensitivity"
         )),
@@ -412,9 +407,11 @@ fn parse_redaction(value: &str) -> Result<RedactionToken, String> {
         "last4" => Ok(RedactionToken::Mode(RedactionMode::Last4)),
         "email_mask" => Ok(RedactionToken::Mode(RedactionMode::EmailMask)),
         "drop" => Ok(RedactionToken::Mode(RedactionMode::Drop)),
-        "hash" => Ok(RedactionToken::Mode(RedactionMode::Hash)),
+        "hash" => Err(format!(
+            "{X_REDACTION}=hash 已移除；contract redaction 不再生成关联令牌，需要在运行时代码中使用 secure::redact_hash(value, &RedactionHashKey)"
+        )),
         other => Err(format!(
-            "未知 {X_REDACTION}={other:?}；支持 public/internal/secret/fixed/last4/email_mask/drop/hash"
+            "未知 {X_REDACTION}={other:?}；支持 public/internal/secret/fixed/last4/email_mask/drop"
         )),
     }
 }
@@ -487,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_invalid_enums_and_pii_hash() {
+    fn validate_rejects_invalid_enums_and_hash_redaction() {
         let schema = json!({
             "title":"T",
             "type":"object",

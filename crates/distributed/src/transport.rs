@@ -98,7 +98,7 @@ const ALLOWED_TRANSPORT_HEADERS: &[&str] = &[
 ///
 /// `Debug` is exposing (not redacted): by construction the entries are diagnostic / trace-context
 /// headers only — they exist to be observable. The `DomainRequest.headers` field is nonetheless
-/// `#[redact(secret)]` so a full-request Debug stays terse.
+/// `#[redact(sensitivity = secret)]` so a full-request Debug stays terse.
 #[derive(Debug, Clone, Default)]
 pub struct TransportHeaders {
     entries: Vec<(String, String)>,
@@ -155,15 +155,15 @@ pub enum TransportHeaderError {
 /// or credentials and are therefore never rendered in clear text.
 #[derive(Clone, secure::Redact)]
 pub struct DomainRequest {
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     contract: ContractBinding,
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     method: DomainMethod,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     path: String,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     headers: TransportHeaders,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     body: Vec<u8>,
 }
 
@@ -217,11 +217,11 @@ impl DomainRequest {
 /// Minimal cross-domain contract HTTP dispatch response.
 #[derive(Clone, secure::Redact)]
 pub struct DomainResponse {
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     status_code: u16,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     headers: Vec<(String, String)>,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     body: Vec<u8>,
 }
 

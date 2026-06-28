@@ -4,7 +4,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct AuditEvent {
    | ^^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
    = note: `#[warn(rss_redact_debug_required)]` on by default
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
@@ -13,7 +13,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct RoleBinding {
    | ^^^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
   --> $DIR/main.rs:18:1
@@ -21,7 +21,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct Session {
    | ^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
   --> $DIR/main.rs:23:1
@@ -29,7 +29,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct SessionId(String);
    | ^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
   --> $DIR/main.rs:26:1
@@ -37,7 +37,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct RequestCtx {
    | ^^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
   --> $DIR/main.rs:31:1
@@ -45,7 +45,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct PrincipalSlot(String);
    | ^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
   --> $DIR/main.rs:34:1
@@ -53,7 +53,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct SecretMaterial(Vec<u8>);
    | ^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 高风险敏感 DTO 不得裸 derive(Debug)
   --> $DIR/main.rs:37:1
@@ -61,7 +61,7 @@ warning: 高风险敏感 DTO 不得裸 derive(Debug)
 LL | struct SecretCoordinate {
    | ^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(public|internal|secret|pii = "...")]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
+   = help: 改用 `#[derive(secure::Redact)]`，并为每个字段声明 `#[redact(sensitivity = ...)]`；确需临时豁免时加 item-level `#[allow(rss_redact_debug_required)] // reason: ...`
 
 warning: 8 warnings emitted
 

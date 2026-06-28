@@ -7,9 +7,10 @@
 //! - `impl ::core::fmt::Debug`：`write!(f, "{}", self.redact_scoped(RedactScope::ServerLog))`——替换手写
 //!   Debug、杜绝 `{:?}` 泄漏（默认 `ServerLog` = 受信进程内诊断渲染，保留掩码）。
 //!
-//! **fail-closed（Hard）**：每个字段必须显式带 `#[redact(...)]`（public/internal/secret/pii 四选一）；
-//! 缺标注 / 重复敏感度 / 未知 mode / `secret|pii|internal` 又 `mode = "show"` 均编译错误——「忘标脱敏的
-//! secret 字段」「把敏感字段标成明文」从类型层不可表达（compile-fail golden 见 `tests/`）。
+//! **fail-closed（Hard）**：每个字段必须显式带 `#[redact(sensitivity = ...)]`；
+//! 缺标注 / 重复敏感度 / 未知 sensitivity / 未知 mode / `secret|pii|internal` 又 `mode = "show"` /
+//! `mode = "hash"` 均编译错误——「忘标脱敏的 secret 字段」「把敏感字段标成明文」从类型层不可表达
+//! （compile-fail golden 见 `tests/`）。
 //!
 //! 不依赖 `secure` crate：只生成 `::secure::…` 绝对路径 token（无编译环；`secure` 内自用经
 //! `extern crate self as secure` 解析）。`sensitivity → mode` 默认映射不在此重复，运行期经
@@ -22,19 +23,20 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Fields, Index, LitStr};
+use syn::{Data, DeriveInput, Fields, Ident, Index, LitStr};
 
 /// 派生 `Redact` + 安全 `Debug`，按每字段 `#[redact(...)]` 策略脱敏。
 ///
 /// 字段属性 grammar：
-/// - `#[redact(public)]`
-/// - `#[redact(internal)]`
-/// - `#[redact(secret)]`
-/// - `#[redact(pii = "generic|email|phone|name|address")]`
-/// - 可选 `mode = "show|fixed|last4|email_mask|hash|drop"`。
+/// - `#[redact(sensitivity = public)]`
+/// - `#[redact(sensitivity = internal)]`
+/// - `#[redact(sensitivity = secret)]`
+/// - `#[redact(sensitivity = pii)]`
+/// - `#[redact(sensitivity = pii_email|pii_phone|pii_name|pii_address)]`
+/// - 可选 `mode = "show|fixed|last4|email_mask|drop"`。
 ///
 /// 每个字段必须且只能声明一个 sensitivity。显式 mode 优先；但 internal/pii/secret 与 `mode = "show"`
-/// 同用 = 编译错误（敏感字段不可声明明文）。
+/// 同用、任意字段与 `mode = "hash"` 同用 = 编译错误。
 #[proc_macro_derive(Redact, attributes(redact))]
 pub fn derive_redact(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
@@ -50,7 +52,6 @@ enum Mode {
     Fixed,
     Last4,
     EmailMask,
-    Hash,
     Drop,
 }
 
@@ -79,7 +80,7 @@ struct FieldPolicy {
     name_token: TokenStream2,
     /// 解析到的 `::secure::RedactionMode` 值表达式。
     mode_expr: TokenStream2,
-    /// 字段 `RedactValue` 取值表达式：读值 mode（show/last4/email_mask/hash 或 sensitivity 派生）
+    /// 字段 `RedactValue` 取值表达式：读值 mode（show/last4/email_mask 或 sensitivity 派生）
     /// 经 `RedactField::as_redact_value(&self.f)`；显式 `fixed`/`drop`（不读值）= `RedactValue::Absent`
     /// ——后者不施加 `RedactField` 约束，自定义字段类型即可固定脱敏（#1360 F2）。
     value_expr: TokenStream2,
@@ -159,19 +160,12 @@ fn field_policy(field: &syn::Field, idx: usize) -> syn::Result<FieldPolicy> {
             "secret|pii|internal 不得与 mode = \"show\" 同用（敏感字段不可声明明文输出）",
         ));
     }
-    if matches!(sens, Some(Sens::Pii(_))) && mode == Some(Mode::Hash) {
-        return Err(syn::Error::new(
-            field.span(),
-            "pii 不得与 mode = \"hash\" 同用（低熵 PII 不可用无盐 hash 脱敏）",
-        ));
-    }
-
     // 解析最终 mode 表达式；fail-closed：mode/sensitivity 皆缺 ⇒ 编译错误（不得隐式明文）。
     let mode_expr = match (mode, sens) {
         (Some(_), None) => {
             return Err(syn::Error::new(
                 field.span(),
-                "字段缺 sensitivity：须显式声明 public/internal/secret/pii 之一",
+                "字段缺 sensitivity：须显式声明 sensitivity = public|internal|secret|pii|pii_email|pii_phone|pii_name|pii_address",
             ));
         }
         (Some(m), Some(_)) => mode_path(m),
@@ -183,7 +177,7 @@ fn field_policy(field: &syn::Field, idx: usize) -> syn::Result<FieldPolicy> {
         (None, None) => {
             return Err(syn::Error::new(
                 field.span(),
-                "字段缺 #[redact(...)]：须显式声明 public/internal/secret/pii 之一（fail-closed，不得隐式明文）",
+                "字段缺 #[redact(...)]：须显式声明 sensitivity = public|internal|secret|pii|pii_email|pii_phone|pii_name|pii_address（fail-closed，不得隐式明文）",
             ));
         }
     };
@@ -217,25 +211,9 @@ fn parse_redact_attr(field: &syn::Field) -> syn::Result<(Option<Mode>, Option<Se
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("public") {
-                set_sens(&mut sens, Sens::Public, meta.path.span())?;
-                return Ok(());
-            }
-            if meta.path.is_ident("internal") {
-                set_sens(&mut sens, Sens::Internal, meta.path.span())?;
-                return Ok(());
-            }
-            if meta.path.is_ident("secret") {
-                set_sens(&mut sens, Sens::Secret, meta.path.span())?;
-                return Ok(());
-            }
-            if meta.path.is_ident("pii") {
-                let value: LitStr = meta.value()?.parse()?;
-                set_sens(
-                    &mut sens,
-                    Sens::Pii(parse_pii_kind(&value)?),
-                    meta.path.span(),
-                )?;
+            if meta.path.is_ident("sensitivity") {
+                let value: Ident = meta.value()?.parse()?;
+                set_sens(&mut sens, parse_sensitivity(&value)?, meta.path.span())?;
                 return Ok(());
             }
             if meta.path.is_ident("mode") {
@@ -245,7 +223,27 @@ fn parse_redact_attr(field: &syn::Field) -> syn::Result<(Option<Mode>, Option<Se
                 }
                 return Ok(());
             }
-            Err(meta.error("未知 #[redact(...)] 键：仅支持 public/internal/secret/pii/mode"))
+            if meta.path.is_ident("public") {
+                return Err(meta.error(
+                    "旧 #[redact(public)] 语法已移除：使用 #[redact(sensitivity = public)]",
+                ));
+            }
+            if meta.path.is_ident("internal") {
+                return Err(meta.error(
+                    "旧 #[redact(internal)] 语法已移除：使用 #[redact(sensitivity = internal)]",
+                ));
+            }
+            if meta.path.is_ident("secret") {
+                return Err(meta.error(
+                    "旧 #[redact(secret)] 语法已移除：使用 #[redact(sensitivity = secret)]",
+                ));
+            }
+            if meta.path.is_ident("pii") {
+                return Err(meta.error(
+                    "旧 #[redact(pii = \"...\")] 语法已移除：使用 #[redact(sensitivity = pii|pii_email|pii_phone|pii_name|pii_address)]",
+                ));
+            }
+            Err(meta.error("未知 #[redact(...)] 键：仅支持 sensitivity/mode"))
         })?;
     }
     Ok((mode, sens))
@@ -255,7 +253,7 @@ fn set_sens(sens: &mut Option<Sens>, next: Sens, span: proc_macro2::Span) -> syn
     if sens.replace(next).is_some() {
         return Err(syn::Error::new(
             span,
-            "重复 sensitivity 声明：public/internal/secret/pii 只能选一个",
+            "重复 sensitivity 声明：sensitivity 只能声明一次",
         ));
     }
     Ok(())
@@ -267,25 +265,33 @@ fn parse_mode(value: &LitStr) -> syn::Result<Mode> {
         "fixed" => Ok(Mode::Fixed),
         "last4" => Ok(Mode::Last4),
         "email_mask" => Ok(Mode::EmailMask),
-        "hash" => Ok(Mode::Hash),
+        "hash" => Err(syn::Error::new(
+            value.span(),
+            "mode = \"hash\" 已移除：使用 secure::redact_hash(value, &RedactionHashKey) 显式传入 HMAC key",
+        )),
         "drop" => Ok(Mode::Drop),
         other => Err(syn::Error::new(
             value.span(),
-            format!("未知 mode `{other}`：支持 show / fixed / last4 / email_mask / hash / drop"),
+            format!("未知 mode `{other}`：支持 show / fixed / last4 / email_mask / drop"),
         )),
     }
 }
 
-fn parse_pii_kind(value: &LitStr) -> syn::Result<PiiKind> {
-    match value.value().as_str() {
-        "email" => Ok(PiiKind::Email),
-        "phone" => Ok(PiiKind::Phone),
-        "name" => Ok(PiiKind::Name),
-        "address" => Ok(PiiKind::Address),
-        "generic" => Ok(PiiKind::Generic),
+fn parse_sensitivity(value: &Ident) -> syn::Result<Sens> {
+    match value.to_string().as_str() {
+        "public" => Ok(Sens::Public),
+        "internal" => Ok(Sens::Internal),
+        "secret" => Ok(Sens::Secret),
+        "pii" => Ok(Sens::Pii(PiiKind::Generic)),
+        "pii_email" => Ok(Sens::Pii(PiiKind::Email)),
+        "pii_phone" => Ok(Sens::Pii(PiiKind::Phone)),
+        "pii_name" => Ok(Sens::Pii(PiiKind::Name)),
+        "pii_address" => Ok(Sens::Pii(PiiKind::Address)),
         other => Err(syn::Error::new(
             value.span(),
-            format!("未知 pii kind `{other}`：支持 generic / email / phone / name / address"),
+            format!(
+                "未知 sensitivity `{other}`：支持 public / internal / secret / pii / pii_email / pii_phone / pii_name / pii_address"
+            ),
         )),
     }
 }
@@ -296,7 +302,6 @@ fn mode_path(m: Mode) -> TokenStream2 {
         Mode::Fixed => quote!(::secure::RedactionMode::Fixed),
         Mode::Last4 => quote!(::secure::RedactionMode::Last4),
         Mode::EmailMask => quote!(::secure::RedactionMode::EmailMask),
-        Mode::Hash => quote!(::secure::RedactionMode::Hash),
         Mode::Drop => quote!(::secure::RedactionMode::Drop),
     }
 }
@@ -331,7 +336,7 @@ fn redact_value_expr(
     match mode {
         Some(Mode::Fixed | Mode::Drop) => quote!(::secure::RedactValue::Absent),
         Some(Mode::Show) => quote!(::secure::RedactValue::Debug(#accessor)),
-        Some(Mode::Last4 | Mode::EmailMask | Mode::Hash) => {
+        Some(Mode::Last4 | Mode::EmailMask) => {
             quote!(::secure::RedactField::as_redact_value(#accessor))
         }
         None => match sens {
@@ -366,7 +371,7 @@ mod tests {
     #[test]
     fn named_struct_emits_both_impls() {
         let out = expand_str(
-            r#"struct Coord { #[redact(secret)] store_id: String, #[redact(public, mode = "fixed")] key: String }"#,
+            r#"struct Coord { #[redact(sensitivity = secret)] store_id: String, #[redact(sensitivity = public, mode = "fixed")] key: String }"#,
         )
         .expect("expand ok");
         assert!(out.contains("impl :: secure :: Redact for Coord"));
@@ -382,7 +387,8 @@ mod tests {
 
     #[test]
     fn tuple_newtype_marks_is_tuple_true_and_no_name() {
-        let out = expand_str("struct Ct(#[redact(secret)] Vec<u8>);").expect("expand ok");
+        let out =
+            expand_str("struct Ct(#[redact(sensitivity = secret)] Vec<u8>);").expect("expand ok");
         assert!(out.contains("redact_struct"));
         assert!(out.contains("true")); // is_tuple = true
         assert!(out.contains("Option :: None")); // tuple 字段 name = None
@@ -397,59 +403,72 @@ mod tests {
 
     #[test]
     fn secret_with_show_is_rejected() {
-        let err = expand_str(r#"struct Bad { #[redact(secret, mode = "show")] x: String }"#)
-            .expect_err("must reject mislabel");
+        let err = expand_str(
+            r#"struct Bad { #[redact(sensitivity = secret, mode = "show")] x: String }"#,
+        )
+        .expect_err("must reject mislabel");
         assert!(err.to_string().contains("不得与 mode = \"show\""));
     }
 
     #[test]
     fn pii_with_show_is_rejected() {
-        let err = expand_str(r#"struct Bad { #[redact(pii = "email", mode = "show")] x: String }"#)
-            .expect_err("must reject mislabel");
+        let err = expand_str(
+            r#"struct Bad { #[redact(sensitivity = pii_email, mode = "show")] x: String }"#,
+        )
+        .expect_err("must reject mislabel");
         assert!(err.to_string().contains("不得与 mode = \"show\""));
     }
 
     #[test]
     fn internal_with_show_is_rejected() {
         // Internal 语义 = 不进 Debug；show 强制明文输出与之矛盾 ⇒ fail-closed 拒绝。
-        let err = expand_str(r#"struct Bad { #[redact(internal, mode = "show")] x: String }"#)
-            .expect_err("must reject mislabel");
+        let err = expand_str(
+            r#"struct Bad { #[redact(sensitivity = internal, mode = "show")] x: String }"#,
+        )
+        .expect_err("must reject mislabel");
         assert!(err.to_string().contains("不得与 mode = \"show\""));
     }
 
     #[test]
     fn public_with_show_is_allowed() {
         // 仅 public 可显式 show（明文非敏感）。
-        let out = expand_str(r#"struct Ok { #[redact(public, mode = "show")] x: String }"#)
-            .expect("public + show 应放行");
+        let out =
+            expand_str(r#"struct Ok { #[redact(sensitivity = public, mode = "show")] x: String }"#)
+                .expect("public + show 应放行");
         assert!(out.contains("Redact"));
     }
 
     #[test]
     fn unknown_mode_is_error() {
-        let err = expand_str(r#"struct Bad { #[redact(public, mode = "bogus")] x: String }"#)
-            .expect_err("unknown mode");
+        let err = expand_str(
+            r#"struct Bad { #[redact(sensitivity = public, mode = "bogus")] x: String }"#,
+        )
+        .expect_err("unknown mode");
         assert!(err.to_string().contains("未知 mode"));
     }
 
     #[test]
-    fn unknown_pii_kind_is_error() {
-        let err = expand_str(r#"struct Bad { #[redact(pii = "vip")] x: String }"#)
-            .expect_err("unknown pii kind");
-        assert!(err.to_string().contains("未知 pii kind"));
+    fn unknown_sensitivity_is_error() {
+        let err = expand_str(r#"struct Bad { #[redact(sensitivity = pii_vip)] x: String }"#)
+            .expect_err("unknown sensitivity");
+        assert!(err.to_string().contains("未知 sensitivity"));
     }
 
     #[test]
     fn duplicate_sensitivity_is_error() {
-        let err = expand_str("struct Bad { #[redact(public, secret)] x: String }")
-            .expect_err("duplicate sensitivity");
+        let err = expand_str(
+            "struct Bad { #[redact(sensitivity = public, sensitivity = secret)] x: String }",
+        )
+        .expect_err("duplicate sensitivity");
         assert!(err.to_string().contains("重复 sensitivity"));
     }
 
     #[test]
     fn unknown_redact_key_is_error() {
-        let err = expand_str(r#"struct Bad { #[redact(public, masking = "fixed")] x: String }"#)
-            .expect_err("unknown key");
+        let err = expand_str(
+            r#"struct Bad { #[redact(sensitivity = public, masking = "fixed")] x: String }"#,
+        )
+        .expect_err("unknown key");
         assert!(err.to_string().contains("未知 #[redact"));
     }
 
@@ -467,17 +486,37 @@ mod tests {
 
     #[test]
     fn each_mode_ident_parses() {
-        for m in ["show", "fixed", "last4", "email_mask", "hash", "drop"] {
-            let src = format!(r#"struct S {{ #[redact(public, mode = "{m}")] x: String }}"#);
+        for m in ["show", "fixed", "last4", "email_mask", "drop"] {
+            let src = format!(
+                r#"struct S {{ #[redact(sensitivity = public, mode = "{m}")] x: String }}"#
+            );
             assert!(expand_str(&src).is_ok(), "mode {m} 应解析");
         }
     }
 
     #[test]
-    fn each_pii_kind_parses() {
-        for kind in ["generic", "email", "phone", "name", "address"] {
-            let src = format!(r#"struct S {{ #[redact(pii = "{kind}")] x: String }}"#);
-            assert!(expand_str(&src).is_ok(), "pii kind {kind} 应解析");
+    fn hash_mode_is_rejected() {
+        let err = expand_str(
+            r#"struct Bad { #[redact(sensitivity = public, mode = "hash")] x: String }"#,
+        )
+        .expect_err("hash mode removed");
+        assert!(err.to_string().contains("mode = \"hash\" 已移除"));
+    }
+
+    #[test]
+    fn each_sensitivity_ident_parses() {
+        for sensitivity in [
+            "public",
+            "internal",
+            "secret",
+            "pii",
+            "pii_email",
+            "pii_phone",
+            "pii_name",
+            "pii_address",
+        ] {
+            let src = format!(r#"struct S {{ #[redact(sensitivity = {sensitivity})] x: String }}"#);
+            assert!(expand_str(&src).is_ok(), "sensitivity {sensitivity} 应解析");
         }
     }
 }

@@ -4,7 +4,7 @@ use securederive::Redact;
 
 #[derive(Redact)]
 struct Bad {
-    #[redact(secret, mode = "show")]
+    #[redact(sensitivity = secret, mode = "show")]
     leaky: String,
 }
 

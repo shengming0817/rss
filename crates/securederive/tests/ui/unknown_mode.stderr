@@ -1,5 +1,5 @@
-error: 未知 mode `bogus`：支持 show / fixed / last4 / email_mask / hash / drop
- --> tests/ui/unknown_mode.rs:7:29
+error: 未知 mode `bogus`：支持 show / fixed / last4 / email_mask / drop
+ --> tests/ui/unknown_mode.rs:7:43
   |
-7 |     #[redact(public, mode = "bogus")]
-  |                             ^^^^^^^
+7 |     #[redact(sensitivity = public, mode = "bogus")]
+  |                                           ^^^^^^^

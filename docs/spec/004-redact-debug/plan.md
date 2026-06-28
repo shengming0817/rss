@@ -20,16 +20,16 @@ Issue #1359 要求把敏感类型的 `Debug` 脱敏从手写实现提升为字�
 - `secure` 导出 `secure::Redact` trait + `#[derive(secure::Redact)]` proc-macro。
 - 不保留 `Redactable` 兼容别名；本仓无外部调用方，按项目规则不做向后兼容 shim。
 - 字段属性语法：
-  - `#[redact(public)]`
-  - `#[redact(internal)]`
-  - `#[redact(secret)]`
-  - `#[redact(pii = "generic|email|phone|name|address")]`
-  - 可选 `mode = "show|fixed|last4|email_mask|hash|drop"`
+  - `#[redact(sensitivity = public)]`
+  - `#[redact(sensitivity = internal)]`
+  - `#[redact(sensitivity = secret)]`
+  - `#[redact(sensitivity = pii|pii_email|pii_phone|pii_name|pii_address)]`
+  - 可选 `mode = "show|fixed|last4|email_mask|drop"`
 - 宏规则：
   - 每字段必须声明且只能声明一个 sensitivity。
-  - 缺标注、重复 sensitivity、未知 PII kind、未知 mode 均编译失败。
+  - 缺标注、重复 sensitivity、未知 sensitivity、未知 mode 均编译失败。
   - `mode = "show"` 只允许搭配 `public`。
-  - `pii` 不得搭配 `mode = "hash"`；低熵 PII 不可用无盐 hash 脱敏。
+  - 字段级 `mode = "hash"` 已移除；关联令牌须走显式 keyed HMAC API。
   - `public` 默认 `show`；`internal`/`secret` 默认 `fixed`；`pii` 默认由 `PiiKind::default_mode()` 决定。
 
 ## 批次与依赖
@@ -46,8 +46,8 @@ Issue #1359 要求把敏感类型的 `Debug` 脱敏从手写实现提升为字�
 
 ## TDD 清单
 
-- `securederive` trybuild compile-fail：缺字段标注、重复 sensitivity、未知 PII kind、未知 mode、
-  `secret|internal|pii + mode = "show"`、`pii + mode = "hash"`。
+- `securederive` trybuild compile-fail：缺字段标注、重复 sensitivity、未知 sensitivity、未知 mode、
+  `secret|internal|pii + mode = "show"`、`mode = "hash"`。
 - `secure` 单测：新语法端到端、public 字段 Debug 渲染、fixed/drop 不要求字段实现 `RedactField`。
 - 核心类型单测：泄漏 marker 不出现在 `format!("{:?}", value)` 中，公共诊断字段仍可见。
 - dylint UI：敏感结构裸 `#[derive(Debug)]` 报错，`#[derive(secure::Redact)]` 或带 reason 的 item-level allow 放行。

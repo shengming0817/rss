@@ -33,7 +33,7 @@ use vocab::TenantId;
 /// 同 `application.rs` 的「session_id 敏感、不得进 broker metadata/日志」约束，`Debug` 不得回显明文
 /// （同 [`super::AttributeValue`] / [`super::RoleBinding`] 的 redacted-Debug 范式，避免经 `{:?}` 泄漏至日志/断言）。
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
-pub struct SessionId(#[redact(secret)] String);
+pub struct SessionId(#[redact(sensitivity = secret)] String);
 
 impl SessionId {
     /// 由已校验字符串构造（funnel 边界 = `pub(crate)`，crate 内信任）。
@@ -64,15 +64,15 @@ impl SessionId {
 /// `expires_at` = 登录时刻 + session_ttl。
 #[derive(Clone, secure::Redact)]
 pub struct Session {
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     id: SessionId,
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     subject: String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     tenant: TenantId,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     expires_at: SystemTime,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     created_at: SystemTime,
 }
 

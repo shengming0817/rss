@@ -212,7 +212,7 @@ fn is_canonical_redacted_bytes(cx: &LateContext<'_>, did: DefId) -> bool {
 /// 公开 / secure-governed 字节字段的结构性 carve-out（按 enclosing struct 末段名判定，已限 `LOCAL_CRATE=="diport"`
 /// ⇒ 名字唯一、无跨 crate 碰撞）。这些类型的裸 `Vec<u8>` 是设计本意、不采纳 `RedactedBytes`：
 /// - `CertSerial`：RFC5280 证书序列号是公开 CRL 字段，`derive(Debug)` 有意可见原值（非机密，与密码学物料相反）。
-/// - `SecretMaterial`：已 `#[derive(secure::Redact)]` `#[redact(secret)]`——完整 Wire + 日志策略由 `secure` 承载
+/// - `SecretMaterial`：已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载
 ///   （`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>`。
 ///
 /// 刻意窄名单（非启发式）。新增 carve-out 须同步本函数 + ADR-013 §4 carve-out registry + `ui/diport.rs` 绿例

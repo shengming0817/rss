@@ -53,7 +53,7 @@ pub enum BlindIndexError {
 /// 真实密钥来源属 KeyProvider DI port（#1466），本原语只接受已验证长度的字节材料。
 /// Debug 渲染 `BlindIndexKey(<redacted>)` by `#[derive(secure::Redact)]`，不泄原字节。
 #[derive(zeroize::ZeroizeOnDrop, secure::Redact)]
-pub struct BlindIndexKey(#[redact(secret)] Vec<u8>);
+pub struct BlindIndexKey(#[redact(sensitivity = secret)] Vec<u8>);
 
 impl BlindIndexKey {
     /// 由字节构造 root key（受控 funnel；< 32 字节 → `KeyTooShort`）。
@@ -118,7 +118,7 @@ impl<'a> IndexScope<'a> {
 /// 不暴露 expose 访问器——子密钥不出模块，全部 HMAC 计算在本模块内完成。
 /// Debug 渲染 `SubKey(<redacted>)` by `#[derive(secure::Redact)]`。
 #[derive(zeroize::ZeroizeOnDrop, secure::Redact)]
-pub(crate) struct SubKey(#[redact(secret)] [u8; 32]);
+pub(crate) struct SubKey(#[redact(sensitivity = secret)] [u8; 32]);
 
 // ── HMAC 内部工具 ─────────────────────────────────────────────────────────────
 

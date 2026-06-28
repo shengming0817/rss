@@ -13,8 +13,8 @@ argon2 = { workspace = true }
 # 字段级脱敏 derive（#[derive(Redact)]，#1360）：intra-base DAG 前向边 secure → securederive（layers.rs）。
 # proc-macro 生成 `::secure::…` 路径，secure 内自用经 lib.rs 的 `extern crate self as secure` 解析。
 securederive = { path = "../securederive" }
-# SHA-256：RedactionMode::Hash 的确定性不可逆 PII 关联摘要（#1360）+ secure::refresh token 不可逆持久化
-# 查找键（#1325）。default-features=false（无 std oid 等额外面）；与 password(argon2) / authn(hmac) 同源。
+# SHA-256：redaction HMAC 关联令牌 + secure::refresh token 不可逆持久化查找键（#1325）。
+# default-features=false（无 std oid 等额外面）；与 password(argon2) / authn(hmac) 同源。
 sha2 = { workspace = true }
 # RedactField 白名单覆盖：UUID / 时间戳这类可观测标量需要稳定文本视图供 hash/last4 等读取值 mode 使用（#1409）。
 uuid = { workspace = true }

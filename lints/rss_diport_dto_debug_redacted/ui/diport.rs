@@ -69,7 +69,7 @@ struct CertSerial {
 }
 
 // G6（结构性 carve-out，SecretMaterial）：enclosing struct 名 `SecretMaterial` → 豁免、不触发。
-// 对应生产 `diport::SecretMaterial`（已 derive(secure::Redact) #[redact(secret)]，完整 Wire+日志策略由 secure 承载）。
+// 对应生产 `diport::SecretMaterial`（已 derive(secure::Redact) #[redact(sensitivity = secret)]，完整 Wire+日志策略由 secure 承载）。
 struct SecretMaterial {
     bytes: Vec<u8>,
 }

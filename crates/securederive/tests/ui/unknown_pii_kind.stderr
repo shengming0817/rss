@@ -1,5 +1,5 @@
-error: 未知 pii kind `vip`：支持 generic / email / phone / name / address
- --> tests/ui/unknown_pii_kind.rs:7:20
+error: 未知 sensitivity `pii_vip`：支持 public / internal / secret / pii / pii_email / pii_phone / pii_name / pii_address
+ --> tests/ui/unknown_pii_kind.rs:7:28
   |
-7 |     #[redact(pii = "vip")]
-  |                    ^^^^^
+7 |     #[redact(sensitivity = pii_vip)]
+  |                            ^^^^^^^

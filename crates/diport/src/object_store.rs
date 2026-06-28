@@ -71,7 +71,7 @@ impl ObjectStoreError {
 ///
 /// `Clone`：dynosaur `dyn(box)` 派发要求方法签名无生命周期参数，故 key 取所有权 move 进各操作。
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
-pub struct ObjectKey(#[redact(pii = "generic")] String);
+pub struct ObjectKey(#[redact(sensitivity = pii)] String);
 
 impl ObjectKey {
     /// 由字符串构造对象 key。

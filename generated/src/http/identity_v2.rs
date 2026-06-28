@@ -60,13 +60,13 @@ pub mod error {
 #[serde(deny_unknown_fields)]
 pub struct IdentityRefreshData {
     #[serde(rename = "accessExpiresAt")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub access_expires_at: i64,
     #[serde(rename = "accessToken")]
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub access_token: ::std::string::String,
     #[serde(rename = "refreshToken")]
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub refresh_token: ::std::string::String,
 }
 ///`IdentityRefreshRequest`
@@ -94,7 +94,7 @@ pub struct IdentityRefreshData {
 #[serde(deny_unknown_fields)]
 pub struct IdentityRefreshRequest {
     #[serde(rename = "refreshToken")]
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub refresh_token: ::std::string::String,
 }
 ///`IdentityRefreshResponse`
@@ -141,7 +141,7 @@ pub struct IdentityRefreshRequest {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityRefreshResponse {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub data: IdentityRefreshData,
 }
 

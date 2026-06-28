@@ -59,33 +59,33 @@ fn alg_mode_consistent(alg: CipherAlg, mode: EncryptionMode) -> bool {
 
 /// AEAD v2 密文 envelope。
 ///
-/// Debug 经 `#[derive(Redact)]`：`nonce`/`ciphertext`/`tag` 为密码字节材料 → `#[redact(secret)]`
+/// Debug 经 `#[derive(Redact)]`：`nonce`/`ciphertext`/`tag` 为密码字节材料 → `#[redact(sensitivity = secret)]`
 /// （`<redacted>`，nonce 密码学非机密但 Debug 字节 dump 无审计价值，统一脱敏 = 防御纵深，对齐 v1 `Ciphertext`
-/// 先例）；`version`/`alg`/`mode`/`kid`/`key_version`/`aad` 是结构化元数据 → `#[redact(public, mode = "show")]`。
+/// 先例）；`version`/`alg`/`mode`/`kid`/`key_version`/`aad` 是结构化元数据 → `#[redact(sensitivity = public, mode = "show")]`。
 /// 私有字段 + 受控构造 funnel [`CiphertextEnvelope::new`]（供 #1466 adapter 在 `seal` 中组装，外部不可直构）。
 #[derive(Clone, PartialEq, Eq, secure::Redact)]
 pub struct CiphertextEnvelope {
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     version: u8,
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     alg: CipherAlg,
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     mode: EncryptionMode,
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     kid: Box<str>,
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     key_version: u32,
     // tradeoff: nonce 脱敏同时遮蔽日志侧 nonce 复用诊断；#1466 实现者须在 AEAD impl 层另行经单调计数器/
     // metrics 覆盖 D3 (DEK,nonce) 唯一性监控，不依赖日志中的 nonce 字节（nonce 本身密码学非机密）。
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     nonce: Vec<u8>,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     ciphertext: Vec<u8>,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     tag: Vec<u8>,
     /// 存储仅供标识/路由/审计（issue 的 `aad_schema` 槽）——是 [`ProtectionAad`]（非 `DerivedAad`），
     /// 类型层禁止回灌给 `open`。非机密、明示。
-    #[redact(public, mode = "show")]
+    #[redact(sensitivity = public, mode = "show")]
     aad: ProtectionAad,
 }
 

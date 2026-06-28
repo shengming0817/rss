@@ -2610,6 +2610,8 @@ pub fn diport::object_store::ObjectKey::fmt(&self, &mut core::fmt::Formatter<'_>
 impl core::hash::Hash for diport::object_store::ObjectKey
 pub fn diport::object_store::ObjectKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::StructuralPartialEq for diport::object_store::ObjectKey
+impl secure::redaction::Redact for diport::object_store::ObjectKey
+pub fn diport::object_store::ObjectKey::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::object_store::ObjectKey
 impl core::marker::Send for diport::object_store::ObjectKey
 impl core::marker::Sync for diport::object_store::ObjectKey
@@ -2959,6 +2961,8 @@ impl core::clone::Clone for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::clone(&self) -> diport::pdp::RawCredential
 impl core::fmt::Debug for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::RawCredential
+pub fn diport::pdp::RawCredential::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::pdp::RawCredential
 impl core::marker::Send for diport::pdp::RawCredential
 impl core::marker::Sync for diport::pdp::RawCredential
@@ -3000,6 +3004,8 @@ impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
 impl core::fmt::Debug for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::VerifiedClaims
+pub fn diport::pdp::VerifiedClaims::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::pdp::VerifiedClaims
 impl core::marker::Send for diport::pdp::VerifiedClaims
 impl core::marker::Sync for diport::pdp::VerifiedClaims
@@ -7696,6 +7702,8 @@ pub fn diport::object_store::ObjectKey::fmt(&self, &mut core::fmt::Formatter<'_>
 impl core::hash::Hash for diport::object_store::ObjectKey
 pub fn diport::object_store::ObjectKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::StructuralPartialEq for diport::object_store::ObjectKey
+impl secure::redaction::Redact for diport::object_store::ObjectKey
+pub fn diport::object_store::ObjectKey::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::object_store::ObjectKey
 impl core::marker::Send for diport::object_store::ObjectKey
 impl core::marker::Sync for diport::object_store::ObjectKey
@@ -8013,6 +8021,8 @@ impl core::clone::Clone for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::clone(&self) -> diport::pdp::RawCredential
 impl core::fmt::Debug for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::RawCredential
+pub fn diport::pdp::RawCredential::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::pdp::RawCredential
 impl core::marker::Send for diport::pdp::RawCredential
 impl core::marker::Sync for diport::pdp::RawCredential
@@ -8655,6 +8665,8 @@ impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
 impl core::fmt::Debug for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::VerifiedClaims
+pub fn diport::pdp::VerifiedClaims::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::pdp::VerifiedClaims
 impl core::marker::Send for diport::pdp::VerifiedClaims
 impl core::marker::Sync for diport::pdp::VerifiedClaims

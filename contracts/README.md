@@ -59,7 +59,7 @@ contracts/{kind}/{domain}/{version}/
 | R13 | `SchemaTitle` | 每个 declared schema（喂 codegen TypeSpace 的 `request`/`response`/`payload`，**不含** saga step `outputSchema`——后者不喂 typify）：root **必须有 string `title`**（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部（含嵌套对象）title 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）+ **契约内**唯一（title→typify Rust 类型名；数字可在非首位，如 `SeedEchoData`/`EchoV2`）。坏 JSON / 缺文件 skip（由 codegen parse 门 / R5 兜底） |
 | R14 | `ActiveSubscriber` | **`lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空**（EVENT-ACTIVE-SUB-01，Medium）；active event 无 subscriber 即死事件，视为错误配置。draft/deprecated 豁免 |
 | R15 | `CommandConsistency` | `kind=command` ⇒ `consistencyLevel=OutboxFact`（命令分发 = 本地事务 + outbox 发布，L2 语义） |
-| R16 | `SchemaRedaction` | declared schema property 上的 `x-pii` / `x-redaction` 字段级策略须合法且完整；拒遗留 `x-sensitive`、未知枚举、`x-pii + hash`、高风险字段未声明策略 |
+| R16 | `SchemaRedaction` | declared schema property 上的 `x-pii` / `x-redaction` 字段级策略须合法且完整；拒遗留 `x-sensitive`、未知枚举、`x-redaction=hash`、高风险字段未声明策略 |
 | R17 | `SchemaProtection` | declared schema 的 `x-protection`（at-rest 加密声明）+ schema 级 `x-at-rest`（持久化 opt-in）须合法且完整（#1468，ADR-011 D1b 声明层）：block 内部一致（`atRest:encrypt` 须 `keyScope`+完整 `aad`；`deterministic`/`blindIndex` 须 `reason` 且 `aad` 稳定子集排除 `schemaVersion`；`atRest:plain` 不携带 encrypt 参数），`x-at-rest:true` 的 schema 内高风险字段缺 `x-protection` 均拒。与 R16（observe redaction）**正交不混用**（ADR-011 D1） |
 | R18 | `HttpAuth` | active HTTP 必须声明 `endpoints.http.auth`；`permission` mode 需非空 permission 且禁止 reason；`public`/`bootstrap`/`clientsOnly`/`serviceOwned` 需非空 reason 且禁止 permission；当前 header 最小闭值集只接受 `X-Tenant-ID = populate-only`，且 `identity.login` public serving 必须声明该 header。codegen 对 active HTTP 同样 fail-closed，不只依赖 validate |
 | R19 | `HttpTenantSource` | HTTP request schema 不得声明 `tenantId`（含嵌套 object schema）；tenant scope 必须来自认证上下文或声明式 populate-only header。validate 与 codegen 共用 schema property walker，避免治理门漂移 |
@@ -74,9 +74,10 @@ contracts/{kind}/{domain}/{version}/
 - `format: int64`/`format: int32` → typify 生成原生整数类型（`i64`/`i32`），无外部依赖，可用。
 - 种子契约避免 `format: uuid`（引入 `uuid` crate）和 `format: date-time`（引入 `chrono` crate）——防 `generated/` 引入超出 `serde` 的额外依赖。其他 `format` 按 typify 映射处理。
 - **字段级 redaction 策略（#1358）**：每个 property 可声明 `x-pii`（`generic|email|phone|name|address`）和 / 或
-  `x-redaction`（`public|internal|secret|fixed|last4|email_mask|drop|hash`）。未声明字段默认 `public`（安全
+  `x-redaction`（`public|internal|secret|fixed|last4|email_mask|drop`）。未声明字段默认 `public`（安全
   `Debug` 中按 `Debug` 明文显示）。`x-pii` 默认使用 `secure::PiiKind::default_mode()`；若与 `x-redaction`
-  同用，只允许 `fixed|last4|email_mask|drop` 作为 mode override，禁止 `hash`。不再使用 `x-sensitive`。
+  同用，只允许 `fixed|last4|email_mask|drop` 作为 mode override。`hash` 已移除，关联令牌必须在运行时代码中
+  通过显式 keyed HMAC API 生成。不再使用 `x-sensitive`。
 - 高风险字段名必须显式声明 `x-pii` 或非 public 的 `x-redaction`：`password`/`passwd`/`secret`/`token`/
   `credential`/`apikey`/`api_key`/`key`/`authorization`/`cookie`/`jwt`/`session`/`bearer`/`salt`/`private`
   （包含匹配）以及 `subject`/`subjectId`/`principal`/`principalId`/`payload`/`metadata`/`actor`

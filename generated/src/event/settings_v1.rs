@@ -150,24 +150,24 @@ impl ::std::convert::TryFrom<::std::string::String> for SettingsConfigChangeKind
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigVersionChangedPayload {
     #[serde(rename = "changeKind")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub change_kind: SettingsConfigChangeKind,
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     pub key: ::std::string::String,
     #[serde(rename = "occurredAt")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub occurred_at: i64,
     #[serde(
         rename = "sourceVersion",
         default,
         skip_serializing_if = "::std::option::Option::is_none"
     )]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub source_version: ::std::option::Option<i64>,
     #[serde(rename = "tenantId")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub tenant_id: ::std::string::String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub version: i64,
 }
 

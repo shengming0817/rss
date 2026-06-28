@@ -70,19 +70,19 @@ pub mod error {
 #[serde(deny_unknown_fields)]
 pub struct IdentityLoginData {
     #[serde(rename = "accessExpiresAt")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub access_expires_at: i64,
     #[serde(rename = "accessToken")]
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub access_token: ::std::string::String,
     #[serde(rename = "expiresAt")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub expires_at: i64,
     #[serde(rename = "refreshToken")]
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub refresh_token: ::std::string::String,
     #[serde(rename = "sessionId")]
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub session_id: ::std::string::String,
 }
 ///`IdentityLoginRequest`
@@ -113,9 +113,9 @@ pub struct IdentityLoginData {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityLoginRequest {
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub password: ::std::string::String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub username: ::std::string::String,
 }
 ///`IdentityLoginResponse`
@@ -172,7 +172,7 @@ pub struct IdentityLoginRequest {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityLoginResponse {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub data: IdentityLoginData,
 }
 

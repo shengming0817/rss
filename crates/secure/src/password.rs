@@ -31,7 +31,7 @@ pub enum PasswordError {
 /// `Debug` 经 `#[derive(Redact)]` 字段级脱敏（PHC 物料 → `<redacted>`，渲染 `PasswordHash(<redacted>)`），
 /// 替换手写 impl（#1360）。
 #[derive(Clone, PartialEq, Eq, secure::Redact)]
-pub struct PasswordHash(#[redact(secret)] zeroize::Zeroizing<String>);
+pub struct PasswordHash(#[redact(sensitivity = secret)] zeroize::Zeroizing<String>);
 
 impl PasswordHash {
     /// 持久化 PHC 字符串（adapter 存库时读取——不含明文，含 argon2 摘要 + 参数 + 盐）。

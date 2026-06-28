@@ -11,7 +11,8 @@
 //! `redact_field` 的 key 判敏感逻辑已**单源**进 [`Sensitivity::from_key`]，`Redacted::new` 仍 `pub(crate)`
 //! 封闭（外部只经公开 funnel 取 `Redacted`，不可伪造安全值）。
 
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac as _};
+use sha2::Sha256;
 use std::fmt::{Debug, Write as _};
 
 /// 敏感 key 关键字白名单（小写包含匹配）。由 [`Sensitivity::from_key`] 单源消费。
@@ -35,9 +36,13 @@ const SENSITIVE_KEY_PATTERNS: &[&str] = &[
 /// 敏感字段脱敏占位符。由 [`RedactionMode::Fixed`] 单源消费。
 const REDACTED_PLACEHOLDER: &str = "<redacted>";
 
-/// [`RedactionMode::Hash`] 摘要截断字节数（6 字节 = 12 hex 字符）。PII 关联令牌 `sha256:<12hex>` 的
+/// [`redact_hash`] HMAC 令牌截断字节数（6 字节 = 12 hex 字符）。关联令牌 `hmac-sha256:<12hex>` 的
 /// **格式稳定性单源**——改此值即改可观测关联令牌格式（operator 合约），须同步运维文档/告警。
 const HASH_TRUNCATE_BYTES: usize = 6;
+
+const REDACTION_HASH_KEY_MIN_BYTES: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// 脱敏器（sync 纯计算 trait）。
 pub trait Redactor {
@@ -81,6 +86,37 @@ impl Redacted {
     }
 
     pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Redaction HMAC key 构造错误。
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RedactionHashError {
+    /// HMAC key 少于 32 字节。
+    #[error("redaction hash key too short")]
+    KeyTooShort,
+}
+
+/// 字段级关联令牌 HMAC key（sealed；无 Clone，drop 自动清零）。
+///
+/// `secure` 是 L0 纯计算 crate：真实 key 来源由上层组合根 / KeyProvider 决定，本类型只接收已加载的
+/// key 字节，并通过 [`redact_hash`] 显式传入。没有全局 key、环境变量读取或部署常量。
+#[derive(zeroize::ZeroizeOnDrop, secure::Redact)]
+pub struct RedactionHashKey(#[redact(sensitivity = secret)] Vec<u8>);
+
+impl RedactionHashKey {
+    /// 由字节构造 redaction HMAC key（< 32 字节 → [`RedactionHashError::KeyTooShort`]）。
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, RedactionHashError> {
+        let b = bytes.into();
+        if b.len() < REDACTION_HASH_KEY_MIN_BYTES {
+            return Err(RedactionHashError::KeyTooShort);
+        }
+        Ok(Self(b))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -132,12 +168,6 @@ pub enum RedactionMode {
     /// **注意**：域名部分原样保留（视为非敏感，便于按域聚合诊断）。内网 / 机密域名本身属敏感时
     /// （如 `@m-and-a-target.com`）须改用 [`Fixed`](Self::Fixed)。
     EmailMask,
-    /// 确定性不可逆摘要（`sha256:<12hex>`）——同值同令牌、可关联不可还原。
-    ///
-    /// **仅适用于高熵输入**（UUID / 随机 token / 高熵 secret）：48 bit 截断 SHA-256 **无盐**，对低熵 PII
-    /// （手机号 / 邮编 / 短验证码）攻击者可预计算全空间反推，**禁用于低熵字段**——低熵 PII 用
-    /// [`Fixed`](Self::Fixed) / [`Last4`](Self::Last4)。`sensitivity` 默认映射从不选 Hash（须显式 `mode = "hash"`）。
-    Hash,
     /// 从输出剔除该字段。
     Drop,
 }
@@ -181,7 +211,8 @@ impl PiiKind {
     }
 }
 
-/// 字段原值的脱敏输入视图（借出，不取所有权）。仅 `Show`/`Last4`/`EmailMask`/`Hash` 真正读取原值。
+/// 字段原值的脱敏输入视图（借出，不取所有权）。仅 `Show`/`Last4`/`EmailMask` 真正读取原值；
+/// 显式 keyed HMAC 关联令牌走 [`redact_hash`]。
 #[derive(Debug, Clone, Copy)]
 pub enum RedactValue<'a> {
     /// 文本字段。
@@ -331,7 +362,6 @@ impl RedactionMode {
             RedactionMode::Drop => String::new(),
             RedactionMode::Last4 => mask_last4(value),
             RedactionMode::EmailMask => mask_email(value),
-            RedactionMode::Hash => mask_hash(value),
         }
     }
 }
@@ -405,28 +435,44 @@ fn mask_email(value: RedactValue<'_>) -> String {
     }
 }
 
-fn mask_hash(value: RedactValue<'_>) -> String {
-    let mut hasher = Sha256::new();
+/// 用显式 HMAC key 生成确定性不可逆关联令牌（`hmac-sha256:<12hex>`）。
+///
+/// 与字段级 `Debug` mode 分离：调用者必须持有 [`RedactionHashKey`] 才能生成可关联令牌，避免低熵 PII
+/// 落入无盐摘要。无值 / Debug-only 视图 fail-closed 为 `<redacted>`。
+pub fn redact_hash(value: RedactValue<'_>, key: &RedactionHashKey) -> Redacted {
+    let Some(token) = mask_hmac(value, key) else {
+        return Redacted::new(REDACTED_PLACEHOLDER);
+    };
+    Redacted::new(token)
+}
+
+fn mask_hmac(value: RedactValue<'_>, key: &RedactionHashKey) -> Option<String> {
+    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => {
+            unreachable!("HMAC-SHA256 new_from_slice does not fail for any key length")
+        }
+    };
     match value {
-        RedactValue::Str(s) => hasher.update(s.as_bytes()),
-        RedactValue::Bytes(b) => hasher.update(b),
+        RedactValue::Str(s) => mac.update(s.as_bytes()),
+        RedactValue::Bytes(b) => mac.update(b),
         RedactValue::Bool(_)
         | RedactValue::Signed(_)
         | RedactValue::Unsigned(_)
         | RedactValue::Uuid(_)
         | RedactValue::Duration(_)
         | RedactValue::SystemTime(_)
-        | RedactValue::OffsetDateTime(_) => hasher.update(scalar_to_string(value).as_bytes()),
+        | RedactValue::OffsetDateTime(_) => mac.update(scalar_to_string(value).as_bytes()),
         // 无值 / Debug-only 视图不可哈希 ⇒ fail-closed 固定占位。
-        RedactValue::Absent | RedactValue::Debug(_) => return REDACTED_PLACEHOLDER.to_string(),
+        RedactValue::Absent | RedactValue::Debug(_) => return None,
     }
-    let digest = hasher.finalize();
-    // 截断 HASH_TRUNCATE_BYTES 字节（= 12 hex 字符）：足够关联、不可逆、不回显全摘要。
+    let digest = mac.finalize().into_bytes();
+    // 截断 HASH_TRUNCATE_BYTES 字节（= 12 hex 字符）：足够关联、不可逆、不回显全 HMAC。
     let mut hex = String::with_capacity(HASH_TRUNCATE_BYTES * 2);
     for byte in digest.iter().take(HASH_TRUNCATE_BYTES) {
         let _ = write!(hex, "{byte:02x}");
     }
-    format!("sha256:{hex}")
+    Some(format!("hmac-sha256:{hex}"))
 }
 
 fn scalar_to_string(value: RedactValue<'_>) -> String {
@@ -496,9 +542,9 @@ pub struct FieldRedaction<'a> {
 
 /// 字段级输出目标通道（issue #1361 的 `ctx`）——决定 pii / 部分泄露 mode 的渲染严格度。
 ///
-/// 唯一通道差异：**部分泄露** mode（[`Last4`](RedactionMode::Last4) / [`EmailMask`](RedactionMode::EmailMask)
-/// / [`Hash`](RedactionMode::Hash)）在 [`Wire`](Self::Wire) 塌缩为 [`Fixed`](RedactionMode::Fixed)，在
-/// [`ServerLog`](Self::ServerLog) 保留声明 mode（诊断掩码 / 关联令牌）。`internal` / `secret` 两通道均 `Fixed`
+/// 唯一通道差异：**部分泄露** mode（[`Last4`](RedactionMode::Last4) / [`EmailMask`](RedactionMode::EmailMask)）
+/// 在 [`Wire`](Self::Wire) 塌缩为 [`Fixed`](RedactionMode::Fixed)，在
+/// [`ServerLog`](Self::ServerLog) 保留声明 mode（诊断掩码）。`internal` / `secret` 两通道均 `Fixed`
 /// （值在 derive 侧根本不捕获，见 [`Redact`]），`public` / `Show` 两通道均原样。
 ///
 /// 对标 `iqlusioninc/crates` secrecy `ExposeSecret`（受控暴露语义）：[`ServerLog`](Self::ServerLog) 是受信
@@ -507,7 +553,7 @@ pub struct FieldRedaction<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RedactScope {
-    /// 受信服务端日志 / `last_error` 持久化 / 进程内诊断：保留声明 mode（含 `Last4`/`EmailMask`/`Hash` 掩码）。
+    /// 受信服务端日志 / `last_error` 持久化 / 进程内诊断：保留声明 mode（含 `Last4`/`EmailMask` 掩码）。
     ServerLog,
     /// 外部不可信输出（导出 trace / API 响应 / 外发日志聚合）：部分泄露 mode 塌缩 `Fixed`，不部分泄露敏感值。
     Wire,
@@ -540,21 +586,20 @@ pub fn safe<R: Redact + ?Sized>(value: &R, scope: RedactScope) -> String {
 }
 
 /// 按输出 [`RedactScope`] 解析字段有效 mode：[`Wire`](RedactScope::Wire) 把**部分泄露** mode
-/// （`Last4`/`EmailMask`/`Hash`）塌缩为 `Fixed`（外部 sink 不部分泄露敏感值）；[`ServerLog`](RedactScope::ServerLog)
+/// （`Last4`/`EmailMask`）塌缩为 `Fixed`（外部 sink 不部分泄露敏感值）；[`ServerLog`](RedactScope::ServerLog)
 /// 原样保留声明 mode。`Show`/`Fixed`/`Drop` 两 scope 一致。
 ///
-/// （不按 sensitivity 区分 public：`public` 字段几乎不会声明 `Last4`/`EmailMask`/`Hash`〔非敏感无需掩码〕，
+/// （不按 sensitivity 区分 public：`public` 字段几乎不会声明 `Last4`/`EmailMask`〔非敏感无需掩码〕，
 /// 即便偶现、外部 sink 上塌缩为 `Fixed` 亦无害——故无需把 sensitivity 抬进 [`FieldRedaction`] 公开面。）
 ///
-/// INVARIANT: REDACT-WIRE-COLLAPSE-01 —— `Wire` scope 下部分泄露 mode（Last4/EmailMask/Hash）必塌缩 `Fixed`；
+/// INVARIANT: REDACT-WIRE-COLLAPSE-01 —— `Wire` scope 下部分泄露 mode（Last4/EmailMask）必塌缩 `Fixed`；
 /// 由 `safe_wire_collapses_partial_reveal_to_fixed` + `redact_struct_wire_collapses_partial_reveal`（anti-vacuity:
 /// 同值两 scope 输出不同）守。`mask` 已 `pub(crate)`、`safe` 是唯一字段级输出入口 ⇒ 旁路收敛。
 fn scope_effective_mode(mode: RedactionMode, scope: RedactScope) -> RedactionMode {
     match (scope, mode) {
-        (
-            RedactScope::Wire,
-            RedactionMode::Last4 | RedactionMode::EmailMask | RedactionMode::Hash,
-        ) => RedactionMode::Fixed,
+        (RedactScope::Wire, RedactionMode::Last4 | RedactionMode::EmailMask) => {
+            RedactionMode::Fixed
+        }
         _ => mode,
     }
 }
@@ -568,7 +613,7 @@ fn scope_effective_mode(mode: RedactionMode, scope: RedactScope) -> RedactionMod
 /// [`Redacted::new`] 独家产出——类型层封闭，外部不可伪造。
 /// 结构化 Debug 上下文的单字段渲染：先按 mode 脱敏，再对 `Show` 字段 Debug-转义（#1360 F3）——
 /// Show 字段含换行 / 控制字符时不污染 `Type { f: .. }` 渲染结构（与 derive(Debug) 对 `String` 字段一致）。
-/// `Fixed`/`Last4`/`EmailMask`/`Hash`/`Drop` 产物是受控占位 / 掩码片段，不转义（避免给 `<redacted>` 加引号）。
+/// `Fixed`/`Last4`/`EmailMask`/`Drop` 产物是受控占位 / 掩码片段，不转义（避免给 `<redacted>` 加引号）。
 fn render_field(mode: RedactionMode, value: RedactValue<'_>) -> String {
     let masked = mode.mask(value);
     if mode == RedactionMode::Show {
@@ -658,7 +703,7 @@ pub fn redact_error(error: &dyn std::error::Error) -> Redacted {
 ///
 /// 本 funnel 只按 key 名猜敏感；敏感 key 白名单 **不含** `email` / `subject` / `dsn` 等——这些
 /// key 返回 `Public`→`Show`→**原值**（`Redacted::Display` 仍是明文！类型名 `Redacted` 在此不代表已脱敏）。
-/// 这类字段须经字段级声明覆盖：`#[derive(secure::Redact)]` + `#[redact(pii = "email")]` 等，再用
+/// 这类字段须经字段级声明覆盖：`#[derive(secure::Redact)]` + `#[redact(sensitivity = pii_email)]` 等，再用
 /// [`safe`]（声明优先于 key 猜测）；DSN 用 [`redact_url_credentials`]。**勿**把 `email` 加进 key 白名单
 /// （违 declaration-over-key-guessing 设计）。
 pub fn redact_field(key: &str, value: &str) -> Redacted {
@@ -745,10 +790,14 @@ impl std::fmt::Debug for LastError {
 mod tests {
     use super::{
         FieldRedaction, LastError, PiiKind, RedactField, RedactScope, RedactValue, Redacted,
-        RedactionCtx, RedactionMode, Sensitivity, redact_error, redact_field, redact_struct,
-        redact_url_credentials, safe,
+        RedactionCtx, RedactionHashError, RedactionHashKey, RedactionMode, Sensitivity,
+        redact_error, redact_field, redact_hash, redact_struct, redact_url_credentials, safe,
     };
     use rstest::rstest;
+
+    fn hash_key(fill: u8) -> Result<RedactionHashKey, RedactionHashError> {
+        RedactionHashKey::from_bytes(vec![fill; 32])
+    }
 
     #[test]
     fn redacted_new_and_as_str() {
@@ -926,29 +975,44 @@ mod tests {
     }
 
     #[test]
-    fn mask_hash_is_deterministic_and_irreversible() {
-        let a = RedactionMode::Hash.mask(RedactValue::Str("user@corp.com"));
-        let b = RedactionMode::Hash.mask(RedactValue::Str("user@corp.com"));
-        assert_eq!(a, b, "同值同摘要（可关联）");
-        assert!(a.starts_with("sha256:"));
-        assert!(!a.contains("user@corp.com"), "不回显原值");
-        assert_eq!(a.len(), "sha256:".len() + 12, "截断 12 hex");
-        let c = RedactionMode::Hash.mask(RedactValue::Str("other@corp.com"));
-        assert_ne!(a, c, "异值异摘要");
+    fn redaction_hash_key_rejects_short_key() {
+        assert!(matches!(
+            RedactionHashKey::from_bytes(vec![0_u8; 31]),
+            Err(RedactionHashError::KeyTooShort)
+        ));
     }
 
     #[test]
-    fn mask_hash_bytes_and_absent() {
+    fn redact_hash_is_keyed_deterministic_and_irreversible() -> Result<(), RedactionHashError> {
+        let key = hash_key(0xA5)?;
+        let other_key = hash_key(0x5A)?;
+        let a = redact_hash(RedactValue::Str("user@corp.com"), &key);
+        let b = redact_hash(RedactValue::Str("user@corp.com"), &key);
+        assert_eq!(a, b, "同 key 同值同摘要（可关联）");
+        assert!(a.as_str().starts_with("hmac-sha256:"));
+        assert!(!a.as_str().contains("user@corp.com"), "不回显原值");
+        assert_eq!(a.as_str().len(), "hmac-sha256:".len() + 12, "截断 12 hex");
+        let c = redact_hash(RedactValue::Str("other@corp.com"), &key);
+        assert_ne!(a, c, "异值异摘要");
+        let other_key_token = redact_hash(RedactValue::Str("user@corp.com"), &other_key);
+        assert_ne!(a, other_key_token, "异 key 隔离关联域");
+        Ok(())
+    }
+
+    #[test]
+    fn redact_hash_bytes_and_absent() -> Result<(), RedactionHashError> {
+        let key = hash_key(0xA5)?;
         assert!(
-            RedactionMode::Hash
-                .mask(RedactValue::Bytes(&[0xDE, 0xAD]))
-                .starts_with("sha256:")
+            redact_hash(RedactValue::Bytes(&[0xDE, 0xAD]), &key)
+                .as_str()
+                .starts_with("hmac-sha256:")
         );
         assert_eq!(
-            RedactionMode::Hash.mask(RedactValue::Absent),
+            redact_hash(RedactValue::Absent, &key).as_str(),
             "<redacted>",
             "无值可哈希 → fail-closed"
         );
+        Ok(())
     }
 
     // --- RedactionCtx ---
@@ -958,15 +1022,6 @@ mod tests {
         // 默认 mode 由 sensitivity 解析（Secret→Fixed）；经 apply() 输出验证（accessor 已收为 pub(crate) 内部）。
         let ctx = RedactionCtx::new(Sensitivity::Secret, None);
         assert_eq!(ctx.apply(RedactValue::Str("k")), "<redacted>");
-    }
-
-    #[test]
-    fn redaction_ctx_explicit_mode_overrides_default() {
-        let ctx = RedactionCtx::new(
-            Sensitivity::Pii(PiiKind::Generic),
-            Some(RedactionMode::Hash),
-        );
-        assert!(ctx.apply(RedactValue::Str("x")).starts_with("sha256:"));
     }
 
     // --- RedactField ---
@@ -1040,11 +1095,13 @@ mod tests {
     }
 
     #[test]
-    fn scalar_redact_value_can_be_hashed() {
-        let a = RedactionMode::Hash.mask(RedactField::as_redact_value(&42_u32));
-        let b = RedactionMode::Hash.mask(RedactValue::Str("42"));
+    fn scalar_redact_value_can_be_hashed() -> Result<(), RedactionHashError> {
+        let key = hash_key(0xA5)?;
+        let a = redact_hash(RedactField::as_redact_value(&42_u32), &key);
+        let b = redact_hash(RedactValue::Str("42"), &key);
         assert_eq!(a, b);
-        assert!(a.starts_with("sha256:"));
+        assert!(a.as_str().starts_with("hmac-sha256:"));
+        Ok(())
     }
 
     // --- redact_struct 渲染 ---
@@ -1151,21 +1208,21 @@ mod tests {
 
     #[allow(dead_code)]
     #[derive(secure::Redact)]
-    struct DerivedNewtype(#[redact(secret)] Vec<u8>);
+    struct DerivedNewtype(#[redact(sensitivity = secret)] Vec<u8>);
 
     #[derive(secure::Redact)]
     // `gone`（mode = "drop"）经 F2 后取 RedactValue::Absent、不被 redact 读取 ⇒ field never read。
     #[allow(dead_code)]
     struct DerivedMixed {
-        #[redact(public, mode = "show")]
+        #[redact(sensitivity = public, mode = "show")]
         visible: String,
-        #[redact(secret)]
+        #[redact(sensitivity = secret)]
         secret: String,
-        #[redact(pii = "phone", mode = "last4")]
+        #[redact(sensitivity = pii_phone, mode = "last4")]
         card: String,
-        #[redact(pii = "email", mode = "email_mask")]
+        #[redact(sensitivity = pii_email, mode = "email_mask")]
         email: String,
-        #[redact(secret, mode = "drop")]
+        #[redact(sensitivity = secret, mode = "drop")]
         gone: String,
     }
 
@@ -1176,9 +1233,9 @@ mod tests {
     #[derive(secure::Redact)]
     #[allow(dead_code)] // fixed/drop 字段取 Absent、不被读取
     struct CustomFixedDrop {
-        #[redact(secret, mode = "fixed")]
+        #[redact(sensitivity = secret, mode = "fixed")]
         a: NotRedactField,
-        #[redact(secret, mode = "drop")]
+        #[redact(sensitivity = secret, mode = "drop")]
         b: NotRedactField,
     }
 

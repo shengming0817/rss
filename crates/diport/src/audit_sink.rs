@@ -63,34 +63,34 @@ pub struct AuditEvent {
     /// 事件发生时刻（由注入 [`crate::Clock`] 取得，非本类型直取系统时钟）。
     /// Clock 纪律由 caller 侧 `clippy.toml` `disallowed-methods`（`SystemTime::now`）在调用点静态拦截
     /// （Medium）；DI-infra 本类型不带构造强制（pub 字段，typed ctor 留 W 阶段）。
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub occurred_at: std::time::SystemTime,
     /// 操作主体标识。待 typed id（W 阶段）。
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     pub principal_id: String,
     /// 操作主体类别（脱敏闭值集，供审计按主体类型分层）。
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub principal_kind: vocab::PrincipalKind,
     /// 主体租户快照；跨租户主体（service / super-admin）可能为 `None`。
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub tenant_id: Option<vocab::TenantId>,
     /// 资源类别（const literal）。
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub resource_kind: &'static str,
     /// 资源标识。待 typed id（W 阶段）。
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     pub resource_id: String,
     /// 操作动作（const literal）。
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub action: &'static str,
     /// 操作结果。
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub outcome: AuditOutcome,
     /// 单次 HTTP 请求追踪 ID。
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     pub request_id: Option<String>,
     /// 跨服务关联 ID，由 outbox envelope correlation 注入，与 request_id 不同语义。
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     pub correlation_id: Option<String>,
 }
 

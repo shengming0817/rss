@@ -147,11 +147,11 @@ impl Role {
 /// ——外部可命名 / 收发 / 读访问器，但**不可伪造**（fail-closed，#1190 RbacAdminService 落 binding）。
 #[derive(secure::Redact)]
 pub struct RoleBinding {
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     subject: String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     role_id: RoleId,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     tenant: vocab::TenantId,
 }
 

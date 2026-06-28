@@ -54,9 +54,9 @@ pub mod error {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigPublishData {
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     pub key: ::std::string::String,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub version: i64,
 }
 ///`SettingsConfigPublishRequest`
@@ -99,9 +99,9 @@ pub struct SettingsConfigPublishData {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigPublishRequest {
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     pub key: ::std::string::String,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     pub value: ::std::string::String,
 }
 ///`SettingsConfigPublishResponse`
@@ -143,7 +143,7 @@ pub struct SettingsConfigPublishRequest {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsConfigPublishResponse {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub data: SettingsConfigPublishData,
 }
 

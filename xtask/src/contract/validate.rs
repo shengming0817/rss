@@ -21,7 +21,7 @@
 //! active event 无 subscriber 即死事件，视为错误配置（#1120）。
 //! INVARIANT: CONTRACT-REDACTION-POLICY-01 — declared schema property 上的 `x-pii` / `x-redaction`
 //! 是 generated 安全 `Debug` 的单源（R16）。遗留 `x-sensitive`、未知枚举、高风险字段未标注、
-//! `x-pii + hash` 均 fail-closed。
+//! `x-redaction=hash` 均 fail-closed。
 //! INVARIANT: CONTRACT-PROTECTION-POLICY-01 — declared schema 的 `x-protection`（at-rest 加密声明）+
 //! `x-at-rest`（持久化 opt-in）合法且完整（R17，#1468，ADR-011 D1b 声明层）。block 内部一致、AAD 维度
 //! 完整（D2）、deterministic/blindIndex 须 reason 且 aad 稳定子集（D4）、`x-at-rest` schema 高风险字段
@@ -117,7 +117,7 @@ pub(crate) enum Rule {
     /// R16：schema property 的 `x-pii` / `x-redaction` 字段级策略须合法且完整。
     ///
     /// INVARIANT: CONTRACT-REDACTION-POLICY-01 — generated wire DTO 的安全 `Debug` 从 contract JSON
-    /// Schema 单源派生。遗留 `x-sensitive`、未知枚举、PII hash、以及高风险字段未声明策略均拒绝。
+    /// Schema 单源派生。遗留 `x-sensitive`、未知枚举、hash redaction、以及高风险字段未声明策略均拒绝。
     SchemaRedaction,
     /// R17：schema property 的 `x-protection`（at-rest storage 加密声明）+ schema 级 `x-at-rest`
     /// opt-in 须合法且完整。
@@ -2964,7 +2964,7 @@ mod tests {
         );
         assert!(
             findings.iter().any(|f| f.detail.contains("hash")),
-            "x-pii + hash 须报错: {findings:?}"
+            "x-redaction=hash 须报错: {findings:?}"
         );
         Ok(())
     }

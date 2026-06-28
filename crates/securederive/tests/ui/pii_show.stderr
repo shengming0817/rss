@@ -1,5 +1,5 @@
 error: secret|pii|internal 不得与 mode = "show" 同用（敏感字段不可声明明文输出）
  --> tests/ui/pii_show.rs:7:5
   |
-7 |     #[redact(pii = "email", mode = "show")]
+7 |     #[redact(sensitivity = pii_email, mode = "show")]
   |     ^

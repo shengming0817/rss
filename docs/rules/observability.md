@@ -38,7 +38,7 @@ field / 日志 / wire / `last_error` 前，经 `secure::safe(&value, scope)` 按
 `email`/`subject`/`dsn`，只有字段策略能拦这些）。
 
 - `secure::RedactScope`（`ctx`）= 输出通道：`ServerLog`（受信进程内诊断 / `last_error` 持久化，= 派生 `Debug`
-  默认，保留 `last4`/`email_mask`/`hash` 掩码）与 `Wire`（外部不可信 sink：导出 trace / API 响应 / 外发日志——
+  默认，保留 `last4`/`email_mask` 掩码）与 `Wire`（外部不可信 sink：导出 trace / API 响应 / 外发日志——
   部分泄露 mode 塌缩 `<redacted>`，敏感值不部分泄露）。`safe(v, ServerLog) == format!("{v:?}")`（同源）。
 - `internal` / `secret` 两通道均 `Fixed`（值在 derive 侧根本不捕获）；`public` 两通道原样。
 - **`last_error` 脱敏安全载体 `secure::LastError`（sealed）**：构造只经 `LastError::from_error(&dyn Error)`
@@ -50,23 +50,24 @@ field / 日志 / wire / `last_error` 前，经 `secure::safe(&value, scope)` 按
 **字段级脱敏策略模型（#1359/#1360）**：任意 struct 字段经 `#[derive(secure::Redact)]` + 字段属性显式声明策略，
 派生安全 `Debug`（替换各 crate 手写脱敏 `Debug`，从输入类型层声明而非仅输出边界清洗）：
 
-- 敏感度必须逐字段显式声明且只能声明一个：`#[redact(public)]` / `#[redact(internal)]` /
-  `#[redact(secret)]` / `#[redact(pii = "generic|email|phone|name|address")]`。
-- 可选 `mode = "show|fixed|last4|email_mask|hash|drop"`；`public` 默认 `show`，`internal`/`secret`
+- 敏感度必须逐字段显式声明且只能声明一个：`#[redact(sensitivity = public)]` /
+  `#[redact(sensitivity = internal)]` / `#[redact(sensitivity = secret)]` /
+  `#[redact(sensitivity = pii|pii_email|pii_phone|pii_name|pii_address)]`。
+- 可选 `mode = "show|fixed|last4|email_mask|drop"`；`public` 默认 `show`，`internal`/`secret`
   默认 `fixed`，`pii` 默认由 `secure::PiiKind::default_mode()` 决定。
-- **fail-closed（Hard）**：字段缺 `#[redact]` 标注、重复敏感度、未知 pii kind、未知 mode、或非 public
-  字段误配 `mode = "show"`、`pii` 误配 `mode = "hash"` 均编译错误；低熵 PII 不得用无盐 hash 脱敏
-  （compile-fail golden 守，`crates/securederive/tests/ui/`）；`Redacted::new` 仍 `pub(crate)` 封闭，derive 经
-  公开 funnel `secure::redact_struct` 产出，外部不可伪造安全值。
+- **fail-closed（Hard）**：字段缺 `#[redact]` 标注、重复敏感度、未知 sensitivity、未知 mode、或非 public
+  字段误配 `mode = "show"`、任意字段误配 `mode = "hash"` 均编译错误。关联令牌必须走
+  `secure::redact_hash(value, &RedactionHashKey)` 显式传入 HMAC key；`Redacted::new` 仍 `pub(crate)`
+  封闭，derive 经公开 funnel `secure::redact_struct` 产出，外部不可伪造安全值。
 
 `secure::redact_field` 的 key 判敏感逻辑已收口进 `secure::Sensitivity::from_key`，与上述模型同源（无双路径）。
 没有业务 opt-out。需要原始诊断时走受控服务端日志，不写入 trace 或 wire。
 
 **contract → generated 字段策略（#1358）**：跨边界 wire DTO 的 `Debug` 策略不在消费侧手写，也不再靠
 字段名剥 `Debug`。`contracts/**/*.schema.json` 的 property 通过 `x-pii`（`generic|email|phone|name|address`）
-与 `x-redaction`（`public|internal|secret|fixed|last4|email_mask|drop|hash`）声明字段策略，`cargo xtask
+与 `x-redaction`（`public|internal|secret|fixed|last4|email_mask|drop`）声明字段策略，`cargo xtask
 codegen` 派生 `#[derive(secure::Redact)]` 和字段 `#[redact(...)]`。`cargo xtask contract validate` 对遗留
-`x-sensitive`、未知枚举、高风险字段未声明、`x-pii + hash` fail-closed；`contract breaking` 对既有字段策略漂移报
+`x-sensitive`、未知枚举、高风险字段未声明、`x-redaction=hash` fail-closed；`contract breaking` 对既有字段策略漂移报
 `REDACTION_POLICY_CHANGED`。
 
 > **observe-redaction ≠ storage-encryption（ADR-011 D1，两条正交面）**：上文 `x-pii`/`x-redaction` 守
@@ -278,6 +279,6 @@ outbox 表无 `tenant_id` 列、无 RLS，无 tenant scope 的 partition_key 同
 
 ## Audit
 
-audit payload 中的 replayable PII 必须 hash 或 redaction。trace 反查复用 auditquery
+audit payload 中的 replayable PII 必须经 keyed HMAC 关联令牌或 redaction。trace 反查复用 auditquery
 标准分页入口，不新增后门 endpoint。审计字段写入位置由类型系统 / sealed 写入入口守卫，
 规则文件只保留约束摘要。

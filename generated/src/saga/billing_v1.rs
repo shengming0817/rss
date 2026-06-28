@@ -58,11 +58,11 @@ pub mod error {
 #[serde(deny_unknown_fields)]
 pub struct BillingCheckoutSagaPayload {
     #[serde(rename = "amountMinor")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub amount_minor: i64,
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub currency: ::std::string::String,
     #[serde(rename = "orderId")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub order_id: ::std::string::String,
 }

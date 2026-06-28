@@ -461,7 +461,7 @@ mod tests {
         #[derive(secure::Redact)]
         #[allow(dead_code)]
         struct WithEmail {
-            #[redact(pii = "email")]
+            #[redact(sensitivity = pii_email)]
             email: String,
         }
         let mem = InMemorySpanExporter::default();

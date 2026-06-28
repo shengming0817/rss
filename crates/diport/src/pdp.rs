@@ -49,9 +49,9 @@ pub enum CredentialScheme {
 /// token 串——adapter 据 scheme 选验签路径。本层**不 parse、不验签**，只受控装箱传给 provider。
 #[derive(Clone, secure::Redact)]
 pub struct RawCredential {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     scheme: CredentialScheme,
-    #[redact(secret)]
+    #[redact(sensitivity = secret)]
     token: String,
 }
 
@@ -92,11 +92,11 @@ impl RawCredential {
 /// （非本层，保 ADR-005 category line）。字段集随消费域细化（`scopes` 等待 authz 消费方落地再加，pre-GA 可演进）。
 #[derive(Clone, secure::Redact)]
 pub struct VerifiedClaims {
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     subject: String,
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     tenant: Option<String>,
-    #[redact(pii = "generic")]
+    #[redact(sensitivity = pii)]
     kind: Option<String>,
 }
 

@@ -53,10 +53,10 @@ pub mod error {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
 #[serde(deny_unknown_fields)]
 pub struct SeedDoThingRequest {
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub amount: i64,
     #[serde(rename = "targetId")]
-    #[redact(public)]
+    #[redact(sensitivity = public)]
     pub target_id: ::std::string::String,
 }
 

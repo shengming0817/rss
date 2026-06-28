@@ -1,5 +1,5 @@
-error: 重复 sensitivity 声明：public/internal/secret/pii 只能选一个
- --> tests/ui/duplicate_sensitivity.rs:7:22
+error: 重复 sensitivity 声明：sensitivity 只能声明一次
+ --> tests/ui/duplicate_sensitivity.rs:7:36
   |
-7 |     #[redact(public, secret)]
-  |                      ^^^^^^
+7 |     #[redact(sensitivity = public, sensitivity = secret)]
+  |                                    ^^^^^^^^^^^

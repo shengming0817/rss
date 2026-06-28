@@ -654,27 +654,31 @@ fn redact_attr(policy: FieldPolicy) -> syn::Attribute {
         .mode
         .map(|mode| syn::LitStr::new(mode.as_wire(), proc_macro2::Span::call_site()));
     match (policy.sensitivity, mode) {
-        (Sensitivity::Public, None) => syn::parse_quote!(#[redact(public)]),
-        (Sensitivity::Public, Some(mode)) => syn::parse_quote!(#[redact(public, mode = #mode)]),
-        (Sensitivity::Internal, None) => syn::parse_quote!(#[redact(internal)]),
-        (Sensitivity::Internal, Some(mode)) => {
-            syn::parse_quote!(#[redact(internal, mode = #mode)])
+        (Sensitivity::Public, None) => syn::parse_quote!(#[redact(sensitivity = public)]),
+        (Sensitivity::Public, Some(mode)) => {
+            syn::parse_quote!(#[redact(sensitivity = public, mode = #mode)])
         }
-        (Sensitivity::Secret, None) => syn::parse_quote!(#[redact(secret)]),
-        (Sensitivity::Secret, Some(mode)) => syn::parse_quote!(#[redact(secret, mode = #mode)]),
+        (Sensitivity::Internal, None) => syn::parse_quote!(#[redact(sensitivity = internal)]),
+        (Sensitivity::Internal, Some(mode)) => {
+            syn::parse_quote!(#[redact(sensitivity = internal, mode = #mode)])
+        }
+        (Sensitivity::Secret, None) => syn::parse_quote!(#[redact(sensitivity = secret)]),
+        (Sensitivity::Secret, Some(mode)) => {
+            syn::parse_quote!(#[redact(sensitivity = secret, mode = #mode)])
+        }
         (Sensitivity::Pii(kind), None) => {
-            let kind = pii_lit(kind);
-            syn::parse_quote!(#[redact(pii = #kind)])
+            let kind = sensitivity_ident(kind);
+            syn::parse_quote!(#[redact(sensitivity = #kind)])
         }
         (Sensitivity::Pii(kind), Some(mode)) => {
-            let kind = pii_lit(kind);
-            syn::parse_quote!(#[redact(pii = #kind, mode = #mode)])
+            let kind = sensitivity_ident(kind);
+            syn::parse_quote!(#[redact(sensitivity = #kind, mode = #mode)])
         }
     }
 }
 
-fn pii_lit(kind: PiiKind) -> syn::LitStr {
-    syn::LitStr::new(kind.as_wire(), proc_macro2::Span::call_site())
+fn sensitivity_ident(kind: PiiKind) -> syn::Ident {
+    syn::Ident::new(kind.as_sensitivity(), proc_macro2::Span::call_site())
 }
 
 fn render_field_protection_impls(file: &syn::File, policies: &StructProtectionPolicies) -> String {
@@ -1372,7 +1376,7 @@ mod tests {
         );
         assert!(
             field_has_redact_attr(&parsed, "SensitiveSeedRequest", "password", "secret"),
-            "password 应注入 #[redact(secret)]:\n{rendered}"
+            "password 应注入 #[redact(sensitivity = secret)]:\n{rendered}"
         );
         assert!(
             field_has_redact_attr(&parsed, "SensitiveSeedRequest", "username", "public"),

@@ -29,9 +29,9 @@ use vocab::PrincipalKind;
 /// 不是值类型，无生产相等语义需求（消费方读 [`RequestCtx::tenant`] / [`RequestCtx::principal`]）。
 #[derive(Clone, PartialEq, Eq, secure::Redact)]
 pub struct RequestCtx<T, P> {
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     tenant: T,
-    #[redact(internal)]
+    #[redact(sensitivity = internal)]
     principal: P,
 }
 

@@ -1,4 +1,4 @@
-error: 字段缺 #[redact(...)]：须显式声明 public/internal/secret/pii 之一（fail-closed，不得隐式明文）
+error: 字段缺 #[redact(...)]：须显式声明 sensitivity = public|internal|secret|pii|pii_email|pii_phone|pii_name|pii_address（fail-closed，不得隐式明文）
  --> tests/ui/missing_attr.rs:7:5
   |
 7 |     plain: String,

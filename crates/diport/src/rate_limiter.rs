@@ -55,7 +55,7 @@ impl RateLimitError {
 ///
 /// `Debug` 经字段级脱敏，避免 per-principal key（tenant/principal/route）随 `?key` / `{key:?}` 泄漏主体标识。
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
-pub struct RateLimitKey(#[redact(pii = "generic")] String);
+pub struct RateLimitKey(#[redact(sensitivity = pii)] String);
 
 impl RateLimitKey {
     /// 由字符串构造限流 key。

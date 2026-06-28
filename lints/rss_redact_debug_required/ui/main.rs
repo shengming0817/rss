@@ -48,9 +48,9 @@ struct HarmlessDiagnostic {
 mod redact_ok {
     #[derive(secure::Redact)]
     struct RoleBinding {
-        #[redact(pii = "generic")]
+        #[redact(sensitivity = pii)]
         subject: String,
-        #[redact(public)]
+        #[redact(sensitivity = public)]
         role_id: String,
     }
 }
