@@ -3028,6 +3028,57 @@ async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
     Ok(())
 }
 
+/// t22b：`PgSessionLifecycle` 接入 tenant no-op conformance：跨租 find 不可见、跨租 revoke 不影响 owner。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn t22b_session_lifecycle_tenant_noop_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t22b-sess");
+    let event_id = unique_event_id("t22b-evt");
+    let tenant_a = TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = TenantId::parse(COTX_TENANT_B).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-iso", tenant_a, expires, created);
+    let sid = session.id().clone();
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
+
+    testkit::repo_conformance::assert_cross_tenant_noop(
+        || async {
+            lifecycle
+                .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+                .await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+            )
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                lifecycle.find(tenant_b, sid.clone()).await?.is_some(),
+            )
+        },
+        || async {
+            lifecycle.revoke(tenant_b, sid.clone()).await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+            )
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 // ── PgConfigRepo / PgConfigUnitOfWork：配置仓储 + co-tx 集成测试（#1249）─────────────
 //
 // OUTBOX-COTX-CONFIG-01 anti-vacuity：正向 `tc5` 证真实 method commit 两行皆在 ↔ 负向双覆盖——`tc6` 经真实
@@ -3248,27 +3299,32 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
     setup_config(&store).await?;
     let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
+    let key = SettingKey::parse("app.k").unwrap();
 
-    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
-    // 陈旧：再写 v1 → 冲突。
-    assert!(matches!(
-        repo.save(tenant, config_entry("app.k", "v1b", 1)).await,
-        Err(ConfigRepoError::VersionConflict)
-    ));
-    // 跳版：max 是 1，写 v3 → 冲突（非 max+1）。
-    assert!(matches!(
-        repo.save(tenant, config_entry("app.k", "v3", 3)).await,
-        Err(ConfigRepoError::VersionConflict)
-    ));
-    // 恰 max+1：v2 成功。
-    repo.save(tenant, config_entry("app.k", "v2", 2)).await?;
-    assert_eq!(
-        repo.find(tenant, &SettingKey::parse("app.k").unwrap())
-            .await?
-            .unwrap()
-            .value(),
-        "v2"
-    );
+    testkit::repo_conformance::assert_versioned_cas_repo(
+        "v1".to_string(),
+        "v1b".to_string(),
+        "v3".to_string(),
+        "v2".to_string(),
+        |version, marker| {
+            let repo = &repo;
+            async move {
+                repo.save(tenant, config_entry("app.k", &marker, version))
+                    .await
+            }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move {
+                repo.find(tenant, key)
+                    .await
+                    .map(|entry| entry.map(|entry| entry.value().to_string()))
+            }
+        },
+        |e| matches!(e, ConfigRepoError::VersionConflict),
+    )
+    .await?;
 
     store.shutdown().await?;
     Ok(())
@@ -3284,39 +3340,46 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
-    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
-    repo.save(tenant, config_entry("app.k", "v2", 2)).await?;
-
-    repo.delete(tenant, &key).await?;
-    assert!(
-        repo.find(tenant, &key).await?.is_none(),
-        "delete 后 find None（latest 为 tombstone）"
-    );
-    // 软删：历史值行保留——find_version 仍可读 v1/v2（audit 友好）。
-    assert_eq!(
-        repo.find_version(tenant, &key, 1).await?.unwrap().value(),
-        "v1",
-        "历史 v1 保留"
-    );
-    assert_eq!(
-        repo.find_version(tenant, &key, 2).await?.unwrap().value(),
-        "v2",
-        "历史 v2 保留"
-    );
-    // tombstone 版本（v3）本身 find_version 返 None。
-    assert!(
-        repo.find_version(tenant, &key, 3).await?.is_none(),
-        "tombstone 版本 v3 不可读"
-    );
-    // latest_version 含 tombstone（= 3），version 不重置。
-    assert_eq!(repo.latest_version(tenant, &key).await?, Some(3));
-    // 幂等：latest 已 tombstone → 再删 no-op（latest_version 不变）。
-    repo.delete(tenant, &key).await?;
-    assert_eq!(
-        repo.latest_version(tenant, &key).await?,
-        Some(3),
-        "再删幂等：不追加新 tombstone"
-    );
+    testkit::repo_conformance::assert_tombstone_repo(
+        "v1".to_string(),
+        "v2".to_string(),
+        |version, marker| {
+            let repo = &repo;
+            async move {
+                repo.save(tenant, config_entry("app.k", &marker, version))
+                    .await
+            }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move { repo.delete(tenant, key).await }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move {
+                repo.find(tenant, key)
+                    .await
+                    .map(|entry| entry.map(|entry| entry.value().to_string()))
+            }
+        },
+        |version| {
+            let repo = &repo;
+            let key = &key;
+            async move {
+                repo.find_version(tenant, key, version)
+                    .await
+                    .map(|entry| entry.map(|entry| entry.value().to_string()))
+            }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move { repo.latest_version(tenant, key).await }
+        },
+    )
+    .await?;
 
     store.shutdown().await?;
     Ok(())
@@ -3541,6 +3604,145 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     Ok(())
 }
 
+/// tc7b：`PgConfigRepo` 接入 L2 co-tx conformance：commit 两边皆在；业务失败两边皆无；CAS 冲突无 outbox。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc7b_config_cotx_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let tenant = config_tenant();
+    let ok_event = unique_event_id("cfg-tc7b-ok");
+    let rollback_event = unique_event_id("cfg-tc7b-rollback");
+    let conflict_event = unique_event_id("cfg-tc7b-conflict");
+
+    repo.save(tenant, config_entry("app.cotx-conflict", "v1", 1))
+        .await?;
+
+    testkit::repo_conformance::assert_cotx_both_or_neither(
+        testkit::repo_conformance::CotxCase {
+            action: || async {
+                repo.save_and_append_outbox(
+                    tenant,
+                    config_entry("app.cotx-ok", "v1", 1),
+                    config_outbox_entry(&ok_event),
+                    config_envelope("app.cotx-ok"),
+                )
+                .await
+            },
+            business_exists: || async {
+                let cnt: (i64,) = sqlx::query_as(
+                    "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
+                )
+                .bind("app.cotx-ok")
+                .bind("v1")
+                .fetch_one(&store.pool)
+                .await
+                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+            },
+            outbox_exists: || async {
+                let cnt: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                        .bind(&ok_event)
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+            },
+        },
+        testkit::repo_conformance::CotxCase {
+            action: || async {
+                let entry = config_outbox_entry(&rollback_event);
+                let env = OutboxEnvelope::new(
+                    "settings".to_string(),
+                    CONFIG_VERSION_CHANGED_TOPIC.to_string(),
+                    OutboxMetadata::new(0, test_tenant())
+                        .with_subject_id("app.cotx-rollback".to_string()),
+                );
+                co_tx_with_outbox(
+                    &store.pool,
+                    tenant,
+                    &entry,
+                    &env,
+                    move |conn| {
+                        Box::pin(async move {
+                            sqlx::query(
+                                "INSERT INTO config_entries (tenant_id, config_key, version, value) \
+                                 VALUES ($1::uuid, $2, $3, $4)",
+                            )
+                            .bind(CONFIG_TENANT)
+                            .bind("app.cotx-rollback")
+                            .bind(1_i64)
+                            .bind("v1")
+                            .execute(&mut *conn)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                            Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
+                        })
+                    },
+                    |e| ConfigRepoError::Storage(Box::new(e)),
+                )
+                .await
+            },
+            business_exists: || async {
+                let cnt: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                        .bind("app.cotx-rollback")
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+            },
+            outbox_exists: || async {
+                let cnt: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                        .bind(&rollback_event)
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+            },
+        },
+        testkit::repo_conformance::CotxCase {
+            action: || async {
+                repo.save_and_append_outbox(
+                    tenant,
+                    config_entry("app.cotx-conflict", "stale", 1),
+                    config_outbox_entry(&conflict_event),
+                    config_envelope("app.cotx-conflict"),
+                )
+                .await
+            },
+            business_exists: || async {
+                let cnt: (i64,) = sqlx::query_as(
+                    "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
+                )
+                .bind("app.cotx-conflict")
+                .bind("stale")
+                .fetch_one(&store.pool)
+                .await
+                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+            },
+            outbox_exists: || async {
+                let cnt: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                        .bind(&conflict_event)
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+            },
+        },
+        |e| matches!(e, ConfigRepoError::VersionConflict),
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc8：storage 错误通道——关池后 find 返回 `ConfigRepoError::Storage`（基础设施错误分层映射，保留 source）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -3549,16 +3751,14 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
     setup_config(&store).await?;
     let repo = PgConfigRepo::new(&store, fixed_clock_arc());
     let tenant = config_tenant();
+    let key = SettingKey::parse("app.k").unwrap();
 
-    // 关池（PgConfigRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 sqlx 错误 → Storage。
-    store.shutdown().await?;
-    let result = repo
-        .find(tenant, &SettingKey::parse("app.k").unwrap())
-        .await;
-    assert!(
-        matches!(result, Err(ConfigRepoError::Storage(_))),
-        "关池后 find 应映射为 ConfigRepoError::Storage（基础设施错误分层，保留 source）"
-    );
+    testkit::repo_conformance::assert_storage_error_mapping(
+        || async { store.shutdown().await },
+        || async { repo.find(tenant, &key).await.map(|_| ()) },
+        |e| matches!(e, ConfigRepoError::Storage(_)),
+    )
+    .await?;
 
     Ok(())
 }
@@ -3578,51 +3778,58 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.k").unwrap();
 
-    // tenant A 写 app.k v1。
-    repo.save(
-        tenant_a,
-        ConfigEntry::hydrate(SettingKey::parse("app.k").unwrap(), "a-secret", tenant_a, 1),
+    testkit::repo_conformance::assert_tenant_scoped_repo(
+        testkit::repo_conformance::TenantScopedCase {
+            tenant_a,
+            tenant_b,
+            a_marker: "a-secret".to_string(),
+            b_marker: "b-value".to_string(),
+            save: |tenant, version, marker: String| {
+                let repo = &repo;
+                async move {
+                    repo.save(
+                        tenant,
+                        ConfigEntry::hydrate(
+                            SettingKey::parse("app.k").unwrap(),
+                            &marker,
+                            tenant,
+                            version,
+                        ),
+                    )
+                    .await
+                }
+            },
+            delete: |tenant| {
+                let repo = &repo;
+                let key = &key;
+                async move { repo.delete(tenant, key).await }
+            },
+            current: |tenant| {
+                let repo = &repo;
+                let key = &key;
+                async move {
+                    repo.find(tenant, key)
+                        .await
+                        .map(|entry| entry.map(|entry| entry.value().to_string()))
+                }
+            },
+            history: |tenant, version| {
+                let repo = &repo;
+                let key = &key;
+                async move {
+                    repo.find_version(tenant, key, version)
+                        .await
+                        .map(|entry| entry.map(|entry| entry.value().to_string()))
+                }
+            },
+            latest_version: |tenant| {
+                let repo = &repo;
+                let key = &key;
+                async move { repo.latest_version(tenant, key).await }
+            },
+        },
     )
     .await?;
-
-    // tenant B 读同 key → None（find / find_version 均不泄漏 A 的数据）。
-    assert!(
-        repo.find(tenant_b, &key).await?.is_none(),
-        "tenant B 不应看到 tenant A 的 config（find 隔离）"
-    );
-    assert!(
-        repo.find_version(tenant_b, &key, 1).await?.is_none(),
-        "tenant B find_version 同样隔离"
-    );
-
-    // tenant B 写同 key v1（独立版本空间，不受 A 的 v1 影响）→ 成功；各读各的值。
-    repo.save(
-        tenant_b,
-        ConfigEntry::hydrate(SettingKey::parse("app.k").unwrap(), "b-value", tenant_b, 1),
-    )
-    .await?;
-    assert_eq!(
-        repo.find(tenant_a, &key).await?.unwrap().value(),
-        "a-secret",
-        "tenant A 值不被 tenant B 覆盖"
-    );
-    assert_eq!(
-        repo.find(tenant_b, &key).await?.unwrap().value(),
-        "b-value",
-        "tenant B 读自己的值"
-    );
-
-    // tenant B delete 不影响 tenant A。
-    repo.delete(tenant_b, &key).await?;
-    assert!(
-        repo.find(tenant_b, &key).await?.is_none(),
-        "tenant B 删除后自身不可见"
-    );
-    assert_eq!(
-        repo.find(tenant_a, &key).await?.unwrap().value(),
-        "a-secret",
-        "tenant B delete 不影响 tenant A"
-    );
 
     store.shutdown().await?;
     Ok(())
@@ -3941,53 +4148,35 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
     let tenant = secret_tenant_a();
+    let key = SecretKey::parse("myapp.token").unwrap();
 
-    repo.save(
-        tenant,
-        make_secret_entry("myapp.token", "vault", "secret/tok", None, 1, tenant),
+    testkit::repo_conformance::assert_versioned_cas_repo(
+        "secret/tok".to_string(),
+        "secret/tok-b".to_string(),
+        "secret/tok-c".to_string(),
+        "secret/tok-v2".to_string(),
+        |version, marker| {
+            let repo = &repo;
+            async move {
+                repo.save(
+                    tenant,
+                    make_secret_entry("myapp.token", "vault", &marker, None, version, tenant),
+                )
+                .await
+            }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move {
+                repo.find(tenant, key)
+                    .await
+                    .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
+            }
+        },
+        |e| matches!(e, SecretRepoError::VersionConflict),
     )
     .await?;
-
-    // 陈旧：再写 v1 → VersionConflict。
-    assert!(
-        matches!(
-            repo.save(
-                tenant,
-                make_secret_entry("myapp.token", "vault", "secret/tok-b", None, 1, tenant),
-            )
-            .await,
-            Err(SecretRepoError::VersionConflict)
-        ),
-        "陈旧版本 → VersionConflict"
-    );
-
-    // 跳版：max=1，写 v3 → VersionConflict（非 max+1）。
-    assert!(
-        matches!(
-            repo.save(
-                tenant,
-                make_secret_entry("myapp.token", "vault", "secret/tok-c", None, 3, tenant),
-            )
-            .await,
-            Err(SecretRepoError::VersionConflict)
-        ),
-        "跳版 → VersionConflict"
-    );
-
-    // 恰 max+1：v2 成功。
-    repo.save(
-        tenant,
-        make_secret_entry("myapp.token", "vault", "secret/tok-v2", None, 2, tenant),
-    )
-    .await?;
-    assert_eq!(
-        repo.find(tenant, &SecretKey::parse("myapp.token").unwrap())
-            .await?
-            .unwrap()
-            .secret_ref()
-            .ref_key(),
-        "secret/tok-v2"
-    );
 
     store.shutdown().await?;
     Ok(())
@@ -4004,67 +4193,49 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
     let tenant = secret_tenant_a();
     let key = SecretKey::parse("myapp.cred").unwrap();
 
-    repo.save(
-        tenant,
-        make_secret_entry("myapp.cred", "vault", "secret/cred", None, 1, tenant),
+    testkit::repo_conformance::assert_tombstone_repo(
+        "secret/cred".to_string(),
+        "secret/cred-v2".to_string(),
+        |version, marker| {
+            let repo = &repo;
+            async move {
+                repo.save(
+                    tenant,
+                    make_secret_entry("myapp.cred", "vault", &marker, None, version, tenant),
+                )
+                .await
+            }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move { repo.delete(tenant, key).await }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move {
+                repo.find(tenant, key)
+                    .await
+                    .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
+            }
+        },
+        |version| {
+            let repo = &repo;
+            let key = &key;
+            async move {
+                repo.find_version(tenant, key, version)
+                    .await
+                    .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
+            }
+        },
+        || {
+            let repo = &repo;
+            let key = &key;
+            async move { repo.latest_version(tenant, key).await }
+        },
     )
     .await?;
-    repo.save(
-        tenant,
-        make_secret_entry(
-            "myapp.cred",
-            "vault",
-            "secret/cred-v2",
-            Some("r2"),
-            2,
-            tenant,
-        ),
-    )
-    .await?;
-
-    // delete → tombstone（v3）。
-    repo.delete(tenant, &key).await?;
-    assert!(
-        repo.find(tenant, &key).await?.is_none(),
-        "delete 后 find None（latest 为 tombstone）"
-    );
-
-    // 历史行保留：find_version 可读 v1/v2（audit 友好）。
-    assert_eq!(
-        repo.find_version(tenant, &key, 1)
-            .await?
-            .unwrap()
-            .secret_ref()
-            .ref_key(),
-        "secret/cred",
-        "历史 v1 保留"
-    );
-    assert_eq!(
-        repo.find_version(tenant, &key, 2)
-            .await?
-            .unwrap()
-            .secret_ref()
-            .ref_key(),
-        "secret/cred-v2",
-        "历史 v2 保留"
-    );
-
-    // tombstone 版本（v3）本身 find_version 返 None（deleted=true）。
-    assert!(
-        repo.find_version(tenant, &key, 3).await?.is_none(),
-        "tombstone v3 不可读"
-    );
-
-    // latest_version 含 tombstone（= 3），version 不重置。
-    assert_eq!(repo.latest_version(tenant, &key).await?, Some(3));
-
-    // 幂等：latest 已 tombstone → 再删 no-op（latest_version 不变）。
-    repo.delete(tenant, &key).await?;
-    assert_eq!(
-        repo.latest_version(tenant, &key).await?,
-        Some(3),
-        "再删幂等：不追加新 tombstone"
-    );
 
     // 不存在 key → no-op（无 panic / 无错误）。
     let phantom = SecretKey::parse("myapp.nonexistent").unwrap();
@@ -4082,16 +4253,14 @@ async fn ts5_secret_find_maps_storage_error() -> TestResult {
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
     let tenant = secret_tenant_a();
+    let key = SecretKey::parse("myapp.k").unwrap();
 
-    // 关池（PgSecretRepo 持 pool clone，sqlx Pool 共享底座 → 一并关闭）→ 后续查询 → Storage。
-    store.shutdown().await?;
-    let result = repo
-        .find(tenant, &SecretKey::parse("myapp.k").unwrap())
-        .await;
-    assert!(
-        matches!(result, Err(SecretRepoError::Storage(_))),
-        "关池后 find 应映射为 SecretRepoError::Storage"
-    );
+    testkit::repo_conformance::assert_storage_error_mapping(
+        || async { store.shutdown().await },
+        || async { repo.find(tenant, &key).await.map(|_| ()) },
+        |e| matches!(e, SecretRepoError::Storage(_)),
+    )
+    .await?;
 
     Ok(())
 }
@@ -4107,66 +4276,60 @@ async fn ts6_secret_cross_tenant_isolation() -> TestResult {
     let tenant_b = TenantId::parse(SECRET_TENANT_B).unwrap();
     let key = SecretKey::parse("shared.key").unwrap();
 
-    // tenant A 写 v1。
-    repo.save(
-        tenant_a,
-        make_secret_entry("shared.key", "vault-a", "secret/a", None, 1, tenant_a),
+    testkit::repo_conformance::assert_tenant_scoped_repo(
+        testkit::repo_conformance::TenantScopedCase {
+            tenant_a,
+            tenant_b,
+            a_marker: "vault-a".to_string(),
+            b_marker: "vault-b".to_string(),
+            save: |tenant, version, marker: String| {
+                let repo = &repo;
+                async move {
+                    repo.save(
+                        tenant,
+                        make_secret_entry(
+                            "shared.key",
+                            &marker,
+                            "secret/ref",
+                            None,
+                            version,
+                            tenant,
+                        ),
+                    )
+                    .await
+                }
+            },
+            delete: |tenant| {
+                let repo = &repo;
+                let key = &key;
+                async move { repo.delete(tenant, key).await }
+            },
+            current: |tenant| {
+                let repo = &repo;
+                let key = &key;
+                async move {
+                    repo.find(tenant, key).await.map(|entry| {
+                        entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
+                    })
+                }
+            },
+            history: |tenant, version| {
+                let repo = &repo;
+                let key = &key;
+                async move {
+                    repo.find_version(tenant, key, version).await.map(|entry| {
+                        entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
+                    })
+                }
+            },
+            latest_version: |tenant| {
+                let repo = &repo;
+                let key = &key;
+                async move { repo.latest_version(tenant, key).await }
+            },
+        },
     )
     .await?;
-
-    // tenant B 读同 key → None（find / find_version 均不泄漏 A 的数据）。
-    assert!(
-        repo.find(tenant_b, &key).await?.is_none(),
-        "tenant B 不应看到 tenant A 的 secret（find 隔离）"
-    );
-    assert!(
-        repo.find_version(tenant_b, &key, 1).await?.is_none(),
-        "tenant B find_version 同样隔离"
-    );
-
-    // tenant B 写同 key v1（独立版本空间，不受 A 的 v1 影响）→ 成功。
-    repo.save(
-        tenant_b,
-        make_secret_entry("shared.key", "vault-b", "secret/b", None, 1, tenant_b),
-    )
-    .await?;
-    assert_eq!(
-        repo.find(tenant_a, &key)
-            .await?
-            .unwrap()
-            .secret_ref()
-            .store_id()
-            .as_str(),
-        "vault-a",
-        "tenant A 值不被 tenant B 覆盖"
-    );
-    assert_eq!(
-        repo.find(tenant_b, &key)
-            .await?
-            .unwrap()
-            .secret_ref()
-            .store_id()
-            .as_str(),
-        "vault-b",
-        "tenant B 读自己的值"
-    );
-
-    // tenant B delete 不影响 tenant A。
-    repo.delete(tenant_b, &key).await?;
-    assert!(
-        repo.find(tenant_b, &key).await?.is_none(),
-        "tenant B 删除后自身不可见"
-    );
-    assert_eq!(
-        repo.find(tenant_a, &key)
-            .await?
-            .unwrap()
-            .secret_ref()
-            .store_id()
-            .as_str(),
-        "vault-a",
-        "tenant B delete 不影响 tenant A"
-    );
 
     store.shutdown().await?;
     Ok(())
@@ -5495,6 +5658,77 @@ async fn rt6_revoke_lineage_cross_tenant_noop() -> TestResult {
     Ok(())
 }
 
+/// RT-6b：`PgRefreshTokenStore` 接入 tenant no-op conformance。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn rt6b_refresh_token_store_tenant_noop_conformance() -> TestResult {
+    use identity::ports::{RefreshStatus, RefreshTokenRecord};
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_a = RtTenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = RtTenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let id_str = uuid::Uuid::new_v4().to_string();
+    let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_650_000);
+    let expires = issued + Duration::from_secs(3_600);
+    let record_a = RefreshTokenRecord::hydrate(
+        id_str.clone(),
+        tenant_a,
+        "refresh-conformance",
+        PrincipalKind::User,
+        test_hash_for(0xF6),
+        None,
+        id_str,
+        RefreshStatus::Active,
+        issued,
+        expires,
+    );
+    let hash_a = record_a.token_hash().clone();
+    let lineage_a = record_a.lineage_id().clone();
+    let rt_store = PgRefreshTokenStore::new(&store);
+
+    testkit::repo_conformance::assert_cross_tenant_noop(
+        || async {
+            rt_store.insert(record_a).await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                rt_store
+                    .find_by_hash(tenant_a, hash_a.clone())
+                    .await?
+                    .is_some_and(|record| record.status() == RefreshStatus::Active),
+            )
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                rt_store
+                    .find_by_hash(tenant_b, hash_a.clone())
+                    .await?
+                    .is_some(),
+            )
+        },
+        || async {
+            rt_store.revoke_lineage(tenant_b, lineage_a.clone()).await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                rt_store
+                    .find_by_hash(tenant_a, hash_a.clone())
+                    .await?
+                    .is_some_and(|record| record.status() == RefreshStatus::Active),
+            )
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// RT-7：并发 rotate CAS fencing——两个 `PgRefreshTokenStore` 实例 `tokio::join!` 并发 rotate 同一 Active 记录。
 ///
 /// 验证：恰一个 rotate 返回 `true`（CAS 命中），一个返回 `false`（miss）；
@@ -5956,6 +6190,54 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
             .await?,
         "B 视角不受 A 锁定影响（跨租隔离）"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_tenant_noop_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let a = cred_tenant(CRED_TENANT_A)?;
+    let b = cred_tenant(CRED_TENANT_B)?;
+    let alice_uid = cred_uid(CRED_USER_ALICE)?;
+    let now = cred_epoch(CRED_BASE_SECS);
+    let credential = make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?;
+
+    testkit::repo_conformance::assert_cross_tenant_noop(
+        || async {
+            repo.save(credential).await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                repo.find_by_user_id(a, alice_uid).await?.is_some(),
+            )
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                repo.find_by_user_id(b, alice_uid).await?.is_some(),
+            )
+        },
+        || async {
+            let outcome = repo
+                .authenticate(b, login_id("alice"), "correct".to_string(), now)
+                .await?;
+            if outcome == AuthOutcome::InvalidUnknown {
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            } else {
+                Err(format!("cross-tenant authenticate returned {outcome:?}").into())
+            }
+        },
+        || async {
+            Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                repo.find_by_user_id(a, alice_uid).await?.is_some(),
+            )
+        },
+    )
+    .await?;
 
     store.shutdown().await?;
     Ok(())
