@@ -47,21 +47,12 @@ pub enum CredentialScheme {
 
 /// 待验签原始凭据（零信任边界）：newtype funnel（私有字段，命名构造入口）。携带 scheme 标签 + 原始
 /// token 串——adapter 据 scheme 选验签路径。本层**不 parse、不验签**，只受控装箱传给 provider。
-#[derive(Clone)]
+#[derive(Clone, secure::Redact)]
 pub struct RawCredential {
+    #[redact(public)]
     scheme: CredentialScheme,
+    #[redact(secret)]
     token: String,
-}
-
-// PII 边界（类型层 Hard，同 `signer.rs` 的 `SignRequest`）：手写 `Debug` 不打印原始 token，只露 scheme。
-// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（回归见 `pii_debug` 单测）。
-impl std::fmt::Debug for RawCredential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawCredential")
-            .field("scheme", &self.scheme)
-            .field("token", &"<redacted>")
-            .finish()
-    }
 }
 
 impl RawCredential {
@@ -94,25 +85,19 @@ impl RawCredential {
 /// 信任语义：本值仅由验签 provider 在校验签名 / exp / MAC **成功后**构造，故其字段是「已验证」身份——
 /// authn 据此 mint `Principal`（验签 = 信任原点，非 authn 旁路 re-parse）。
 ///
-/// PII 边界：`subject` / `tenant` / `kind` **全部**手写 `Debug` 脱敏（DIPORT-DTO-PII-DEBUG-REDACT-01）。
+/// PII 边界：`subject` / `tenant` / `kind` 全部经 `#[derive(secure::Redact)]` 脱敏
+/// （DIPORT-DTO-PII-DEBUG-REDACT-01）。
 /// `kind` 是 adapter 透传的**未类型化、未校验** `Option<String>`——观测面不信任未校验输入，故一律脱敏，
 /// 杜绝 adapter 误塞 PII（email / 设备指纹）经 `kind` 进日志。`kind`→`PrincipalKind` 的**策略**归 authn
 /// （非本层，保 ADR-005 category line）。字段集随消费域细化（`scopes` 等待 authz 消费方落地再加，pre-GA 可演进）。
-#[derive(Clone)]
+#[derive(Clone, secure::Redact)]
 pub struct VerifiedClaims {
+    #[redact(pii = "generic")]
     subject: String,
+    #[redact(pii = "generic")]
     tenant: Option<String>,
+    #[redact(pii = "generic")]
     kind: Option<String>,
-}
-
-impl std::fmt::Debug for VerifiedClaims {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerifiedClaims")
-            .field("subject", &"<redacted>")
-            .field("tenant", &"<redacted>")
-            .field("kind", &"<redacted>")
-            .finish()
-    }
 }
 
 impl VerifiedClaims {
@@ -187,6 +172,14 @@ mod pii_debug {
     //! `RawCredential.token` / `VerifiedClaims.subject·tenant` Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01（同 `signer.rs` 的 `pii_debug`）。
     use super::{CredentialScheme, RawCredential, VerifiedClaims};
+
+    fn _assert_redact<T: secure::Redact>() {}
+
+    #[test]
+    fn pii_dtos_use_redact_derive_model() {
+        _assert_redact::<RawCredential>();
+        _assert_redact::<VerifiedClaims>();
+    }
 
     #[test]
     fn raw_credential_debug_redacts_token() {

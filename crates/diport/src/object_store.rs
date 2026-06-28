@@ -65,20 +65,13 @@ impl ObjectStoreError {
 /// opaque：key 命名 / 前缀策略随消费域派生，不在 DI-infra 层冻结。bucket **不**在此（是 adapter 构造配置）。
 ///
 /// PII 边界（**类型层 Hard**，对标 [`crate::Message`] 的 `payload` / [`ObjectStoreError`]）：key 可能内嵌租户 /
-/// 用户标识，**不** derive `Debug`——手写 `Debug` 只输出 `ObjectKey(<redacted>)`，使任意消费方的 `?key` /
+/// 用户标识，`#[derive(secure::Redact)]` 只输出 `ObjectKey(<redacted>)`，使任意消费方的 `?key` /
 /// `{key:?}` 不泄漏原文（把 adapter 侧「不记录 key 原文」的 Soft 约定上移为通用类型层保证）。
 /// INVARIANT: DIPORT-OBJECTKEY-DEBUG-REDACT-01（回归见 `smoke::object_key_debug_redacts`）。
 ///
 /// `Clone`：dynosaur `dyn(box)` 派发要求方法签名无生命周期参数，故 key 取所有权 move 进各操作。
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ObjectKey(String);
-
-impl std::fmt::Debug for ObjectKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // PII 边界（Hard）：key 可能内嵌租户 / 用户标识 ⇒ 只输出固定占位，原文从类型层不可经 Debug 泄漏。
-        f.debug_tuple("ObjectKey").field(&"<redacted>").finish()
-    }
-}
+#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+pub struct ObjectKey(#[redact(pii = "generic")] String);
 
 impl ObjectKey {
     /// 由字符串构造对象 key。
@@ -176,6 +169,8 @@ mod smoke {
     //! 另覆盖 [`ObjectPayload::collect_limited`] 的有界 / 超限 / 错误传播行为（stream-first 读取契约）。
     use super::{DynObjectStore, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError};
 
+    fn _assert_redact<T: secure::Redact>() {}
+
     fn obj_stream(bytes: &'static [u8]) -> ObjectPayload {
         ObjectPayload::new(Box::pin(futures::stream::once(async move {
             Ok::<Vec<u8>, ObjectStoreError>(bytes.to_vec())
@@ -256,6 +251,7 @@ mod smoke {
     // PII 边界回归（INVARIANT DIPORT-OBJECTKEY-DEBUG-REDACT-01）：key 原文不得经 Debug 泄漏。
     #[test]
     fn object_key_debug_redacts() {
+        _assert_redact::<ObjectKey>();
         let key = ObjectKey::new("tenant-a/blob.bin");
         let dbg = format!("{key:?}");
         assert!(!dbg.contains("tenant-a"), "key 原文(tenant)泄漏: {dbg}");

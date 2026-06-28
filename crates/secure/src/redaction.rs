@@ -188,6 +188,20 @@ pub enum RedactValue<'a> {
     Str(&'a str),
     /// 字节字段（如密钥物料 / 密文）。
     Bytes(&'a [u8]),
+    /// 布尔标量。
+    Bool(bool),
+    /// 有符号整数标量。
+    Signed(i128),
+    /// 无符号整数标量。
+    Unsigned(u128),
+    /// UUID 标量。
+    Uuid(uuid::Uuid),
+    /// 时间间隔标量。
+    Duration(std::time::Duration),
+    /// 系统时间标量。
+    SystemTime(std::time::SystemTime),
+    /// `time` crate 时间戳标量。
+    OffsetDateTime(time::OffsetDateTime),
     /// 仅供结构化 `Debug` 上下文的非敏感字段：按字段自身 `Debug` 渲染，避免给 public 字段新增
     /// `RedactField` impl。
     Debug(&'a dyn Debug),
@@ -226,6 +240,75 @@ impl RedactField for Vec<u8> {
     }
 }
 
+impl RedactField for bool {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::Bool(*self)
+    }
+}
+
+macro_rules! impl_redact_field_signed {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl RedactField for $ty {
+                fn as_redact_value(&self) -> RedactValue<'_> {
+                    RedactValue::Signed(i128::from(*self))
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! impl_redact_field_unsigned {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl RedactField for $ty {
+                fn as_redact_value(&self) -> RedactValue<'_> {
+                    RedactValue::Unsigned(u128::from(*self))
+                }
+            }
+        )*
+    };
+}
+
+impl_redact_field_signed!(i8, i16, i32, i64, i128);
+impl_redact_field_unsigned!(u8, u16, u32, u64, u128);
+
+impl RedactField for isize {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::Signed(*self as i128)
+    }
+}
+
+impl RedactField for usize {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::Unsigned(*self as u128)
+    }
+}
+
+impl RedactField for uuid::Uuid {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::Uuid(*self)
+    }
+}
+
+impl RedactField for std::time::Duration {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::Duration(*self)
+    }
+}
+
+impl RedactField for std::time::SystemTime {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::SystemTime(*self)
+    }
+}
+
+impl RedactField for time::OffsetDateTime {
+    fn as_redact_value(&self) -> RedactValue<'_> {
+        RedactValue::OffsetDateTime(*self)
+    }
+}
+
 impl<T: RedactField> RedactField for Option<T> {
     fn as_redact_value(&self) -> RedactValue<'_> {
         match self {
@@ -260,14 +343,31 @@ fn mask_show(value: RedactValue<'_>) -> String {
         RedactValue::Str(s) => s.to_string(),
         // Bytes 即便声明 Show 也不回显原始字节（仅长度供诊断）；Debug 仅用于结构化上下文。
         RedactValue::Bytes(b) => format!("[{} bytes]", b.len()),
+        RedactValue::Bool(_)
+        | RedactValue::Signed(_)
+        | RedactValue::Unsigned(_)
+        | RedactValue::Uuid(_)
+        | RedactValue::Duration(_)
+        | RedactValue::SystemTime(_)
+        | RedactValue::OffsetDateTime(_) => scalar_to_string(value),
         RedactValue::Debug(v) => format!("{v:?}"),
         RedactValue::Absent => "None".to_string(),
     }
 }
 
 fn mask_last4(value: RedactValue<'_>) -> String {
-    let RedactValue::Str(s) = value else {
-        return REDACTED_PLACEHOLDER.to_string();
+    let s = match value {
+        RedactValue::Str(s) => s.to_string(),
+        RedactValue::Bool(_)
+        | RedactValue::Signed(_)
+        | RedactValue::Unsigned(_)
+        | RedactValue::Uuid(_)
+        | RedactValue::Duration(_)
+        | RedactValue::SystemTime(_)
+        | RedactValue::OffsetDateTime(_) => scalar_to_string(value),
+        RedactValue::Bytes(_) | RedactValue::Debug(_) | RedactValue::Absent => {
+            return REDACTED_PLACEHOLDER.to_string();
+        }
     };
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= 4 {
@@ -280,11 +380,21 @@ fn mask_last4(value: RedactValue<'_>) -> String {
 }
 
 fn mask_email(value: RedactValue<'_>) -> String {
-    let RedactValue::Str(s) = value else {
-        return REDACTED_PLACEHOLDER.to_string();
+    let s = match value {
+        RedactValue::Str(s) => s.to_string(),
+        RedactValue::Bool(_)
+        | RedactValue::Signed(_)
+        | RedactValue::Unsigned(_)
+        | RedactValue::Uuid(_)
+        | RedactValue::Duration(_)
+        | RedactValue::SystemTime(_)
+        | RedactValue::OffsetDateTime(_) => scalar_to_string(value),
+        RedactValue::Bytes(_) | RedactValue::Debug(_) | RedactValue::Absent => {
+            return REDACTED_PLACEHOLDER.to_string();
+        }
     };
     // 域名部分原样保留（视为非敏感，见 RedactionMode::EmailMask 文档）；local 仅留首字符。
-    match s.split_once('@') {
+    match s.as_str().split_once('@') {
         Some((local, domain)) if !domain.is_empty() => match local.chars().next() {
             Some(first) => format!("{first}***@{domain}"),
             // 空 local（如 `@d.com`）⇒ fail-closed 固定占位。
@@ -300,6 +410,13 @@ fn mask_hash(value: RedactValue<'_>) -> String {
     match value {
         RedactValue::Str(s) => hasher.update(s.as_bytes()),
         RedactValue::Bytes(b) => hasher.update(b),
+        RedactValue::Bool(_)
+        | RedactValue::Signed(_)
+        | RedactValue::Unsigned(_)
+        | RedactValue::Uuid(_)
+        | RedactValue::Duration(_)
+        | RedactValue::SystemTime(_)
+        | RedactValue::OffsetDateTime(_) => hasher.update(scalar_to_string(value).as_bytes()),
         // 无值 / Debug-only 视图不可哈希 ⇒ fail-closed 固定占位。
         RedactValue::Absent | RedactValue::Debug(_) => return REDACTED_PLACEHOLDER.to_string(),
     }
@@ -310,6 +427,27 @@ fn mask_hash(value: RedactValue<'_>) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     format!("sha256:{hex}")
+}
+
+fn scalar_to_string(value: RedactValue<'_>) -> String {
+    match value {
+        RedactValue::Bool(v) => v.to_string(),
+        RedactValue::Signed(v) => v.to_string(),
+        RedactValue::Unsigned(v) => v.to_string(),
+        RedactValue::Uuid(v) => v.hyphenated().to_string(),
+        RedactValue::Duration(v) => format!("{}ns", v.as_nanos()),
+        RedactValue::SystemTime(v) => match v.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => format!("{}ns_since_unix_epoch", duration.as_nanos()),
+            Err(err) => format!("-{}ns_since_unix_epoch", err.duration().as_nanos()),
+        },
+        RedactValue::OffsetDateTime(v) => {
+            format!("{}ns_since_unix_epoch", v.unix_timestamp_nanos())
+        }
+        RedactValue::Str(s) => s.to_string(),
+        RedactValue::Bytes(b) => format!("[{} bytes]", b.len()),
+        RedactValue::Debug(v) => format!("{v:?}"),
+        RedactValue::Absent => "None".to_string(),
+    }
 }
 
 /// 字段脱敏策略：绑定 [`Sensitivity`] 与最终 [`RedactionMode`]。
@@ -847,6 +985,66 @@ mod tests {
         assert!(matches!(some.as_redact_value(), RedactValue::Str("v")));
         let none: Option<String> = None;
         assert!(matches!(none.as_redact_value(), RedactValue::Absent));
+    }
+
+    #[test]
+    fn redact_field_trait_scalar_views() {
+        assert!(matches!(
+            RedactField::as_redact_value(&true),
+            RedactValue::Bool(true)
+        ));
+        assert!(matches!(
+            RedactField::as_redact_value(&42_u32),
+            RedactValue::Unsigned(42)
+        ));
+        assert!(matches!(
+            RedactField::as_redact_value(&-7_i64),
+            RedactValue::Signed(-7)
+        ));
+
+        let uuid = uuid::Uuid::from_u128(0xf47ac10b58cc4372a5670e02b2c3d479);
+        assert!(matches!(RedactField::as_redact_value(&uuid), RedactValue::Uuid(v) if v == uuid));
+    }
+
+    #[test]
+    fn redact_field_trait_time_views_are_stable() {
+        let duration = std::time::Duration::from_millis(1_234);
+        assert!(matches!(
+            RedactField::as_redact_value(&duration),
+            RedactValue::Duration(v) if v == duration
+        ));
+        assert_eq!(
+            RedactionMode::Show.mask(RedactField::as_redact_value(&duration)),
+            "1234000000ns"
+        );
+
+        let system_time = std::time::UNIX_EPOCH + duration;
+        assert!(matches!(
+            RedactField::as_redact_value(&system_time),
+            RedactValue::SystemTime(v) if v == system_time
+        ));
+        assert_eq!(
+            RedactionMode::Show.mask(RedactField::as_redact_value(&system_time)),
+            "1234000000ns_since_unix_epoch"
+        );
+
+        let offset = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1_234);
+        assert!(matches!(
+            RedactField::as_redact_value(&offset),
+            RedactValue::OffsetDateTime(v) if v == offset
+        ));
+        assert_eq!(
+            RedactionMode::Show.mask(RedactField::as_redact_value(&offset)),
+            "1234000000000ns_since_unix_epoch"
+        );
+    }
+
+    #[test]
+    fn scalar_redact_value_can_be_hashed() {
+        let a = RedactionMode::Hash.mask(RedactField::as_redact_value(&42_u32));
+        let b = RedactionMode::Hash.mask(RedactValue::Str("42"));
+        assert_eq!(a, b);
+        assert!(a.starts_with("sha256:"));
     }
 
     // --- redact_struct 渲染 ---
