@@ -20,14 +20,13 @@ use std::sync::Arc;
 
 use consistency::Entry;
 use diport::{Clock, OutboxEnvelopeParts};
-use futures::future::BoxFuture;
 use settings::ports::{
     ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey, TenantId,
 };
-use sqlx::{Executor, PgConnection, Postgres, Row};
+use sqlx::{Executor, Postgres, Row};
 
 use crate::PgStore;
-use crate::cotx::{co_tx_with_outbox, set_local_tenant, tenant_scoped_read};
+use crate::cotx::PgTenantPool;
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
@@ -40,7 +39,7 @@ use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 /// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgSessionLifecycle`]）：
 /// settings bundle 以**单一**注入 clock 经 `Arc::clone` 扇出到 read/write 两个实例（PERSIST-003，#1424）。
 pub struct PgConfigRepo {
-    pool: sqlx::PgPool,
+    pool: PgTenantPool,
     clock: Arc<dyn Clock>,
 }
 
@@ -50,7 +49,7 @@ impl PgConfigRepo {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
     pub(crate) fn new(store: &PgStore, clock: Arc<dyn Clock>) -> Self {
         Self {
-            pool: store.pool.clone(),
+            pool: PgTenantPool::new(store),
             clock,
         }
     }
@@ -158,44 +157,6 @@ fn hydrate_active(
     }
 }
 
-/// 在 tenant-scoped 事务内执行单条写（begin → SET LOCAL tenant → write → 单 commit；失败 rollback）。
-///
-/// F3：plain `save` / `delete` 与 co-tx 写路径一致经 [`set_local_tenant`] 注入 scope，不绕过 tenant scope
-/// （未来 RLS policy 锚点）。错误已是域 [`ConfigRepoError`]（业务写闭包内 map），骨架 sqlx 错误经 `storage` 收口。
-async fn tenant_scoped<F>(
-    pool: &sqlx::PgPool,
-    tenant: TenantId,
-    write: F,
-) -> Result<(), ConfigRepoError>
-where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), ConfigRepoError>> + Send,
-{
-    let mut tx = pool.begin().await.map_err(storage)?;
-    set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-    match write(&mut tx).await {
-        Ok(()) => tx.commit().await.map_err(|e| {
-            tracing::warn!(
-                target: "postgres",
-                tenant_id = %tenant,
-                error = %secure::redact_error(&e),
-                "tenant_scoped: commit failed"
-            );
-            storage(e)
-        }),
-        Err(e) => {
-            if let Err(rb) = tx.rollback().await {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = %tenant,
-                    error = %secure::redact_error(&rb),
-                    "tenant_scoped: rollback failed after write error"
-                );
-            }
-            Err(e)
-        }
-    }
-}
-
 impl ConfigRepo for PgConfigRepo {
     async fn find(
         &self,
@@ -209,25 +170,27 @@ impl ConfigRepo for PgConfigRepo {
         let key_str = key.as_str().to_owned();
         let tenant_uuid_q = tenant_uuid.clone();
 
-        let row = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                sqlx::query(
-                    r#"
+        let row = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        r#"
                         SELECT config_key, value, version, deleted
                         FROM config_entries
                         WHERE tenant_id = $1::uuid AND config_key = $2
                         ORDER BY version DESC
                         LIMIT 1
                         "#,
-                )
-                .bind(tenant_uuid_q)
-                .bind(key_str)
-                .fetch_optional(&mut *conn)
-                .await
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str)
+                    .fetch_optional(&mut *conn)
+                    .await
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
         hydrate_active(tenant, row)
     }
 
@@ -244,24 +207,26 @@ impl ConfigRepo for PgConfigRepo {
         let tenant_uuid_q = tenant_uuid.clone();
         let version_i = version_param(version);
 
-        let row = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                sqlx::query(
-                    r#"
+        let row = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        r#"
                         SELECT config_key, value, version, deleted
                         FROM config_entries
                         WHERE tenant_id = $1::uuid AND config_key = $2 AND version = $3
                         "#,
-                )
-                .bind(tenant_uuid_q)
-                .bind(key_str)
-                .bind(version_i)
-                .fetch_optional(&mut *conn)
-                .await
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str)
+                    .bind(version_i)
+                    .fetch_optional(&mut *conn)
+                    .await
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
         hydrate_active(tenant, row)
     }
 
@@ -278,10 +243,9 @@ impl ConfigRepo for PgConfigRepo {
         let key_str = key.as_str().to_owned();
         let tenant_uuid_q = tenant_uuid.clone();
 
-        let (mv,): (Option<i64>,) = tenant_scoped_read(
-            &self.pool,
-            tenant,
-            move |conn| {
+        let (mv,): (Option<i64>,) = self
+            .pool
+            .read(tenant, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
                         "SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
@@ -291,8 +255,7 @@ impl ConfigRepo for PgConfigRepo {
                     .fetch_one(&mut *conn)
                     .await
                 })
-            },
-        )
+            })
         .await
         .map_err(storage)?;
         Ok(mv.and_then(|v| u64::try_from(v).ok()))
@@ -300,10 +263,13 @@ impl ConfigRepo for PgConfigRepo {
 
     async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError> {
         // F3：plain CAS 写经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致。
-        tenant_scoped(&self.pool, tenant, move |conn| {
-            Box::pin(async move { cas_insert(conn, tenant, &entry).await })
-        })
-        .await
+        self.pool
+            .write(
+                tenant,
+                move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
+                storage,
+            )
+            .await
     }
 
     async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError> {
@@ -311,10 +277,13 @@ impl ConfigRepo for PgConfigRepo {
         // 复用）。F3：经 tenant-scoped 事务（SET LOCAL）。
         let tu = tenant_param(tenant);
         let key_str = key.as_str().to_string();
-        tenant_scoped(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                sqlx::query(
-                    r#"
+        self.pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            r#"
                     INSERT INTO config_entries (tenant_id, config_key, version, value, deleted)
                     SELECT $1::uuid, $2, 1 + COALESCE(max(version), 0), '', true
                     FROM config_entries
@@ -325,16 +294,18 @@ impl ConfigRepo for PgConfigRepo {
                          ORDER BY version DESC LIMIT 1),
                         true)
                     "#,
-                )
-                .bind(&tu)
-                .bind(&key_str)
-                .execute(&mut *conn)
-                .await
-                .map_err(storage)
-                .map(|_| ())
-            })
-        })
-        .await
+                        )
+                        .bind(&tu)
+                        .bind(&key_str)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(storage)
+                        .map(|_| ())
+                    })
+                },
+                storage,
+            )
+            .await
     }
 }
 
@@ -362,14 +333,14 @@ impl ConfigUnitOfWork for PgConfigRepo {
         .with_partition_key_opt(partition_key);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。
-        co_tx_with_outbox(
-            &self.pool,
-            tenant,
-            &outbox_entry,
-            &env,
-            move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
-            storage,
-        )
-        .await
+        self.pool
+            .co_tx_with_outbox(
+                tenant,
+                &outbox_entry,
+                &env,
+                move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
+                storage,
+            )
+            .await
     }
 }

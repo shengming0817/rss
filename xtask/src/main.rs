@@ -15,6 +15,7 @@
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
 //!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
+//!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（azure 无 CI ⇒ 唯一实际 gate）：fmt + meta（contract
 //!                                      validate / assembly validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
@@ -55,6 +56,7 @@ mod layers;
 mod migrations;
 mod pathsafe;
 mod pdpallow;
+mod pg_tenant_tx_guard;
 mod publicapi;
 mod schema_rls;
 mod setlocal_funnel;
@@ -112,6 +114,8 @@ enum Command {
     SchemaRls,
     /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01）。
     SetLocalFunnel,
+    /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01）。
+    PgTenantTxGuard,
     DeferGate,
     Migrations,
 }
@@ -138,11 +142,12 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["integration", rest @ ..] => parse_integration(rest),
         ["schema-rls"] => Ok(Command::SchemaRls),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
+        ["pg-tenant-tx-guard"] => Ok(Command::PgTenantTxGuard),
         ["defer-gate"] => Ok(Command::DeferGate),
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | migrations | schema-rls | setlocal-funnel | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | migrations | schema-rls | setlocal-funnel | pg-tenant-tx-guard | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -344,6 +349,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         } => verify::run_integration(allow_missing_tools),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::SetLocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
+        Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
         Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
     }
@@ -789,6 +795,22 @@ mod tests {
     fn parse_command_setlocal_funnel_rejects_trailing_args() {
         assert!(parse_command(&s(&["setlocal-funnel", "--bogus"])).is_err());
         assert!(parse_command(&s(&["setlocal-funnel", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_pg_tenant_tx_guard() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["pg-tenant-tx-guard"]))?,
+            Command::PgTenantTxGuard
+        );
+        Ok(())
+    }
+
+    /// pg-tenant-tx-guard fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_pg_tenant_tx_guard_rejects_trailing_args() {
+        assert!(parse_command(&s(&["pg-tenant-tx-guard", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["pg-tenant-tx-guard", "extra"])).is_err());
     }
 
     #[test]

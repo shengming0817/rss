@@ -30,7 +30,7 @@
 - [x] T005 [US1] Add contract/header governance tests for authenticated tenant header sources in xtask
 - [ ] T006 [US1] Wire durable bootstrap to use non-superuser NOBYPASSRLS `rss_app` serving pool in adapters/postgres and runtime composition
 - [ ] T007 [US1] Add readyz/current-role probe coverage for non-bypass serving role in crates/syshealth or adapters/postgres
-- [ ] T008 [US1] Add raw-pool/TxManager bypass guard for tenant-scoped Postgres code in adapters/postgres and xtask
+- [x] T008 [US1] Add raw-pool/TxManager bypass guard for tenant-scoped Postgres code in adapters/postgres and xtask
 
 ---
 

@@ -57,7 +57,7 @@ impl PgStore {
 /// 杜绝任意 caller 手写全局 projection journal。完整派生 topic 绑定随 emit 期 co-tx 双写 decorator 落地（本 PR 外）。
 #[allow(dead_code)]
 // reason: sanctioned 写入入口，当前仅 integration 测试构造；生产 caller = 未来 emit co-tx 双写 decorator
-// （wiring 本 PR 外）。默认 build 无生产 caller，同 tx.rs::run_in_transaction 范式（pub(crate) 受控入口待接线）。
+// （wiring 本 PR 外）。默认 build 无生产 caller，同 tx.rs::run_global_transaction 范式（pub(crate) 受控入口待接线）。
 pub(crate) struct NewProjectionEvent {
     /// 事件所属域（如 `"identity"`）。
     pub(crate) domain: String,
@@ -85,7 +85,7 @@ impl PgProjectionEvents {
     /// 外部 crate 不可手写全局 journal；emit 期 co-tx 双写 decorator 经此唯一受控路径写入（接线本 PR 外）。
     #[allow(dead_code)]
     // reason: 当前仅 integration 测试调用；生产 caller = 未来 emit co-tx 双写 decorator（wiring 本 PR 外）。
-    // 同 tx.rs::run_in_transaction 范式（pub(crate) 受控入口待接线，默认 build 无生产 caller）。
+    // 同 tx.rs::run_global_transaction 范式（pub(crate) 受控入口待接线，默认 build 无生产 caller）。
     pub(crate) async fn append(
         &self,
         ev: NewProjectionEvent,

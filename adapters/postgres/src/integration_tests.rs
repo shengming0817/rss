@@ -1,6 +1,6 @@
 //! postgres adapter 集成测试（crate-internal；需真实 postgres，`integration` feature 门控；#1116 review F2/F5/F6）。
 //!
-//! crate-internal（非 `tests/`）以行使 `pub(crate)` 的 [`crate::PgStore::run_in_transaction`]（裸事务非公开
+//! crate-internal（非 `tests/`）以行使 `pub(crate)` 的 [`crate::PgStore::run_global_transaction`]（裸事务非公开
 //! API，review F2）。容器经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置。
 //! **外部 PG 路径（快速本地迭代）**：须设 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`（显式 opt-in）+
 //! 5 元组 `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`；`PGDATABASE` 须以 `_test` 结尾或 `== "test"`
@@ -166,7 +166,7 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 
     // setup：干净表 + 1 行，commit（committed 数据对所有池连接可见）。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             Box::pin(async move {
                 sqlx::query("DROP TABLE IF EXISTS rss_tx_probe")
                     .execute(&mut *c)
@@ -183,9 +183,9 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
         .await?;
     assert_eq!(probe_count(&store).await?, 1);
 
-    // rollback 路径：插入后强制 Err → run_in_transaction 回滚。
+    // rollback 路径：插入后强制 Err → run_global_transaction 回滚。
     let rolled_back = store
-        .run_in_transaction::<_, (), sqlx::Error>(|c| {
+        .run_global_transaction::<_, (), sqlx::Error>(|c| {
             Box::pin(async move {
                 sqlx::query("INSERT INTO rss_tx_probe (id) VALUES (2)")
                     .execute(&mut *c)
@@ -199,7 +199,7 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 
     // commit 路径：插入后 Ok → 持久化。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             Box::pin(async move {
                 sqlx::query("INSERT INTO rss_tx_probe (id) VALUES (3)")
                     .execute(&mut *c)
@@ -212,7 +212,7 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 
     // cleanup
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             Box::pin(async move {
                 sqlx::query("DROP TABLE rss_tx_probe")
                     .execute(&mut *c)
@@ -279,7 +279,7 @@ async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
 /// 在独立事务内读 `rss_tx_probe` 行数（committed 数据跨池连接可见）。
 async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             Box::pin(async move {
                 let row: (i64,) = sqlx::query_as("SELECT count(*) FROM rss_tx_probe")
                     .fetch_one(&mut *c)
@@ -470,7 +470,7 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
 
     // 事务内 append_outbox，然后返回 Err → 回滚。
     let result = store
-        .run_in_transaction::<_, (), sqlx::Error>(|c| {
+        .run_global_transaction::<_, (), sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
@@ -513,7 +513,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
 
     // 事务内 append_outbox + Ok → commit。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
@@ -559,7 +559,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
 
     // seed: 1 行 pending。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
@@ -607,7 +607,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
 
     // seed: 1 行 pending，retry_count=0。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t4-domain".to_string(),
@@ -678,7 +678,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
 
     // seed: 1 行 pending，手动置 retry_count=MAX-1。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t5-domain".to_string(),
@@ -737,7 +737,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
 
     // seed: 1 行 pending，retry_count 保持默认 0（首投）。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
                 "t5b-domain".to_string(),
@@ -795,7 +795,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
 
     // seed: 1 行，手动置为 status='publishing' 且 updated_at 早于 LEASE_TTL+10s 前（模拟崩溃残留）。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = make_test_env("crash-domain", "c");
             Box::pin(async move {
@@ -820,7 +820,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
     let other_id = unique_event_id("t6-other");
     let other_entry = make_entry(&other_id);
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = other_entry.clone();
             Box::pin(async move {
                 append_outbox(c, &entry, &make_test_env("other-domain", "c")).await?;
@@ -890,7 +890,7 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
 
     // seed 1 行 pending。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = make_test_env("t7-domain", "c");
             Box::pin(async move {
@@ -964,7 +964,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         let entry_c = (*entry).clone();
         let env_id_c = env_id.to_string();
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 Box::pin(async move {
                     let env = make_test_env("sweep-domain", "c");
                     append_outbox(c, &entry_c, &env).await?;
@@ -994,7 +994,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         let entry_c = make_entry(eid);
         let eid_c = eid.to_string();
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 Box::pin(async move {
                     append_outbox(c, &entry_c, &make_test_env("sweep-domain", "c")).await?;
                     Ok(())
@@ -1487,7 +1487,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     let entry = make_entry(&event_id);
 
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             let env = make_test_env(&domain, "contract-dlq");
             Box::pin(async move {
@@ -1607,7 +1607,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 
     // seed 1 行 pending。
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = entry.clone();
             Box::pin(async move {
                 append_outbox(c, &entry, &make_test_env("t9-domain", "c")).await?;
@@ -1909,9 +1909,9 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let sid = session_id.clone();
 
     // 同 PgSessionLifecycle 写序列（SET LOCAL + INSERT session + append_outbox）在单事务内执行后强制 Err →
-    // run_in_transaction 回滚。证明两写**共**回滚（真实 method rollback 路径结构同源，见本节注释 + T10）。
+    // run_global_transaction 回滚。证明两写**共**回滚（真实 method rollback 路径结构同源，见本节注释 + T10）。
     let rolled = store
-        .run_in_transaction::<_, (), sqlx::Error>(move |c| {
+        .run_global_transaction::<_, (), sqlx::Error>(move |c| {
             Box::pin(async move {
                 sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
                     .bind(&tenant)
@@ -2065,7 +2065,7 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
         let eid = unique_event_id(prefix);
         let entry = make_entry(&eid);
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 let env = make_test_env(domain, "c");
                 Box::pin(async move {
@@ -2107,7 +2107,7 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     // 先插"新" pending 行（created_at = now()）。
     let new_id = unique_event_id("t17-new");
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = make_entry(&new_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
@@ -2120,7 +2120,7 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     // 插"旧" pending 行，并把 created_at 回拨 10s（模拟 10 秒前写入）。
     let old_id = unique_event_id("t17-old");
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = make_entry(&old_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
@@ -2170,7 +2170,7 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     // seed：1 到期 pending（retry_after IS NULL）+ 1 未到期 pending（retry_after = now()+3600）。
     let due_id = unique_event_id("t18-due");
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = make_entry(&due_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
@@ -2182,7 +2182,7 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
 
     let future_id = unique_event_id("t18-future");
     store
-        .run_in_transaction::<_, _, sqlx::Error>(|c| {
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
             let entry = make_entry(&future_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
@@ -2230,7 +2230,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
         let eid = unique_event_id(prefix);
         let entry = make_entry(&eid);
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 let env = make_test_env(domain, "c");
                 Box::pin(async move {
@@ -2309,7 +2309,7 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c");
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2383,7 +2383,7 @@ async fn t25_partition_serial_in_order() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2479,7 +2479,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
         let entry = make_entry(&p1_id);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(p1_key));
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2493,7 +2493,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
         let entry = make_entry(&p2_id);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(p2_key));
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2507,7 +2507,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
         let entry = make_entry(nid);
         let env = make_test_env(&domain, "c");
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2569,7 +2569,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2601,7 +2601,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c"); // no partition
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2677,7 +2677,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;
@@ -2751,7 +2751,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         let entry = make_entry(eid);
         let env = make_test_env(&domain, "c").with_partition_key_opt(Some(key.clone()));
         store
-            .run_in_transaction::<_, _, sqlx::Error>(|c| {
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
                 let entry = entry.clone();
                 Box::pin(async move {
                     append_outbox(c, &entry, &env).await?;

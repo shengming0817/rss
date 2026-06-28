@@ -1,13 +1,13 @@
 //! `co_tx_with_outbox` —— 通用 **co-tx** 骨架：begin → SET LOCAL tenant → 业务写闭包 → `append_outbox` →
 //! 单 commit；任一步 Err ⇒ rollback + warn（#1249，吸收 #1232 co-tx）。
 //!
-//! 抽取自 session co-tx 范式（`session_lifecycle.rs`），供配置写 `PgConfigUnitOfWork` 复用。identity
-//! `PgSessionLifecycle` 迁移到本骨架延后（保留 t11/t12/t14 不动，见 #1271）。
+//! 抽取自 session co-tx 范式（`session_lifecycle.rs`），供 session 创建与配置写
+//! `PgConfigUnitOfWork` 复用。
 //!
 //! 错误泛型 `E`：业务写闭包返回 `Result<(), E>`（如 CAS 0 行 → 域 `VersionConflict`）；骨架自身产生的 sqlx
 //! 错误（begin / SET LOCAL / `append_outbox` / commit）经调用方传入的 `map_storage: Fn(sqlx::Error)->E` 收敛进
 //! 同一 `E`——**不**要求 `E: From<sqlx::Error>`（域错误 `ConfigRepoError` 不依赖 sqlx，无法 impl `From`）。
-//! 这正是不直接复用 `PgStore::run_in_transaction`（要求 `E: From<sqlx::Error>`）的原因。
+//! 这正是不直接复用 `PgStore::run_global_transaction`（要求 `E: From<sqlx::Error>`）的原因。
 //!
 //! # INVARIANT: OUTBOX-COTX-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
@@ -22,7 +22,90 @@ use futures::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use vocab::TenantId;
 
+use crate::PgStore;
 use crate::outbox::{OutboxEnvelope, append_outbox};
+
+/// tenant-scoped Postgres pool wrapper.
+///
+/// This is the typed production entry for RLS tenant-table access. It is cloneable for repo
+/// structs, but it does not expose raw [`PgPool`], `begin`, `acquire`, or `Executor`; callers can
+/// only run scoped read/write/co-tx closures after this module has injected `SET LOCAL
+/// rss.tenant_id`.
+///
+/// # INVARIANT: TENANCY-PG-TX-FUNNEL-01
+///
+/// Tenant-table adapters hold `PgTenantPool`, not `sqlx::PgPool`; direct raw-pool tenant-table
+/// access is therefore not expressible through their fields. `cargo xtask pg-tenant-tx-guard`
+/// is the Medium backstop that catches drift and explicit raw global exceptions.
+#[derive(Clone)]
+pub(crate) struct PgTenantPool {
+    pool: PgPool,
+}
+
+impl PgTenantPool {
+    /// Build the scoped wrapper from the crate-private store. The raw pool remains owned by
+    /// [`PgStore`] and is not exposed through this wrapper.
+    pub(crate) fn new(store: &PgStore) -> Self {
+        Self {
+            pool: store.pool.clone(),
+        }
+    }
+
+    /// Run a tenant-scoped read transaction.
+    pub(crate) async fn read<T, F>(&self, tenant: TenantId, read: F) -> Result<T, sqlx::Error>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
+        T: Send,
+    {
+        tenant_scoped_read(&self.pool, tenant, read).await
+    }
+
+    /// Run a tenant-scoped read transaction whose closure can return domain errors.
+    pub(crate) async fn read_map<T, F, E>(
+        &self,
+        tenant: TenantId,
+        read: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: Send,
+        T: Send,
+    {
+        tenant_scoped_read_map(&self.pool, tenant, read, map_storage).await
+    }
+
+    /// Run a tenant-scoped write transaction.
+    pub(crate) async fn write<T, F, E>(
+        &self,
+        tenant: TenantId,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: Send,
+        T: Send,
+    {
+        tenant_scoped_write(&self.pool, tenant, write, map_storage).await
+    }
+
+    /// Run a tenant-scoped business write followed by outbox append in the same transaction.
+    pub(crate) async fn co_tx_with_outbox<F, E>(
+        &self,
+        tenant: TenantId,
+        entry: &Entry,
+        env: &OutboxEnvelope,
+        business_write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<(), E>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+        E: Send,
+    {
+        co_tx_with_outbox(&self.pool, tenant, entry, env, business_write, map_storage).await
+    }
+}
 
 /// tenant-scoped 只读事务：begin → SET LOCAL `rss.tenant_id` → 读闭包 → commit。
 ///
@@ -74,6 +157,50 @@ where
     }
 }
 
+/// tenant-scoped read variant for closures that return domain errors while storage errors
+/// still flow through `map_storage`.
+pub(crate) async fn tenant_scoped_read_map<T, F, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    read: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send,
+) -> Result<T, E>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: Send,
+    T: Send,
+{
+    let mut tx = pool.begin().await.map_err(&map_storage)?;
+    set_local_tenant(&mut tx, tenant)
+        .await
+        .map_err(&map_storage)?;
+    match read(&mut tx).await {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = %tenant,
+                    error = %secure::redact_error(&e),
+                    "tenant_scoped_read_map: commit failed"
+                );
+                map_storage(e)
+            })?;
+            Ok(v)
+        }
+        Err(e) => {
+            if let Err(rb) = tx.rollback().await {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = %tenant,
+                    error = %secure::redact_error(&rb),
+                    "tenant_scoped_read_map: rollback failed after read error"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
 /// co-tx 写（[`co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）共享，
 /// 保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
@@ -94,6 +221,49 @@ pub(crate) async fn set_local_tenant(
         .execute(conn)
         .await
         .map(|_| ())
+}
+
+/// 在单事务内执行 tenant-scoped 写：begin → SET LOCAL tenant → write → commit。
+pub(crate) async fn tenant_scoped_write<T, F, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    write: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send,
+) -> Result<T, E>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    E: Send,
+    T: Send,
+{
+    let mut tx = pool.begin().await.map_err(&map_storage)?;
+    set_local_tenant(&mut tx, tenant)
+        .await
+        .map_err(&map_storage)?;
+    match write(&mut tx).await {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = %tenant,
+                    error = %secure::redact_error(&e),
+                    "tenant_scoped_write: commit failed"
+                );
+                map_storage(e)
+            })?;
+            Ok(v)
+        }
+        Err(e) => {
+            if let Err(rb) = tx.rollback().await {
+                tracing::warn!(
+                    target: "postgres",
+                    tenant_id = %tenant,
+                    error = %secure::redact_error(&rb),
+                    "tenant_scoped_write: rollback failed after write error"
+                );
+            }
+            Err(e)
+        }
+    }
 }
 
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
@@ -126,7 +296,7 @@ where
     E: Send,
 {
     let mut tx = pool.begin().await.map_err(&map_storage)?;
-    match write_in_tx(&mut tx, tenant, entry, env, business_write, &map_storage).await {
+    match write_in_tx(&mut tx, tenant, entry, env, business_write).await {
         Ok(()) => tx.commit().await.map_err(|e| {
             tracing::warn!(
                 target: "postgres",
@@ -139,6 +309,7 @@ where
             map_storage(e)
         }),
         Err(e) => {
+            log_cotx_write_error(entry, env, &e);
             // rollback 失败是运维高价值事件（连接泄漏 / PG 断线）——补齐 event_id/domain/topic 定位字段
             // （与 commit 分支对齐），便于按域 / 事件排障。
             if let Err(rb) = tx.rollback().await {
@@ -151,7 +322,7 @@ where
                     "co-tx: rollback failed after write error"
                 );
             }
-            Err(e)
+            Err(e.into_domain(&map_storage))
         }
     }
 }
@@ -163,16 +334,74 @@ async fn write_in_tx<F, E>(
     entry: &Entry,
     env: &OutboxEnvelope,
     business_write: F,
-    map_storage: &(impl Fn(sqlx::Error) -> E + Send),
-) -> Result<(), E>
+) -> Result<(), CoTxWriteError<E>>
 where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
 {
     // tenant scope（事务级，commit/rollback 自动失效；与 plain 写共享 set_local_tenant，F3）。
-    set_local_tenant(tx, tenant).await.map_err(map_storage)?;
+    set_local_tenant(tx, tenant)
+        .await
+        .map_err(CoTxWriteError::TenantScope)?;
     // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。`tx: &mut Transaction` 经 DerefMut 自动强制成
     // 闭包参数 `&mut PgConnection`（reborrow，非 move——append_outbox 仍可再借）。
-    business_write(tx).await?;
+    business_write(tx)
+        .await
+        .map_err(CoTxWriteError::BusinessWrite)?;
     // outbox append（同 tx — co-tx 原子性；复用 append_outbox + OUTBOX-ATOMIC-IDEM-01）。
-    append_outbox(tx, entry, env).await.map_err(map_storage)
+    append_outbox(tx, entry, env)
+        .await
+        .map_err(CoTxWriteError::AppendOutbox)
+}
+
+enum CoTxWriteError<E> {
+    TenantScope(sqlx::Error),
+    BusinessWrite(E),
+    AppendOutbox(sqlx::Error),
+}
+
+impl<E> CoTxWriteError<E> {
+    fn stage(&self) -> &'static str {
+        match self {
+            Self::TenantScope(_) => "set-local-tenant",
+            Self::BusinessWrite(_) => "business-write",
+            Self::AppendOutbox(_) => "append-outbox",
+        }
+    }
+
+    fn sqlx_source(&self) -> Option<&sqlx::Error> {
+        match self {
+            Self::TenantScope(e) | Self::AppendOutbox(e) => Some(e),
+            Self::BusinessWrite(_) => None,
+        }
+    }
+
+    fn into_domain(self, map_storage: &(impl Fn(sqlx::Error) -> E + Send)) -> E {
+        match self {
+            Self::TenantScope(e) | Self::AppendOutbox(e) => map_storage(e),
+            Self::BusinessWrite(e) => e,
+        }
+    }
+}
+
+fn log_cotx_write_error<E>(entry: &Entry, env: &OutboxEnvelope, error: &CoTxWriteError<E>) {
+    if let Some(source) = error.sqlx_source() {
+        tracing::warn!(
+            target: "postgres",
+            event_id = entry.idem_key().as_str(),
+            domain = env.domain(),
+            topic = entry.topic().as_str(),
+            stage = error.stage(),
+            error = %secure::redact_error(source),
+            "co-tx: write failed; rolling back"
+        );
+    } else {
+        tracing::warn!(
+            target: "postgres",
+            event_id = entry.idem_key().as_str(),
+            domain = env.domain(),
+            topic = entry.topic().as_str(),
+            stage = error.stage(),
+            "co-tx: write failed; rolling back"
+        );
+    }
 }

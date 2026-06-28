@@ -37,7 +37,7 @@ audit = { path = "../../crates/audit" }
 settings = { path = "../../crates/settings" }
 # eventexec 持久化基座（#1116）：连接池 / 事务 / Migrator。features migrate+macros 在 workspace.dependencies 声明。
 sqlx = { workspace = true }
-# run_in_transaction 闭包返回 BoxFuture（HRTB 绕过异步闭包借用规则）。
+# run_global_transaction 闭包返回 BoxFuture（HRTB 绕过异步闭包借用规则）。
 futures = { workspace = true }
 # 连接 / 迁移成功的结构化日志。
 tracing = { workspace = true }

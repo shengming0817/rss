@@ -23,7 +23,7 @@ use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMe
 use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::PgTenantPool;
 
 /// `dead_letter` 旧死信记录保留期（秒，默认 30 天）。超期由 [`PgDeadLetterStore`] 的 [`RetentionSweeper`]
 /// 清理（合规导向膨胀控制，对标 gocell 死信 30 天清理，#1210）。
@@ -36,7 +36,8 @@ pub const DEAD_LETTER_RETENTION_SECONDS: u64 = 30 * 24 * 3600;
 /// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
 /// 经 [`crate::PgInfraDeps::dead_letter`] 构造（`PgStore::dead_letter` 为 `pub(crate)` funnel）。
 pub struct PgDeadLetterStore {
-    pool: PgPool,
+    tenant_pool: PgTenantPool,
+    maintenance_pool: PgPool,
 }
 
 impl PgStore {
@@ -45,7 +46,8 @@ impl PgStore {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::dead_letter`] 收口。
     pub(crate) fn dead_letter(&self) -> PgDeadLetterStore {
         PgDeadLetterStore {
-            pool: self.pool.clone(),
+            tenant_pool: PgTenantPool::new(self),
+            maintenance_pool: self.pool.clone(),
         }
     }
 }
@@ -63,35 +65,37 @@ impl DeadLetterStore for PgDeadLetterStore {
         let original_entry = original_entry_json(record.original_payload());
         let metadata = metadata_json(record.metadata());
 
-        let mut tx = self.pool.begin().await.map_err(DeadLetterStoreError::new)?;
-        set_local_tenant(&mut tx, record.tenant())
+        self.tenant_pool
+            .write(
+                record.tenant(),
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO dead_letter
+                                (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
+                            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                            "#,
+                        )
+                        .bind(record.tenant().to_string())
+                        .bind(record.message_id())
+                        .bind(record.domain())
+                        .bind(record.contract_id())
+                        .bind(record.topic())
+                        .bind(sqlx::types::Json(&original_entry))
+                        .bind(record.error_summary())
+                        .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
+                        .bind(record.source().as_str())
+                        .bind(sqlx::types::Json(&metadata))
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(DeadLetterStoreError::new)
+                        .map(|_| ())
+                    })
+                },
+                DeadLetterStoreError::new,
+            )
             .await
-            .map_err(DeadLetterStoreError::new)?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO dead_letter
-                (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            "#,
-        )
-        .bind(record.tenant().to_string())
-        .bind(record.message_id())
-        .bind(record.domain())
-        .bind(record.contract_id())
-        .bind(record.topic())
-        .bind(sqlx::types::Json(&original_entry))
-        .bind(record.error_summary())
-        .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
-        .bind(record.source().as_str())
-        .bind(sqlx::types::Json(&metadata))
-        .execute(&mut *tx)
-        .await
-        .map_err(DeadLetterStoreError::new)?;
-
-        tx.commit().await.map_err(DeadLetterStoreError::new)?;
-
-        Ok(())
     }
 
     /// 释放资源（pool 由 `PgStore` 统一管理；此处 no-op）。
@@ -147,6 +151,11 @@ impl RetentionSweeper for PgDeadLetterStore {
     /// （单一无偏移时间源）。`last_attempt_at == first_attempt_at`（immutable INSERT，二者同写入时刻），
     /// 用 `last_attempt_at` 对齐既有 `idx_dead_letter_scan` 语义；专用 `idx_dead_letter_sweep (last_attempt_at)`
     /// 覆盖本全域谓词（迁移 0021）。
+    ///
+    /// INVARIANT: TENANCY-PG-TX-FUNNEL-01 exception — this is the named `dead_letter`
+    /// maintenance sweep. It is deliberately not tenant-scoped because retention expiry is a
+    /// global storage hygiene operation, not a tenant data access path; `pg-tenant-tx-guard`
+    /// allowlists only this shape and has a stale-allowlist test.
     async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
         // u64→i64：超 i64::MAX 的保留期是非法输入（负 interval 会反向清空全表），fail-closed。
         let secs = i64::try_from(retain_seconds)
@@ -158,7 +167,7 @@ impl RetentionSweeper for PgDeadLetterStore {
             "#,
         )
         .bind(secs)
-        .execute(&self.pool)
+        .execute(&self.maintenance_pool)
         .await
         .map_err(|e| {
             tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "dead_letter: sweep db error");

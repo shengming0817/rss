@@ -7,20 +7,22 @@ use eventexec::{
 };
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::PgTenantPool;
 use crate::dead_letter::decode_original_entry;
 use crate::outbox::{STATUS_DLX, STATUS_PENDING};
 
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
-    pool: sqlx::PgPool,
+    tenant_pool: PgTenantPool,
+    global_pool: sqlx::PgPool,
 }
 
 impl PgStore {
     /// 构造 DLQ inspection/replay adapter（pool clone 自 `PgStore`，轻量）。
     pub(crate) fn dlq(&self) -> PgDlqStore {
         PgDlqStore {
-            pool: self.pool.clone(),
+            tenant_pool: PgTenantPool::new(self),
+            global_pool: self.pool.clone(),
         }
     }
 }
@@ -36,92 +38,91 @@ impl DlqStore for PgDlqStore {
         &self,
         request: DlqReplayRequest,
     ) -> Result<DlqReplayOutcome, DlqError> {
-        let mut tx = self.pool.begin().await.map_err(db_error("replay.begin"))?;
-        set_local_tenant(&mut tx, request.tenant())
+        self.tenant_pool
+            .write(
+                request.tenant(),
+                move |conn| {
+                    Box::pin(async move {
+                        let row: Option<(
+                            String,
+                            String,
+                            String,
+                            String,
+                            serde_json::Value,
+                            String,
+                            serde_json::Value,
+                        )> = sqlx::query_as(
+                            r#"
+                            SELECT source_kind, message_id, domain, contract_id, original_entry, topic, metadata
+                            FROM dead_letter
+                            WHERE id = $1::uuid
+                              AND tenant_id = $2::uuid
+                            "#,
+                        )
+                        .bind(request.dead_letter_id().as_str())
+                        .bind(request.tenant().to_string())
+                        .fetch_optional(&mut *conn)
+                        .await
+                        .map_err(db_error("replay.fetch_dead_letter"))?;
+
+                        let Some((source, message_id, domain, contract_id, original_entry, topic, metadata)) =
+                            row
+                        else {
+                            return Err(DlqError::NotFound);
+                        };
+
+                        match parse_source(&source)? {
+                            DeadLetterSource::Consumer | DeadLetterSource::Saga => {}
+                            DeadLetterSource::Legacy | DeadLetterSource::OutboxRelay => {
+                                return Err(DlqError::NotReplayable);
+                            }
+                        }
+
+                        let payload = decode_original_entry(&original_entry).map_err(|_| {
+                            tracing::warn!(
+                                target: "postgres",
+                                operation = "replay.decode_original_entry",
+                                dead_letter_id = %request.dead_letter_id(),
+                                tenant_id = %request.tenant(),
+                                "dlq: invalid original_entry payload"
+                            );
+                            DlqError::InvalidPayload
+                        })?;
+                        let metadata = replay_metadata(
+                            metadata,
+                            request.tenant(),
+                            request.dead_letter_id().as_str(),
+                            &message_id,
+                        );
+
+                        let result = sqlx::query(
+                            r#"
+                            INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status)
+                            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                            ON CONFLICT (event_id) DO NOTHING
+                            "#,
+                        )
+                        .bind(request.replay_id().as_str())
+                        .bind(domain)
+                        .bind(topic)
+                        .bind(contract_id)
+                        .bind(payload)
+                        .bind(metadata.to_string())
+                        .bind(STATUS_PENDING)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(db_error("replay.insert_outbox"))?;
+
+                        if result.rows_affected() == 1 {
+                            Ok(DlqReplayOutcome::Inserted)
+                        } else {
+                            Ok(DlqReplayOutcome::AlreadyExists)
+                        }
+                    })
+                },
+                db_error("replay.tx"),
+            )
             .await
-            .map_err(db_error("replay.set_tenant"))?;
-
-        let row: Option<(
-            String,
-            String,
-            String,
-            String,
-            serde_json::Value,
-            String,
-            serde_json::Value,
-        )> = sqlx::query_as(
-            r#"
-            SELECT source_kind, message_id, domain, contract_id, original_entry, topic, metadata
-            FROM dead_letter
-            WHERE id = $1::uuid
-              AND tenant_id = $2::uuid
-            "#,
-        )
-        .bind(request.dead_letter_id().as_str())
-        .bind(request.tenant().to_string())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_error("replay.fetch_dead_letter"))?;
-
-        let Some((source, message_id, domain, contract_id, original_entry, topic, metadata)) = row
-        else {
-            tx.rollback()
-                .await
-                .map_err(db_error("replay.rollback_not_found"))?;
-            return Err(DlqError::NotFound);
-        };
-
-        match parse_source(&source)? {
-            DeadLetterSource::Consumer | DeadLetterSource::Saga => {}
-            DeadLetterSource::Legacy | DeadLetterSource::OutboxRelay => {
-                tx.rollback()
-                    .await
-                    .map_err(db_error("replay.rollback_not_replayable"))?;
-                return Err(DlqError::NotReplayable);
-            }
-        }
-
-        let payload = decode_original_entry(&original_entry).map_err(|_| {
-            tracing::warn!(
-                target: "postgres",
-                operation = "replay.decode_original_entry",
-                dead_letter_id = %request.dead_letter_id(),
-                tenant_id = %request.tenant(),
-                "dlq: invalid original_entry payload"
-            );
-            DlqError::InvalidPayload
-        })?;
-        let metadata = replay_metadata(
-            metadata,
-            request.tenant(),
-            request.dead_letter_id().as_str(),
-            &message_id,
-        );
-
-        let result = sqlx::query(
-            r#"
-            INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-            ON CONFLICT (event_id) DO NOTHING
-            "#,
-        )
-        .bind(request.replay_id().as_str())
-        .bind(domain)
-        .bind(topic)
-        .bind(contract_id)
-        .bind(payload)
-        .bind(metadata.to_string())
-        .bind(STATUS_PENDING)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_error("replay.insert_outbox"))?;
-
-        tx.commit().await.map_err(db_error("replay.commit"))?;
-        if result.rows_affected() == 1 {
-            Ok(DlqReplayOutcome::Inserted)
-        } else {
-            Ok(DlqReplayOutcome::AlreadyExists)
-        }
     }
 
     async fn redrive_outbox(
@@ -146,7 +147,7 @@ impl DlqStore for PgDlqStore {
         .bind(STATUS_PENDING)
         .bind(STATUS_DLX)
         .bind(KEY_TENANT_ID)
-        .execute(&self.pool)
+        .execute(&self.global_pool)
         .await
         .map_err(db_error("redrive.update_outbox"))?;
 
@@ -167,42 +168,49 @@ impl PgDlqStore {
             return Ok(Vec::new());
         }
 
-        let mut tx = self.pool.begin().await.map_err(db_error("list.begin"))?;
-        set_local_tenant(&mut tx, query.tenant())
+        let source = query
+            .source()
+            .map(DeadLetterSource::as_str)
+            .map(str::to_owned);
+        let tenant = query.tenant();
+        let domain = query.domain().map(str::to_owned);
+        let fetch_limit = query.fetch_limit();
+        let rows: Vec<DeadLetterRow> = self
+            .tenant_pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query_as(
+                        r#"
+                        SELECT id::text,
+                               message_id,
+                               domain,
+                               contract_id,
+                               topic,
+                               COALESCE(jsonb_array_length(original_entry -> 'bytes'), 0)::bigint,
+                               error_summary,
+                               num_attempts,
+                               source_kind,
+                               EXTRACT(EPOCH FROM last_attempt_at)::bigint
+                        FROM dead_letter
+                        WHERE tenant_id = $1::uuid
+                          AND source_kind <> $5
+                          AND ($2::text IS NULL OR domain = $2)
+                          AND ($3::text IS NULL OR source_kind = $3)
+                        ORDER BY last_attempt_at DESC
+                        LIMIT $4
+                        "#,
+                    )
+                    .bind(tenant.to_string())
+                    .bind(domain)
+                    .bind(source)
+                    .bind(i64::from(fetch_limit))
+                    .bind(DeadLetterSource::OutboxRelay.as_str())
+                    .fetch_all(&mut *conn)
+                    .await
+                })
+            })
             .await
-            .map_err(db_error("list.set_tenant"))?;
-
-        let source = query.source().map(DeadLetterSource::as_str);
-        let rows: Vec<DeadLetterRow> = sqlx::query_as(
-            r#"
-            SELECT id::text,
-                   message_id,
-                   domain,
-                   contract_id,
-                   topic,
-                   COALESCE(jsonb_array_length(original_entry -> 'bytes'), 0)::bigint,
-                   error_summary,
-                   num_attempts,
-                   source_kind,
-                   EXTRACT(EPOCH FROM last_attempt_at)::bigint
-            FROM dead_letter
-            WHERE tenant_id = $1::uuid
-              AND source_kind <> $5
-              AND ($2::text IS NULL OR domain = $2)
-              AND ($3::text IS NULL OR source_kind = $3)
-            ORDER BY last_attempt_at DESC
-            LIMIT $4
-            "#,
-        )
-        .bind(query.tenant().to_string())
-        .bind(query.domain())
-        .bind(source)
-        .bind(i64::from(query.fetch_limit()))
-        .bind(DeadLetterSource::OutboxRelay.as_str())
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(db_error("list.fetch_dead_letter"))?;
-        tx.commit().await.map_err(db_error("list.commit"))?;
+            .map_err(db_error("list.fetch_dead_letter"))?;
 
         rows.into_iter()
             .map(|row| row.into_summary(DlqEntryKind::DeadLetter, query.tenant()))
@@ -241,7 +249,7 @@ impl PgDlqStore {
         .bind(query.tenant().to_string())
         .bind(query.domain())
         .bind(i64::from(query.fetch_limit()))
-        .fetch_all(&self.pool)
+        .fetch_all(&self.global_pool)
         .await
         .map_err(db_error("list.fetch_outbox_dlx"))?;
 
@@ -365,7 +373,7 @@ fn u64_from_i64(n: i64) -> Result<u64, DlqError> {
     u64::try_from(n).map_err(|_| DlqError::Store)
 }
 
-fn db_error(operation: &'static str) -> impl FnOnce(sqlx::Error) -> DlqError {
+fn db_error(operation: &'static str) -> impl Fn(sqlx::Error) -> DlqError {
     move |e| {
         tracing::warn!(
             target: "postgres",

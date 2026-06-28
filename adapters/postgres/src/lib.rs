@@ -1,7 +1,7 @@
 //! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See docs/rules/architecture.md.
 //!
 //! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）、事务运行器
-//! （`run_in_transaction`）、Migrator（`run_migrations`）——均 `pub(crate)` funnel，外部经
+//! （`run_global_transaction`）、Migrator（`run_migrations`）——均 `pub(crate)` funnel，外部经
 //! [`PgRuntimeDeps::setup`] 构造（#1423，PG-BUNDLE-FUNNEL-01）；并 impl
 //! `diport::ManagedResource`（关池接入 `bootstrap::ShutdownStack` 逆序编排）。
 //!

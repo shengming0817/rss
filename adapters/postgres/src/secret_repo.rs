@@ -20,12 +20,11 @@
 //!
 //! ref: adapters/postgres/src/config_repo.rs（版本历史 + CAS + tombstone + tenant_scoped 范式）
 
-use futures::future::BoxFuture;
 use settings::ports::{SecretEntry, SecretKey, SecretRepo, SecretRepoError, StoreId, TenantId};
-use sqlx::{Executor, PgConnection, Postgres, Row};
+use sqlx::{Executor, Postgres, Row};
 
 use crate::PgStore;
-use crate::cotx::{set_local_tenant, tenant_scoped_read};
+use crate::cotx::PgTenantPool;
 
 /// settings secret 引用坐标仓储 PostgreSQL adapter。
 ///
@@ -33,7 +32,7 @@ use crate::cotx::{set_local_tenant, tenant_scoped_read};
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入）clone 构造；读路径与写路径共用同一 pool。
 pub struct PgSecretRepo {
-    pool: sqlx::PgPool,
+    pool: PgTenantPool,
 }
 
 impl PgSecretRepo {
@@ -42,7 +41,7 @@ impl PgSecretRepo {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::secret_repo` 收口。
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
-            pool: store.pool.clone(),
+            pool: PgTenantPool::new(store),
         }
     }
 }
@@ -160,28 +159,6 @@ where
     }
 }
 
-/// 在 tenant-scoped 事务内执行单条写（begin → SET LOCAL tenant → write → commit；失败 rollback）。
-///
-/// 写路径经 [`set_local_tenant`] 注入 scope，与 config_repo 写路径一致（未来 RLS policy 锚点）。
-async fn tenant_scoped<F>(
-    pool: &sqlx::PgPool,
-    tenant: TenantId,
-    write: F,
-) -> Result<(), SecretRepoError>
-where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), SecretRepoError>> + Send,
-{
-    let mut tx = pool.begin().await.map_err(storage)?;
-    set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-    match write(&mut tx).await {
-        Ok(()) => tx.commit().await.map_err(storage),
-        Err(e) => {
-            let _ = tx.rollback().await;
-            Err(e)
-        }
-    }
-}
-
 impl SecretRepo for PgSecretRepo {
     async fn find(
         &self,
@@ -195,25 +172,27 @@ impl SecretRepo for PgSecretRepo {
         let key_str = key.as_str().to_owned();
         let tenant_uuid_q = tenant_uuid.clone();
 
-        let row = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                sqlx::query(
-                    r#"
+        let row = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        r#"
                     SELECT secret_key, store_id, ref_key, ref_version, version, deleted
                     FROM secret_refs
                     WHERE tenant_id = $1::uuid AND secret_key = $2
                     ORDER BY version DESC
                     LIMIT 1
                     "#,
-                )
-                .bind(tenant_uuid_q)
-                .bind(key_str)
-                .fetch_optional(&mut *conn)
-                .await
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str)
+                    .fetch_optional(&mut *conn)
+                    .await
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
         hydrate_active(tenant, row)
     }
 
@@ -230,24 +209,26 @@ impl SecretRepo for PgSecretRepo {
         let tenant_uuid_q = tenant_uuid.clone();
         let version_i = version_param(version);
 
-        let row = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                sqlx::query(
-                    r#"
+        let row = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        r#"
                     SELECT secret_key, store_id, ref_key, ref_version, version, deleted
                     FROM secret_refs
                     WHERE tenant_id = $1::uuid AND secret_key = $2 AND version = $3
                     "#,
-                )
-                .bind(tenant_uuid_q)
-                .bind(key_str)
-                .bind(version_i)
-                .fetch_optional(&mut *conn)
-                .await
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str)
+                    .bind(version_i)
+                    .fetch_optional(&mut *conn)
+                    .await
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
         hydrate_active(tenant, row)
     }
 
@@ -264,10 +245,9 @@ impl SecretRepo for PgSecretRepo {
         let key_str = key.as_str().to_owned();
         let tenant_uuid_q = tenant_uuid.clone();
 
-        let (mv,): (Option<i64>,) = tenant_scoped_read(
-            &self.pool,
-            tenant,
-            move |conn| {
+        let (mv,): (Option<i64>,) = self
+            .pool
+            .read(tenant, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
                         "SELECT max(version) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
@@ -277,8 +257,7 @@ impl SecretRepo for PgSecretRepo {
                     .fetch_one(&mut *conn)
                     .await
                 })
-            },
-        )
+            })
         .await
         .map_err(storage)?;
         Ok(mv.and_then(|v| u64::try_from(v).ok()))
@@ -286,10 +265,13 @@ impl SecretRepo for PgSecretRepo {
 
     async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError> {
         // 写路径经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致（未来 RLS policy 锚点）。
-        tenant_scoped(&self.pool, tenant, move |conn| {
-            Box::pin(async move { cas_insert(conn, tenant, &entry).await })
-        })
-        .await
+        self.pool
+            .write(
+                tenant,
+                move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
+                storage,
+            )
+            .await
     }
 
     async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError> {
@@ -297,7 +279,7 @@ impl SecretRepo for PgSecretRepo {
         // 占位坐标列 store_id='', ref_key='', ref_version=NULL——不携带有效坐标。
         let tu = tenant_param(tenant);
         let key_str = key.as_str().to_string();
-        tenant_scoped(&self.pool, tenant, move |conn| {
+        self.pool.write(tenant, move |conn| {
             Box::pin(async move {
                 sqlx::query(
                     r#"
@@ -319,7 +301,7 @@ impl SecretRepo for PgSecretRepo {
                 .map_err(storage)
                 .map(|_| ())
             })
-        })
+        }, storage)
         .await
     }
 }

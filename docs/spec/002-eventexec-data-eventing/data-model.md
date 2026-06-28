@@ -127,7 +127,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | `LeaderElector` | acquire_lease / renew_lease(LostLease) | P11 |
 | `FencedWriter` | write_fenced(key,val,epoch)→bool | P11 |
 | `DeadLetterStore` | write_dead_letter | P7 |
-| `TxRunner` | run_in_transaction | P3(基座)/P10(projection 用) |
+| `TxRunner` | run_global_transaction | P3(基座)/P10(projection 用) |
 
 > 既有 `Publisher`/`Subscriber`/`AuditSink`/`Clock`/`Signer`/`ManagedResource`/`SubscribeInitializer` 已在 diport（已实现/已冻结）。`IdempotencyStore`/`OutboxRelay` 是 consistency 引擎 trait（native AFIT，非 diport）。
 

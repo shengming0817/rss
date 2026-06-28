@@ -33,13 +33,11 @@
 use consistency::Entry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantId};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 use crate::PgStore;
-use crate::cotx::{set_local_tenant, tenant_scoped_read};
-use crate::outbox::{
-    OutboxEnvelope, append_outbox, epoch_secs_to_time, metadata_with_ambient, unix_secs,
-};
+use crate::cotx::PgTenantPool;
+use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 
 /// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/revoke 均已交付，#1278）。
 ///
@@ -49,7 +47,7 @@ use crate::outbox::{
 /// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Box<dyn Clock>`，同 [`crate::PgEmitter`] 与全项目约定）：
 /// envelope `occurred_at` 时间源（#1129）。
 pub struct PgSessionLifecycle {
-    pool: PgPool,
+    pool: PgTenantPool,
     clock: Box<dyn Clock>,
 }
 
@@ -59,7 +57,7 @@ impl PgSessionLifecycle {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::session_lifecycle` 收口。
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: store.pool.clone(),
+            pool: PgTenantPool::new(store),
             clock,
         }
     }
@@ -89,8 +87,21 @@ impl SessionLifecycle for PgSessionLifecycle {
             metadata_with_ambient(unix_secs(self.clock.now()), tenant).with_subject_id(subject_id),
         )
         .with_partition_key_opt(partition_key);
-        let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
-        persist_and_emit_in_tx(tx, &session, &entry, &env).await
+        self.pool
+            .co_tx_with_outbox(
+                tenant,
+                &entry,
+                &env,
+                move |conn| {
+                    Box::pin(async move {
+                        write_session(conn, &session)
+                            .await
+                            .map_err(OutboxEmitError::new)
+                    })
+                },
+                OutboxEmitError::new,
+            )
+            .await
     }
 
     async fn find(
@@ -107,34 +118,36 @@ impl SessionLifecycle for PgSessionLifecycle {
         // 还原（`extract(epoch ...)::bigint`，与写路径 `to_timestamp(unix_secs)` 编码对称，不加 sqlx 时间 feature）。
         let tenant_uuid = tenant.as_uuid().to_string();
         let session_id_q = session_id.as_str().to_owned();
-        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                let row = sqlx::query(
-                    r#"
+        let raw = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        r#"
                     SELECT subject,
                            extract(epoch from expires_at)::bigint AS expires_at,
                            extract(epoch from created_at)::bigint AS created_at
                     FROM sessions
                     WHERE tenant_id = $1::uuid AND session_id = $2 AND revoked = false
                     "#,
-                )
-                .bind(tenant_uuid)
-                .bind(session_id_q)
-                .fetch_optional(&mut *conn)
-                .await?;
-                match row {
-                    None => Ok(None),
-                    Some(r) => {
-                        let subject: String = r.try_get("subject")?;
-                        let expires_at: i64 = r.try_get("expires_at")?;
-                        let created_at: i64 = r.try_get("created_at")?;
-                        Ok(Some((subject, expires_at, created_at)))
+                    )
+                    .bind(tenant_uuid)
+                    .bind(session_id_q)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+                    match row {
+                        None => Ok(None),
+                        Some(r) => {
+                            let subject: String = r.try_get("subject")?;
+                            let expires_at: i64 = r.try_get("expires_at")?;
+                            let created_at: i64 = r.try_get("created_at")?;
+                            Ok(Some((subject, expires_at, created_at)))
+                        }
                     }
-                }
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
         match raw {
             None => Ok(None),
             // 受控重建（WHERE 已锁 session_id / tenant = 入参，复用即存储值，同 `Role::hydrate` 复用 id）。
@@ -153,37 +166,25 @@ impl SessionLifecycle for PgSessionLifecycle {
         // `UPDATE ... SET revoked = true`。幂等：未知 / 跨租（`WHERE tenant_id` 不匹配）/ 已撤销均 0 行影响、仍
         // `Ok(())`（与 in-mem / demo provider 的幂等 no-op 语义对齐）。软撤销不删行（保留审计 + 幂等）。
         let tenant_uuid = tenant.as_uuid().to_string();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-        let result = sqlx::query(
-            "UPDATE sessions SET revoked = true WHERE tenant_id = $1::uuid AND session_id = $2",
-        )
-        .bind(&tenant_uuid)
-        .bind(session_id.as_str())
-        .execute(&mut *tx)
-        .await;
-        match result {
-            Ok(_) => tx.commit().await.map_err(|e| {
-                tracing::warn!(
-                    target: "postgres",
-                    error = %secure::redact_error(&e),
-                    "session revoke: commit failed"
-                );
-                storage(e)
-            }),
-            Err(e) => {
-                // rollback 失败是运维高价值事件（连接泄漏 / PG 断线），补 warn（与 co-tx / role save 分支对齐）；
-                // 不覆盖原写错误；Transaction Drop 亦兜底回滚。
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        error = %secure::redact_error(&rb),
-                        "session revoke: rollback failed after update error"
-                    );
-                }
-                Err(storage(e))
-            }
-        }
+        self.pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE sessions SET revoked = true WHERE tenant_id = $1::uuid AND session_id = $2",
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(session_id.as_str())
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(storage)
+                        .map(|_| ())
+                    })
+                },
+                storage,
+            )
+            .await
     }
 }
 
@@ -192,50 +193,12 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-/// co-tx 事务体：写两行（SET LOCAL + INSERT session + append_outbox）→ 单 commit；失败 rollback + warn
-/// （与 emit 分离以控认知复杂度，同 emitter.rs `emit_in_tx`）。
-async fn persist_and_emit_in_tx(
-    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+/// 同一 tenant-scoped 事务内写 session；outbox append 由 [`PgTenantPool::co_tx_with_outbox`] 接续执行。
+async fn write_session(
+    conn: &mut sqlx::PgConnection,
     session: &Session,
-    entry: &Entry,
-    env: &OutboxEnvelope,
-) -> Result<(), OutboxEmitError> {
-    if let Err(e) = write_session_and_outbox(&mut tx, session, entry, env).await {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            topic = entry.topic().as_str(),
-            error = %secure::redact_error(&e),
-            "session co-tx: session+outbox write failed"
-        );
-        rollback_warn(tx).await;
-        return Err(OutboxEmitError::new(e));
-    }
-    tx.commit().await.map_err(|e| {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            topic = entry.topic().as_str(),
-            error = %secure::redact_error(&e),
-            "session co-tx: commit failed"
-        );
-        OutboxEmitError::new(e)
-    })
-}
-
-/// 同一事务内：注入 tenant scope（SET LOCAL）→ INSERT session → append outbox（co-tx 双写）。
-async fn write_session_and_outbox(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session: &Session,
-    entry: &Entry,
-    env: &OutboxEnvelope,
 ) -> Result<(), sqlx::Error> {
     let tenant = session.tenant().as_uuid().to_string();
-    // tenant scope（事务级，commit/rollback 自动失效）：经统一 funnel `set_local_tenant` 注入
-    // `rss.tenant_id` GUC（TENANCY-SETLOCAL-FUNNEL-01：GUC 注入 literal 仅 cotx.rs::set_local_tenant）。
-    set_local_tenant(tx, session.tenant()).await?;
     // session 行（同 tx；ON CONFLICT 幂等——重试登录安全，同 append_outbox 范式）。
     sqlx::query(
         r#"
@@ -249,20 +212,7 @@ async fn write_session_and_outbox(
     .bind(&tenant)
     .bind(unix_secs(session.expires_at()))
     .bind(unix_secs(session.created_at()))
-    .execute(&mut **tx)
-    .await?;
-    // outbox append（同 tx — co-tx 原子性 FR-003；复用既有 append_outbox + OUTBOX-ATOMIC-IDEM-01）。
-    // `tx: &mut Transaction` 经 deref 强制成 append_outbox 的 `&mut PgConnection`（auto-deref）。
-    append_outbox(tx, entry, env).await
-}
-
-/// rollback 并在失败时记 warn（不覆盖调用方原错误；同 emitter.rs `rollback_warn`）。
-async fn rollback_warn(tx: sqlx::Transaction<'_, sqlx::Postgres>) {
-    if let Err(rb) = tx.rollback().await {
-        tracing::warn!(
-            target: "postgres",
-            error = %secure::redact_error(&rb),
-            "session co-tx: rollback failed after write error"
-        );
-    }
+    .execute(conn)
+    .await
+    .map(|_| ())
 }

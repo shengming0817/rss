@@ -78,6 +78,8 @@ enum InternalCheck {
     SchemaRlsGuard,
     /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01；内容扫描 Rust 源，no-compile）。
     SetLocalFunnel,
+    /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01；no-compile）。
+    PgTenantTxGuard,
     /// migration 文件序号唯一性 + 连续性守卫（MIGRATION-SERIAL-UNIQUE-01；内容扫描文件名，no-compile）。
     MigrationsSerial,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
@@ -110,6 +112,7 @@ impl InternalCheck {
             Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
             Self::SchemaRlsGuard => "xtask/src/schema_rls.rs",
             Self::SetLocalFunnel => "xtask/src/setlocal_funnel.rs",
+            Self::PgTenantTxGuard => "xtask/src/pg_tenant_tx_guard.rs",
             Self::MigrationsSerial => "xtask/src/migrations.rs",
             Self::CommandSymmetry => "xtask/src/command_symmetry.rs",
             Self::DeferGate => "xtask/src/defergate.rs",
@@ -284,6 +287,15 @@ fn step_setlocal_funnel() -> Step {
         label: "setlocal-funnel",
         args: &[],
         kind: StepKind::Internal(InternalCheck::SetLocalFunnel),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_pg_tenant_tx_guard() -> Step {
+    Step {
+        label: "pg-tenant-tx-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::PgTenantTxGuard),
         env: &[],
         needs_compile: false,
     }
@@ -721,6 +733,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
         step_setlocal_funnel(),
+        step_pg_tenant_tx_guard(),
         step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
@@ -753,6 +766,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_pdp_allow_guard(),
         step_schema_rls_guard(),
         step_setlocal_funnel(),
+        step_pg_tenant_tx_guard(),
         step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
@@ -980,6 +994,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
         InternalCheck::SetLocalFunnel => run_check(&crate::setlocal_funnel::SetLocalFunnelGuard),
+        InternalCheck::PgTenantTxGuard => run_check(&crate::pg_tenant_tx_guard::PgTenantTxGuard),
         InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
@@ -1079,6 +1094,7 @@ mod tests {
                 "pdp-allow-guard",
                 "schema-rls",
                 "setlocal-funnel",
+                "pg-tenant-tx-guard",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1118,6 +1134,7 @@ mod tests {
                 "pdp-allow-guard",
                 "schema-rls",
                 "setlocal-funnel",
+                "pg-tenant-tx-guard",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1156,6 +1173,7 @@ mod tests {
                     "pdp-allow-guard",
                     "schema-rls",
                     "setlocal-funnel",
+                    "pg-tenant-tx-guard",
                     "migrations-serial",
                     "command-symmetry",
                     "defer-gate"
@@ -1281,6 +1299,7 @@ mod tests {
                 "pdp-allow-guard",
                 "schema-rls",
                 "setlocal-funnel",
+                "pg-tenant-tx-guard",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1372,6 +1391,7 @@ mod tests {
             "pdp-allow-guard",
             "schema-rls",
             "setlocal-funnel",
+            "pg-tenant-tx-guard",
             "migrations-serial",
             "command-symmetry",
             "defer-gate",

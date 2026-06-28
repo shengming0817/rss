@@ -18,13 +18,13 @@ use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
 use sqlx::Row;
 
 use crate::PgStore;
-use crate::cotx::{set_local_tenant, tenant_scoped_read};
+use crate::cotx::PgTenantPool;
 
 /// identity 角色仓储的 PostgreSQL adapter。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgConfigRepo`]）clone 构造。
 pub struct PgRoleRepo {
-    pool: sqlx::PgPool,
+    pool: PgTenantPool,
 }
 
 impl PgRoleRepo {
@@ -33,7 +33,7 @@ impl PgRoleRepo {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::role_repo` 收口。
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
-            pool: store.pool.clone(),
+            pool: PgTenantPool::new(store),
         }
     }
 }
@@ -59,31 +59,33 @@ impl RoleRepo for PgRoleRepo {
         let tenant_uuid_q = tenant_uuid.clone();
         let id_str_q = id_str.clone();
 
-        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                let row = sqlx::query(
-                    r#"
+        let raw = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        r#"
                         SELECT name, permissions
                         FROM roles
                         WHERE tenant_id = $1::uuid AND id = $2
                         "#,
-                )
-                .bind(tenant_uuid_q)
-                .bind(id_str_q)
-                .fetch_optional(&mut *conn)
-                .await?;
-                match row {
-                    None => Ok(None),
-                    Some(r) => {
-                        let name: String = r.try_get("name")?;
-                        let permissions: Vec<String> = r.try_get("permissions")?;
-                        Ok(Some((name, permissions)))
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(id_str_q)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+                    match row {
+                        None => Ok(None),
+                        Some(r) => {
+                            let name: String = r.try_get("name")?;
+                            let permissions: Vec<String> = r.try_get("permissions")?;
+                            Ok(Some((name, permissions)))
+                        }
                     }
-                }
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
 
         match raw {
             None => Ok(None),
@@ -100,46 +102,31 @@ impl RoleRepo for PgRoleRepo {
         let permissions: Vec<String> = role.permission_ids().map(str::to_owned).collect();
         // tenant-scoped 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert。
         // save 是本 adapter **唯一**写路径（find 为 plain read）⇒ 不抽 `tenant_scoped` helper，直接 inline。
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-        let result = sqlx::query(
-            r#"
-            INSERT INTO roles (tenant_id, id, name, permissions)
-            VALUES ($1::uuid, $2, $3, $4)
-            ON CONFLICT (tenant_id, id) DO UPDATE
-            SET name = EXCLUDED.name, permissions = EXCLUDED.permissions
-            "#,
-        )
-        .bind(&tenant_uuid)
-        .bind(role.id().as_str())
-        .bind(role.name())
-        .bind(&permissions)
-        .execute(&mut *tx)
-        .await;
-        match result {
-            Ok(_) => tx.commit().await.map_err(|e| {
-                // commit 失败是运维高价值事件，补 warn 定位（与 cotx co-tx 分支对齐；error 经 redact 脱敏）。
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = tenant_uuid.as_str(),
-                    error = %secure::redact_error(&e),
-                    "role save: commit failed"
-                );
-                storage(e)
-            }),
-            Err(e) => {
-                // rollback 失败是运维高价值事件（连接泄漏 / PG 断线），补 warn 定位（与 cotx co-tx 分支对齐）；
-                // 不覆盖原写错误；Transaction Drop 亦兜底回滚。
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = tenant_uuid.as_str(),
-                        error = %secure::redact_error(&rb),
-                        "role save: rollback failed after write error"
-                    );
-                }
-                Err(storage(e))
-            }
-        }
+        self.pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO roles (tenant_id, id, name, permissions)
+                            VALUES ($1::uuid, $2, $3, $4)
+                            ON CONFLICT (tenant_id, id) DO UPDATE
+                            SET name = EXCLUDED.name, permissions = EXCLUDED.permissions
+                            "#,
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(role.id().as_str())
+                        .bind(role.name())
+                        .bind(&permissions)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(storage)
+                        .map(|_| ())
+                    })
+                },
+                storage,
+            )
+            .await
     }
 }

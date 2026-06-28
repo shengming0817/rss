@@ -19,7 +19,7 @@
 //! 「locker」不在选型层：单执行器正确性由 journal `(saga_id,seq)` PK（ON CONFLICT 幂等）+ checkpoint
 //! `version` CAS 保证；多副本 saga 互斥延后到 P11 leader-elect（reconcile.md），故 durable 决策只携
 //! postgres URL，不分叉 locker provider。journal/checkpoint 同事务（tx）由 postgres adapter 内部承担，
-//! 非注入 port（`PgStore::run_in_transaction` 是固有方法，#1116）。
+//! 非注入 port（`PgStore::run_global_transaction` 是固有方法，#1116）。
 //!
 //! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 postgres URL ⇒ [`resolve`] 返 `Err`，组合根 fail-fast
 //!   拒绝启动，**绝不静默降级回 demo/in-mem**（`Result` + bootstrap fail-fast，Medium；类型层强化：

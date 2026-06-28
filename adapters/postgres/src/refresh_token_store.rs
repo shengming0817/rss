@@ -26,10 +26,10 @@ use identity::ports::{
     IdentityError, RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId,
     RefreshTokenRecord, RefreshTokenStore, TenantId, kind_from_db, kind_to_db,
 };
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 use crate::PgStore;
-use crate::cotx::{set_local_tenant, tenant_scoped_read};
+use crate::cotx::PgTenantPool;
 use crate::outbox::unix_secs;
 
 /// refresh token 持久化 PostgreSQL adapter（impl [`RefreshTokenStore`]，#1325）。
@@ -37,7 +37,7 @@ use crate::outbox::unix_secs;
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgRoleRepo`]）clone 构造。
 /// **Clock 不注入**：issued_at/expires_at 来自 record，由 `RefreshService` 的 Clock 派生，adapter 只透传落库。
 pub struct PgRefreshTokenStore {
-    pool: PgPool,
+    pool: PgTenantPool,
 }
 
 impl PgRefreshTokenStore {
@@ -46,7 +46,7 @@ impl PgRefreshTokenStore {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::refresh_token_store` 收口。
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
-            pool: store.pool.clone(),
+            pool: PgTenantPool::new(store),
         }
     }
 }
@@ -125,33 +125,15 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     /// 持久化新签发记录（tenant-scoped 事务，SET LOCAL 锚点，`do_insert` 写体）。
     async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError> {
         let tenant = record.tenant();
-        let tenant_uuid = tenant.as_uuid().to_string();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-        match do_insert(&mut tx, &record).await {
-            Ok(()) => tx.commit().await.map_err(|e| {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = tenant_uuid.as_str(),
-                    operation = "refresh_token.insert",
-                    error = %secure::redact_error(&e),
-                    "refresh token insert: commit failed"
-                );
-                storage(e)
-            }),
-            Err(e) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = tenant_uuid.as_str(),
-                        operation = "refresh_token.insert",
-                        error = %secure::redact_error(&rb),
-                        "refresh token insert: rollback failed after write error"
-                    );
-                }
-                Err(storage(e))
-            }
-        }
+        self.pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move { do_insert(conn, &record).await.map_err(storage) })
+                },
+                storage,
+            )
+            .await
     }
 
     /// 按 secret 摘要查找（`tenant_scoped_read` RLS-safe 读；跨租 → None；
@@ -166,48 +148,50 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         let tenant_uuid_q = tenant_uuid.clone();
         let hash_bytes = *hash.as_bytes();
 
-        let raw = tenant_scoped_read(&self.pool, tenant, move |conn| {
-            Box::pin(async move {
-                let row = sqlx::query(
-                    r#"
+        let raw = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        r#"
                     SELECT id::text, subject, kind, parent_id::text, lineage_id::text, status,
                            extract(epoch from issued_at)::bigint AS issued_at,
                            extract(epoch from expires_at)::bigint AS expires_at
                     FROM refresh_tokens
                     WHERE tenant_id = $1::uuid AND token_hash = $2
                     "#,
-                )
-                .bind(&tenant_uuid_q)
-                .bind(&hash_bytes as &[u8])
-                .fetch_optional(&mut *conn)
-                .await?;
-                match row {
-                    None => Ok(None),
-                    Some(r) => {
-                        let id: String = r.try_get("id")?;
-                        let subject: String = r.try_get("subject")?;
-                        let kind_str: String = r.try_get("kind")?;
-                        let parent_id: Option<String> = r.try_get("parent_id")?;
-                        let lineage_id: String = r.try_get("lineage_id")?;
-                        let status_str: String = r.try_get("status")?;
-                        let issued_secs: i64 = r.try_get("issued_at")?;
-                        let expires_secs: i64 = r.try_get("expires_at")?;
-                        Ok(Some((
-                            id,
-                            subject,
-                            kind_str,
-                            parent_id,
-                            lineage_id,
-                            status_str,
-                            issued_secs,
-                            expires_secs,
-                        )))
+                    )
+                    .bind(&tenant_uuid_q)
+                    .bind(&hash_bytes as &[u8])
+                    .fetch_optional(&mut *conn)
+                    .await?;
+                    match row {
+                        None => Ok(None),
+                        Some(r) => {
+                            let id: String = r.try_get("id")?;
+                            let subject: String = r.try_get("subject")?;
+                            let kind_str: String = r.try_get("kind")?;
+                            let parent_id: Option<String> = r.try_get("parent_id")?;
+                            let lineage_id: String = r.try_get("lineage_id")?;
+                            let status_str: String = r.try_get("status")?;
+                            let issued_secs: i64 = r.try_get("issued_at")?;
+                            let expires_secs: i64 = r.try_get("expires_at")?;
+                            Ok(Some((
+                                id,
+                                subject,
+                                kind_str,
+                                parent_id,
+                                lineage_id,
+                                status_str,
+                                issued_secs,
+                                expires_secs,
+                            )))
+                        }
                     }
-                }
+                })
             })
-        })
-        .await
-        .map_err(storage)?;
+            .await
+            .map_err(storage)?;
 
         match raw {
             None => Ok(None),
@@ -253,40 +237,23 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     /// 入参 [`RefreshRotation`] 是 sealed command（`begin_rotation` 从源 record 派生）——tenant 从
     /// `rotation.new_record().tenant()` 取，无独立 `tenant` 入参错位风险（REFRESH-ROTATE-LINEAGE-01）。
     async fn rotate(&self, rotation: RefreshRotation) -> Result<bool, IdentityError> {
-        let old_id = rotation.old_id();
-        let new = rotation.new_record();
+        let old_id = rotation.old_id().clone();
+        let new = rotation.new_record().clone();
         let tenant = new.tenant();
         let tenant_uuid = tenant.as_uuid().to_string();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-        match do_rotate_tx(&tenant_uuid, &mut tx, old_id, new).await {
-            Err(e) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = tenant_uuid.as_str(),
-                        operation = "refresh_token.rotate",
-                        error = %secure::redact_error(&rb),
-                        "refresh token rotate: rollback failed"
-                    );
-                }
-                Err(storage(e))
-            }
-            Ok(hit) => {
-                // CAS miss（hit=false）或命中（hit=true）：均 commit（合并两臂控复杂度 ≤15）。
-                tx.commit().await.map_err(|e| {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = tenant_uuid.as_str(),
-                        operation = "refresh_token.rotate",
-                        error = %secure::redact_error(&e),
-                        "refresh token rotate: commit failed"
-                    );
-                    storage(e)
-                })?;
-                Ok(hit)
-            }
-        }
+        self.pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        do_rotate_tx(&tenant_uuid, conn, &old_id, &new)
+                            .await
+                            .map_err(storage)
+                    })
+                },
+                storage,
+            )
+            .await
     }
 
     /// **级联撤销整条谱系**（幂等；0 行也 Ok）：tenant-scoped 事务内批量 `UPDATE status='revoked'
@@ -297,40 +264,26 @@ impl RefreshTokenStore for PgRefreshTokenStore {
         lineage_id: RefreshTokenId,
     ) -> Result<(), IdentityError> {
         let tenant_uuid = tenant.as_uuid().to_string();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        set_local_tenant(&mut tx, tenant).await.map_err(storage)?;
-        let result = sqlx::query(
-            "UPDATE refresh_tokens SET status = $3 \
-             WHERE tenant_id = $1::uuid AND lineage_id = $2::uuid",
-        )
-        .bind(&tenant_uuid)
-        .bind(lineage_id.as_str())
-        .bind(RefreshStatus::Revoked.as_db_str())
-        .execute(&mut *tx)
-        .await;
-        match result {
-            Ok(_) => tx.commit().await.map_err(|e| {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = tenant_uuid.as_str(),
-                    operation = "refresh_token.revoke_lineage",
-                    error = %secure::redact_error(&e),
-                    "refresh token revoke_lineage: commit failed"
-                );
-                storage(e)
-            }),
-            Err(e) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = tenant_uuid.as_str(),
-                        operation = "refresh_token.revoke_lineage",
-                        error = %secure::redact_error(&rb),
-                        "refresh token revoke_lineage: rollback failed after update error"
-                    );
-                }
-                Err(storage(e))
-            }
-        }
+        self.pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE refresh_tokens SET status = $3 \
+                             WHERE tenant_id = $1::uuid AND lineage_id = $2::uuid",
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(lineage_id.as_str())
+                        .bind(RefreshStatus::Revoked.as_db_str())
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(storage)
+                        .map(|_| ())
+                    })
+                },
+                storage,
+            )
+            .await
     }
 }

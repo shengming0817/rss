@@ -21,6 +21,7 @@
 //! ref: crates/audit/src/internal/mem.rs（cursor encode/decode + verify_window 调用语义；postgres 改用 seq 键，
 //!   非 Vec 下标）
 
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use audit::ports::{
@@ -29,10 +30,10 @@ use audit::ports::{
 };
 use base64::Engine as _;
 use primitives::MacVerifier;
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{PgConnection, Row};
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::PgTenantPool;
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -55,16 +56,16 @@ const TABLE: &str = "audit_entries";
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgRoleRepo`]）clone 构造。
 /// `hasher` 持 keyed HMAC verifier + key（构造器必填，无 key 不可造 hasher，防篡改属性类型层成立）。
 pub struct PgAuditRepo<M: primitives::MacVerifier> {
-    pool: sqlx::PgPool,
-    hasher: AuditChainHasher<M>,
+    pool: PgTenantPool,
+    hasher: Arc<AuditChainHasher<M>>,
 }
 
 impl<M: MacVerifier + Send + Sync> PgAuditRepo<M> {
     /// 由 [`PgStore`] + `hasher` 构造（clone pool；hasher 持注入 verifier + key）。
     pub(crate) fn new(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
         Self {
-            pool: store.pool.clone(),
-            hasher,
+            pool: PgTenantPool::new(store),
+            hasher: Arc::new(hasher),
         }
     }
 }
@@ -198,7 +199,7 @@ fn hydrate_row(row: &sqlx::postgres::PgRow, tenant: TenantId) -> Result<AuditEnt
 
 /// 读取租户子链尾部（seq + entry_hash）；空链返回 (0, genesis)。
 async fn read_tail(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     tenant_uuid: &str,
 ) -> Result<(u64, EntryHash), AuditError> {
     let row = sqlx::query(&format!(
@@ -208,7 +209,7 @@ async fn read_tail(
          ORDER BY seq DESC LIMIT 1",
     ))
     .bind(tenant_uuid)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(storage)?;
 
@@ -232,7 +233,7 @@ async fn read_tail(
 
 /// 在事务内插入审计行（所有字段）。
 async fn insert_entry(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     tenant_uuid: &str,
     seq: u64,
     prev: &EntryHash,
@@ -269,7 +270,7 @@ async fn insert_entry(
     .bind(record.outcome.to_db())
     .bind(at_secs)
     .bind(at_nanos)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await
     .map_err(storage)?;
 
@@ -278,19 +279,16 @@ async fn insert_entry(
 
 /// append 事务体：SET LOCAL → advisory lock → tail → link → INSERT。
 async fn append_in_tx<M: MacVerifier>(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     tenant_uuid: &str,
-    tenant: TenantId,
     lock_key: i64,
     record: &AuditRecord,
     hasher: &AuditChainHasher<M>,
 ) -> Result<(), AuditError> {
-    set_local_tenant(tx, tenant).await.map_err(storage)?;
-
     // 串行化同租户并发 append（xact-level advisory lock，commit/rollback 自动释放）。
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_key)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(storage)?;
 
@@ -320,7 +318,7 @@ async fn append_in_tx<M: MacVerifier>(
 
 /// 取前驱行（seq = pred_seq）并 hydrate；行不存在返回 None（链首 genesis，前驱 = None）。
 async fn fetch_predecessor(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     tenant_uuid: &str,
     pred_seq_i64: i64,
     tenant: TenantId,
@@ -332,7 +330,7 @@ async fn fetch_predecessor(
     ))
     .bind(tenant_uuid)
     .bind(pred_seq_i64)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(storage)?;
 
@@ -344,15 +342,13 @@ async fn fetch_predecessor(
 
 /// list 事务体：SET LOCAL → 前驱 + 窗口读取 → hydrate → verify_window → 游标组装。
 async fn list_in_tx<M: MacVerifier>(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     tenant_uuid: &str,
     tenant: TenantId,
     start_seq: u64,
     limit: usize,
     hasher: &AuditChainHasher<M>,
 ) -> Result<AuditListResult, AuditError> {
-    set_local_tenant(tx, tenant).await.map_err(storage)?;
-
     let start_seq_i64 = i64::try_from(start_seq).map_err(AuditError::storage)?;
     let fetch_limit = i64::try_from(limit + 1).unwrap_or(i64::MAX);
 
@@ -374,7 +370,7 @@ async fn list_in_tx<M: MacVerifier>(
     .bind(tenant_uuid)
     .bind(start_seq_i64)
     .bind(fetch_limit)
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut *tx)
     .await
     .map_err(storage)?;
 
@@ -406,14 +402,12 @@ async fn list_in_tx<M: MacVerifier>(
 
 /// verify_tail 事务体：SET LOCAL → 末 limit 行 DESC → 升序 → 前驱 → verify_window。
 async fn verify_tail_in_tx<M: MacVerifier>(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     tenant_uuid: &str,
     tenant: TenantId,
     limit: u32,
     hasher: &AuditChainHasher<M>,
 ) -> Result<(), AuditError> {
-    set_local_tenant(tx, tenant).await.map_err(storage)?;
-
     let limit_i64 = i64::from(limit);
 
     // 取末 `limit` 行（DESC），再升序排列。
@@ -426,7 +420,7 @@ async fn verify_tail_in_tx<M: MacVerifier>(
     ))
     .bind(tenant_uuid)
     .bind(limit_i64)
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut *tx)
     .await
     .map_err(storage)?;
 
@@ -453,45 +447,23 @@ async fn verify_tail_in_tx<M: MacVerifier>(
 // AuditRepo impl
 // ---------------------------------------------------------------------------
 
-impl<M: MacVerifier + Send + Sync> AuditRepo for PgAuditRepo<M> {
+impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
     /// **原子封链 append**：advisory-lock 串行化 → 读 tail → 链接 → INSERT（单事务原子）。
     async fn append(&self, record: AuditRecord) -> Result<(), AuditError> {
         let tenant_uuid = tenant_str(record.tenant);
         let lock_key = advisory_lock_key(record.tenant);
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = append_in_tx(
-            &mut tx,
-            &tenant_uuid,
-            record.tenant,
-            lock_key,
-            &record,
-            &self.hasher,
-        )
-        .await;
-        match result {
-            Ok(()) => tx.commit().await.map_err(|e| {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = %tenant_uuid,
-                    op = "audit_append",
-                    error = %secure::redact_error(&e),
-                    "audit_append: commit failed"
-                );
-                storage(e)
-            }),
-            Err(e) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = %tenant_uuid,
-                        op = "audit_append",
-                        error = %secure::redact_error(&rb),
-                        "audit_append: rollback failed after error"
-                    );
-                }
-                Err(e)
-            }
-        }
+        let hasher = Arc::clone(&self.hasher);
+        self.pool
+            .write(
+                record.tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        append_in_tx(conn, &tenant_uuid, lock_key, &record, &hasher).await
+                    })
+                },
+                storage,
+            )
+            .await
     }
 
     /// 按租户分页列出审计条目（读路径**增量验证**窗口+1前驱，篡改 fail-closed → `Err`）。
@@ -502,74 +474,35 @@ impl<M: MacVerifier + Send + Sync> AuditRepo for PgAuditRepo<M> {
             None => 0u64,
         };
         let limit = usize::from(page.limit.get());
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = list_in_tx(
-            &mut tx,
-            &tenant_uuid,
-            tenant,
-            start_seq,
-            limit,
-            &self.hasher,
-        )
-        .await;
-        match result {
-            Ok(v) => {
-                tx.commit().await.map_err(|e| {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = %tenant_uuid,
-                        op = "audit_list",
-                        error = %secure::redact_error(&e),
-                        "audit_list: commit failed"
-                    );
-                    storage(e)
-                })?;
-                Ok(v)
-            }
-            Err(e) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = %tenant_uuid,
-                        op = "audit_list",
-                        error = %secure::redact_error(&rb),
-                        "audit_list: rollback failed after error"
-                    );
-                }
-                Err(e)
-            }
-        }
+        let hasher = Arc::clone(&self.hasher);
+        self.pool
+            .read_map(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        list_in_tx(conn, &tenant_uuid, tenant, start_seq, limit, &hasher).await
+                    })
+                },
+                storage,
+            )
+            .await
     }
 
     /// **尾部增量验证**（末 `limit` 条 + 前驱，非全扫整链；bootstrap 启动自检用）。
     async fn verify_tail(&self, tenant: TenantId, limit: u32) -> Result<(), AuditError> {
         let tenant_uuid = tenant_str(tenant);
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result = verify_tail_in_tx(&mut tx, &tenant_uuid, tenant, limit, &self.hasher).await;
-        match result {
-            Ok(()) => tx.commit().await.map_err(|e| {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = %tenant_uuid,
-                    op = "audit_verify_tail",
-                    error = %secure::redact_error(&e),
-                    "audit_verify_tail: commit failed"
-                );
-                storage(e)
-            }),
-            Err(e) => {
-                if let Err(rb) = tx.rollback().await {
-                    tracing::warn!(
-                        target: "postgres",
-                        tenant_id = %tenant_uuid,
-                        op = "audit_verify_tail",
-                        error = %secure::redact_error(&rb),
-                        "audit_verify_tail: rollback failed after error"
-                    );
-                }
-                Err(e)
-            }
-        }
+        let hasher = Arc::clone(&self.hasher);
+        self.pool
+            .read_map(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        verify_tail_in_tx(conn, &tenant_uuid, tenant, limit, &hasher).await
+                    })
+                },
+                storage,
+            )
+            .await
     }
 }
 

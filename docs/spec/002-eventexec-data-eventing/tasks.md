@@ -37,7 +37,7 @@
 **触及**: `adapters/postgres/{Cargo.toml,src/lib.rs,src/{pool,tx,migrator}.rs,migrations/}` · **等级**: —（纯基础设施连接层，无业务一致性等级；安全/连通性由集成测试 + xtask verify 覆盖）· **blocked-by**: 无 · **并行**: 与 T001 并行。
 
 - [ ] T003.1 [US1] 先写集成测试骨架（`#[cfg(feature="integration")]`）：Pool 连接、TxManager begin/commit/rollback、Migrator 应用空 migration —— FAIL
-- [ ] T003.2 [US1] 加 sqlx 依赖；实现 `PgStore` Pool + `TxRunner`(diport, run_in_transaction) + Migrator(`sqlx::migrate!`) + `impl ManagedResource`（替换 todo!()）
+- [ ] T003.2 [US1] 加 sqlx 依赖；实现 `PgStore` Pool + `TxRunner`(diport, run_global_transaction) + Migrator(`sqlx::migrate!`) + `impl ManagedResource`（替换 todo!()）
 - [ ] T003.3 [US1] 建 `migrations/README.md`（命名 `{序号}_{动词}_{对象}.sql`、只增不改、pre-GA 普通 CREATE INDEX）+ `0001_init_schema.sql` 占位
 - [ ] T003.4 [US1] 交付 `docker/dev-stack.yml`（本地 postgres，T006 补 redis/rabbitmq）+ `.env.example`，使 quickstart 的 durable 集成测试可运行；并在该 crate `Cargo.toml` 定义 package-scoped `[features] integration = []`
 - [ ] T003.5 [US1] 单测以 fake/sqlite 或 testcontainer；clippy/fmt 绿；`cargo xtask layer-deps` 绿（adapter 不被域依赖）

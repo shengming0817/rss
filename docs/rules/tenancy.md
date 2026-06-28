@@ -54,9 +54,11 @@ JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 
 
 ## RLS 与 PG scope
 
-PG tenant scope 使用 `SET LOCAL` 注入当前事务，读路径（`tenant_scoped_read`）与写路径
-（`tenant_scoped` / `co_tx_with_outbox`）均经受控 helper 注入；绕过 TxManager 直接借连接
-必须 fail-fast。
+PG tenant scope 使用 `SET LOCAL` 注入当前事务。tenant-scoped repository 不持有 raw
+`sqlx::PgPool`，只持有 opaque `PgTenantPool`；读写入口只能是
+`PgTenantPool::{read, write, co_tx_with_outbox}`。`PgTenantPool` 不暴露 `begin`、`acquire`、
+raw `PgPool` 或 `Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。
+绕过该类型入口直接借连接或走 global transaction 必须 fail-fast。
 
 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
 Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` +
@@ -93,11 +95,27 @@ typed `PartitionKey::for_tenant(TenantId, ..)` 让 tenant scope 进类型层）�
 所有 tenant 表**行不可见、写操作被拒**。这是设计预期的 fail-closed 默认拒绝，不是故障；
 无隐式 fallback 或 anonymous 租户。
 
-**单 funnel 强制**：postgres 生产路径所有 `SET LOCAL rss.tenant_id` 注入只经 `cotx.rs` 三个
+**单 funnel 强制**：postgres 生产路径所有 `SET LOCAL rss.tenant_id` 注入只经 `cotx.rs`
 helper 进行；`INVARIANT TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`，Medium
 内容扫描）机器强制：字面量 `set_config('rss.tenant_id'` 仅允许出现在
-`adapters/postgres/src/cotx.rs`（测试代码豁免）。类型化参数 `tenant: TenantId` 是 Hard 载体
-——非 `TenantId` 类型无法通过编译进入 funnel。
+`adapters/postgres/src/cotx.rs`（测试代码豁免）。tenant repository 的 Hard 载体是
+`PgTenantPool` + `tenant: TenantId`：非 `TenantId` 类型无法通过编译进入 funnel，tenant repo
+也无法直接调用 raw pool transaction / connection API。
+
+**raw-pool / TxManager bypass 守卫**：`INVARIANT TENANCY-PG-TX-FUNNEL-01` 由两层承载。
+Hard 层是 `PgTenantPool`，tenant 表 adapter（sessions / config / roles / secret_refs /
+credentials / refresh_tokens / audit_entries / tenant dead_letter/DLQ 路径）只存该 wrapper。
+Medium backstop 是 `cargo xtask pg-tenant-tx-guard`（接入 `verify` / `ci`）：从迁移派生
+tenant 表集合，扫描生产 Rust SQL site，禁止 tenant 表 SQL 通过 raw `pool.begin` /
+`pool.acquire` / `&self.pool` executor / `run_global_transaction` 访问，并带 anti-vacuity 与 stale
+allowlist 测试。raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
+global infra adapter 和命名维护例外中出现。
+
+**命名维护例外**：`dead_letter` retention sweep 是唯一 tenant 表 raw-pool 维护例外：它按保留期
+批量删除历史 dead-letter 记录，不代表某个 tenant repository 的业务路径；该例外必须在
+`pg-tenant-tx-guard` 中有显式规则和 stale-allowlist 测试。outbox relay 将 publish 失败写入
+`dead_letter` 是全局 relay 的 DLX settlement 例外；outbox tenant partition hardening 仍属
+#1405，不在本规则中把 outbox 重新分类为 tenant RLS 表。
 
 **启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用
 `PgStore::verify_rls_capability()`，动态派生含 `tenant_id` 列的表集合，断言每张表满足
@@ -107,12 +125,12 @@ RLS 状态无法在编译期校验，载体为 Medium 运行期门）。`RlsRead
 backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过标记 `Unhealthy`（→ 503）。
 
 **解锁器边界说明（#1437 是 PERSIST-016 解锁器）**：本 issue 落地统一的 typed cotx funnel
-（Hard）与 xtask setlocal-funnel 守卫（Medium）及启动能力门控（Medium），为以下同批
-issue 提供稳定底座：
+（Hard）与 xtask setlocal-funnel / pg-tenant-tx-guard 守卫（Medium）及启动能力门控（Medium），
+为以下同批 issue 提供稳定底座：
 
 - **#1405**：outbox / inbox tenant 注入（outbox 当前为无 `tenant_id` 的全局表，见上文全局表注，其 tenant 硬化超出本 issue 范围）。
 - **#1426**：完整 repo 一致性 conformance testkit（CAS / rollback / co-tx 跨场景验收）。
-- **#1436**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
+- **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
 
 dual-pool（`rss_app` serving 非 superuser 角色）接线见上文 §RLS 与 PG scope；`rss_app
 NOBYPASSRLS` 已 provision，dual-pool bootstrap 接线是独立 follow-up。
