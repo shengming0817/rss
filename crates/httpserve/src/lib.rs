@@ -14,7 +14,10 @@ mod middleware;
 pub mod protect;
 pub mod routes;
 
-pub use auth::{AuditSinkHandle, Authenticated, PendingScopeCtx, RouteMeta};
+pub use auth::{
+    AuditSinkHandle, Authenticated, PendingScopeCtx, RouteMeta, ServiceTokenTenantBindingError,
+    service_token_tenant_binding,
+};
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{

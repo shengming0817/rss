@@ -576,10 +576,11 @@ pub async fn verify_jwt(
 /// 受控 seal 进 [`VerifiedServiceToken`]（携 raw + 单一 canonical 身份源 `VerifiedClaims`）。
 pub async fn verify_service_token(
     raw: &str,
+    binding: diport::ServiceTokenTenantBinding,
     pdp: &diport::DynPdp<'_>,
 ) -> Result<(VerifiedServiceToken, Principal), AuthnError> {
     let claims = pdp
-        .verify(&diport::RawCredential::service_token(raw))
+        .verify(&diport::RawCredential::service_token(raw, binding))
         .await?;
     let verified = VerifiedServiceToken::seal(AccessToken::new(raw), claims);
     let principal = Principal::from_verified_service_token(&verified)?;
@@ -1469,6 +1470,7 @@ mod verify_bridge_tests {
     //! 绝不 seal / 派生（fail-closed，verify 先于 seal 的顺序由 `?`-链保证）。
     use super::{AuthnError, PrincipalKind, test_jwt, verify_jwt, verify_service_token};
     use diport::{DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
+    use vocab::tenant::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
@@ -1483,6 +1485,11 @@ mod verify_bridge_tests {
     }
     fn boxed(result: Result<VerifiedClaims, PdpError>) -> Box<DynPdp<'static>> {
         DynPdp::new_box(StubPdp { result })
+    }
+
+    #[allow(clippy::expect_used)]
+    fn service_binding() -> diport::ServiceTokenTenantBinding {
+        diport::ServiceTokenTenantBinding::new(TenantId::parse(CANON).expect("canonical tenant"))
     }
 
     /// happy：验签 ok → `(VerifiedJwt, Principal)`；身份反映**验签产物**而非 raw 重解析。
@@ -1574,7 +1581,7 @@ mod verify_bridge_tests {
             None,
             Some("ignored".to_string()),
         )));
-        let (vs, principal) = verify_service_token("opaque-service-token", &pdp)
+        let (vs, principal) = verify_service_token("opaque-service-token", service_binding(), &pdp)
             .await
             .expect("service verify ok");
         assert_eq!(principal.kind(), PrincipalKind::Service);
@@ -1592,7 +1599,7 @@ mod verify_bridge_tests {
             (PdpError::Untrusted, AuthnError::TokenUntrusted),
         ] {
             let pdp = boxed(Err(perr.clone()));
-            let result = verify_service_token("opaque-token", &pdp).await;
+            let result = verify_service_token("opaque-token", service_binding(), &pdp).await;
             assert!(
                 matches!(&result, Err(e) if std::mem::discriminant(e) == std::mem::discriminant(&want)),
                 "PdpError::{perr:?} 须映射到 {want:?}（且绝不 mint）"
@@ -1618,7 +1625,7 @@ mod verify_bridge_tests {
         ));
         let pdp_svc = boxed(Ok(VerifiedClaims::new("", None, None)));
         assert!(matches!(
-            verify_service_token("opaque", &pdp_svc).await,
+            verify_service_token("opaque", service_binding(), &pdp_svc).await,
             Err(AuthnError::PrincipalInvalid)
         ));
     }

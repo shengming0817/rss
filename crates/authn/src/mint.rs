@@ -128,6 +128,9 @@ pub enum JwtIssueError {
     /// fail-closed，杜绝签发语义与验签 scheme 分裂的凭据（验签侧 `verify_credential` 把 scheme 锁到 alg）。
     #[error("jwt alg does not match principal kind scheme")]
     AlgKindMismatch,
+    /// service-token 必须绑定 `X-Tenant-ID` 后签发。
+    #[error("service-token requires tenant header binding")]
+    MissingServiceTokenTenantBinding,
     /// 注入 `Clock` 早于 UNIX epoch（不可能的系统态）——fail-closed，不签发。
     #[error("clock is before unix epoch")]
     ClockBeforeEpoch,
@@ -286,6 +289,26 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
         tenant: Option<TenantId>,
         kind: PrincipalKind,
     ) -> Result<MintedJwt, JwtIssueError> {
+        self.issue_inner(subject, tenant, kind, None).await
+    }
+
+    /// 组装 tenant-bound HS256 service-token。
+    pub async fn issue_service_token(
+        &self,
+        subject: &str,
+        binding: diport::ServiceTokenTenantBinding,
+    ) -> Result<MintedJwt, JwtIssueError> {
+        self.issue_inner(subject, None, PrincipalKind::Service, Some(binding))
+            .await
+    }
+
+    async fn issue_inner(
+        &self,
+        subject: &str,
+        tenant: Option<TenantId>,
+        kind: PrincipalKind,
+        service_token_binding: Option<diport::ServiceTokenTenantBinding>,
+    ) -> Result<MintedJwt, JwtIssueError> {
         // 1) 输入 fail-closed（对称验签侧 `derive_from_claims`：空 subject / 不可签发 kind / scoped 缺 tenant）。
         if subject.is_empty() {
             return Err(JwtIssueError::EmptySubject);
@@ -295,6 +318,9 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
         // 验签 scheme 分裂的凭据（验签侧 `verify_credential` 把 Jwt→ES256 / ServiceToken→HS256 锁死）。
         if !alg_allows_kind(self.config.alg, kind) {
             return Err(JwtIssueError::AlgKindMismatch);
+        }
+        if matches!(kind, PrincipalKind::Service) && service_token_binding.is_none() {
+            return Err(JwtIssueError::MissingServiceTokenTenantBinding);
         }
         let tenant_claim = if needs_tenant(kind) {
             // TenantId Display = canonical lowercase-hyphenated（验签侧 `TenantId::parse` 接受同一形态）。
@@ -328,6 +354,10 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
             B64_URL.encode(serde_json::to_vec(&claims).map_err(JwtIssueError::ClaimsEncode)?);
         // JWS Signing Input（RFC 7515 §5.1）：base64url(header)."."base64url(payload)。
         let signing_input = format!("{header_b64}.{payload_b64}");
+        let message = match service_token_binding.as_ref() {
+            Some(binding) => diport::service_token_mac_input(signing_input.as_bytes(), binding),
+            None => signing_input.as_bytes().to_vec(),
+        };
 
         // 4) 委托签名（唯一非纯步；fail 传播，绝不返回半成品 token）。签名失败 / 关键路径 tracing span 待
         //    httpserve 接线补（无生产调用方前不埋空转 span，同 verify→mint bridge #1109 deferral）。
@@ -336,7 +366,7 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
             .sign(diport::SignRequest {
                 key: self.config.key.clone(),
                 purpose: self.config.purpose.clone(),
-                message: signing_input.as_bytes().to_vec().into(),
+                message: message.into(),
             })
             .await
             .map_err(JwtIssueError::Sign)?;
@@ -423,6 +453,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn tenant() -> TenantId {
         TenantId::parse(CANON_TENANT).expect("canonical tenant")
+    }
+
+    fn tenant_binding() -> diport::ServiceTokenTenantBinding {
+        diport::ServiceTokenTenantBinding::new(tenant())
     }
 
     /// 合法默认配置（key/alg/purpose/iss/aud/ttl）；validation 测试经 struct-update 注入非法字段。
@@ -546,31 +580,45 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn issue_ignores_tenant_for_cross_tenant_kinds() {
-        // 跨租户 kind（super-admin / service）即便传入 Some(tenant) 也省略 tenant claim（needs_tenant=false）。
-        for kind in [PrincipalKind::SuperAdmin, PrincipalKind::Service] {
-            let alg = if matches!(kind, PrincipalKind::Service) {
-                JwtAlg::Hs256
-            } else {
-                JwtAlg::Es256
-            };
-            let issuer = issuer_with(
-                RecordingSigner::ok(),
-                now_time(),
-                alg,
-                "p",
-                Duration::from_secs(3600),
-            );
-            let jwt = issuer
-                .issue("subject", Some(tenant()), kind)
-                .await
-                .expect("issue ok");
-            let claims = decode_segment(&segments(&jwt)[1]);
-            assert!(
-                claims.get("tenant_id").is_none(),
-                "kind={kind:?} 跨租户须省略 tenant claim（即便传入 Some）"
-            );
-        }
+    async fn issue_ignores_tenant_for_super_admin() {
+        let issuer = issuer_with(
+            RecordingSigner::ok(),
+            now_time(),
+            JwtAlg::Es256,
+            "p",
+            Duration::from_secs(3600),
+        );
+        let jwt = issuer
+            .issue("subject", Some(tenant()), PrincipalKind::SuperAdmin)
+            .await
+            .expect("issue ok");
+        let claims = decode_segment(&segments(&jwt)[1]);
+        assert!(
+            claims.get("tenant_id").is_none(),
+            "super-admin 跨租户须省略 tenant claim（即便传入 Some）"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn issue_service_token_requires_tenant_binding() {
+        let signer = RecordingSigner::ok();
+        let issuer = issuer_with(
+            signer.clone(),
+            now_time(),
+            JwtAlg::Hs256,
+            "p",
+            Duration::from_secs(3600),
+        );
+        let err = issuer
+            .issue("svc", None, PrincipalKind::Service)
+            .await
+            .expect_err("service-token 不得经 unsigned issue 签出");
+        assert!(matches!(
+            err,
+            JwtIssueError::MissingServiceTokenTenantBinding
+        ));
+        assert!(signer.captured().is_none(), "签名前 fail-closed");
     }
 
     #[tokio::test]
@@ -692,14 +740,20 @@ mod tests {
         );
         // service-token 路径：跨租户、无 tenant claim。
         let jwt = issuer
-            .issue("svc-acct", None, PrincipalKind::Service)
+            .issue_service_token("svc-acct", tenant_binding())
             .await
             .expect("issue ok");
         let header = decode_segment(&segments(&jwt)[0]);
         assert_eq!(header["alg"], "HS256");
+        let captured = signer.captured().expect("called");
+        assert_eq!(captured.purpose.as_str(), "auth.svc.hs256");
+        let parts = segments(&jwt);
+        let expected_jws_input = format!("{}.{}", parts[0], parts[1]);
+        let expected_mac_input = format!("{expected_jws_input}\nx-tenant-id:{CANON_TENANT}");
         assert_eq!(
-            signer.captured().expect("called").purpose.as_str(),
-            "auth.svc.hs256"
+            captured.message.as_bytes(),
+            expected_mac_input.as_bytes(),
+            "HS256 service-token 签名输入须绑定 canonical X-Tenant-ID"
         );
     }
 

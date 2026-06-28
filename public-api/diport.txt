@@ -2955,7 +2955,8 @@ pub struct diport::pdp::RawCredential
 impl diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::jwt(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn diport::pdp::RawCredential::scheme(&self) -> diport::pdp::CredentialScheme
-pub fn diport::pdp::RawCredential::service_token(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn diport::pdp::RawCredential::service_token(impl core::convert::Into<alloc::string::String>, diport::pdp::ServiceTokenTenantBinding) -> Self
+pub fn diport::pdp::RawCredential::service_token_tenant(&self) -> core::option::Option<&diport::pdp::ServiceTokenTenantBinding>
 pub fn diport::pdp::RawCredential::token(&self) -> &str
 impl core::clone::Clone for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::clone(&self) -> diport::pdp::RawCredential
@@ -2994,6 +2995,47 @@ impl<T> core::convert::From<T> for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::pdp::RawCredential
 pub type diport::pdp::RawCredential::Output = T
+pub struct diport::pdp::ServiceTokenTenantBinding(_)
+impl diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
+pub fn diport::pdp::ServiceTokenTenantBinding::tenant_header_value(&self) -> &str
+impl core::clone::Clone for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::clone(&self) -> diport::pdp::ServiceTokenTenantBinding
+impl core::fmt::Debug for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::Send for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::Sync for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::Unpin for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenTenantBinding
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenTenantBinding
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenTenantBinding
+impl<T, U> core::convert::Into<U> for diport::pdp::ServiceTokenTenantBinding where U: core::convert::From<T>
+pub fn diport::pdp::ServiceTokenTenantBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::pdp::ServiceTokenTenantBinding where U: core::convert::Into<T>
+pub type diport::pdp::ServiceTokenTenantBinding::Error = core::convert::Infallible
+pub fn diport::pdp::ServiceTokenTenantBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::pdp::ServiceTokenTenantBinding where U: core::convert::TryFrom<T>
+pub type diport::pdp::ServiceTokenTenantBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::pdp::ServiceTokenTenantBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::pdp::ServiceTokenTenantBinding where T: core::clone::Clone
+pub type diport::pdp::ServiceTokenTenantBinding::Owned = T
+pub fn diport::pdp::ServiceTokenTenantBinding::clone_into(&self, &mut T)
+pub fn diport::pdp::ServiceTokenTenantBinding::to_owned(&self) -> T
+impl<T> core::any::Any for diport::pdp::ServiceTokenTenantBinding where T: 'static + ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenTenantBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::pdp::ServiceTokenTenantBinding where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenTenantBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::pdp::ServiceTokenTenantBinding where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenTenantBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::pdp::ServiceTokenTenantBinding where T: core::clone::Clone
+pub unsafe fn diport::pdp::ServiceTokenTenantBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::pdp::ServiceTokenTenantBinding
+pub type diport::pdp::ServiceTokenTenantBinding::Output = T
 pub struct diport::pdp::VerifiedClaims
 impl diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::kind(&self) -> core::option::Option<&str>
@@ -3037,6 +3079,8 @@ impl<T> core::convert::From<T> for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::pdp::VerifiedClaims
 pub type diport::pdp::VerifiedClaims::Output = T
+pub const diport::pdp::SERVICE_TOKEN_TENANT_HEADER: &str
+pub const diport::pdp::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::pdp::Pdp: core::marker::Send
 pub fn diport::pdp::Pdp::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send
@@ -3051,6 +3095,7 @@ pub trait diport::pdp::PdpLocal
 pub async fn diport::pdp::PdpLocal::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
 impl<TraitVariantBlanketType: diport::pdp::Pdp> diport::pdp::PdpLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
+pub fn diport::pdp::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
 pub diport::publisher::PublishErrorKind::Permanent
@@ -8015,7 +8060,8 @@ pub struct diport::RawCredential
 impl diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::jwt(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn diport::pdp::RawCredential::scheme(&self) -> diport::pdp::CredentialScheme
-pub fn diport::pdp::RawCredential::service_token(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn diport::pdp::RawCredential::service_token(impl core::convert::Into<alloc::string::String>, diport::pdp::ServiceTokenTenantBinding) -> Self
+pub fn diport::pdp::RawCredential::service_token_tenant(&self) -> core::option::Option<&diport::pdp::ServiceTokenTenantBinding>
 pub fn diport::pdp::RawCredential::token(&self) -> &str
 impl core::clone::Clone for diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::clone(&self) -> diport::pdp::RawCredential
@@ -8343,6 +8389,47 @@ impl<T> core::convert::From<T> for diport::secret_resolver::SecretMaterial
 pub fn diport::secret_resolver::SecretMaterial::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::secret_resolver::SecretMaterial
 pub type diport::secret_resolver::SecretMaterial::Output = T
+pub struct diport::ServiceTokenTenantBinding(_)
+impl diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
+pub fn diport::pdp::ServiceTokenTenantBinding::tenant_header_value(&self) -> &str
+impl core::clone::Clone for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::clone(&self) -> diport::pdp::ServiceTokenTenantBinding
+impl core::fmt::Debug for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl core::marker::Freeze for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::Send for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::Sync for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::Unpin for diport::pdp::ServiceTokenTenantBinding
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenTenantBinding
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenTenantBinding
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenTenantBinding
+impl<T, U> core::convert::Into<U> for diport::pdp::ServiceTokenTenantBinding where U: core::convert::From<T>
+pub fn diport::pdp::ServiceTokenTenantBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::pdp::ServiceTokenTenantBinding where U: core::convert::Into<T>
+pub type diport::pdp::ServiceTokenTenantBinding::Error = core::convert::Infallible
+pub fn diport::pdp::ServiceTokenTenantBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::pdp::ServiceTokenTenantBinding where U: core::convert::TryFrom<T>
+pub type diport::pdp::ServiceTokenTenantBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::pdp::ServiceTokenTenantBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::pdp::ServiceTokenTenantBinding where T: core::clone::Clone
+pub type diport::pdp::ServiceTokenTenantBinding::Owned = T
+pub fn diport::pdp::ServiceTokenTenantBinding::clone_into(&self, &mut T)
+pub fn diport::pdp::ServiceTokenTenantBinding::to_owned(&self) -> T
+impl<T> core::any::Any for diport::pdp::ServiceTokenTenantBinding where T: 'static + ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenTenantBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::pdp::ServiceTokenTenantBinding where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenTenantBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::pdp::ServiceTokenTenantBinding where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenTenantBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::pdp::ServiceTokenTenantBinding where T: core::clone::Clone
+pub unsafe fn diport::pdp::ServiceTokenTenantBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::pdp::ServiceTokenTenantBinding
+pub fn diport::pdp::ServiceTokenTenantBinding::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::pdp::ServiceTokenTenantBinding
+pub type diport::pdp::ServiceTokenTenantBinding::Output = T
 pub struct diport::ShutdownError
 impl diport::managed_resource::ShutdownError
 pub fn diport::managed_resource::ShutdownError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -8706,6 +8793,8 @@ pub const diport::KEY_SUBJECT_ID: &str
 pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
 pub const diport::RESERVED_METADATA_KEYS: [&str; 5]
+pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
+pub const diport::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::AckableSubscriber: core::marker::Send
 pub fn diport::AckableSubscriber::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::AckableSubscriber::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
@@ -9062,6 +9151,7 @@ pub fn alloc::boxed::Box<diport::DynSubscriber<'dynosaur_struct>>::subscribe(&se
 impl<'dynosaur_struct> diport::subscriber::Subscriber for diport::DynSubscriber<'dynosaur_struct>
 pub fn diport::DynSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynSubscriber<'dynosaur_struct>::subscribe(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::subscriber::MessageStream, diport::subscriber::SubscriberError>> + core::marker::Send
+pub fn diport::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub type diport::DeliveryStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::acker::Delivery> + core::marker::Send)>>
 pub type diport::MessageStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::subscriber::Message> + core::marker::Send)>>
 pub type diport::ObjectByteStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = core::result::Result<alloc::vec::Vec<u8>, diport::object_store::ObjectStoreError>> + core::marker::Send)>>

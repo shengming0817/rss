@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use manifest::ContractManifest;
 
+pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str =
+    "认证上下文、声明式 populate-only header 或 service-token MAC 绑定 header";
+
 /// 一个已发现并解析的契约：目录 + 元数据 + 磁盘路径派生的 kind/domain/version 段。
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveredContract {

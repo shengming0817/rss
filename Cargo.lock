@@ -3377,6 +3377,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "vocab",
 ]
 
 [[package]]

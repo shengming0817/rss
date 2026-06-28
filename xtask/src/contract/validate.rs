@@ -27,7 +27,8 @@
 //! 完整（D2）、deterministic/blindIndex 须 reason 且 aad 稳定子集（D4）、`x-at-rest` schema 高风险字段
 //! 须显式 `x-protection`，均 fail-closed。与 R16 observe redaction **正交不混用**（ADR-011 D1）。
 //! INVARIANT: CONTRACT-HTTP-SERVING-01 — active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
-//! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文或声明式 populate-only header（R19）。
+//! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only header 或
+//! service-token MAC 绑定 header（R19）。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -130,10 +131,11 @@ pub(crate) enum Rule {
     /// R18：active HTTP serving 必须声明 fail-closed auth/header metadata。
     ///
     /// `mode=permission` 需要 permission 且禁止 reason；public/bootstrap/clientsOnly/serviceOwned 需要
-    /// non-empty reason 且禁止 permission。当前最小 header 面只接受 `X-Tenant-ID = "populate-only"`，
+    /// non-empty reason 且禁止 permission。当前最小 header 面只接受 `X-Tenant-ID` 的闭值模式，
     /// identity.login public serving 必须声明该 header。
     HttpAuth,
-    /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文或声明式 populate-only header。
+    /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文、声明式 populate-only header
+    /// 或 service-token MAC 绑定 header。
     HttpTenantSource,
     /// R20：嵌套形态（`{kind}/{domain}/{version}/{slug}/`）的 slug 段语法须收口——slug 经 kebab→snake 拼进
     /// generated `pub mod <slug_ident>`（见 codegen），须为合法 Rust 模块标识符前体（首 `a-z`、余 `[a-z0-9_-]`、
@@ -637,12 +639,16 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
     };
 
     for (name, mode) in &http.headers {
-        if name != "X-Tenant-ID" || *mode != HttpHeaderMode::PopulateOnly {
+        let allowed_mode = matches!(
+            mode,
+            HttpHeaderMode::PopulateOnly | HttpHeaderMode::ServiceTokenTenantBound
+        );
+        if name != "X-Tenant-ID" || !allowed_mode {
             out.push(finding(
                 Rule::HttpAuth,
                 label,
                 format!(
-                    "{FIELD_ENDPOINTS_HTTP_HEADERS} 当前仅接受 \"X-Tenant-ID\" = \"populate-only\"，实为 {name:?} = {:?}",
+                    "{FIELD_ENDPOINTS_HTTP_HEADERS} 当前仅接受 \"X-Tenant-ID\" = \"populate-only\" 或 \"service-token-tenant-bound\"，实为 {name:?} = {:?}",
                     mode
                 ),
             ));
@@ -708,9 +714,11 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
             }
         }
     }
+    let tenant_header_mode = http.headers.get("X-Tenant-ID").copied();
+    rule_http_service_token_header_coupling(auth.mode, tenant_header_mode, label, &mut out);
     if m.id == "identity.login"
         && matches!(auth.mode, HttpAuthMode::Public)
-        && http.headers.get("X-Tenant-ID") != Some(&HttpHeaderMode::PopulateOnly)
+        && tenant_header_mode != Some(HttpHeaderMode::PopulateOnly)
     {
         out.push(finding(
             Rule::HttpAuth,
@@ -719,6 +727,34 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
         ));
     }
     out
+}
+
+fn rule_http_service_token_header_coupling(
+    auth_mode: HttpAuthMode,
+    tenant_header_mode: Option<HttpHeaderMode>,
+    label: &str,
+    out: &mut Vec<Finding>,
+) {
+    if tenant_header_mode == Some(HttpHeaderMode::ServiceTokenTenantBound)
+        && !matches!(auth_mode, HttpAuthMode::ServiceOwned)
+    {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "X-Tenant-ID = service-token-tenant-bound 仅允许 serviceOwned HTTP auth mode"
+                .to_string(),
+        ));
+    }
+    if matches!(auth_mode, HttpAuthMode::ServiceOwned)
+        && tenant_header_mode != Some(HttpHeaderMode::ServiceTokenTenantBound)
+    {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "serviceOwned HTTP auth mode 必须声明 X-Tenant-ID = service-token-tenant-bound"
+                .to_string(),
+        ));
+    }
 }
 
 fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
@@ -743,7 +779,8 @@ fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<F
             Rule::HttpTenantSource,
             label,
             format!(
-                "HTTP request schema {request} 声明 tenantId；tenant scope 必须来自 X-Tenant-ID/JWT，不得来自 body"
+                "HTTP request schema {request} 声明 tenantId；tenant scope 必须来自{}，不得来自 body",
+                super::TENANT_SCOPE_SOURCE_RULE
             ),
         )];
     }
@@ -1958,6 +1995,127 @@ mod tests {
         let findings = rule_http_auth(&m, "x");
         assert!(
             findings.iter().any(|f| f.detail.contains("禁止 reason")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_service_token_tenant_bound_header_mode_is_allowed() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/internal".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::ServiceOwned,
+                    reason: Some("internal service-token route".to_string()),
+                    permission: None,
+                }),
+                headers: BTreeMap::from([(
+                    "X-Tenant-ID".to_string(),
+                    HttpHeaderMode::ServiceTokenTenantBound,
+                )]),
+            }),
+        });
+        assert!(rule_http_auth(&m, "x").is_empty());
+    }
+
+    #[test]
+    fn r18_service_token_tenant_bound_permission_mode_fails() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/internal".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("internal.call".to_string()),
+                }),
+                headers: BTreeMap::from([(
+                    "X-Tenant-ID".to_string(),
+                    HttpHeaderMode::ServiceTokenTenantBound,
+                )]),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("仅允许 serviceOwned")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_service_owned_without_tenant_bound_header_fails() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/internal".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::ServiceOwned,
+                    reason: Some("internal service-token route".to_string()),
+                    permission: None,
+                }),
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("必须声明 X-Tenant-ID")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_service_token_tenant_bound_wrong_header_name_fails() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/internal".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("internal.call".to_string()),
+                }),
+                headers: BTreeMap::from([(
+                    "X-Other-Tenant".to_string(),
+                    HttpHeaderMode::ServiceTokenTenantBound,
+                )]),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("X-Tenant-ID")),
             "{findings:?}"
         );
     }

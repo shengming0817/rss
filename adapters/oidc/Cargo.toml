@@ -55,3 +55,4 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 rstest = { workspace = true }
 # 脱敏回归：捕获 tracing 输出，断言原始 token 不入日志（DIPORT-ERR 同源 PII 边界）。
 tracing-subscriber = { workspace = true }
+vocab = { path = "../../crates/vocab" }

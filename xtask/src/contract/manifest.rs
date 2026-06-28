@@ -260,6 +260,7 @@ impl HttpAuthMode {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum HttpHeaderMode {
     PopulateOnly,
+    ServiceTokenTenantBound,
 }
 
 /// 事件投递语义（event 契约 per-kind 字段）。三标准投递保证；非法值解析即 `Err`（Hard，类型层）。

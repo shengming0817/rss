@@ -31,10 +31,8 @@ pub(crate) fn verify_credential(
     raw: &RawCredential,
 ) -> Result<VerifiedClaims, PdpError> {
     match raw.scheme() {
-        CredentialScheme::Jwt => verify_path(config, clock, raw.token(), SupportedAlg::Es256),
-        CredentialScheme::ServiceToken => {
-            verify_path(config, clock, raw.token(), SupportedAlg::Hs256)
-        }
+        CredentialScheme::Jwt => verify_path(config, clock, raw.token(), SupportedAlg::Es256, None),
+        CredentialScheme::ServiceToken => verify_service_token_path(config, clock, raw),
         _ => {
             // 未来 scheme（`CredentialScheme` #[non_exhaustive]）无验签器 → fail-closed。只记静态 reason
             // （不记 scheme 值——未来变体若携数据则 fmt 会泄漏，前向安全）。
@@ -49,12 +47,36 @@ pub(crate) fn verify_credential(
     }
 }
 
+fn verify_service_token_path(
+    config: &VerifierConfig,
+    clock: &dyn Clock,
+    raw: &RawCredential,
+) -> Result<VerifiedClaims, PdpError> {
+    let Some(binding) = raw.service_token_tenant() else {
+        tracing::warn!(
+            target: LOG_TARGET,
+            resource = LOG_TARGET,
+            reason = "missing_tenant_binding",
+            "oidc service-token missing tenant binding"
+        );
+        return Err(PdpError::InvalidSignature);
+    };
+    verify_path(
+        config,
+        clock,
+        raw.token(),
+        SupportedAlg::Hs256,
+        Some(binding),
+    )
+}
+
 /// 单路径验签：解析 → 路径隔离闸 → 签名校验 → claim 校验。`expected` = 本 scheme 路径锁定的算法。
 fn verify_path(
     config: &VerifierConfig,
     clock: &dyn Clock,
     token: &str,
     expected: SupportedAlg,
+    service_token_binding: Option<&diport::ServiceTokenTenantBinding>,
 ) -> Result<VerifiedClaims, PdpError> {
     let jws = jws::parse(token).map_err(classify_parse)?;
     // 取当前 key 快照（静态不变 / JWKS 文件源后台刷新的最新；Arc clone 同步零撕裂）。
@@ -68,7 +90,10 @@ fn verify_path(
     let kid = jws.kid.as_deref();
     match match expected {
         SupportedAlg::Es256 => verify_es256(&snapshot, kid, &jws),
-        SupportedAlg::Hs256 => verify_hs256(&snapshot, kid, &jws),
+        SupportedAlg::Hs256 => match service_token_binding {
+            Some(binding) => verify_hs256(&snapshot, kid, &jws, binding),
+            None => VerifyOutcome::BadSignature,
+        },
     } {
         VerifyOutcome::Verified => {}
         VerifyOutcome::NoCandidate => {
@@ -121,11 +146,17 @@ fn verify_es256(keys: &KeySet, kid: Option<&str>, jws: &Jws) -> VerifyOutcome {
 
 /// HS256（HMAC-SHA256）MAC 校验：逐**候选** HS256 密钥算 tag + 常数时间比对（复用
 /// `primitives::crypto::constant_time_eq`，CRYPTO-CONST-TIME-01；候选按 `kid` 过滤）。候选为空 → `NoCandidate`。
-fn verify_hs256(keys: &KeySet, kid: Option<&str>, jws: &Jws) -> VerifyOutcome {
+fn verify_hs256(
+    keys: &KeySet,
+    kid: Option<&str>,
+    jws: &Jws,
+    binding: &diport::ServiceTokenTenantBinding,
+) -> VerifyOutcome {
+    let mac_input = diport::service_token_mac_input(&jws.signing_input, binding);
     let mut had_candidate = false;
     for secret in keys.hs256_candidates(kid) {
         had_candidate = true;
-        if hs256_tag_matches(secret, &jws.signing_input, &jws.signature) {
+        if hs256_tag_matches(secret, &mac_input, &jws.signature) {
             return VerifyOutcome::Verified;
         }
     }
@@ -184,7 +215,7 @@ mod tests {
 
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use diport::{Clock, PdpError, RawCredential};
+    use diport::{Clock, PdpError, RawCredential, ServiceTokenTenantBinding};
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 
@@ -201,6 +232,8 @@ mod tests {
     const TEST_SK2_BYTES: [u8; 32] = [0x11; 32];
     /// HS256 测试共享密钥（service-token 路径 fixture）。
     const HS_SECRET: &[u8] = b"unit-test-hs256-shared-secret-0001";
+    const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
 
     /// 确定性 tracing 捕获（PII 回归测试用）。`cargo test`（非进程隔离的 nextest）多测试共进程：先跑的、
     /// 无 subscriber 的测试会把 warn/debug callsite 的 interest 缓存成 `never`，事件宏短路、不再咨询后装的
@@ -339,6 +372,26 @@ mod tests {
         let signing_input = format!("{header}.{body}");
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
         mac.update(signing_input.as_bytes());
+        let tag = mac.finalize().into_bytes();
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(tag))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_binding(raw: &str) -> ServiceTokenTenantBinding {
+        ServiceTokenTenantBinding::new(vocab::tenant::TenantId::parse(raw).expect("tenant"))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn mint_hs256_bound(secret: &[u8], payload_json: &str, tenant: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#);
+        let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let binding = tenant_binding(tenant);
+        let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+        mac.update(&mac_input);
         let tag = mac.finalize().into_bytes();
         format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(tag))
     }
@@ -533,7 +586,7 @@ mod tests {
         let r = verify_credential(
             &hs256_config(),
             &FixedClock(NOW),
-            &RawCredential::service_token(token),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
         );
         assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
     }
@@ -541,23 +594,53 @@ mod tests {
     // ── 验收场景 ⑥ 有效 service_token HS256 → Ok ────────────────────────────────
     #[test]
     fn valid_hs256_service_token_maps_claims() {
-        let token = mint_hs256(
+        let token = mint_hs256_bound(
             HS_SECRET,
             &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            CANON_TENANT,
         );
         let claims = ok_claims(verify_credential(
             &hs256_config(),
             &FixedClock(NOW),
-            &RawCredential::service_token(token),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
         ));
         assert_eq!(claims.subject(), "alice");
         assert_eq!(claims.kind(), Some("service"));
     }
 
     #[test]
+    fn hs256_service_token_wrong_tenant_binding_rejected() {
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(OTHER_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
+    #[test]
+    fn legacy_unbound_hs256_service_token_rejected() {
+        let token = mint_hs256(
+            HS_SECRET,
+            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
+    #[test]
     #[allow(clippy::unwrap_used)]
     fn hs256_tampered_rejected() {
-        let token = mint_hs256(HS_SECRET, &payload(NOW + 3600, ISS, AUD, ""));
+        let token = mint_hs256_bound(HS_SECRET, &payload(NOW + 3600, ISS, AUD, ""), CANON_TENANT);
         // 篡改签名段最后一字符。
         let mut t = token;
         let last = t.pop().unwrap_or('A');
@@ -565,7 +648,7 @@ mod tests {
         let r = verify_credential(
             &hs256_config(),
             &FixedClock(NOW),
-            &RawCredential::service_token(t),
+            &RawCredential::service_token(t, tenant_binding(CANON_TENANT)),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
     }
@@ -894,14 +977,15 @@ mod tests {
             .build()
             .expect("config");
         // 用第二把 secret 签发 → 验签器遍历两把密钥，第二把命中 → Ok。
-        let token = mint_hs256(
+        let token = mint_hs256_bound(
             HS_SECRET2,
             &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            CANON_TENANT,
         );
         let r = verify_credential(
             &config,
             &FixedClock(NOW),
-            &RawCredential::service_token(token),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
         );
         assert!(r.is_ok(), "第二把 key 应命中: {r:?}");
     }

@@ -29,6 +29,7 @@ use tower::ServiceExt as _;
 
 /// 合法测试租户（`user` kind 需 tenant；canonical UUID）。
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
 
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
@@ -103,6 +104,24 @@ fn mint_hs256(secret: &[u8], payload: &str) -> String {
     let signing_input = format!("{header}.{body}");
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
     mac.update(signing_input.as_bytes());
+    format!(
+        "{signing_input}.{}",
+        B64.encode(mac.finalize().into_bytes())
+    )
+}
+#[allow(clippy::expect_used)]
+fn mint_hs256_bound(secret: &[u8], payload: &str, tenant: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let header = B64.encode(br#"{"alg":"HS256"}"#);
+    let body = B64.encode(payload.as_bytes());
+    let signing_input = format!("{header}.{body}");
+    let binding = diport::ServiceTokenTenantBinding::new(
+        vocab::tenant::TenantId::parse(tenant).expect("canonical tenant"),
+    );
+    let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+    mac.update(&mac_input);
     format!(
         "{signing_input}.{}",
         B64.encode(mac.finalize().into_bytes())
@@ -235,9 +254,32 @@ async fn status(
     uri: &str,
     bearer: Option<&str>,
 ) -> StatusCode {
+    status_with_tenant(app, uri, bearer, None).await
+}
+
+#[allow(clippy::unwrap_used)]
+async fn status_with_tenant(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+    tenant: Option<&str>,
+) -> StatusCode {
+    status_with_tenant_values(app, uri, bearer, tenant).await
+}
+
+#[allow(clippy::unwrap_used)]
+async fn status_with_tenant_values<'a>(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+    tenants: impl IntoIterator<Item = &'a str>,
+) -> StatusCode {
     let mut builder = axum::http::Request::builder().method(Method::GET).uri(uri);
     if let Some(value) = bearer {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    for value in tenants {
+        builder = builder.header(diport::SERVICE_TOKEN_TENANT_HEADER, value);
     }
     // 取回裸 Router 做 oneshot（`#[doc(hidden)]` 测试入口；生产经 into_make_service bind，无此出口）。
     let resp = app
@@ -454,9 +496,22 @@ async fn body_of(
     uri: &str,
     bearer: Option<&str>,
 ) -> (StatusCode, String) {
+    body_of_with_tenant(app, uri, bearer, None).await
+}
+
+#[allow(clippy::unwrap_used)]
+async fn body_of_with_tenant(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+    tenant: Option<&str>,
+) -> (StatusCode, String) {
     let mut builder = axum::http::Request::builder().method(Method::GET).uri(uri);
     if let Some(value) = bearer {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = tenant {
+        builder = builder.header(diport::SERVICE_TOKEN_TENANT_HEADER, value);
     }
     let resp = app
         .into_router_for_test()
@@ -754,12 +809,13 @@ async fn public_route_no_token_is_200() {
 #[allow(clippy::expect_used)]
 async fn service_token_hs256_is_200() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256(
+    let token = mint_hs256_bound(
         &secret,
         &format!(
             r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
             NOW + 3600
         ),
+        TENANT,
     );
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
         rb.mount(
@@ -775,24 +831,117 @@ async fn service_token_hs256_is_200() {
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
     let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
     assert_eq!(
-        status(app, "/svc", Some(&format!("Bearer {token}"))).await,
+        status_with_tenant(app, "/svc", Some(&format!("Bearer {token}")), Some(TENANT)).await,
         StatusCode::OK,
-        "有效 HS256 service-token → 证据注入放行 200"
+        "有效 HS256 service-token + matching X-Tenant-ID → 证据注入放行 200"
     );
 }
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
-async fn service_token_does_not_establish_scope() {
-    // service 主体（Internal/ServiceToken）tenant=None → 不建 ambient scope（与 Primary/JWT scope 用例互补的
-    // 回归：若 `from_verified_service_token` 将来误带 tenant，本用例会 FAIL）。仍放行（有证据）。
+async fn service_token_missing_or_wrong_tenant_header_is_401() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256(
+    let token = mint_hs256_bound(
         &secret,
         &format!(
             r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
             NOW + 3600
         ),
+        TENANT,
+    );
+    let make_authed = || {
+        let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+            rb.mount(
+                httpserve::Route {
+                    method: Method::GET,
+                    path: "/svc",
+                    contract_id: "test.svc",
+                },
+                get(|| async { "ok" }),
+            )
+        });
+        let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
+        httpserve::finalize_auth(routes, plan).expect("finalize_auth")
+    };
+    let authed = make_authed();
+    let bearer = format!("Bearer {token}");
+    assert_eq!(
+        status_with_tenant(
+            apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken),
+            "/svc",
+            Some(&bearer),
+            None,
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "缺 X-Tenant-ID 不得通过 service-token 验签"
+    );
+
+    let (provider, _) = hs256_provider();
+    let authed = make_authed();
+    assert_eq!(
+        status_with_tenant(
+            apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken),
+            "/svc",
+            Some(&bearer),
+            Some(OTHER_TENANT),
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "跨 tenant replay 必须 401"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn service_token_duplicate_tenant_header_is_401() {
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256_bound(
+        &secret,
+        &format!(
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            NOW + 3600
+        ),
+        TENANT,
+    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+        rb.mount(
+            httpserve::Route {
+                method: Method::GET,
+                path: "/svc",
+                contract_id: "test.svc",
+            },
+            get(|| async { "ok" }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+    assert_eq!(
+        status_with_tenant_values(
+            app,
+            "/svc",
+            Some(&format!("Bearer {token}")),
+            [TENANT, OTHER_TENANT],
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "重复 X-Tenant-ID 不得由 bridge 选一个值验签"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn service_token_establishes_scope_from_mac_bound_tenant() {
+    // service 主体自身仍 tenant=None；ambient scope 来自已 MAC 认证的 canonical `X-Tenant-ID`。
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256_bound(
+        &secret,
+        &format!(
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            NOW + 3600
+        ),
+        TENANT,
     );
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
         rb.mount(
@@ -807,11 +956,18 @@ async fn service_token_does_not_establish_scope() {
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
     let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
-    let (status, body) = body_of(app, "/scope", Some(&format!("Bearer {token}"))).await;
+    let (status, body) = body_of_with_tenant(
+        app,
+        "/scope",
+        Some(&format!("Bearer {token}")),
+        Some(TENANT),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "service-token 仍放行（证据在场）");
     assert_eq!(
-        body, SCOPE_MISSING,
-        "service 主体（tenant=None）不建 ambient scope"
+        body,
+        format!("tenant={TENANT};kind=Service;alice=false"),
+        "service-token MAC 绑定 tenant 须进入 ambient scope"
     );
 }
 
@@ -993,4 +1149,54 @@ fn tracing_deny_logs_per_variant_reason_no_pii() {
         assert!(!logs.contains(&token), "{label}: 禁泄漏原始 token: {logs}");
         assert!(!logs.contains("alice"), "{label}: 禁泄漏 subject: {logs}");
     }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+fn tracing_service_token_binding_error_has_distinct_reason_no_pii() {
+    let _capture_guard = tracing_capture_lock().lock().unwrap();
+    ensure_global_trace_capture();
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256_bound(
+        &secret,
+        &format!(
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            NOW + 3600
+        ),
+        TENANT,
+    );
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+        rb.mount(
+            httpserve::Route {
+                method: Method::GET,
+                path: "/svc",
+                contract_id: "test.svc",
+            },
+            get(|| async { "ok" }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).expect("plan");
+    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
+
+    let start = trace_len();
+    let st = block_on_current_thread(status_with_tenant(
+        app,
+        "/svc",
+        Some(&format!("Bearer {token}")),
+        None,
+    ));
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    let logs = captured_since(start);
+    assert!(
+        logs.contains("tenant_binding_invalid"),
+        "service-token binding parser failure must have its own deny reason: {logs}"
+    );
+    assert!(
+        !logs.contains("signature_invalid"),
+        "service-token binding parser failure must not be reported as signature_invalid: {logs}"
+    );
+    assert!(!logs.contains(&token), "禁泄漏原始 token: {logs}");
+    assert!(!logs.contains(TENANT), "禁泄漏 tenant header 值: {logs}");
 }

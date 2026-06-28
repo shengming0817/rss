@@ -21,7 +21,9 @@ use typify::{TypeSpace, TypeSpaceSettings};
 use crate::contract::manifest::{ContractKind, HttpAuthMode, HttpHeaderMode, Lifecycle};
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
-use crate::contract::{DiscoveredContract, discover, schema_declares_property};
+use crate::contract::{
+    DiscoveredContract, TENANT_SCOPE_SOURCE_RULE, discover, schema_declares_property,
+};
 use crate::pathsafe;
 
 /// 入口：生成（`check=false`）或校验漂移（`check=true`）真实仓的 committed 派生码。
@@ -228,8 +230,9 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
             && schema_declares_property(&value, "tenantId")
         {
             bail!(
-                "HTTP request schema {} 声明 tenantId；tenant scope 必须来自 X-Tenant-ID/JWT，不得来自 body",
-                path.display()
+                "HTTP request schema {} 声明 tenantId；tenant scope 必须来自{}，不得来自 body",
+                path.display(),
+                TENANT_SCOPE_SOURCE_RULE
             );
         }
         let schema_policies = redaction::collect_struct_policies(&value).map_err(|violations| {
@@ -362,6 +365,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
         }
         let header_mode = match mode {
             HttpHeaderMode::PopulateOnly => "PopulateOnly",
+            HttpHeaderMode::ServiceTokenTenantBound => "ServiceTokenTenantBound",
         };
         headers.push(format!(
             "    {sup}HttpHeaderSpec {{ name: \"{name}\", mode: {sup}HttpHeaderMode::{header_mode} }}"
@@ -900,6 +904,7 @@ pub struct HttpHeaderSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpHeaderMode {
     PopulateOnly,
+    ServiceTokenTenantBound,
 }
 "#;
 

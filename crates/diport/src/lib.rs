@@ -155,7 +155,11 @@ pub use object_store::{
     DynObjectStore, ObjectByteStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError,
 };
 pub use outbox_emitter::{DynOutboxEmitter, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
-pub use pdp::{CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, VerifiedClaims};
+pub use pdp::{
+    CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, SERVICE_TOKEN_TENANT_HEADER,
+    SERVICE_TOKEN_TENANT_MAC_NAME, ServiceTokenTenantBinding, VerifiedClaims,
+    service_token_mac_input,
+};
 pub use publisher::{
     DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,
 };

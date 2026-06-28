@@ -36,6 +36,7 @@ pub struct HttpHeaderSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpHeaderMode {
     PopulateOnly,
+    ServiceTokenTenantBound,
 }
 pub mod _seed_v1;
 pub mod audit_v1;

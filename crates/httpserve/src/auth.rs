@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::extract::Request;
+use axum::http::HeaderMap;
 use axum::response::Response;
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
@@ -42,6 +43,29 @@ use tower::Service;
 use vocab::{PrincipalKind, TenantId};
 
 use crate::middleware::RequestId;
+
+/// service-token tenant header binding 解析错误（不携 header 值，避免 PII 进入日志）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceTokenTenantBindingError;
+
+/// 从请求 header 生成 service-token MAC tenant binding。
+///
+/// 缺失、非 UTF-8、非 canonical tenant id 都 fail-closed；调用方应按认证失败处理。
+pub fn service_token_tenant_binding(
+    headers: &HeaderMap,
+) -> Result<(diport::ServiceTokenTenantBinding, TenantId), ServiceTokenTenantBindingError> {
+    let mut values = headers.get_all(diport::SERVICE_TOKEN_TENANT_HEADER).iter();
+    let raw = values
+        .next()
+        .ok_or(ServiceTokenTenantBindingError)?
+        .to_str()
+        .map_err(|_| ServiceTokenTenantBindingError)?;
+    if values.next().is_some() {
+        return Err(ServiceTokenTenantBindingError);
+    }
+    let tenant = TenantId::parse(raw).map_err(|_| ServiceTokenTenantBindingError)?;
+    Ok((diport::ServiceTokenTenantBinding::new(tenant), tenant))
+}
 
 /// 短路 helper：将已构造的错误响应包装成 `Pin<Box<dyn Future<...>>>` 供 `call` 直接返回。
 ///

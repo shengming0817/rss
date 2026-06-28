@@ -29,12 +29,13 @@ audit read 的 serving 池对 `RowScope::All` 始终 fail-closed，返回
 
 ## Tenant source（认证通道，非 request body）
 
-tenant scope 只能来自**声明过的入口**：JWT tenant claim（→ ctx）或 `X-Tenant-ID` header
-（internal / pre-auth 路径，经 `endpoints.http.headers.X-Tenant-ID = "populate-only"`
-派生，handler fail-closed 解析）。当前 `identity.login` 的 pre-auth header 保证是
-contract/codegen/header-shape fail-closed，**不是** cryptographic header authenticity；service-token
-签名 header enforcement 仍是后续独立硬化项（#1503）。**HTTP request body 不得携带
-`tenantId`**——body 是唯一不被 service-token MAC 覆盖的入口，body tenant 是未认证维度。契约 codegen
+tenant scope 只能来自**声明过的入口**：JWT tenant claim（→ ctx）或 `X-Tenant-ID` header。
+`X-Tenant-ID = "populate-only"` 仅用于 public / pre-auth 填充路径（如 login），由
+contract/codegen/header-shape + handler fail-closed 解析保证形态，**不是** cryptographic header
+authenticity；service-token 路径必须使用 `service-token-tenant-bound`，runtime bridge 将 canonical
+`X-Tenant-ID` 纳入 HS256 MAC 输入（缺 header / 错 header / 旧 unsigned token 均 401），防跨 tenant replay。
+**HTTP request body 不得携带 `tenantId`**——body 不在 service-token tenant header MAC 绑定入口内，body tenant
+是未认证维度。契约 codegen
 schema/codegen/validate 在不可绕的 request 路径拒绝任何声明 `tenantId` 的 HTTP request schema：
 upstream schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned
 call-site 是 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立

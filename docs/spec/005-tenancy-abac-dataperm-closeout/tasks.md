@@ -26,8 +26,8 @@
 
 **Critical**: No RowScope/ABAC/FieldMask expansion should proceed before PR1-PR4 are complete or explicitly accounted for.
 
-- [ ] T004 [US1] Implement service-token MAC binding for `X-Tenant-ID` in crates/authn and crates/httpserve
-- [ ] T005 [US1] Add contract/header governance tests for authenticated tenant header sources in xtask
+- [x] T004 [US1] Implement service-token MAC binding for `X-Tenant-ID` in crates/authn and crates/httpserve
+- [x] T005 [US1] Add contract/header governance tests for authenticated tenant header sources in xtask
 - [ ] T006 [US1] Wire durable bootstrap to use non-superuser NOBYPASSRLS `rss_app` serving pool in adapters/postgres and runtime composition
 - [ ] T007 [US1] Add readyz/current-role probe coverage for non-bypass serving role in crates/syshealth or adapters/postgres
 - [ ] T008 [US1] Add raw-pool/TxManager bypass guard for tenant-scoped Postgres code in adapters/postgres and xtask

@@ -161,6 +161,7 @@ pub authn::JwtIssueError::EmptySubject
 pub authn::JwtIssueError::ExpiryOverflow
 pub authn::JwtIssueError::InvalidConfig
 pub authn::JwtIssueError::KindNotIssuable
+pub authn::JwtIssueError::MissingServiceTokenTenantBinding
 pub authn::JwtIssueError::MissingTenant
 pub authn::JwtIssueError::Sign(diport::signer::SignerError)
 impl core::error::Error for authn::JwtIssueError
@@ -291,6 +292,7 @@ pub type authn::Jwt::Output = T
 pub struct authn::JwtIssuer<S>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<S>
 pub async fn authn::JwtIssuer<S>::issue(&self, &str, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub async fn authn::JwtIssuer<S>::issue_service_token(&self, &str, diport::pdp::ServiceTokenTenantBinding) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig) -> core::result::Result<Self, authn::JwtIssueError>
 impl<S> core::marker::Freeze for authn::JwtIssuer<S>
 impl<S> core::marker::Send for authn::JwtIssuer<S> where S: core::marker::Sync + core::marker::Send
@@ -572,4 +574,4 @@ impl<T> typenum::type_operators::Same for authn::VerifiedServiceToken
 pub type authn::VerifiedServiceToken::Output = T
 pub fn authn::app_ctx(alloc::sync::Arc<authn::Principal>) -> core::option::Option<runctx::ctx::AppCtx>
 pub async fn authn::verify_jwt(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
-pub async fn authn::verify_service_token(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>
+pub async fn authn::verify_service_token(&str, diport::pdp::ServiceTokenTenantBinding, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>
