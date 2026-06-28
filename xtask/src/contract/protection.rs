@@ -14,12 +14,14 @@
 
 use super::redaction::is_high_risk_field;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 pub(crate) const X_PROTECTION: &str = "x-protection";
 pub(crate) const X_AT_REST: &str = "x-at-rest";
 
 const PROPS: &str = "properties";
 const PATTERN_PROPS: &str = "patternProperties";
+const REF: &str = "$ref";
 
 /// `x-protection` block 字段名（DRY：各在解析路径出现 ≥3 次，rust-standards「同义字符串重复三次抽 const」）。
 const KEY_AT_REST: &str = "atRest";
@@ -39,20 +41,20 @@ const AAD_SCHEMA_VERSION: &str = "schemaVersion";
 const KNOWN_AAD_DIMS: &[&str] = &[AAD_TENANT, AAD_CONFIG_KEY, AAD_FIELD, AAD_SCHEMA_VERSION];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AtRest {
+pub(crate) enum AtRest {
     Plain,
     Encrypt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProtectionMode {
+pub(crate) enum ProtectionMode {
     Randomized,
     Deterministic,
     BlindIndex,
 }
 
 impl ProtectionMode {
-    fn as_wire(self) -> &'static str {
+    pub(crate) fn as_wire(self) -> &'static str {
         match self {
             Self::Randomized => "randomized",
             Self::Deterministic => "deterministic",
@@ -65,12 +67,293 @@ impl ProtectionMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AadDim {
+    Tenant,
+    ConfigKey,
+    Field,
+    SchemaVersion,
+}
+
+impl AadDim {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            Self::Tenant => AAD_TENANT,
+            Self::ConfigKey => AAD_CONFIG_KEY,
+            Self::Field => AAD_FIELD,
+            Self::SchemaVersion => AAD_SCHEMA_VERSION,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldProtectionPolicy {
+    pub(crate) at_rest: AtRest,
+    pub(crate) mode: Option<ProtectionMode>,
+    pub(crate) key_scope: Option<String>,
+    pub(crate) aad: Vec<AadDim>,
+    pub(crate) reason: Option<String>,
+}
+
+pub(crate) type StructProtectionPolicies =
+    BTreeMap<String, BTreeMap<String, FieldProtectionPolicy>>;
+
 /// 一处校验/漂移违例：JSON 路径（dotted，root = ""）+ 详情。与 `redaction::Violation` 同形但独立，
 /// 保两面模块互不耦合（ADR-011 D1）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Violation {
     pub(crate) pointer: String,
     pub(crate) detail: String,
+}
+
+pub(crate) fn collect_struct_policies(
+    schema: &Value,
+) -> Result<StructProtectionPolicies, Vec<Violation>> {
+    let violations = validate_schema(schema);
+    if !violations.is_empty() {
+        return Err(violations);
+    }
+    let mut out = BTreeMap::new();
+    let mut metadata_violations = Vec::new();
+    collect_struct_policies_node(schema, schema, "", &mut out, &mut metadata_violations);
+    if metadata_violations.is_empty() {
+        Ok(out)
+    } else {
+        Err(metadata_violations)
+    }
+}
+
+fn collect_struct_policies_node(
+    schema: &Value,
+    root: &Value,
+    path: &str,
+    out: &mut StructProtectionPolicies,
+    violations: &mut Vec<Violation>,
+) {
+    let Value::Object(map) = schema else {
+        return;
+    };
+    reject_pattern_property_metadata(map, root, path, violations);
+
+    if let Some(title) = map.get("title").and_then(Value::as_str)
+        && let Some(props) = map.get(PROPS).and_then(Value::as_object)
+    {
+        let fields = out.entry(title.to_string()).or_default();
+        for (name, prop_schema) in props {
+            collect_property_metadata(prop_schema, root, name, fields, violations, &mut Vec::new());
+        }
+    }
+
+    for map_key in [PROPS, PATTERN_PROPS] {
+        if let Some(children) = map.get(map_key).and_then(Value::as_object) {
+            for (name, child_schema) in children {
+                collect_struct_policies_node(
+                    child_schema,
+                    root,
+                    &child(path, name),
+                    out,
+                    violations,
+                );
+            }
+        }
+    }
+    for key in [
+        "items",
+        "additionalProperties",
+        "not",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "definitions",
+        "$defs",
+    ] {
+        if let Some(value) = map.get(key) {
+            collect_schema_value(value, root, &child(path, key), out, violations);
+        }
+    }
+}
+
+fn collect_property_metadata(
+    schema: &Value,
+    root: &Value,
+    field_path: &str,
+    fields: &mut BTreeMap<String, FieldProtectionPolicy>,
+    violations: &mut Vec<Violation>,
+    ref_stack: &mut Vec<String>,
+) {
+    let Value::Object(map) = schema else {
+        return;
+    };
+
+    if let Some(reference) = map.get(REF).and_then(Value::as_str) {
+        collect_ref_property_metadata(reference, root, field_path, fields, violations, ref_stack);
+        return;
+    }
+
+    if map.contains_key(X_PROTECTION)
+        && let Ok(policy) = parse_protection(map)
+    {
+        fields.insert(field_path.to_string(), policy);
+    }
+
+    if let Some(props) = map.get(PROPS).and_then(Value::as_object) {
+        for (name, child_schema) in props {
+            collect_property_metadata(
+                child_schema,
+                root,
+                &child(field_path, name),
+                fields,
+                violations,
+                ref_stack,
+            );
+        }
+    }
+    for (key, suffix) in [
+        ("items", "[]"),
+        ("additionalProperties", ".*"),
+        ("not", ""),
+        ("allOf", ""),
+        ("anyOf", ""),
+        ("oneOf", ""),
+    ] {
+        if let Some(value) = map.get(key) {
+            collect_property_metadata_value(
+                value,
+                root,
+                &format!("{field_path}{suffix}"),
+                fields,
+                violations,
+                ref_stack,
+            );
+        }
+    }
+}
+
+fn collect_ref_property_metadata(
+    reference: &str,
+    root: &Value,
+    field_path: &str,
+    fields: &mut BTreeMap<String, FieldProtectionPolicy>,
+    violations: &mut Vec<Violation>,
+    ref_stack: &mut Vec<String>,
+) {
+    if ref_stack.iter().any(|seen| seen == reference) {
+        violations.push(Violation {
+            pointer: show_path(field_path).to_string(),
+            detail: format!("{REF} cycle in FieldProtectionMetadata collector: {reference}"),
+        });
+        return;
+    }
+    let Some(target) = resolve_local_ref(root, reference) else {
+        violations.push(Violation {
+            pointer: show_path(field_path).to_string(),
+            detail: format!(
+                "{REF} {reference:?} cannot be resolved for FieldProtectionMetadata; only local JSON Pointer refs are supported"
+            ),
+        });
+        return;
+    };
+    ref_stack.push(reference.to_string());
+    collect_property_metadata(target, root, field_path, fields, violations, ref_stack);
+    ref_stack.pop();
+}
+
+fn resolve_local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    if reference == "#" {
+        return Some(root);
+    }
+    root.pointer(reference.strip_prefix('#')?)
+}
+
+fn collect_property_metadata_value(
+    value: &Value,
+    root: &Value,
+    field_path: &str,
+    fields: &mut BTreeMap<String, FieldProtectionPolicy>,
+    violations: &mut Vec<Violation>,
+    ref_stack: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(_) => {
+            collect_property_metadata(value, root, field_path, fields, violations, ref_stack)
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_property_metadata_value(
+                    value, root, field_path, fields, violations, ref_stack,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reject_pattern_property_metadata(
+    map: &Map<String, Value>,
+    root: &Value,
+    path: &str,
+    violations: &mut Vec<Violation>,
+) {
+    let Some(patterns) = map.get(PATTERN_PROPS).and_then(Value::as_object) else {
+        return;
+    };
+    for (pattern, schema) in patterns {
+        if contains_protection(schema, root, &mut Vec::new()) {
+            violations.push(Violation {
+                pointer: show_path(&child(path, pattern)).to_string(),
+                detail: format!(
+                    "{X_PROTECTION} under patternProperties cannot be emitted as stable FieldProtectionMetadata; use explicit properties"
+                ),
+            });
+        }
+    }
+}
+
+fn contains_protection(value: &Value, root: &Value, ref_stack: &mut Vec<String>) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key(X_PROTECTION) {
+                return true;
+            }
+            if let Some(reference) = map.get(REF).and_then(Value::as_str) {
+                if ref_stack.iter().any(|seen| seen == reference) {
+                    return false;
+                }
+                if let Some(target) = resolve_local_ref(root, reference) {
+                    ref_stack.push(reference.to_string());
+                    let found = contains_protection(target, root, ref_stack);
+                    ref_stack.pop();
+                    if found {
+                        return true;
+                    }
+                }
+            }
+            map.values()
+                .any(|value| contains_protection(value, root, ref_stack))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_protection(value, root, ref_stack)),
+        _ => false,
+    }
+}
+
+fn collect_schema_value(
+    value: &Value,
+    root: &Value,
+    path: &str,
+    out: &mut StructProtectionPolicies,
+    violations: &mut Vec<Violation>,
+) {
+    match value {
+        Value::Object(_) => collect_struct_policies_node(value, root, path, out, violations),
+        Value::Array(values) => {
+            for (idx, value) in values.iter().enumerate() {
+                collect_schema_value(value, root, &format!("{path}[{idx}]"), out, violations);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ───────────────────────────── validate（R17 单源）─────────────────────────────
@@ -181,7 +464,7 @@ fn resolve_at_rest(
 }
 
 /// 解析并校验一个 `x-protection` block（调用方已确认 `X_PROTECTION` 键在场）。
-fn parse_protection(map: &Map<String, Value>) -> Result<(), String> {
+fn parse_protection(map: &Map<String, Value>) -> Result<FieldProtectionPolicy, String> {
     let Some(obj) = map.get(X_PROTECTION).and_then(Value::as_object) else {
         return Err(format!(
             "{X_PROTECTION} 必须是 object（含 atRest 等字段），不是裸 string/其它"
@@ -214,7 +497,7 @@ fn parse_protection(map: &Map<String, Value>) -> Result<(), String> {
 }
 
 /// `atRest:plain` 不得携带 encrypt 参数（plain 携带 mode/keyScope/aad/reason = 语义不一致）。
-fn parse_plain(obj: &Map<String, Value>) -> Result<(), String> {
+fn parse_plain(obj: &Map<String, Value>) -> Result<FieldProtectionPolicy, String> {
     for key in [KEY_MODE, KEY_KEY_SCOPE, KEY_AAD, KEY_REASON] {
         if obj.contains_key(key) {
             return Err(format!(
@@ -222,15 +505,24 @@ fn parse_plain(obj: &Map<String, Value>) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    Ok(FieldProtectionPolicy {
+        at_rest: AtRest::Plain,
+        mode: None,
+        key_scope: None,
+        aad: Vec::new(),
+        reason: None,
+    })
 }
 
 /// `atRest:encrypt`：keyScope 必填 + aad 完整 + deterministic/blindIndex 须 reason（D2/D4）。
-fn parse_encrypt(obj: &Map<String, Value>, mode: Option<ProtectionMode>) -> Result<(), String> {
-    match obj.get(KEY_KEY_SCOPE) {
-        Some(Value::String(s)) if !s.is_empty() => {}
+fn parse_encrypt(
+    obj: &Map<String, Value>,
+    mode: Option<ProtectionMode>,
+) -> Result<FieldProtectionPolicy, String> {
+    let key_scope = match obj.get(KEY_KEY_SCOPE) {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
         _ => return Err(format!("{X_PROTECTION} atRest:encrypt 须声明非空 keyScope")),
-    }
+    };
     let dims = parse_aad(obj.get(KEY_AAD))?;
     let mode = mode.unwrap_or(ProtectionMode::Randomized);
     validate_aad_for_mode(mode, &dims)?;
@@ -240,7 +532,16 @@ fn parse_encrypt(obj: &Map<String, Value>, mode: Option<ProtectionMode>) -> Resu
             mode.as_wire()
         ));
     }
-    Ok(())
+    Ok(FieldProtectionPolicy {
+        at_rest: AtRest::Encrypt,
+        mode: Some(mode),
+        key_scope: Some(key_scope),
+        aad: dims,
+        reason: obj
+            .get(KEY_REASON)
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn has_reason(obj: &Map<String, Value>) -> bool {
@@ -250,7 +551,7 @@ fn has_reason(obj: &Map<String, Value>) -> bool {
 }
 
 /// aad 必须是非空 string 数组，元素 ∈ 已知维度集（未知维度 fail-closed）。返回去重前的维度列表。
-fn parse_aad(aad: Option<&Value>) -> Result<Vec<String>, String> {
+fn parse_aad(aad: Option<&Value>) -> Result<Vec<AadDim>, String> {
     let Some(Value::Array(items)) = aad else {
         return Err(format!(
             "{X_PROTECTION} atRest:encrypt 须声明非空 aad 数组（AAD 维度绑定）"
@@ -270,9 +571,22 @@ fn parse_aad(aad: Option<&Value>) -> Result<Vec<String>, String> {
                 KNOWN_AAD_DIMS.join("/")
             ));
         }
-        dims.push(dim.to_string());
+        dims.push(parse_aad_dim(dim)?);
     }
     Ok(dims)
+}
+
+fn parse_aad_dim(value: &str) -> Result<AadDim, String> {
+    match value {
+        AAD_TENANT => Ok(AadDim::Tenant),
+        AAD_CONFIG_KEY => Ok(AadDim::ConfigKey),
+        AAD_FIELD => Ok(AadDim::Field),
+        AAD_SCHEMA_VERSION => Ok(AadDim::SchemaVersion),
+        other => Err(format!(
+            "{X_PROTECTION} 未知 aad 维度 `{other}`；支持 {}",
+            KNOWN_AAD_DIMS.join("/")
+        )),
+    }
 }
 
 /// AAD 维度按 mode 的 required / forbidden 集合（**ADR-011 D2/D4 单源**，required+forbidden 同处声明，
@@ -297,8 +611,8 @@ fn aad_forbidden_dims(mode: ProtectionMode) -> &'static [&'static str] {
     }
 }
 
-fn validate_aad_for_mode(mode: ProtectionMode, dims: &[String]) -> Result<(), String> {
-    let has = |d: &str| dims.iter().any(|x| x == d);
+fn validate_aad_for_mode(mode: ProtectionMode, dims: &[AadDim]) -> Result<(), String> {
+    let has = |d: &str| dims.iter().any(|x| x.as_wire() == d);
     for req in aad_required_dims(mode) {
         if !has(req) {
             return Err(format!(

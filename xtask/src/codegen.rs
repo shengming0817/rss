@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{ContractKind, HttpAuthMode, HttpHeaderMode, Lifecycle};
+use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
 use crate::contract::{DiscoveredContract, discover, schema_declares_property};
 use crate::pathsafe;
@@ -212,6 +213,7 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
         c.manifest.version
     );
     let mut redaction_policies: StructPolicies = BTreeMap::new();
+    let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
     for schema_file in c.manifest.schemas.declared_files() {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
@@ -242,6 +244,19 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
             )
         })?;
         redaction_policies.extend(schema_policies);
+        let schema_protection_policies =
+            protection::collect_struct_policies(&value).map_err(|violations| {
+                anyhow::anyhow!(
+                    "protection policy invalid in {}: {}",
+                    path.display(),
+                    violations
+                        .iter()
+                        .map(|v| format!("{}: {}", v.pointer, v.detail))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+        protection_policies.extend(schema_protection_policies);
         let root: RootSchema = serde_json::from_str(&text)
             .with_context(|| format!("解析 schema {}", path.display()))?;
         space
@@ -253,7 +268,11 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
     apply_redaction_policy(&mut parsed, &redaction_policies);
     allow_derivable_default_impls(&mut parsed);
     allow_unwrap_in_defaults_mod(&mut parsed);
-    let payload = prettyplease::unparse(&parsed);
+    let mut payload = prettyplease::unparse(&parsed);
+    payload.push_str(&render_field_protection_impls(
+        &parsed,
+        &protection_policies,
+    ));
 
     // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
     // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
@@ -658,6 +677,83 @@ fn pii_lit(kind: PiiKind) -> syn::LitStr {
     syn::LitStr::new(kind.as_wire(), proc_macro2::Span::call_site())
 }
 
+fn render_field_protection_impls(file: &syn::File, policies: &StructProtectionPolicies) -> String {
+    let mut out = String::new();
+    for item in &file.items {
+        let syn::Item::Struct(s) = item else {
+            continue;
+        };
+        let struct_name = s.ident.to_string();
+        let Some(fields) = policies.get(&struct_name) else {
+            continue;
+        };
+        if fields.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "\nimpl crate::FieldProtectionMetadata for {struct_name} {{\n    const FIELD_PROTECTIONS: &'static [crate::FieldProtectionSpec] = &[\n"
+        ));
+        for (field_path, policy) in fields {
+            out.push_str(&format!(
+                "        crate::FieldProtectionSpec {{ field_path: {}, at_rest: {}, mode: {}, key_scope: {}, aad: {}, reason: {} }},\n",
+                rust_string_lit(field_path),
+                render_at_rest(policy.at_rest),
+                render_protection_mode(policy.mode),
+                render_option_string(policy.key_scope.as_deref()),
+                render_aad_dims(&policy.aad),
+                render_option_string(policy.reason.as_deref()),
+            ));
+        }
+        out.push_str("    ];\n}\n");
+    }
+    out
+}
+
+fn render_at_rest(at_rest: AtRest) -> &'static str {
+    match at_rest {
+        AtRest::Plain => "crate::ProtectionAtRest::Plain",
+        AtRest::Encrypt => "crate::ProtectionAtRest::Encrypt",
+    }
+}
+
+fn render_protection_mode(mode: Option<ProtectionMode>) -> String {
+    match mode {
+        Some(ProtectionMode::Randomized) => "Some(crate::ProtectionMode::Randomized)".to_string(),
+        Some(ProtectionMode::Deterministic) => {
+            "Some(crate::ProtectionMode::Deterministic)".to_string()
+        }
+        Some(ProtectionMode::BlindIndex) => "Some(crate::ProtectionMode::BlindIndex)".to_string(),
+        None => "None".to_string(),
+    }
+}
+
+fn render_aad_dims(dims: &[AadDim]) -> String {
+    if dims.is_empty() {
+        return "&[]".to_string();
+    }
+    let values = dims
+        .iter()
+        .map(|dim| match dim {
+            AadDim::Tenant => "crate::ProtectionAadDim::Tenant",
+            AadDim::ConfigKey => "crate::ProtectionAadDim::ConfigKey",
+            AadDim::Field => "crate::ProtectionAadDim::Field",
+            AadDim::SchemaVersion => "crate::ProtectionAadDim::SchemaVersion",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("&[{values}]")
+}
+
+fn render_option_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("Some({})", rust_string_lit(value)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn rust_string_lit(value: &str) -> String {
+    format!("{value:?}")
+}
+
 fn serde_rename(field: &syn::Field) -> Option<String> {
     for attr in &field.attrs {
         if !attr.path().is_ident("serde") {
@@ -870,6 +966,66 @@ pub trait CommandRegister {
 }
 "#;
 
+const FIELD_PROTECTION_METADATA_DEF: &str = r#"
+/// Field-level at-rest protection metadata generated from schema `x-protection`.
+///
+/// This is declarative metadata only. It does not perform encryption/decryption and intentionally
+/// does not depend on runtime protection types such as `KeyProvider`, `ProtectionContext`, or AAD
+/// constructors.
+pub trait FieldProtectionMetadata {
+    /// Field protection declarations for this DTO, expressed in wire field paths.
+    const FIELD_PROTECTIONS: &'static [FieldProtectionSpec];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldProtectionSpec {
+    /// Dotted wire path from the DTO root, for example `value` or `profile.secret`.
+    ///
+    /// Rust field names produced by codegen, such as `store_id`, are never used here.
+    pub field_path: &'static str,
+    /// At-rest declaration. `Plain` is emitted only when schema explicitly says `atRest: plain`.
+    pub at_rest: ProtectionAtRest,
+    /// Encryption mode for encrypted fields. `None` means `at_rest` is `Plain`.
+    pub mode: Option<ProtectionMode>,
+    /// Wire key scope from schema, currently for example `tenant`.
+    pub key_scope: Option<&'static str>,
+    /// AAD dimensions declared by schema, preserved in declaration order.
+    pub aad: &'static [ProtectionAadDim],
+    /// Required rationale for equality-revealing modes.
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectionAtRest {
+    /// The field is explicitly declared as not encrypted at rest.
+    Plain,
+    /// The field is declared as encrypted at rest.
+    Encrypt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectionMode {
+    /// Randomized encryption: same plaintext may produce different ciphertext.
+    Randomized,
+    /// Deterministic encryption: exposes plaintext equality by design.
+    Deterministic,
+    /// Blind index: exposes a stable lookup token by design.
+    BlindIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectionAadDim {
+    /// Tenant boundary dimension.
+    Tenant,
+    /// Settings/config key dimension.
+    ConfigKey,
+    /// Field path dimension.
+    Field,
+    /// Schema version dimension.
+    SchemaVersion,
+}
+"#;
+
 fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
     let mut s = generated_header("cargo xtask codegen (module funnel)");
     // event kind：定义 SubscriptionSpec POD；command kind：定义 CommandEmit/CommandRegister seam
@@ -890,6 +1046,7 @@ fn render_lib_rs<'a>(kinds: impl Iterator<Item = &'a String>) -> String {
     let mut s = String::new();
     s.push_str("//! generated — 契约派生 wire 类型（committed，一等审查材料）。\n");
     s.push_str("//! 由 `cargo xtask codegen` 生成；勿手改。漂移由 `cargo xtask codegen --check` 守（CI 门）。\n");
+    s.push_str(FIELD_PROTECTION_METADATA_DEF);
     for k in kinds {
         s.push_str(&format!("pub mod {k};\n"));
     }
@@ -1114,6 +1271,37 @@ mod tests {
         Ok(())
     }
 
+    fn seed_http_protection_policy(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/http/_prot/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            "id = \"prot.publish\"\nkind = \"http\"\ndomain = \"_prot\"\nversion = \"v1\"\nowner = \"_framework\"\nconsistencyLevel = \"LocalOnly\"\nlifecycle = \"draft\"\n[schemas]\nrequest = \"request.schema.json\"\nresponse = \"response.schema.json\"\n",
+        )?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "title":"ProtectionRequest",
+  "type":"object",
+  "required":["storeId","value","profile","plaintext","note"],
+  "properties":{
+    "storeId":{"type":"string","x-protection":{"atRest":"encrypt","keyScope":"tenant","aad":["tenant","configKey","field","schemaVersion"]}},
+    "value":{"type":"string","x-protection":{"atRest":"encrypt","mode":"blindIndex","keyScope":"tenant","aad":["tenant","configKey","field"],"reason":"lookup"}},
+    "profile":{"type":"object","required":["secret"],"properties":{"secret":{"type":"string","x-redaction":"secret","x-protection":{"atRest":"encrypt","keyScope":"tenant","aad":["tenant","configKey","field","schemaVersion"]}},"note":{"type":"string"}},"additionalProperties":false},
+    "plaintext":{"type":"string","x-protection":{"atRest":"plain"}},
+    "note":{"type":"string"}
+  },
+  "additionalProperties":false
+}"#,
+        )?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"ProtectionResponse","type":"object","required":["ok"],"properties":{"ok":{"type":"string"}},"additionalProperties":false}"#,
+        )?;
+        Ok(())
+    }
+
     /// 派生 .rs 中名为 `name` 的 struct derive 列表里是否含末段 `derive_name`。
     fn struct_derives(file: &syn::File, name: &str, derive_name: &str) -> bool {
         file.items.iter().any(|item| {
@@ -1212,6 +1400,195 @@ mod tests {
         assert!(
             field_has_redact_attr(&parsed, "XSensCoordRequest", "store_id", "internal"),
             "storeId 应按 x-redaction=internal 注入字段策略:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn field_protection_policy_drives_metadata() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http_protection_policy(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_prot_v1.rs"))?;
+        let lib_rs = std::fs::read_to_string(gen_src.join("lib.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            lib_rs.contains("pub trait FieldProtectionMetadata"),
+            "lib.rs 应定义字段保护 metadata trait:\n{lib_rs}"
+        );
+        assert!(
+            rendered.contains("impl crate::FieldProtectionMetadata for ProtectionRequest"),
+            "request 应实现字段保护 metadata:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("field_path: \"value\"")
+                && rendered.contains("crate::ProtectionMode::BlindIndex")
+                && rendered.contains("reason: Some(\"lookup\")"),
+            "value 字段应携带 blindIndex protection metadata:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn field_protection_metadata_uses_wire_field_path() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http_protection_policy(&root)?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_prot_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains("field_path: \"storeId\""),
+            "metadata 必须使用 wire field path storeId:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("field_path: \"store_id\""),
+            "metadata 不得使用 Rust 字段名 store_id:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn field_protection_metadata_uses_nested_wire_field_path() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http_protection_policy(&root)?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_prot_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains("field_path: \"profile.secret\""),
+            "nested protection metadata must use dotted wire field path:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("field_path: \"secret\""),
+            "nested protection metadata must not collapse to local field name:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn field_protection_metadata_resolves_local_ref_wire_field_path() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r##"{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "title":"SeedEchoRequest",
+  "type":"object",
+  "required":["profile"],
+  "properties":{
+    "profile":{"$ref":"#/$defs/Profile"}
+  },
+  "$defs":{
+    "Profile":{
+      "type":"object",
+      "required":["secret"],
+      "properties":{
+        "secret":{"type":"string","x-redaction":"secret","x-protection":{"atRest":"encrypt","keyScope":"tenant","aad":["tenant","configKey","field","schemaVersion"]}}
+      },
+      "additionalProperties":false
+    }
+  },
+  "additionalProperties":false
+}"##,
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains("field_path: \"profile.secret\""),
+            "$ref target protection metadata must keep the referring wire path:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn field_protection_plain_and_absent_fields_are_distinct() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http_protection_policy(&root)?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_prot_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains("field_path: \"plaintext\"")
+                && rendered.contains("at_rest: crate::ProtectionAtRest::Plain"),
+            "atRest:plain 字段应显式进入 metadata:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("field_path: \"note\""),
+            "未声明 x-protection 的字段不应进入 metadata:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_invalid_protection_policy_without_validate_first() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SeedEchoRequest","type":"object","required":["memo"],"properties":{"memo":{"type":"string","x-protection":{"atRest":"encrypt"}}},"additionalProperties":false}"#,
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        let err = match result {
+            Ok(()) => anyhow::bail!("codegen must fail closed on protection policy violations"),
+            Err(err) => err,
+        };
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("protection policy invalid") && message.contains("memo"),
+            "错误应指向 protection policy 与字段名:\n{message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_pattern_property_protection_metadata() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r#"{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "title":"SeedEchoRequest",
+  "type":"object",
+  "required":["labels"],
+  "properties":{
+    "labels":{
+      "type":"object",
+      "patternProperties":{
+        "^x-":{"type":"string","x-protection":{"atRest":"encrypt","keyScope":"tenant","aad":["tenant","configKey","field","schemaVersion"]}}
+      },
+      "additionalProperties":false
+    }
+  },
+  "additionalProperties":false
+}"#,
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        let err = match result {
+            Ok(()) => {
+                anyhow::bail!("codegen must fail closed on patternProperties protection metadata")
+            }
+            Err(err) => err,
+        };
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("patternProperties") && message.contains("FieldProtectionMetadata"),
+            "错误应说明 patternProperties 无稳定 protection metadata path:\n{message}"
         );
         Ok(())
     }

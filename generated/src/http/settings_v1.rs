@@ -78,6 +78,17 @@ pub struct SettingsConfigPublishData {
 ///    },
 ///    "value": {
 ///      "type": "string",
+///      "x-protection": {
+///        "aad": [
+///          "tenant",
+///          "configKey",
+///          "field",
+///          "schemaVersion"
+///        ],
+///        "atRest": "encrypt",
+///        "keyScope": "tenant",
+///        "mode": "randomized"
+///      },
 ///      "x-redaction": "secret"
 ///    }
 ///  },
@@ -134,6 +145,23 @@ pub struct SettingsConfigPublishRequest {
 pub struct SettingsConfigPublishResponse {
     #[redact(public)]
     pub data: SettingsConfigPublishData,
+}
+
+impl crate::FieldProtectionMetadata for SettingsConfigPublishRequest {
+    const FIELD_PROTECTIONS: &'static [crate::FieldProtectionSpec] =
+        &[crate::FieldProtectionSpec {
+            field_path: "value",
+            at_rest: crate::ProtectionAtRest::Encrypt,
+            mode: Some(crate::ProtectionMode::Randomized),
+            key_scope: Some("tenant"),
+            aad: &[
+                crate::ProtectionAadDim::Tenant,
+                crate::ProtectionAadDim::ConfigKey,
+                crate::ProtectionAadDim::Field,
+                crate::ProtectionAadDim::SchemaVersion,
+            ],
+            reason: None,
+        }];
 }
 
 /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

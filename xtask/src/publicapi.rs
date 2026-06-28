@@ -35,7 +35,8 @@ use std::process::Command;
 // curated extras 不是架构 layer，只是安全敏感公开 API 面的定点 golden 例外。
 // `diport`（DI-infra 层，非 basis/engine）：持全部安全敏感 DI port（Signer/SecretResolver/Pdp/Revocation/
 // KeyProvider…），公开 trait/类型面是轴 A SemVer 边界，列入 curated extras 定点冻结（#1470）。
-const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport"];
+// `generated` 暴露 contract-derived protection metadata，作为 PR review 审查材料定点冻结（#1472）。
+const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated"];
 
 /// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
 /// 编译器即强制回退 rolling `nightly`（其 rustdoc-json 格式随日期漂移 ⇒ baseline 误报）；本 const 经
@@ -248,24 +249,37 @@ mod tests {
     }
 
     #[test]
-    fn target_crates_by_layer() {
+    fn target_crates_counts_and_curated_exact_set() {
         // basis = diagctx/vocab/ids/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
         assert_eq!(target_crates(Some(Layer::Basis)).len(), 6);
         // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
         assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis(6) + engine(3) + curated extras(authn/diport=2) 全集。
-        assert_eq!(target_crates(None).len(), 11);
+        // None = basis(6) + engine(3) + curated extras(authn/diport/generated=3) 全集。
+        assert_eq!(target_crates(None).len(), 12);
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
-        assert_eq!(target_crates(Some(Layer::Curated)), vec!["authn", "diport"]);
+        assert_eq!(
+            target_crates(Some(Layer::Curated)),
+            vec!["authn", "diport", "generated"]
+        );
+    }
+
+    #[test]
+    fn target_crates_membership_keeps_curated_out_of_layers() {
         assert!(target_crates(None).contains(&"authn"));
         assert!(target_crates(None).contains(&"diport"));
+        assert!(target_crates(None).contains(&"generated"));
+        assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
+        assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
+        assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
         assert!(!target_crates(Some(Layer::Basis)).contains(&"authn"));
         assert!(!target_crates(Some(Layer::Engine)).contains(&"authn"));
         // diport 是 DI-infra 层，既非 basis 也非 engine——只经 curated extras 入 baseline。
         assert!(!target_crates(Some(Layer::Basis)).contains(&"diport"));
         assert!(!target_crates(Some(Layer::Engine)).contains(&"diport"));
+        assert!(!target_crates(Some(Layer::Basis)).contains(&"generated"));
+        assert!(!target_crates(Some(Layer::Engine)).contains(&"generated"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
         assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
     }
@@ -346,6 +360,50 @@ mod tests {
             assert!(
                 !baseline.contains(forbidden),
                 "diport public-api golden 不得暴露 key 标识的非常数时间 `==`（ADR-011 §D3）: {forbidden}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_public_api_golden_exposes_protection_metadata_only() -> anyhow::Result<()> {
+        let baseline = std::fs::read_to_string(baseline_dir()?.join("generated.txt"))?;
+        for required in [
+            "pub trait generated::FieldProtectionMetadata",
+            "pub const generated::FieldProtectionMetadata::FIELD_PROTECTIONS: &'static [generated::FieldProtectionSpec]",
+            "impl generated::FieldProtectionMetadata for generated::http::settings_v1::SettingsConfigPublishRequest",
+            "pub const generated::http::settings_v1::SettingsConfigPublishRequest::FIELD_PROTECTIONS: &'static [generated::FieldProtectionSpec]",
+            "pub struct generated::FieldProtectionSpec",
+            "pub generated::FieldProtectionSpec::field_path: &'static str",
+            "pub generated::FieldProtectionSpec::at_rest: generated::ProtectionAtRest",
+            "pub generated::FieldProtectionSpec::mode: core::option::Option<generated::ProtectionMode>",
+            "pub enum generated::ProtectionAadDim",
+            "pub enum generated::ProtectionAtRest",
+            "pub enum generated::ProtectionMode",
+        ] {
+            assert!(
+                baseline.contains(required),
+                "generated public-api golden 缺少字段保护 metadata API: {required}"
+            );
+        }
+        for forbidden in [
+            "diport::",
+            "secure::aead",
+            "secure::Ciphertext",
+            "generated::KeyProvider",
+            "generated::ProtectionContext",
+            "generated::DerivedAad",
+            "generated::ValueTransformer",
+            "generated::KeyRef",
+            "generated::EncryptOutput",
+            "generated::DecryptOutput",
+            "generated::seal",
+            "generated::open",
+            "generated::rewrap",
+        ] {
+            assert!(
+                !baseline.lines().any(|line| line.contains(forbidden)),
+                "generated public-api golden 不得暴露加解密执行面符号: {forbidden}"
             );
         }
         Ok(())
