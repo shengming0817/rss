@@ -106,6 +106,34 @@ pub(crate) struct Violation {
     pub(crate) detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScalarShape {
+    Absent,
+    Single(String),
+    NonScalar,
+}
+
+impl ScalarShape {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NonScalar, _) | (_, Self::NonScalar) => Self::NonScalar,
+            (Self::Absent, shape) | (shape, Self::Absent) => shape,
+            (Self::Single(left), Self::Single(right)) if left == right => Self::Single(left),
+            (Self::Single(_), Self::Single(_)) => Self::NonScalar,
+        }
+    }
+
+    fn is_single_scalar(&self) -> bool {
+        matches!(self, Self::Single(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchemaShape {
+    declares_null: bool,
+    scalar: ScalarShape,
+}
+
 pub(crate) fn collect_struct_policies(
     schema: &Value,
 ) -> Result<StructProtectionPolicies, Vec<Violation>> {
@@ -361,7 +389,7 @@ fn collect_schema_value(
 /// 校验整棵 schema 的 `x-protection` / `x-at-rest` 声明合法且完整。空 = 全过。
 pub(crate) fn validate_schema(schema: &Value) -> Vec<Violation> {
     let mut out = Vec::new();
-    validate_schema_node(schema, "", None, false, &mut out);
+    validate_schema_node(schema, schema, "", None, false, &mut out);
     out
 }
 
@@ -370,6 +398,7 @@ pub(crate) fn validate_schema(schema: &Value) -> Vec<Violation> {
 /// （而非父循环），故字段自身 `x-at-rest:true` 经 (2) 并入 `at_rest` 后亦触发自检，不绕过（F2）。
 fn validate_schema_node(
     schema: &Value,
+    root: &Value,
     path: &str,
     field_name: Option<&str>,
     at_rest: bool,
@@ -380,13 +409,14 @@ fn validate_schema_node(
     };
 
     // (1) 本节点 `x-protection` block 内部一致性（字段级 property 或任意带 block 的子 schema）。
-    if map.contains_key(X_PROTECTION)
-        && let Err(detail) = parse_protection(map)
-    {
-        out.push(Violation {
-            pointer: show_path(path).to_string(),
-            detail,
-        });
+    if map.contains_key(X_PROTECTION) {
+        match parse_protection(map) {
+            Ok(policy) => validate_schema_shape_for_policy(map, root, path, &policy, out),
+            Err(detail) => out.push(Violation {
+                pointer: show_path(path).to_string(),
+                detail,
+            }),
+        }
     }
 
     // (2) 解析本节点 `x-at-rest`（含类型校验），与祖先 opt-in 合取——一旦 opt-in 子树内保持 opt-in。
@@ -410,7 +440,14 @@ fn validate_schema_node(
     for map_key in [PROPS, PATTERN_PROPS] {
         if let Some(children) = map.get(map_key).and_then(Value::as_object) {
             for (name, child_schema) in children {
-                validate_schema_node(child_schema, &child(path, name), Some(name), at_rest, out);
+                validate_schema_node(
+                    child_schema,
+                    root,
+                    &child(path, name),
+                    Some(name),
+                    at_rest,
+                    out,
+                );
             }
         }
     }
@@ -426,21 +463,194 @@ fn validate_schema_node(
         "$defs",
     ] {
         if let Some(value) = map.get(key) {
-            validate_schema_value(value, &child(path, key), at_rest, out);
+            validate_schema_value(value, root, &child(path, key), at_rest, out);
         }
     }
 }
 
-fn validate_schema_value(value: &Value, path: &str, at_rest: bool, out: &mut Vec<Violation>) {
+fn validate_schema_value(
+    value: &Value,
+    root: &Value,
+    path: &str,
+    at_rest: bool,
+    out: &mut Vec<Violation>,
+) {
     match value {
-        Value::Object(_) => validate_schema_node(value, path, None, at_rest, out),
+        Value::Object(_) => validate_schema_node(value, root, path, None, at_rest, out),
         Value::Array(values) => {
             for (idx, value) in values.iter().enumerate() {
-                validate_schema_value(value, &format!("{path}[{idx}]"), at_rest, out);
+                validate_schema_value(value, root, &format!("{path}[{idx}]"), at_rest, out);
             }
         }
         _ => {}
     }
+}
+
+/// `x-protection` 与 JSON Schema 形态之间的跨字段不变式（#1476）。
+///
+/// 这些约束不能放进 [`parse_protection`]，因为它只解析 `x-protection` block 本身；nullable / scalar
+/// 语义取自同一 schema object 的 `type` / `oneOf` / `anyOf` 等 JSON Schema 字段。
+fn validate_schema_shape_for_policy(
+    map: &Map<String, Value>,
+    root: &Value,
+    path: &str,
+    policy: &FieldProtectionPolicy,
+    out: &mut Vec<Violation>,
+) {
+    if policy.at_rest != AtRest::Encrypt {
+        return;
+    }
+
+    let shape = match analyze_schema_shape(map, root, &mut Vec::new()) {
+        Ok(shape) => shape,
+        Err(detail) => {
+            out.push(Violation {
+                pointer: show_path(path).to_string(),
+                detail,
+            });
+            return;
+        }
+    };
+
+    if shape.declares_null {
+        out.push(Violation {
+            pointer: show_path(path).to_string(),
+            detail: format!(
+                "{X_PROTECTION} atRest:encrypt 不支持 nullable schema（null 会泄漏明文空值状态）；\
+                 当前无显式 null-policy，须改为非 null 字段或另行设计加密 null sentinel"
+            ),
+        });
+    }
+
+    if policy.mode == Some(ProtectionMode::BlindIndex) && !shape.scalar.is_single_scalar() {
+        out.push(Violation {
+            pointer: show_path(path).to_string(),
+            detail: format!(
+                "{X_PROTECTION} mode:blindIndex 只支持非 nullable scalar 字段（string/number/integer/boolean）的等值索引"
+            ),
+        });
+    }
+}
+
+/// 保守判定：当前 schema 与本地 `$ref` 目标任一声明了 `null`，即视为 nullable leakage 风险；
+/// `blindIndex` 则要求当前 schema 与 `$ref` 目标合并后仍是单一 scalar 类型。
+fn analyze_schema_shape(
+    map: &Map<String, Value>,
+    root: &Value,
+    ref_stack: &mut Vec<String>,
+) -> Result<SchemaShape, String> {
+    let mut shape = SchemaShape {
+        declares_null: schema_direct_declares_null(map),
+        scalar: schema_direct_scalar_shape(map),
+    };
+
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(items) = map.get(key).and_then(Value::as_array) {
+            for item in items {
+                let nested = analyze_schema_shape_value(item, root, ref_stack)?;
+                shape.declares_null |= nested.declares_null;
+            }
+        }
+    }
+
+    if let Some(reference) = map.get(REF).and_then(Value::as_str) {
+        let referenced = analyze_ref_shape(reference, root, ref_stack)?;
+        shape.declares_null |= referenced.declares_null;
+        shape.scalar = shape.scalar.combine(referenced.scalar);
+    }
+
+    Ok(shape)
+}
+
+fn analyze_schema_shape_value(
+    value: &Value,
+    root: &Value,
+    ref_stack: &mut Vec<String>,
+) -> Result<SchemaShape, String> {
+    match value {
+        Value::Object(map) => analyze_schema_shape(map, root, ref_stack),
+        Value::Array(items) => {
+            let mut shape = SchemaShape {
+                declares_null: false,
+                scalar: ScalarShape::Absent,
+            };
+            for item in items {
+                let nested = analyze_schema_shape_value(item, root, ref_stack)?;
+                shape.declares_null |= nested.declares_null;
+                shape.scalar = shape.scalar.combine(nested.scalar);
+            }
+            Ok(shape)
+        }
+        _ => Ok(SchemaShape {
+            declares_null: false,
+            scalar: ScalarShape::Absent,
+        }),
+    }
+}
+
+fn analyze_ref_shape(
+    reference: &str,
+    root: &Value,
+    ref_stack: &mut Vec<String>,
+) -> Result<SchemaShape, String> {
+    if ref_stack.iter().any(|seen| seen == reference) {
+        return Err(format!(
+            "{REF} cycle in {X_PROTECTION} schema shape validation: {reference}"
+        ));
+    }
+    let Some(target) = resolve_local_ref(root, reference) else {
+        return Err(format!(
+            "{REF} {reference:?} cannot be resolved for {X_PROTECTION} schema shape validation; only local JSON Pointer refs are supported"
+        ));
+    };
+    ref_stack.push(reference.to_string());
+    let shape = analyze_schema_shape_value(target, root, ref_stack);
+    ref_stack.pop();
+    shape
+}
+
+fn schema_direct_declares_null(map: &Map<String, Value>) -> bool {
+    type_declares_null(map.get("type"))
+        || matches!(map.get("const"), Some(Value::Null))
+        || map
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(Value::is_null))
+}
+
+fn type_declares_null(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(s)) => s == "null",
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("null")),
+        _ => false,
+    }
+}
+
+fn schema_direct_scalar_shape(map: &Map<String, Value>) -> ScalarShape {
+    match map.get("type") {
+        Some(Value::String(s)) if is_scalar_type(s) => ScalarShape::Single(s.clone()),
+        Some(Value::String(_)) => ScalarShape::NonScalar,
+        Some(Value::Array(types)) => match types.as_slice() {
+            [only] => only
+                .as_str()
+                .filter(|value| is_scalar_type(value))
+                .map(|value| ScalarShape::Single(value.to_string()))
+                .unwrap_or(ScalarShape::NonScalar),
+            _ => ScalarShape::NonScalar,
+        },
+        Some(_) => ScalarShape::NonScalar,
+        None if map.contains_key(PROPS)
+            || map.contains_key(PATTERN_PROPS)
+            || map.contains_key("items") =>
+        {
+            ScalarShape::NonScalar
+        }
+        None => ScalarShape::Absent,
+    }
+}
+
+fn is_scalar_type(value: &str) -> bool {
+    matches!(value, "string" | "number" | "integer" | "boolean")
 }
 
 /// 解析本节点 `x-at-rest` 标记并与祖先 opt-in 合取。非 bool → 推违例、保持祖先值（不丢覆盖）。
@@ -1230,5 +1440,268 @@ mod tests {
         });
         let v = validate_schema(&schema);
         assert!(v.iter().any(|f| f.detail.contains("keyScope")), "{v:?}");
+    }
+
+    /// #1476：加密字段若允许 JSON null，会把「是否为空」作为明文存储形态泄漏；当前无显式 null-policy，
+    /// 因此直接 fail-closed，直到未来单独设计加密 null sentinel。
+    #[test]
+    fn red_encrypt_rejects_nullable_type_union() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "type": ["string", "null"],
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field", "schemaVersion"]
+                }
+            }),
+        );
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("null")),
+            "encrypted nullable field must be rejected: {v:?}"
+        );
+    }
+
+    #[test]
+    fn red_encrypt_rejects_direct_null_type() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "type": "null",
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field", "schemaVersion"]
+                }
+            }),
+        );
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("null")),
+            "encrypted direct null type must be rejected: {v:?}"
+        );
+    }
+
+    /// #1476：nullable leakage 不能只看顶层 `type`；JSON Schema 组合子里出现 null arm 也应拒绝。
+    #[test]
+    fn red_encrypt_rejects_any_of_null_arm() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field", "schemaVersion"]
+                }
+            }),
+        );
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("null")),
+            "encrypted anyOf null arm must be rejected: {v:?}"
+        );
+    }
+
+    /// #1476：blindIndex 是 HMAC 等值索引，只适用于非 nullable scalar 字段；object/array 没有稳定等值语义。
+    #[test]
+    fn red_blind_index_rejects_object_schema() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "type": "object",
+                "properties": {"inner": {"type": "string"}},
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "mode": "blindIndex",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field"],
+                    "reason": "lookup"
+                }
+            }),
+        );
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("scalar")),
+            "blindIndex object schema must be rejected: {v:?}"
+        );
+    }
+
+    #[test]
+    fn red_blind_index_rejects_array_schema() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "type": "array",
+                "items": {"type": "string"},
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "mode": "blindIndex",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field"],
+                    "reason": "lookup"
+                }
+            }),
+        );
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("scalar")),
+            "blindIndex array schema must be rejected: {v:?}"
+        );
+    }
+
+    #[test]
+    fn red_blind_index_rejects_multi_scalar_union() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "type": ["string", "number"],
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "mode": "blindIndex",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field"],
+                    "reason": "lookup"
+                }
+            }),
+        );
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("scalar")),
+            "blindIndex multi-scalar union schema must be rejected: {v:?}"
+        );
+    }
+
+    #[test]
+    fn red_encrypt_rejects_ref_nullable_schema() {
+        let schema = json!({
+            "title": "ConfigEntry",
+            "type": "object",
+            "$defs": {
+                "NullableSecret": {"type": ["string", "null"]}
+            },
+            "properties": {
+                "value": {
+                    "$ref": "#/$defs/NullableSecret",
+                    "x-protection": {
+                        "atRest": "encrypt",
+                        "keyScope": "tenant",
+                        "aad": ["tenant", "configKey", "field", "schemaVersion"]
+                    }
+                }
+            }
+        });
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("null")),
+            "encrypted $ref nullable field must be rejected: {v:?}"
+        );
+    }
+
+    #[test]
+    fn red_blind_index_rejects_ref_object_schema() {
+        let schema = json!({
+            "title": "ConfigEntry",
+            "type": "object",
+            "$defs": {
+                "ObjectSecret": {
+                    "type": "object",
+                    "properties": {"inner": {"type": "string"}}
+                }
+            },
+            "properties": {
+                "value": {
+                    "$ref": "#/$defs/ObjectSecret",
+                    "type": "string",
+                    "x-protection": {
+                        "atRest": "encrypt",
+                        "mode": "blindIndex",
+                        "keyScope": "tenant",
+                        "aad": ["tenant", "configKey", "field"],
+                        "reason": "lookup"
+                    }
+                }
+            }
+        });
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("scalar")),
+            "blindIndex $ref object schema must be rejected: {v:?}"
+        );
+    }
+
+    #[test]
+    fn red_encrypt_rejects_unresolved_ref_schema() {
+        let schema = json!({
+            "title": "ConfigEntry",
+            "type": "object",
+            "properties": {
+                "value": {
+                    "$ref": "#/$defs/Missing",
+                    "x-protection": {
+                        "atRest": "encrypt",
+                        "keyScope": "tenant",
+                        "aad": ["tenant", "configKey", "field", "schemaVersion"]
+                    }
+                }
+            }
+        });
+        let v = validate_schema(&schema);
+        assert!(
+            v.iter().any(|f| f.detail.contains("$ref")),
+            "encrypted unresolved $ref schema must fail closed: {v:?}"
+        );
+    }
+
+    #[test]
+    fn green_blind_index_accepts_non_nullable_scalar() {
+        let schema = schema_with(
+            "value",
+            json!({
+                "type": "string",
+                "x-protection": {
+                    "atRest": "encrypt",
+                    "mode": "blindIndex",
+                    "keyScope": "tenant",
+                    "aad": ["tenant", "configKey", "field"],
+                    "reason": "lookup"
+                }
+            }),
+        );
+        assert!(
+            validate_schema(&schema).is_empty(),
+            "{:?}",
+            validate_schema(&schema)
+        );
+    }
+
+    #[test]
+    fn green_blind_index_accepts_ref_non_nullable_scalar() {
+        let schema = json!({
+            "title": "ConfigEntry",
+            "type": "object",
+            "$defs": {
+                "LookupSecret": {"type": "string"}
+            },
+            "properties": {
+                "value": {
+                    "$ref": "#/$defs/LookupSecret",
+                    "x-protection": {
+                        "atRest": "encrypt",
+                        "mode": "blindIndex",
+                        "keyScope": "tenant",
+                        "aad": ["tenant", "configKey", "field"],
+                        "reason": "lookup"
+                    }
+                }
+            }
+        });
+        assert!(
+            validate_schema(&schema).is_empty(),
+            "{:?}",
+            validate_schema(&schema)
+        );
     }
 }

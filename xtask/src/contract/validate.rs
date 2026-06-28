@@ -25,7 +25,8 @@
 //! INVARIANT: CONTRACT-PROTECTION-POLICY-01 — declared schema 的 `x-protection`（at-rest 加密声明）+
 //! `x-at-rest`（持久化 opt-in）合法且完整（R17，#1468，ADR-011 D1b 声明层）。block 内部一致、AAD 维度
 //! 完整（D2）、deterministic/blindIndex 须 reason 且 aad 稳定子集（D4）、`x-at-rest` schema 高风险字段
-//! 须显式 `x-protection`，均 fail-closed。与 R16 observe redaction **正交不混用**（ADR-011 D1）。
+//! 须显式 `x-protection`、加密字段不得 nullable、blindIndex 只允许非 nullable scalar，均 fail-closed。
+//! 与 R16 observe redaction **正交不混用**（ADR-011 D1）。
 //! INVARIANT: CONTRACT-HTTP-SERVING-01 — active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
 //! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only header 或
 //! service-token MAC 绑定 header（R19）。
@@ -126,7 +127,8 @@ pub(crate) enum Rule {
     /// INVARIANT: CONTRACT-PROTECTION-POLICY-01 — at-rest 加密声明面单源（#1468，ADR-011 D1b 声明层）。
     /// `x-protection` block 内部一致（atRest:encrypt 须 keyScope+完整 aad；deterministic/blindIndex 须
     /// reason 且 aad 稳定子集排除 schemaVersion；plain 不携带 encrypt 参数），`x-at-rest:true` 的 schema
-    /// 内高风险字段缺 `x-protection` 均拒绝。与 R16（observe redaction）正交不混用。
+    /// 内高风险字段缺 `x-protection` 均拒绝；encrypt 字段不得 nullable，blindIndex 仅支持非 nullable scalar。
+    /// 与 R16（observe redaction）正交不混用。
     SchemaProtection,
     /// R18：active HTTP serving 必须声明 fail-closed auth/header metadata。
     ///

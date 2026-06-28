@@ -16,4 +16,5 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/open_rejects_stored_aad.rs");
     t.compile_fail("tests/ui/open_rejects_stored_aad_rederived.rs");
+    t.compile_fail("tests/ui/open_rejects_raw_plaintext_vec.rs");
 }

@@ -60,7 +60,7 @@ contracts/{kind}/{domain}/{version}/
 | R14 | `ActiveSubscriber` | **`lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空**（EVENT-ACTIVE-SUB-01，Medium）；active event 无 subscriber 即死事件，视为错误配置。draft/deprecated 豁免 |
 | R15 | `CommandConsistency` | `kind=command` ⇒ `consistencyLevel=OutboxFact`（命令分发 = 本地事务 + outbox 发布，L2 语义） |
 | R16 | `SchemaRedaction` | declared schema property 上的 `x-pii` / `x-redaction` 字段级策略须合法且完整；拒遗留 `x-sensitive`、未知枚举、`x-redaction=hash`、高风险字段未声明策略 |
-| R17 | `SchemaProtection` | declared schema 的 `x-protection`（at-rest 加密声明）+ schema 级 `x-at-rest`（持久化 opt-in）须合法且完整（#1468，ADR-011 D1b 声明层）：block 内部一致（`atRest:encrypt` 须 `keyScope`+完整 `aad`；`deterministic`/`blindIndex` 须 `reason` 且 `aad` 稳定子集排除 `schemaVersion`；`atRest:plain` 不携带 encrypt 参数），`x-at-rest:true` 的 schema 内高风险字段缺 `x-protection` 均拒。与 R16（observe redaction）**正交不混用**（ADR-011 D1） |
+| R17 | `SchemaProtection` | declared schema 的 `x-protection`（at-rest 加密声明）+ schema 级 `x-at-rest`（持久化 opt-in）须合法且完整（#1468，ADR-011 D1b 声明层）：block 内部一致（`atRest:encrypt` 须 `keyScope`+完整 `aad`；`deterministic`/`blindIndex` 须 `reason` 且 `aad` 稳定子集排除 `schemaVersion`；`atRest:plain` 不携带 encrypt 参数），`x-at-rest:true` 的 schema 内高风险字段缺 `x-protection` 均拒；加密字段不得 nullable，`blindIndex` 只允许非 nullable scalar。与 R16（observe redaction）**正交不混用**（ADR-011 D1） |
 | R18 | `HttpAuth` | active HTTP 必须声明 `endpoints.http.auth`；`permission` mode 需非空 permission 且禁止 reason；`public`/`bootstrap`/`clientsOnly`/`serviceOwned` 需非空 reason 且禁止 permission；当前 header 最小闭值集只接受 `X-Tenant-ID = populate-only` 或 `service-token-tenant-bound`，且 `identity.login` public serving 必须声明 populate-only header，`serviceOwned` 必须声明 service-token tenant-bound header，非 `serviceOwned` 禁止该模式。codegen 对 active HTTP 同样 fail-closed，不只依赖 validate |
 | R19 | `HttpTenantSource` | HTTP request schema 不得声明 `tenantId`（含嵌套 object schema）；tenant scope 必须来自认证上下文、声明式 populate-only header，或 service-token MAC 绑定 header。validate 与 codegen 共用 schema property walker，避免治理门漂移 |
 
@@ -94,6 +94,13 @@ contracts/{kind}/{domain}/{version}/
     `deterministic`/`blindIndex` 须含稳定子集 `tenant`+`configKey`+`field` 且**不得**含 `schemaVersion`（D4——否则 schema 演进后等值查询静默失效）。
     `configKey` 是复合坐标的必备维度（防跨 entry replay），**非可选**——偏离须改 ADR-011 而非局部放宽。
   - `reason`（`deterministic`/`blindIndex` 必填，非空 string）：deterministic 暴露明文相等性（pattern leak），须文档化权衡（D4）。
+  - `atRest:encrypt` 字段不得是 nullable schema（例如 `type:["string","null"]`、`type:"null"` 或 `oneOf`/`anyOf`
+    null arm）——当前无显式 null-policy，允许 JSON null 会把「是否为空」作为明文存储状态泄漏；如需加密 null sentinel，
+    必须另行设计新的机器门。
+  - `mode:"blindIndex"` 只允许非 nullable scalar schema（`string`/`number`/`integer`/`boolean`），并且只承诺等值索引。
+    当前 contract 没有 query metadata，故 range / prefix / LIKE / sort / regex 的禁止不靠文档假装成 gate；运行时硬载体是
+    `secure::BlindIndexValue` 无 `Ord`/`PartialOrd`/`Eq`，仅暴露 `ct_eq`，且 `secure::BlindIndex` 没有 range/prefix API。
+    未来若新增 contract query 声明面，必须同步新增闭值枚举 + Rxx 机器校验。
   - 另：schema 节点顶层可声明 `x-at-rest: true`（持久化 opt-in）。**递归传播**进整棵子树——一旦某节点 opt-in，
     其下（含嵌套对象 / 数组元素）每个高风险字段（同上字段名集）**必须**显式声明 `x-protection`（缺即 R17 拒
     「敏感持久化字段缺 storage policy」，fail-closed）；不需要保护的高风险命名字段显式声明 `{"atRest":"plain"}` 表态豁免。

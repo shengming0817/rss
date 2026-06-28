@@ -120,6 +120,8 @@ practice）。**RSS 偏离 = 取 Vault 的强制性**：RSS 的 AAD 在类型层
 
 5. **等值-only 不变式**：`BlindIndexValue` 不 derive `Ord`/`PartialOrd`/`Eq`，仅 `subtle::ConstantTimeEq`（防 timing oracle）；
    无 range / prefix / sort API ⇒ 范围 / 前缀查询类型层不可表达（`FIELDPROT-BLINDIDX-EQUALITYONLY-01`，Hard，§3）。
+   当前 contract 还没有 query metadata 声明面，因此不把 range / prefix / LIKE / sort / regex 禁止伪装成 docs gate；
+   若未来新增 query 声明，必须用闭值 enum + `cargo xtask contract validate` 机器规则承载。
 
 **稳定子集 scope（与 D2 对齐）**：blind index 子密钥派生使用**不含 schema-version** 的稳定子集（tenant/config-key/field），
 确保 schema 演进后旧 index 值与新查询仍相等。代价：binding 范围比主密文 AAD 窄 schema-version 一维，须文档化；
@@ -128,7 +130,7 @@ schema 演进时 blind index 仍须 re-index。稳定维度在 authoring 面经 
 **Authoring 声明面 = `x-protection.mode=blindIndex`（#1468，单源）**：blind index 的 contract authoring 不另立平行注解——
 统一经 #1468 的 `x-protection{atRest:encrypt, mode:blindIndex, keyScope, aad:[tenant,configKey,field], reason}` 声明，
 `cargo xtask contract validate` R17 `SchemaProtection` fail-closed（`mode=deterministic|blindIndex` 须非空 reason +
-稳定子集 aad 排除 schemaVersion）、`contract breaking` `PROTECTION_POLICY_CHANGED` 守漂移（INVARIANT
+稳定子集 aad 排除 schemaVersion；加密字段不得 nullable；`blindIndex` 只允许非 nullable scalar）、`contract breaking` `PROTECTION_POLICY_CHANGED` 守漂移（INVARIANT
 `CONTRACT-PROTECTION-POLICY-01`，Medium，#1468 承载）。本 ADR 不再引入独立 `x-blind-index` 注解（避免双授权路径）。
 
 **运行体 = `secure::blind_index`（本 PR #1478）**：上述 authoring `mode=blindIndex` 的真实 HMAC 计算由 `crates/secure/src/blind_index.rs`
