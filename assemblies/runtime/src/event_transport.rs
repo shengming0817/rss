@@ -1,11 +1,11 @@
 //! event_transport — topology-gated 事件传输组合根接线（issue #1251）。
 //!
 //! [`wire_event_transport`] 是 `run()` 事件传输单入口：根据 [`EventTransportConfig`] 中的拓扑决策
-//! 连接 AMQP（per-domain）+ Redis，spawn relay worker + consumer workers，并返回 [`EventRuntime`]
+//! 连接 AMQP（per-domain），spawn relay worker + PG inbox consumer workers，并返回 [`EventRuntime`]
 //! 交给 `run()` merge/drain 标准 [`bootstrap::DomainModuleResult`]。
 //!
 //! LIFO 注册顺序（由 `run()` 负责执行）：
-//! - `infra_guards`（AMQP 连接 + Redis pool guard）先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
+//! - `infra_guards`（AMQP 连接 guard）先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
 //! - `module.resources/module.workers`（relay + consumers + outbox sampler/sweeper）后注册 ⇒ LIFO 最先 drain。
 //!
 //! Demo 拓扑：`wire_event_transport` 返回空 [`EventRuntime`]（无 env/容器即可单测）；生产 Demo
@@ -45,10 +45,6 @@ pub struct EventTransportConfig {
     pub topology: bootstrap::Topology,
     /// AMQP per-domain 传输配置（per-domain URL 集合）。
     pub transport: bootstrap::eventtransport::TransportConfig,
-    /// Redis 幂等去重配置（URL）。
-    pub idempotency: bootstrap::replaydeps::IdempotencyConfig,
-    /// Redis claim TTL（消费者幂等锁过期时间）。
-    pub redis_claim_ttl: Duration,
     /// Outbox relay 轮询间隔。
     pub relay_poll_interval: Duration,
     /// Outbox relay 单次批量大小。
@@ -63,7 +59,7 @@ pub struct EventTransportConfig {
 
 /// 事件传输接线产物（交 `run()` 装配进 [`bootstrap::ShutdownStack`]）。
 pub struct EventRuntime {
-    /// infra 连接守卫（AMQP + Redis）：先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
+    /// infra 连接守卫（AMQP）：先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
     pub infra_guards: Vec<Box<DynManagedResource<'static>>>,
     /// 标准 module 产物：probes/resources/workers 由 runtime 统一 merge/drain。
     pub module: DomainModuleResult,
@@ -94,6 +90,8 @@ impl Default for EventRuntime {
 /// 未列入的发布域 outbox 会在 durable runtime 静默积压（#1251 F2）。新增 L2 发布域时在此追加 + 在 `wire_durable`
 /// 显式接一个 relay（caps::* 是编译期 marker，无法对 domain 字符串泛型循环）。
 const RELAY_DOMAINS: &[&str] = &["identity", "settings"];
+const INBOX_SWEEPER_WORKER_NAME: &str = "inbox-sweeper";
+const INBOX_SWEEPER_PROBE: &str = "inbox_sweeper";
 
 /// worker 健康 → readyz `HealthCheck` 适配探针。
 struct WorkerHealthProbe {
@@ -103,7 +101,11 @@ struct WorkerHealthProbe {
 
 impl bootstrap::HealthProbe for WorkerHealthProbe {
     fn check(&self) -> HealthCheck {
-        HealthCheck::new(self.name.clone(), self.health.status(), "worker")
+        HealthCheck::new(
+            self.name.clone(),
+            self.health.status(),
+            self.health.detail(),
+        )
     }
 }
 
@@ -123,67 +125,67 @@ struct RelayTiming {
 /// vhost 拉取。转小写、去重、排序。
 pub(crate) fn required_domains(subscribers: &[SubscriberBinding]) -> Vec<String> {
     let mut domains: Vec<String> = RELAY_DOMAINS.iter().map(|d| (*d).to_string()).collect();
-    domains.extend(subscribers.iter().map(|b| {
-        b.topic
-            .split('.')
-            .next()
-            .unwrap_or(b.topic)
-            .to_ascii_lowercase()
-    }));
+    domains.extend(subscribers.iter().map(|b| topic_owner(b.topic)));
     domains.sort_unstable();
     domains.dedup();
     domains
 }
 
+fn topic_owner(topic: &str) -> String {
+    topic
+        .split('.')
+        .next()
+        .unwrap_or(topic)
+        .to_ascii_lowercase()
+}
+
+fn consumer_meta_parts_for_binding(
+    binding: &SubscriberBinding,
+) -> (&'static str, &'static str, &'static str) {
+    (binding.consumer, binding.contract_id, binding.topic)
+}
+
+fn consumer_meta_for_binding(binding: &SubscriberBinding) -> ConsumerMeta {
+    let (consumer, contract_id, topic) = consumer_meta_parts_for_binding(binding);
+    ConsumerMeta::new(consumer, contract_id, topic)
+}
+
 /// topology 接线决策（纯函数，不依赖 PG/infra；可脱离容器单测）。
 ///
-/// 从 transport + idempotency config 分别 resolve，再按一致性配对决策：
-/// - 两者均 Demo → [`EventDecision::Demo`]
-/// - 两者均 Durable → [`EventDecision::Durable`]
-/// - 不一致（mixed strata）→ `bail!` fail-closed（配置错误，非运行期故障）
+/// 从 transport config resolve：
+/// - Demo → [`EventDecision::Demo`]
+/// - Durable → [`EventDecision::Durable`]
 #[derive(Debug)]
 enum EventDecision {
     Demo,
     Durable {
         per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
-        redis_url: bootstrap::replaydeps::RedisUrl,
     },
 }
 
-/// resolve transport + idempotency 并做一致性配对决策（从 [`wire_event_transport`] 抽出，便于单测）。
+/// resolve transport 接线决策（从 [`wire_event_transport`] 抽出，便于单测）。
 fn resolve_event_decision(
     topology: bootstrap::Topology,
     transport: bootstrap::eventtransport::TransportConfig,
-    idem: bootstrap::replaydeps::IdempotencyConfig,
     required: &[&str],
 ) -> anyhow::Result<EventDecision> {
     let transport = bootstrap::eventtransport::resolve(topology, transport, required)
         .context("resolve event transport")?;
-    let idem = bootstrap::replaydeps::resolve(topology, idem).context("resolve idempotency")?;
-    match (transport, idem) {
-        (bootstrap::ResolvedTransport::Demo, bootstrap::ResolvedIdempotency::Demo) => {
-            Ok(EventDecision::Demo)
+    match transport {
+        bootstrap::ResolvedTransport::Demo => Ok(EventDecision::Demo),
+        bootstrap::ResolvedTransport::Durable { per_domain } => {
+            Ok(EventDecision::Durable { per_domain })
         }
-        (
-            bootstrap::ResolvedTransport::Durable { per_domain },
-            bootstrap::ResolvedIdempotency::Durable { redis_url },
-        ) => Ok(EventDecision::Durable {
-            per_domain,
-            redis_url,
-        }),
-        _ => anyhow::bail!(
-            "inconsistent topology: transport and idempotency resolved to different durability strata"
-        ),
+        _ => anyhow::bail!("unknown event transport resolution"),
     }
 }
 
 /// topology-gated 事件传输接线单入口（`run()` 调用点）。
 ///
 /// - Demo 拓扑：返回 [`EventRuntime::empty`]（不建连接/不 spawn；生产 Demo fail-fast 由 `run()` 保证）。
-/// - Durable 拓扑（Shared / Isolated）：连接 per-domain AMQP + Redis → spawn relay + consumer workers。
-/// - 混合决策（transport/idempotency 分属 Demo/Durable 不一致）：`bail!` fail-closed。
+/// - Durable 拓扑（Shared / Isolated）：连接 per-domain AMQP → spawn relay + PG inbox consumer workers。
 ///
-/// `cfg` 按值消费（`TransportConfig`/`IdempotencyConfig` 不 impl Clone）。
+/// `cfg` 按值消费（`TransportConfig` 不 impl Clone）。
 pub async fn wire_event_transport(
     pg: &PgRuntimeDeps,
     subscribers: Vec<SubscriberBinding>,
@@ -198,7 +200,7 @@ pub async fn wire_event_transport(
         sweep: cfg.outbox_sweep_interval,
         retain_seconds: cfg.outbox_retain_seconds,
     };
-    match resolve_event_decision(cfg.topology, cfg.transport, cfg.idempotency, &required_refs)? {
+    match resolve_event_decision(cfg.topology, cfg.transport, &required_refs)? {
         EventDecision::Demo => {
             // reason: Demo 拓扑返回空产物——函数可在无 env/容器下单测；生产走 Demo 时
             // 组合根 `run()` 在此函数调用前已 fail-fast（TOPO-INMEM-SEAL-01）。
@@ -208,19 +210,8 @@ pub async fn wire_event_transport(
             );
             Ok(EventRuntime::empty())
         }
-        EventDecision::Durable {
-            per_domain,
-            redis_url,
-        } => {
-            wire_durable(
-                pg,
-                subscribers,
-                per_domain,
-                redis_url,
-                cfg.redis_claim_ttl,
-                timing,
-            )
-            .await
+        EventDecision::Durable { per_domain } => {
+            wire_durable(pg, subscribers, per_domain, timing).await
         }
     }
 }
@@ -229,7 +220,6 @@ pub async fn wire_event_transport(
 ///
 /// 必填 env var：
 /// - `RSS_TOPOLOGY`：`demo` | `durable-shared` | `durable-isolated`（必填）
-/// - `RSS_REDIS_URL`：Redis 幂等 claimer URL（非 Demo 必填）
 ///
 /// AMQP broker URL（非 Demo；至少一个，否则 `eventtransport::resolve` per-domain fail-closed）：
 /// - `RSS_<DOMAIN>_AMQP_URL`（如 `RSS_IDENTITY_AMQP_URL`）：per-domain broker URL（优先）。
@@ -241,7 +231,6 @@ pub async fn wire_event_transport(
 /// - `RSS_RELAY_SAMPLE_INTERVAL_MS`（30000ms）
 /// - `RSS_OUTBOX_SWEEP_INTERVAL_MS`（300000ms）
 /// - `RSS_OUTBOX_RETAIN_SECONDS`（604800s）
-/// - `RSS_REDIS_CLAIM_TTL_MS`（30000ms）
 pub fn build_event_transport_config_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<EventTransportConfig> {
@@ -249,11 +238,8 @@ pub fn build_event_transport_config_from(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_TOPOLOGY"))?;
     let topology = parse_topology(topo_raw.trim())?;
 
-    let (transport, idempotency) = if topology == bootstrap::Topology::Demo {
-        (
-            bootstrap::eventtransport::TransportConfig::default(),
-            bootstrap::replaydeps::IdempotencyConfig::default(),
-        )
+    let transport = if topology == bootstrap::Topology::Demo {
+        bootstrap::eventtransport::TransportConfig::default()
     } else {
         // env 只把 AMQP 配置完整映射成 typed config——per-domain（`RSS_<DOMAIN>_AMQP_URL`，优先）+ 共享回退
         // （`RSS_AMQP_URL`）；per-domain/shared 完备性与隔离由 `eventtransport::resolve` 单源 fail-closed 强制，
@@ -266,24 +252,12 @@ pub fn build_event_transport_config_from(
             }
         }
         let shared = get("RSS_AMQP_URL").map(bootstrap::AmqpUrl::new);
-        let transport = bootstrap::eventtransport::TransportConfig::new(per_domain, shared);
-        let redis_raw = get("RSS_REDIS_URL")
-            .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_REDIS_URL"))?;
-        let idempotency = bootstrap::replaydeps::IdempotencyConfig::new(Some(
-            bootstrap::replaydeps::RedisUrl::new(redis_raw),
-        ));
-        (transport, idempotency)
+        bootstrap::eventtransport::TransportConfig::new(per_domain, shared)
     };
 
     Ok(EventTransportConfig {
         topology,
         transport,
-        idempotency,
-        redis_claim_ttl: parse_duration_ms_env(
-            get("RSS_REDIS_CLAIM_TTL_MS"),
-            "RSS_REDIS_CLAIM_TTL_MS",
-            30_000,
-        ),
         relay_poll_interval: parse_duration_ms_env(
             get("RSS_RELAY_POLL_INTERVAL_MS"),
             "RSS_RELAY_POLL_INTERVAL_MS",
@@ -310,17 +284,15 @@ pub fn build_event_transport_config_from(
 
 // ── 内部函数 ──────────────────────────────────────────────────────────────────
 
-/// durable 拓扑接线内核（Shared / Isolated）：建立 AMQP + Redis，spawn relay + consumer workers。
+/// durable 拓扑接线内核（Shared / Isolated）：建立 AMQP，spawn relay + PG inbox consumer workers。
 #[allow(clippy::cognitive_complexity)]
-// reason: wire_durable 是顺序聚合函数，步骤严格有序（guard → Redis → AMQP → relay → consumers）以
-// 保证 LIFO 关闭顺序（infra_guards 最后关 = Redis/AMQP 连接在 workers drain 后才断开）；
+// reason: wire_durable 是顺序聚合函数，步骤严格有序（guard → AMQP → relay → consumers）以
+// 保证 LIFO 关闭顺序（infra_guards 最后关 = AMQP 连接在 workers drain 后才断开）；
 // 拆分为子函数会把 Vec push 顺序散布到多处并隐藏 LIFO 约束，复杂度来自不可压缩的业务顺序。
 async fn wire_durable(
     pg: &PgRuntimeDeps,
     subscribers: Vec<SubscriberBinding>,
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
-    redis_url: bootstrap::replaydeps::RedisUrl,
-    claim_ttl: Duration,
     timing: RelayTiming,
 ) -> anyhow::Result<EventRuntime> {
     // saga/projection 投影重建 defer → 见 #1251 follow-up issue（executor body 仍 todo!()，#1121/#1122）
@@ -330,50 +302,6 @@ async fn wire_durable(
 
     // 每个 required 域（[`RELAY_DOMAINS`] 发布域 ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
     // AMQP URL → 下方 amqp_map 逐域连接；relay/consumer 取连接时 `.context(...)` 兜底 fail-closed，无需额外 guard。
-
-    // Redis 幂等 claimer：用第一个 binding 的 ConsumerGroup 构造（MVP 单 group；见 #1251 多 group follow-up）。
-    let first_group = subscribers
-        .first()
-        .map(|b| b.group.clone())
-        .context("wire_durable requires at least one subscriber binding")?;
-    // 日志用（first_group 下方被 move 进 setup）。
-    let group_name = first_group.as_str().to_owned();
-
-    // FIX 3 — 多 group fail-closed guard（rv-arch B）。
-    // RedisStore 按 ConsumerGroup 命名空间幂等键；多 group 会在同一 Redis namespace 下混用，
-    // 导致不同 group 幂等状态互相覆盖——MVP 强制单 group，多 group 支持留 #1251 follow-up。
-    anyhow::ensure!(
-        subscribers.iter().all(|b| b.group == first_group),
-        "MVP：所有 subscriber binding 须共享同一 ConsumerGroup；多 group redis 幂等命名空间隔离尚未支持（#1251 follow-up）"
-    );
-
-    #[allow(clippy::disallowed_methods)]
-    // reason: 凭据原文仅在组合根 Redis pool 构造点调用 expose()（CREDENTIAL-EXPOSE-COMPOSITIONROOT-01）。
-    let redis_raw = redis_url.expose();
-    // FIX 8 — TLS startup warn：cleartext redis = 凭据 + payload 明文传输，生产必须 rediss://。
-    if !redis_raw.starts_with("rediss://") {
-        tracing::warn!(
-            "redis connection is cleartext (credentials unencrypted); production must use rediss:// TLS"
-        );
-    }
-    let redis_pool = deadpool_redis::Config::from_url(redis_raw)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("build redis pool")?;
-    let redis = redis::RedisRuntimeDeps::setup(redis_pool);
-    // infra guard 先收（先注册 → LIFO 最后关；workers 后注册 → 最先 drain）。
-    infra_guards.extend(redis.runtime_resources());
-    // #1255 后 redis API：idempotency(group, ttl) 在 call 时绑 group + ttl（非 setup 时）；TTL fail-fast 在此。
-    let idempotency = Arc::new(
-        redis
-            .infra()
-            .idempotency(first_group, claim_ttl)
-            .context("setup redis idempotency store")?,
-    );
-    let lease_cfg = LeaseConfig::from_ttl(idempotency.lease_ttl());
-    tracing::info!(
-        group = group_name,
-        "durable event transport: redis idempotency store ready"
-    );
 
     // AMQP per-domain 连接（relay 发布 + consumer 订阅共用同一 vhost 连接）。
     let mut amqp_map: BTreeMap<String, amqp::AmqpRuntimeDeps> = BTreeMap::new();
@@ -412,15 +340,8 @@ async fn wire_durable(
     }
     wire_outbox_maintenance(pg, &timing, &mut module)?;
 
-    // Consumer workers（per binding）。
-    wire_consumer_workers(
-        pg,
-        subscribers,
-        &amqp_map,
-        &idempotency,
-        lease_cfg,
-        &mut module,
-    )?;
+    // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
+    wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &timing, &mut module)?;
 
     Ok(EventRuntime {
         infra_guards,
@@ -580,38 +501,36 @@ fn wire_sweeper_worker(
     Ok(())
 }
 
-/// Consumer workers 接线（per [`SubscriberBinding`] → `spawn_consumer_ackable` → [`ConsumerWorker`]）。
-fn wire_consumer_workers(
+/// Consumer resource bundle 接线（PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
+fn wire_consumer_resource_bundle(
     pg: &PgRuntimeDeps,
     subscribers: Vec<SubscriberBinding>,
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
-    idempotency: &Arc<redis::RedisIdempotencyStore>,
-    lease_cfg: LeaseConfig,
+    timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
     for binding in subscribers {
-        let owner = binding
-            .topic
-            .split('.')
-            .next()
-            .unwrap_or(binding.topic)
-            .to_ascii_lowercase();
+        let group = binding.group.clone();
+        let owner = topic_owner(binding.topic);
         let amqp_conn = amqp_map
             .get(&owner)
             .with_context(|| format!("no amqp connection for topic owner '{owner}'"))?;
         let subscriber = amqp_conn.infra().subscriber();
         let topic = Topic::new(binding.topic);
-        let meta = ConsumerMeta::new(&owner, binding.contract_id, binding.topic);
+        let meta = consumer_meta_for_binding(&binding);
         let handler = adapt_subscriber_handler(binding.handler);
-        let consumer_health = Arc::new(WorkerHealth::healthy());
+        let inbox = pg.infra().inbox(group);
+        let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
+        let idempotency = Arc::new(inbox);
+        let consumer_health = Arc::new(WorkerHealth::starting());
         let dlx = DynDeadLetterStore::new_box(pg.infra().dead_letter());
-        let worker_name = format!("event-consumer:{}", binding.topic);
+        let worker_name = format!("event-consumer:{}:{}", binding.consumer, binding.topic);
         tracing::info!(
+            consumer = binding.consumer,
             topic = binding.topic,
-            "durable event transport: consumer worker registered"
+            "durable event transport: pg inbox consumer worker registered"
         );
-        let idempotency = Arc::clone(idempotency);
         let health = Arc::clone(&consumer_health);
         let worker: WorkerSpec = Box::new(move |token| {
             DynManagedResource::new_box(spawn_consumer_ackable_subscriber(
@@ -634,6 +553,46 @@ fn wire_consumer_workers(
             consumer_health,
         )?);
     }
+    wire_inbox_sweeper(pg, timing, module)?;
+    Ok(())
+}
+
+fn wire_inbox_sweeper(
+    pg: &PgRuntimeDeps,
+    timing: &RelayTiming,
+    module: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let config = SweeperConfig::new(postgres::INBOX_DEDUP_RETENTION_SECONDS, timing.sweep)
+        .context("build inbox sweeper config")?;
+    let health = Arc::new(WorkerHealth::healthy());
+    let worker_health = Arc::clone(&health);
+    let sweeper = pg.infra().inbox_sweeper();
+    let worker: WorkerSpec = Box::new(move |token| {
+        let handle = tokio::spawn(sweeper_loop(
+            Arc::new(sweeper),
+            config,
+            token.clone(),
+            Arc::clone(&worker_health),
+            "inbox_dedup",
+        ));
+        DynManagedResource::new_box(SweeperWorker::adopt(
+            INBOX_SWEEPER_WORKER_NAME,
+            handle,
+            worker_health,
+            token,
+        ))
+    });
+    module.workers.push(worker);
+
+    let probe_name =
+        ProbeName::parse(INBOX_SWEEPER_PROBE).context("parse inbox sweeper probe name")?;
+    module.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerHealthProbe {
+            name: probe_name,
+            health,
+        }),
+    ));
     Ok(())
 }
 
@@ -769,6 +728,7 @@ mod tests {
             SubscriberBinding {
                 contract_id: "test.event",
                 topic,
+                consumer: "test-consumer",
                 group: consistency::ConsumerGroup::parse("test.group").unwrap(),
                 handler: Box::new(NopHandler),
             }
@@ -782,6 +742,42 @@ mod tests {
         // subscriber owner {identity, audit} ∪ RELAY_DOMAINS {identity, settings} → 去重排序。
         let domains = required_domains(&bindings);
         assert_eq!(domains, vec!["audit", "identity", "settings"]);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 helper 构造合法 consumer group；parse 失败即测试写错。
+    #[test]
+    fn consumer_meta_uses_subscription_consumer_not_topic_owner() {
+        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
+        use futures::future::BoxFuture;
+
+        struct NopHandler;
+        impl bootstrap::SubscriberHandler for NopHandler {
+            fn handle(
+                &self,
+                _: diport::Message,
+            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let binding = SubscriberBinding {
+            contract_id: "identity.session-created",
+            topic: "identity.session-created",
+            consumer: "audit",
+            group: consistency::ConsumerGroup::parse("audit.session-created").unwrap(),
+            handler: Box::new(NopHandler),
+        };
+
+        assert_eq!(topic_owner(binding.topic), "identity");
+        assert_eq!(
+            consumer_meta_parts_for_binding(&binding),
+            (
+                "audit",
+                "identity.session-created",
+                "identity.session-created"
+            )
+        );
     }
 
     // ── parse_topology ────────────────────────────────────────────────────────
@@ -823,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn config_builder_demo_topology_does_not_require_amqp_or_redis() {
+    fn config_builder_demo_topology_does_not_require_amqp() {
         let result = build_event_transport_config_from(|name| {
             if name == "RSS_TOPOLOGY" {
                 Some("demo".into())
@@ -831,7 +827,7 @@ mod tests {
                 None
             }
         });
-        assert!(result.is_ok(), "demo topology: no AMQP/Redis vars required");
+        assert!(result.is_ok(), "demo topology: no AMQP vars required");
     }
 
     /// review #342 F1 修复：durable-shared 仅配共享 `RSS_AMQP_URL`（无 per-domain）也应可启动——env
@@ -843,12 +839,10 @@ mod tests {
         let cfg = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
             "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
-            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
             _ => None,
         })
         .unwrap();
-        let decision =
-            resolve_event_decision(cfg.topology, cfg.transport, cfg.idempotency, &["identity"]);
+        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
         assert!(
             matches!(decision, Ok(EventDecision::Durable { .. })),
             "durable-shared 仅配共享 URL 应回退成 Durable，实得 {decision:?}"
@@ -858,17 +852,15 @@ mod tests {
     /// durable 缺所有 AMQP URL（per-domain + shared 均无）→ env builder 不报错（只映射），由 resolver
     /// 单源 fail-closed（per-domain MissingBrokerUrl）。
     #[allow(clippy::unwrap_used)]
-    // reason: redis 齐备 → build 必成功；item-level carve-out。
+    // reason: topology 齐备 → build 必成功；item-level carve-out。
     #[test]
     fn config_builder_durable_missing_amqp_resolves_fail_closed() {
         let cfg = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
             _ => None,
         })
         .unwrap();
-        let decision =
-            resolve_event_decision(cfg.topology, cfg.transport, cfg.idempotency, &["identity"]);
+        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
         assert!(
             decision.is_err(),
             "durable 缺所有 AMQP URL → resolver fail-closed"
@@ -878,40 +870,20 @@ mod tests {
     /// durable-isolated 配共享 `RSS_AMQP_URL` → resolver fail-closed（IsolatedFallbackForbidden）：
     /// 隔离拓扑禁回退共享凭据，env builder 照常映射、resolver 单源拒。
     #[allow(clippy::unwrap_used)]
-    // reason: redis+shared 齐备 → build 必成功；item-level carve-out。
+    // reason: topology+shared 齐备 → build 必成功；item-level carve-out。
     #[test]
     fn config_builder_durable_isolated_with_shared_fails_closed() {
         let cfg = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-isolated".into()),
             "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
-            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
             _ => None,
         })
         .unwrap();
-        let decision =
-            resolve_event_decision(cfg.topology, cfg.transport, cfg.idempotency, &["identity"]);
+        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
         assert!(
             decision.is_err(),
             "durable-isolated 配共享 URL → resolver fail-closed"
         );
-    }
-
-    #[allow(clippy::panic)]
-    // reason: Ok 臂等价 unreachable；panic! 是标准测试断言手段；item-level carve-out。
-    #[test]
-    fn config_builder_durable_requires_redis_url() {
-        let result = build_event_transport_config_from(|name| match name {
-            "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
-            _ => None,
-        });
-        match result {
-            Err(e) => assert!(
-                e.to_string().contains("RSS_REDIS_URL"),
-                "expected error about missing Redis URL, got: {e}"
-            ),
-            Ok(_) => panic!("expected error for missing Redis URL"),
-        }
     }
 
     #[test]
@@ -919,7 +891,6 @@ mod tests {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
             "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
-            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
             _ => None,
         });
         assert!(result.is_ok(), "full durable config should succeed");
@@ -929,7 +900,6 @@ mod tests {
         assert_eq!(cfg.relay_sample_interval, Duration::from_millis(30_000));
         assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
         assert_eq!(cfg.outbox_retain_seconds, 604_800);
-        assert_eq!(cfg.redis_claim_ttl, Duration::from_millis(30_000));
     }
 
     #[test]
@@ -937,7 +907,6 @@ mod tests {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
             "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
-            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
             "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("120000".into()),
             "RSS_OUTBOX_RETAIN_SECONDS" => Some("86400".into()),
             _ => None,
@@ -953,7 +922,6 @@ mod tests {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
             "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
-            "RSS_REDIS_URL" => Some("redis://host:6379".into()),
             "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("bad-ms".into()),
             "RSS_OUTBOX_RETAIN_SECONDS" => Some("bad-seconds".into()),
             _ => None,
@@ -986,7 +954,6 @@ mod tests {
         let result = resolve_event_decision(
             bootstrap::Topology::Demo,
             bootstrap::eventtransport::TransportConfig::default(),
-            bootstrap::replaydeps::IdempotencyConfig::default(),
             &[],
         );
         assert!(result.is_ok(), "Demo topology must succeed: {result:?}");
@@ -996,7 +963,7 @@ mod tests {
         );
     }
 
-    /// (b) DurableShared + identity url + redis url → EventDecision::Durable。
+    /// (b) DurableShared + identity url → EventDecision::Durable。
     #[allow(clippy::unwrap_used)]
     // reason: 测试 Ok 臂断言 Durable 变体，unwrap 失败即 test 意图写错；item-level carve-out。
     #[test]
@@ -1005,15 +972,8 @@ mod tests {
             "identity",
             bootstrap::AmqpUrl::new("amqp://user:pass@host/vhost".to_string()),
         );
-        let idem = bootstrap::replaydeps::IdempotencyConfig::new(Some(
-            bootstrap::replaydeps::RedisUrl::new("redis://host:6379".to_string()),
-        ));
-        let result = resolve_event_decision(
-            bootstrap::Topology::DurableShared,
-            transport,
-            idem,
-            &["identity"],
-        );
+        let result =
+            resolve_event_decision(bootstrap::Topology::DurableShared, transport, &["identity"]);
         assert!(result.is_ok(), "Durable topology must succeed: {result:?}");
         assert!(
             matches!(result.unwrap(), EventDecision::Durable { .. }),
@@ -1021,33 +981,12 @@ mod tests {
         );
     }
 
-    /// (c) DurableShared + identity url + no redis url → Err（replaydeps fail-closed 或 mixed strata）。
-    #[test]
-    fn resolve_decision_mixed_strata_errors() {
-        let transport = bootstrap::eventtransport::TransportConfig::default().with_domain_url(
-            "identity",
-            bootstrap::AmqpUrl::new("amqp://user:pass@host/vhost".to_string()),
-        );
-        // IdempotencyConfig::default() 无 redis url → replaydeps resolve 为 Demo 或 Err（mixed strata）。
-        let result = resolve_event_decision(
-            bootstrap::Topology::DurableShared,
-            transport,
-            bootstrap::replaydeps::IdempotencyConfig::default(),
-            &["identity"],
-        );
-        assert!(result.is_err(), "mixed strata must return Err");
-    }
-
-    /// (d) DurableShared + empty TransportConfig → Err（无 AMQP URL 供所需 domain）。
+    /// (c) DurableShared + empty TransportConfig → Err（无 AMQP URL 供所需 domain）。
     #[test]
     fn resolve_decision_missing_amqp_url_errors() {
-        let idem = bootstrap::replaydeps::IdempotencyConfig::new(Some(
-            bootstrap::replaydeps::RedisUrl::new("redis://host:6379".to_string()),
-        ));
         let result = resolve_event_decision(
             bootstrap::Topology::DurableShared,
             bootstrap::eventtransport::TransportConfig::default(), // 无 domain url
-            idem,
             &["identity"],
         );
         assert!(result.is_err(), "missing AMQP URL must return Err");

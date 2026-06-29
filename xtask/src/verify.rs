@@ -69,6 +69,8 @@ enum InternalCheck {
     WsDepsDrift,
     /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
     DocContracts,
+    /// runtime event transport consumer 禁回 Redis claimer（EVENT-TRANSPORT-PG-INBOX-01）。
+    EventTransportGuard,
     /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
     ArchRules,
     CodegenCheck,
@@ -107,6 +109,7 @@ impl InternalCheck {
             Self::LayerDeps => "xtask/src/layerdeps.rs",
             Self::WsDepsDrift => "xtask/src/wsdeps.rs",
             Self::DocContracts => "xtask/src/doc_contracts.rs",
+            Self::EventTransportGuard => "xtask/src/event_transport_guard.rs",
             Self::ArchRules => "xtask/src/archrules.rs",
             Self::CodegenCheck => "xtask/src/codegen.rs",
             Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
@@ -242,6 +245,15 @@ fn step_doc_contracts() -> Step {
         label: "doc-contracts",
         args: &[],
         kind: StepKind::Internal(InternalCheck::DocContracts),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_event_transport_guard() -> Step {
+    Step {
+        label: "event-transport-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::EventTransportGuard),
         env: &[],
         needs_compile: false,
     }
@@ -728,6 +740,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_doc_contracts(),
+        step_event_transport_guard(),
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
@@ -761,6 +774,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_doc_contracts(),
+        step_event_transport_guard(),
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
@@ -989,6 +1003,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
+        InternalCheck::EventTransportGuard => {
+            run_check(&crate::event_transport_guard::EventTransportGuard)
+        }
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
@@ -1089,6 +1106,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "event-transport-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1129,6 +1147,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "event-transport-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1146,8 +1165,8 @@ mod tests {
         }
     }
 
-    /// meta 十四项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
-    /// doc-contracts / archrules / codegen /
+    /// meta 十五项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
+    /// doc-contracts / event-transport-guard / archrules / codegen /
     /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
     /// defer-gate）在两种模式恒在。
     #[test]
@@ -1168,6 +1187,7 @@ mod tests {
                     "layer-deps",
                     "wsdeps-drift",
                     "doc-contracts",
+                    "event-transport-guard",
                     "archrules",
                     "codegen-check",
                     "pdp-allow-guard",
@@ -1294,6 +1314,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "event-transport-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1386,6 +1407,7 @@ mod tests {
             "layer-deps",
             "wsdeps-drift",
             "doc-contracts",
+            "event-transport-guard",
             "archrules",
             "codegen-check",
             "pdp-allow-guard",

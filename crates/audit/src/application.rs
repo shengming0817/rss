@@ -288,6 +288,7 @@ impl Domain for AuditDomain {
         reg.subscriber(
             spec.contract_id,
             spec.topic,
+            spec.consumer,
             group,
             Box::new(SessionCreatedAuditHandler::new(self.repo.clone())),
         )?;
@@ -508,6 +509,7 @@ mod tests {
         assert_eq!(spec.consumer, AUDIT_DOMAIN);
         assert_eq!(subs[0].contract_id, spec.contract_id);
         assert_eq!(subs[0].topic, spec.topic);
+        assert_eq!(subs[0].consumer, spec.consumer);
         assert_eq!(subs[0].group.as_str(), spec.group);
     }
 

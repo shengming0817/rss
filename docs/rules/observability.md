@@ -148,6 +148,7 @@ at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker �
 |--------|------|-------|------|
 | `consumer_settle_total` | Counter | `domain`,`action`,`outcome` | 单条 broker 结算（action=ack/requeue/reject；outcome=ok/error） |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed 路径主动跳过 app DLX 写入（当前 reason=`tenant_missing`） |
+| `consumer_dlx_write_total` | Counter | `domain`,`outcome` | app DLX store 写入结果（outcome=ok/error）；error 同时把 consumer health 标为 degraded |
 
 label 闭值集纪律：
 
@@ -155,6 +156,8 @@ label 闭值集纪律：
   `ok`/`error`（settle 调用是否成功）——crate 自有闭映射，无副本可漂移。
 - `reason` 闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 `&'static str` 常量调用点；新增 reason
   必须同步本表和 ops 契约，禁止把 handler error / tenant / payload 派生值写入 label。
+- `consumer_dlx_write_total.outcome` 闭合于 `eventexec::consumer_worker` 的 DLX wrapper（`ok`/`error`），禁止把
+  store 错误、message_id、tenant、payload 派生值写入 label。
 - `domain` 来自 `eventexec::ConsumerMeta`（注册期绑定的 domain/contract/topic 三元组），非请求/租户派生，基数有界。
 - emit site = `eventexec::consumer::settle`（minimal 直发 `metrics` facade，无 recorder 即 no-op）；告警面 =
   `outcome="error"`（结算失败）。注入式 `ConsumerMetrics` 端口（与 `OutboxMetrics` 同形、组合根注入、成功/失败
@@ -163,6 +166,8 @@ label 闭值集纪律：
 - `consumer_dlx_skip_total` emit site = `eventexec::consumer::record_dead_letter_skip`；这是诊断计数器，不配置
   Prometheus 告警。原因：该路径已经 fail-closed 到 broker `Reject`/drop 语义，告警应看 settle/reject 或业务
   DLQ 增长，skip metric 只用于解释「为什么没有 app DLX row」。
+- `consumer_dlx_write_total` emit site = `eventexec::consumer_worker` 的 health-reporting DLX wrapper；告警面 =
+  `outcome="error"`（DLX 未落库，consumer 会 release inbox claim 并 broker Requeue）。
 
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 

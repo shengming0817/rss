@@ -160,8 +160,8 @@ async fn login_audit_durable_topology() -> Result<()> {
     let binding = single_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
 
-    // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源）。
-    let claimer = Arc::new(id.inbox(binding.group.clone()));
+    // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
+    let claimer = Arc::new(deps.infra().inbox(binding.group.clone()));
     let token = CancellationToken::new();
     let stream = bus
         .subscriber()

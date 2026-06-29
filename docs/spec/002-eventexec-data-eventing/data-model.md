@@ -55,7 +55,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 
 - PK: `(event_id, consumer_group)`。claim = INSERT ON CONFLICT DO NOTHING → 首见 Fresh，冲突 Duplicate。
 - 保留期清理（#1210）：`PgInboxSweeper` 删 `status='done' AND claimed_at ≤ now()-retain` 的去重记录（`claimed` 行不删）；默认 **7 天**（`INBOX_DEDUP_RETENTION_SECONDS`），**必须严格大于**最大重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律——低于/等于即迟到重投误判 Fresh 重复执行），编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-DEDUP-RETENTION-FLOOR-01）。清理索引 `(status, claimed_at)`（migration 0020）。完整三表保留期契约见 `docs/ops/…-outbox-relay-observability.md §保留期清理`。
-- Redis 等价：按 observability.md §Redis Namespace 当前登记的 outbox 消费幂等 claimer key `_runtime:{eventID}:lease|done` 扩 consumer-group 维度为 `_runtime:{eventID}:{group}:lease|done`。**该扩展格式须由 T005 在 observability.md §Redis Namespace 登记**（与既有 `_runtime:{eventID}` 形态结构性互斥），否则违反「新增 `_runtime` shared-infra 原语必须登记」规则。EventId 全局唯一（UUID）保证跨租户不冲突；key 不加 tenant 段属显式决策（见 spec.md §Assumptions 租户隔离立场）。
+- runtime durable event consumer 以 PostgreSQL `inbox_dedup` 为单一幂等 claimer；Redis 不再作为 event consumer 去重后端。EventId 全局唯一（UUID）保证跨租户不冲突；key 不加 tenant 段属显式决策（见 spec.md §Assumptions 租户隔离立场）。
 
 ### dead_letter（P7）
 | 列 | 类型 | 说明 |

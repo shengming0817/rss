@@ -46,10 +46,13 @@ const SAMPLER_WORKER_NAME: &str = "outbox-sampler";
 /// worker 关闭超时：重 I/O drain，覆盖默认 30s（relay/sweeper 同值）。
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
-// AtomicU8 编码：0=Healthy 1=Degraded 2=Unhealthy
+// AtomicU8 编码：0=Healthy 1=Degraded 2=Unhealthy 3=Starting 4=SubscriberUnavailable 5=DlxWriteError
 const HEALTH_HEALTHY: u8 = 0;
 const HEALTH_DEGRADED: u8 = 1;
 const HEALTH_UNHEALTHY: u8 = 2;
+const HEALTH_STARTING: u8 = 3;
+const HEALTH_SUBSCRIBER_UNAVAILABLE: u8 = 4;
+const HEALTH_DLX_WRITE_ERROR: u8 = 5;
 
 // ── WorkerHealth ────────────────────────────────────────────────────────────
 
@@ -65,14 +68,32 @@ impl WorkerHealth {
         Self(AtomicU8::new(HEALTH_HEALTHY))
     }
 
+    /// 构造初始 Starting 状态（readyz 视为 Unhealthy，直到 worker 明确进入运行态）。
+    pub fn starting() -> Self {
+        Self(AtomicU8::new(HEALTH_STARTING))
+    }
+
     /// 读当前健康状态。
     pub fn status(&self) -> HealthStatus {
         match self.0.load(Ordering::Acquire) {
             HEALTH_HEALTHY => HealthStatus::Healthy,
-            HEALTH_DEGRADED => HealthStatus::Degraded,
+            HEALTH_DEGRADED | HEALTH_DLX_WRITE_ERROR => HealthStatus::Degraded,
+            HEALTH_STARTING | HEALTH_SUBSCRIBER_UNAVAILABLE => HealthStatus::Unhealthy,
             // `_` 兜底 HEALTH_UNHEALTHY + 任何非法编码（AtomicU8 仅由本类型三 const 写入；
             // clippy::wildcard_in_or_patterns 拒 `CONST | _`，故用裸 `_`）。
             _ => HealthStatus::Unhealthy,
+        }
+    }
+
+    /// 稳定 readyz detail（const literal，无 runtime 错误 / 凭据 / payload）。
+    pub fn detail(&self) -> &'static str {
+        match self.0.load(Ordering::Acquire) {
+            HEALTH_HEALTHY => "worker",
+            HEALTH_DEGRADED => "degraded",
+            HEALTH_STARTING => "starting",
+            HEALTH_SUBSCRIBER_UNAVAILABLE => "subscriber-unavailable",
+            HEALTH_DLX_WRITE_ERROR => "dlx-write-error",
+            _ => "stopped",
         }
     }
 
@@ -92,8 +113,22 @@ impl WorkerHealth {
         self.0.store(HEALTH_DEGRADED, Ordering::Release);
     }
 
+    /// 订阅失败（broker/subscriber 不可用）→ Unhealthy，detail 固定为 subscriber-unavailable。
+    pub(crate) fn mark_subscriber_unavailable(&self) {
+        self.0
+            .store(HEALTH_SUBSCRIBER_UNAVAILABLE, Ordering::Release);
+    }
+
+    /// DLX 写失败 → Degraded，detail 固定为 dlx-write-error。
+    pub(crate) fn mark_dlx_write_error(&self) {
+        self.0.store(HEALTH_DLX_WRITE_ERROR, Ordering::Release);
+    }
+
     /// loop 退出（worker 停止运行）→ Unhealthy；readyz 据此翻。
     pub(crate) fn mark_stopped(&self) {
+        if self.0.load(Ordering::Acquire) == HEALTH_SUBSCRIBER_UNAVAILABLE {
+            return;
+        }
         self.0.store(HEALTH_UNHEALTHY, Ordering::Release);
     }
 }

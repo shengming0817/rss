@@ -1,10 +1,10 @@
-//! #1251 durable e2e journey：`wire_event_transport` → postgres + RabbitMQ + Redis 三真容器
-//! 贯通 outbox → relay → AMQP → consumer → Redis 幂等去重 → audit 审计链。
+//! #1251/#1434 durable e2e journey：`wire_event_transport` → postgres + RabbitMQ 真容器
+//! 贯通 outbox → relay → AMQP → consumer → PG inbox 幂等去重 → audit 审计链。
 //!
 //! 断言 A（至少一次）：登录触发 outbox 落库 → relay 中继 → AMQP consumer 消费 → audit append
 //! 仅一次（20s timeout）。
 //!
-//! 断言 B（Redis 幂等去重，tracer 正向见证）：重投同一 event_id（duplicate）+ 一条新 event_id（tracer，
+//! 断言 B（PG inbox 幂等去重，tracer 正向见证）：重投同一 event_id（duplicate）+ 一条新 event_id（tracer，
 //! 同 payload → Fresh → append）。FIFO 单 consumer：tracer 被 audit（len→2）证明其之前的 duplicate 已被
 //! 真实消费+settle；稳定 len==2（original + tracer）证明 duplicate 命中 Duplicate 去重（升到 3 即去重失效）。
 //!
@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use consistency::OutboxSource;
@@ -28,6 +28,7 @@ use identity::ports::{DynSessionLifecycle, TenantId};
 use identity::{IdentityDomain, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use runtime::event_transport::{EventTransportConfig, wire_event_transport};
@@ -168,28 +169,51 @@ fn pg_config(p: &testkit::PgConnParams) -> Result<PgConfig> {
     .with_acquire_timeout(Duration::from_secs(5)))
 }
 
+fn pg_connect_options(p: &testkit::PgConnParams) -> PgConnectOptions {
+    PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+}
+
+async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<i64> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2 AND status = 'done'",
+    )
+    .bind(event_id)
+    .bind(group)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
 // ── e2e 测试主体 ───────────────────────────────────────────────────────────────────────────
 
 /// durable e2e：`wire_event_transport` 真容器贯通验收（#1251 task 6）。
 ///
-/// - 断言 A：login → PgOutbox(pending) → relay → AMQP → consumer → Redis(Fresh) → audit append（至少一次）。
+/// - 断言 A：login → PgOutbox(pending) → relay → AMQP → consumer → PG inbox(Fresh) → audit append（至少一次）。
 /// - 断言 B：重投同一 event_id（duplicate）+ tracer（新 event_id）→ tracer 被消费正向见证 duplicate 已消费；
-///   稳定 audit len==2（original + tracer）证明 duplicate 命中 Redis Duplicate 去重（升到 3 即去重失效）。
+///   稳定 audit len==2 + `inbox_dedup` done 行证明 duplicate 命中 PG inbox Duplicate 去重。
 ///
 /// 需 docker：`cargo test -p runtime --features integration event_transport_durable -- --nocapture`
 /// 或 `cargo nextest run -p runtime --features integration`。无 docker 时只需通过
 /// `cargo test -p runtime --features integration --no-run`（编译门）。
 #[tokio::test(flavor = "multi_thread")]
 async fn event_transport_durable_e2e() -> Result<()> {
-    // ── 步骤 1：启动三个真实容器 fixture（guard 绑到测试结束，Drop 停容器）─────────────────────
+    // ── 步骤 1：启动两个真实容器 fixture（guard 绑到测试结束，Drop 停容器）─────────────────────
 
     let pgfix = testkit::env_or_postgres().await?;
     let rmq = testkit::env_or_rabbitmq().await?;
-    let redisfix = testkit::env_or_redis().await?;
 
     // ── 步骤 2：postgres capability bundle（connect + run_migrations + RLS 能力门）──────────────
 
     let pg = PgRuntimeDeps::setup(&pg_config(pgfix.params())?).await?;
+    let assertion_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pg_connect_options(pgfix.params()))
+        .await?;
     let id = pg.for_domain::<caps::Identity>();
 
     // ── 步骤 3：域装配（identity + audit）────────────────────────────────────────────────────
@@ -219,24 +243,24 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     let mut registry = bootstrap::compose(&[&identity_domain, &audit_domain_inst])?;
     let subscribers = registry.drain_subscribers();
+    let consumer_group = subscribers
+        .first()
+        .map(|s| s.group.as_str().to_owned())
+        .context("e2e must register at least one subscriber")?;
 
     // ── 步骤 5：构造 EventTransportConfig（直接赋值，无 env 侧效应）────────────────────────────
 
     let vhost_url = rmq.vhost_url("rss_evt_e2e").await?;
-    let redis_url = redisfix.url().to_string();
 
     // relay_poll_interval=2s：在 [100ms, 300s] 范围内；2s 窗口使步骤 6 poll 能赢过 relay 第二次轮询。
     // relay_sample_interval=30s：在 [1s, 60s] 范围内。
-    let transport = bootstrap::eventtransport::TransportConfig::default()
-        .with_domain_url("identity", bootstrap::AmqpUrl::new(vhost_url.clone()));
-    let idempotency = bootstrap::replaydeps::IdempotencyConfig::new(Some(
-        bootstrap::replaydeps::RedisUrl::new(redis_url),
-    ));
+    let transport = bootstrap::eventtransport::TransportConfig::new(
+        std::collections::BTreeMap::new(),
+        Some(bootstrap::AmqpUrl::new(vhost_url.clone())),
+    );
     let cfg = EventTransportConfig {
         topology: bootstrap::Topology::DurableShared,
         transport,
-        idempotency,
-        redis_claim_ttl: Duration::from_secs(30),
         relay_poll_interval: Duration::from_secs(2),
         relay_batch: 16,
         relay_sample_interval: Duration::from_secs(30),
@@ -253,8 +277,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     );
     assert_eq!(
         event_runtime.module.workers.len(),
-        5,
-        "identity relay + settings relay + consumer + sampler + sweeper"
+        6,
+        "identity relay + settings relay + consumer + sampler + outbox sweeper + inbox sweeper"
     );
 
     // ── 步骤 7：注册 ShutdownStack（infra_guards 先注册 → LIFO 最后关；workers 后注册 → LIFO 最先 drain）
@@ -342,7 +366,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 10：断言 A（至少一次）────────────────────────────────────────────────────────────
 
-    // relay（后台 OS 线程）会在下次 2s 轮询时拾起 pending entry → AMQP publish → consumer → Redis
+    // relay（后台 OS 线程）会在下次 2s 轮询时拾起 pending entry → AMQP publish → consumer → PG inbox
     // Fresh → audit append。20s timeout 覆盖 2s relay 间隔 + AMQP 投递 + consumer 处理延迟。
     tokio::time::timeout(Duration::from_secs(20), async {
         while audit.is_empty() {
@@ -361,11 +385,16 @@ async fn event_transport_durable_e2e() -> Result<()> {
         1,
         "断言 A：login → outbox → relay → AMQP → consumer → audit，仅 append 一次"
     );
+    assert_eq!(
+        inbox_done_count(&assertion_pool, &captured_event_id, &consumer_group).await?,
+        1,
+        "断言 A：original event 必须在 PG inbox_dedup 标记 done"
+    );
 
-    // ── 步骤 11：断言 B（Redis 幂等去重）──────────────────────────────────────────────────────
+    // ── 步骤 11：断言 B（PG inbox 幂等去重）──────────────────────────────────────────────────
 
     // 仅「重投后 len 不增」是假阴性（重投未投递/未及处理也会通过）。改用 **tracer 正向见证**：先重投同一
-    // event_id（duplicate，期望 Redis `try_claim` 返回 Duplicate、不 append），再投一条**新 event_id**
+    // event_id（duplicate，期望 PG inbox `try_claim` 返回 Duplicate、不 append），再投一条**新 event_id**
     // （tracer，同 payload → Fresh → append）。单 queue 单 consumer FIFO 顺序消费：tracer 被 audit（len 达 2）
     // 即证明其之前的 duplicate 已被 consumer 真实消费+settle（而非未投递）。去重生效 → 最终稳定 len==2
     // （original + tracer）；去重失效 → duplicate 也 append、升到 3，被下方 fail-fast 捕获。
@@ -404,12 +433,22 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await;
     assert!(
         leaked_dup.is_err(),
-        "断言 B 失败：duplicate 被重复 append（audit len 升到 3），Redis 幂等去重未生效"
+        "断言 B 失败：duplicate 被重复 append（audit len 升到 3），PG inbox 幂等去重未生效"
     );
     assert_eq!(
         audit.audited().len(),
         2,
-        "断言 B：original + tracer 各 append 一次，duplicate 命中 Redis Duplicate 被去重（共 2）"
+        "断言 B：original + tracer 各 append 一次，duplicate 命中 PG inbox Duplicate 被去重（共 2）"
+    );
+    assert_eq!(
+        inbox_done_count(&assertion_pool, &captured_event_id, &consumer_group).await?,
+        1,
+        "断言 B：duplicate 不得新增 original 的 inbox_dedup done 行"
+    );
+    assert_eq!(
+        inbox_done_count(&assertion_pool, &tracer_id, &consumer_group).await?,
+        1,
+        "断言 B：tracer 新 event 必须在 PG inbox_dedup 标记 done"
     );
 
     pubr.shutdown().await?;
@@ -419,13 +458,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let failures = stack.shutdown().await;
     assert!(failures.is_empty(), "shutdown 存在失败项: {failures:?}");
 
-    // fixture guard drop：停三个容器（pg / rmq / redis）。
+    // fixture guard drop：停两个容器（pg / rmq）。
     drop(poll_view);
     drop(id);
+    drop(assertion_pool);
     drop(pg);
     drop(pgfix);
     drop(rmq);
-    drop(redisfix);
 
     Ok(())
 }

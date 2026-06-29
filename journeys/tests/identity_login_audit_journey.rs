@@ -247,6 +247,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     let SubscriberBinding {
         contract_id,
         topic,
+        consumer: _,
         group,
         handler,
     } = binding;
@@ -337,6 +338,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let SubscriberBinding {
         contract_id,
         topic,
+        consumer: _,
         group,
         handler,
     } = single_subscription(registry)?;
@@ -453,6 +455,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     let SubscriberBinding {
         contract_id,
         topic,
+        consumer: _,
         group,
         handler,
     } = single_subscription(registry)?;
@@ -506,6 +509,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     let SubscriberBinding {
         contract_id,
         topic,
+        consumer: _,
         group,
         handler: _,
     } = single_subscription(registry)?;

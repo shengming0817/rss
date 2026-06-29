@@ -9,8 +9,8 @@
 //! - [`PgDomainDeps<D>`]：per-domain 受控句柄（`Clone`，私有持 `Arc<PgStore>`），只暴露该域的 repo
 //!   构造方法。类型参数 `D: PgDomain`（sealed marker）使「settings 的 deps 拿去建 identity repo」=
 //!   编译错误 E0599（类型层不可表达）。
-//! - [`PgInfraDeps`]：framework/global（provider-agnostic、非单域）基建能力句柄——emitter / dead_letter /
-//!   checkpoint / saga / projection，不绑 `caps::*` 域。
+//! - [`PgInfraDeps`]：framework/global（provider-agnostic、非单域）基建能力句柄——emitter / inbox /
+//!   dead_letter / checkpoint / saga / projection，不绑 `caps::*` 域。
 //! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同
 //!   store + 单 clock 扇出），内部预包装 read config + write co-tx UoW + secret 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
@@ -314,12 +314,6 @@ impl PgSettingsBundle {
 }
 
 impl PgDomainDeps<caps::Identity> {
-    /// 幂等 inbox（consumer 去重）。`group` 标识消费组。
-    #[must_use]
-    pub fn inbox(&self, group: consistency::ConsumerGroup) -> PgInboxStore {
-        self.store.inbox(group)
-    }
-
     /// 会话生命周期仓储（co-tx 创建 + durable find/revoke）。`clock` 为 envelope 时间源（构造器位置参）。
     #[must_use]
     pub fn session_lifecycle(&self, clock: Box<dyn Clock>) -> PgSessionLifecycle {
@@ -417,6 +411,15 @@ impl PgInfraDeps {
     #[must_use]
     pub fn outbox_maintenance(&self) -> PgOutboxMaintenance {
         PgOutboxMaintenance::new(&self.store)
+    }
+
+    /// consumer inbox 幂等去重 store（runtime consumer resource bundle 使用）。
+    ///
+    /// `inbox_dedup` key 为 `(event_id, consumer_group)`，不是 identity 域资源；因此归 framework/global
+    /// infra 句柄，避免组合根为通用 consumer 借用某个业务域句柄。
+    #[must_use]
+    pub fn inbox(&self, group: consistency::ConsumerGroup) -> PgInboxStore {
+        self.store.inbox(group)
     }
 
     /// dead-letter store（DLX 终态）。同时 impl `consistency::RetentionSweeper`——组合根可经此句柄取死信
@@ -590,11 +593,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)] // reason: ConsumerGroup::parse const literal 仅字符非法时失败（item-level carve-out）。
     async fn identity_accessors_construct() {
         let i: PgDomainDeps<caps::Identity> = deps().for_domain();
-        let group = consistency::ConsumerGroup::parse("identity.projector").expect("valid group");
-        let _ = i.inbox(group);
         let _ = i.session_lifecycle(Box::new(EpochClock));
         let _ = i.outbox(DynPublisher::new_box(StubPublisher));
         // F1 补齐的 identity 域 repo（credentials / roles / refresh tokens）——纯 pool clone，无 I/O。
@@ -604,10 +604,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)] // reason: ConsumerGroup::parse const literal 仅字符非法时失败（item-level carve-out）。
     async fn infra_accessors_construct() {
         // PgInfraDeps：framework/global 基建能力（F1 补齐）——纯 pool clone，无 I/O。
         let infra = deps().infra();
+        let group = consistency::ConsumerGroup::parse("runtime.consumer").expect("valid group");
         let _ = infra.emitter(Box::new(EpochClock));
+        let _ = infra.inbox(group);
         let _ = infra.outbox_maintenance();
         let _ = infra.dead_letter();
         let _ = infra.inbox_sweeper();

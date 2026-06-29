@@ -22,7 +22,7 @@
 - 错误：`thiserror`（库枚举，message `&'static str` const，C10）；engine 类型不 derive serde（C6）
 - 测试：`cargo-nextest`（进程隔离）、`rstest`（表驱动）、`insta`（golden）、`mockall`（mock）
 
-**Storage**: PostgreSQL（outbox / inbox dedup / dead-letter / saga journal / checkpoint / projection_events）；Redis（多副本 claimer / leader-elect lease / fencing）；AMQP broker（per-domain 事件传输）。demo 拓扑全部以 `adapters/memory` in-mem 替身。
+**Storage**: PostgreSQL（outbox / inbox dedup / dead-letter / saga journal / checkpoint / projection_events）；Redis（leader-elect lease / fencing / CAS 等 runtime 原语）；AMQP broker（per-domain 事件传输）。demo 拓扑全部以 `adapters/memory` in-mem 替身。
 
 **Testing**: 单测 fake/in-mem 替身（`#[cfg(test)]`）；持久化集成测试 `#[cfg(feature = "integration")]` 门控（`tests/`）；L0 表驱动 / L1 事务完整性 / L2 原子性+幂等 / L3 replay+投影重建 / L4 状态机+超时+fencing。
 

@@ -10,7 +10,7 @@ rustup show                      # stable 1.96（rust-toolchain.toml）
 cargo nextest --version          # 进程隔离测试
 ```
 
-> **durable 拓扑基建尚未交付**：本地 postgres + redis + rabbitmq 的 `docker/dev-stack.yml`
+> **durable 拓扑基建尚未交付**：本地 postgres + rabbitmq（以及需要 Redis 的其它机制）的 `docker/dev-stack.yml`
 > 当前仓库**不存在**，由 T003（postgres 基座）/ T006（amqp）随 adapter 落地时交付。
 > 在此之前，下文「durable 集成测试」与「场景验证」中标注 durable 的步骤**不可直接运行**；
 > demo（in-mem）路径与单测/治理则当前即可跑。

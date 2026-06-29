@@ -36,11 +36,12 @@ pub(crate) struct RouteGroupDecl {
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
 ///
-/// contract_id、topic、consumer group、handler 四元组；经 [`Registry::drain_subscribers`]
+/// contract_id、topic、consumer domain、consumer group、handler 五元组；经 [`Registry::drain_subscribers`]
 /// 转为 [`SubscriberBinding`] 交组合根接 eventexec 分发驱动。
 pub(crate) struct SubscriberDecl {
     pub(crate) contract_id: &'static str,
     pub(crate) topic: &'static str,
+    pub(crate) consumer: &'static str,
     pub(crate) group: consistency::ConsumerGroup,
     pub(crate) handler: Box<dyn SubscriberHandler>,
 }
@@ -48,13 +49,15 @@ pub(crate) struct SubscriberDecl {
 /// finalize 后交组合根的订阅绑定（从 [`SubscriberDecl`] 展开）。
 ///
 /// 组合根据此把 handler 接到 eventexec 分发驱动：`topic` 用于 broker 订阅；
-/// `group` 传 ConsumerBase；`contract_id` 提供契约来源（审计/追踪）；
+/// `consumer` 用于 ConsumerMeta/DLX/metrics 归因；`group` 传 ConsumerBase；`contract_id` 提供契约来源（审计/追踪）；
 /// `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
 pub struct SubscriberBinding {
     /// 契约 ID（对应 `generated` 中的 `CONTRACT_ID` 常量）。
     pub contract_id: &'static str,
     /// broker topic（对应 `generated` 中的 `TOPIC` 常量）。
     pub topic: &'static str,
+    /// 消费者域 DomainId（对应 `generated` 中 `SubscriptionSpec::consumer`）。
+    pub consumer: &'static str,
     /// 消费者组（稳定标识，幂等去重 PK 的第二维度）。
     pub group: consistency::ConsumerGroup,
     /// bootstrap-local 擦除 handler（由组合根 adapt 为 `eventexec::HandlerFn`）。
@@ -320,6 +323,8 @@ impl Registry {
     ///
     /// - `contract_id`：契约 ID，取自 `generated::event::<domain_v1>::CONTRACT_ID`。
     /// - `topic`：broker routing key，取自 `generated::event::<domain_v1>::TOPIC`。
+    /// - `consumer`：消费者域 DomainId，取自 `generated::event::*::SUBSCRIPTIONS[*].consumer`；
+    ///   用于 DLX / metrics / health 归因，不得从 topic owner 反推。
     /// - `group`：消费者组（[`consistency::ConsumerGroup`]），幂等去重 PK 的第二维度；
     ///   取自消费域 const，经 `ConsumerGroup::parse(...)` 构造——失败须冒泡为 [`KernelError::Subscriber`]，
     ///   不得在 init 内 `unwrap`/`expect`。
@@ -331,12 +336,14 @@ impl Registry {
         &mut self,
         contract_id: &'static str,
         topic: &'static str,
+        consumer: &'static str,
         group: consistency::ConsumerGroup,
         handler: Box<dyn SubscriberHandler>,
     ) -> Result<(), KernelError> {
         self.subscribers.push(SubscriberDecl {
             contract_id,
             topic,
+            consumer,
             group,
             handler,
         });
@@ -479,12 +486,13 @@ impl Registry {
         Ok(by_listener)
     }
 
-    /// 取出订阅绑定（contract_id + topic + group + handler），交组合根接 eventexec 分发驱动。
+    /// 取出订阅绑定（contract_id + topic + consumer + group + handler），交组合根接 eventexec 分发驱动。
     ///
     /// 排空 `subscribers`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
     /// [`finalize_routes`](Self::finalize_routes) 不争用消费权；消费顺序由组合根定）。
     /// 幂等 drain——`subscribers` 排空后再次调用返回空 `Vec`（非错误）。
-    /// 返回 [`SubscriberBinding`] 列表；组合根据 `topic` 订阅 broker，据 `group` 接 ConsumerBase，
+    /// 返回 [`SubscriberBinding`] 列表；组合根据 `topic` 订阅 broker，据 `consumer` 构造 ConsumerMeta，
+    /// 据 `group` 接 ConsumerBase，
     /// 据 `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
     pub fn drain_subscribers(&mut self) -> Vec<SubscriberBinding> {
         std::mem::take(&mut self.subscribers)
@@ -492,6 +500,7 @@ impl Registry {
             .map(|d| SubscriberBinding {
                 contract_id: d.contract_id,
                 topic: d.topic,
+                consumer: d.consumer,
                 group: d.group,
                 handler: d.handler,
             })
@@ -588,6 +597,7 @@ mod collect {
         reg.subscriber(
             "identity.session-created",
             "identity.session-created",
+            "audit",
             group,
             Box::new(OkHandler),
         )
@@ -603,6 +613,7 @@ mod collect {
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].contract_id, "identity.session-created");
         assert_eq!(subs[0].topic, "identity.session-created");
+        assert_eq!(subs[0].consumer, "audit");
         assert_eq!(subs[0].group.as_str(), "audit.session-created");
     }
 
@@ -612,7 +623,13 @@ mod collect {
             let group = consistency::ConsumerGroup::parse("domain-a.topic-a")
                 .map_err(|_| KernelError::Subscriber)?;
             reg.route_group::<Primary>("/api/v1/a", Ok)?;
-            reg.subscriber("contract.topic-a", "topic.a", group, Box::new(OkHandler))?;
+            reg.subscriber(
+                "contract.topic-a",
+                "topic.a",
+                "domain-a",
+                group,
+                Box::new(OkHandler),
+            )?;
             Ok(())
         }
     }
@@ -621,7 +638,13 @@ mod collect {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
             let group = consistency::ConsumerGroup::parse("domain-b.topic-b")
                 .map_err(|_| KernelError::Subscriber)?;
-            reg.subscriber("contract.topic-b", "topic.b", group, Box::new(OkHandler))?;
+            reg.subscriber(
+                "contract.topic-b",
+                "topic.b",
+                "domain-b",
+                group,
+                Box::new(OkHandler),
+            )?;
             Ok(())
         }
     }
@@ -724,6 +747,7 @@ mod finalize {
         reg.subscriber(
             "test.drain-topic",
             "drain.topic",
+            "test-consumer",
             group,
             Box::new(StubHandler),
         )
@@ -733,6 +757,7 @@ mod finalize {
         assert_eq!(bindings.len(), 1, "drain 取出一个绑定");
         assert_eq!(bindings[0].contract_id, "test.drain-topic");
         assert_eq!(bindings[0].topic, "drain.topic");
+        assert_eq!(bindings[0].consumer, "test-consumer");
         assert_eq!(bindings[0].group.as_str(), "test.drain-group");
 
         // 二次 drain 幂等返回空（subscribers 已被 std::mem::take 清空）。

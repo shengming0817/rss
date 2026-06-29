@@ -1,6 +1,7 @@
 //! `pg-tenant-tx-guard` —— Postgres tenant-table raw-pool / TxManager bypass guard.
 //!
-//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 — tenant-table production paths must go through
+//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" } —
+//! tenant-table production paths must go through
 //! `PgTenantPool::{read,write,co_tx_with_outbox}` or the lower-level `cotx.rs` funnel. Raw
 //! `sqlx::PgPool` / direct connection / global transaction paths are allowed only for explicitly
 //! named global infrastructure or maintenance exceptions.

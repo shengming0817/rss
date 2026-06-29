@@ -152,7 +152,8 @@ impl RetentionSweeper for PgDeadLetterStore {
     /// 用 `last_attempt_at` 对齐既有 `idx_dead_letter_scan` 语义；专用 `idx_dead_letter_sweep (last_attempt_at)`
     /// 覆盖本全域谓词（迁移 0021）。
     ///
-    /// INVARIANT: TENANCY-PG-TX-FUNNEL-01 exception — this is the named `dead_letter`
+    /// INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" } exception —
+    /// this is the named `dead_letter`
     /// maintenance sweep. It is deliberately not tenant-scoped because retention expiry is a
     /// global storage hygiene operation, not a tenant data access path; `pg-tenant-tx-guard`
     /// allowlists only this shape and has a stale-allowlist test.

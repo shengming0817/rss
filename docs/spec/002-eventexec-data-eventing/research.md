@@ -16,11 +16,11 @@
 - **ref**: ADR-003；diport/src/lib.rs:7-46。
 
 ### D3. 持久化库选型
-- **postgres** = `sqlx`（编译期查询校验 + `sqlx::migrate!` 命名空间）；**amqp** = `lapin`；**redis** = `redis`(claimer/distlock)。
+- **postgres** = `sqlx`（编译期查询校验 + `sqlx::migrate!` 命名空间；outbox/inbox/DLX）；**amqp** = `lapin`；**redis** = `redis`（distlock/CAS/历史 replaydeps 后端，不再作为 runtime event consumer claimer）。
 - **ref**: gocell-rust-directory-structure §四 工具链清单；framework-comparison（omicron db 层 RLS / SET LOCAL；lapin AMQP）。
 
 ### D4. topology-gated resolver fail-closed
-- **Decision**: resolver 在 demo(in-mem)/durable(broker+pg+redis) 间选型；durable 缺配置 → 启动期 `Err`，绝不回落 in-mem。in-mem 原语 sealed（`pub(crate)` + resolver 私有构造），生产代码类型层不可达。
+- **Decision**: resolver 在 demo(in-mem)/durable 间选型；eventtransport durable 使用 broker+PG inbox/DLX，Redis 只随需要它的 runtime 原语启用。durable 缺对应配置 → 启动期 `Err`，绝不回落 in-mem。in-mem 原语 sealed（`pub(crate)` + resolver 私有构造），生产代码类型层不可达。
 - **Rationale**: 生产误用 in-mem = 跨进程/重启丢事件，必须编译期/启动期堵死。
 - **ref**: docs/rules/eventbus.md §topology-gated；spec FR-007/FR-008。
 

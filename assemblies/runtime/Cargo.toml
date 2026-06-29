@@ -39,10 +39,10 @@ identity = { path = "../../crates/identity" }
 crypto-adapter = { path = "../../adapters/crypto" }
 # postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + PgAuditRepo + 采样组件）。
 postgres = { path = "../../adapters/postgres" }
-# eventbus 真传输 topology-gated 接线（#1251）：durable transport = amqp publisher/subscriber（backend=真 lapin，
-# 不拉 testkit）+ eventexec relay/consumer 执行体 + deadpool-redis 池构造。
+# eventbus 真传输 topology-gated 接线（#1251/#1434）：durable transport = amqp publisher/subscriber
+# （backend=真 lapin，不拉 testkit）+ eventexec relay/consumer 执行体；consumer 幂等走 PG inbox。
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
-# Redis adapter（package=redis-adapter，import 名 redis；RedisRuntimeDeps + distlock/CAS/idempotency；#1251 用 idempotency）。
+# Redis adapter（package=redis-adapter，import 名 redis；RedisRuntimeDeps + distlock/CAS/idempotency）。
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 eventexec = { path = "../../crates/eventexec" }
 deadpool-redis = { workspace = true }
@@ -80,7 +80,7 @@ otel = { path = "../../adapters/otel", features = ["backend"] }
 prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"] }
 
 [features]
-# 需要真实 postgres + RabbitMQ + Redis 的集成测试（无 docker 时只需能编译；不运行）。
+# 需要真实后端的集成测试（event transport 使用 postgres + RabbitMQ；其它测试可按需用 Redis）。
 # testkit/containers：激活 testcontainers fixture（PgFixture/RabbitFixture/RedisFixture）。
 # identity/seed-login：启用 LoginService::with_seed_credential（仅 e2e 测试用；生产组合根不启用）。
 integration = ["testkit/containers", "identity/seed-login"]

@@ -59,8 +59,8 @@ use std::time::Duration;
 use consistency::idempotency::IdempotencyStore;
 use consistency::{HandleResult, OutboxRelay, OutboxSource};
 use diport::{
-    AckableSubscriber, DeliveryStream, DynAckableSubscriber, DynDeadLetterStore, Message,
-    MessageStream, Topic,
+    AckableSubscriber, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeliveryStream,
+    DynAckableSubscriber, DynDeadLetterStore, Message, MessageStream, Topic,
 };
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -166,6 +166,58 @@ impl Drop for StoppedOnExit {
     }
 }
 
+/// DLX store wrapper：发射闭值集写入指标，并在写失败时把 consumer worker 标为 degraded。
+///
+/// wrapper 只包 consumer worker 路径；不改变 ConsumerBase 的 commit/release/settle 状态机。
+struct HealthReportingDlx {
+    inner: tokio::sync::Mutex<Box<DynDeadLetterStore<'static>>>,
+    health: Arc<WorkerHealth>,
+    domain: String,
+}
+
+#[allow(unknown_lints, rss_diport_impl_allowlist)]
+// reason(rss_diport_impl_allowlist): eventexec consumer worker 内部包装已注入的 DLX port，用于 worker health/metrics；
+// 不新增 provider，不触碰 adapter 资源构造。
+impl DeadLetterStore for HealthReportingDlx {
+    async fn write_dead_letter(
+        &self,
+        record: DeadLetterRecord,
+    ) -> Result<(), DeadLetterStoreError> {
+        let inner = self.inner.lock().await;
+        let result = inner.write_dead_letter(record).await;
+        let outcome = if result.is_ok() {
+            "ok"
+        } else {
+            self.health.mark_dlx_write_error();
+            "error"
+        };
+        metrics::counter!(
+            "consumer_dlx_write_total",
+            "domain" => self.domain.clone(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        result
+    }
+
+    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
+        let inner = self.inner.lock().await;
+        inner.shutdown().await
+    }
+}
+
+fn health_reporting_dlx(
+    dlx: Box<DynDeadLetterStore<'static>>,
+    health: Arc<WorkerHealth>,
+    meta: &ConsumerMeta,
+) -> Box<DynDeadLetterStore<'static>> {
+    DynDeadLetterStore::new_box(HealthReportingDlx {
+        inner: tokio::sync::Mutex::new(dlx),
+        health,
+        domain: meta.domain().to_owned(),
+    })
+}
+
 /// 在专用 OS 线程建 current-thread runtime `block_on` 跑 `body`：线程退出（正常 / runtime 构建失败 /
 /// future panic）由 [`StoppedOnExit`] 守卫统一 `health.mark_stopped()`（readyz Unhealthy）。
 ///
@@ -223,7 +275,10 @@ where
     S: IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
+    let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
+    let health_run = Arc::clone(&health);
     let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
+        health_run.mark_healthy();
         run_consumer(stream, idempotency, dlx, meta, handler, lease_cfg).await;
     });
     ConsumerWorker::adopt(name, handle, health, token)
@@ -289,7 +344,10 @@ where
     S: IdempotencyStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
+    let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
+    let health_run = Arc::clone(&health);
     let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
+        health_run.mark_healthy();
         run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
     });
     ConsumerWorker::adopt(name, handle, health, token)
@@ -321,13 +379,15 @@ where
 {
     let token_run = token.clone();
     let health_run = Arc::clone(&health);
+    let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
     let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
         match subscriber.subscribe_ackable(topic, token_run.clone()).await {
             Ok(stream) => {
+                health_run.mark_healthy();
                 run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
             }
             Err(err) => {
-                health_run.mark_degraded();
+                health_run.mark_subscriber_unavailable();
                 tracing::error!(
                     error = %err,
                     "consumer: subscribe_ackable failed; worker exiting"
@@ -344,7 +404,11 @@ mod tests {
 
     use consistency::error::EngineError;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
-    use diport::dead_letter_store::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError};
+    use diport::EnvelopeMetadata;
+    use diport::dead_letter_store::{
+        DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary,
+        WritableDeadLetterSource,
+    };
     use diport::{
         AckAction, AckError, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
         ManagedResource, SubscriberError, Topic,
@@ -355,8 +419,8 @@ mod tests {
     use super::{
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
         DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, LeaseConfig,
-        Message, MessageStream, Mutex, WorkerHealth, spawn_consumer, spawn_consumer_ackable,
-        spawn_consumer_ackable_subscriber, spawn_relay,
+        Message, MessageStream, Mutex, WorkerHealth, health_reporting_dlx, spawn_consumer,
+        spawn_consumer_ackable, spawn_consumer_ackable_subscriber, spawn_relay,
     };
 
     /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
@@ -435,6 +499,26 @@ mod tests {
         }
     }
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("test subscriber unavailable")]
+    struct TestSubscriberUnavailable;
+
+    struct FailingSubscriber;
+
+    impl AckableSubscriber for FailingSubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            _token: CancellationToken,
+        ) -> Result<DeliveryStream, SubscriberError> {
+            Err(SubscriberError::new(TestSubscriberUnavailable))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            Ok(())
+        }
+    }
+
     /// 恒 Fresh 幂等 store（计 commit 次数）。
     struct FreshStore {
         commits: AtomicU32,
@@ -495,6 +579,43 @@ mod tests {
         DynDeadLetterStore::new_box(NoopDlx)
     }
 
+    struct ErrorDlx;
+    impl DeadLetterStore for ErrorDlx {
+        async fn write_dead_letter(
+            &self,
+            _record: DeadLetterRecord,
+        ) -> Result<(), DeadLetterStoreError> {
+            Err(DeadLetterStoreError::new(std::io::Error::other(
+                "test dlx write failed",
+            )))
+        }
+        async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
+            Ok(())
+        }
+    }
+
+    fn error_dlx() -> Box<DynDeadLetterStore<'static>> {
+        DynDeadLetterStore::new_box(ErrorDlx)
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: 测试 tenant literal 合法，失败即测试数据写错。
+    fn sample_dead_letter_record(message_id: &str) -> DeadLetterRecord {
+        DeadLetterRecord::new(
+            vocab::TenantId::parse("00000000-0000-0000-0000-000000000001")
+                .expect("valid tenant id"),
+            message_id,
+            "audit",
+            "identity.session-created",
+            "identity.session-created",
+            b"payload".to_vec(),
+            DeadLetterSummary::new("test dead letter"),
+            1,
+            WritableDeadLetterSource::Consumer,
+            EnvelopeMetadata::empty(),
+        )
+    }
+
     fn handler_ack(
         counter: Arc<AtomicU32>,
     ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static {
@@ -523,6 +644,59 @@ mod tests {
     }
 
     // ── tests ───────────────────────────────────────────────────────────────────
+
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 runtime 构造和 wrapper 调用，失败即测试环境错误；item-level carve-out。
+    #[test]
+    fn health_reporting_dlx_emits_write_metric_and_degrades_on_error() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ok_health = Arc::new(WorkerHealth::starting());
+        let err_health = Arc::new(WorkerHealth::starting());
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let meta = meta();
+                let ok = health_reporting_dlx(noop_dlx(), Arc::clone(&ok_health), &meta);
+                ok.write_dead_letter(sample_dead_letter_record("dlx-ok"))
+                    .await
+                    .unwrap();
+
+                let err = health_reporting_dlx(error_dlx(), Arc::clone(&err_health), &meta);
+                assert!(
+                    err.write_dead_letter(sample_dead_letter_record("dlx-error"))
+                        .await
+                        .is_err()
+                );
+            });
+        });
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("consumer_dlx_write_total"),
+            "缺 metric consumer_dlx_write_total: {rendered}"
+        );
+        assert!(
+            rendered.contains("domain=\"audit\""),
+            "缺 domain label: {rendered}"
+        );
+        assert!(
+            rendered.contains("outcome=\"ok\""),
+            "缺 outcome=ok label: {rendered}"
+        );
+        assert!(
+            rendered.contains("outcome=\"error\""),
+            "缺 outcome=error label: {rendered}"
+        );
+        assert_eq!(ok_health.status(), HealthStatus::Unhealthy);
+        assert_eq!(ok_health.detail(), "starting");
+        assert_eq!(err_health.status(), HealthStatus::Degraded);
+        assert_eq!(err_health.detail(), "dlx-write-error");
+    }
 
     /// at-most-once 驱动有限流：处理全部消息（handler / commit 各 N 次），shutdown 后 Unhealthy。
     #[tokio::test]
@@ -677,6 +851,28 @@ mod tests {
             "root/stack child cancellation must reach subscriber stream token"
         );
         assert!(worker.shutdown().await.is_ok());
+    }
+
+    /// 订阅失败应保留 subscriber-unavailable detail；线程退出守卫不得覆盖成 stopped。
+    #[tokio::test]
+    async fn ackable_subscriber_failure_health_remains_subscriber_unavailable() {
+        let health = Arc::new(WorkerHealth::starting());
+        let worker = spawn_consumer_ackable_subscriber(
+            "event_consumer:audit:session.created".to_string(),
+            DynAckableSubscriber::new_box(FailingSubscriber),
+            Topic::new("session.created"),
+            FreshStore::new(),
+            noop_dlx(),
+            meta(),
+            handler_ack(Arc::new(AtomicU32::new(0))),
+            lease_cfg(),
+            CancellationToken::new(),
+            Arc::clone(&health),
+        );
+
+        assert!(worker.shutdown().await.is_ok());
+        assert_eq!(worker.health().status(), HealthStatus::Unhealthy);
+        assert_eq!(worker.health().detail(), "subscriber-unavailable");
     }
 
     /// `ConsumerWorker` 是 `Send + Sync`（经 `Box<DynManagedResource>` 注入 ShutdownStack 的前提）。

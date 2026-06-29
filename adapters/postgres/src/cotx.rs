@@ -32,7 +32,7 @@ use crate::outbox::{OutboxEnvelope, append_outbox};
 /// only run scoped read/write/co-tx closures after this module has injected `SET LOCAL
 /// rss.tenant_id`.
 ///
-/// # INVARIANT: TENANCY-PG-TX-FUNNEL-01
+/// # INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
 /// Tenant-table adapters hold `PgTenantPool`, not `sqlx::PgPool`; direct raw-pool tenant-table
 /// access is therefore not expressible through their fields. `cargo xtask pg-tenant-tx-guard`
@@ -385,13 +385,13 @@ impl<E> CoTxWriteError<E> {
 
 fn log_cotx_write_error<E>(entry: &Entry, env: &OutboxEnvelope, error: &CoTxWriteError<E>) {
     if let Some(source) = error.sqlx_source() {
-        log_cotx_storage_error(entry, env, error.stage(), source);
+        log_cotx_sqlx_error(entry, env, error.stage(), source);
     } else {
-        log_cotx_business_error(entry, env, error.stage());
+        log_cotx_domain_error(entry, env, error.stage());
     }
 }
 
-fn log_cotx_storage_error(
+fn log_cotx_sqlx_error(
     entry: &Entry,
     env: &OutboxEnvelope,
     stage: &'static str,
@@ -408,7 +408,7 @@ fn log_cotx_storage_error(
     );
 }
 
-fn log_cotx_business_error(entry: &Entry, env: &OutboxEnvelope, stage: &'static str) {
+fn log_cotx_domain_error(entry: &Entry, env: &OutboxEnvelope, stage: &'static str) {
     tracing::warn!(
         target: "postgres",
         event_id = entry.idem_key().as_str(),

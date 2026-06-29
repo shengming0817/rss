@@ -21,7 +21,7 @@
 - **域 crate 作者**（identity / settings / audit / …）：需要 durable outbox 发事件、幂等消费、saga 编排、CQRS 投影、L4 收敛环、命令分发等一致性原语，且这些原语在编译期/启动期把错误用法变得不可表达。
 - **平台运维**：需要至少一次投递、进程重启/崩溃不丢事件、跨副本不重复副作用、永久失败可观测（DLX）、多副本下单写者收敛（leader-elect + fencing）。
 
-「demo 拓扑」= 进程内 in-mem（单进程 / 测试 / 样例）；「durable 拓扑」= postgres + amqp + redis（生产）。topology-gated resolver 在二者间选型，**缺生产配置即启动期 fail-closed，绝不静默降级回 in-mem**。
+「demo 拓扑」= 进程内 in-mem（单进程 / 测试 / 样例）；「durable 拓扑」= postgres + amqp（生产事件传输；consumer 幂等走 PG inbox）。topology-gated resolver 在二者间选型，**缺生产配置即启动期 fail-closed，绝不静默降级回 in-mem**。
 
 ---
 
@@ -63,17 +63,17 @@
 
 ### User Story 3 - 消费幂等去重（idempotency / inbox，L0 + replaydeps）(Priority: P1)
 
-消费方在执行副作用前以稳定 key（EventId / DispatchId）做 claim-or-skip：首见 `Fresh` 则执行，已见 `Duplicate` 则幂等短路。topology-gated `replaydeps` resolver 在单进程（in-mem claimer）与多副本（redis-backed claimer）间选型；多副本缺 redis 配置即 fail-closed。
+消费方在执行副作用前以稳定 key（EventId / DispatchId）做 claim-or-skip：首见 `Fresh` 则执行，已见 `Duplicate` 则幂等短路。runtime durable event consumer 通过 PG `inbox_dedup` resource bundle 接入，不再经 Redis claimer。
 
 **Why this priority**: at-least-once 投递必然有重投；没有消费幂等，relay/saga/projection/command 的重投会产生重复副作用。是所有消费链的正确性前提。
 
-**Independent Test**: 表驱动覆盖 `Fresh`/`Duplicate` 状态转移；同一 key 连续 try_claim 3 次仅首次 `Fresh`；consumer group 名变更后去重失效（负向断言）；resolver 在缺 redis 配置的多副本拓扑下 fail-closed。
+**Independent Test**: 表驱动覆盖 `Fresh`/`Duplicate` 状态转移；同一 key 连续 try_claim 3 次仅首次 `Fresh`；consumer group 名变更后去重失效（负向断言）；runtime e2e 证明 duplicate 命中 PG inbox 且 tracer 新事件正常消费。
 
 **Acceptance Scenarios**:
 
 1. **Given** 一个全新 idem key，**When** 首次 `try_claim`，**Then** 返回 `Fresh`；同 key 再次 `try_claim` 返回 `Duplicate`。
-2. **Given** demo 拓扑，**When** resolver 解析 claimer，**Then** 得 in-mem claimer（sealed，仅 resolver 可达）。
-3. **Given** 多副本拓扑但缺 redis 配置，**When** 启动解析 claimer，**Then** 启动期报错 fail-closed，不回落 in-mem。
+2. **Given** durable runtime consumer，**When** 同一 event_id + consumer_group 重复投递，**Then** 第二次命中 PG inbox `Duplicate`，handler 不重复执行。
+3. **Given** durable runtime consumer，**When** tracer 使用新 event_id 投递，**Then** PG inbox 返回 `Fresh` 并最终 `done`。
 
 ---
 
@@ -210,7 +210,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-004**: relay MUST 以 at-least-once 中继已持久化 entry，发布成功后经 CAS 标记 published；瞬态失败延后重试、永久失败进 DLX；MUST 不丢事件（崩溃重启后复投）。relay 后台 worker MUST 注册运行时操作 health probe `outbox_relay`（**无 `_ready` 后缀**——`_ready` 专属依赖可用性 probe，运行时操作 probe 不带，见 observability.md §Readyz Probe）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
 - **FR-005**: sweeper MUST 周期兜底扫描未发 entry 触发重投，防中断导致 entry 永不发。sweeper 后台 worker MUST 注册运行时操作 health probe `outbox_sweeper`（**无 `_ready` 后缀**，同 observability.md §Readyz Probe 命名约定）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
 - **FR-006**: 消费方 MUST 在副作用前以稳定 key claim-or-skip 幂等去重；重复投递 MUST 不产生重复副作用。
-- **FR-007**: topology-gated resolver（eventtransport / replaydeps / sagaprojectiondeps）MUST 在 demo（in-mem）与 durable（postgres/redis/amqp）拓扑间单源选型；durable 拓扑缺生产配置 MUST 启动期 fail-closed，MUST NOT 静默降级回 in-mem。
+- **FR-007**: topology-gated resolver（eventtransport / replaydeps / sagaprojectiondeps）MUST 在 demo（in-mem）与 durable 拓扑间单源选型；eventtransport durable = AMQP + PostgreSQL inbox/DLX，Redis 仅用于其它 runtime 原语/历史 replaydeps 后端。durable 拓扑缺对应生产配置 MUST 启动期 fail-closed，MUST NOT 静默降级回 in-mem。
 - **FR-008**: in-mem 原语（claimer / bus / journal / checkpoint / locker）MUST sealed，仅 resolver 的 demo 分支可达，生产代码 MUST 不可直接构造（类型层 Hard）。
 - **FR-009**: 消费框架 MUST 经 `HandleResult` 三路（ack/requeue/reject）收口，瞬态退避有预算上限，耗尽或永久失败 MUST 进 DLX 并结构化记录（不静默丢消息）。DLX 写入 MUST 触发 `tracing::error!` 并带 span 定位字段（domain / contract_id / topic / num_attempts / error_summary，均无 PII）。
 - **FR-010**: 订阅注册 MUST 与域 crate `contract.toml` 同源（codegen 派生 glue），active 事件契约 MUST 至少有一个订阅 handler（死事件守卫）。
@@ -235,7 +235,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **Projection Event**：投影输入载体（outbox entry / saga journal event 共同实现）——topic + lsn + payload。
 - **Reconcile Request / Outcome**：收敛单元——目标 entity（None=resync 全量）/ 收敛结果（settled / requeue_after）+ fencing epoch。
 - **Command Dispatch**：命令载体——DispatchId（幂等 key）+ 命令 topic + Request payload；与 outbox entry 同表。
-- **Topology Resolver 配置**：拓扑选型输入——transport（demo bus / amqp）、replay（in-mem / redis claimer）、saga-projection（mem / postgres journal+checkpoint+tx + locker）。
+- **Topology Resolver 配置**：拓扑选型输入——transport（demo bus / amqp）、runtime consumer inbox（postgres `inbox_dedup`）、replay/其它 runtime 原语（in-mem / redis 等）、saga-projection（mem / postgres journal+checkpoint+tx + locker）。
 
 ## Success Criteria *(mandatory)*
 
@@ -245,7 +245,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **SC-002**: 事件零丢失——relay 进程在「发布后 CAS 前」被杀，重启后该事件仍被消费方收到且仅生效一次（at-least-once + 幂等）。
 - **SC-003**: 业务事务回滚时 outbox 无孤立 entry，原子性测试 100% 通过（L1）。
 - **SC-004**: 同一事件/命令重复投递 N 次，副作用仅发生一次（消费幂等），L2 幂等治理测试通过。
-- **SC-005**: durable 拓扑缺任一生产配置（broker/redis/pg）时，进程启动 fail-closed 报错，绝不以 in-mem 静默启动（100% 的缺配置用例触发启动失败）。
+- **SC-005**: durable 拓扑缺对应生产配置时，进程启动 fail-closed 报错，绝不以 in-mem 静默启动；eventtransport consumer 至少要求 broker + PG inbox/DLX，Redis 不再是该路径必需项（100% 的缺配置用例触发启动失败）。
 - **SC-006**: saga 任一步失败超预算时，已完成步按逆序 100% 被补偿（无跳过、无乱序），补偿失败写 saga dead-letter 时产生 `tracing::error!`（含 saga_id / step_name / error_summary）并可经 metric（如 `saga_dead_letters_total{domain}`）计数告警。
 - **SC-007**: 投影从 checkpoint 续投在崩溃重启后无重复 apply、无遗漏；从 offset 0 重放结果与增量构建逐字段一致。
 - **SC-008**: 多副本 reconcile 在任意时刻至多一个 leader dispatch；旧 epoch 写 100% 被 fencing 拒绝。
@@ -257,7 +257,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - G0/#997 已冻结全部 trait/type 签名；本 feature 不改公共接缝，只填 body（破坏式 wire 变更走 pre-GA 窗口原地改 active 版本 + 扇出闭环，至 2026-12-31）。
 - **租户隔离立场**：当前 per-domain 队列/凭据隔离粒度为 domain，不分 tenant；outbox/inbox_dedup 去重以 `(event_id, consumer_group)` 为键，跨租户正确性依赖 EventId 全局唯一（UUID）+ 上层 RLS + envelope principal；**outbox/inbox 不引入 tenant_id 维度属本 feature 显式范围决策**，post-GA 如需 per-tenant 队列/索引隔离再单列 Epic 跟踪。
 - `consistency` 引擎策略 trait 为 native AFIT + 泛型静态分发（不引 dynosaur/async-trait）；`diport` DI port 为 dynosaur dyn（ADR-003）。二者分工不变。
-- demo 拓扑（in-mem，adapters/memory）已实现并保留为单进程/测试/样例路径；durable 拓扑（postgres/redis/amqp）当前为 sealed-marker stub，待本 feature 落地。
+- demo 拓扑（in-mem，adapters/memory）已实现并保留为单进程/测试/样例路径；durable 拓扑按机制组合 postgres/amqp/redis，其中 runtime event consumer 使用 postgres inbox + amqp，不再经 Redis claimer。
 - G1 追踪弹（identity→in-mem→audit）已绿，作为 #1100 durable 替换的起点与回归基线。
 - reconcile Loop harness 的最终 crate 落位（eventexec vs 独立 home）与 saga/projection 共享 checkpoint store 的先后，由 `/speckit-plan` 阶段裁定（不阻塞拆解）。
 - postgres 索引/migration 形态遵 rust-standards §数据库迁移（pre-GA 普通 `CREATE INDEX`，migration 只增不改）。

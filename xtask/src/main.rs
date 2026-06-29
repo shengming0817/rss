@@ -51,6 +51,7 @@ mod defergate;
 mod diagnostic;
 mod diffcov;
 mod doc_contracts;
+mod event_transport_guard;
 mod layerdeps;
 mod layers;
 mod migrations;
