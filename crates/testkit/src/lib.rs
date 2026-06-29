@@ -40,6 +40,8 @@ pub use containers::{
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
 // 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。
 #[cfg(feature = "containers")]
+pub mod eventing_conformance;
+#[cfg(feature = "containers")]
 pub mod repo_conformance;
 #[cfg(feature = "containers")]
 pub mod tenant_conformance;

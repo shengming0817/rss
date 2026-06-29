@@ -302,14 +302,27 @@ async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
 // T8: sweep 删超保留期 published、保留 dlx + 保留期内 published/pending anti-vacuity
 // T9: lease_token CAS fencing（stale token 不能结算被新租约接管的行）
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use consistency::{Disposition, Entry, OutboxRelay, OutboxSource, RetentionSweeper, Topic};
-use diport::{DynPublisher, PublishRequest, Publisher, PublisherError};
+use consistency::{
+    Disposition, Entry, HandleResult, OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper,
+    Topic,
+};
+use diport::{
+    AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
+    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata, KEY_TENANT_ID,
+    Message, PublishRequest, Publisher, PublisherError,
+};
+use eventexec::{ConsumerMeta, LeaseConfig, MAX_REDELIVERY, run_consumer_ackable};
+use testkit::eventing_conformance as eventconf;
 
 use crate::outbox::{
     MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, PgOutbox, SettleOutcome, append_outbox,
 };
+
+static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// setup 阶段：应用 migration（含 outbox 表）。**不**全表 DELETE——每个 outbox 用例按唯一 `event_id`
 /// （[`unique_event_id`]）+ 唯一 domain 命名空间自隔离断言（`WHERE event_id = $1` / domain-scoped 查询用各自
@@ -453,6 +466,831 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
         calls: Arc::new(Mutex::new(0)),
     };
     PgOutbox::new(store, DynPublisher::new_box(pub_))
+}
+
+/// Conformance publisher：记录 broker-visible message_id，并按脚本返回 publish 结果。
+struct ConformancePublisher {
+    mode: eventconf::PublishMode,
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl ConformancePublisher {
+    fn new(mode: eventconf::PublishMode) -> (Self, Arc<Mutex<Vec<String>>>) {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                mode,
+                messages: Arc::clone(&messages),
+            },
+            messages,
+        )
+    }
+}
+
+impl Publisher for ConformancePublisher {
+    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(request.event_id().as_str().to_string());
+        match self.mode {
+            eventconf::PublishMode::Ok => Ok(()),
+            eventconf::PublishMode::Transient => Err(PublisherError::transient(
+                std::io::Error::other("eventing conformance transient publish"),
+            )),
+            eventconf::PublishMode::Permanent => Err(PublisherError::permanent(
+                std::io::Error::other("eventing conformance permanent publish"),
+            )),
+            _ => Err(PublisherError::permanent(std::io::Error::other(
+                "eventing conformance unknown publish mode",
+            ))),
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), PublisherError> {
+        Ok(())
+    }
+}
+
+async fn conf_seed_pending(
+    store: &PgStore,
+    event_id: String,
+    domain: String,
+) -> Result<(), String> {
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = make_entry(&event_id);
+            let env = make_test_env(&domain, "eventing-conf");
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_relay(
+    store: &PgStore,
+    event_id: String,
+    mode: eventconf::PublishMode,
+) -> Result<eventconf::RelayObservation, String> {
+    let (publisher, messages) = ConformancePublisher::new(mode);
+    let outbox = PgOutbox::new(store, DynPublisher::new_box(publisher));
+    let entry = make_entry(&event_id);
+    let disposition = outbox.relay(&entry).await.map_err(|e| format!("{e:?}"))?;
+    let messages = messages.lock().unwrap_or_else(|e| e.into_inner());
+    let message_id = messages.last().cloned();
+    let publish_count = messages.len() as u64;
+    Ok(eventconf::RelayObservation {
+        disposition: match disposition {
+            Disposition::Ack => eventconf::RelayDisposition::Ack,
+            Disposition::Requeue => eventconf::RelayDisposition::Requeue,
+            Disposition::Reject => eventconf::RelayDisposition::Reject,
+            _ => {
+                return Err("unknown relay disposition".to_string());
+            }
+        },
+        message_id,
+        publish_count,
+    })
+}
+
+async fn conf_poll_pending(store: &PgStore, domain: String) -> Result<Vec<String>, String> {
+    let outbox = make_pg_outbox(store, || Ok(()));
+    outbox
+        .poll_pending(&domain, 100)
+        .await
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.idem_key().as_str().to_string())
+                .collect()
+        })
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_outbox_state(
+    store: &PgStore,
+    event_id: String,
+) -> Result<eventconf::OutboxState, String> {
+    let row: Option<(String, i32, bool)> = sqlx::query_as(
+        "SELECT status, retry_count, retry_after IS NOT NULL FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_optional(&store.pool)
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+    let dlx_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+    Ok(match row {
+        Some((status, retry_count, retry_after_set)) => eventconf::OutboxState {
+            exists: true,
+            status: conf_outbox_status(&status)?,
+            retry_count: i64::from(retry_count),
+            retry_after_set,
+            dlx_count: dlx_count.0 as u64,
+        },
+        None => eventconf::OutboxState {
+            exists: false,
+            status: eventconf::OutboxStatus::Absent,
+            retry_count: 0,
+            retry_after_set: false,
+            dlx_count: dlx_count.0 as u64,
+        },
+    })
+}
+
+fn conf_outbox_status(status: &str) -> Result<eventconf::OutboxStatus, String> {
+    match status {
+        crate::outbox::STATUS_PENDING => Ok(eventconf::OutboxStatus::Pending),
+        crate::outbox::STATUS_PUBLISHING => Ok(eventconf::OutboxStatus::Publishing),
+        crate::outbox::STATUS_PUBLISHED => Ok(eventconf::OutboxStatus::Published),
+        crate::outbox::STATUS_DLX => Ok(eventconf::OutboxStatus::Dlx),
+        other => Err(format!("unknown outbox status {other:?}")),
+    }
+}
+
+async fn conf_backdate_publishing(store: &PgStore, event_id: String) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE outbox \
+         SET status='publishing', lease_token = gen_random_uuid(), \
+             created_at = now() - make_interval(secs => $1), \
+             updated_at = now() - make_interval(secs => $1) \
+         WHERE event_id = $2",
+    )
+    .bind(crate::outbox::LEASE_TTL_SECONDS + 10)
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+async fn conf_sample_backlog(
+    store: &PgStore,
+    domain: String,
+) -> Result<eventconf::BacklogSample, String> {
+    let outbox = make_pg_outbox(store, || Ok(()));
+    outbox
+        .sample_backlog(&domain)
+        .await
+        .map(|s| eventconf::BacklogSample {
+            depth: s.depth(),
+            oldest_age_seconds: s.oldest_age_seconds(),
+        })
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_sweep_outbox(store: &PgStore, retain_seconds: u64) -> Result<u64, String> {
+    let outbox = make_pg_outbox(store, || Ok(()));
+    outbox
+        .sweep(retain_seconds)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_seed_terminal(
+    store: &PgStore,
+    event_id: String,
+    domain: String,
+    status: eventconf::TerminalStatus,
+) -> Result<(), String> {
+    conf_seed_pending(store, event_id.clone(), domain).await?;
+    let status = match status {
+        eventconf::TerminalStatus::PublishedOld => "published",
+        eventconf::TerminalStatus::DlxOld => "dlx",
+        _ => "dlx",
+    };
+    sqlx::query(
+        "UPDATE outbox SET status = $1, created_at = now() - make_interval(secs => 7200) WHERE event_id = $2",
+    )
+    .bind(status)
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eventing_conformance_outbox_enrolls_postgres() -> TestResult {
+    let _sweep_guard = OUTBOX_SWEEP_TEST_LOCK.lock().await;
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let domain = unique_domain("eventing-conf-domain");
+    let other_domain = unique_domain("eventing-conf-other-domain");
+    let event_id = unique_event_id("eventing-conf-outbox");
+
+    eventconf::assert_outbox_relay_conformance(eventconf::OutboxRelayCase {
+        ids: eventconf::EventingIds::new(
+            event_id.clone(),
+            event_id.clone(),
+            "eventing-conf-group",
+            "lease-a",
+        ),
+        domain,
+        other_domain,
+        max_attempts: MAX_PUBLISH_ATTEMPTS as u32,
+        seed_pending: Box::new(|args| {
+            Box::pin(conf_seed_pending(&store, args.event_id, args.domain))
+        }),
+        relay: Box::new(|args| Box::pin(conf_relay(&store, args.event_id, args.mode))),
+        poll_pending: Box::new(|args| Box::pin(conf_poll_pending(&store, args.domain))),
+        state: Box::new(|args| Box::pin(conf_outbox_state(&store, args.event_id))),
+        backdate_publishing: Box::new(|args| {
+            Box::pin(conf_backdate_publishing(&store, args.event_id))
+        }),
+        sample_backlog: Box::new(|args| Box::pin(conf_sample_backlog(&store, args.domain))),
+        sweep: Box::new(|retain_seconds| Box::pin(conf_sweep_outbox(&store, retain_seconds))),
+        seed_terminal: Box::new(|args| {
+            Box::pin(conf_seed_terminal(
+                &store,
+                args.event_id,
+                args.domain,
+                args.status,
+            ))
+        }),
+    })
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+fn conf_lease_for(leases: &Arc<Mutex<HashMap<String, LeaseToken>>>, alias: String) -> LeaseToken {
+    let mut guard = leases.lock().unwrap_or_else(|e| e.into_inner());
+    guard.entry(alias).or_insert_with(LeaseToken::mint).clone()
+}
+
+async fn conf_try_claim(
+    store: &PgStore,
+    leases: &Arc<Mutex<HashMap<String, LeaseToken>>>,
+    key: String,
+    group: String,
+    lease_alias: String,
+) -> Result<eventconf::InboxSeen, String> {
+    let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
+    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let lease = conf_lease_for(leases, lease_alias);
+    store
+        .inbox(group)
+        .try_claim(&key, &lease)
+        .await
+        .map(|seen| match seen {
+            SeenState::Fresh => eventconf::InboxSeen::Fresh,
+            SeenState::Duplicate => eventconf::InboxSeen::Duplicate,
+            _ => eventconf::InboxSeen::Duplicate,
+        })
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_extend(
+    store: &PgStore,
+    leases: &Arc<Mutex<HashMap<String, LeaseToken>>>,
+    key: String,
+    group: String,
+    lease_alias: String,
+) -> Result<eventconf::LeaseOutcome, String> {
+    let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
+    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let lease = conf_lease_for(leases, lease_alias);
+    store
+        .inbox(group)
+        .extend(&key, &lease)
+        .await
+        .map(|outcome| match outcome {
+            consistency::LeaseOutcome::Held => eventconf::LeaseOutcome::Held,
+            consistency::LeaseOutcome::Lost => eventconf::LeaseOutcome::Lost,
+            _ => eventconf::LeaseOutcome::Lost,
+        })
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_commit(
+    store: &PgStore,
+    leases: &Arc<Mutex<HashMap<String, LeaseToken>>>,
+    key: String,
+    group: String,
+    lease_alias: String,
+) -> Result<eventconf::LeaseOutcome, String> {
+    let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
+    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let lease = conf_lease_for(leases, lease_alias);
+    store
+        .inbox(group)
+        .commit(&key, &lease)
+        .await
+        .map(|outcome| match outcome {
+            consistency::LeaseOutcome::Held => eventconf::LeaseOutcome::Held,
+            consistency::LeaseOutcome::Lost => eventconf::LeaseOutcome::Lost,
+            _ => eventconf::LeaseOutcome::Lost,
+        })
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_release(
+    store: &PgStore,
+    leases: &Arc<Mutex<HashMap<String, LeaseToken>>>,
+    key: String,
+    group: String,
+    lease_alias: String,
+) -> Result<(), String> {
+    let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
+    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let lease = conf_lease_for(leases, lease_alias);
+    store
+        .inbox(group)
+        .release(&key, &lease)
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_backdate_claim(store: &PgStore, key: String, group: String) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE inbox_dedup \
+         SET claimed_at = now() - make_interval(secs => $1) \
+         WHERE event_id = $2 AND consumer_group = $3",
+    )
+    .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 10)
+    .bind(&key)
+    .bind(&group)
+    .execute(&store.pool)
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eventing_conformance_inbox_enrolls_postgres() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let event_id = unique_event_id("eventing-conf-inbox");
+    let group = unique_domain("eventing-conf-inbox-group");
+    let group_b = unique_domain("eventing-conf-inbox-group-b");
+    let leases: Arc<Mutex<HashMap<String, LeaseToken>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let try_leases = Arc::clone(&leases);
+    let extend_leases = Arc::clone(&leases);
+    let commit_leases = Arc::clone(&leases);
+    let release_leases = Arc::clone(&leases);
+    eventconf::assert_inbox_conformance(eventconf::InboxConformanceCase {
+        ids: eventconf::EventingIds::new(event_id.clone(), event_id.clone(), group, "lease-a"),
+        second_group: group_b,
+        try_claim: Box::new(|args| {
+            Box::pin(conf_try_claim(
+                &store,
+                &try_leases,
+                args.inbox_key,
+                args.consumer_group,
+                args.lease_alias,
+            ))
+        }),
+        extend: Box::new(|args| {
+            Box::pin(conf_extend(
+                &store,
+                &extend_leases,
+                args.inbox_key,
+                args.consumer_group,
+                args.lease_alias,
+            ))
+        }),
+        commit: Box::new(|args| {
+            Box::pin(conf_commit(
+                &store,
+                &commit_leases,
+                args.inbox_key,
+                args.consumer_group,
+                args.lease_alias,
+            ))
+        }),
+        release: Box::new(|args| {
+            Box::pin(conf_release(
+                &store,
+                &release_leases,
+                args.inbox_key,
+                args.consumer_group,
+                args.lease_alias,
+            ))
+        }),
+        backdate_claim: Box::new(|args| {
+            Box::pin(conf_backdate_claim(
+                &store,
+                args.inbox_key,
+                args.consumer_group,
+            ))
+        }),
+    })
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+struct ConformanceAcker {
+    actions: Mutex<Vec<AckAction>>,
+}
+
+impl ConformanceAcker {
+    fn new() -> (Arc<Self>, Box<DynAcker<'static>>) {
+        let acker = Arc::new(Self {
+            actions: Mutex::new(Vec::new()),
+        });
+        struct ArcAcker(Arc<ConformanceAcker>);
+        impl Acker for ArcAcker {
+            async fn settle(&self, action: AckAction) -> Result<(), diport::AckError> {
+                self.0
+                    .actions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(action);
+                Ok(())
+            }
+        }
+        (Arc::clone(&acker), DynAcker::new_box(ArcAcker(acker)))
+    }
+
+    fn exactly_one_action(&self) -> Result<AckAction, String> {
+        let actions = self.actions.lock().unwrap_or_else(|e| e.into_inner());
+        match actions.as_slice() {
+            [action] => Ok(*action),
+            [] => Err("missing settle action".to_string()),
+            many => Err(format!(
+                "expected exactly one settle action, got {}",
+                many.len()
+            )),
+        }
+    }
+}
+
+struct FailingDlx {
+    captured: Arc<Mutex<Option<DeadLetterRecord>>>,
+}
+
+impl FailingDlx {
+    fn new(captured: Arc<Mutex<Option<DeadLetterRecord>>>) -> Self {
+        Self { captured }
+    }
+}
+
+impl DeadLetterStore for FailingDlx {
+    async fn write_dead_letter(
+        &self,
+        record: DeadLetterRecord,
+    ) -> Result<(), DeadLetterStoreError> {
+        *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
+        Err(DeadLetterStoreError::new(std::io::Error::other(
+            "eventing conformance dlx failure",
+        )))
+    }
+
+    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
+        Ok(())
+    }
+}
+
+fn conf_consumer_metadata() -> EnvelopeMetadata {
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
+    metadata
+}
+
+fn conf_delivery_stream(event_id: &str) -> (DeliveryStream, Arc<ConformanceAcker>) {
+    let (acker, boxed) = ConformanceAcker::new();
+    let message = Message::new_with_metadata(
+        event_id,
+        b"eventing-conformance-payload".to_vec(),
+        conf_consumer_metadata(),
+    );
+    (
+        Box::pin(futures::stream::iter(vec![Delivery::new(message, boxed)])),
+        acker,
+    )
+}
+
+fn conf_consumer_meta() -> ConsumerMeta {
+    ConsumerMeta::new(
+        "eventing-conf-consumer-domain",
+        "eventing-conf-consumer-contract",
+        "eventing.conf.consumer",
+    )
+}
+
+fn conf_expected_dlx() -> eventconf::DlxFields {
+    eventconf::DlxFields {
+        source_kind: "consumer".to_string(),
+        domain: "eventing-conf-consumer-domain".to_string(),
+        contract_id: "eventing-conf-consumer-contract".to_string(),
+        topic: "eventing.conf.consumer".to_string(),
+        num_attempts: MAX_REDELIVERY,
+    }
+}
+
+fn conf_lease_cfg() -> LeaseConfig {
+    LeaseConfig::from_ttl(std::time::Duration::from_secs(
+        crate::inbox::INBOX_LEASE_TTL_SECONDS as u64,
+    ))
+}
+
+fn conf_requeue_handler(
+    calls: Arc<AtomicU32>,
+) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    move |_message| {
+        let calls = Arc::clone(&calls);
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::Relaxed);
+            HandleResult::requeue(consistency::EngineError::new(
+                consistency::EngineErrorKind::Transient,
+            ))
+        })
+    }
+}
+
+fn conf_ack_handler(
+    calls: Arc<AtomicU32>,
+) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    move |_message| {
+        let calls = Arc::clone(&calls);
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::Relaxed);
+            HandleResult::ack()
+        })
+    }
+}
+
+fn action_to_settle(action: AckAction) -> Result<eventconf::SettleAction, String> {
+    match action {
+        AckAction::Ack => Ok(eventconf::SettleAction::Ack),
+        AckAction::Requeue => Ok(eventconf::SettleAction::Requeue),
+        AckAction::Reject => Ok(eventconf::SettleAction::Reject),
+        _ => Err("unknown ack action".to_string()),
+    }
+}
+
+fn conf_settle_action(acker: &ConformanceAcker) -> Result<eventconf::SettleAction, String> {
+    action_to_settle(acker.exactly_one_action()?)
+}
+
+fn conf_dlx_fields_from_record(record: &DeadLetterRecord) -> eventconf::DlxFields {
+    eventconf::DlxFields {
+        source_kind: record.source().as_str().to_string(),
+        domain: record.domain().to_string(),
+        contract_id: record.contract_id().to_string(),
+        topic: record.topic().to_string(),
+        num_attempts: record.num_attempts(),
+    }
+}
+
+async fn conf_inbox_status(
+    store: &PgStore,
+    event_id: &str,
+    group: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT status FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+    )
+    .bind(event_id)
+    .bind(group)
+    .fetch_optional(&store.pool)
+    .await
+    .map(|row| row.map(|(status,)| status))
+    .map_err(|e| format!("{e:?}"))
+}
+
+async fn conf_dlx_fields(
+    store: &PgStore,
+    event_id: &str,
+) -> Result<(u64, eventconf::DlxFields), String> {
+    let row: Option<(String, String, String, String, i32)> = sqlx::query_as(
+        "SELECT source_kind, domain, contract_id, topic, num_attempts \
+         FROM dead_letter WHERE message_id = $1 ORDER BY last_attempt_at DESC LIMIT 1",
+    )
+    .bind(event_id)
+    .fetch_optional(&store.pool)
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+    let Some((source_kind, domain, contract_id, topic, num_attempts)) = row else {
+        return Ok((
+            0,
+            eventconf::DlxFields {
+                source_kind: String::new(),
+                domain: String::new(),
+                contract_id: String::new(),
+                topic: String::new(),
+                num_attempts: 0,
+            },
+        ));
+    };
+    Ok((
+        1,
+        eventconf::DlxFields {
+            source_kind,
+            domain,
+            contract_id,
+            topic,
+            num_attempts: u32::try_from(num_attempts).unwrap_or(0),
+        },
+    ))
+}
+
+async fn conf_duplicate_delivery(
+    store: &PgStore,
+    event_id: String,
+    group: String,
+) -> Result<eventconf::ConsumerObservation, String> {
+    let key = IdemKey::parse(&event_id).map_err(|e| format!("{e:?}"))?;
+    let group_id = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let lease = LeaseToken::mint();
+    let inbox = store.inbox(group_id);
+    inbox
+        .try_claim(&key, &lease)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    inbox
+        .commit(&key, &lease)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+
+    let calls = Arc::new(AtomicU32::new(0));
+    let (stream, acker) = conf_delivery_stream(&event_id);
+    run_consumer_ackable(
+        stream,
+        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        DynDeadLetterStore::new_box(store.dead_letter()),
+        conf_consumer_meta(),
+        conf_ack_handler(Arc::clone(&calls)),
+        conf_lease_cfg(),
+    )
+    .await;
+
+    let (_, dlx) = conf_dlx_fields(store, &event_id).await?;
+    Ok(eventconf::ConsumerObservation {
+        handler_calls: calls.load(Ordering::Relaxed),
+        claim_attempts: 1,
+        committed: false,
+        released: false,
+        dlx_count: 0,
+        settle: conf_settle_action(&acker)?,
+        num_attempts: dlx.num_attempts,
+        source_kind: dlx.source_kind,
+        domain: dlx.domain,
+        contract_id: dlx.contract_id,
+        topic: dlx.topic,
+    })
+}
+
+async fn conf_poison_delivery(
+    store: &PgStore,
+    event_id: String,
+    group: String,
+) -> Result<eventconf::ConsumerObservation, String> {
+    let calls = Arc::new(AtomicU32::new(0));
+    let (stream, acker) = conf_delivery_stream(&event_id);
+    run_consumer_ackable(
+        stream,
+        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        DynDeadLetterStore::new_box(store.dead_letter()),
+        conf_consumer_meta(),
+        conf_requeue_handler(Arc::clone(&calls)),
+        conf_lease_cfg(),
+    )
+    .await;
+
+    let (dlx_count, dlx) = conf_dlx_fields(store, &event_id).await?;
+    let committed = conf_inbox_status(store, &event_id, &group).await? == Some("done".to_string());
+    Ok(eventconf::ConsumerObservation {
+        handler_calls: calls.load(Ordering::Relaxed),
+        claim_attempts: 1,
+        committed,
+        released: false,
+        dlx_count,
+        settle: conf_settle_action(&acker)?,
+        num_attempts: dlx.num_attempts,
+        source_kind: dlx.source_kind,
+        domain: dlx.domain,
+        contract_id: dlx.contract_id,
+        topic: dlx.topic,
+    })
+}
+
+async fn conf_dlx_failure(
+    store: &PgStore,
+    event_id: String,
+    group: String,
+) -> Result<eventconf::ConsumerObservation, String> {
+    let calls = Arc::new(AtomicU32::new(0));
+    let (stream, acker) = conf_delivery_stream(&event_id);
+    let captured = Arc::new(Mutex::new(None));
+    run_consumer_ackable(
+        stream,
+        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        DynDeadLetterStore::new_box(FailingDlx::new(Arc::clone(&captured))),
+        conf_consumer_meta(),
+        conf_requeue_handler(Arc::clone(&calls)),
+        conf_lease_cfg(),
+    )
+    .await;
+
+    let released = conf_inbox_status(store, &event_id, &group).await?.is_none();
+    let captured = captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| "missing failed dlx write record".to_string())?;
+    let dlx = conf_dlx_fields_from_record(&captured);
+    Ok(eventconf::ConsumerObservation {
+        handler_calls: calls.load(Ordering::Relaxed),
+        claim_attempts: 1,
+        committed: false,
+        released,
+        dlx_count: 0,
+        settle: conf_settle_action(&acker)?,
+        num_attempts: dlx.num_attempts,
+        source_kind: dlx.source_kind,
+        domain: dlx.domain,
+        contract_id: dlx.contract_id,
+        topic: dlx.topic,
+    })
+}
+
+async fn conf_malformed_delivery(
+    store: &PgStore,
+    group: String,
+) -> Result<eventconf::ConsumerObservation, String> {
+    let calls = Arc::new(AtomicU32::new(0));
+    let (stream, acker) = conf_delivery_stream("");
+    run_consumer_ackable(
+        stream,
+        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        DynDeadLetterStore::new_box(store.dead_letter()),
+        conf_consumer_meta(),
+        conf_ack_handler(Arc::clone(&calls)),
+        conf_lease_cfg(),
+    )
+    .await;
+
+    let expected = conf_expected_dlx();
+    Ok(eventconf::ConsumerObservation {
+        handler_calls: calls.load(Ordering::Relaxed),
+        claim_attempts: 0,
+        committed: false,
+        released: false,
+        dlx_count: 0,
+        settle: conf_settle_action(&acker)?,
+        num_attempts: expected.num_attempts,
+        source_kind: expected.source_kind,
+        domain: expected.domain,
+        contract_id: expected.contract_id,
+        topic: expected.topic,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eventing_conformance_consumer_enrolls_postgres() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let base_id = unique_event_id("eventing-conf-consumer");
+    let group = unique_domain("eventing-conf-consumer-group");
+
+    eventconf::assert_consumer_conformance(eventconf::ConsumerConformanceCase {
+        ids: eventconf::EventingIds::new(
+            base_id.clone(),
+            base_id.clone(),
+            group.clone(),
+            "lease-a",
+        ),
+        expected_dlx: conf_expected_dlx(),
+        duplicate_delivery: Box::new(|| {
+            Box::pin(conf_duplicate_delivery(
+                &store,
+                format!("{base_id}-duplicate"),
+                group.clone(),
+            ))
+        }),
+        poison_delivery: Box::new(|| {
+            Box::pin(conf_poison_delivery(
+                &store,
+                format!("{base_id}-poison"),
+                group.clone(),
+            ))
+        }),
+        dlx_failure: Box::new(|| {
+            Box::pin(conf_dlx_failure(
+                &store,
+                format!("{base_id}-dlx-failure"),
+                group.clone(),
+            ))
+        }),
+        malformed_message_id: Box::new(|| Box::pin(conf_malformed_delivery(&store, group.clone()))),
+    })
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
 }
 
 // ── T1: INVARIANT OUTBOX-ATOMIC-IDEM-01：回滚→无 entry ──────────────────────
@@ -951,6 +1789,7 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
+    let _sweep_guard = OUTBOX_SWEEP_TEST_LOCK.lock().await;
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
@@ -2019,7 +2858,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
 // T17: oldest_age_seconds 来自 min(created_at)（最老 pending 行；允许小容差）。
 // T18: retry_after > now() 的行排除在 depth 之外（与 poll_pending pending 谓词同源）。
 
-use consistency::{BacklogSample, OutboxBacklog};
+use consistency::BacklogSample;
 
 /// T15: 对一个无任何用例写入的专属 domain（`t15-domain`）采样 → sample_backlog 返 BacklogSample::empty()。
 /// domain-scoped 断言：不依赖全表净起点，去掉 `setup_outbox` 全表 DELETE 后仍恒空（#1194）。
