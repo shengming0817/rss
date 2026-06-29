@@ -69,7 +69,7 @@ impl Permission {
 /// `Role::new`（crate 内信任 funnel）/ `Role::hydrate`（跨 crate 受控重建 funnel）——adapter 可接收/返回
 /// `Role`、按需读其访问器，但**不可伪造其不变式**（id / permission 必经 parse 白名单）。`permissions`
 /// 字段类型 `PermissionId` 仍 `pub(crate)` 不外泄；adapter 读侧经 `permission_ids()`（`&str` 迭代器）取用。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Role {
     id: RoleId,
     name: String,
@@ -168,6 +168,27 @@ impl RoleBinding {
             role_id,
             tenant,
         }
+    }
+
+    /// 跨 crate 受控重建 funnel（postgres `PgRoleBindingLifecycle` 读 binding 给授权器）。
+    ///
+    /// `role_id` 经 [`RoleId::parse`] 白名单复核；持久化损坏值归 [`IdentityError::Storage`]，授权调用方
+    /// fail-closed。`subject` 允许 opaque 非 UUID（可能是外部 IdP subject），但空 subject 无授权意义，
+    /// 视为损坏持久化值。
+    pub fn hydrate(
+        subject: impl Into<String>,
+        role_id: &str,
+        tenant: vocab::TenantId,
+    ) -> Result<Self, IdentityError> {
+        let subject = subject.into();
+        if subject.is_empty() {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "role binding subject is empty",
+            ))));
+        }
+        let role_id = RoleId::parse(role_id).map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        Ok(Self::new(subject, role_id, tenant))
     }
 
     /// 取 subject 引用。

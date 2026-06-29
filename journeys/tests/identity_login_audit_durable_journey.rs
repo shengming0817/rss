@@ -26,7 +26,7 @@ use anyhow::Result;
 use bootstrap::SubscriberHandler;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
-    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, single_subscription,
+    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, identity_domain, single_subscription,
 };
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
 use diagctx::{CorrelationId, DiagnosticCtx};
@@ -38,9 +38,9 @@ use diport::{
 use eventexec::{ConsumerMeta, LeaseConfig, run_consumer};
 use futures::future::BoxFuture;
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
-use generated::http::identity_v1::IdentityLoginRequest;
+use generated::http::identity_v1::login::IdentityLoginRequest;
+use identity::LoginService;
 use identity::ports::DynSessionLifecycle;
-use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -211,7 +211,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         PASSWORD,
         TenantId::parse(CANON_TENANT)?,
     )?);
-    let identity_domain = IdentityDomain::new(login_identity, refresh_identity);
+    let identity_domain = identity_domain(login_identity, refresh_identity);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
     let binding = single_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);

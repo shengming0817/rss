@@ -49,6 +49,7 @@ uuid = { workspace = true, features = ["v4"] }
 # 登录路径结构化 span（不记 password；observability.md §日志）。
 tracing = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 # 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate，

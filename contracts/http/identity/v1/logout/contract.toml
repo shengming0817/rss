@@ -1,0 +1,18 @@
+# 当前认证主体 logout HTTP 契约。session soft revoke ⇒ L1。
+id = "identity.logout"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+path = "/api/v1/identity/logout"
+method = "POST"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:session:write"

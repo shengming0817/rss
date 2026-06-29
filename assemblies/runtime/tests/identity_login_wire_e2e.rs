@@ -19,13 +19,18 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
-use generated::http::identity_v1::SPEC as LOGIN_SPEC;
-use generated::http::identity_v2::SPEC as REFRESH_SPEC;
-use identity::ports::{Credential, CredentialRepo as _, TenantId};
+use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
+use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
+use generated::http::identity_v1::roles_assign::SPEC as ROLES_ASSIGN_SPEC;
+use generated::http::identity_v1::roles_list::SPEC as ROLES_LIST_SPEC;
+use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
+use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleRepo};
+use identity::ports::{Role, RoleRepo as _, TenantId};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::ListenerKind;
 use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity_with};
+use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
 use wiremock::matchers::{body_partial_json, method as match_method};
@@ -39,6 +44,10 @@ const LOGIN_USERNAME: &str = "alice";
 const PASSWORD: &str = "correct-horse";
 const TEST_APP_ROLE: &str = "rss_identity_login_e2e_app";
 const TEST_APP_PASSWORD: &str = "identity_login_e2e_pw";
+const ADMIN_ROLE: &str = "tenant-admin";
+const OPERATOR_ROLE: &str = "operator";
+const TARGET_SUBJECT: &str = "bob@example.test";
+const JWT_EXP_FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01T00:00:00Z.
 
 // ── vault Transit mock helpers（mirror refresh_mint_e2e.rs） ────────────────────────────────────
 
@@ -47,6 +56,30 @@ const TEST_APP_PASSWORD: &str = "identity_login_e2e_pw";
 fn sk_jwt() -> SigningKey {
     let bytes: [u8; 32] = std::array::from_fn(|i| (i + 1) as u8);
     SigningKey::from_slice(&bytes).expect("valid P-256 scalar")
+}
+
+fn sec1(sk: &SigningKey) -> Vec<u8> {
+    sk.verifying_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec()
+}
+
+fn mint_es256(sk: &SigningKey, payload: &str) -> String {
+    let header = B64_URL.encode(br#"{"alg":"ES256"}"#);
+    let body = B64_URL.encode(payload.as_bytes());
+    let signing_input = format!("{header}.{body}");
+    let sig: Signature = sk.sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", B64_URL.encode(sig.to_bytes()))
+}
+
+fn admin_jwt() -> String {
+    mint_es256(
+        &sk_jwt(),
+        &format!(
+            r#"{{"sub":"{CANON_USER}","exp":{JWT_EXP_FAR_FUTURE},"iss":"https://issuer.test","aud":"rss","kind":"admin","tenant_id":"{CANON_TENANT}"}}"#
+        ),
+    )
 }
 
 /// wiremock Transit `/sign` 响应器：解 `{"input": base64std(signing_input)}` → 用 `sk` 对 signing-input
@@ -113,13 +146,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
 async fn provision_nobypass_app_role(
     p: &testkit::PgConnParams,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let options = PgConnectOptions::new()
-        .host(&p.host)
-        .port(p.port)
-        .database(&p.database)
-        .username(&p.username)
-        .password(&p.password)
-        .ssl_mode(SqlxPgSslMode::Prefer);
+    let options = pg_connect_options(p, &p.username, &p.password);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(5))
@@ -159,17 +186,71 @@ async fn provision_nobypass_app_role(
     Ok(())
 }
 
+fn pg_connect_options(
+    p: &testkit::PgConnParams,
+    username: &str,
+    password: &str,
+) -> PgConnectOptions {
+    PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(username)
+        .password(password)
+        .ssl_mode(SqlxPgSslMode::Prefer)
+}
+
+async fn assertion_pool(
+    p: &testkit::PgConnParams,
+) -> Result<PgPool, Box<dyn std::error::Error + Send + Sync>> {
+    let options = pg_connect_options(p, &p.username, &p.password);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    Ok(pool)
+}
+
 fn test_provider() -> oidc::OidcProvider {
     #[allow(clippy::expect_used)]
     runtime::provider_from_b64(
         "https://issuer.test",
         "rss",
-        "user",
-        None,
+        "user,admin",
+        Some(&B64_URL.encode(sec1(&sk_jwt()))),
         Some(&B64_URL.encode([7u8; 32])),
         Box::new(SystemClock),
     )
     .expect("test provider")
+}
+
+async fn outbox_topic_count(
+    pool: &PgPool,
+    topic: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE domain = 'identity' AND topic = $1")
+            .bind(topic)
+            .fetch_one(pool)
+            .await?;
+    Ok(count)
+}
+
+async fn role_binding_count(
+    pool: &PgPool,
+    role_id: &str,
+    subject: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM role_bindings WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
+    )
+    .bind(CANON_TENANT)
+    .bind(role_id)
+    .bind(subject)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
 }
 
 // ── 端到端测试 ───────────────────────────────────────────────────────────────────────────────────
@@ -211,7 +292,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     // 3. vault bundle（#1498）：pre-GA 空 allowlist，secret resolver 不触 vault；仅构造器结构满足
     //    SharedRuntimeDeps.vault 字段。mock http URL 可用（resolver 仅构造期校验 URL，无连接）。
     let vault = runtime::build_vault_runtime_deps(|name| match name {
-        "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
+        "RSS_VAULT_ADDR" => Some("https://vault.test".to_string()),
         "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
         _ => None,
     })?;
@@ -345,5 +426,194 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         "reused refresh token should return 401 (one-shot rotation reuse detection)"
     );
 
+    Ok(())
+}
+
+/// RBAC role binding 生产 wire 端到端：admin JWT → Primary router/auth middleware →
+/// PgRoleBindingLifecycle co-tx → role_bindings + outbox。
+#[tokio::test(flavor = "multi_thread")]
+async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> TestResult {
+    // 1. hermetic vault Transit mock：identity wiring 需要 JwtIssuer；本测试请求使用手铸 admin JWT。
+    let vault_server = MockServer::start().await;
+    Mock::given(match_method("POST"))
+        .and(body_partial_json(
+            serde_json::json!({ "marshaling_algorithm": "jws" }),
+        ))
+        .respond_with(TransitSignResponder { sk: sk_jwt() })
+        .mount(&vault_server)
+        .await;
+    let vault_uri = vault_server.uri();
+
+    // 2. postgres fixture + RBAC seed：admin 角色、operator 角色、admin 自身 role binding。
+    let (fixture, pg) = connect_pg().await?;
+    let assertion_pool = assertion_pool(fixture.params()).await?;
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let actor = ids::UserId::parse(CANON_USER)?;
+    let id = pg.for_domain::<caps::Identity>();
+    let admin_role = Role::hydrate(
+        ADMIN_ROLE,
+        "Tenant admin",
+        &[
+            "identity:role:assign".to_string(),
+            "identity:role:read".to_string(),
+            "identity:role:revoke".to_string(),
+        ],
+    )?;
+    let admin_role_id = admin_role.id().clone();
+    id.role_repo().save(tenant, admin_role).await?;
+    id.role_repo()
+        .save(
+            tenant,
+            Role::hydrate(
+                OPERATOR_ROLE,
+                "Operator",
+                &["identity:profile:read".to_string()],
+            )?,
+        )
+        .await?;
+    let setup_roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(id.role_repo()));
+    let setup_bindings: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(
+        DynRoleBindingLifecycle::new_box(id.role_binding_lifecycle(Box::new(SystemClock))),
+    );
+    let setup_rbac =
+        identity::RbacAdminService::new(setup_roles, setup_bindings, Box::new(SystemClock));
+    setup_rbac
+        .assign_role(tenant, actor, CANON_USER.to_string(), admin_role_id)
+        .await?;
+
+    let assigned_before = outbox_topic_count(&assertion_pool, "identity.role-assigned").await?;
+    let revoked_before = outbox_topic_count(&assertion_pool, "identity.role-revoked").await?;
+
+    // 3. production runtime deps + Primary router/auth middleware.
+    let vault = runtime::build_vault_runtime_deps(|name| match name {
+        "RSS_VAULT_ADDR" => Some("https://vault.test".to_string()),
+        "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
+        _ => None,
+    })?;
+    let redis_fixture = testkit::env_or_redis().await?;
+    let redis = runtime::build_redis_runtime_deps(|name| {
+        (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
+    })
+    .await?;
+    let deps = SharedRuntimeDeps {
+        pg,
+        redis: Some(redis),
+        vault,
+    };
+    let identity_domain = wire_identity_with(
+        &deps,
+        |name| match name {
+            "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
+            "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
+            "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
+            "RSS_JWT_ISSUER" => Some("https://issuer.test".to_string()),
+            "RSS_JWT_AUDIENCE" => Some("rss".to_string()),
+            "RSS_JWT_ES256_KEY_ID" => Some("rss-jwt-es256".to_string()),
+            "RSS_JWT_ACCESS_TTL_SECS" => Some("900".to_string()),
+            "RSS_REFRESH_TTL_SECS" => Some("2592000".to_string()),
+            _ => None,
+        },
+        true,
+    )?;
+    let mut registry = bootstrap::compose(&[&identity_domain])?;
+    let mut primary = None;
+    for (listener, routes) in runtime::assemble_authed_routers(
+        &mut registry,
+        Arc::new(test_provider()),
+        httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+        Arc::new(SystemClock),
+    )? {
+        if listener == ListenerKind::Primary {
+            primary = Some(routes.into_router_for_test());
+        }
+    }
+    let app = primary.ok_or("identity domain did not produce Primary router")?;
+    let bearer = format!("Bearer {}", admin_jwt());
+
+    // 4. POST /roles/{roleId}/bindings：真实 auth middleware 放行 admin JWT，binding + role-assigned outbox 同事务落库。
+    let assign_path = ROLES_ASSIGN_SPEC.path.replace("{roleId}", OPERATOR_ROLE);
+    let assign_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(assign_path)
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "subject": TARGET_SUBJECT,
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        assign_resp.status(),
+        StatusCode::CREATED,
+        "admin role assign should pass through Primary auth and persist binding"
+    );
+    assert_eq!(
+        role_binding_count(&assertion_pool, OPERATOR_ROLE, TARGET_SUBJECT).await?,
+        1,
+        "role binding row must be committed"
+    );
+    assert_eq!(
+        outbox_topic_count(&assertion_pool, "identity.role-assigned").await?,
+        assigned_before + 1,
+        "role assign must append identity.role-assigned outbox"
+    );
+
+    // 5. GET /roles：同一 admin JWT 通过 role:read 权限，真实 repo list 返回 seeded roles。
+    let list_uri = format!("{}?limit=20", ROLES_LIST_SPEC.path);
+    let list_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(list_uri)
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(list_resp.status(), StatusCode::OK, "roles list should pass");
+    let list_bytes = axum::body::to_bytes(list_resp.into_body(), usize::MAX).await?;
+    let list_text = String::from_utf8(list_bytes.to_vec())?;
+    assert!(
+        list_text.contains(ADMIN_ROLE) && list_text.contains(OPERATOR_ROLE),
+        "roles list should include seeded roles; body: {list_text}"
+    );
+
+    // 6. DELETE /roles/{roleId}/bindings/{subject}：真实 auth + Pg lifecycle 删除 binding 并写 revoked outbox。
+    let revoke_path = ROLES_REVOKE_SPEC
+        .path
+        .replace("{roleId}", OPERATOR_ROLE)
+        .replace("{subject}", TARGET_SUBJECT);
+    let revoke_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(revoke_path)
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        revoke_resp.status(),
+        StatusCode::OK,
+        "admin role revoke should pass through Primary auth"
+    );
+    assert_eq!(
+        role_binding_count(&assertion_pool, OPERATOR_ROLE, TARGET_SUBJECT).await?,
+        0,
+        "role binding row must be removed"
+    );
+    assert_eq!(
+        outbox_topic_count(&assertion_pool, "identity.role-revoked").await?,
+        revoked_before + 1,
+        "role revoke must append identity.role-revoked outbox"
+    );
+
+    assertion_pool.close().await;
     Ok(())
 }

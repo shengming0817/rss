@@ -5413,9 +5413,9 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
 // 取得——RoleId 构造封闭（`pub(crate)` parse/new），测试不可裸 mint，符合 funnel 设计（外部可读不可伪造）。
 // ───────────────────────────────────────────────────────────────────────────
 
-use identity::ports::{Role, RoleRepo};
+use identity::ports::{DynRoleBindingLifecycle, DynRoleRepo, Role, RolePage, RoleRepo};
 
-use crate::PgRoleRepo;
+use crate::{PgRoleBindingLifecycle, PgRoleRepo};
 
 const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -5576,6 +5576,187 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(n2.0, 8, "8 个不同 id 各落一行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// list：按 id 升序稳定分页，cursor after 语义，且 tenant scoped。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used)]
+async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgRoleRepo::new(&store);
+    let tenant_a = role_tenant(ROLE_TENANT_A)?;
+    let tenant_b = role_tenant(ROLE_TENANT_B)?;
+
+    for (id, name) in [("role-a", "A"), ("role-b", "B"), ("role-c", "C")] {
+        repo.save(tenant_a, Role::hydrate(id, name, &[format!("perm:{id}")])?)
+            .await?;
+    }
+    repo.save(
+        tenant_b,
+        Role::hydrate("role-aa", "TenantB", &["perm:b".to_string()])?,
+    )
+    .await?;
+
+    let page1 = repo
+        .list(
+            tenant_a,
+            RolePage {
+                limit: vocab::Limit::new(2)?,
+                after: None,
+            },
+        )
+        .await?;
+    assert!(page1.has_more);
+    assert_eq!(
+        page1
+            .roles
+            .iter()
+            .map(|role| role.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["role-a", "role-b"]
+    );
+
+    let after = page1.roles[1].id().clone();
+    let page2 = repo
+        .list(
+            tenant_a,
+            RolePage {
+                limit: vocab::Limit::new(2)?,
+                after: Some(after),
+            },
+        )
+        .await?;
+    assert!(!page2.has_more);
+    assert_eq!(
+        page2
+            .roles
+            .iter()
+            .map(|role| role.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["role-c"]
+    );
+
+    let tenant_b_page = repo
+        .list(
+            tenant_b,
+            RolePage {
+                limit: vocab::Limit::new(10)?,
+                after: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        tenant_b_page
+            .roles
+            .iter()
+            .map(|role| role.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["role-aa"],
+        "tenant B 只看到自己的角色"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// RoleBindingLifecycle：经 RbacAdminService 驱动生产 Pg impl，验证 binding + outbox both-or-neither 正向路径与
+// revoke 未命中不发事件。
+#[tokio::test(flavor = "multi_thread")]
+async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let tenant_b = role_tenant(ROLE_TENANT_B)?;
+    let role = Role::hydrate("role-admin", "Admin", &["identity:role:assign".to_string()])?;
+    let role_id = role.id().clone();
+    let repo = PgRoleRepo::new(&store);
+    repo.save(tenant, role.clone()).await?;
+    repo.save(tenant_b, role).await?;
+
+    let svc = identity::RbacAdminService::new(
+        Arc::from(DynRoleRepo::new_box(PgRoleRepo::new(&store))),
+        Arc::from(DynRoleBindingLifecycle::new_box(
+            PgRoleBindingLifecycle::new(&store, fixed_clock()),
+        )),
+        fixed_clock(),
+    );
+    let actor = ids::UserId::parse("11111111-2222-4333-8444-555555555555")?;
+
+    svc.assign_role(tenant, actor, "target-user".to_string(), role_id.clone())
+        .await?;
+    let binding_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM role_bindings WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind("role-admin")
+    .bind("target-user")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(binding_count.0, 1, "assign 写入 binding");
+    let assigned_events: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE contract_id = $1")
+            .bind("identity.role-assigned")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(assigned_events.0, 1, "assign 写入 role-assigned outbox");
+
+    let cross_tenant_revoked = svc
+        .revoke_role(tenant_b, actor, role_id.clone(), "target-user".to_string())
+        .await?;
+    assert!(
+        !cross_tenant_revoked,
+        "tenant B revoke 隐藏 tenant A binding"
+    );
+    let binding_after_cross_tenant_revoke: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM role_bindings WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind("role-admin")
+    .bind("target-user")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        binding_after_cross_tenant_revoke.0, 1,
+        "tenant B revoke 不应删除 tenant A binding"
+    );
+    let revoked_events_before_hit: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE contract_id = $1")
+            .bind("identity.role-revoked")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        revoked_events_before_hit.0, 0,
+        "tenant B revoke 未命中不写 role-revoked outbox"
+    );
+
+    let revoked = svc
+        .revoke_role(tenant, actor, role_id.clone(), "target-user".to_string())
+        .await?;
+    assert!(revoked);
+    let binding_after_revoke: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM role_bindings WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind("role-admin")
+    .bind("target-user")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(binding_after_revoke.0, 0, "revoke 删除 binding");
+
+    let revoked_again = svc
+        .revoke_role(tenant, actor, role_id, "target-user".to_string())
+        .await?;
+    assert!(!revoked_again, "重复 revoke 幂等 false");
+    let revoked_events: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE contract_id = $1")
+            .bind("identity.role-revoked")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(revoked_events.0, 1, "未命中 revoke 不追加 outbox");
 
     store.shutdown().await?;
     Ok(())
@@ -5996,6 +6177,162 @@ async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
         assert_eq!(
             cnt.0, 0,
             "t22: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T22b：RLS 强制力证明 — role_bindings 表（#1190 PR5b）。
+///
+/// 验证：rss_app 角色 + tenant_a scope 下 INSERT/SELECT binding 成功；切换 tenant_b scope → 不可见；
+/// tenant_a scope 内尝试写 tenant_b binding → WITH CHECK 拒绝；未设 rss.tenant_id → fail-closed（0 行）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
+async fn t22b_rls_role_bindings_enforces_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let role_id = format!("rls-binding-role-{}", uuid::Uuid::new_v4());
+    let subject = format!("rls-binding-subject-{}", uuid::Uuid::new_v4());
+
+    // FK 前置：两个租户各有同 id role，避免 Tx4 被 FK 失败遮蔽 RLS WITH CHECK。
+    sqlx::query(
+        "INSERT INTO roles (tenant_id, id, name, permissions) \
+         VALUES ($1::uuid, $2, $3, $4), ($5::uuid, $2, $6, $4)",
+    )
+    .bind(&tenant_a)
+    .bind(&role_id)
+    .bind("RlsBindingRoleA")
+    .bind(vec!["identity:role:read".to_string()])
+    .bind(&tenant_b)
+    .bind("RlsBindingRoleB")
+    .execute(&store.pool)
+    .await?;
+
+    // Tx1：rss_app + tenant_a scope → INSERT tenant_a binding → 成功。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO role_bindings (tenant_id, role_id, subject) \
+             VALUES ($1::uuid, $2, $3)",
+        )
+        .bind(&tenant_a)
+        .bind(&role_id)
+        .bind(&subject)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Tx1 INSERT tenant_a role_binding failed (should succeed): {e}"))?;
+        tx.commit().await?;
+    }
+
+    // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM role_bindings WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
+        )
+        .bind(&tenant_a)
+        .bind(&role_id)
+        .bind(&subject)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 1,
+            "t22b: rss_app + tenant_a scope — role_binding 应可见（USING policy pass）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx3：rss_app + tenant_b scope → SELECT 同 binding → 不可见（跨租 USING 过滤）。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM role_bindings WHERE role_id = $1 AND subject = $2",
+        )
+        .bind(&role_id)
+        .bind(&subject)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t22b: rss_app + tenant_b scope — tenant_a role_binding 应不可见（跨租 RLS 过滤）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b binding → WITH CHECK 拒绝。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO role_bindings (tenant_id, role_id, subject) \
+             VALUES ($1::uuid, $2, $3)",
+        )
+        .bind(&tenant_b)
+        .bind(&role_id)
+        .bind(format!("{subject}-cross"))
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "t22b: WITH CHECK 应拒绝 tenant_b role_binding 写入（rss.tenant_id=tenant_a）"
+        );
+        tx.rollback().await?;
+    }
+
+    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT role_bindings → 0 行。
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM role_bindings WHERE role_id = $1 AND subject = $2",
+        )
+        .bind(&role_id)
+        .bind(&subject)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "t22b: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
         );
         tx.rollback().await?;
     }

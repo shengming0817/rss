@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::http::StatusCode;
 use diport::Clock;
-use generated::http::identity_v1::{IdentityLoginRequest, IdentityLoginResponse, SPEC};
+use generated::http::identity_v1::login::{IdentityLoginRequest, IdentityLoginResponse, SPEC};
 use testkit::ContractRequest;
 
 use crate::application::{RefreshService, login_router_for_test};

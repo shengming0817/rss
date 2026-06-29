@@ -34,6 +34,7 @@ mod pool;
 mod projection_events;
 mod readiness;
 mod refresh_token_store;
+mod role_binding_lifecycle;
 mod role_repo;
 mod saga_journal;
 mod secret_repo;
@@ -56,6 +57,7 @@ pub use outbox::{PgOutbox, PgOutboxMaintenance};
 // sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径 read_from + PgProjectionRecord 公开。
 pub use projection_events::{PgProjectionEvents, PgProjectionRecord, ProjectionEventsError};
 pub use refresh_token_store::PgRefreshTokenStore;
+pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
 pub use secret_repo::PgSecretRepo;

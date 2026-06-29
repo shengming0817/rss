@@ -61,7 +61,8 @@ use crate::{
     PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
     PgOutbox, PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
-    PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
+    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore,
+    PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -344,6 +345,12 @@ impl PgDomainDeps<caps::Identity> {
     #[must_use]
     pub fn role_repo(&self) -> PgRoleRepo {
         PgRoleRepo::new(&self.store)
+    }
+
+    /// 角色绑定生命周期（binding co-tx + role event outbox）。
+    #[must_use]
+    pub fn role_binding_lifecycle(&self, clock: Box<dyn Clock>) -> PgRoleBindingLifecycle {
+        PgRoleBindingLifecycle::new(&self.store, clock)
     }
 
     /// refresh token store（哈希存储 + CAS rotation + 谱系级联撤销 + RLS）。

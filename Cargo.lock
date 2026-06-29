@@ -2678,6 +2678,7 @@ version = "0.0.0"
 dependencies = [
  "authn",
  "axum",
+ "base64",
  "bootstrap",
  "consistency",
  "deviceloop",

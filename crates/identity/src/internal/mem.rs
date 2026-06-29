@@ -262,13 +262,11 @@ impl SessionLifecycle for InMemSessionLifecycle {
 // InMemRoleRepo / InMemRoleBindingLifecycle — RBAC 角色仓储 + 绑定生命周期 in-mem 替身（#1190，US5）
 // ---------------------------------------------------------------------------
 
-/// `RoleRepo` 的 in-memory 替身：仅记录「存在的 `(tenant, role_id)`」集合。`find` 命中返回一个**占位**
-/// [`Role`]（`RbacAdminService::assign_role` 只校验角色存在性、不读 Role 内容，且 `Role` 非 `Clone` ⇒
-/// 无需存实体，命中即构占位）。跨租 find→None（不泄露存在性）。
+/// `RoleRepo` 的 in-memory 替身：保存完整 [`Role`]，供 assign/revoke 校验与列表 handler 测试共用。
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct InMemRoleRepo {
-    roles: Arc<Mutex<HashSet<(String, String)>>>, // (tenant, role_id)
+    roles: Arc<Mutex<HashMap<(String, String), Role>>>, // (tenant, role_id)
 }
 
 #[cfg(test)]
@@ -279,7 +277,10 @@ impl InMemRoleRepo {
 
     /// 种子：标记 `(tenant, role_id)` 存在。
     pub(crate) fn with_role(self, tenant: TenantId, role_id: &RoleId) -> Self {
-        recover(&self.roles).insert((tenant.to_string(), role_id.as_str().to_string()));
+        recover(&self.roles).insert(
+            (tenant.to_string(), role_id.as_str().to_string()),
+            Role::new(role_id.clone(), "seeded".to_string(), vec![]),
+        );
         self
     }
 }
@@ -287,14 +288,34 @@ impl InMemRoleRepo {
 #[cfg(test)]
 impl RoleRepo for InMemRoleRepo {
     async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError> {
-        let exists = recover(&self.roles).contains(&(tenant.to_string(), id.as_str().to_string()));
-        // reason: assign 只校验存在性；Role 非 Clone ⇒ 命中构占位实体（name / 权限不参与 assign 判定）。
-        Ok(exists.then(|| Role::new(id, "seeded".to_string(), vec![])))
+        Ok(recover(&self.roles)
+            .get(&(tenant.to_string(), id.as_str().to_string()))
+            .cloned())
     }
 
     async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError> {
-        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()));
+        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
         Ok(())
+    }
+
+    async fn list(
+        &self,
+        tenant: TenantId,
+        page: crate::ports::RolePage,
+    ) -> Result<crate::ports::RoleListResult, IdentityError> {
+        let limit = usize::from(page.limit.get());
+        let after = page.after.as_ref().map(RoleId::as_str);
+        let mut roles = recover(&self.roles)
+            .iter()
+            .filter(|((t, id), _)| {
+                t == &tenant.to_string() && after.is_none_or(|a| id.as_str() > a)
+            })
+            .map(|(_, role)| role.clone())
+            .collect::<Vec<_>>();
+        roles.sort_by(|a, b| a.id().as_str().cmp(b.id().as_str()));
+        let has_more = roles.len() > limit;
+        roles.truncate(limit);
+        Ok(crate::ports::RoleListResult { roles, has_more })
     }
 }
 
@@ -423,6 +444,18 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
             recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
         }
         Ok(removed)
+    }
+
+    async fn list_for_subject(
+        &self,
+        tenant: TenantId,
+        subject: String,
+    ) -> Result<Vec<RoleBinding>, IdentityError> {
+        recover(&self.bindings)
+            .iter()
+            .filter(|(t, _, s)| t == &tenant.to_string() && s == &subject)
+            .map(|(_, role_id, s)| RoleBinding::hydrate(s.clone(), role_id, tenant))
+            .collect()
     }
 }
 

@@ -63,7 +63,7 @@
 | `identity.role-assigned` | L2 OutboxFact | `{subject, role_id, tenant_id, assigned_by, occurred_at}` | 新增（PR5，lifecycle draft） |
 | `identity.role-revoked` | L2 OutboxFact | `{subject, role_id, tenant_id, revoked_by, occurred_at}` | 新增（PR5，lifecycle draft） |
 
-> 字段 camelCase（serde rename）；payload 类型经 `generated`，非手写共享 crate。`role-*` 事件订阅方 = audit（角色变更审计），但**运行时订阅消费延 #1017 Join**——本 feature 内 `role-*` lifecycle 暂为 **draft**（active 事件才要求至少一个 subscriber，§active event subscriber；draft 契约设计 + 发布侧不触发该守卫，避免无 subscriber 时 validate 红）。`session-created` 仍 active（G1 已有 audit subscriber）。
+> 字段 camelCase（serde rename）；payload 类型经 `generated`，非手写共享 crate。`role-*` 事件订阅方 = audit（角色变更审计），但**运行时订阅消费延 #1017 Join**——本 feature 内 `role-*` lifecycle 暂为 **draft**（active 事件才要求至少一个 subscriber，§active event subscriber；draft 契约设计 + 发布侧不触发该守卫，避免无 subscriber 时 validate 红）。PR5b 补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`，确保 assign/revoke HTTP 端点不是测试专用接线；`session-created` 仍 active（G1 已有 audit subscriber）。
 
 ## HTTP 契约（`contracts/http/identity/v1/`）
 
@@ -72,7 +72,7 @@
 | login | POST `/api/v1/identity/login` | **L2 OutboxFact**（与权威 contract.toml 同源：同事务写会话 + 发 session-created；`SessionRepo::create` 仅 L1 子步骤，不单独成契约边界） | Public（opt_out） | — | ✓ draft→active；tenant 来源 X-Tenant-ID header，body 禁 tenantId；响应含 `{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}`（#1252 首发 JWT bundle 已接线） |
 | password-change | POST `/api/v1/identity/password/change` | L1 | 鉴权（selfScoped） | `identity:profile:write` | 新增 |
 | logout | POST `/api/v1/identity/logout` | L1 | 鉴权（selfScoped） | `identity:session:write` | 新增；仅域侧软撤销，硬吊销延 #1003 |
-| roles assign | POST `/api/v1/identity/roles` | L2 | 鉴权 | `identity:role:assign` | 新增 |
+| roles assign | POST `/api/v1/identity/roles/{roleId}/bindings` | L2 | 鉴权 | `identity:role:assign` | 新增 |
 | roles revoke | DELETE `/api/v1/identity/roles/{roleId}/bindings/{subject}` | L2 | 鉴权（binding 级：tenant 从鉴权上下文，只撤目标 binding，跨租隐藏存在性） | `identity:role:revoke` | 新增 |
 | roles list | GET `/api/v1/identity/roles` | L0 | 鉴权 + 分页(limit≤500) | `identity:role:read` | 新增；响应格式 `{data,nextCursor,hasMore}` |
 | profile | GET `/api/v1/identity/profile` | L0 | 鉴权（selfScoped） | `identity:profile:read` | 新增 |

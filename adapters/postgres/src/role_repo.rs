@@ -14,7 +14,7 @@
 //! ref: casbin/casbin-rs（RBAC 角色多租 domain-scoped 持久化模型）
 //! ref: adapters/postgres/src/config_repo.rs（#1249，pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
 
-use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
+use identity::ports::{IdentityError, Role, RoleId, RoleListResult, RolePage, RoleRepo, TenantId};
 use sqlx::Row;
 
 use crate::PgStore;
@@ -128,5 +128,56 @@ impl RoleRepo for PgRoleRepo {
                 storage,
             )
             .await
+    }
+
+    async fn list(
+        &self,
+        tenant: TenantId,
+        page: RolePage,
+    ) -> Result<RoleListResult, IdentityError> {
+        let tenant_uuid = tenant_param(tenant);
+        let after = page.after.as_ref().map(|id| id.as_str().to_owned());
+        let limit = i64::from(page.limit.get()) + 1;
+        let raw = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    let rows = sqlx::query(
+                        r#"
+                        SELECT id, name, permissions
+                        FROM roles
+                        WHERE tenant_id = $1::uuid
+                          AND ($2::text IS NULL OR id > $2)
+                        ORDER BY id ASC
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(tenant_uuid)
+                    .bind(after)
+                    .bind(limit)
+                    .fetch_all(&mut *conn)
+                    .await?;
+
+                    rows.into_iter()
+                        .map(|r| {
+                            let id: String = r.try_get("id")?;
+                            let name: String = r.try_get("name")?;
+                            let permissions: Vec<String> = r.try_get("permissions")?;
+                            Ok((id, name, permissions))
+                        })
+                        .collect::<Result<Vec<_>, sqlx::Error>>()
+                })
+            })
+            .await
+            .map_err(storage)?;
+
+        let requested = usize::from(page.limit.get());
+        let has_more = raw.len() > requested;
+        let roles = raw
+            .into_iter()
+            .take(requested)
+            .map(|(id, name, permissions)| Role::hydrate(&id, name, &permissions))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(RoleListResult { roles, has_more })
     }
 }

@@ -1,0 +1,18 @@
+# 当前认证主体密码变更 HTTP 契约。self-scoped CAS write ⇒ L1。
+id = "identity.password-change"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+path = "/api/v1/identity/password/change"
+method = "POST"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:profile:write"

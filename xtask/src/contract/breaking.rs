@@ -439,15 +439,18 @@ pub(crate) struct SchemaVersions {
 }
 
 /// 一侧（base 或 working）的契约投影：label + lifecycle + slot→已解析 schema JSON。
-/// base/working 两侧同形，[`plan_diffs`] 按 (label, slot) 取并集对齐（C1：删除类破坏须从 base 侧进入比较）。
+/// base/working 两侧同形，[`plan_diffs`] 按 (identity, slot) 取并集对齐（C1：删除类破坏须从 base 侧进入比较）。
 #[derive(Debug, Clone)]
 pub(crate) struct ContractSide {
+    /// 稳定契约身份。来自 manifest `id`，不随 flat/nested 目录迁移漂移。
+    pub(crate) identity: String,
+    /// 人读诊断 label，保留来源路径形态。
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
     pub(crate) slots: BTreeMap<String, Value>,
 }
 
-/// 按 (label, slot) 构造 base ∪ working 并集（纯函数，C1）：
+/// 按 (identity, slot) 构造 base ∪ working 并集（纯函数，C1）：
 /// - lifecycle：working 在场用其 lifecycle，否则用 base 的（删整个契约 = base lifecycle 决定是否检）。
 /// - `old` = base slot schema（`None` ⇒ base 无此 slot ⇒ 新契约/新 slot，[`evaluate`] 跳过不报）。
 /// - `new` = working slot schema；base 有而 working 无（slot/契约被删）⇒ 空 schema ⇒ compare 报 base 字段全删。
@@ -456,20 +459,25 @@ pub(crate) struct ContractSide {
 /// FILE_NO_DELETE / MESSAGE_NO_DELETE：基准侧存在而当前侧缺失须进入比较）。
 pub(crate) fn plan_diffs(base: &[ContractSide], working: &[ContractSide]) -> Vec<ContractDiff> {
     let base_idx: BTreeMap<&str, &ContractSide> =
-        base.iter().map(|s| (s.label.as_str(), s)).collect();
+        base.iter().map(|s| (s.identity.as_str(), s)).collect();
     let work_idx: BTreeMap<&str, &ContractSide> =
-        working.iter().map(|s| (s.label.as_str(), s)).collect();
-    let labels: BTreeSet<&str> = base_idx.keys().chain(work_idx.keys()).copied().collect();
+        working.iter().map(|s| (s.identity.as_str(), s)).collect();
+    let identities: BTreeSet<&str> = base_idx.keys().chain(work_idx.keys()).copied().collect();
 
     let mut diffs = Vec::new();
-    for label in labels {
-        let b = base_idx.get(label).copied();
-        let w = work_idx.get(label).copied();
+    for identity in identities {
+        let b = base_idx.get(identity).copied();
+        let w = work_idx.get(identity).copied();
         // working 在场优先用其 lifecycle，否则 base 的；label 取自并集，至少一侧在场。
         let lifecycle = match w.or(b) {
             Some(s) => s.lifecycle,
             None => continue,
         };
+        let label = w
+            .or(b)
+            .map(|s| s.label.as_str())
+            .unwrap_or(identity)
+            .to_string();
         let mut slot_keys: BTreeSet<&str> = BTreeSet::new();
         if let Some(s) = b {
             slot_keys.extend(s.slots.keys().map(String::as_str));
@@ -491,7 +499,7 @@ pub(crate) fn plan_diffs(base: &[ContractSide], working: &[ContractSide]) -> Vec
             });
         }
         diffs.push(ContractDiff {
-            label: label.to_string(),
+            label,
             lifecycle,
             schemas,
         });
@@ -677,12 +685,14 @@ fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
     let discovered = discover(contracts_root)?;
     let mut sides = Vec::with_capacity(discovered.len());
     for c in &discovered {
-        let label = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
+        let label = contract_label(c);
+        let identity = contract_identity(&c.manifest);
         let mut slots = BTreeMap::new();
         for (slot, file) in slot_files(&c.manifest) {
             slots.insert(slot, read_working_schema(&c.dir, &file)?);
         }
         sides.push(ContractSide {
+            identity,
             label,
             lifecycle: c.manifest.lifecycle,
             slots,
@@ -716,6 +726,7 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
             }
         }
         sides.push(ContractSide {
+            identity: contract_identity(&manifest),
             label,
             lifecycle: manifest.lifecycle,
             slots,
@@ -759,12 +770,29 @@ fn read_text_at_ref(root: &Path, git_ref: &str, rel: &str) -> Result<Option<Stri
     Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
-/// `contracts/{kind}/{domain}/{version}/contract.toml` → label `{kind}/{domain}/{version}`（与 working 同源）。
+/// `contracts/{kind}/{domain}/{version}[/<slug>]/contract.toml` → label
+/// `{kind}/{domain}/{version}[/<slug>]`（与 working 同源）。
 fn label_from_manifest_path(rel: &str) -> Option<String> {
     let inner = rel
         .strip_prefix("contracts/")?
         .strip_suffix("/contract.toml")?;
-    (inner.split('/').count() == 3).then(|| inner.to_string())
+    let count = inner.split('/').count();
+    matches!(count, 3 | 4).then(|| inner.to_string())
+}
+
+fn contract_identity(m: &ContractManifest) -> String {
+    m.id.clone()
+}
+
+/// 契约诊断 label：嵌套契约必须带 slug，否则同一 `{kind}/{domain}/{version}` 下的 sibling 会互相覆盖。
+fn contract_label(c: &super::DiscoveredContract) -> String {
+    match &c.slug {
+        Some(slug) => format!(
+            "{}/{}/{}/{}",
+            c.path_kind, c.path_domain, c.path_version, slug
+        ),
+        None => format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version),
+    }
 }
 
 #[cfg(test)]
@@ -1211,7 +1239,17 @@ mod tests {
     // ─────────── C1：base ∪ working 并集（删除类破坏不漏检）───────────
 
     fn side(label: &str, lifecycle: Lifecycle, slots: &[(&str, Value)]) -> ContractSide {
+        side_with_identity(label, label, lifecycle, slots)
+    }
+
+    fn side_with_identity(
+        identity: &str,
+        label: &str,
+        lifecycle: Lifecycle,
+        slots: &[(&str, Value)],
+    ) -> ContractSide {
         ContractSide {
+            identity: identity.to_string(),
             label: label.to_string(),
             lifecycle,
             slots: slots
@@ -1219,6 +1257,112 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn base_manifest_label_accepts_flat_and_nested_paths() {
+        assert_eq!(
+            label_from_manifest_path("contracts/http/identity/v1/contract.toml"),
+            Some("http/identity/v1".to_string())
+        );
+        assert_eq!(
+            label_from_manifest_path("contracts/http/identity/v1/roles-revoke/contract.toml"),
+            Some("http/identity/v1/roles-revoke".to_string())
+        );
+        assert_eq!(
+            label_from_manifest_path("contracts/http/identity/v1/a/b/contract.toml"),
+            None,
+            "五段嵌套不是合法 contract path"
+        );
+    }
+
+    #[test]
+    fn working_manifest_label_includes_nested_slug() -> anyhow::Result<()> {
+        let manifest = ContractManifest::from_toml_str(
+            r#"
+id = "identity.roles-revoke"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+"#,
+        )?;
+        let c = super::super::DiscoveredContract {
+            dir: std::path::PathBuf::from("contracts/http/identity/v1/roles-revoke"),
+            path_kind: "http".to_string(),
+            path_domain: "identity".to_string(),
+            path_version: "v1".to_string(),
+            slug: Some("roles-revoke".to_string()),
+            manifest,
+        };
+        assert_eq!(contract_label(&c), "http/identity/v1/roles-revoke");
+        Ok(())
+    }
+
+    #[test]
+    fn nested_identity_v1_siblings_do_not_collapse_to_three_segment_label() {
+        let slugs = [
+            "login",
+            "refresh",
+            "roles-assign",
+            "roles-revoke",
+            "roles-list",
+            "profile",
+            "password-change",
+            "logout",
+        ];
+        let base: Vec<_> = slugs
+            .iter()
+            .map(|slug| {
+                side(
+                    &format!("http/identity/v1/{slug}"),
+                    Lifecycle::Active,
+                    &[(
+                        "response",
+                        json!({"properties": {"data": {"type": "object"}}}),
+                    )],
+                )
+            })
+            .collect();
+        let working = base.clone();
+
+        let diffs = plan_diffs(&base, &working);
+        let labels: BTreeSet<&str> = diffs.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(diffs.len(), 8, "8 个 sibling 必须逐个参与 breaking diff");
+        assert_eq!(
+            labels.len(),
+            8,
+            "nested sibling label 不能折叠成单个 http/identity/v1"
+        );
+        assert!(labels.contains("http/identity/v1/roles-revoke"));
+    }
+
+    #[test]
+    fn flat_to_nested_same_contract_id_is_not_treated_as_delete_and_add() {
+        let schema = json!({"properties": {"username": {"type":"string"}}});
+        let base = vec![side_with_identity(
+            "identity.login",
+            "http/identity/v1",
+            Lifecycle::Active,
+            &[("request", schema.clone())],
+        )];
+        let working = vec![side_with_identity(
+            "identity.login",
+            "http/identity/v1/login",
+            Lifecycle::Active,
+            &[("request", schema)],
+        )];
+
+        let diffs = plan_diffs(&base, &working);
+        let r = evaluate(&diffs, EnforcementMode::Deny);
+        assert!(
+            r.findings.is_empty(),
+            "flat -> nested path migration must not look like a contract deletion: {:?}",
+            r.findings
+        );
+        assert!(!r.any_deny);
     }
 
     /// 删除整个 active 契约（base 有、working 无）→ base 各字段报 FIELD_NO_DELETE（经 plan_diffs empty-new）。

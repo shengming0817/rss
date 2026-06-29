@@ -1,11 +1,11 @@
 # Contracts — identity 域 crate
 
-> 契约真源在 `contracts/{http,event}/identity/v1/`（声明）→ `generated/src/{http,event}/identity_v1.rs`（派生）。本文件只是 spec 阶段的契约范围说明，不复制 schema；实际 schema 在 PR5 落地，走 contract-fanout.md 闭环。
+> 契约真源在 `contracts/{http,event}/identity/v1/`（声明）→ `generated/src/{http,event}/identity_v1.rs`（派生）。HTTP identity 契约采用 nested v1 形态（`contracts/http/identity/v1/<slug>/`），不再使用旧 `identity/v2` refresh workaround。本文件只是 spec 阶段的契约范围说明，不复制 schema；实际 schema 走 contract-fanout.md 闭环。
 
 ## 现存（draft，本 feature 升 active）
 
-- **`identity.login`**（http，**L2 OutboxFact**——与权威 `contracts/http/identity/v1/contract.toml` `consistencyLevel = "OutboxFact"` 同源：登录在同事务写本地会话 + 发布 `identity.session-created` outbox fact，故 login 契约整体是 L2；`SessionRepo::create` 仅是其中的 L1 子步骤，不单独成契约一致性边界）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}}`——登录成功首发 access JWT（vault `Signer` 经 `authn::JwtIssuer` 签）+ refresh token bundle（#1252 Join 接线）。
-- **`identity.refresh`**（http，**L1 LocalTx**，`contracts/http/identity/v2/`）：`POST /api/v1/identity/refresh`，Public（opt_out；refresh token 自身即凭据）。tenant 来源 `X-Tenant-ID` header。req `{refreshToken}` → resp `{data:{accessToken,refreshToken,accessExpiresAt}}`——轮换 refresh token 血缘（reuse-detection 级联撤销）+ 铸新 access JWT。未知/重放/过期 → 401（#1252）。
+- **`identity.login`**（http，**L2 OutboxFact**，`contracts/http/identity/v1/login/`）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}}`——登录成功首发 access JWT（vault `Signer` 经 `authn::JwtIssuer` 签）+ refresh token bundle（#1252 Join 接线）。
+- **`identity.refresh`**（http，**L1 LocalTx**，`contracts/http/identity/v1/refresh/`）：`POST /api/v1/identity/refresh`，Public（opt_out；refresh token 自身即凭据）。tenant 来源 `X-Tenant-ID` header。req `{refreshToken}` → resp `{data:{accessToken,refreshToken,accessExpiresAt}}`——轮换 refresh token 血缘（reuse-detection 级联撤销）+ 铸新 access JWT。未知/重放/过期 → 401（#1252）。
 - **`identity.session-created`**（event，L2 OutboxFact）：payload `{sessionId,subject,tenantId,occurredAt}`；订阅方 audit。
 
 ## 新增（PR5）
@@ -16,10 +16,12 @@
 | `identity.role-revoked` | event | L2 OutboxFact | identity | 触发：角色撤销；订阅：audit（同上） | — |
 | `identity.password-change` | http | L1 | identity | `POST /api/v1/identity/password/change`，鉴权（selfScoped） | `identity:profile:write` |
 | `identity.logout` | http | L1 | identity | `POST /api/v1/identity/logout`，鉴权（selfScoped）；仅域侧软撤销，硬吊销延 #1003 | `identity:session:write` |
-| `identity.roles-assign` | http | L2 | identity | `POST /api/v1/identity/roles`，鉴权 | `identity:role:assign` |
+| `identity.roles-assign` | http | L2 | identity | `POST /api/v1/identity/roles/{roleId}/bindings`，鉴权 | `identity:role:assign` |
 | `identity.roles-revoke` | http | L2 | identity | `DELETE /api/v1/identity/roles/{roleId}/bindings/{subject}`，鉴权（binding 级资源：tenant 从鉴权上下文派生，只撤目标 binding，跨租隐藏存在性） | `identity:role:revoke` |
 | `identity.roles-list` | http | L0 | identity | `GET /api/v1/identity/roles`，鉴权 + 分页(limit≤500)，响应 `{data,nextCursor,hasMore}` | `identity:role:read` |
 | `identity.profile` | http | L0 | identity | `GET /api/v1/identity/profile`，鉴权（selfScoped） | `identity:profile:read` |
+
+PR5b 同步补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`：assign/revoke 的 binding 行和 role event outbox 行同事务落库；role event audit consumer / session invalidation 仍延后 #1017。
 
 ## 扇出闭环（每个新契约，contract-fanout.md）
 

@@ -44,7 +44,7 @@
 - 真实持久化（postgres `RoleRepo` / `CredentialRepo` / `SessionRepo` impl）→ **adapter 单元（#1009–1011 / #1083 / #1116）**；本 feature 只定义 port + in-mem 替身。
 - EST 设备注册 / 证书签发 / CredentialFence sealed 令牌 → 独立 `deviceidentity` crate + authn（后期，非 #1012）。
 - `vocab::Decision` 增 Obligations/FieldMask 通道（P0-6 完整态）→ 若 ABAC deny-overrides 最小可用不需要，则不在本 feature 引入；需要则 PR2 内最小改动并在 PR body 标注（base crate 改动）。
-- 真依赖接线 + journey 全量 + bins/examples 集成 → Join 阶段 **#1017**。
+- role event audit consumer / session invalidation + journey 全量 + bins/examples 集成 → Join 阶段 **#1017**；PR5b 已补最小 `role_bindings` + `PgRoleBindingLifecycle` 生产闭环。
 
 > **blocked-by 精度**：identity 各子 PR 消费 authn 的是**已冻结签名**，故编译不被 #1003 实现硬阻塞——子 PR 用 in-mem 替身即可独立完成 + 测。5 个子 PBI 的 `Blocked-by` 只声明**彼此之间**与 #999，不错挂 #1003 / adapter（避免假依赖拖慢 wave）。
 
@@ -148,7 +148,7 @@
 
 | 端点 | Method | Path | AuthZ | Permission |
 |------|--------|------|-------|------------|
-| roles assign | POST | `/api/v1/identity/roles` | 鉴权 | `identity:role:assign` |
+| roles assign | POST | `/api/v1/identity/roles/{roleId}/bindings` | 鉴权 | `identity:role:assign` |
 | roles revoke | DELETE | `/api/v1/identity/roles/{roleId}/bindings/{subject}` | 鉴权（binding 级：tenant 从鉴权上下文，只撤目标 binding，跨租隐藏存在性） | `identity:role:revoke` |
 | roles list | GET | `/api/v1/identity/roles` | 鉴权 + 分页(limit≤500)，响应 `{data,nextCursor,hasMore}` | `identity:role:read` |
 | profile | GET | `/api/v1/identity/profile` | 鉴权（selfScoped） | `identity:profile:read` |
@@ -222,7 +222,7 @@
 ## Assumptions
 
 - authn（#1003）的 `Principal` / `PrincipalKind` / `diport::{Pdp,Publisher,Clock}` 等冻结签名已可消费（#997 已冻结），identity 编译不被 authn body 阻塞。
-- 真实持久化由 adapter 单元提供；本 feature 用 in-mem 替身验证 port 契约，真依赖接线在 Join（#1017）。
+- role assign/revoke 的最小生产持久化由 PR5b 的 `role_bindings` + `PgRoleBindingLifecycle` 提供；role event audit consumer、session invalidation 和全量 journey 仍在 Join（#1017）。
 - pre-GA wire 破坏窗口（至 2026-12-31）内允许原地改 active 契约版本（api-versioning.md §兼容窗口），仍走扇出闭环。
 - `vocab::Decision` 现形态足以表达 Allow/Deny；若 ABAC 需 Obligations/FieldMask，则 PR2 内最小扩展（base crate 改动，PR body 标注），否则不引入。
 - argon2/bcrypt 哈希算法选型沿用 `secure` crate 既有能力（若已提供）；否则在 identity 内最小封装并在 research.md 记对标。

@@ -1,5 +1,4 @@
 # identity 登录 HTTP 契约。
-# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
 # 登录写本地会话 + 发布 session-created outbox fact ⇒ consistencyLevel = OutboxFact（L2）。
 id = "identity.login"
 kind = "http"

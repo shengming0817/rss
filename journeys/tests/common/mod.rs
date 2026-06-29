@@ -10,7 +10,15 @@ use std::sync::{Arc, Mutex};
 
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
+use consistency::Entry;
+use diport::{OutboxEmitError, OutboxEnvelopeParts};
+use identity::ports::{
+    DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Role, RoleBinding, RoleBindingLifecycle,
+    RoleId, RoleListResult, RolePage, RoleRepo,
+};
+use identity::{IdentityDomain, LoginService, RbacAdminService, RefreshService};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+use vocab::TenantId;
 
 /// canonical UUID 种子租户（TenantId::parse 接受形态）。
 pub const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -100,6 +108,80 @@ pub fn audit_domain() -> (AuditDomain, CapturingVerifier) {
         Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)));
     let domain = AuditDomain::new(repo);
     (domain, verifier)
+}
+
+struct NoopRoleRepo;
+
+impl RoleRepo for NoopRoleRepo {
+    async fn find(&self, _tenant: TenantId, _id: RoleId) -> Result<Option<Role>, IdentityError> {
+        Ok(None)
+    }
+
+    async fn save(&self, _tenant: TenantId, _role: Role) -> Result<(), IdentityError> {
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        _tenant: TenantId,
+        _page: RolePage,
+    ) -> Result<RoleListResult, IdentityError> {
+        Ok(RoleListResult {
+            roles: Vec::new(),
+            has_more: false,
+        })
+    }
+}
+
+struct NoopRoleBindingLifecycle;
+
+impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
+    async fn assign_and_emit(
+        &self,
+        _binding: RoleBinding,
+        _entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<(), OutboxEmitError> {
+        Ok(())
+    }
+
+    async fn revoke_and_emit(
+        &self,
+        _tenant: TenantId,
+        _role_id: RoleId,
+        _subject: String,
+        _entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, OutboxEmitError> {
+        Ok(false)
+    }
+
+    async fn list_for_subject(
+        &self,
+        _tenant: TenantId,
+        _subject: String,
+    ) -> Result<Vec<RoleBinding>, IdentityError> {
+        Ok(Vec::new())
+    }
+}
+
+/// 构造 identity 域，并为本 journey 不触达的 RBAC 端点注入 no-op 依赖。
+pub fn identity_domain<S>(
+    login: Arc<LoginService<S>>,
+    refresh: Arc<RefreshService<S>>,
+) -> IdentityDomain<S>
+where
+    S: diport::Signer + Send + Sync + 'static,
+{
+    let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(NoopRoleRepo));
+    let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+        Arc::from(DynRoleBindingLifecycle::new_box(NoopRoleBindingLifecycle));
+    let rbac = Arc::new(RbacAdminService::new(
+        roles.clone(),
+        Arc::clone(&bindings),
+        Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
+    ));
+    IdentityDomain::new(login, refresh, rbac, roles, bindings)
 }
 
 /// 取唯一 session-created 订阅绑定（断言恰一个）。

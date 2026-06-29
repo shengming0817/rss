@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityRolesRevokeResponse",
+  "type": "object",
+  "required": ["data"],
+  "properties": {
+    "data": {
+      "title": "IdentityRolesRevokeData",
+      "type": "object",
+      "required": ["revoked"],
+      "properties": {
+        "revoked": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

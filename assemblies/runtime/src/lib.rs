@@ -43,8 +43,11 @@ use crypto::RustCryptoMacVerifier;
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use httpd::HttpServer;
 use identity::{
-    IdentityDomain, LoginService, RefreshService,
-    ports::{DynCredentialRepo, DynRefreshTokenStore, DynSessionLifecycle},
+    IdentityDomain, LoginService, RbacAdminService, RefreshService,
+    ports::{
+        DynCredentialRepo, DynRefreshTokenStore, DynRoleBindingLifecycle, DynRoleRepo,
+        DynSessionLifecycle,
+    },
 };
 use oidc::OidcProvider;
 use postgres::{
@@ -1006,6 +1009,11 @@ pub fn wire_identity_with(
     let lifecycle = Arc::from(DynSessionLifecycle::new_box(
         identity_pg.session_lifecycle(Box::new(SystemClock)),
     ));
+    let roles_for_admin = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
+    let roles_for_list = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
+    let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
+        identity_pg.role_binding_lifecycle(Box::new(SystemClock)),
+    ));
 
     // vault `Signer` + JWT issuer（#1252）：access JWT 经 vault Transit ES256 签。signer shutdown 是 no-op
     // （reqwest pool drop 即释放），同 Pdp `provider` 不入 ShutdownStack——无需独立句柄注册。
@@ -1032,7 +1040,18 @@ pub fn wire_identity_with(
         Box::new(SystemClock),
         ttl,
     ));
-    Ok(IdentityDomain::new(login, refresh))
+    let rbac_admin = Arc::new(RbacAdminService::new(
+        roles_for_admin,
+        Arc::clone(&bindings),
+        Box::new(SystemClock),
+    ));
+    Ok(IdentityDomain::new(
+        login,
+        refresh,
+        rbac_admin,
+        roles_for_list,
+        bindings,
+    ))
 }
 
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────

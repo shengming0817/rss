@@ -135,10 +135,14 @@ pub(crate) async fn trace(req: Request, next: Next) -> Response {
         .map(|r| r.0.clone())
         .unwrap_or_default();
     let correlation = diagctx::correlation();
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("<unmatched>", |p| p.as_str());
     let span = tracing::info_span!(
         "http.request",
         method = %req.method(),
-        path = %req.uri().path(),
+        path = %route,
         request_id = %rid,
         correlation = correlation.as_ref().map_or("", |c| c.as_str()),
         status = tracing::field::Empty,

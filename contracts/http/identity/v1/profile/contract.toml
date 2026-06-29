@@ -1,0 +1,18 @@
+# 当前认证主体 profile HTTP 契约。self-scoped authenticated read ⇒ L0。
+id = "identity.profile"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/identity/profile"
+method = "GET"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:profile:read"

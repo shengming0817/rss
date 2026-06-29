@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityPasswordChangeRequest",
+  "type": "object",
+  "required": ["currentPassword", "newPassword"],
+  "properties": {
+    "currentPassword": { "type": "string", "x-redaction": "secret" },
+    "newPassword": { "type": "string", "x-redaction": "secret" }
+  },
+  "additionalProperties": false
+}

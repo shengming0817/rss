@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityRolesListResponse",
+  "type": "object",
+  "required": ["data", "hasMore"],
+  "properties": {
+    "data": {
+      "type": "array",
+      "items": {
+        "title": "IdentityRoleView",
+        "type": "object",
+        "required": ["roleId", "name", "permissions"],
+        "properties": {
+          "roleId": { "type": "string" },
+          "name": { "type": "string" },
+          "permissions": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "nextCursor": { "type": "string" },
+    "hasMore": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}

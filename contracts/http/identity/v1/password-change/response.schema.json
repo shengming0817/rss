@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityPasswordChangeResponse",
+  "type": "object",
+  "required": ["data"],
+  "properties": {
+    "data": {
+      "title": "IdentityPasswordChangeData",
+      "type": "object",
+      "required": ["changed"],
+      "properties": {
+        "changed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -42,27 +42,45 @@ pub use vocab::TenantId;
 /// dyn-safe（ADR-003 §4.6）：方法 `&self`、参数/返回为具体类型、supertrait 仅 Send。归属为域形 port
 /// （签名引用 `Role`/`RoleId`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
 ///
-/// ⚠ **当前方法集 = 最小生产接缝（find / save），非完整 repo 设计范式（勿照抄查询集）**。安全 scope 由签名
-/// 承载：`Role` 按租户内角色建模，repo 方法必须接收 typed `TenantId` 位置参做 store scope（pre-GA：显式
-/// `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨 roles/sessions/
-/// config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立 `GlobalRoleRepo`，
-/// 不得复用本租户内 repo 签名。
+/// **当前方法集 = PR5b 最小生产接缝（find / save / tenant-scoped list），非完整 repo 设计范式（勿照抄查询集）**。
+/// 安全 scope 由签名承载：`Role` 按租户内角色建模，repo 方法必须接收 typed `TenantId` 位置参做 store scope
+/// （pre-GA：显式 `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨
+/// roles/sessions/config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立
+/// `GlobalRoleRepo`，不得复用本租户内 repo 签名。
 /// **生产 postgres impl 已由 postgres `PgRoleRepo` 承载**（roles 表 + tenant scope + `Role::hydrate` 受控重建，
-/// #1250；替换原 `#[cfg(test)]` `RoleRepoEdgeProof` 编译证明）——签名实体 accessor（`RoleId::as_str` /
-/// `Role::id|name|permission_ids` / `Role::hydrate`）已按需升 `pub`（字段私有 + 构造经 funnel，外部可读不可伪造）。
-/// **查询形态后续**：按业务补 `list_by_tenant` / `find_by_name` / `exists` 等惯用方法 + 强制分页（`limit≤500`）。
+/// #1250；PR5b 补齐 `list` 分页查询）——签名实体 accessor（`RoleId::as_str` / `Role::id|name|permission_ids`
+/// / `Role::hydrate`）已按需升 `pub`（字段私有 + 构造经 funnel，外部可读不可伪造）。
+/// **查询形态后续**：按业务补 `find_by_name` / `exists` 等惯用方法；列表查询继续强制分页（`limit≤500`）。
 #[trait_variant::make(RoleRepo: Send)]
 #[dynosaur(pub DynRoleRepo = dyn(box) RoleRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RoleRepo` 变体 + dynosaur
 // `DynRoleRepo` 承载（DI 注入走 Send wrapper）。与 diport DI port 同范式（ADR-003/ADR-004 C1）。body=todo!()
 // （签名冻结，ADR-004 C8）。
-pub trait RoleRepoLocal {
+pub trait RoleRepoLocal: Send + Sync {
     /// 按 ID 查角色（不存在返回 `Ok(None)`）。
     async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError>;
 
     /// 持久化角色（upsert）。
     async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError>;
+
+    /// 租户内分页列出角色（按 role id 升序稳定排序）。
+    async fn list(&self, tenant: TenantId, page: RolePage)
+    -> Result<RoleListResult, IdentityError>;
+}
+
+/// 角色列表分页参数（handler 已完成 query/cursor 校验，repo 只接收 typed page）。
+#[derive(Debug, Clone)]
+pub struct RolePage {
+    pub limit: vocab::Limit,
+    pub after: Option<RoleId>,
+}
+
+/// 角色列表分页结果（`has_more` 由 repo over-fetch 判定；`nextCursor` 由 handler 用末项 role id 派生）。
+#[derive(Debug)]
+pub struct RoleListResult {
+    pub roles: Vec<Role>,
+    pub has_more: bool,
 }
 
 /// 角色绑定生命周期 DI port（域形；provider 可换：prod postgres / test in-mem）——RBAC 角色分配 / 撤销的
@@ -79,17 +97,19 @@ pub trait RoleRepoLocal {
 /// commit；任一步失败整体 rollback。**唯一 binding-写 API**（域无 `save`/`emit` 分调、无半开事务句柄；co-tx
 /// 不可拆解在类型层成立，同 [`SessionLifecycle`] 的 OUTBOX-COTX-SESSION-01）。
 ///
-/// INVARIANT: OUTBOX-COTX-BINDING-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }— binding 行写/删与 role-event outbox 行 both-or-neither（Hard，
-/// combined-method funnel 在类型层成立）；#1017 生产 postgres `PgRoleBindingLifecycle` impl 落地时须以此 ID
-/// 标注 same-tx 接线 + 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无），同 OUTBOX-COTX-SESSION-01。
+/// INVARIANT: OUTBOX-COTX-BINDING-API-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }— 域只暴露
+/// combined-method funnel，调用方无法把 binding 行写/删与 role-event outbox append 拆成两个 port 调用。
+/// INVARIANT: OUTBOX-COTX-BINDING-PG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—
+/// 生产 postgres `PgRoleBindingLifecycle` 在 PR5b 落地 same-tx 接线与集成 anti-vacuity（commit 两行皆在 ↔
+/// rollback 两行皆无），同 OUTBOX-COTX-SESSION-01。
 ///
 /// **租户隔离由签名承载（fail-closed）**：`assign_and_emit` 的 tenant 来自 `binding.tenant()`；
 /// `revoke_and_emit` 接 typed [`TenantId`] 位参做 store scope——跨租 revoke → 幂等 `Ok(false)`（不撤、不发
 /// 事件、不泄露存在性，IDENTITY-AUTHZ-TENANT-01）。失败通道经 [`OutboxEmitError`]（infra 错误，source 已
 /// PII-redacted）冒泡。
 ///
-/// **draft 阶段**：本 PR 仅交付 port + `#[cfg(test)]` in-mem 替身 + 发布侧 producer 测试；生产 postgres
-/// adapter impl + audit 消费侧延后（#1017）——事件 draft 无下游，边界安全。
+/// **PR5b 状态**：port + `#[cfg(test)]` in-mem 替身 + 生产 `PgRoleBindingLifecycle` 已闭合 assign/revoke
+/// 发布侧；role assigned/revoked event contract 仍为 draft，生产 audit consumer 延后（#1017）。
 ///
 /// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
 /// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）
@@ -120,6 +140,14 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError>;
+
+    /// **授权读（L1）**：按 `(tenant, subject)` 列出该主体的 role bindings。仅供 contract-derived
+    /// authorizer 求值；不存在返回空集，跨租经 tenant scope 天然不可见。失败由调用方 fail-closed 映射 403。
+    async fn list_for_subject(
+        &self,
+        tenant: TenantId,
+        subject: String,
+    ) -> Result<Vec<RoleBinding>, IdentityError>;
 }
 
 /// 凭据仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
@@ -382,6 +410,13 @@ mod smoke {
         async fn save(&self, _tenant: TenantId, _role: Role) -> Result<(), IdentityError> {
             todo!()
         }
+        async fn list(
+            &self,
+            _tenant: TenantId,
+            _page: super::RolePage,
+        ) -> Result<super::RoleListResult, IdentityError> {
+            todo!()
+        }
     }
 
     fn assert_send<T: Send>(_: &T) {}
@@ -427,6 +462,11 @@ mod smoke {
                 id: RoleId,
             ) -> Result<Option<Role>, IdentityError>;
             async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError>;
+            async fn list(
+                &self,
+                tenant: TenantId,
+                page: super::RolePage,
+            ) -> Result<super::RoleListResult, IdentityError>;
         }
     }
 

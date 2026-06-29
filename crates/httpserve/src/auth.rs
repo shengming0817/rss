@@ -136,8 +136,15 @@ impl Authenticated {
         self.principal_kind
     }
 
-    /// 已认证主体 subject（PII）：仅供本 crate 的审计事件构造，不得写入 tracing / Debug / metrics label。
+    /// 已认证主体 subject（PII）：仅供本 crate 审计事件构造。
+    /// 不得写入 tracing / Debug / metrics label。
     pub(crate) fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    /// 已认证主体 subject（PII）：只暴露给租户作用域 handler 作 self-scoped 身份锚点。
+    /// 调用方不得写入 tracing / Debug / metrics label。
+    pub fn self_scoped_principal_id(&self) -> &str {
         &self.principal_id
     }
 

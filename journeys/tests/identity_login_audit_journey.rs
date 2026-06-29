@@ -46,7 +46,7 @@ use bootstrap::{
 };
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
-    audit_domain, single_subscription,
+    audit_domain, identity_domain, single_subscription,
 };
 use consistency::{
     EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
@@ -58,9 +58,9 @@ use diport::{
 };
 use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
-use generated::http::identity_v1::IdentityLoginRequest;
+use generated::http::identity_v1::login::IdentityLoginRequest;
 use identity::ports::DynSessionLifecycle;
-use identity::{IdentityDomain, LoginService, RefreshService, SeedSigner};
+use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{
     FixedClock, InMemClaimer, MemBus, MemDeadLetterStore, MemEmitter, MemSessionLifecycle,
 };
@@ -222,7 +222,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅 + admin 读路由组。
     let (audit_domain, audit) = audit_domain();
     let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
-    let identity_domain = IdentityDomain::new(login, refresh);
+    let identity_domain = identity_domain(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let route_groups = registry.route_groups();
@@ -449,7 +449,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
     let (audit_domain, audit) = audit_domain();
     let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
-    let identity_domain = IdentityDomain::new(login, refresh);
+    let identity_domain = identity_domain(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
     let SubscriberBinding {
