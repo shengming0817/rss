@@ -24,6 +24,8 @@ runctx = { path = "../../crates/runctx" }
 vocab = { path = "../../crates/vocab" }
 primitives = { path = "../../crates/primitives" }
 diport = { path = "../../crates/diport" }
+distributed = { path = "../../crates/distributed" }
+consistency = { path = "../../crates/consistency" }
 # 生产验签 provider（真 RustCrypto ES256/HS256；backend feature 开 impl diport::Pdp）。安全同批门：依赖图引真
 # verifier、不引 stub（memory adapter 经 deny.toml 禁 server/rss；runtime 同策）。
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
@@ -46,8 +48,6 @@ amqp = { path = "../../adapters/amqp", features = ["backend"] }
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 eventexec = { path = "../../crates/eventexec" }
 generated = { path = "../../generated" }
-# bridge output stores parsed ConsumerGroup from generated topology before wiring eventexec.
-consistency = { path = "../../crates/consistency" }
 deadpool-redis = { workspace = true }
 # Vault KV v2 secret 解析 adapter（VaultSecretResolver + TenantStoreAllowlist；backend feature 开）。
 vault = { path = "../../adapters/vault", features = ["backend"] }
@@ -58,6 +58,8 @@ reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 axum = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
 # verify_jwt(&DynPdp) future 为 !Send（DynPdp !Sync，DIPORT-ASYNC-ARC-SEND-01）；OidcProvider::verify 纯 CPU 无真
 # await ⇒ future 首 poll 即 ready。验签桥经 now_or_never() 同步驱动该 ready future，使中间件 future 保持 Send。
 futures = { workspace = true }

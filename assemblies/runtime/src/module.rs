@@ -44,14 +44,11 @@ pub struct SharedRuntimeDeps {
     /// 均经 `PgRuntimeDeps` 方法派发。
     pub pg: PgRuntimeDeps,
 
-    /// 共享 redis capability bundle，**demo-optional**（#332 F2）；distributed runtime 通过此唯一入口取得
-    /// idempotency / lock / CAS provider。`None` = 未配 `RSS_REDIS_URL`（默认 demo 路径不打断）；分布式
-    /// lock/CAS provider 当前为 draft、组合根无 consumer，故 redis 非启动硬依赖。go-live（active + `wire_distributed`）
-    /// 落地时改回必配（见 `assemblies/runtime/assembly.toml` 注释）。
+    /// 共享 redis capability bundle，生产必配；distributed runtime 通过此唯一入口取得 lock provider。
     ///
     /// 不暴露 `deadpool_redis::Pool`，保持 REDIS-BUNDLE-FUNNEL-01：pool guard、distlock、CAS、idempotency
     /// 均经 `RedisRuntimeDeps::infra()` / `runtime_resources()` 派发。
-    pub redis: Option<RedisRuntimeDeps>,
+    pub redis: RedisRuntimeDeps,
 
     /// 共享 vault capability bundle（#1498）；settings 域经 `vault.for_domain::<caps::Settings>().secret_resolver()`
     /// 投影受控 secret-resolution 句柄，拿不到 signer 或裸 `reqwest::Client`（VAULT-BUNDLE-RESOLVER-02）。

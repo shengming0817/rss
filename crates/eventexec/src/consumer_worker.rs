@@ -154,18 +154,6 @@ impl diport::ManagedResource for ConsumerWorker {
 
 // ── spawn（专用线程驱动 !Send 消费 future）─────────────────────────────────────
 
-/// 线程退出守卫：`Drop` 时 `mark_stopped`（readyz 翻 Unhealthy）。RAII 覆盖**所有**退出路径——正常返回
-/// （stream 终止）、runtime 构建失败 early-return、以及 handler future panic unwind——杜绝「panic 跳过
-/// mark_stopped、readyz 误报 Healthy 而 worker 已死」（review #274 F3/C3）。panic 仍照常 unwind 至
-/// [`std::thread::JoinHandle::join`] → `shutdown` 上抛 [`ConsumerThreadPanicked`]（守卫只标终态、不吞 panic）。
-struct StoppedOnExit(Arc<WorkerHealth>);
-
-impl Drop for StoppedOnExit {
-    fn drop(&mut self) {
-        self.0.mark_stopped();
-    }
-}
-
 /// DLX store wrapper：发射闭值集写入指标，并在写失败时把 consumer worker 标为 degraded。
 ///
 /// wrapper 只包 consumer worker 路径；不改变 ConsumerBase 的 commit/release/settle 状态机。
@@ -219,7 +207,7 @@ fn health_reporting_dlx(
 }
 
 /// 在专用 OS 线程建 current-thread runtime `block_on` 跑 `body`：线程退出（正常 / runtime 构建失败 /
-/// future panic）由 [`StoppedOnExit`] 守卫统一 `health.mark_stopped()`（readyz Unhealthy）。
+/// future panic）由 [`crate::WorkerStoppedGuard`] 守卫统一 `health.mark_stopped()`（readyz Unhealthy）。
 ///
 /// `worker_name` 用于 runtime 构建失败时的结构化日志归因（`worker = worker_name` 字段）。
 /// `make_body` **必须** `Send`（捕获值跨线程移入），其返回的 future **无需** `Send`（在线程内构建与轮询）。
@@ -235,7 +223,7 @@ where
     let worker_name = worker_name.to_string();
     std::thread::spawn(move || {
         // 退出守卫：正常返回 / runtime 构建失败 / future panic 三条路径均经 Drop 统一 mark_stopped（F3）。
-        let _stopped = StoppedOnExit(health);
+        let _stopped = health.stopped_on_exit();
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -284,14 +272,14 @@ where
     ConsumerWorker::adopt(name, handle, health, token)
 }
 
-/// spawn outbox relay worker（专用 OS 线程 + panic-safety `StoppedOnExit` 守卫，与
+/// spawn outbox relay worker（专用 OS 线程 + panic-safety `WorkerStoppedGuard` 守卫，与
 /// `spawn_consumer_ackable` 对称）。
 ///
 /// `PgOutbox: Send+!Sync` → `Arc<PgOutbox>: !Send` → relay future `!Send`，不可 `tokio::spawn`；
 /// 解法：`store: A`（`A: Send`）跨线程移入，在线程内 `Arc::new(store)` 构建——`Arc<A>`（`!Send`）
 /// 始终在单一线程持有，无需 `Send`（与 [`crate::RelayWorker`] / OS 线程模式对称）。
 ///
-/// panic-safety：`StoppedOnExit` Drop 守卫覆盖**所有**退出路径（runtime 构建失败、relay future
+/// panic-safety：`WorkerStoppedGuard` Drop 守卫覆盖**所有**退出路径（runtime 构建失败、relay future
 /// panic unwind、正常返回），确保 `health.mark_stopped()`（readyz Unhealthy）不被 panic 跳过。
 /// `relay_loop` 自身在取消后亦调 `mark_stopped`（幂等：两次 store 同值，正常路径无害）。
 ///
@@ -768,7 +756,7 @@ mod tests {
     }
 
     /// worker 线程 panic（handler panic）→ shutdown join 返 Err（ShutdownError），不静默吞（relay F6 同款）；
-    /// 且 panic unwind 仍经 [`super::StoppedOnExit`] 守卫标 Unhealthy（F3：原 `mark_stopped` 在 `block_on`
+    /// 且 panic unwind 仍经 [`crate::WorkerStoppedGuard`] 守卫标 Unhealthy（F3：原 `mark_stopped` 在 `block_on`
     /// 后，被 panic 跳过 → readyz 误报 Healthy；守卫修复后此断言成立）。
     #[tokio::test]
     async fn worker_panic_propagates_and_marks_stopped() {
@@ -966,11 +954,11 @@ mod tests {
             "spawn_relay worker shutdown must succeed"
         );
 
-        // 退出后 Unhealthy（relay_loop mark_stopped + StoppedOnExit 守卫双重保证）。
+        // 退出后 Unhealthy（relay_loop mark_stopped + WorkerStoppedGuard 守卫双重保证）。
         assert_eq!(
             worker.health().status(),
             primitives::healthz::HealthStatus::Unhealthy,
-            "relay worker must be Unhealthy after shutdown (StoppedOnExit guard)"
+            "relay worker must be Unhealthy after shutdown (WorkerStoppedGuard guard)"
         );
     }
 

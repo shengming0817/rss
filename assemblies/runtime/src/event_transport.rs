@@ -28,18 +28,21 @@ use bootstrap::{
     DomainModuleResult, SubscriberBinding, SubscriberHandler, WorkerSpec, adapt_subscriber_handler,
 };
 use consistency::ConsumerGroup;
-use diport::{DynDeadLetterStore, DynManagedResource, Topic};
+use diport::{DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownError, Topic};
 use eventexec::{
     ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE,
-    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, SWEEPER_WORKER_NAME, SamplerWorker,
-    SweeperConfig, SweeperWorker, WorkerHealth, backlog_sampler_loop,
-    spawn_consumer_ackable_subscriber, spawn_relay, sweeper_loop,
+    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, SWEEPER_WORKER_NAME, SweeperConfig,
+    SweeperWorker, WorkerHealth, backlog_sampler_loop, spawn_consumer_ackable_subscriber,
+    spawn_relay, sweeper_loop,
 };
 use generated::event::SubscriptionSpec;
 use postgres::{PgRuntimeDeps, caps};
 use primitives::{HealthCheck, ProbeName};
 
 use crate::SystemClock;
+use crate::distributed_runtime::{
+    CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
+};
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
@@ -110,6 +113,49 @@ impl bootstrap::HealthProbe for WorkerHealthProbe {
             self.health.status(),
             self.health.detail(),
         )
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("threaded event worker failed")]
+struct ThreadedWorkerError;
+
+struct ThreadedEventWorker {
+    name: &'static str,
+    token: tokio_util::sync::CancellationToken,
+    handle: tokio::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl ThreadedEventWorker {
+    fn spawn<F>(name: &'static str, token: tokio_util::sync::CancellationToken, run: F) -> Self
+    where
+        F: FnOnce(tokio_util::sync::CancellationToken) + Send + 'static,
+    {
+        let thread_token = token.clone();
+        let handle = std::thread::spawn(move || run(thread_token));
+        Self {
+            name,
+            token,
+            handle: tokio::sync::Mutex::new(Some(handle)),
+        }
+    }
+}
+
+impl ManagedResource for ThreadedEventWorker {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        let Some(handle) = self.handle.lock().await.take() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || handle.join())
+            .await
+            .map_err(ShutdownError::new)?
+            .map_err(|_| ShutdownError::new(ThreadedWorkerError))?;
+        Ok(())
     }
 }
 
@@ -317,6 +363,7 @@ fn resolve_event_decision(
 /// `cfg` 按值消费（`TransportConfig` 不 impl Clone）。
 pub async fn wire_event_transport(
     pg: &PgRuntimeDeps,
+    distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
 ) -> anyhow::Result<EventRuntime> {
@@ -340,7 +387,7 @@ pub async fn wire_event_transport(
             Ok(EventRuntime::empty())
         }
         EventDecision::Durable { per_domain } => {
-            wire_durable(pg, subscribers, per_domain, timing).await
+            wire_durable(pg, distributed, subscribers, per_domain, timing).await
         }
     }
 }
@@ -420,6 +467,7 @@ pub fn build_event_transport_config_from(
 // 拆分为子函数会把 Vec push 顺序散布到多处并隐藏 LIFO 约束，复杂度来自不可压缩的业务顺序。
 async fn wire_durable(
     pg: &PgRuntimeDeps,
+    distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
     timing: RelayTiming,
@@ -467,7 +515,7 @@ async fn wire_durable(
         let outbox = pg.for_domain::<caps::Settings>().outbox(publisher);
         wire_domain_relay("settings", outbox, &timing, &mut module)?;
     }
-    wire_outbox_maintenance(pg, &timing, &mut module)?;
+    wire_outbox_maintenance(pg, distributed, &timing, &mut module)?;
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
     wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &timing, &mut module)?;
@@ -490,7 +538,7 @@ fn relay_publisher(
         .publisher())
 }
 
-/// 为单个 L2 发布域声明一个 outbox relay worker（`eventexec::spawn_relay`：专用 OS 线程 + `StoppedOnExit`
+/// 为单个 L2 发布域声明一个 outbox relay worker（`eventexec::spawn_relay`：专用 OS 线程 + `WorkerStoppedGuard`
 /// panic-safety 守卫，与 ConsumerWorker 对称）+ 一个 per-domain readyz 探针，收进 module。
 ///
 /// `outbox` 已绑该域 vhost publisher（调用方按 `caps::*` marker 构造，编译期防跨域错插）；`PgOutbox: Send+!Sync`
@@ -544,6 +592,7 @@ fn wire_domain_relay(
 /// outbox maintenance workers：backlog sampler + published-row sweeper。
 fn wire_outbox_maintenance(
     pg: &PgRuntimeDeps,
+    distributed: DistributedRuntimeDeps,
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
@@ -558,27 +607,53 @@ fn wire_outbox_maintenance(
         .context("build outbox sweeper config")?;
 
     let maintenance = pg.infra().outbox_maintenance();
-    wire_sampler_worker(maintenance.clone(), relay_cfg, module)?;
-    wire_sweeper_worker(maintenance, sweeper_cfg, module)?;
+    let coordinator = distributed.outbox_maintenance_coordinator();
+    wire_sampler_worker(
+        CoordinatedOutboxBacklog::new(maintenance.clone(), coordinator.clone()),
+        relay_cfg,
+        module,
+    )?;
+    wire_sweeper_worker(
+        CoordinatedRetentionSweeper::new(maintenance, coordinator),
+        sweeper_cfg,
+        module,
+    )?;
     Ok(())
 }
 
 fn wire_sampler_worker(
-    maintenance: postgres::PgOutboxMaintenance,
+    maintenance: CoordinatedOutboxBacklog<postgres::PgOutboxMaintenance>,
     config: RelayConfig,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
     let worker: WorkerSpec = Box::new(move |token| {
-        let handle = tokio::spawn(backlog_sampler_loop(
-            Arc::new(maintenance),
-            config,
-            token.clone(),
-            Arc::clone(&worker_health),
-            Arc::new(MetricsOutboxMetrics),
-        ));
-        DynManagedResource::new_box(SamplerWorker::adopt(handle, worker_health, token))
+        DynManagedResource::new_box(ThreadedEventWorker::spawn(
+            "outbox-sampler",
+            token,
+            move |thread_token| {
+                let _stopped = worker_health.stopped_on_exit();
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        tracing::error!(error = %err, "outbox sampler runtime build failed");
+                        return;
+                    }
+                };
+                runtime.block_on(backlog_sampler_loop(
+                    Arc::new(maintenance),
+                    config,
+                    thread_token,
+                    Arc::clone(&worker_health),
+                    Arc::new(MetricsOutboxMetrics),
+                ));
+            },
+        ))
     });
     module.workers.push(worker);
 
@@ -595,25 +670,37 @@ fn wire_sampler_worker(
 }
 
 fn wire_sweeper_worker(
-    maintenance: postgres::PgOutboxMaintenance,
+    maintenance: CoordinatedRetentionSweeper<postgres::PgOutboxMaintenance>,
     config: SweeperConfig,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
     let worker: WorkerSpec = Box::new(move |token| {
-        let handle = tokio::spawn(sweeper_loop(
-            Arc::new(maintenance),
-            config,
-            token.clone(),
-            Arc::clone(&worker_health),
-            "outbox",
-        ));
-        DynManagedResource::new_box(SweeperWorker::adopt(
+        DynManagedResource::new_box(ThreadedEventWorker::spawn(
             SWEEPER_WORKER_NAME,
-            handle,
-            worker_health,
             token,
+            move |thread_token| {
+                let _stopped = worker_health.stopped_on_exit();
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        tracing::error!(error = %err, "outbox sweeper runtime build failed");
+                        return;
+                    }
+                };
+                runtime.block_on(sweeper_loop(
+                    Arc::new(maintenance),
+                    config,
+                    thread_token,
+                    Arc::clone(&worker_health),
+                    "outbox",
+                ));
+            },
         ))
     });
     module.workers.push(worker);
@@ -1488,6 +1575,26 @@ mod tests {
     #[test]
     fn parse_usize_env_falls_back_on_invalid() {
         assert_eq!(parse_usize_env(Some("oops".into()), "TEST_VAR", 8), 8);
+    }
+
+    #[allow(clippy::panic)]
+    #[tokio::test]
+    async fn threaded_event_worker_marks_health_stopped_on_thread_exit() {
+        let health = Arc::new(WorkerHealth::healthy());
+        let worker_health = Arc::clone(&health);
+        let token = tokio_util::sync::CancellationToken::new();
+        let worker = ThreadedEventWorker::spawn("test-threaded-worker", token, move |_| {
+            let _stopped = worker_health.stopped_on_exit();
+        });
+
+        if let Err(err) = worker.shutdown().await {
+            panic!("thread joins: {err}");
+        }
+        assert_eq!(
+            health.status(),
+            primitives::healthz::HealthStatus::Unhealthy
+        );
+        assert_eq!(health.detail(), "stopped");
     }
 
     // ── make_consumer_probe（FIX 7）────────────────────────────────────────────

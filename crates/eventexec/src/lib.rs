@@ -24,8 +24,8 @@ pub mod command;
 pub mod relay;
 pub use relay::{
     OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker,
-    SWEEPER_WORKER_NAME, SamplerWorker, SweeperWorker, WorkerHealth, backlog_sampler_loop,
-    relay_loop, sweeper_loop,
+    SWEEPER_WORKER_NAME, SamplerWorker, SweeperWorker, WorkerHealth, WorkerStoppedGuard,
+    backlog_sampler_loop, relay_loop, sweeper_loop,
 };
 
 // #1209 outbox relay 配置护栏（构造期 fail-fast）+ 可观测性发射端口（注入式）。

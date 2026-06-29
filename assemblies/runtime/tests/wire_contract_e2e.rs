@@ -36,14 +36,18 @@ async fn connect_pg()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    match PgRuntimeDeps::setup(&owner_config).await {
+    match PgRuntimeDeps::setup(&owner_config, &owner_config).await {
         Ok(deps) => return Ok((fixture, deps)),
         Err(PgError::RlsBypassRole) => {
             provision_nobypass_app_role(p).await?;
         }
         Err(e) => return Err(Box::new(e)),
     }
-    let deps = PgRuntimeDeps::setup(&pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD)).await?;
+    let deps = PgRuntimeDeps::setup(
+        &owner_config,
+        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+    )
+    .await?;
     Ok((fixture, deps))
 }
 
@@ -129,11 +133,7 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     })
     .await?;
 
-    let deps = SharedRuntimeDeps {
-        pg,
-        redis: Some(redis),
-        vault,
-    };
+    let deps = SharedRuntimeDeps { pg, redis, vault };
 
     // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回 (SettingsDomain, DomainModuleResult)；
     // module 半边产物恰一条 configs_ready 探针（#1430：domain 半边经 run() compose 挂业务路由，此处只验 module 出向）。
@@ -159,12 +159,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         "vault-secret-resolver",
         "vault 单源 resource 即 resolver guard"
     );
-    // redis 为 demo-optional（#332 F2）；本 fixture 配了 RSS_REDIS_URL，故 Some——取 pool guard 单源验收。
-    let redis = deps
-        .redis
-        .as_ref()
-        .ok_or("redis configured in this wire_contract e2e fixture")?;
-    let redis_resources = redis.runtime_resources();
+    // Redis 为生产硬依赖；取 pool guard 单源验收。
+    let redis_resources = deps.redis.runtime_resources();
     assert_eq!(redis_resources.len(), 1, "redis 单源派生 pool guard");
     Ok(())
 }

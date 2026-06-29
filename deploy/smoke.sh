@@ -8,7 +8,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
-HEALTH_URL="http://localhost:8083/health/v1"
+export RSS_PRIMARY_HOST_PORT="${RSS_PRIMARY_HOST_PORT:-18080}"
+export RSS_INTERNAL_HOST_PORT="${RSS_INTERNAL_HOST_PORT:-18081}"
+export RSS_ADMIN_HOST_PORT="${RSS_ADMIN_HOST_PORT:-18082}"
+export RSS_HEALTH_HOST_PORT="${RSS_HEALTH_HOST_PORT:-18083}"
+HEALTH_URL="http://localhost:${RSS_HEALTH_HOST_PORT}/health/v1"
 READY_TIMEOUT="${READY_TIMEOUT:-120}" # 秒：含镜像构建后首启 + 迁移。
 # reason: 唯一临时文件——同机并行跑（CI 多 job / 多终端）不互相覆盖 readyz 响应。
 READYZ_TMP="$(mktemp)"
@@ -21,7 +25,7 @@ fail() {
 
 cleanup() {
     rm -f "$READYZ_TMP"
-    if [ "${KEEP_UP:-0}" = "1" ]; then
+    if [[ "${KEEP_UP:-0}" = "1" ]]; then
         log "KEEP_UP=1：保留栈，跳过 teardown（手动 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml down -v' 清理）"
         return
     fi
@@ -30,26 +34,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "构建并拉起演示栈（postgres + server）…"
+log "构建并拉起演示栈（postgres + redis + rabbitmq + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
 $COMPOSE up --build -d
 
 # ── 闭环 1：/readyz 轮询至 200（PG healthy + 迁移完 + 池就绪）────────────────────────────────────
 log "轮询 ${HEALTH_URL}/readyz 至 200（超时 ${READY_TIMEOUT}s）…"
 deadline=$((SECONDS + READY_TIMEOUT))
 ready=0
-while [ $SECONDS -lt $deadline ]; do
+while [[ $SECONDS -lt $deadline ]]; do
     if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
         ready=1
         break
     fi
     sleep 2
 done
-[ $ready -eq 1 ] || {
+[[ $ready -eq 1 ]] || {
     log "readyz 未在超时内 200；server 日志："
     $COMPOSE logs --tail=50 server >&2 || true
     fail "/readyz 未就绪"
 }
 log "readyz 200 ✓ → $(cat "$READYZ_TMP")"
+grep -q '"name":"redis_ready"' "$READYZ_TMP" || fail "readyz body 缺 redis_ready probe"
+log "redis_ready probe 暴露 ✓"
 
 # ── 闭环 2：/healthz liveness 恒 200 ──────────────────────────────────────────────────────────────
 curl -fsS "${HEALTH_URL}/healthz" >/dev/null || fail "/healthz 非 200"
@@ -66,11 +72,43 @@ esac
 
 # ── 闭环 4：运行时加固断言（非 root + 只读 rootfs）────────────────────────────────────────────────
 cid="$($COMPOSE ps -q server)"
-[ -n "$cid" ] || fail "找不到 server 容器"
+[[ -n "$cid" ]] || fail "找不到 server 容器"
 user="$(docker inspect -f '{{.Config.User}}' "$cid")"
 ro="$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")"
-[ "$user" = "65532:65532" ] || fail "期望非 root user 65532:65532，实际 '${user}'"
-[ "$ro" = "true" ] || fail "期望只读 rootfs (ReadonlyRootfs=true)，实际 '${ro}'"
+[[ "$user" = "65532:65532" ]] || fail "期望非 root user 65532:65532，实际 '${user}'"
+[[ "$ro" = "true" ]] || fail "期望只读 rootfs (ReadonlyRootfs=true)，实际 '${ro}'"
 log "加固断言 ✓（user=${user}, read_only=${ro}）"
+
+# ── 闭环 5：Redis down → readyz 503 ────────────────────────────────────────────────────────────
+log "停止 redis，验证 readyz 降为 503…"
+$COMPOSE stop redis >/dev/null
+deadline=$((SECONDS + 20))
+redis_down=0
+while [[ $SECONDS -lt $deadline ]]; do
+    code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
+    if [[ "$code" = "503" ]] && grep -q '"name":"redis_ready"' "$READYZ_TMP"; then
+        redis_down=1
+        break
+    fi
+    sleep 1
+done
+[[ $redis_down -eq 1 ]] || fail "Redis down 后 /readyz 未返回 503（last=$(cat "$READYZ_TMP")）"
+log "Redis down → readyz 503 ✓"
+
+if [[ "${KEEP_UP:-0}" = "1" ]]; then
+    log "KEEP_UP=1：恢复 redis 并等待 readyz 回到 200…"
+    $COMPOSE start redis >/dev/null
+    deadline=$((SECONDS + READY_TIMEOUT))
+    restored=0
+    while [[ $SECONDS -lt $deadline ]]; do
+        if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
+            restored=1
+            break
+        fi
+        sleep 2
+    done
+    [[ $restored -eq 1 ]] || fail "KEEP_UP=1 恢复 redis 后 /readyz 未回到 200（last=$(cat "$READYZ_TMP")）"
+    log "KEEP_UP=1：redis 已恢复，readyz 200 ✓"
+fi
 
 log "全部冒烟通过 ✅"

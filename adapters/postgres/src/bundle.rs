@@ -3,9 +3,10 @@
 //! 绝不泄漏裸 `sqlx::PgPool`。
 //!
 //! 四个类型：
-//! - [`PgRuntimeDeps`]：组合根级集中 funnel。唯一公开构造路径 [`PgRuntimeDeps::setup`]（connect →
-//!   run_migrations → 新建 readiness handle）；派发 [`PgRuntimeDeps::for_domain`] / [`PgRuntimeDeps::infra`]、
-//!   产出 shutdown 资源（[`PgRuntimeDeps::store_guard`]）+ 采样 worker（[`PgRuntimeDeps::spawn_readiness_sampler`]）。
+//! - [`PgRuntimeDeps`]：组合根级集中 funnel。唯一公开构造路径 [`PgRuntimeDeps::setup`]（migrator connect →
+//!   run_migrations → serving connect → RLS gate → 新建 readiness handle）；派发 [`PgRuntimeDeps::for_domain`] /
+//!   [`PgRuntimeDeps::infra`]、产出 shutdown 资源（[`PgRuntimeDeps::store_guard`]）+ 采样 worker
+//!   （[`PgRuntimeDeps::spawn_readiness_sampler`]）。
 //! - [`PgDomainDeps<D>`]：per-domain 受控句柄（`Clone`，私有持 `Arc<PgStore>`），只暴露该域的 repo
 //!   构造方法。类型参数 `D: PgDomain`（sealed marker）使「settings 的 deps 拿去建 identity repo」=
 //!   编译错误 E0599（类型层不可表达）。
@@ -52,7 +53,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use diport::{Clock, DynCasStore, DynPublisher};
+use diport::{Clock, DynCasStore, DynPublisher, ManagedResource};
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
@@ -109,14 +110,21 @@ pub struct PgRuntimeDeps {
 }
 
 impl PgRuntimeDeps {
-    /// 唯一公开构造路径：连接 + 跑迁移 + RLS 能力门 + 新建 readiness handle（初值 `Down`，fail-closed）。
+    /// 唯一公开构造路径：migrator 连接跑迁移，serving 连接建长期 pool 并跑 RLS 能力门。
     ///
-    /// 缺配 / 连不上 / 迁移失败 / **RLS 能力缺失**均 fail-fast 返 [`PgError`]（区分 `Connect` / `Migrate` /
-    /// `Rls*` 阶段）；组合根在边界 `.context(..)` 成 anyhow。对标 omicron `DataStore::new_with_timeout`
-    /// （构造器集中 + schema/能力门控，对象返回前校验）。
-    pub async fn setup(config: &PgConfig) -> Result<Self, PgError> {
-        let store = Arc::new(PgStore::connect(config).await?);
-        store.run_migrations().await?;
+    /// `migrator_config` 必须是短生命周期 DDL 角色；`serving_config` 必须是长期最小权限
+    /// NOBYPASSRLS 角色。缺配 / 连不上 / 迁移失败 / **RLS 能力缺失**均 fail-fast 返 [`PgError`]
+    /// （区分 `Connect` / `Migrate` / `Rls*` 阶段）；组合根在边界 `.context(..)` 成 anyhow。
+    /// 对标 omicron `DataStore::new_with_timeout`（构造器集中 + schema/能力门控，对象返回前校验）。
+    pub async fn setup(
+        migrator_config: &PgConfig,
+        serving_config: &PgConfig,
+    ) -> Result<Self, PgError> {
+        let migrator = PgStore::connect(migrator_config).await?;
+        migrator.run_migrations().await?;
+        migrator.shutdown().await.ok();
+
+        let store = Arc::new(PgStore::connect(serving_config).await?);
         // durable RLS 能力门（fail-fast）：tenant 表须 FORCE RLS + policy 且 GUC roundtrip 通过，否则拒绝启动。
         store.verify_rls_capability().await?;
         Ok(Self {

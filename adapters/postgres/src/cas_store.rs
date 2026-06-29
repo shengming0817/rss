@@ -149,6 +149,8 @@ mod smoke {
 mod integration_tests {
     use diport::{CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, ManagedResource};
 
+    use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
+
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     fn request(
@@ -163,6 +165,34 @@ mod integration_tests {
             new_value: Vec::from(new_value).into(),
             expected_token,
         }
+    }
+
+    async fn connect_rss_app_member(
+        fixture: &testkit::PgFixture,
+        owner: &PgStore,
+    ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
+        let role = format!("rss_cas_app_{}", uuid::Uuid::new_v4().simple());
+        let password = "cas_test_pw";
+        sqlx::query(&format!(
+            "CREATE ROLE {role} LOGIN PASSWORD '{password}' NOBYPASSRLS"
+        ))
+        .execute(&owner.pool)
+        .await?;
+        sqlx::query(&format!("GRANT rss_app TO {role}"))
+            .execute(&owner.pool)
+            .await?;
+
+        let p = fixture.params();
+        let config = PgConfig::new(
+            p.host.clone(),
+            p.port,
+            p.database.clone(),
+            role,
+            PgPassword::new(password.to_string()),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(std::time::Duration::from_secs(5));
+        Ok(PgStore::connect(&config).await?)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -253,6 +283,96 @@ mod integration_tests {
 
         cas.shutdown().await?;
         store.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rss_app_nobypass_role_can_use_cas_without_delete() -> TestResult {
+        let (pg, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let app_store = connect_rss_app_member(&pg, &owner).await?;
+
+        let cas = app_store.cas_store();
+        let key = format!("cas-rss-app-{}", uuid::Uuid::new_v4());
+        assert_eq!(
+            cas.compare_and_swap(request(&key, None, b"v1", None))
+                .await?,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(1)
+            }
+        );
+        assert_eq!(
+            cas.compare_and_swap(request(
+                &key,
+                Some(b"v1"),
+                b"v2",
+                Some(vocab::Epoch::new(1))
+            ))
+            .await?,
+            CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(2)
+            }
+        );
+        assert_eq!(
+            cas.compare_and_swap(request(
+                &key,
+                Some(b"v1"),
+                b"v3",
+                Some(vocab::Epoch::new(2))
+            ))
+            .await?,
+            CasStoreOutcome::Conflict {
+                current: Some(Vec::from(&b"v2"[..]).into())
+            }
+        );
+        assert_eq!(
+            cas.compare_and_swap(request(
+                &key,
+                Some(b"v2"),
+                b"v4",
+                Some(vocab::Epoch::new(1))
+            ))
+            .await?,
+            CasStoreOutcome::Fenced {
+                current_token: vocab::Epoch::new(2)
+            }
+        );
+
+        let race_key = format!("cas-rss-app-race-{}", uuid::Uuid::new_v4());
+        let cas = std::sync::Arc::new(cas);
+        let mut tasks = Vec::new();
+        for idx in 0_u8..8 {
+            let cas = std::sync::Arc::clone(&cas);
+            let race_key = race_key.clone();
+            tasks.push(tokio::spawn(async move {
+                cas.compare_and_swap(request(&race_key, None, &[idx], None))
+                    .await
+            }));
+        }
+        let mut applied = 0;
+        let mut conflicts = 0;
+        for task in tasks {
+            match task.await?? {
+                CasStoreOutcome::Applied { .. } => applied += 1,
+                CasStoreOutcome::Conflict { current: Some(_) } => conflicts += 1,
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        assert_eq!(applied, 1, "rss_app 并发 create 应只有一个 winner");
+        assert_eq!(conflicts, 7, "rss_app 其余并发 create 应 Conflict");
+
+        let delete = sqlx::query("DELETE FROM distributed_cas WHERE cas_key = $1")
+            .bind(&key)
+            .execute(&app_store.pool)
+            .await;
+        assert!(
+            delete.is_err(),
+            "rss_app member must not receive DELETE on distributed_cas"
+        );
+
+        cas.shutdown().await?;
+        app_store.shutdown().await?;
+        owner.shutdown().await?;
         Ok(())
     }
 }

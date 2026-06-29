@@ -1,14 +1,14 @@
-# RSS 演示栈（#1134 验收 harness）：postgres + server，闭环验 `docker run → /readyz 200`。
+# RSS 演示栈（#1134 验收 harness）：postgres + redis + rabbitmq + server，闭环验 `docker run → /readyz 200`。
 #
 # 用途：本地证明镜像「能起进程 + 连 PG + 跑迁移 + readyz 就绪 + 非 root + 只读 rootfs 兼容」。
 # 非生产编排（生产用 k8s + 私有 CA TLS + 真 OIDC/Vault，见 docs/ops/202606271438-003-container-image.md）。
 #
 # 跑：  docker compose -f deploy/docker-compose.yml up --build -d
-# 验：  curl -fsS http://localhost:8083/health/v1/readyz   # → HTTP 200 overall healthy
+# 验：  curl -fsS http://localhost:${RSS_HEALTH_HOST_PORT:-8083}/health/v1/readyz   # → HTTP 200 overall healthy
 # 关：  docker compose -f deploy/docker-compose.yml down -v
 #
-# 两个 service 共享 .env.example 作演示值单源：postgres 读 POSTGRES_*，server 读 RSS_*，
-# 各自忽略不认的变量 ⇒ demo 口令两边自动一致（无需手抄两遍）。
+# compose 演示栈共享 .env.example 作配置单源：postgres 读 POSTGRES_*，server 读 RSS_*，
+# redis/rabbitmq 用服务默认值；各自忽略不认的变量 ⇒ demo 口令两边自动一致（无需手抄两遍）。
 
 services:
   postgres:
@@ -25,6 +25,28 @@ services:
     # 仅演示期暴露，便于宿主 psql 排查；**绑 127.0.0.1**（仅本机可达，不上局域网）；生产 PG 不对外。
     ports:
       - "127.0.0.1:5432:5432"
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+
+  redis:
+    image: redis:7-alpine # 演示用；生产钉 digest 并启 TLS / AUTH。
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3.13.6-management-alpine # 演示用；生产钉 digest 并启 TLS / AUTH。
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   server:
     build:
@@ -35,13 +57,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     # 全部端口绑 127.0.0.1（仅本机演示可达，不暴露到局域网/所有网卡）。宿主 smoke 经 localhost 验证不受影响。
     # Internal/Admin 是控制/管理面：即便本机演示也不应对外，loopback 绑定收紧默认暴露面。
     ports:
-      - "127.0.0.1:8080:8080" # Primary（业务 API；scaffold 期无路由）
-      - "127.0.0.1:8081:8081" # Internal（服务间控制面）
-      - "127.0.0.1:8082:8082" # Admin（管理面：audit route，按 Admin listener 鉴权）
-      - "127.0.0.1:8083:8083" # Health（healthz / readyz / metrics）— 匿名 NoAuth 面，loopback-only 落实内部网络边界（#1253）
+      - "127.0.0.1:${RSS_PRIMARY_HOST_PORT:-8080}:8080" # Primary（业务 API；scaffold 期无路由）
+      - "127.0.0.1:${RSS_INTERNAL_HOST_PORT:-8081}:8081" # Internal（服务间控制面）
+      - "127.0.0.1:${RSS_ADMIN_HOST_PORT:-8082}:8082" # Admin（管理面：audit route，按 Admin listener 鉴权）
+      - "127.0.0.1:${RSS_HEALTH_HOST_PORT:-8083}:8083" # Health（healthz / readyz / metrics）— 匿名 NoAuth 面，loopback-only 落实内部网络边界（#1253）
     # ── 运行时加固：非 root + 只读 rootfs + 丢能力（证明 acceptance「read-only rootfs compatible」）──
     user: "65532:65532" # distroless:nonroot 内置 uid；显式声明便于审计。
     read_only: true # 只读根文件系统；server 不写盘（日志走 stdout，TLS 走 rustls 无磁盘状态）。

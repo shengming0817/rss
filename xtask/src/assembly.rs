@@ -45,6 +45,8 @@ pub(crate) enum Rule {
     /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "verify", source = "code" }— provider↔providerCrate 绑定由 xtask provider
     /// matrix 单源锁定；manifest 声明错误 crate 名须被机器拒（Medium，red test 反恒真）。
     ProviderCrateMismatch,
+    /// active distributed provider 必须有组合根 consumer 接线证据。
+    ActiveDistributedProviderConsumer,
 }
 
 pub(crate) struct AssemblyValidate;
@@ -169,6 +171,7 @@ impl fmt::Display for ProviderDurability {
 }
 
 struct DiscoveredAssembly {
+    dir: PathBuf,
     manifest_label: String,
     cargo_label: String,
     manifest_src: String,
@@ -231,6 +234,7 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
         let manifest_label = rel_label(root, &manifest_path);
         let cargo_label = rel_label(root, &cargo_path);
         assemblies.push(DiscoveredAssembly {
+            dir,
             manifest_label,
             cargo_label,
             manifest_src,
@@ -346,9 +350,163 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
                     ));
                 }
             }
+
+            if is_active_distributed_provider(provider) && !has_distributed_consumer_evidence(a) {
+                findings.push(finding(
+                    Rule::ActiveDistributedProviderConsumer,
+                    &subject,
+                    "field=consumer active distributed Lock/CAS provider 必须有 composition-root consumer 证据：wire_distributed + DistributedRuntimeDeps 必填注入真实 consumer",
+                ));
+            }
         }
     }
     findings
+}
+
+fn is_active_distributed_provider(provider: &DiportProvider) -> bool {
+    provider.lifecycle == ProviderLifecycle::Active
+        && provider.consumer == "distributed"
+        && matches!(provider.port, DiportPort::Lock | DiportPort::Cas)
+}
+
+fn has_distributed_consumer_evidence(a: &DiscoveredAssembly) -> bool {
+    distributed_consumer_evidence_from_sources(&a.dir).unwrap_or(false)
+}
+
+fn distributed_consumer_evidence_from_sources(dir: &Path) -> Result<bool> {
+    let src_dir = dir.join("src");
+    if !src_dir.exists() {
+        return Ok(false);
+    }
+    let mut files = Vec::new();
+    collect_rust_sources(&src_dir, &mut files)?;
+    files.sort();
+    for path in files {
+        let content = std::fs::read_to_string(&path)?;
+        let file = syn::parse_file(&content)
+            .with_context(|| format!("parse rust source {}", path.display()))?;
+        if file_has_distributed_consumer_evidence(&file) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, files)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct DistributedConsumerVisitor {
+    root_entrypoint_depth: usize,
+    distributed_bindings: BTreeSet<String>,
+    found_consumer: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DistributedConsumerVisitor {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if node.sig.ident != "run" {
+            return;
+        }
+
+        self.root_entrypoint_depth += 1;
+        syn::visit::visit_item_fn(self, node);
+        self.root_entrypoint_depth -= 1;
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if self.root_entrypoint_depth == 0 {
+            return;
+        }
+        if let Some(ident) = local_binding_ident(&node.pat)
+            && let Some(init) = &node.init
+            && expr_contains_wire_distributed(&init.expr)
+        {
+            self.distributed_bindings.insert(ident.to_string());
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if self.root_entrypoint_depth == 0 {
+            return;
+        }
+        if call_path_ends_with(node.func.as_ref(), "wire_event_transport") {
+            let second_arg = node.args.iter().nth(1);
+            if second_arg.is_some_and(|expr| self.expr_is_distributed_arg(expr)) {
+                self.found_consumer = true;
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+impl DistributedConsumerVisitor {
+    fn expr_is_distributed_arg(&self, expr: &syn::Expr) -> bool {
+        if expr_contains_wire_distributed(expr) {
+            return true;
+        }
+        matches!(
+            expr,
+            syn::Expr::Path(path)
+                if path.path.get_ident().is_some_and(|ident| {
+                    self.distributed_bindings.contains(&ident.to_string())
+                })
+        )
+    }
+}
+
+fn file_has_distributed_consumer_evidence(file: &syn::File) -> bool {
+    let mut visitor = DistributedConsumerVisitor::default();
+    syn::visit::Visit::visit_file(&mut visitor, file);
+    visitor.found_consumer
+}
+
+fn local_binding_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
+    match pat {
+        syn::Pat::Ident(pat) => Some(&pat.ident),
+        syn::Pat::Type(pat) => local_binding_ident(&pat.pat),
+        _ => None,
+    }
+}
+
+fn expr_contains_wire_distributed(expr: &syn::Expr) -> bool {
+    struct WireDistributedVisitor {
+        found: bool,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for WireDistributedVisitor {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if call_path_ends_with(node.func.as_ref(), "wire_distributed") {
+                self.found = true;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+
+    let mut visitor = WireDistributedVisitor { found: false };
+    syn::visit::Visit::visit_expr(&mut visitor, expr);
+    visitor.found
+}
+
+fn call_path_ends_with(func: &syn::Expr, segment: &str) -> bool {
+    matches!(
+        func,
+        syn::Expr::Path(path)
+            if path
+                .path
+                .segments
+                .last()
+                .is_some_and(|last| last.ident == segment)
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -494,6 +652,14 @@ mod tests {
         write(&dir.join("assembly.toml"), manifest)?;
         write(&dir.join("Cargo.toml"), cargo)?;
         Ok(())
+    }
+
+    fn write_runtime_src(root: &Path, path: &str, text: &str) -> anyhow::Result<()> {
+        let file = root.join("assemblies/runtime/src").join(path);
+        if let Some(parent) = file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write(&file, text)
     }
 
     fn valid_manifest_with_profile(profile: &str, provider_extra: &str) -> String {
@@ -885,11 +1051,126 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
 postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            r#"
+pub struct DistributedRuntimeDeps;
+	pub fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps { DistributedRuntimeDeps }
+	pub struct SharedRuntimeDeps;
+	pub fn run(deps: &SharedRuntimeDeps) {
+	    let pg = ();
+	    let subscribers = Vec::new();
+	    let cfg = ();
+	    let distributed: DistributedRuntimeDeps = wire_distributed(deps);
+	    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
+	}
+	fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
+	"#,
+        )?;
 
         let (_count, findings) = validate_root(&root)?;
         assert!(
             findings.is_empty(),
             "active distributed Lock/Cas providers (feature + providerCrate bound) must pass: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_distributed_provider_comment_or_dead_helper_evidence_is_rejected()
+    -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-distributed-string-evidence");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+redis = { path = "../../adapters/redis", features = ["backend"] }
+"#,
+        )?;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            r#"
+pub struct DistributedRuntimeDeps;
+pub struct SharedRuntimeDeps;
+
+// wire_distributed( DistributedRuntimeDeps wire_event_transport
+const COMMENT_BAIT: &str = "wire_distributed(DistributedRuntimeDeps) wire_event_transport";
+
+fn unused_helper(deps: &SharedRuntimeDeps) {
+    let distributed: DistributedRuntimeDeps = wire_distributed(deps);
+    let pg = ();
+    let subscribers = Vec::new();
+    let cfg = ();
+    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
+}
+
+fn wire_distributed(_: &SharedRuntimeDeps) -> DistributedRuntimeDeps {
+    DistributedRuntimeDeps
+}
+fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDistributedProviderConsumer),
+            "comment/string/dead helper evidence must not satisfy real consumer guard: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_distributed_provider_without_composition_root_consumer_is_rejected()
+    -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-distributed-no-consumer");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+redis = { path = "../../adapters/redis", features = ["backend"] }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDistributedProviderConsumer),
+            "active distributed provider without consumer evidence must be rejected: {findings:?}"
         );
         Ok(())
     }

@@ -62,6 +62,19 @@ const HEALTH_DLX_WRITE_ERROR: u8 = 5;
 /// readyz 聚合经 `health()` 读此状态，据此翻 probe。
 pub struct WorkerHealth(AtomicU8);
 
+/// Marks a worker as stopped when the owning thread/task exits.
+///
+/// This shared guard covers wrappers that can return before reaching their
+/// loop-level `mark_stopped` call, for example runtime build failures or panic
+/// unwinds in supervised worker threads.
+pub struct WorkerStoppedGuard(Arc<WorkerHealth>);
+
+impl Drop for WorkerStoppedGuard {
+    fn drop(&mut self) {
+        self.0.mark_stopped();
+    }
+}
+
 impl WorkerHealth {
     /// 构造初始 Healthy 状态（AtomicU8::new(0)）。
     pub fn healthy() -> Self {
@@ -71,6 +84,12 @@ impl WorkerHealth {
     /// 构造初始 Starting 状态（readyz 视为 Unhealthy，直到 worker 明确进入运行态）。
     pub fn starting() -> Self {
         Self(AtomicU8::new(HEALTH_STARTING))
+    }
+
+    /// Build a guard that flips the worker to Unhealthy when dropped.
+    #[must_use]
+    pub fn stopped_on_exit(self: &Arc<Self>) -> WorkerStoppedGuard {
+        WorkerStoppedGuard(Arc::clone(self))
     }
 
     /// 读当前健康状态。

@@ -13,6 +13,11 @@ use diport::{DynCasStore, DynLockStore, DynManagedResource, ManagedResource, Shu
 
 use crate::{InvalidClaimTtl, RedisStore, claimer};
 
+/// Redis readiness ping failed. Display is intentionally stable and does not include endpoint data.
+#[derive(Debug, thiserror::Error)]
+#[error("redis ping failed")]
+pub struct RedisPingError;
+
 /// 组合根级 redis 能力包：集中 pool 构造，派发 infra 能力句柄，并产出 shutdown 资源。
 #[derive(Clone)]
 pub struct RedisRuntimeDeps {
@@ -54,6 +59,28 @@ impl RedisRuntimeDeps {
     #[must_use]
     pub fn runtime_resources(&self) -> Vec<Box<DynManagedResource<'static>>> {
         vec![DynManagedResource::new_box(self.store_guard())]
+    }
+
+    /// Redis readiness probe operation. This is the only public live-check path exposed by the
+    /// bundle, so composition code never reaches into `deadpool_redis::Pool` directly.
+    pub async fn ping(&self) -> Result<(), RedisPingError> {
+        let mut conn = self.store.pool().get().await.map_err(|e| {
+            tracing::warn!(error = %secure::redact_error(&e), "redis readiness pool checkout failed");
+            RedisPingError
+        })?;
+        let pong: String = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %secure::redact_error(&e), "redis readiness ping failed");
+                RedisPingError
+            })?;
+        if pong == "PONG" {
+            Ok(())
+        } else {
+            tracing::warn!("redis readiness ping returned unexpected response");
+            Err(RedisPingError)
+        }
     }
 
     #[cfg(test)]

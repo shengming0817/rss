@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use testcontainers::ContainerAsync;
 use testcontainers::ImageExt;
-use testcontainers::core::ExecCommand;
+use testcontainers::core::{CmdWaitFor, ExecCommand};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::mosquitto::Mosquitto;
 use testcontainers_modules::postgres::Postgres;
@@ -351,6 +351,7 @@ pub async fn env_or_rabbitmq() -> Result<RabbitFixture> {
 
 /// 在运行中的 rabbitmq 容器内建 `vhost` + 给默认 `guest` 用户全权限（per-domain 隔离）。
 async fn create_vhost(container: &ContainerAsync<RabbitMq>, vhost: &str) -> Result<()> {
+    run_rabbitmqctl(container, &["await_startup"]).await?;
     run_rabbitmqctl(container, &["add_vhost", vhost]).await?;
     run_rabbitmqctl(
         container,
@@ -375,7 +376,9 @@ async fn run_rabbitmqctl(container: &ContainerAsync<RabbitMq>, args: &[&str]) ->
         .collect();
     let mut last: Option<i64> = None;
     for attempt in 0..RABBITMQCTL_MAX_ATTEMPTS {
-        let res = container.exec(ExecCommand::new(cmd.clone())).await?;
+        let res = container
+            .exec(ExecCommand::new(cmd.clone()).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
+            .await?;
         let code = res.exit_code().await?;
         if code == Some(0) {
             return Ok(());

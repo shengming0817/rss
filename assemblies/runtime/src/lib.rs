@@ -20,9 +20,11 @@
 //! 原 xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
+pub mod distributed_runtime;
 pub mod event_transport;
 pub mod module;
 
+pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
 pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
@@ -38,7 +40,7 @@ use axum::http::Method;
 use base64::Engine as _;
 use bootstrap::shutdown::ShutdownStack;
 use crypto::RustCryptoMacVerifier;
-use diport::DynManagedResource;
+use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use httpd::HttpServer;
 use identity::{
     IdentityDomain, LoginService, RefreshService,
@@ -309,7 +311,7 @@ pub fn assemble_authed_routers(
 
 // ── postgres 配置 wiring ─────────────────────────────────────────────────────────────────────
 
-/// 从注入的配置读取器构造 `PgConfig`（fail-fast：任一必填 env 缺失立即返 `Err`）。
+/// 从注入的配置读取器构造 serving `PgConfig`（fail-fast：任一必填 env 缺失立即返 `Err`）。
 ///
 /// 必填变量：
 /// - `RSS_PG_HOST` — postgres 主机（非空）。
@@ -325,6 +327,14 @@ pub fn assemble_authed_routers(
 pub(crate) fn build_pg_config_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<PgConfig> {
+    build_pg_config_with_user_env(&get, "RSS_PG_USERNAME", "RSS_PG_PASSWORD")
+}
+
+fn build_pg_config_with_user_env(
+    get: &impl Fn(&str) -> Option<String>,
+    username_env: &'static str,
+    password_env: &'static str,
+) -> anyhow::Result<PgConfig> {
     let host = get("RSS_PG_HOST")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_HOST"))?;
     let port_str = get("RSS_PG_PORT")
@@ -334,10 +344,10 @@ pub(crate) fn build_pg_config_from(
     })?;
     let database = get("RSS_PG_DATABASE")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_DATABASE"))?;
-    let username = get("RSS_PG_USERNAME")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_USERNAME"))?;
-    let password = get("RSS_PG_PASSWORD")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_PG_PASSWORD"))?;
+    let username = get(username_env)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {username_env}"))?;
+    let password = get(password_env)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {password_env}"))?;
 
     // PgConfig::new 存储参数；validate 在 PgStore::connect 内调用（pub(crate)）。
     // 这里只做构造，连接时再 fail-fast（组合根在 wire_settings 中 connect）。
@@ -384,6 +394,21 @@ pub fn build_pg_config() -> anyhow::Result<PgConfig> {
     build_pg_config_from(|name| std::env::var(name).ok())
 }
 
+/// 从注入的配置读取器构造 migrator `PgConfig`。
+///
+/// Host / port / database / TLS mode 与 serving 连接一致；用户名和密码必须来自
+/// `RSS_PG_MIGRATOR_USERNAME` / `RSS_PG_MIGRATOR_PASSWORD`，避免长期 serving role 继承 DDL 能力。
+pub(crate) fn build_pg_migrator_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PgConfig> {
+    build_pg_config_with_user_env(&get, "RSS_PG_MIGRATOR_USERNAME", "RSS_PG_MIGRATOR_PASSWORD")
+}
+
+/// 从 `std::env` 构造 migrator `PgConfig`。
+pub fn build_pg_migrator_config() -> anyhow::Result<PgConfig> {
+    build_pg_migrator_config_from(|name| std::env::var(name).ok())
+}
+
 /// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
 pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
@@ -393,9 +418,13 @@ pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTr
 
 /// 默认 DB readiness 采样周期（5 秒）。
 const DEFAULT_READINESS_INTERVAL: Duration = Duration::from_secs(5);
+/// 默认 Redis readiness 采样周期（5 秒）。
+const DEFAULT_REDIS_READINESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 采样间隔上限（秒）：限制 DB 失联后维持旧 Ready 状态的最长时间。
 const MAX_READINESS_INTERVAL_SECS: u64 = 300;
+/// Redis 是 distributed lock 运行期依赖，摘流延迟上限更短。
+const MAX_REDIS_READINESS_INTERVAL_SECS: u64 = 30;
 
 /// configs_ready DB 采样周期（env `RSS_PG_READINESS_SAMPLE_INTERVAL_SECS`）。
 ///
@@ -423,6 +452,31 @@ pub(crate) fn build_readiness_interval_from(get: impl Fn(&str) -> Option<String>
 
 fn build_readiness_interval() -> Duration {
     build_readiness_interval_from(|n| std::env::var(n).ok())
+}
+
+/// redis_ready 采样周期（env `RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS`）。
+pub(crate) fn build_redis_readiness_interval_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    match get("RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS") {
+        None => DEFAULT_REDIS_READINESS_INTERVAL,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(n) if (1..=MAX_REDIS_READINESS_INTERVAL_SECS).contains(&n) => Duration::from_secs(n),
+            _ => {
+                tracing::warn!(
+                    env = "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
+                    raw = %raw,
+                    max_secs = MAX_REDIS_READINESS_INTERVAL_SECS,
+                    "invalid redis readiness sample interval (need 1..=30s); using default 5s"
+                );
+                DEFAULT_REDIS_READINESS_INTERVAL
+            }
+        },
+    }
+}
+
+fn build_redis_readiness_interval() -> Duration {
+    build_redis_readiness_interval_from(|n| std::env::var(n).ok())
 }
 
 // ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
@@ -616,6 +670,84 @@ impl bootstrap::HealthProbe for RlsReadyProbe {
             (HealthStatus::Unhealthy, "not-enforced")
         };
         HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+// ── RedisReadyProbe ───────────────────────────────────────────────────────────────────────────
+
+/// Redis readiness probe stable name.
+pub const REDIS_READY_PROBE_NAME: &str = "redis_ready";
+
+/// Redis dependency readiness probe. Startup PING is fail-fast; this probe keeps the dependency
+/// visible to `/readyz` and lets later Redis outages fail readiness.
+pub struct RedisReadyProbe {
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    name: ProbeName,
+}
+
+impl RedisReadyProbe {
+    #[allow(clippy::expect_used)]
+    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        let name = ProbeName::parse(REDIS_READY_PROBE_NAME).expect("valid probe name const");
+        Self { ready, name }
+    }
+}
+
+impl bootstrap::HealthProbe for RedisReadyProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+            (HealthStatus::Healthy, "ready")
+        } else {
+            (HealthStatus::Unhealthy, "down")
+        };
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+struct RedisReadinessSampler {
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token: CancellationToken,
+}
+
+impl ManagedResource for RedisReadinessSampler {
+    fn name(&self) -> &str {
+        "redis-readiness-sampler"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        let mut handle = self.handle.lock().await;
+        if let Some(handle) = handle.take()
+            && let Err(err) = handle.await
+        {
+            tracing::warn!(error = %err, "redis readiness sampler join failed");
+        }
+        Ok(())
+    }
+}
+
+fn spawn_redis_readiness_sampler(
+    redis: redis::RedisRuntimeDeps,
+    period: Duration,
+    token: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+) -> RedisReadinessSampler {
+    let child = token.child_token();
+    let worker_token = child.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = worker_token.cancelled() => break,
+                () = tokio::time::sleep(period) => {
+                    let is_ready = redis.ping().await.is_ok();
+                    ready.store(is_ready, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+    });
+    RedisReadinessSampler {
+        handle: tokio::sync::Mutex::new(Some(handle)),
+        token: child,
     }
 }
 
@@ -1235,7 +1367,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 
     // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
     // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
-    let pg = PgRuntimeDeps::setup(&build_pg_config()?)
+    let pg = PgRuntimeDeps::setup(&build_pg_migrator_config()?, &build_pg_config()?)
         .await
         .context("setup postgres deps")?;
 
@@ -1243,21 +1375,11 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
     let vault =
         build_vault_runtime_deps(|name| std::env::var(name).ok()).context("setup vault deps")?;
-    // redis capability bundle 是 demo-optional（#332 F2）：分布式 lock/CAS provider 当前为 draft、组合根无
-    // consumer（见 assembly.toml 注释），故未配 `RSS_REDIS_URL` 即跳过、不打断默认 demo 路径；配了则照常
-    // PING + fail-fast（durable 部署仍 fail-closed）。go-live（active + wire_distributed）落地时改回必配。
-    let redis = if std::env::var_os("RSS_REDIS_URL").is_some() {
-        Some(
-            build_redis_runtime_deps(|name| std::env::var(name).ok())
-                .await
-                .context("setup redis deps")?,
-        )
-    } else {
-        tracing::warn!(
-            "RSS_REDIS_URL 未配置：跳过 redis capability bundle（distributed lock/CAS provider 为 draft、组合根无 consumer）"
-        );
-        None
-    };
+    // redis capability bundle（#1571 go-live）：Redis 是 distributed lock provider 的生产硬依赖。
+    // 缺 `RSS_REDIS_URL` 或启动期 PING 失败均 fail-fast，不保留 demo-optional 生产路径。
+    let redis = build_redis_runtime_deps(|name| std::env::var(name).ok())
+        .await
+        .context("setup redis deps")?;
 
     // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
     let deps = SharedRuntimeDeps {
@@ -1290,13 +1412,12 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     // 聚合各域 module result（settings configs_ready 探针；后续域只需多一行 module.merge(wire_X(&deps).await?)）。
     let mut module = DomainModuleResult::default();
     module.merge(settings_module);
-    // provider capability bundle 单源装配（#1498）：vault resolver guard 经 runtime_resources() 单源排进
-    // module.resources，组合根不再逐 channel 手写 register_detached（D5）。redis 为 demo-optional（未配
-    // RSS_REDIS_URL 时 None），仅在已装配时排入 pool guard（#332 F2）；amqp 待各自 durable body 接入。
-    if let Some(redis) = &deps.redis {
-        module.resources.extend(redis.runtime_resources());
-    }
+    // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
+    // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
+    module.resources.extend(deps.redis.runtime_resources());
     module.resources.extend(deps.vault.runtime_resources());
+    let pg_readiness_period = build_readiness_interval();
+    let redis_readiness_period = build_redis_readiness_interval();
 
     // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
     // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
@@ -1308,6 +1429,15 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
         )
         .context("register rls_ready probe")?;
+    let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let redis_probe_name =
+        ProbeName::parse(REDIS_READY_PROBE_NAME).context("parse redis_ready probe name")?;
+    registry
+        .probe(
+            redis_probe_name,
+            Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
+        )
+        .context("register redis_ready probe")?;
 
     // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
     // Demo 拓扑 fail-fast（生产不走 in-memory 路径；TOPO-INMEM-SEAL-01 组合根层保证）。
@@ -1318,12 +1448,14 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
              use durable-shared or durable-isolated"
         );
     }
+    let distributed = wire_distributed(&deps).context("wire distributed")?;
     let event_subscribers =
         event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
             .context("bridge generated event subscriptions")?;
-    let event_runtime = event_transport::wire_event_transport(&pg, event_subscribers, event_cfg)
-        .await
-        .context("wire event transport")?;
+    let event_runtime =
+        event_transport::wire_event_transport(&pg, distributed, event_subscribers, event_cfg)
+            .await
+            .context("wire event transport")?;
     let event_infra_guards = event_runtime.infra_guards;
     module.merge(event_runtime.module);
 
@@ -1336,12 +1468,24 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     }
 
     // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
+    let redis_for_sampler = deps.redis.clone();
+    module.workers.push(Box::new(move |token| {
+        DynManagedResource::new_box(spawn_redis_readiness_sampler(
+            redis_for_sampler.clone(),
+            redis_readiness_period,
+            token,
+            Arc::clone(&redis_ready),
+        ))
+    }));
     let domain_resources = module.resources;
     let domain_workers = module.workers;
-    let period = build_readiness_interval();
     tracing::info!(
-        sample_interval_secs = period.as_secs(),
+        sample_interval_secs = pg_readiness_period.as_secs(),
         "pg readiness sampler interval configured"
+    );
+    tracing::info!(
+        sample_interval_secs = redis_readiness_period.as_secs(),
+        "redis readiness sampler interval configured"
     );
 
     // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
@@ -1374,7 +1518,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
         // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
         stack.register_with_token(move |token| {
-            DynManagedResource::new_box(pg.spawn_readiness_sampler(period, token))
+            DynManagedResource::new_box(pg.spawn_readiness_sampler(pg_readiness_period, token))
         });
         // 事件传输 infra guards（AMQP + Redis）先于 workers 注册 → LIFO 在 workers drain 后才断连接。
         for g in event_infra_guards {
@@ -1394,8 +1538,6 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "integration")]
-    use diport::ManagedResource as _;
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1437,6 +1579,64 @@ mod tests {
         let down = probe.check();
         assert_eq!(down.status(), HealthStatus::Unhealthy);
         assert_eq!(down.detail(), "not-enforced");
+    }
+
+    /// RedisReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("down")`（fail-closed）。
+    #[test]
+    fn redis_ready_probe_maps_flag_to_health() {
+        use bootstrap::HealthProbe;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let flag = Arc::new(AtomicBool::new(true));
+        let probe = RedisReadyProbe::new(Arc::clone(&flag));
+        let ready = probe.check();
+        assert_eq!(ready.status(), HealthStatus::Healthy);
+        assert_eq!(ready.detail(), "ready");
+        assert_eq!(ready.name().as_str(), REDIS_READY_PROBE_NAME);
+
+        flag.store(false, Ordering::Release);
+        let down = probe.check();
+        assert_eq!(down.status(), HealthStatus::Unhealthy);
+        assert_eq!(down.detail(), "down");
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn pg_migrator_config_requires_dedicated_credentials() {
+        let result = build_pg_migrator_config_from(|name| match name {
+            "RSS_PG_HOST" => Some("postgres".to_string()),
+            "RSS_PG_PORT" => Some("5432".to_string()),
+            "RSS_PG_DATABASE" => Some("rss".to_string()),
+            "RSS_PG_USERNAME" => Some("rss_app".to_string()),
+            "RSS_PG_PASSWORD" => Some("app_pw".to_string()),
+            _ => None,
+        });
+        match result {
+            Ok(_) => panic!("missing migrator username should fail"),
+            Err(err) => assert!(err.to_string().contains("RSS_PG_MIGRATOR_USERNAME")),
+        }
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn pg_migrator_config_uses_dedicated_credentials() {
+        let cfg = match build_pg_migrator_config_from(|name| match name {
+            "RSS_PG_HOST" => Some("postgres".to_string()),
+            "RSS_PG_PORT" => Some("5432".to_string()),
+            "RSS_PG_DATABASE" => Some("rss".to_string()),
+            "RSS_PG_USERNAME" => Some("rss_app".to_string()),
+            "RSS_PG_PASSWORD" => Some("app_pw".to_string()),
+            "RSS_PG_MIGRATOR_USERNAME" => Some("postgres".to_string()),
+            "RSS_PG_MIGRATOR_PASSWORD" => Some("owner_pw".to_string()),
+            "RSS_PG_SSL_MODE" => Some("disable".to_string()),
+            _ => None,
+        }) {
+            Ok(cfg) => cfg,
+            Err(err) => panic!("migrator config: {err}"),
+        };
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("postgres"));
+        assert!(!debug.contains("rss_app"));
     }
 
     #[test]
@@ -1980,6 +2180,24 @@ mod tests {
             (n == "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
         });
         assert_eq!(d, Duration::from_secs(300), "300 → 300s（合法上边界）");
+    }
+
+    #[test]
+    fn build_redis_readiness_interval_uses_redis_env_not_pg_env() {
+        let d = build_redis_readiness_interval_from(|n| match n {
+            "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS" => Some("300".to_string()),
+            "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS" => Some("7".to_string()),
+            _ => None,
+        });
+        assert_eq!(d, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn build_redis_readiness_interval_rejects_pg_sized_upper_bound() {
+        let d = build_redis_readiness_interval_from(|n| {
+            (n == "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
+        });
+        assert_eq!(d, DEFAULT_REDIS_READINESS_INTERVAL);
     }
 
     // ── identity_session_ttl_secs 测试 ────────────────────────────────────────────────

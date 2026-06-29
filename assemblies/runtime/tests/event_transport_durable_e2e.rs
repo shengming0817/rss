@@ -26,13 +26,16 @@ use generated::event::identity_v1::session_created::IdentitySessionCreatedPayloa
 use generated::http::identity_v1::IdentityLoginRequest;
 use identity::ports::{DynSessionLifecycle, TenantId};
 use identity::{IdentityDomain, LoginService};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 
 use runtime::event_transport::{
     EventTransportConfig, bridge_generated_subscriptions, wire_event_transport,
+};
+use runtime::{
+    SharedRuntimeDeps, build_redis_runtime_deps, build_vault_runtime_deps, wire_distributed,
 };
 
 // ── 共用常量（自 journeys/tests/common/mod.rs 复制，runtime 测试不能 mod common）────────────
@@ -45,6 +48,8 @@ const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 const AUDIT_KEY: [u8; 32] = [0x5a; 32];
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
+const TEST_APP_ROLE: &str = "rss_event_transport_e2e_app";
+const TEST_APP_PASSWORD: &str = "event_transport_e2e_pw";
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -159,19 +164,96 @@ fn audit_domain() -> (AuditDomain, CapturingVerifier) {
 
 // ── pg_config helper（自 journeys/tests/identity_login_audit_durable_journey.rs 复制）──────
 
-fn pg_config(p: &testkit::PgConnParams) -> Result<PgConfig> {
-    Ok(PgConfig::new(
+async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
+    let fixture = testkit::env_or_postgres().await?;
+    let p = fixture.params();
+    let owner_config = pg_config(p, &p.username, &p.password);
+    match PgRuntimeDeps::setup(&owner_config, &owner_config).await {
+        Ok(deps) => return Ok((fixture, deps)),
+        Err(PgError::RlsBypassRole) => {
+            provision_nobypass_app_role(p).await?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let deps = PgRuntimeDeps::setup(
+        &owner_config,
+        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+    )
+    .await?;
+    Ok((fixture, deps))
+}
+
+fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+    PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        p.username.clone(),
-        PgPassword::new(p.password.clone()),
+        username.to_string(),
+        PgPassword::new(password.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5)))
+    .with_acquire_timeout(Duration::from_secs(5))
 }
 
-fn pg_connect_options(p: &testkit::PgConnParams) -> PgConnectOptions {
+async fn provision_nobypass_app_role(p: &testkit::PgConnParams) -> Result<()> {
+    let options = PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(SqlxPgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    sqlx::query(&format!(
+        r#"
+        DO $$
+        BEGIN
+            PERFORM pg_advisory_xact_lock(hashtext('{TEST_APP_ROLE}'));
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        "#
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, CREATE ON SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "REVOKE DELETE ON distributed_cas FROM {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE ON distributed_cas TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {TEST_APP_ROLE}"
+    ))
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
+}
+
+fn pg_owner_connect_options(p: &testkit::PgConnParams) -> PgConnectOptions {
     PgConnectOptions::new()
         .host(&p.host)
         .port(p.port)
@@ -206,15 +288,14 @@ async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> R
 async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 1：启动两个真实容器 fixture（guard 绑到测试结束，Drop 停容器）─────────────────────
 
-    let pgfix = testkit::env_or_postgres().await?;
+    let (pgfix, pg) = connect_pg().await?;
     let rmq = testkit::env_or_rabbitmq().await?;
 
     // ── 步骤 2：postgres capability bundle（connect + run_migrations + RLS 能力门）──────────────
 
-    let pg = PgRuntimeDeps::setup(&pg_config(pgfix.params())?).await?;
     let assertion_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(pg_connect_options(pgfix.params()))
+        .connect_with(pg_owner_connect_options(pgfix.params()))
         .await?;
     let id = pg.for_domain::<caps::Identity>();
 
@@ -276,7 +357,23 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 6：wire_event_transport → EventRuntime（relay OS 线程 + consumer worker 启动）──────
 
-    let event_runtime = wire_event_transport(&pg, subscribers, cfg).await?;
+    let redis_fixture = testkit::env_or_redis().await?;
+    let redis = build_redis_runtime_deps(|name| {
+        (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
+    })
+    .await?;
+    let vault = build_vault_runtime_deps(|name| match name {
+        "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
+        "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+        _ => None,
+    })?;
+    let deps = SharedRuntimeDeps {
+        pg: pg.clone(),
+        redis,
+        vault,
+    };
+    let distributed = wire_distributed(&deps)?;
+    let event_runtime = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
     assert!(
         event_runtime.module.resources.is_empty(),
         "event transport workers must drain through DomainModuleResult::workers"

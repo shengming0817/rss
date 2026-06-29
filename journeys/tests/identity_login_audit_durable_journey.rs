@@ -43,10 +43,13 @@ use identity::ports::DynSessionLifecycle;
 use identity::{IdentityDomain, LoginService};
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
 const IDENTITY_DOMAIN: &str = "identity";
+const TEST_APP_ROLE: &str = "rss_journey_app";
+const TEST_APP_PASSWORD: &str = "rss_journey_pw";
 /// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
@@ -64,6 +67,56 @@ fn pg_config(p: &testkit::PgConnParams) -> Result<PgConfig> {
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5)))
+}
+
+fn pg_config_for(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+    PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        username.to_string(),
+        PgPassword::new(password.to_string()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(Duration::from_secs(5))
+}
+
+async fn provision_nobypass_app_role(p: &testkit::PgConnParams) -> Result<()> {
+    let options = PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(SqlxPgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    sqlx::query(&format!(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
+                CREATE ROLE rss_app NOLOGIN NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{TEST_APP_ROLE}') THEN
+                CREATE ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            ELSE
+                ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        "#
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!("GRANT rss_app TO {TEST_APP_ROLE}"))
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    Ok(())
 }
 
 /// noop DLX（journey 不验死信路径；eventexec consumer.rs 已覆盖三路径）。
@@ -131,8 +184,11 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn login_audit_durable_topology() -> Result<()> {
     let pg = testkit::env_or_postgres().await?;
+    provision_nobypass_app_role(pg.params()).await?;
+    let owner_config = pg_config(pg.params())?;
+    let app_config = pg_config_for(pg.params(), TEST_APP_ROLE, TEST_APP_PASSWORD);
     // postgres capability bundle（#1423）：`setup` 含 connect + run_migrations；identity 域受控句柄派发 repo。
-    let deps = PgRuntimeDeps::setup(&pg_config(pg.params())?).await?;
+    let deps = PgRuntimeDeps::setup(&owner_config, &app_config).await?;
     let id = deps.for_domain::<caps::Identity>();
 
     let bus = MemBus::new();

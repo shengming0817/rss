@@ -40,14 +40,18 @@ async fn connect_pg()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    match PgRuntimeDeps::setup(&owner_config).await {
+    match PgRuntimeDeps::setup(&owner_config, &owner_config).await {
         Ok(deps) => return Ok((fixture, deps)),
         Err(PgError::RlsBypassRole) => {
             provision_nobypass_app_role(p).await?;
         }
         Err(e) => return Err(Box::new(e)),
     }
-    let deps = PgRuntimeDeps::setup(&pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD)).await?;
+    let deps = PgRuntimeDeps::setup(
+        &owner_config,
+        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+    )
+    .await?;
     Ok((fixture, deps))
 }
 

@@ -83,14 +83,18 @@ async fn connect_pg()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    match PgRuntimeDeps::setup(&owner_config).await {
+    match PgRuntimeDeps::setup(&owner_config, &owner_config).await {
         Ok(deps) => return Ok((fixture, deps)),
         Err(PgError::RlsBypassRole) => {
             provision_nobypass_app_role(p).await?;
         }
         Err(e) => return Err(Box::new(e)),
     }
-    let deps = PgRuntimeDeps::setup(&pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD)).await?;
+    let deps = PgRuntimeDeps::setup(
+        &owner_config,
+        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+    )
+    .await?;
     Ok((fixture, deps))
 }
 
@@ -217,11 +221,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
     })
     .await?;
-    let deps = SharedRuntimeDeps {
-        pg,
-        redis: Some(redis),
-        vault,
-    };
+    let deps = SharedRuntimeDeps { pg, redis, vault };
 
     // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
     let identity_domain = wire_identity_with(
