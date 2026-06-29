@@ -24,3 +24,16 @@ pub struct SubscriptionSpec {
 pub mod _seed_v1;
 pub mod identity_v1;
 pub mod settings_v1;
+
+/// Root event topology registry aggregated from every generated event `SUBSCRIPTIONS` slice.
+///
+/// Runtime composition consumes this single registry through its bridge before constructing
+/// consumer bundle inputs. Do not enumerate per-contract subscription slices in runtime wiring.
+pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[SubscriptionSpec {
+    contract_id: identity_v1::session_created::CONTRACT_ID,
+    topic: identity_v1::session_created::TOPIC,
+    consumer: "audit",
+    group: "audit.session-created",
+    partition_key: "none",
+    readiness: "required",
+}];

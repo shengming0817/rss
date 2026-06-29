@@ -31,7 +31,9 @@ use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
-use runtime::event_transport::{EventTransportConfig, wire_event_transport};
+use runtime::event_transport::{
+    EventTransportConfig, bridge_generated_subscriptions, wire_event_transport,
+};
 
 // ── 共用常量（自 journeys/tests/common/mod.rs 复制，runtime 测试不能 mod common）────────────
 
@@ -242,11 +244,15 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 4：compose + drain subscribers（audit 的 session-created 订阅绑定）────────────────
 
     let mut registry = bootstrap::compose(&[&identity_domain, &audit_domain_inst])?;
-    let subscribers = registry.drain_subscribers();
-    let consumer_group = subscribers
-        .first()
-        .map(|s| s.group.as_str().to_owned())
-        .context("e2e must register at least one subscriber")?;
+    let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
+    let consumer_group = generated::event::SUBSCRIPTIONS
+        .iter()
+        .find(|spec| {
+            spec.contract_id == generated::event::identity_v1::session_created::CONTRACT_ID
+                && spec.consumer == "audit"
+        })
+        .map(|spec| spec.group.to_owned())
+        .context("e2e must declare audit session-created subscriber")?;
 
     // ── 步骤 5：构造 EventTransportConfig（直接赋值，无 env 侧效应）────────────────────────────
 

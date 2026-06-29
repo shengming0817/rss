@@ -1318,7 +1318,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
              use durable-shared or durable-isolated"
         );
     }
-    let event_subscribers = registry.drain_subscribers();
+    let event_subscribers =
+        event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
+            .context("bridge generated event subscriptions")?;
     let event_runtime = event_transport::wire_event_transport(&pg, event_subscribers, event_cfg)
         .await
         .context("wire event transport")?;

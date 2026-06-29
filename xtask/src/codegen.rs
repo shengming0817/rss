@@ -110,10 +110,11 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
         files.push((rel, render_module_file(group)?));
     }
     for (kind_dir, (modules, mod_kind)) in &kinds {
-        files.push((
-            PathBuf::from(kind_dir).join("mod.rs"),
-            render_mod_rs(modules, *mod_kind),
-        ));
+        let mut mod_rs = render_mod_rs(modules, *mod_kind);
+        if *mod_kind == ModKind::Event {
+            mod_rs.push_str(&render_event_root_subscriptions(contracts)?);
+        }
+        files.push((PathBuf::from(kind_dir).join("mod.rs"), mod_rs));
     }
     files.push((PathBuf::from("lib.rs"), render_lib_rs(kinds.keys())));
     Ok(files)
@@ -1059,6 +1060,43 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
     s
 }
 
+fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<String> {
+    let mut entries = Vec::new();
+    for c in contracts
+        .iter()
+        .filter(|c| c.manifest.kind == ContractKind::Event)
+    {
+        let module = module_name(&c.manifest.domain, &c.manifest.version);
+        let path = match c.slug.as_deref() {
+            Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
+            None => module,
+        };
+        for s in &c.manifest.subscriptions {
+            entries.push(format!(
+                "    SubscriptionSpec {{ contract_id: {path}::CONTRACT_ID, topic: {path}::TOPIC, consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
+                s.consumer,
+                s.group,
+                s.topology.partition_key.as_wire(),
+                s.topology.readiness.as_wire()
+            ));
+        }
+    }
+    let body = if entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", entries.join(",\n"))
+    };
+    Ok(format!(
+        r#"
+/// Root event topology registry aggregated from every generated event `SUBSCRIPTIONS` slice.
+///
+/// Runtime composition consumes this single registry through its bridge before constructing
+/// consumer bundle inputs. Do not enumerate per-contract subscription slices in runtime wiring.
+pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[{body}];
+"#
+    ))
+}
+
 fn render_lib_rs<'a>(kinds: impl Iterator<Item = &'a String>) -> String {
     let mut s = String::new();
     s.push_str("//! generated — 契约派生 wire 类型（committed，一等审查材料）。\n");
@@ -1834,6 +1872,22 @@ mod tests {
         assert!(
             mod_rs.contains("pub struct SubscriptionSpec"),
             "mod.rs 缺 SubscriptionSpec 定义:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("pub const SUBSCRIPTIONS: &[SubscriptionSpec]"),
+            "mod.rs 缺 root SUBSCRIPTIONS registry:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("contract_id: _seed_v1::CONTRACT_ID"),
+            "root registry 应引用生成模块 CONTRACT_ID:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("topic: _seed_v1::TOPIC"),
+            "root registry 应引用生成模块 TOPIC:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains(r#"consumer: "audit""#),
+            "root registry 缺 consumer 字面量:\n{mod_rs}"
         );
         // 子模块通过 super:: 引用（不重复定义）
         assert!(

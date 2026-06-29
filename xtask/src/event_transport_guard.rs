@@ -1,14 +1,17 @@
 //! runtime event transport source guard.
 //!
 //! INVARIANT: EVENT-TRANSPORT-PG-INBOX-01 { level = "Medium", exec = "verify", source = "code" }——
-//! `assemblies/runtime/src/event_transport.rs` 的 consumer idempotency must come from PG inbox, not Redis.
+//! `assemblies/runtime/src/event_transport.rs` 的 consumer idempotency must come from PG inbox, not Redis,
+//! and production consumer workers must go through the generated-topology bridge.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use syn::visit::Visit;
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
-use crate::layers::DOMAIN_CRATES;
+use crate::src_scan::{is_excluded, member_dirs, rs_files};
 use crate::workspace_root;
 
 const TARGET: &str = "assemblies/runtime/src/event_transport.rs";
@@ -21,7 +24,12 @@ const RUNTIME_FORBIDDEN: &[&str] = &[
     "Redis 幂等",
 ];
 const RUNTIME_REQUIRED: &[&str] = &[
+    "pub struct BridgedSubscription",
+    "pub fn bridge_generated_subscriptions(",
+    "bridge_subscriptions_with_specs(bindings, generated::event::SUBSCRIPTIONS)",
+    "subscribers: Vec<BridgedSubscription>",
     "fn wire_consumer_resource_bundle(",
+    "let group = subscription.group().clone();",
     "let inbox = pg.infra().inbox(group);",
     "let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());",
     "let dlx = DynDeadLetterStore::new_box(pg.infra().dead_letter());",
@@ -38,12 +46,27 @@ const DOMAIN_FORBIDDEN: &[&str] = &[
     "pg.infra().inbox(",
     "pg.infra().dead_letter(",
 ];
+const BYPASS_FORBIDDEN: &[&str] = &[
+    "spawn_consumer(",
+    "spawn_consumer_ackable(",
+    "spawn_consumer_ackable_subscriber(",
+    "pg.infra().inbox(",
+];
+const BYPASS_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies", "bins"];
+const BYPASS_LEAF_CRATES: &[&str] = &["journeys"];
+const BYPASS_ALLOWED_PATHS: &[&str] = &[
+    TARGET,
+    "crates/eventexec/src/consumer_worker.rs",
+    "adapters/postgres/src/bundle.rs",
+    "adapters/postgres/src/inbox.rs",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
     RedisConsumerClaimer,
     MissingBundleFragment,
     DomainConsumerBundleBypass,
+    ProductionConsumerBundleBypass,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -62,8 +85,11 @@ impl GovernanceCheck for EventTransportGuard {
             .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
         let mut findings = scan_runtime_content(Path::new(TARGET), &content);
         findings.extend(scan_domain_crates(&root)?);
+        findings.extend(scan_production_bypasses(&root)?);
         Ok((
-            format!("{TARGET} 经 PG inbox consumer bundle 接线，域 crate 无散装 consumer bundle"),
+            format!(
+                "{TARGET} 经 generated topology bridge + PG inbox consumer bundle 接线，生产 src 无散装 consumer bundle"
+            ),
             findings,
         ))
     }
@@ -110,10 +136,45 @@ fn scan_domain_crates(root: &Path) -> Result<Vec<Finding<Rule>>> {
 }
 
 fn domain_crate_roots() -> Vec<String> {
-    DOMAIN_CRATES
+    crate::layers::DOMAIN_CRATES
         .iter()
         .map(|crate_name| format!("crates/{crate_name}"))
         .collect()
+}
+
+fn scan_production_bypasses(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut findings = Vec::new();
+    for top in BYPASS_MEMBER_ROOTS {
+        for member in member_dirs(&root.join(top))? {
+            if is_excluded(&member) {
+                continue;
+            }
+            scan_bypass_dir(root, &member.join("src"), &mut findings)?;
+        }
+    }
+    for leaf in BYPASS_LEAF_CRATES {
+        let dir = root.join(leaf);
+        if !is_excluded(&dir) {
+            scan_bypass_dir(root, &dir.join("src"), &mut findings)?;
+        }
+    }
+    Ok(findings)
+}
+
+fn scan_bypass_dir(root: &Path, dir: &Path, findings: &mut Vec<Finding<Rule>>) -> Result<()> {
+    for path in rs_files(dir)? {
+        let rel = rel_path(root, &path);
+        if BYPASS_ALLOWED_PATHS
+            .iter()
+            .any(|allowed| rel == Path::new(allowed))
+        {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
+        findings.extend(scan_bypass_content(&rel, &content));
+    }
+    Ok(())
 }
 
 fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -150,6 +211,143 @@ fn scan_domain_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     findings
 }
 
+fn scan_bypass_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
+    let forbidden = syn::parse_file(content)
+        .map(|file| file_bypass_fragments(&file))
+        .unwrap_or_else(|_| text_bypass_fragments(content));
+    forbidden
+        .into_iter()
+        .map(|fragment| {
+            finding(
+                Rule::ProductionConsumerBundleBypass,
+                path.display().to_string(),
+                format!(
+                    "consumer inbox/worker 只能经 generated topology bridge + runtime bundle 接线，生产 src 禁止片段: `{fragment}`"
+                ),
+            )
+        })
+        .collect()
+}
+
+fn text_bypass_fragments(content: &str) -> BTreeSet<&'static str> {
+    BYPASS_FORBIDDEN
+        .iter()
+        .copied()
+        .filter(|forbidden| content.contains(forbidden))
+        .collect()
+}
+
+#[derive(Default)]
+struct BypassVisitor {
+    imported_calls: BTreeMap<String, &'static str>,
+    infra_aliases: BTreeSet<String>,
+    fragments: BTreeSet<&'static str>,
+}
+
+impl<'ast> Visit<'ast> for BypassVisitor {
+    fn visit_use_tree(&mut self, node: &'ast syn::UseTree) {
+        collect_bypass_imports(node, false, &mut self.imported_calls);
+        syn::visit::visit_use_tree(self, node);
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Ident(pat_ident) = &node.pat
+            && let Some(init) = &node.init
+            && expr_is_infra_call(&init.expr)
+        {
+            self.infra_aliases.insert(pat_ident.ident.to_string());
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(fragment) = call_path_bypass_fragment(&path.path, &self.imported_calls)
+        {
+            self.fragments.insert(fragment);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "inbox" && expr_is_infra_receiver(&node.receiver, &self.infra_aliases) {
+            self.fragments.insert("pg.infra().inbox(");
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn file_bypass_fragments(file: &syn::File) -> BTreeSet<&'static str> {
+    let mut visitor = BypassVisitor::default();
+    visitor.visit_file(file);
+    visitor.fragments
+}
+
+fn collect_bypass_imports(
+    tree: &syn::UseTree,
+    seen_eventexec: bool,
+    imports: &mut BTreeMap<String, &'static str>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            collect_bypass_imports(
+                &path.tree,
+                seen_eventexec || path.ident == "eventexec",
+                imports,
+            );
+        }
+        syn::UseTree::Name(name) if seen_eventexec => {
+            if let Some(fragment) = forbidden_spawn_fragment(&name.ident.to_string()) {
+                imports.insert(name.ident.to_string(), fragment);
+            }
+        }
+        syn::UseTree::Rename(rename) if seen_eventexec => {
+            if let Some(fragment) = forbidden_spawn_fragment(&rename.ident.to_string()) {
+                imports.insert(rename.rename.to_string(), fragment);
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_bypass_imports(item, seen_eventexec, imports);
+            }
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn call_path_bypass_fragment(
+    path: &syn::Path,
+    imports: &BTreeMap<String, &'static str>,
+) -> Option<&'static str> {
+    let ident = path.segments.last()?.ident.to_string();
+    forbidden_spawn_fragment(&ident).or_else(|| imports.get(&ident).copied())
+}
+
+fn forbidden_spawn_fragment(ident: &str) -> Option<&'static str> {
+    match ident {
+        "spawn_consumer" => Some("spawn_consumer("),
+        "spawn_consumer_ackable" => Some("spawn_consumer_ackable("),
+        "spawn_consumer_ackable_subscriber" => Some("spawn_consumer_ackable_subscriber("),
+        _ => None,
+    }
+}
+
+fn expr_is_infra_receiver(expr: &syn::Expr, infra_aliases: &BTreeSet<String>) -> bool {
+    if expr_is_infra_call(expr) {
+        return true;
+    }
+    matches!(
+        expr,
+        syn::Expr::Path(path)
+            if path.path.segments.len() == 1
+                && infra_aliases.contains(&path.path.segments[0].ident.to_string())
+    )
+}
+
+fn expr_is_infra_call(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::MethodCall(call) if call.method == "infra")
+}
+
 fn rel_path(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
@@ -178,7 +376,13 @@ mod tests {
         let findings = scan_runtime_content(
             Path::new(TARGET),
             r#"
+            pub struct BridgedSubscription;
+            pub fn bridge_generated_subscriptions() {
+                bridge_subscriptions_with_specs(bindings, generated::event::SUBSCRIPTIONS)
+            }
+            fn accepts(subscribers: Vec<BridgedSubscription>) {}
             fn wire_consumer_resource_bundle() {
+                let group = subscription.group().clone();
                 let inbox = pg.infra().inbox(group);
                 let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
                 let dlx = DynDeadLetterStore::new_box(pg.infra().dead_letter());
@@ -208,6 +412,54 @@ mod tests {
             "let _ = PgInboxStore; spawn_consumer_ackable_subscriber();",
         );
         assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn scan_bypass_content_rejects_production_spawn_outside_bridge() {
+        let findings = scan_bypass_content(
+            Path::new("assemblies/runtime/src/other.rs"),
+            "spawn_consumer(); spawn_consumer_ackable_subscriber();",
+        );
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::ProductionConsumerBundleBypass)
+        );
+    }
+
+    #[test]
+    fn scan_bypass_content_rejects_import_alias_and_split_infra_receiver() {
+        let findings = scan_bypass_content(
+            Path::new("assemblies/runtime/src/other.rs"),
+            r#"
+            use eventexec::{spawn_consumer_ackable_subscriber as spawn_it};
+
+            fn wire(pg: PgRuntimeDeps) {
+                spawn_it();
+                let infra = pg.infra();
+                infra.inbox(group);
+            }
+            "#,
+        );
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::ProductionConsumerBundleBypass)
+        );
+    }
+
+    #[test]
+    fn scan_bypass_content_ignores_strings_and_comments() {
+        let findings = scan_bypass_content(
+            Path::new("assemblies/runtime/src/other.rs"),
+            r#"
+            // spawn_consumer();
+            const NOTE: &str = "pg.infra().inbox(group)";
+            "#,
+        );
+        assert!(findings.is_empty());
     }
 
     #[test]

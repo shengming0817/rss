@@ -205,6 +205,20 @@ service 必填依赖走构造器**必填参数**（非 `Option`）——缺失�
 webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata，派生到
 `generated`（`generated/`），运行时 registration 只消费派生结果。
 
+event consumer 运行时接线分两段：
+
+- 域 crate 的 `Domain::init` 只从 per-contract generated `SUBSCRIPTIONS` 读取声明并注册 handler。
+- 组合根必须把 drained runtime bindings 交给 `runtime::event_transport::bridge_generated_subscriptions`
+  桥接为 `BridgedSubscription`，再传给 consumer bundle；bridge 内部固定消费
+  `generated::event::SUBSCRIPTIONS` 根级 registry，不接受调用方传入平行 spec。bridge 必须双向校验
+  generated spec 与 runtime binding 一对一精确匹配，任一侧缺项、重复消费或 group drift 都 fail-fast；
+  `wire_event_transport` 不接受 raw `SubscriberBinding`。
+
+`BridgedSubscription` 字段私有，topic / consumer group / consumer / readiness 等只能来自 generated
+topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `spawn_consumer_ackable*` 或
+`spawn_consumer` / `pg.infra().inbox(...)`；`EVENT-TRANSPORT-PG-INBOX-01` 由 `cargo xtask verify` 中的
+`event-transport-guard` 作 Medium 扫描补强。主路径 bridge-only 构造是类型/API 层约束；旁路扫描不声称 Hard。
+
 ## DLX 与幂等
 
 - 永久错误进入 DLX。统一审计表为 `dead_letter`，`source_kind` 闭值集为 `consumer` / `outbox_relay` / `saga`
