@@ -46,6 +46,16 @@ durability = "persistent"
 purpose = "jwt-access-token-signing"
 
 [[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-configvalue-at-rest-encryption"
+
+[[diportProviders]]
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
 providerCrate = "oidc"

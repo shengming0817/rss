@@ -960,6 +960,12 @@ pub enum ConfigRepoError {
     /// 版本冲突（乐观并发写：`entry.version()` ≠ 当前最高版本 + 1）。
     #[error("config version conflict")]
     VersionConflict,
+    /// 字段保护 provider 不可用（KMS/KeyProvider 超时、不可达或配置拒绝），调用方可按基础设施错误处理。
+    #[error("config value protection unavailable")]
+    ProtectionUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// 字段保护认证失败（AAD mismatch / 坏密文 / 坏 key ref / 存储 envelope 损坏），fail-closed。
+    #[error("config value protection authentication failed")]
+    ProtectionAuthFailure(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
     #[error("config storage error")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),

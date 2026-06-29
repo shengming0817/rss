@@ -192,8 +192,9 @@ pub(crate) fn build_sign_body(
 }
 
 /// 单一 AAD→Vault context funnel：RSS `DerivedAad` 的 canonical bytes 经 STANDARD base64 编码后放入
-/// Vault Transit `context`。KeyProvider 路径**不**生成 `associated_data` 字段；rewrap 依赖 Vault 对
-/// `context` 的原生支持，保留“不解密明文”的 rewrap 语义。
+/// Vault Transit `context`。KeyProvider 路径**不**生成 `associated_data` 字段；settings Transit key 必须
+/// `derived=true`，由组合根 wrong-AAD self-check 证明。rewrap 依赖 Vault 对 `context` 的原生支持，保留
+/// “不解密明文”的 rewrap 语义。
 pub(crate) fn build_context(aad: &DerivedAad) -> String {
     BASE64.encode(aad.as_canonical_bytes())
 }

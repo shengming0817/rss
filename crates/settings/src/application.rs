@@ -89,6 +89,12 @@ pub enum SettingsServiceError {
     /// 底层存储失败（配置写 / 同事务 outbox append 持久化错误；原始错误进 source，不进 Display/wire）。
     #[error("config storage failed")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// 配置值保护 provider 不可用（KMS/KeyProvider 暂不可用或配置拒绝）。
+    #[error("config value protection unavailable")]
+    ProtectionUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// 配置值保护认证失败（AAD mismatch / 坏密文 / envelope 损坏）。
+    #[error("config value protection authentication failed")]
+    ProtectionAuthFailure(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<SettingsError> for SettingsServiceError {
@@ -109,6 +115,8 @@ impl From<ConfigRepoError> for SettingsServiceError {
         match error {
             // 业务：乐观并发 CAS 冲突（读后重写重试可恢复）。
             ConfigRepoError::VersionConflict => Self::VersionConflict,
+            ConfigRepoError::ProtectionUnavailable(source) => Self::ProtectionUnavailable(source),
+            ConfigRepoError::ProtectionAuthFailure(source) => Self::ProtectionAuthFailure(source),
             // 基础设施：保留 source 链（adapter 已 redact 日志；5xx 时 wire strip）。
             ConfigRepoError::Storage(source) => Self::Storage(source),
         }
@@ -510,6 +518,8 @@ fn config_error_response(
         SettingsServiceError::NotFound => CoreErrorKind::NotFound,
         SettingsServiceError::PayloadEncode(_)
         | SettingsServiceError::EntryBuild
+        | SettingsServiceError::ProtectionUnavailable(_)
+        | SettingsServiceError::ProtectionAuthFailure(_)
         | SettingsServiceError::Storage(_) => CoreErrorKind::Internal,
     };
     if matches!(kind, CoreErrorKind::Internal) {

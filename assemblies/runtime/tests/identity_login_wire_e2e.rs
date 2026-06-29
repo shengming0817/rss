@@ -323,6 +323,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     let vault = runtime::build_vault_runtime_deps(|name| match name {
         "RSS_VAULT_ADDR" => Some("https://vault.test".to_string()),
         "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
+        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
         _ => None,
     })?;
     // SharedRuntimeDeps 现含 redis bundle（#1255/#332）——构造 redis fixture 满足结构（identity wiring 不消费）。
@@ -331,7 +332,12 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
     })
     .await?;
-    let deps = SharedRuntimeDeps { pg, redis, vault };
+    let deps = SharedRuntimeDeps {
+        pg,
+        redis,
+        vault,
+        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+    };
 
     // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
     let identity_domain = wire_identity_with(
@@ -524,6 +530,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let vault = runtime::build_vault_runtime_deps(|name| match name {
         "RSS_VAULT_ADDR" => Some("https://vault.test".to_string()),
         "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
+        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
         _ => None,
     })?;
     let redis_fixture = testkit::env_or_redis().await?;
@@ -531,7 +538,12 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
     })
     .await?;
-    let deps = SharedRuntimeDeps { pg, redis, vault };
+    let deps = SharedRuntimeDeps {
+        pg,
+        redis,
+        vault,
+        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+    };
     let identity_domain = wire_identity_with(
         &deps,
         |name| match name {

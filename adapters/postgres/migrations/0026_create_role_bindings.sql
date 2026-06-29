@@ -18,6 +18,7 @@ CREATE INDEX idx_role_bindings_tenant ON role_bindings (tenant_id);
 CREATE INDEX idx_role_bindings_tenant_subject ON role_bindings (tenant_id, subject);
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON role_bindings TO rss_app;
+GRANT SELECT, INSERT, UPDATE ON distributed_cas TO rss_app;
 
 ALTER TABLE role_bindings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE role_bindings FORCE ROW LEVEL SECURITY;

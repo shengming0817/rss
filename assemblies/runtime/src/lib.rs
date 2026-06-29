@@ -29,6 +29,7 @@ pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
 
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -40,7 +41,10 @@ use axum::http::Method;
 use base64::Engine as _;
 use bootstrap::shutdown::ShutdownStack;
 use crypto::RustCryptoMacVerifier;
-use diport::{DynManagedResource, ManagedResource, ShutdownError};
+use diport::{
+    DynKeyProvider, DynManagedResource, KeyName, KeyProvider, ManagedResource, RedactedBytes,
+    ShutdownError,
+};
 use httpd::HttpServer;
 use identity::{
     IdentityDomain, LoginService, RbacAdminService, RefreshService,
@@ -51,17 +55,22 @@ use identity::{
 };
 use oidc::OidcProvider;
 use postgres::{
-    PgConfig, PgDbReadiness, PgPassword, PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
+    ConfigValueProtections, LegacyConfigPlaintextPolicy, PgConfig, PgDbReadiness, PgPassword,
+    PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
 };
 use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
     RequiredScheme,
 };
 use ratelimit::GovernorLimiter;
+use secure::{Plaintext, ProtectionContext};
 use settings::ports::DynSecretRepo;
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
-use vault::{TenantStoreAllowlist, VaultRuntimeDeps, VaultSecretResolver, VaultSigner};
+use vault::{
+    TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver, VaultSigner,
+    caps as vault_caps,
+};
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -425,6 +434,28 @@ pub fn build_pg_migrator_config() -> anyhow::Result<PgConfig> {
     build_pg_migrator_config_from(|name| std::env::var(name).ok())
 }
 
+/// 从注入的配置读取器构造 legacy plaintext `ConfigValue` 启动策略。
+///
+/// `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES` 是安全豁免开关：缺省为 deny；显式非法值 fail-fast。
+pub(crate) fn legacy_config_plaintext_policy_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<LegacyConfigPlaintextPolicy> {
+    let Some(raw) = get(SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV) else {
+        return Ok(LegacyConfigPlaintextPolicy::Deny);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Ok(LegacyConfigPlaintextPolicy::AllowTemporary),
+        "0" | "false" | "no" => Ok(LegacyConfigPlaintextPolicy::Deny),
+        _ => anyhow::bail!(
+            "{SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV} must be true/false (or 1/0, yes/no)"
+        ),
+    }
+}
+
+fn legacy_config_plaintext_policy() -> anyhow::Result<LegacyConfigPlaintextPolicy> {
+    legacy_config_plaintext_policy_from(|name| std::env::var(name).ok())
+}
+
 /// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
 pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
@@ -436,11 +467,15 @@ pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTr
 const DEFAULT_READINESS_INTERVAL: Duration = Duration::from_secs(5);
 /// 默认 Redis readiness 采样周期（5 秒）。
 const DEFAULT_REDIS_READINESS_INTERVAL: Duration = Duration::from_secs(5);
+/// 默认 KeyProvider readiness 采样周期（5 秒）。
+const DEFAULT_KEYPROVIDER_READINESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 采样间隔上限（秒）：限制 DB 失联后维持旧 Ready 状态的最长时间。
 const MAX_READINESS_INTERVAL_SECS: u64 = 300;
 /// Redis 是 distributed lock 运行期依赖，摘流延迟上限更短。
 const MAX_REDIS_READINESS_INTERVAL_SECS: u64 = 30;
+/// KeyProvider 保护 settings 持久化读写，摘流延迟上限与 Redis 一样按运行期强依赖收紧。
+const MAX_KEYPROVIDER_READINESS_INTERVAL_SECS: u64 = 30;
 
 /// configs_ready DB 采样周期（env `RSS_PG_READINESS_SAMPLE_INTERVAL_SECS`）。
 ///
@@ -495,6 +530,33 @@ fn build_redis_readiness_interval() -> Duration {
     build_redis_readiness_interval_from(|n| std::env::var(n).ok())
 }
 
+/// keyprovider_ready 采样周期（env `RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS`）。
+pub(crate) fn build_keyprovider_readiness_interval_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    match get("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS") {
+        None => DEFAULT_KEYPROVIDER_READINESS_INTERVAL,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(n) if (1..=MAX_KEYPROVIDER_READINESS_INTERVAL_SECS).contains(&n) => {
+                Duration::from_secs(n)
+            }
+            _ => {
+                tracing::warn!(
+                    env = "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
+                    raw = %raw,
+                    max_secs = MAX_KEYPROVIDER_READINESS_INTERVAL_SECS,
+                    "invalid keyprovider readiness sample interval (need 1..=30s); using default 5s"
+                );
+                DEFAULT_KEYPROVIDER_READINESS_INTERVAL
+            }
+        },
+    }
+}
+
+fn build_keyprovider_readiness_interval() -> Duration {
+    build_keyprovider_readiness_interval_from(|n| std::env::var(n).ok())
+}
+
 // ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
 
 /// 默认 Vault 请求超时（pre-GA 合理值；生产可经 env 覆盖，待后续 Vault 配置切片——非 #1320 范围）。
@@ -514,11 +576,19 @@ fn warn_vault_startup_security(stores: &TenantStoreAllowlist) {
 /// 构造 vault HTTP client（rustls + ring + webpki-roots，#1252）：reqwest `rustls-tls-webpki-roots` feature
 /// 选 ring crypto provider（`__rustls-ring`，禁 aws-lc，与 deny.toml openssl/aws-lc ban 一致）+ Mozilla 根 CA。
 /// secret resolver 与 Transit `Signer` 共用——二者均经 https 访问 vault（signer 在 login/refresh 热路径真实签发）。
-fn build_vault_tls_client() -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()
-        .context("build vault rustls TLS client")
+fn build_vault_tls_client_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().use_rustls_tls();
+    if let Some(path) = get(VAULT_CA_CERT_PEM_PATH_ENV).filter(|raw| !raw.trim().is_empty()) {
+        let pem = fs::read(path.trim()).with_context(|| {
+            format!("read {VAULT_CA_CERT_PEM_PATH_ENV} PEM bundle for Vault TLS")
+        })?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .with_context(|| format!("{VAULT_CA_CERT_PEM_PATH_ENV} must point to a PEM CA cert"))?;
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().context("build vault rustls TLS client")
 }
 
 /// 从注入的配置读取器构造 `VaultSecretResolver`（fail-fast：必填 env 缺失立即返 `Err`）。
@@ -539,7 +609,7 @@ pub(crate) fn build_vault_resolver_from(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
 
     // rustls + ring + webpki-roots（#1252）：vault token 经 TLS 加密出网。
-    let client = build_vault_tls_client()?;
+    let client = build_vault_tls_client_from(&get)?;
 
     // pre-GA 空 allowlist：无生产 secret reader → 所有 resolve fail-closed Forbidden（网络前拦截）。
     // 待后续 issue 填充 TenantStoreAllowlist（per-store mount + prefix，#1272 follow-up）。
@@ -552,6 +622,33 @@ pub(crate) fn build_vault_resolver_from(
         .map_err(|e| anyhow::anyhow!("vault resolver config error: {e}"))
 }
 
+/// 从注入的配置读取器构造 Vault Transit KeyProvider。必填：
+/// `RSS_VAULT_ADDR` / `RSS_VAULT_TOKEN` / `RSS_VAULT_TRANSIT_MOUNT`。
+pub(crate) fn build_vault_key_provider_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<VaultKeyProvider> {
+    let addr = get(VAULT_ADDR_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
+    let token = get(VAULT_TOKEN_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
+    let mount = get(VAULT_TRANSIT_MOUNT_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
+    let client = build_vault_tls_client_from(&get)?;
+    VaultKeyProvider::new(client, addr, token, mount, DEFAULT_VAULT_TIMEOUT)
+        .map_err(|e| anyhow::anyhow!("vault key provider config error: {e}"))
+}
+
+/// settings ConfigValue 加密 keyset 名。空名等非法值经 [`KeyName`] funnel fail-fast。
+pub fn build_settings_config_value_key_name_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<KeyName> {
+    let raw = get(SETTINGS_CONFIG_VALUE_KEY_NAME_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {SETTINGS_CONFIG_VALUE_KEY_NAME_ENV}")
+    })?;
+    KeyName::try_new(raw)
+        .map_err(|e| anyhow::anyhow!("{SETTINGS_CONFIG_VALUE_KEY_NAME_ENV} is invalid: {e}"))
+}
+
 /// 组合根级 vault capability bundle 构造（#1498）：env → `VaultSecretResolver`（fail-closed without env，
 /// 见 [`build_vault_resolver_from`]）→ [`VaultRuntimeDeps`]（vault 的 dispatch + lifecycle 单源装配出口）。
 ///
@@ -560,7 +657,10 @@ pub(crate) fn build_vault_resolver_from(
 pub fn build_vault_runtime_deps(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<VaultRuntimeDeps> {
-    Ok(VaultRuntimeDeps::new(build_vault_resolver_from(get)?))
+    Ok(VaultRuntimeDeps::new(
+        build_vault_resolver_from(&get)?,
+        build_vault_key_provider_from(get)?,
+    ))
 }
 
 /// 组合根级 redis capability bundle 构造：`RSS_REDIS_URL` → deadpool redis pool + PING → [`redis::RedisRuntimeDeps`].
@@ -767,6 +867,159 @@ fn spawn_redis_readiness_sampler(
     }
 }
 
+// ── KeyProviderReadyProbe ─────────────────────────────────────────────────────────────────────
+
+/// Vault Transit KeyProvider readiness probe stable name.
+pub const KEYPROVIDER_READY_PROBE_NAME: &str = "keyprovider_ready";
+
+const KEYPROVIDER_READINESS_TENANT: &str = "00000000-0000-4000-8000-000000000147";
+const KEYPROVIDER_READINESS_MISMATCH_TENANT: &str = "00000000-0000-4000-8000-000000000148";
+const KEYPROVIDER_READINESS_CONFIG_KEY: &str = "readiness.probe";
+const KEYPROVIDER_READINESS_VALUE: &[u8] = b"rss-keyprovider-ready";
+const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
+const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+
+pub struct KeyProviderReadyProbe {
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    name: ProbeName,
+}
+
+impl KeyProviderReadyProbe {
+    #[allow(clippy::expect_used)]
+    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        let name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME).expect("valid probe name const");
+        Self { ready, name }
+    }
+}
+
+impl bootstrap::HealthProbe for KeyProviderReadyProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+            (HealthStatus::Healthy, "ready")
+        } else {
+            (HealthStatus::Unhealthy, "down")
+        };
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+fn keyprovider_readiness_aad() -> anyhow::Result<secure::DerivedAad> {
+    let tenant = vocab::TenantId::parse(KEYPROVIDER_READINESS_TENANT)
+        .context("keyprovider readiness tenant constant is invalid")?;
+    ProtectionContext::authenticated_request(
+        tenant,
+        KEYPROVIDER_READINESS_CONFIG_KEY,
+        KEYPROVIDER_CONFIG_FIELD,
+        KEYPROVIDER_CONFIG_SCHEME,
+    )
+    .map(|ctx| ctx.derive())
+    .context("keyprovider readiness aad")
+}
+
+fn keyprovider_readiness_mismatch_aad() -> anyhow::Result<secure::DerivedAad> {
+    let tenant = vocab::TenantId::parse(KEYPROVIDER_READINESS_MISMATCH_TENANT)
+        .context("keyprovider readiness mismatch tenant constant is invalid")?;
+    ProtectionContext::authenticated_request(
+        tenant,
+        KEYPROVIDER_READINESS_CONFIG_KEY,
+        KEYPROVIDER_CONFIG_FIELD,
+        KEYPROVIDER_CONFIG_SCHEME,
+    )
+    .map(|ctx| ctx.derive())
+    .context("keyprovider readiness mismatch aad")
+}
+
+async fn verify_keyprovider_ready(
+    provider: &DynKeyProvider<'static>,
+    key_name: KeyName,
+) -> anyhow::Result<()> {
+    let aad = keyprovider_readiness_aad()?;
+    let encrypted = provider
+        .encrypt(
+            key_name,
+            Plaintext::new(KEYPROVIDER_READINESS_VALUE.to_vec()),
+            aad.clone(),
+        )
+        .await
+        .context("key provider readiness encrypt")?;
+    let key_ref = encrypted.key().clone();
+    let plaintext = provider
+        .decrypt(
+            RedactedBytes::new(encrypted.ciphertext().to_vec()),
+            key_ref.clone(),
+            aad,
+        )
+        .await
+        .context("key provider readiness decrypt")?;
+    anyhow::ensure!(
+        plaintext.expose() == KEYPROVIDER_READINESS_VALUE,
+        "key provider readiness plaintext mismatch"
+    );
+    let mismatch_aad = keyprovider_readiness_mismatch_aad()?;
+    match provider
+        .decrypt(
+            RedactedBytes::new(encrypted.ciphertext().to_vec()),
+            key_ref,
+            mismatch_aad,
+        )
+        .await
+    {
+        Ok(_) => anyhow::bail!("key provider accepted mismatched readiness aad"),
+        Err(err) if err.kind() == diport::key_provider::KeyProviderErrorKind::Rejected => {}
+        Err(err) => return Err(err).context("key provider readiness mismatched aad decrypt"),
+    }
+    Ok(())
+}
+
+struct KeyProviderReadinessSampler {
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token: CancellationToken,
+}
+
+impl ManagedResource for KeyProviderReadinessSampler {
+    fn name(&self) -> &str {
+        "keyprovider-readiness-sampler"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        let mut handle = self.handle.lock().await;
+        if let Some(handle) = handle.take()
+            && let Err(err) = handle.await
+        {
+            tracing::warn!(error = %err, "keyprovider readiness sampler join failed");
+        }
+        Ok(())
+    }
+}
+
+fn spawn_keyprovider_readiness_sampler(
+    vault: VaultRuntimeDeps,
+    key_name: KeyName,
+    period: Duration,
+    token: CancellationToken,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+) -> KeyProviderReadinessSampler {
+    let child = token.child_token();
+    let worker_token = child.clone();
+    let provider = vault.for_domain::<vault_caps::Settings>().key_provider();
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = worker_token.cancelled() => break,
+                () = tokio::time::sleep(period) => {
+                    let is_ready = verify_keyprovider_ready(&provider, key_name.clone()).await.is_ok();
+                    ready.store(is_ready, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+    });
+    KeyProviderReadinessSampler {
+        handle: tokio::sync::Mutex::new(Some(handle)),
+        token: child,
+    }
+}
+
 // ── settings + secret wiring ─────────────────────────────────────────────────────────────────
 
 /// 接线 settings 域（#1430 PERSIST-009 settings 首条 durable module 闭环）：构造 config 应用服务 + secret
@@ -791,12 +1044,26 @@ fn spawn_redis_readiness_sampler(
 pub async fn wire_settings(
     deps: &SharedRuntimeDeps,
 ) -> anyhow::Result<(SettingsDomain, DomainModuleResult)> {
+    let vault_settings = deps.vault.for_domain::<vault_caps::Settings>();
+    let key_name = deps.settings_config_value_key_name.clone();
+    let probe_provider = vault_settings.key_provider();
+    verify_keyprovider_ready(&probe_provider, key_name.clone())
+        .await
+        .context("verify settings config value key provider")?;
+
     // 单一 settings bundle（PERSIST-003）：read+write config + secret repo 同 pool、单 clock 经 Arc 扇出，预包装
     // 域形 dyn port——组合根不再散装构造 repo / 手工 DynX 包裹 / 配对 read↔write。
     let (configs, writer, secrets) = deps
         .pg
         .for_domain::<caps::Settings>()
-        .settings_bundle(Arc::new(SystemClock))
+        .settings_bundle(
+            Arc::new(SystemClock),
+            ConfigValueProtections::new(
+                vault_settings.key_provider(),
+                vault_settings.key_provider(),
+                key_name.clone(),
+            ),
+        )
         .into_parts();
 
     // config 应用服务（L2 OutboxFact：CAS 写 + outbox co-tx）→ 经 Arc 作 config-publish 路由 axum State。
@@ -805,7 +1072,19 @@ pub async fn wire_settings(
     // secret 仓储端口 → 经 Arc 作 secret-publish 路由 axum State（`DynSecretRepo` 已 Send+Sync）。
     let secret_repo: Arc<DynSecretRepo<'static>> = Arc::from(secrets);
 
-    let module = settings_module_result(deps.pg.readiness_handle())?;
+    let keyprovider_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut module =
+        settings_module_result(deps.pg.readiness_handle(), Arc::clone(&keyprovider_ready))?;
+    let vault_for_sampler = deps.vault.clone();
+    module.workers.push(Box::new(move |token| {
+        DynManagedResource::new_box(spawn_keyprovider_readiness_sampler(
+            vault_for_sampler.clone(),
+            key_name.clone(),
+            build_keyprovider_readiness_interval(),
+            token,
+            Arc::clone(&keyprovider_ready),
+        ))
+    }));
     Ok((
         SettingsDomain::new(Arc::new(config_svc), secret_repo),
         module,
@@ -817,13 +1096,24 @@ pub async fn wire_settings(
 /// 从 [`wire_settings`] 抽出——后者前半段 vault resolver / pg repo 构造受 env + 真实 pg 门控（integration only），
 /// 而本探针 emission 只需 `Arc<PgDbReadiness>`（无 I/O）。独立成纯函数后 `#[cfg(test)]` 可脱离 vault env / 真实 pg
 /// 单测探针 emission 契约（恰一条 configs_ready、无 resources/workers）。
-fn settings_module_result(readiness: Arc<PgDbReadiness>) -> anyhow::Result<DomainModuleResult> {
+fn settings_module_result(
+    readiness: Arc<PgDbReadiness>,
+    keyprovider_ready: Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<DomainModuleResult> {
     // configs_ready 探针：读 SharedRuntimeDeps 注入的共享 PgDbReadiness（框架 sampler 写）。作 settings 域
     // readiness 产物经 result 出向——不能放纯声明的 `Domain::init`（需运行时构造的 handle）。
     let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
         .context("configs_ready probe name is invalid")?;
+    let keyprovider_probe_name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME)
+        .context("keyprovider_ready probe name is invalid")?;
     Ok(DomainModuleResult {
-        probes: vec![(probe_name, Box::new(ConfigsReadyProbe::new(readiness)))],
+        probes: vec![
+            (probe_name, Box::new(ConfigsReadyProbe::new(readiness))),
+            (
+                keyprovider_probe_name,
+                Box::new(KeyProviderReadyProbe::new(keyprovider_ready)),
+            ),
+        ],
         ..Default::default()
     })
 }
@@ -893,6 +1183,8 @@ fn identity_session_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Re
 const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
 /// vault token env（同上）。
 const VAULT_TOKEN_ENV: &str = "RSS_VAULT_TOKEN";
+/// Optional PEM CA cert path for private/dev Vault HTTPS endpoints.
+const VAULT_CA_CERT_PEM_PATH_ENV: &str = "RSS_VAULT_CA_CERT_PEM_PATH";
 
 /// JWT access-token 签发 env（ES256，组合根注入 vault `Signer`，#1252）。
 const JWT_ISSUER_ENV: &str = "RSS_JWT_ISSUER";
@@ -902,6 +1194,11 @@ const JWT_KEY_ID_ENV: &str = "RSS_JWT_ES256_KEY_ID";
 const JWT_ACCESS_TTL_ENV: &str = "RSS_JWT_ACCESS_TTL_SECS";
 /// vault Transit mount path（如 `transit`，per-deploy）。
 const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
+/// settings ConfigValue 加密使用的 Vault Transit keyset 名。
+const SETTINGS_CONFIG_VALUE_KEY_NAME_ENV: &str = "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME";
+/// 临时允许启动时存在 legacy plaintext settings ConfigValue 行的安全豁免。
+const SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV: &str =
+    "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES";
 /// refresh token 有效期 env（缺省 30 天）。
 const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
 const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
@@ -943,7 +1240,7 @@ fn build_vault_signer_with(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
     let mount = get(VAULT_TRANSIT_MOUNT_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
-    let client = build_vault_tls_client()?;
+    let client = build_vault_tls_client_from(&get)?;
     if allow_http {
         VaultSigner::new_allow_http(
             client,
@@ -1400,14 +1697,21 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 
     // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
     // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
-    let pg = PgRuntimeDeps::setup(&build_pg_migrator_config()?, &build_pg_config()?)
-        .await
-        .context("setup postgres deps")?;
+    let pg = PgRuntimeDeps::setup_with_legacy_config_policy(
+        &build_pg_migrator_config()?,
+        &build_pg_config()?,
+        legacy_config_plaintext_policy()?,
+    )
+    .await
+    .context("setup postgres deps")?;
 
     // vault capability bundle（#1498）：env → resolver → VaultRuntimeDeps（单源装配出口）。vault env 缺失即
     // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
     let vault =
         build_vault_runtime_deps(|name| std::env::var(name).ok()).context("setup vault deps")?;
+    let settings_config_value_key_name =
+        build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
+            .context("settings config value key name")?;
     // redis capability bundle（#1571 go-live）：Redis 是 distributed lock provider 的生产硬依赖。
     // 缺 `RSS_REDIS_URL` 或启动期 PING 失败均 fail-fast，不保留 demo-optional 生产路径。
     let redis = build_redis_runtime_deps(|name| std::env::var(name).ok())
@@ -1419,6 +1723,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         pg: pg.clone(),
         redis,
         vault,
+        settings_config_value_key_name,
     };
 
     // Prometheus 指标导出（#1253）：装进程级 `metrics` global recorder（counter!/gauge! 发射点经此写入）+ 持 render 句柄。
@@ -1604,7 +1909,7 @@ mod tests {
         Arc::new(AllowAuthorizer)
     }
 
-    /// settings 域产物：恰一条 `configs_ready` 探针、resources / workers 空。
+    /// settings 域产物：`configs_ready` + `keyprovider_ready` 两条探针、resources / workers 空。
     ///
     /// 直测 [`settings_module_result`]（脱离 vault env / 真实 pg），覆盖 `wire_settings` 的探针 emission
     /// 契约——该路径在 integration Ok 分支（需 vault+pg）外不可达，故抽出后单测以满足新增覆盖。
@@ -1612,11 +1917,21 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn settings_module_result_emits_single_configs_ready_probe() {
         let readiness = Arc::new(PgDbReadiness::new());
-        let result = settings_module_result(readiness).expect("settings_module_result ok");
-        assert_eq!(result.probes.len(), 1, "仅 configs_ready 一条探针");
+        let keyprovider_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let result = settings_module_result(readiness, keyprovider_ready)
+            .expect("settings_module_result ok");
+        assert_eq!(
+            result.probes.len(),
+            2,
+            "settings 暴露 configs_ready + keyprovider_ready"
+        );
         assert_eq!(result.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
+        assert_eq!(result.probes[1].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
         assert!(result.resources.is_empty(), "settings 今无 detached 资源");
-        assert!(result.workers.is_empty(), "settings 今无后台 worker");
+        assert!(
+            result.workers.is_empty(),
+            "纯 module result helper 不创建后台 worker"
+        );
     }
 
     /// RlsReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("not-enforced")`（fail-closed）。
@@ -1655,6 +1970,135 @@ mod tests {
         let down = probe.check();
         assert_eq!(down.status(), HealthStatus::Unhealthy);
         assert_eq!(down.detail(), "down");
+    }
+
+    /// KeyProviderReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("down")`（fail-closed）。
+    #[test]
+    fn keyprovider_ready_probe_maps_flag_to_health() {
+        use bootstrap::HealthProbe;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let flag = Arc::new(AtomicBool::new(true));
+        let probe = KeyProviderReadyProbe::new(Arc::clone(&flag));
+        let ready = probe.check();
+        assert_eq!(ready.status(), HealthStatus::Healthy);
+        assert_eq!(ready.detail(), "ready");
+        assert_eq!(ready.name().as_str(), KEYPROVIDER_READY_PROBE_NAME);
+
+        flag.store(false, Ordering::Release);
+        let down = probe.check();
+        assert_eq!(down.status(), HealthStatus::Unhealthy);
+        assert_eq!(down.detail(), "down");
+    }
+
+    struct FailingKeyProvider;
+
+    impl diport::KeyProvider for FailingKeyProvider {
+        async fn encrypt(
+            &self,
+            _key: diport::KeyName,
+            _plaintext: secure::Plaintext,
+            _aad: secure::DerivedAad,
+        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+            Err(keyprovider_unavailable())
+        }
+
+        async fn decrypt(
+            &self,
+            _ciphertext: diport::RedactedBytes,
+            _key: diport::KeyRef,
+            _aad: secure::DerivedAad,
+        ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+            Err(keyprovider_unavailable())
+        }
+
+        async fn rewrap(
+            &self,
+            _ciphertext: diport::RedactedBytes,
+            _key: diport::KeyRef,
+            _aad: secure::DerivedAad,
+        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+            Err(keyprovider_unavailable())
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+            Ok(())
+        }
+    }
+
+    struct AadBlindKeyProvider;
+
+    impl diport::KeyProvider for AadBlindKeyProvider {
+        async fn encrypt(
+            &self,
+            key: diport::KeyName,
+            _plaintext: secure::Plaintext,
+            _aad: secure::DerivedAad,
+        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+            Ok(diport::EncryptOutput::new(
+                b"vault:v1:test".to_vec(),
+                diport::KeyRef::new(key, diport::KeyVersion::new(1)),
+            ))
+        }
+
+        async fn decrypt(
+            &self,
+            _ciphertext: diport::RedactedBytes,
+            _key: diport::KeyRef,
+            _aad: secure::DerivedAad,
+        ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+            Ok(secure::Plaintext::new(KEYPROVIDER_READINESS_VALUE.to_vec()))
+        }
+
+        async fn rewrap(
+            &self,
+            _ciphertext: diport::RedactedBytes,
+            _key: diport::KeyRef,
+            _aad: secure::DerivedAad,
+        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+            Err(keyprovider_unavailable())
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+            Ok(())
+        }
+    }
+
+    fn keyprovider_unavailable() -> diport::KeyProviderError {
+        diport::KeyProviderError::new(
+            diport::key_provider::KeyProviderErrorKind::Unavailable,
+            std::io::Error::other("test keyprovider unavailable"),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn keyprovider_startup_self_check_failure_is_error() {
+        let provider = DynKeyProvider::new_box(FailingKeyProvider);
+        let key = KeyName::try_new("settings-config").expect("valid key");
+
+        let err = verify_keyprovider_ready(&provider, key)
+            .await
+            .expect_err("failing provider must fail readiness self-check");
+        assert!(
+            format!("{err:#}").contains("key provider readiness encrypt"),
+            "startup self-check error should preserve encrypt context: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn keyprovider_startup_self_check_rejects_aad_blind_provider() {
+        let provider = DynKeyProvider::new_box(AadBlindKeyProvider);
+        let key = KeyName::try_new("settings-config").expect("valid key");
+
+        let err = verify_keyprovider_ready(&provider, key)
+            .await
+            .expect_err("AAD-blind provider must fail readiness self-check");
+        assert!(
+            format!("{err:#}").contains("accepted mismatched readiness aad"),
+            "startup self-check should prove wrong AAD fails closed: {err:#}"
+        );
     }
 
     #[allow(clippy::panic)]
@@ -1890,6 +2334,30 @@ mod tests {
     }
 
     #[test]
+    fn build_vault_runtime_deps_missing_transit_mount_fails_fast() {
+        let get = |k: &str| match k {
+            _ if k == VAULT_ADDR_ENV => Some("https://vault.example:8200".to_string()),
+            _ if k == VAULT_TOKEN_ENV => Some("s.testtoken".to_string()),
+            _ => None,
+        };
+        assert!(
+            matches!(&build_vault_runtime_deps(get), Err(e) if format!("{e:#}").contains(VAULT_TRANSIT_MOUNT_ENV)),
+            "缺 vault transit mount env 须 fail-fast 且错误含变量名"
+        );
+    }
+
+    #[test]
+    fn settings_config_value_key_name_missing_fails_fast() {
+        assert!(
+            matches!(
+                &build_settings_config_value_key_name_from(|_| None),
+                Err(e) if format!("{e:#}").contains(SETTINGS_CONFIG_VALUE_KEY_NAME_ENV)
+            ),
+            "缺 settings config value key name 须 fail-fast"
+        );
+    }
+
+    #[test]
     #[allow(clippy::expect_used)] // reason: 有效 env 必构造成功，item-level carve-out。
     fn build_vault_runtime_deps_valid_env_single_sources_resolver() {
         // addr + token 在 → 构造成功（无 live vault：VaultSecretResolver::new 仅构造期校验 URL/token +
@@ -1897,12 +2365,17 @@ mod tests {
         let get = |k: &str| match k {
             _ if k == VAULT_ADDR_ENV => Some("https://vault.example:8200".to_string()),
             _ if k == VAULT_TOKEN_ENV => Some("s.testtoken".to_string()),
+            _ if k == VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_string()),
             _ => None,
         };
         let deps = build_vault_runtime_deps(get);
         assert!(deps.is_ok(), "有效 vault env 须构造成功");
         let resources = deps.expect("valid vault deps").runtime_resources();
-        assert_eq!(resources.len(), 1, "vault bundle 单源派生 resolver guard");
+        assert_eq!(
+            resources.len(),
+            2,
+            "vault bundle 单源派生 resolver + key-provider guard"
+        );
     }
 
     #[tokio::test]
@@ -2092,6 +2565,57 @@ mod tests {
         }
     }
 
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_config_plaintext_policy_defaults_to_deny() {
+        let policy = legacy_config_plaintext_policy_from(|_| None).expect("policy");
+        assert_eq!(policy, LegacyConfigPlaintextPolicy::Deny);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_config_plaintext_policy_allows_explicit_temporary_values() {
+        for raw in ["true", "1", "yes", " TRUE "] {
+            let policy = legacy_config_plaintext_policy_from(|n| {
+                (n == SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV).then(|| raw.to_string())
+            })
+            .expect("policy");
+            assert_eq!(
+                policy,
+                LegacyConfigPlaintextPolicy::AllowTemporary,
+                "{SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV}={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_config_plaintext_policy_denies_explicit_false_values() {
+        for raw in ["false", "0", "no", " FALSE "] {
+            let policy = legacy_config_plaintext_policy_from(|n| {
+                (n == SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV).then(|| raw.to_string())
+            })
+            .expect("policy");
+            assert_eq!(
+                policy,
+                LegacyConfigPlaintextPolicy::Deny,
+                "{SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV}={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_config_plaintext_policy_rejects_invalid_value() {
+        let result = legacy_config_plaintext_policy_from(|n| {
+            (n == SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV).then(|| "enabled".to_string())
+        });
+        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            err.contains(SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES_ENV),
+            "error must identify env var: {err}"
+        );
+    }
+
     // ── ConfigsReadyProbe / readiness_to_health 测试 ─────────────────────────────────────
 
     /// `PoolReadiness::Ready` → `(Healthy, "ready")`。
@@ -2256,6 +2780,24 @@ mod tests {
             (n == "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
         });
         assert_eq!(d, DEFAULT_REDIS_READINESS_INTERVAL);
+    }
+
+    #[test]
+    fn build_keyprovider_readiness_interval_uses_keyprovider_env_not_pg_env() {
+        let d = build_keyprovider_readiness_interval_from(|n| match n {
+            "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS" => Some("300".to_string()),
+            "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS" => Some("7".to_string()),
+            _ => None,
+        });
+        assert_eq!(d, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn build_keyprovider_readiness_interval_rejects_pg_sized_upper_bound() {
+        let d = build_keyprovider_readiness_interval_from(|n| {
+            (n == "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
+        });
+        assert_eq!(d, DEFAULT_KEYPROVIDER_READINESS_INTERVAL);
     }
 
     // ── identity_session_ttl_secs 测试 ────────────────────────────────────────────────

@@ -78,6 +78,37 @@ async fn migrator_applies_and_is_idempotent() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn legacy_config_plaintext_policy_rejects_existing_scheme_zero_rows() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("DELETE FROM config_entries")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(COTX_TENANT_A)
+    .bind("legacy.startup.block")
+    .bind("plain")
+    .execute(&store.pool)
+    .await?;
+
+    let verdict = store
+        .verify_config_legacy_plaintext_policy(crate::LegacyConfigPlaintextPolicy::Deny)
+        .await;
+    assert!(
+        matches!(
+            verdict,
+            Err(crate::PgError::LegacyConfigPlaintextPresent { count: 1 })
+        ),
+        "scheme=0 row must block default startup policy, got: {verdict:?}"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     sqlx::query(
@@ -112,6 +143,30 @@ async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
         rendered.contains("dead_letter must be empty before enabling encrypted original_entry"),
         "unexpected migration error: {rendered}"
     );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_config_plaintext_policy_allows_temporary_override() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("DELETE FROM config_entries")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(COTX_TENANT_A)
+    .bind("legacy.startup.allow")
+    .bind("plain")
+    .execute(&store.pool)
+    .await?;
+
+    store
+        .verify_config_legacy_plaintext_policy(crate::LegacyConfigPlaintextPolicy::AllowTemporary)
+        .await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -4222,10 +4277,10 @@ async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
 
 use settings::ports::{ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey};
 
-use crate::PgConfigRepo;
 use crate::config_repo::{arm_config_retry_failpoint, config_retry_failpoint_hits};
 use crate::cotx::co_tx_with_outbox;
 use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
+use crate::{ConfigValueProtection, ConfigValueProtections, PgConfigRepo};
 
 /// config 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值，避免两 const 漂移）。
 const CONFIG_TENANT: &str = COTX_TENANT_A;
@@ -4248,6 +4303,180 @@ fn config_entry(key: &str, value: &str, version: u64) -> ConfigEntry {
         value,
         config_tenant(),
         version,
+    )
+}
+
+struct AadBoundKeyProvider;
+
+impl diport::KeyProvider for AadBoundKeyProvider {
+    async fn encrypt(
+        &self,
+        key: diport::KeyName,
+        plaintext: secure::Plaintext,
+        aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        let aad_bytes = aad.as_canonical_bytes();
+        let mut ciphertext = Vec::with_capacity(4 + aad_bytes.len() + plaintext.expose().len());
+        ciphertext.extend_from_slice(&(aad_bytes.len() as u32).to_be_bytes());
+        ciphertext.extend_from_slice(aad_bytes);
+        ciphertext.extend(plaintext.expose().iter().map(|b| b ^ 0xA5));
+        Ok(diport::EncryptOutput::new(
+            ciphertext,
+            diport::KeyRef::new(key, diport::KeyVersion::new(1)),
+        ))
+    }
+
+    async fn decrypt(
+        &self,
+        ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        let raw = ciphertext.as_bytes();
+        if raw.len() < 4 {
+            return Err(config_key_rejected());
+        }
+        let aad_len = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+        if raw.len() < 4 + aad_len {
+            return Err(config_key_rejected());
+        }
+        let (stored_aad, plaintext) = raw[4..].split_at(aad_len);
+        if stored_aad != aad.as_canonical_bytes() {
+            return Err(config_key_rejected());
+        }
+        Ok(secure::Plaintext::new(
+            plaintext.iter().map(|b| b ^ 0xA5).collect(),
+        ))
+    }
+
+    async fn rewrap(
+        &self,
+        ciphertext: diport::RedactedBytes,
+        key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Ok(diport::EncryptOutput::new(ciphertext.into_bytes(), key))
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        Ok(())
+    }
+}
+
+struct RejectingKeyProvider;
+
+impl diport::KeyProvider for RejectingKeyProvider {
+    async fn encrypt(
+        &self,
+        _key: diport::KeyName,
+        _plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn decrypt(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn rewrap(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        Ok(())
+    }
+}
+
+struct UnavailableKeyProvider;
+
+impl diport::KeyProvider for UnavailableKeyProvider {
+    async fn encrypt(
+        &self,
+        _key: diport::KeyName,
+        _plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Err(config_key_unavailable())
+    }
+
+    async fn decrypt(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        Err(config_key_unavailable())
+    }
+
+    async fn rewrap(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Err(config_key_unavailable())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        Ok(())
+    }
+}
+
+fn config_key_rejected() -> diport::KeyProviderError {
+    diport::KeyProviderError::new(
+        diport::key_provider::KeyProviderErrorKind::Rejected,
+        std::io::Error::other("test key provider rejected"),
+    )
+}
+
+fn config_key_unavailable() -> diport::KeyProviderError {
+    diport::KeyProviderError::new(
+        diport::key_provider::KeyProviderErrorKind::Unavailable,
+        std::io::Error::other("test key provider unavailable"),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn config_protection() -> ConfigValueProtection {
+    ConfigValueProtection::new(
+        diport::DynKeyProvider::new_box(AadBoundKeyProvider),
+        diport::KeyName::try_new("settings-config").unwrap(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn config_protections() -> ConfigValueProtections {
+    ConfigValueProtections::new(
+        diport::DynKeyProvider::new_box(AadBoundKeyProvider),
+        diport::DynKeyProvider::new_box(AadBoundKeyProvider),
+        diport::KeyName::try_new("settings-config").unwrap(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn rejecting_config_protection() -> ConfigValueProtection {
+    ConfigValueProtection::new(
+        diport::DynKeyProvider::new_box(RejectingKeyProvider),
+        diport::KeyName::try_new("settings-config").unwrap(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn unavailable_config_protection() -> ConfigValueProtection {
+    ConfigValueProtection::new(
+        diport::DynKeyProvider::new_box(UnavailableKeyProvider),
+        diport::KeyName::try_new("settings-config").unwrap(),
     )
 }
 
@@ -4287,7 +4516,7 @@ async fn setup_config(store: &PgStore) -> Result<(), Box<dyn std::error::Error +
 async fn tc1_config_save_find_roundtrip() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.timeout").unwrap();
 
@@ -4300,6 +4529,171 @@ async fn tc1_config_save_find_roundtrip() -> TestResult {
     assert_eq!(found.version(), 1, "find 取回版本");
     assert_eq!(found.key().as_str(), "app.timeout", "find 取回 key");
     assert_eq!(found.tenant(), tenant, "find 取回 tenant（tenant-correct）");
+    let raw: (Option<String>, i32, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+        "SELECT value, protection_scheme, value_enc, key_id \
+         FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 AND version = 1",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("app.timeout")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(raw.0, None, "新写不得持久化 plaintext value");
+    assert_eq!(raw.1, 1, "新写必须使用 encrypted scheme");
+    assert!(raw.2.is_some(), "encrypted ciphertext present");
+    let ciphertext = raw.2.unwrap();
+    assert!(
+        !ciphertext.windows(b"30s".len()).any(|w| w == b"30s"),
+        "raw ciphertext must not contain plaintext"
+    );
+    assert_eq!(raw.3.as_deref(), Some("settings-config:1"));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1a：legacy plaintext 行只读兼容；读取路径不得调用 KeyProvider。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1a_config_legacy_plaintext_read_does_not_call_key_provider() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, $3, $4, 0)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.value")
+    .bind(1_i64)
+    .bind("plain-v1")
+    .execute(&store.pool)
+    .await?;
+
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), rejecting_config_protection());
+    let tenant = config_tenant();
+    let key = SettingKey::parse("legacy.value").unwrap();
+    let found = repo.find(tenant, &key).await?.unwrap();
+    assert_eq!(found.value(), "plain-v1", "legacy scheme 0 直接返回明文");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1c：fresh schema 不再给 `protection_scheme` 默认值，旧 INSERT 形态不能继续写明文。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1c_config_plaintext_insert_without_scheme_is_rejected() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+
+    let result = sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value) \
+         VALUES ($1::uuid, $2, $3, $4)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.default.rejected")
+    .bind(1_i64)
+    .bind("plain-v1")
+    .execute(&store.pool)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "old plaintext INSERT shape must fail after 0029 drops protection_scheme default"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1d：复制 encrypted row 到另一租户后，tenant 维度 AAD mismatch → fail-closed。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1d_config_encrypted_row_cross_tenant_copy_rejected() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let tenant_a = config_tenant();
+    let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
+    let key = SettingKey::parse("app.aad").unwrap();
+
+    repo.save(tenant_a, config_entry("app.aad", "tenant-a-value", 1))
+        .await?;
+    sqlx::query(
+        "INSERT INTO config_entries (
+             tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
+         )
+         SELECT $1::uuid, config_key, version, value, deleted, protection_scheme, value_enc, key_id
+         FROM config_entries
+         WHERE tenant_id = $2::uuid AND config_key = $3 AND version = 1",
+    )
+    .bind(CONFIG_TENANT_B)
+    .bind(CONFIG_TENANT)
+    .bind("app.aad")
+    .execute(&store.pool)
+    .await?;
+
+    let result = repo.find(tenant_b, &key).await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
+        "copied ciphertext under another tenant must fail AAD authentication"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1e：encrypted 行读取时 KeyProvider 不可用 → ProtectionUnavailable，且不回退明文。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1e_config_encrypted_read_provider_unavailable() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let reader = PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.kms").unwrap();
+
+    writer
+        .save(tenant, config_entry("app.kms", "encrypted-value", 1))
+        .await?;
+    let result = reader.find(tenant, &key).await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::ProtectionUnavailable(_))),
+        "provider unavailable on encrypted read must surface ProtectionUnavailable"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1f：encrypted row 元数据损坏（bad key_id）→ ProtectionAuthFailure fail-closed。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1f_config_corrupt_encrypted_metadata_fails_closed() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (
+             tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+         )
+         VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("app.corrupt")
+    .bind(1_i64)
+    .bind(&b"ciphertext"[..])
+    .bind("not-a-key-ref")
+    .execute(&store.pool)
+    .await?;
+
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let result = repo
+        .find(config_tenant(), &SettingKey::parse("app.corrupt").unwrap())
+        .await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
+        "corrupt encrypted metadata must fail closed as auth failure"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -4316,7 +4710,7 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
     let (configs, _writer, _secrets) = deps
         .for_domain::<crate::caps::Settings>()
-        .settings_bundle(fixed_clock_arc())
+        .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();
     let tenant = config_tenant();
     let key = SettingKey::parse("bundle.timeout").unwrap();
@@ -4344,7 +4738,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
     let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
     let (_configs, writer, _secrets) = deps
         .for_domain::<crate::caps::Settings>()
-        .settings_bundle(fixed_clock_arc())
+        .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc1c-evt");
@@ -4398,7 +4792,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
 async fn tc2_config_find_version_returns_history() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -4434,7 +4828,7 @@ async fn tc2_config_find_version_returns_history() -> TestResult {
 async fn tc3_config_save_cas_conflict() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -4467,13 +4861,40 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
     Ok(())
 }
 
+/// tc3b：写前 seal 失败（provider unavailable）→ 不打开业务写事务、不落 config 行。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc3b_config_save_provider_unavailable_persists_nothing() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
+    let tenant = config_tenant();
+
+    let result = repo
+        .save(tenant, config_entry("app.kms-down", "no-write", 1))
+        .await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::ProtectionUnavailable(_))),
+        "write-time provider unavailable must surface ProtectionUnavailable"
+    );
+    let cfg_cnt: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind("app.kms-down")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cfg_cnt.0, 0, "seal failure happens before DB write");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc4：delete 软删（tombstone）——find 返 None；历史值行**保留**（find_version 可读）；幂等。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -4522,14 +4943,60 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
     Ok(())
 }
 
-/// tc4b：并发 delete/delete 应保持幂等——唯一键抢占 tombstone 版本时，失败方重读 latest tombstone 后 no-op。
+/// tc4b：delete no-op（不存在 / 已 tombstone）不得依赖 KeyProvider 可用性。
 #[tokio::test(flavor = "multi_thread")]
-async fn tc4b_config_concurrent_delete_is_idempotent() -> TestResult {
+#[allow(clippy::unwrap_used)]
+async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let tenant = config_tenant();
+    let missing = SettingKey::parse("app.missing").unwrap();
+    let key = SettingKey::parse("app.deleted").unwrap();
+
+    let unavailable_repo =
+        PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
+    unavailable_repo.delete(tenant, &missing).await?;
+    let missing_cnt: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind("app.missing")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(missing_cnt.0, 0, "missing-key delete no-op writes nothing");
+
+    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    writer
+        .save(tenant, config_entry("app.deleted", "v1", 1))
+        .await?;
+    writer.delete(tenant, &key).await?;
+    unavailable_repo.delete(tenant, &key).await?;
+
+    let latest: (Option<i64>,) =
+        sqlx::query_as("SELECT max(version) FROM config_entries WHERE config_key = $1")
+            .bind("app.deleted")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        latest.0,
+        Some(2),
+        "already-deleted no-op must not append another tombstone"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc4c：并发 delete/delete 应保持幂等——唯一键抢占 tombstone 版本时，失败方重读 latest tombstone 后 no-op。
+#[tokio::test(flavor = "multi_thread")]
+async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
     use std::sync::Arc;
 
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = Arc::new(PgConfigRepo::new(&store, fixed_clock_arc()));
+    let repo = Arc::new(PgConfigRepo::new(
+        &store,
+        fixed_clock_arc(),
+        config_protection(),
+    ));
     let tenant = config_tenant();
     let key = Arc::new(SettingKey::parse("app.concurrent-delete")?);
 
@@ -4580,13 +5047,14 @@ async fn tc4b_config_concurrent_delete_is_idempotent() -> TestResult {
 async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5-evt");
+    let plain_value = "settings-value-must-not-leak";
 
     repo.save_and_append_outbox(
         tenant,
-        config_entry("app.k", "v1", 1),
+        config_entry("app.k", plain_value, 1),
         config_outbox_entry(&event_id),
         config_envelope("app.k"),
     )
@@ -4610,6 +5078,24 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 1, "outbox 行应写入（co-tx 两行皆在）");
+    let outbox_shape: (Vec<u8>, String) =
+        sqlx::query_as("SELECT payload, metadata::text FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        !outbox_shape
+            .0
+            .windows(plain_value.len())
+            .any(|window| window == plain_value.as_bytes()),
+        "config publish payload 不得包含 ConfigValue plaintext: {}",
+        String::from_utf8_lossy(&outbox_shape.0)
+    );
+    assert!(
+        !outbox_shape.1.contains(plain_value),
+        "config publish metadata 不得包含 ConfigValue plaintext: {}",
+        outbox_shape.1
+    );
     // #262 F1：settings config co-tx outbox metadata 含构造期注入的 occurred_at（第三装配点，从注入 Clock）。
     let cfg_meta: (String,) =
         sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
@@ -4630,7 +5116,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
             .await?
             .unwrap()
             .value(),
-        "v1"
+        plain_value
     );
 
     store.shutdown().await?;
@@ -4643,7 +5129,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
 async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5b-evt");
     let envelope = OutboxEnvelopeParts::new(
@@ -4705,13 +5191,15 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
         move |conn| {
             Box::pin(async move {
                 sqlx::query(
-                    "INSERT INTO config_entries (tenant_id, config_key, version, value) \
-                     VALUES ($1::uuid, $2, $3, $4)",
+                    "INSERT INTO config_entries (
+                         tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+                     ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
                 )
                 .bind(CONFIG_TENANT)
                 .bind("app.rollback")
                 .bind(1_i64)
-                .bind("v1")
+                .bind(&b"ciphertext"[..])
+                .bind("settings-config:1")
                 .execute(&mut *conn)
                 .await
                 .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
@@ -4754,7 +5242,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
 async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
 
     repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
@@ -4799,7 +5287,7 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
 async fn tc7b_config_cotx_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let ok_event = unique_event_id("cfg-tc7b-ok");
     let rollback_event = unique_event_id("cfg-tc7b-rollback");
@@ -4820,15 +5308,11 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                 .await
             },
             business_exists: || async {
-                let cnt: (i64,) = sqlx::query_as(
-                    "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
-                )
-                .bind("app.cotx-ok")
-                .bind("v1")
-                .fetch_one(&store.pool)
-                .await
-                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+                let key = SettingKey::parse("app.cotx-ok")
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                repo.find(tenant, &key)
+                    .await
+                    .map(|entry| entry.is_some_and(|entry| entry.value() == "v1"))
             },
             outbox_exists: || async {
                 let cnt: (i64,) =
@@ -4857,13 +5341,15 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                     move |conn| {
                         Box::pin(async move {
                             sqlx::query(
-                                "INSERT INTO config_entries (tenant_id, config_key, version, value) \
-                                 VALUES ($1::uuid, $2, $3, $4)",
+                                "INSERT INTO config_entries (
+                                     tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+                                 ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
                             )
                             .bind(CONFIG_TENANT)
                             .bind("app.cotx-rollback")
                             .bind(1_i64)
-                            .bind("v1")
+                            .bind(&b"ciphertext"[..])
+                            .bind("settings-config:1")
                             .execute(&mut *conn)
                             .await
                             .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
@@ -4904,15 +5390,11 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                 .await
             },
             business_exists: || async {
-                let cnt: (i64,) = sqlx::query_as(
-                    "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
-                )
-                .bind("app.cotx-conflict")
-                .bind("stale")
-                .fetch_one(&store.pool)
-                .await
-                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                Ok::<bool, ConfigRepoError>(cnt.0 == 1)
+                let key = SettingKey::parse("app.cotx-conflict")
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                repo.find(tenant, &key)
+                    .await
+                    .map(|entry| entry.is_some_and(|entry| entry.value() == "stale"))
             },
             outbox_exists: || async {
                 let cnt: (i64,) =
@@ -4941,7 +5423,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
 async fn tc7c_config_retry_boundary_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let transient_event = unique_event_id("cfg-tc7c-transient");
     let conflict_event = unique_event_id("cfg-tc7c-conflict");
@@ -5068,7 +5550,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
 async fn tc8_config_find_maps_storage_error() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -5092,7 +5574,7 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
 async fn tc9_config_cross_tenant_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.k").unwrap();
@@ -5162,7 +5644,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
 async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.conformance").unwrap();
@@ -5206,7 +5688,7 @@ fn config_event_id(tenant: TenantId, key: &str, version: u64) -> String {
 async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -6290,12 +6772,14 @@ async fn t21_rls_config_entries_enforces_tenant_isolation() -> TestResult {
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "INSERT INTO config_entries (tenant_id, config_key, version, value) \
-             VALUES ($1::uuid, $2, 1, $3)",
+            "INSERT INTO config_entries (
+                 tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+             ) VALUES ($1::uuid, $2, 1, NULL, 1, $3, $4)",
         )
         .bind(&tenant_a)
         .bind(&cfg_key)
-        .bind("rls-test-value")
+        .bind(&b"ciphertext"[..])
+        .bind("settings-config:1")
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Tx1 INSERT tenant_a config failed (should succeed): {e}"))?;
@@ -6359,12 +6843,14 @@ async fn t21_rls_config_entries_enforces_tenant_isolation() -> TestResult {
             .execute(&mut *tx)
             .await?;
         let result = sqlx::query(
-            "INSERT INTO config_entries (tenant_id, config_key, version, value) \
-             VALUES ($1::uuid, $2, 1, $3)",
+            "INSERT INTO config_entries (
+                 tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+             ) VALUES ($1::uuid, $2, 1, NULL, 1, $3, $4)",
         )
         .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
         .bind(format!("{cfg_key}.cross"))
-        .bind("cross-tenant-value")
+        .bind(&b"ciphertext"[..])
+        .bind("settings-config:1")
         .execute(&mut *tx)
         .await;
         assert!(

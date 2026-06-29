@@ -16,6 +16,7 @@ HEALTH_URL="http://localhost:${RSS_HEALTH_HOST_PORT}/health/v1"
 READY_TIMEOUT="${READY_TIMEOUT:-120}" # 秒：含镜像构建后首启 + 迁移。
 # reason: 唯一临时文件——同机并行跑（CI 多 job / 多终端）不互相覆盖 readyz 响应。
 READYZ_TMP="$(mktemp)"
+vault_paused=0
 
 log() { printf '\033[1;34m[smoke]\033[0m %s\n' "$*"; }
 fail() {
@@ -24,6 +25,12 @@ fail() {
 }
 
 cleanup() {
+    if [[ $vault_paused -eq 1 ]]; then
+        vault_cid="$($COMPOSE ps -q vault 2>/dev/null || true)"
+        if [[ -n "$vault_cid" ]]; then
+            docker unpause "$vault_cid" >/dev/null 2>&1 || true
+        fi
+    fi
     rm -f "$READYZ_TMP"
     if [[ "${KEEP_UP:-0}" = "1" ]]; then
         log "KEEP_UP=1：保留栈，跳过 teardown（手动 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml down -v' 清理）"
@@ -34,7 +41,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "构建并拉起演示栈（postgres + redis + rabbitmq + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
+log "构建并拉起演示栈（postgres + redis + rabbitmq + vault + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
 $COMPOSE up --build -d
 
 # ── 闭环 1：/readyz 轮询至 200（PG healthy + 迁移完 + 池就绪）────────────────────────────────────
@@ -56,6 +63,8 @@ done
 log "readyz 200 ✓ → $(cat "$READYZ_TMP")"
 grep -q '"name":"redis_ready"' "$READYZ_TMP" || fail "readyz body 缺 redis_ready probe"
 log "redis_ready probe 暴露 ✓"
+grep -q '"name":"keyprovider_ready"' "$READYZ_TMP" || fail "readyz body 缺 keyprovider_ready probe"
+log "keyprovider_ready probe 暴露 ✓"
 
 # ── 闭环 2：/healthz liveness 恒 200 ──────────────────────────────────────────────────────────────
 curl -fsS "${HEALTH_URL}/healthz" >/dev/null || fail "/healthz 非 200"
@@ -79,7 +88,39 @@ ro="$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")"
 [[ "$ro" = "true" ]] || fail "期望只读 rootfs (ReadonlyRootfs=true)，实际 '${ro}'"
 log "加固断言 ✓（user=${user}, read_only=${ro}）"
 
-# ── 闭环 5：Redis down → readyz 503 ────────────────────────────────────────────────────────────
+# ── 闭环 5：Vault/KeyProvider down → readyz 503 ───────────────────────────────────────────────
+log "暂停 vault，验证 keyprovider_ready 触发 readyz 503…"
+vault_cid="$($COMPOSE ps -q vault)"
+[[ -n "$vault_cid" ]] || fail "找不到 vault 容器"
+docker pause "$vault_cid" >/dev/null
+vault_paused=1
+deadline=$((SECONDS + 40))
+vault_down=0
+while [[ $SECONDS -lt $deadline ]]; do
+    code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
+    if [[ "$code" = "503" ]] && grep -q '"name":"keyprovider_ready"' "$READYZ_TMP"; then
+        vault_down=1
+        break
+    fi
+    sleep 1
+done
+[[ $vault_down -eq 1 ]] || fail "Vault paused 后 /readyz 未返回 503（last=$(cat "$READYZ_TMP")）"
+log "Vault paused → keyprovider_ready 503 ✓"
+docker unpause "$vault_cid" >/dev/null
+vault_paused=0
+deadline=$((SECONDS + READY_TIMEOUT))
+vault_restored=0
+while [[ $SECONDS -lt $deadline ]]; do
+    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
+        vault_restored=1
+        break
+    fi
+    sleep 2
+done
+[[ $vault_restored -eq 1 ]] || fail "Vault 恢复后 /readyz 未回到 200（last=$(cat "$READYZ_TMP")）"
+log "Vault 恢复 → readyz 200 ✓"
+
+# ── 闭环 6：Redis down → readyz 503 ────────────────────────────────────────────────────────────
 log "停止 redis，验证 readyz 降为 503…"
 $COMPOSE stop redis >/dev/null
 deadline=$((SECONDS + 20))

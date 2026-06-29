@@ -19,6 +19,7 @@ const REVOCATION_STORE_PORT: &str = "diport::RevocationStore";
 const PUBLISHER_PORT: &str = "diport::Publisher";
 const ACKABLE_SUBSCRIBER_PORT: &str = "diport::AckableSubscriber";
 const SIGNER_PORT: &str = "diport::Signer";
+const KEY_PROVIDER_PORT: &str = "diport::KeyProvider";
 const PDP_PORT: &str = "diport::Pdp";
 const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 const LOCK_STORE_PORT: &str = "diport::LockStore";
@@ -115,6 +116,8 @@ pub(crate) enum DiportPort {
     AckableSubscriber,
     #[serde(rename = "diport::Signer")]
     Signer,
+    #[serde(rename = "diport::KeyProvider")]
+    KeyProvider,
     #[serde(rename = "diport::Pdp")]
     Pdp,
     #[serde(rename = "diport::RateLimiter")]
@@ -132,6 +135,7 @@ impl DiportPort {
             Self::Publisher => PUBLISHER_PORT,
             Self::AckableSubscriber => ACKABLE_SUBSCRIBER_PORT,
             Self::Signer => SIGNER_PORT,
+            Self::KeyProvider => KEY_PROVIDER_PORT,
             Self::Pdp => PDP_PORT,
             Self::RateLimiter => RATE_LIMITER_PORT,
             Self::Lock => LOCK_STORE_PORT,
@@ -566,6 +570,12 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
         }),
         "vault::VaultSigner" => Some(ProviderSpec {
             port: DiportPort::Signer,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "vault",
+        }),
+        "vault::VaultKeyProvider" => Some(ProviderSpec {
+            port: DiportPort::KeyProvider,
             durability: ProviderDurability::Persistent,
             required_features: &["backend"],
             provider_crate: "vault",
@@ -1364,6 +1374,39 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+vault = { path = "../../adapters/vault", features = ["backend"] }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn active_vault_keyprovider_with_dependency_and_required_feature_is_allowed()
+    -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-active-vault-keyprovider");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-configvalue-at-rest-encryption"
 "#,
             r#"[package]
 name = "runtime"

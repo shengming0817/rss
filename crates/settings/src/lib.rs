@@ -126,10 +126,12 @@ mod smoke {
 
     #[test]
     fn config_repo_error_enum_is_exhaustive() {
-        // 业务/基础设施分层（#1226）：VersionConflict（CAS）+ Storage(#[source])（持久化）。
+        // 业务/基础设施分层：VersionConflict（CAS）+ protection + Storage(#[source])（持久化）。
         let e = ConfigRepoError::VersionConflict;
         match e {
             ConfigRepoError::VersionConflict => {}
+            ConfigRepoError::ProtectionUnavailable(_) => {}
+            ConfigRepoError::ProtectionAuthFailure(_) => {}
             ConfigRepoError::Storage(_) => {}
         }
     }

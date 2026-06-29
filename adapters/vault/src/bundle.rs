@@ -42,12 +42,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use diport::{
-    DynManagedResource, DynSecretResolver, ManagedResource, SecretCoordinate, SecretMaterial,
+    DynKeyProvider, DynManagedResource, DynSecretResolver, EncryptOutput, KeyName, KeyProvider,
+    KeyProviderError, KeyRef, ManagedResource, RedactedBytes, SecretCoordinate, SecretMaterial,
     SecretResolver, SecretResolverError, ShutdownError,
 };
+use secure::{DerivedAad, Plaintext};
 use vocab::TenantId;
 
-use crate::VaultSecretResolver;
+use crate::{VaultKeyProvider, VaultSecretResolver};
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
 mod sealed {
@@ -79,15 +81,18 @@ impl VaultDomain for caps::Settings {}
 #[derive(Clone)]
 pub struct VaultRuntimeDeps {
     resolver: Arc<VaultSecretResolver>,
+    key_provider: Arc<VaultKeyProvider>,
 }
 
 impl VaultRuntimeDeps {
-    /// 由组合根注入已构造的 [`VaultSecretResolver`]（vault TLS-agnostic：`reqwest::Client` + addr/token/
-    /// allowlist 在组合根 DI 期组装）。`Arc` 化以在 dispatch（service）与 guard（shutdown）间共享单源 lifecycle。
+    /// 由组合根注入已构造的 [`VaultSecretResolver`] + [`VaultKeyProvider`]（vault TLS-agnostic：
+    /// `reqwest::Client` + addr/token/mount 在组合根 DI 期组装）。`Arc` 化以在 dispatch（service）与
+    /// guard（shutdown）间共享单源 lifecycle。
     #[must_use]
-    pub fn new(resolver: VaultSecretResolver) -> Self {
+    pub fn new(resolver: VaultSecretResolver, key_provider: VaultKeyProvider) -> Self {
         Self {
             resolver: Arc::new(resolver),
+            key_provider: Arc::new(key_provider),
         }
     }
 
@@ -97,6 +102,7 @@ impl VaultRuntimeDeps {
     pub fn for_domain<D: VaultDomain>(&self) -> VaultDomainDeps<D> {
         VaultDomainDeps {
             resolver: Arc::clone(&self.resolver),
+            key_provider: Arc::clone(&self.key_provider),
             _marker: PhantomData,
         }
     }
@@ -106,9 +112,10 @@ impl VaultRuntimeDeps {
     /// （当前仅 resolver guard），杜绝逐 channel 手写 `register_detached`（D5）。
     #[must_use]
     pub fn runtime_resources(&self) -> Vec<Box<DynManagedResource<'static>>> {
-        vec![DynManagedResource::new_box(VaultResolverGuard(Arc::clone(
-            &self.resolver,
-        )))]
+        vec![
+            DynManagedResource::new_box(VaultResolverGuard(Arc::clone(&self.resolver))),
+            DynManagedResource::new_box(VaultKeyProviderGuard(Arc::clone(&self.key_provider))),
+        ]
     }
 }
 
@@ -137,6 +144,7 @@ impl VaultRuntimeDeps {
 /// ```
 pub struct VaultDomainDeps<D: VaultDomain> {
     resolver: Arc<VaultSecretResolver>,
+    key_provider: Arc<VaultKeyProvider>,
     _marker: PhantomData<D>,
 }
 
@@ -145,6 +153,7 @@ impl<D: VaultDomain> Clone for VaultDomainDeps<D> {
     fn clone(&self) -> Self {
         Self {
             resolver: Arc::clone(&self.resolver),
+            key_provider: Arc::clone(&self.key_provider),
             _marker: PhantomData,
         }
     }
@@ -157,6 +166,13 @@ impl VaultDomainDeps<caps::Settings> {
     #[must_use]
     pub fn secret_resolver(&self) -> Box<DynSecretResolver<'static>> {
         DynSecretResolver::new_box(SharedVaultResolver(Arc::clone(&self.resolver)))
+    }
+
+    /// settings 域字段保护 KeyProvider 句柄。经 delegating handle 共享 bundle 的 `Arc<VaultKeyProvider>`，
+    /// 不泄漏 Arc 本身；可多次调用以给 read/write repo 各一份 owned dyn box。
+    #[must_use]
+    pub fn key_provider(&self) -> Box<DynKeyProvider<'static>> {
+        DynKeyProvider::new_box(SharedVaultKeyProvider(Arc::clone(&self.key_provider)))
     }
 }
 
@@ -172,6 +188,42 @@ impl SecretResolver for SharedVaultResolver {
         coord: &SecretCoordinate,
     ) -> Result<SecretMaterial, SecretResolverError> {
         self.0.resolve(tenant, coord).await
+    }
+}
+
+/// `Arc<VaultKeyProvider>` 的 `KeyProvider` delegating handle。
+struct SharedVaultKeyProvider(Arc<VaultKeyProvider>);
+
+impl KeyProvider for SharedVaultKeyProvider {
+    async fn encrypt(
+        &self,
+        key: KeyName,
+        plaintext: Plaintext,
+        aad: DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        self.0.encrypt(key, plaintext, aad).await
+    }
+
+    async fn decrypt(
+        &self,
+        ciphertext: RedactedBytes,
+        key: KeyRef,
+        aad: DerivedAad,
+    ) -> Result<Plaintext, KeyProviderError> {
+        self.0.decrypt(ciphertext, key, aad).await
+    }
+
+    async fn rewrap(
+        &self,
+        ciphertext: RedactedBytes,
+        key: KeyRef,
+        aad: DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        self.0.rewrap(ciphertext, key, aad).await
+    }
+
+    async fn shutdown(&self) -> Result<(), KeyProviderError> {
+        KeyProvider::shutdown(&*self.0).await
     }
 }
 
@@ -192,6 +244,18 @@ impl ManagedResource for VaultResolverGuard {
     }
 }
 
+pub(crate) struct VaultKeyProviderGuard(Arc<VaultKeyProvider>);
+
+impl ManagedResource for VaultKeyProviderGuard {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        ManagedResource::shutdown(&*self.0).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! bundle 单元测：wiremock-free（构造合法 resolver + allowlist），覆盖 funnel 派发 + 单源
@@ -202,7 +266,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use crate::TenantStoreAllowlist;
+    use crate::{TenantStoreAllowlist, VaultKeyProvider};
 
     const ADDR: &str = "https://vault.example:8200";
     const TOKEN: &str = "s.testtoken";
@@ -215,8 +279,14 @@ mod tests {
             .expect("valid config")
     }
 
+    #[allow(clippy::expect_used)] // reason: 合法配置 key provider 必成功；item-level carve-out。
+    fn key_provider() -> VaultKeyProvider {
+        VaultKeyProvider::new(reqwest::Client::new(), ADDR, TOKEN, "transit", TIMEOUT)
+            .expect("valid config")
+    }
+
     fn deps() -> VaultRuntimeDeps {
-        VaultRuntimeDeps::new(resolver())
+        VaultRuntimeDeps::new(resolver(), key_provider())
     }
 
     #[test]
@@ -228,6 +298,10 @@ mod tests {
             Arc::ptr_eq(&s.resolver, &d.resolver),
             "for_domain clone 共享 resolver Arc"
         );
+        assert!(
+            Arc::ptr_eq(&s.key_provider, &d.key_provider),
+            "for_domain clone 共享 key provider Arc"
+        );
     }
 
     #[test]
@@ -237,6 +311,10 @@ mod tests {
         assert!(
             Arc::ptr_eq(&s.resolver, &c.resolver),
             "clone 廉价共享 resolver Arc（非深拷贝）"
+        );
+        assert!(
+            Arc::ptr_eq(&s.key_provider, &c.key_provider),
+            "clone 廉价共享 key provider Arc（非深拷贝）"
         );
     }
 
@@ -248,17 +326,28 @@ mod tests {
     }
 
     #[test]
+    fn settings_key_provider_constructs() {
+        let s: VaultDomainDeps<caps::Settings> = deps().for_domain();
+        let _ = s.key_provider();
+    }
+
+    #[test]
     fn runtime_resources_single_sources_resolver_guard() {
         let resources = deps().runtime_resources();
         assert_eq!(
             resources.len(),
-            1,
-            "vault 当前只产 resolver-guard 单一受管资源"
+            2,
+            "vault 当前产 resolver + key-provider 两条受管资源"
         );
         assert_eq!(
             resources[0].name(),
             "vault-secret-resolver",
             "单源 resource 即 vault resolver guard"
+        );
+        assert_eq!(
+            resources[1].name(),
+            "vault-key-provider",
+            "单源 resource 即 vault key provider guard"
         );
     }
 

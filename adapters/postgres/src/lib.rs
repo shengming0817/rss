@@ -49,7 +49,7 @@ pub use auth_audit_sink::PgAuthAuditSink;
 pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, PgSettingsBundle, caps};
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
-pub use config_repo::PgConfigRepo;
+pub use config_repo::{ConfigValueProtection, ConfigValueProtections, PgConfigRepo};
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use dead_letter_payload::DlxPayloadProtector;
@@ -73,7 +73,7 @@ mod integration_tests;
 mod test_pg;
 
 pub use inbox::{INBOX_DEDUP_RETENTION_SECONDS, PgInboxStore, PgInboxSweeper};
-pub use pool::{PgConfig, PgError, PgPassword, PoolReadiness};
+pub use pool::{LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PoolReadiness};
 // `pg_readiness_sampling_loop` 降 `pub(crate)`（经 `PgRuntimeDeps::spawn_readiness_sampler` 收口，#1423），
 // 不再 re-export；类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / bundle 返回类型）。
 pub use readiness::{PgDbReadiness, PgReadinessSampler};

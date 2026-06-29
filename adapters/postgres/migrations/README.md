@@ -34,6 +34,11 @@
 >（`0020_add_inbox_dedup_sweep_index.sql` / `0020_harden_dead_letter_rls.sql`）。本 PR 仅重编号后者及其后续
 > dead-letter sweep migration（`0021`/`0022`），不改 SQL 语义；RLS predicate 修复改用新的 `0024` 前向迁移。
 > 依据同 ADR-011：pre-GA 且重号本身已让 fresh DB migration 不可应用。
+>
+> **例外扩展（#1477，pre-GA residual duplicate carve-out）**：`develop` 仍残留两个 `0026`
+>（`0026_create_role_bindings.sql` / `0026_grant_distributed_cas.sql`）。后者仅一条 grant，本 PR 将该 grant
+> 并入唯一的 `0026_create_role_bindings.sql` 并删除重复文件，不改授权语义；依据同上，重号本身已让 fresh DB
+> migration 不可应用。
 
 ## 索引形态（阶段约定）
 

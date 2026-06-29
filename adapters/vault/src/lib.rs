@@ -24,9 +24,10 @@
 //! 具名构造器 opt-in。请求级 `timeout` 是构造器必填参数（防注入的 `Client` 未配 timeout 时无限等待）。
 //!
 //! **字段保护 AAD 映射**：`VaultKeyProvider` 把 RSS `secure::DerivedAad` 的 canonical bytes 经单一 funnel
-//! base64 编码进 Vault Transit `context` 字段，**不使用 `associated_data`**。Vault `/rewrap` 源码对
-//! `context` 生效，但非 batch rewrap 不实际使用 `associated_data`；用 `context` 可保留原生 rewrap，避免
-//! decrypt+encrypt fallback 把明文拉回 adapter。
+//! base64 编码进 Vault Transit `context` 字段，**要求 Transit key `derived=true`，不使用 `associated_data`**。
+//! Vault `/rewrap` 源码对 `context` 生效，但非 batch rewrap 不实际使用 `associated_data`；用 `context` 可保留
+//! 原生 rewrap，避免 decrypt+encrypt fallback 把明文拉回 adapter。组合根启动 self-check 用 wrong-AAD 解密
+//! fail-closed 证明生产 key 策略没有退化成 AAD-blind。
 //!
 //! **keyset / rotation 语义（#1474）**：`diport::KeyName` 对应 Vault Transit key name；`diport::KeyVersion`
 //! 对应 Vault tagged ciphertext 的 `vault:vN:` version；`diport::KeyRef` 是调用方随密文持久化的稳定

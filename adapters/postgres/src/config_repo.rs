@@ -23,7 +23,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use consistency::Entry;
-use diport::{Clock, OutboxEnvelopeParts};
+use diport::key_provider::KeyProviderErrorKind;
+use diport::{
+    Clock, DynKeyProvider, KeyName, KeyProvider, KeyProviderError, KeyRef, OutboxEnvelopeParts,
+    RedactedBytes,
+};
+use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
     ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey, TenantId,
 };
@@ -53,23 +58,117 @@ static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 pub struct PgConfigRepo {
     pool: PgTenantPool,
     clock: Arc<dyn Clock>,
+    protection: ConfigValueProtection,
+}
+
+/// settings `ConfigValue` 字段保护依赖：KeyProvider 句柄 + 写入 keyset 名。
+///
+/// 字段私有，唯一构造经 [`ConfigValueProtection::new`]。`PgConfigRepo` 只持此参数对象，不知道具体 Vault
+/// adapter；组合根 / bundle 负责传入共享 KeyProvider handle。
+pub struct ConfigValueProtection {
+    key_provider: Box<DynKeyProvider<'static>>,
+    key_name: KeyName,
+}
+
+impl ConfigValueProtection {
+    /// 构造 config value 字段保护依赖。两项必填，无 plaintext-write flag。
+    #[must_use]
+    pub fn new(key_provider: Box<DynKeyProvider<'static>>, key_name: KeyName) -> Self {
+        Self {
+            key_provider,
+            key_name,
+        }
+    }
+}
+
+/// settings bundle 读写两条 config lane 的字段保护依赖。
+///
+/// `settings_bundle` 只接收此聚合类型，不暴露两个同类型 `ConfigValueProtection` 位置参，避免组合根把
+/// read/write lane 误调换（F6）。读写 lane 各持独立 `DynKeyProvider` handle；共享同一 key name。
+pub struct ConfigValueProtections {
+    read: ConfigValueProtection,
+    write: ConfigValueProtection,
+}
+
+impl ConfigValueProtections {
+    /// 构造 settings bundle 的读写字段保护依赖。两条 lane 的 provider handle 与 key name 均显式注入。
+    #[must_use]
+    pub fn new(
+        read_key_provider: Box<DynKeyProvider<'static>>,
+        write_key_provider: Box<DynKeyProvider<'static>>,
+        key_name: KeyName,
+    ) -> Self {
+        Self {
+            read: ConfigValueProtection::new(read_key_provider, key_name.clone()),
+            write: ConfigValueProtection::new(write_key_provider, key_name),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (ConfigValueProtection, ConfigValueProtection) {
+        (self.read, self.write)
+    }
 }
 
 impl PgConfigRepo {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
-    pub(crate) fn new(store: &PgStore, clock: Arc<dyn Clock>) -> Self {
+    pub(crate) fn new(
+        store: &PgStore,
+        clock: Arc<dyn Clock>,
+        protection: ConfigValueProtection,
+    ) -> Self {
         Self {
             pool: PgTenantPool::new(store),
             clock,
+            protection,
         }
     }
+}
+
+const CONFIG_VALUE_FIELD: &str = "settings.config.value";
+const CONFIG_VALUE_PROTECTION_SCHEME: i32 = 1;
+
+#[derive(Clone)]
+struct EncodedConfigValue {
+    value: Option<String>,
+    protection_scheme: i32,
+    value_enc: Option<Vec<u8>>,
+    key_id: Option<String>,
 }
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，故在 adapter 边界收口）。
 fn storage(e: sqlx::Error) -> ConfigRepoError {
     ConfigRepoError::Storage(Box::new(e))
+}
+
+fn protection_unavailable<E>(e: E) -> ConfigRepoError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    ConfigRepoError::ProtectionUnavailable(Box::new(e))
+}
+
+fn protection_auth_failure<E>(e: E) -> ConfigRepoError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    ConfigRepoError::ProtectionAuthFailure(Box::new(e))
+}
+
+fn protection_auth_message(message: &'static str) -> ConfigRepoError {
+    protection_auth_failure(std::io::Error::other(message))
+}
+
+fn key_provider_error(e: KeyProviderError) -> ConfigRepoError {
+    match e.kind() {
+        KeyProviderErrorKind::Rejected => protection_auth_failure(e),
+        KeyProviderErrorKind::NotFound
+        | KeyProviderErrorKind::Forbidden
+        | KeyProviderErrorKind::Unavailable
+        | KeyProviderErrorKind::Timeout => protection_unavailable(e),
+        _ => protection_unavailable(e),
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -139,18 +238,113 @@ fn version_param(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
-/// DB row → [`ConfigEntry`]（受控 hydrate）。`config_key` 经 `SettingKey::parse` 复核——持久化值写入时已校验，
-/// 复核失败属数据完整性问题，归 `Storage`（保留原错误）。`version` i64 → u64（负值不可能：CAS 从 1 递增）。
-fn hydrate_row(
-    tenant: TenantId,
-    row: &sqlx::postgres::PgRow,
-) -> Result<ConfigEntry, ConfigRepoError> {
-    let key_str: String = row.try_get("config_key").map_err(storage)?;
-    let value: String = row.try_get("value").map_err(storage)?;
-    let version: i64 = row.try_get("version").map_err(storage)?;
-    let key = SettingKey::parse(&key_str).map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-    let version = u64::try_from(version).map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-    Ok(ConfigEntry::hydrate(key, value, tenant, version))
+fn config_value_aad(tenant: TenantId, key: &SettingKey) -> Result<DerivedAad, ConfigRepoError> {
+    ProtectionContext::authenticated_request(
+        tenant,
+        key.as_str(),
+        CONFIG_VALUE_FIELD,
+        CONFIG_VALUE_PROTECTION_SCHEME as u32,
+    )
+    .map(|ctx| ctx.derive())
+    .map_err(protection_auth_failure)
+}
+
+impl PgConfigRepo {
+    async fn encode_value(
+        &self,
+        tenant: TenantId,
+        entry: &ConfigEntry,
+    ) -> Result<EncodedConfigValue, ConfigRepoError> {
+        self.encode_value_bytes(tenant, entry.key(), entry.value().as_bytes())
+            .await
+    }
+
+    async fn encode_value_bytes(
+        &self,
+        tenant: TenantId,
+        key: &SettingKey,
+        value: &[u8],
+    ) -> Result<EncodedConfigValue, ConfigRepoError> {
+        let aad = config_value_aad(tenant, key)?;
+        let encrypted = self
+            .protection
+            .key_provider
+            .encrypt(
+                self.protection.key_name.clone(),
+                Plaintext::new(value.to_vec()),
+                aad,
+            )
+            .await
+            .map_err(key_provider_error)?;
+        Ok(EncodedConfigValue {
+            value: None,
+            protection_scheme: CONFIG_VALUE_PROTECTION_SCHEME,
+            value_enc: Some(encrypted.ciphertext().to_vec()),
+            key_id: Some(encrypted.key().to_token()),
+        })
+    }
+
+    async fn decode_value(
+        &self,
+        tenant: TenantId,
+        key: &SettingKey,
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<String, ConfigRepoError> {
+        let scheme: i32 = row.try_get("protection_scheme").map_err(storage)?;
+        let value: Option<String> = row.try_get("value").map_err(storage)?;
+        let value_enc: Option<Vec<u8>> = row.try_get("value_enc").map_err(storage)?;
+        let key_id: Option<String> = row.try_get("key_id").map_err(storage)?;
+
+        match scheme {
+            0 => {
+                if value_enc.is_some() || key_id.is_some() {
+                    return Err(protection_auth_message(
+                        "legacy config value has encrypted columns",
+                    ));
+                }
+                value.ok_or_else(|| protection_auth_message("legacy config value is null"))
+            }
+            CONFIG_VALUE_PROTECTION_SCHEME => {
+                if value.is_some() {
+                    return Err(protection_auth_message(
+                        "encrypted config value has plaintext",
+                    ));
+                }
+                let ciphertext = value_enc.ok_or_else(|| {
+                    protection_auth_message("encrypted config value missing ciphertext")
+                })?;
+                let key_ref = key_id
+                    .ok_or_else(|| protection_auth_message("encrypted config value missing key id"))
+                    .and_then(|raw| KeyRef::parse(&raw).map_err(protection_auth_failure))?;
+                let aad = config_value_aad(tenant, key)?;
+                let plaintext = self
+                    .protection
+                    .key_provider
+                    .decrypt(RedactedBytes::new(ciphertext), key_ref, aad)
+                    .await
+                    .map_err(key_provider_error)?;
+                String::from_utf8(plaintext.expose().to_vec()).map_err(protection_auth_failure)
+            }
+            _ => Err(protection_auth_message(
+                "unknown config value protection scheme",
+            )),
+        }
+    }
+
+    /// DB row → [`ConfigEntry`]（受控 hydrate）。`config_key` 经 `SettingKey::parse` 复核——持久化值写入时
+    /// 已校验，复核失败属数据完整性问题。`version` i64 → u64（负值不可能：CAS 从 1 递增）。
+    async fn hydrate_row(
+        &self,
+        tenant: TenantId,
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<ConfigEntry, ConfigRepoError> {
+        let key_str: String = row.try_get("config_key").map_err(storage)?;
+        let version: i64 = row.try_get("version").map_err(storage)?;
+        let key = SettingKey::parse(&key_str).map_err(protection_auth_failure)?;
+        let value = self.decode_value(tenant, &key, row).await?;
+        let version = u64::try_from(version).map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+        Ok(ConfigEntry::hydrate(key, value, tenant, version))
+    }
 }
 
 /// CAS 追加新版本（泛型 executor：`&PgPool`（plain save）/ `&mut PgConnection`（co-tx 事务内）共用一条语句）。
@@ -161,14 +355,17 @@ async fn cas_insert<'e, E>(
     executor: E,
     tenant: TenantId,
     entry: &ConfigEntry,
+    encoded: &EncodedConfigValue,
 ) -> Result<(), ConfigRepoError>
 where
     E: Executor<'e, Database = Postgres>,
 {
     let result = sqlx::query(
         r#"
-        INSERT INTO config_entries (tenant_id, config_key, version, value)
-        SELECT $1::uuid, $2, $3, $4
+        INSERT INTO config_entries (
+            tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+        )
+        SELECT $1::uuid, $2, $3, $4, $5, $6, $7
         WHERE $3 = 1 + COALESCE(
             (SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2),
             0
@@ -178,7 +375,10 @@ where
     .bind(tenant_param(tenant))
     .bind(entry.key().as_str())
     .bind(version_param(entry.version()))
-    .bind(entry.value())
+    .bind(encoded.value.as_deref())
+    .bind(encoded.protection_scheme)
+    .bind(encoded.value_enc.as_deref())
+    .bind(encoded.key_id.as_deref())
     .execute(executor)
     .await;
     match result {
@@ -198,7 +398,8 @@ where
 
 /// row（含 `deleted` 列）→ 活跃 `ConfigEntry`：tombstone（`deleted=true`）⇒ 视为已删 `None`；否则 hydrate。
 /// `find` / `find_version` 共用（活跃值语义；版本计数器经 `latest_version` 单独读，含 tombstone）。
-fn hydrate_active(
+async fn hydrate_active(
+    repo: &PgConfigRepo,
     tenant: TenantId,
     row: Option<sqlx::postgres::PgRow>,
 ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
@@ -209,7 +410,7 @@ fn hydrate_active(
             if deleted {
                 Ok(None)
             } else {
-                Ok(Some(hydrate_row(tenant, &r)?))
+                Ok(Some(repo.hydrate_row(tenant, &r).await?))
             }
         }
     }
@@ -264,7 +465,7 @@ impl ConfigRepo for PgConfigRepo {
                 Box::pin(async move {
                     sqlx::query(
                         r#"
-                        SELECT config_key, value, version, deleted
+                        SELECT config_key, value, version, deleted, protection_scheme, value_enc, key_id
                         FROM config_entries
                         WHERE tenant_id = $1::uuid AND config_key = $2
                         ORDER BY version DESC
@@ -279,7 +480,7 @@ impl ConfigRepo for PgConfigRepo {
             })
             .await
             .map_err(storage)?;
-        hydrate_active(tenant, row)
+        hydrate_active(self, tenant, row).await
     }
 
     async fn find_version(
@@ -301,7 +502,7 @@ impl ConfigRepo for PgConfigRepo {
                 Box::pin(async move {
                     sqlx::query(
                         r#"
-                        SELECT config_key, value, version, deleted
+                        SELECT config_key, value, version, deleted, protection_scheme, value_enc, key_id
                         FROM config_entries
                         WHERE tenant_id = $1::uuid AND config_key = $2 AND version = $3
                         "#,
@@ -315,7 +516,7 @@ impl ConfigRepo for PgConfigRepo {
             })
             .await
             .map_err(storage)?;
-        hydrate_active(tenant, row)
+        hydrate_active(self, tenant, row).await
     }
 
     async fn latest_version(
@@ -351,16 +552,20 @@ impl ConfigRepo for PgConfigRepo {
 
     async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError> {
         // F3：plain CAS 写经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致。
+        let encoded = self.encode_value(tenant, &entry).await?;
         run_pg_tx_retry(
             SETTINGS_CONFIG_BOUNDARY,
             |_attempt| {
                 let entry = entry.clone();
+                let encoded = encoded.clone();
                 async move {
                     self.pool
                         .retry_write(
                             tenant,
                             move |conn| {
-                                Box::pin(async move { cas_insert(conn, tenant, &entry).await })
+                                Box::pin(
+                                    async move { cas_insert(conn, tenant, &entry, &encoded).await },
+                                )
                             },
                             storage,
                         )
@@ -375,13 +580,42 @@ impl ConfigRepo for PgConfigRepo {
     async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError> {
         // F1 软删：仅当 latest 非 tombstone 时在 max+1 追加 tombstone（幂等；version 单调不重置，防 event_id
         // 复用）。F3：经 tenant-scoped 事务（SET LOCAL）。
-        let tu = tenant_param(tenant);
+        let tenant_uuid = tenant_param(tenant);
         let key_str = key.as_str().to_string();
+        let tenant_uuid_q = tenant_uuid.clone();
+        let key_str_q = key_str.clone();
+        let latest_deleted_before: Option<bool> = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query_scalar(
+                        r#"
+                        SELECT deleted
+                        FROM config_entries
+                        WHERE tenant_id = $1::uuid AND config_key = $2
+                        ORDER BY version DESC
+                        LIMIT 1
+                        "#,
+                    )
+                    .bind(tenant_uuid_q)
+                    .bind(key_str_q)
+                    .fetch_optional(&mut *conn)
+                    .await
+                })
+            })
+            .await
+            .map_err(storage)?;
+        if latest_deleted_before.unwrap_or(true) {
+            return Ok(());
+        }
+
+        let encoded = self.encode_value_bytes(tenant, key, b"").await?;
         let result = run_pg_tx_retry(
             SETTINGS_CONFIG_BOUNDARY,
             |_attempt| {
-                let tu = tu.clone();
+                let tenant_uuid = tenant_uuid.clone();
                 let key_str = key_str.clone();
+                let encoded = encoded.clone();
                 async move {
                     self.pool
                         .retry_write(
@@ -390,8 +624,10 @@ impl ConfigRepo for PgConfigRepo {
                                 Box::pin(async move {
                                     sqlx::query(
                                         r#"
-                    INSERT INTO config_entries (tenant_id, config_key, version, value, deleted)
-                    SELECT $1::uuid, $2, 1 + COALESCE(max(version), 0), '', true
+                    INSERT INTO config_entries (
+                        tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
+                    )
+                    SELECT $1::uuid, $2, 1 + COALESCE(max(version), 0), $3, true, $4, $5, $6
                     FROM config_entries
                     WHERE tenant_id = $1::uuid AND config_key = $2
                     HAVING NOT COALESCE(
@@ -401,8 +637,12 @@ impl ConfigRepo for PgConfigRepo {
                         true)
                     "#,
                                     )
-                                    .bind(&tu)
+                                    .bind(&tenant_uuid)
                                     .bind(&key_str)
+                                    .bind(encoded.value.as_deref())
+                                    .bind(encoded.protection_scheme)
+                                    .bind(encoded.value_enc.as_deref())
+                                    .bind(encoded.key_id.as_deref())
                                     .execute(&mut *conn)
                                     .await
                                     .map_err(storage)
@@ -445,6 +685,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
         if env_tenant != tenant {
             return Err(tenant_mismatch_storage_error("config co-tx"));
         }
+        let encoded = self.encode_value(tenant, &entry).await?;
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
@@ -457,6 +698,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
             SETTINGS_CONFIG_BOUNDARY,
             |_attempt| {
                 let entry = entry.clone();
+                let encoded = encoded.clone();
                 let outbox_entry = outbox_entry.clone();
                 let env = env.clone();
                 async move {
@@ -467,7 +709,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
                             &env,
                             move |conn| {
                                 Box::pin(async move {
-                                    cas_insert(conn, tenant, &entry).await?;
+                                    cas_insert(conn, tenant, &entry, &encoded).await?;
                                     #[cfg(all(test, feature = "integration"))]
                                     maybe_fail_config_retry(entry.key())?;
                                     Ok(())

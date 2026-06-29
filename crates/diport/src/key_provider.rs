@@ -267,8 +267,9 @@ impl EncryptOutput {
 /// provider-agnostic 信封加解密 DI port（async）。
 ///
 /// 公开 [`KeyProvider`] 是 **Send 变体**（adapters `impl KeyProvider for ...`），[`DynKeyProvider`] 是其
-/// dyn-compatible wrapper（组合根经 `Box<DynKeyProvider>` 注入）。非 Send 基 trait `KeyProviderLocal` 不在 crate
-/// 根 re-export。所有参数 by-value（无生命周期）→ dynosaur `dyn(box)` dyn-compatible 保证。
+/// dyn-compatible wrapper（组合根经 `Box<DynKeyProvider>` 注入）。基 trait 自身要求 `Send + Sync`：settings
+/// durable repo 会被 axum state 共享，故持有的 KeyProvider handle 必须可跨线程共享。所有参数 by-value
+/// （无生命周期）→ dynosaur `dyn(box)` dyn-compatible 保证。
 ///
 /// 轮换语义（ADR-011 §D3 / #1474）：`encrypt` 用 provider current-primary 版本；`decrypt` 按 [`KeyRef`]
 /// 的 version 读取 provider previous-read 窗口；`rewrap` 把旧密文重包裹到 current-primary（不把 plaintext
@@ -276,9 +277,9 @@ impl EncryptOutput {
 #[trait_variant::make(KeyProvider: Send)]
 #[dynosaur(pub DynKeyProvider = dyn(box) KeyProvider, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `KeyProvider` 变体 +
-// dynosaur `DynKeyProvider` 承载（DI 注入走 Send wrapper）。ADR-003 既定 dyn-port 范式。
-pub trait KeyProviderLocal {
+// reason: base trait 加 Send+Sync 是 settings 持久化 repo 的共享状态硬需求；Send 由 trait_variant 生成的
+// `KeyProvider` 变体 + dynosaur `DynKeyProvider` 承载（DI 注入走 Send wrapper）。ADR-003 既定 dyn-port 范式。
+pub trait KeyProviderLocal: Send + Sync {
     /// 用 `key` 的 current-primary 版本加密 `plaintext`，绑定 `aad`；返回 opaque 密文 + 实际 [`KeyRef`]。
     async fn encrypt(
         &self,
@@ -505,7 +506,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn key_provider_is_dyn_injectable() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
         let kp: Box<DynKeyProvider> = DynKeyProvider::new_box(NoopKeyProvider);
+        assert_send_sync(&kp);
         let joined = tokio::spawn(async move {
             let enc = kp
                 .encrypt(

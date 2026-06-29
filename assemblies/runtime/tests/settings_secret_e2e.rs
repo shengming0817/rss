@@ -20,8 +20,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use diport::{Clock, DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolverError};
-use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use diport::{
+    Clock, DynKeyProvider, DynSecretResolver, EncryptOutput, KeyName, KeyProvider,
+    KeyProviderError, KeyRef, KeyVersion, RedactedBytes, SecretCoordinate, SecretMaterial,
+    SecretResolverError,
+};
+use postgres::{
+    ConfigValueProtections, PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps,
+};
 use settings::SecretService;
 use settings::ports::{SecretKey, SecretRef, StoreId, TenantId};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -87,6 +93,53 @@ impl Clock for FixedClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
+}
+
+struct UnusedKeyProvider;
+
+impl KeyProvider for UnusedKeyProvider {
+    async fn encrypt(
+        &self,
+        key: KeyName,
+        _plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        Ok(EncryptOutput::new(
+            b"unused".to_vec(),
+            KeyRef::new(key, KeyVersion::new(1)),
+        ))
+    }
+
+    async fn decrypt(
+        &self,
+        _ciphertext: RedactedBytes,
+        _key: KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, KeyProviderError> {
+        Ok(secure::Plaintext::new(Vec::new()))
+    }
+
+    async fn rewrap(
+        &self,
+        ciphertext: RedactedBytes,
+        key: KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        Ok(EncryptOutput::new(ciphertext.into_bytes(), key))
+    }
+
+    async fn shutdown(&self) -> Result<(), KeyProviderError> {
+        Ok(())
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn unused_config_protections() -> ConfigValueProtections {
+    ConfigValueProtections::new(
+        DynKeyProvider::new_box(UnusedKeyProvider),
+        DynKeyProvider::new_box(UnusedKeyProvider),
+        KeyName::try_new("settings-config").expect("valid key name"),
+    )
 }
 
 // ── 测试辅助 ──────────────────────────────────────────────────────────────────
@@ -203,7 +256,7 @@ fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretServ
     // settings bundle 产出 secret box（本 e2e 不消费 read/write config）。
     let (_configs, _writer, secrets) = deps
         .for_domain::<caps::Settings>()
-        .settings_bundle(Arc::new(FixedClock))
+        .settings_bundle(Arc::new(FixedClock), unused_config_protections())
         .into_parts();
     SecretService::with_postgres(
         secrets,

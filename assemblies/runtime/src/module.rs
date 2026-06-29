@@ -24,6 +24,7 @@
 //!
 //! ref: oxidecomputer/omicron nexus/src/context.rs@8eb92537bd12598dfd2c861f897a88962fabf684
 
+use diport::KeyName;
 use postgres::PgRuntimeDeps;
 use redis::RedisRuntimeDeps;
 use vault::VaultRuntimeDeps;
@@ -51,9 +52,13 @@ pub struct SharedRuntimeDeps {
     pub redis: RedisRuntimeDeps,
 
     /// 共享 vault capability bundle（#1498）；settings 域经 `vault.for_domain::<caps::Settings>().secret_resolver()`
-    /// 投影受控 secret-resolution 句柄，拿不到 signer 或裸 `reqwest::Client`（VAULT-BUNDLE-RESOLVER-02）。
-    /// 其 `runtime_resources()` 单源派生 resolver guard，组合根 `merge` 进 `DomainModuleResult.resources`。
+    /// / `key_provider()` 投影受控 Vault 句柄，拿不到 signer 或裸 `reqwest::Client`（VAULT-BUNDLE-RESOLVER-02）。
+    /// 其 `runtime_resources()` 单源派生 resolver/key-provider guard，组合根 `merge` 进 `DomainModuleResult.resources`。
     pub vault: VaultRuntimeDeps,
+
+    /// settings `ConfigValue` 加密使用的 Vault Transit key name。组合根启动期从
+    /// `RSS_SETTINGS_CONFIG_VALUE_KEY_NAME` fail-fast 解析，wire_settings 只消费 typed 值。
+    pub settings_config_value_key_name: KeyName,
 }
 
 #[cfg(test)]

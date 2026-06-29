@@ -48,7 +48,7 @@ use vault::VaultKeyProvider;
 use crate::distributed_runtime::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
 };
-use crate::{DEFAULT_VAULT_TIMEOUT, SystemClock, build_vault_tls_client};
+use crate::{DEFAULT_VAULT_TIMEOUT, SystemClock, build_vault_tls_client_from};
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
@@ -1096,7 +1096,7 @@ fn build_dlx_payload_protector_from(
     let key_name = KeyName::try_new(key_name.trim().to_string())
         .map_err(|e| anyhow::anyhow!("{DLX_PAYLOAD_KEY_NAME_ENV} is invalid: {e}"))?;
     let provider = VaultKeyProvider::new(
-        build_vault_tls_client()?,
+        build_vault_tls_client_from(|name| std::env::var(name).ok())?,
         addr,
         token,
         mount,

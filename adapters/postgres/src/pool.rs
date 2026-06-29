@@ -73,6 +73,25 @@ pub enum PgError {
     /// NOBYPASSRLS 角色（fail-closed，拒绝启动；tenancy.md「生产 owner 须为非 superuser」）。
     #[error("postgres rls capability: connection role bypasses RLS (superuser or BYPASSRLS)")]
     RlsBypassRole,
+    /// config_entries 中仍存在 legacy plaintext `ConfigValue` 行。默认启动 fail-closed；临时兼容只能经显式
+    /// `LegacyConfigPlaintextPolicy::AllowTemporary` 放行。
+    #[error("postgres legacy plaintext config values are present")]
+    LegacyConfigPlaintextPresent { count: i64 },
+    /// legacy plaintext 扫描 SQL 失败（启动关键路径）。
+    #[error("postgres legacy plaintext config value probe failed")]
+    LegacyConfigPlaintextProbe(#[source] sqlx::Error),
+}
+
+/// 启动期 legacy plaintext `ConfigValue` 行策略。
+///
+/// 默认 [`Deny`](Self::Deny)：迁移后发现 `protection_scheme = 0` 即拒绝启动。[`AllowTemporary`](Self::AllowTemporary)
+/// 仅供 backfill 前的短期人工豁免；新写路径仍只能写 encrypted scheme。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyConfigPlaintextPolicy {
+    /// 默认 fail-closed：存在 legacy plaintext 行即启动失败。
+    Deny,
+    /// 临时放行 legacy plaintext 行，供人工规划 backfill 前短期运行。
+    AllowTemporary,
 }
 
 /// postgres 连接密码：私有字段 + redacted `Debug`，杜绝明文进日志 / panic message / `PgConfig` 派生 Debug。

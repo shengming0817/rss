@@ -59,11 +59,12 @@ use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DlxPayloadProtector, PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo,
-    PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
-    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgProjectionEvents,
-    PgReadinessSampler, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal,
-    PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
+    ConfigValueProtections, DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditRepo,
+    PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo, PgDbReadiness,
+    PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper, PgOutbox,
+    PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
+    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore,
+    PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -122,8 +123,26 @@ impl PgRuntimeDeps {
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
     ) -> Result<Self, PgError> {
+        Self::setup_with_legacy_config_policy(
+            migrator_config,
+            serving_config,
+            LegacyConfigPlaintextPolicy::Deny,
+        )
+        .await
+    }
+
+    /// [`setup`](Self::setup) 的显式 legacy plaintext 策略版本。runtime 组合根只在读取到人工临时豁免 env 时
+    /// 传入 [`LegacyConfigPlaintextPolicy::AllowTemporary`]；默认 deny。
+    pub async fn setup_with_legacy_config_policy(
+        migrator_config: &PgConfig,
+        serving_config: &PgConfig,
+        legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
+    ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
         migrator.run_migrations().await?;
+        migrator
+            .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
+            .await?;
         migrator.shutdown().await.ok();
 
         let store = Arc::new(PgStore::connect(serving_config).await?);
@@ -225,9 +244,13 @@ impl PgRuntimeDeps {
 ///
 /// ```
 /// use postgres::{PgDomainDeps, caps};
-/// fn settings_ok(d: PgDomainDeps<caps::Settings>, clock: std::sync::Arc<dyn diport::Clock>) {
+/// fn settings_ok(
+///     d: PgDomainDeps<caps::Settings>,
+///     clock: std::sync::Arc<dyn diport::Clock>,
+///     protections: postgres::ConfigValueProtections,
+/// ) {
 ///     // Arc：单一 clock 经 settings_bundle 扇出到 read/write 两个 config 实例（见 settings_bundle）。
-///     let _ = d.settings_bundle(clock);
+///     let _ = d.settings_bundle(clock, protections);
 /// }
 /// fn identity_ok(d: PgDomainDeps<caps::Identity>, clock: Box<dyn diport::Clock>) {
 ///     let _ = d.session_lifecycle(clock);
@@ -260,10 +283,23 @@ impl PgDomainDeps<caps::Settings> {
     ///
     /// 返回类型 [`PgSettingsBundle`] 自身 `#[must_use]`（drop 而不 `into_parts` 即 lint），故此处无方法级
     /// `#[must_use]`（避免 `clippy::double_must_use`）。
-    pub fn settings_bundle(&self, clock: Arc<dyn Clock>) -> PgSettingsBundle {
+    pub fn settings_bundle(
+        &self,
+        clock: Arc<dyn Clock>,
+        protections: ConfigValueProtections,
+    ) -> PgSettingsBundle {
+        let (config_read_protection, config_write_protection) = protections.into_parts();
         PgSettingsBundle {
-            config_repo: DynConfigRepo::new_box(PgConfigRepo::new(&self.store, Arc::clone(&clock))),
-            config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new(&self.store, clock)),
+            config_repo: DynConfigRepo::new_box(PgConfigRepo::new(
+                &self.store,
+                Arc::clone(&clock),
+                config_read_protection,
+            )),
+            config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new(
+                &self.store,
+                clock,
+                config_write_protection,
+            )),
             secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(&self.store)),
         }
     }
@@ -299,8 +335,12 @@ impl PgDomainDeps<caps::Settings> {
 ///
 /// ```compile_fail
 /// use postgres::{PgDomainDeps, caps};
-/// fn bad(d: PgDomainDeps<caps::Settings>, clock: std::sync::Arc<dyn diport::Clock>) {
-///     let b = d.settings_bundle(clock);
+/// fn bad(
+///     d: PgDomainDeps<caps::Settings>,
+///     clock: std::sync::Arc<dyn diport::Clock>,
+///     protections: postgres::ConfigValueProtections,
+/// ) {
+///     let b = d.settings_bundle(clock, protections);
 ///     // E0616：字段 `config_repo` 私有——须经 `into_parts` 唯一出口取三元，不可旁路直读单字段（PG-BUNDLE-SETTINGS-04）。
 ///     let _ = b.config_repo;
 /// }
@@ -505,8 +545,12 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
-    use diport::{PublishRequest, Publisher, PublisherError};
+    use diport::{
+        DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
+        PublishRequest, Publisher, PublisherError, RedactedBytes,
+    };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+    use secure::{DerivedAad, Plaintext};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     /// 测试时钟：返回 `UNIX_EPOCH`（const，不触 `disallowed_methods` 的 `SystemTime::now`）。
@@ -530,6 +574,43 @@ mod tests {
         }
     }
 
+    struct StubKeyProvider;
+    impl KeyProvider for StubKeyProvider {
+        async fn encrypt(
+            &self,
+            key: KeyName,
+            _plaintext: Plaintext,
+            _aad: DerivedAad,
+        ) -> Result<EncryptOutput, KeyProviderError> {
+            Ok(EncryptOutput::new(
+                b"ct".to_vec(),
+                KeyRef::new(key, KeyVersion::new(1)),
+            ))
+        }
+
+        async fn decrypt(
+            &self,
+            _ciphertext: RedactedBytes,
+            _key: KeyRef,
+            _aad: DerivedAad,
+        ) -> Result<Plaintext, KeyProviderError> {
+            Ok(Plaintext::new(b"pt".to_vec()))
+        }
+
+        async fn rewrap(
+            &self,
+            _ciphertext: RedactedBytes,
+            key: KeyRef,
+            _aad: DerivedAad,
+        ) -> Result<EncryptOutput, KeyProviderError> {
+            Ok(EncryptOutput::new(b"ct2".to_vec(), key))
+        }
+
+        async fn shutdown(&self) -> Result<(), KeyProviderError> {
+            Ok(())
+        }
+    }
+
     #[derive(Debug)]
     struct TestMac;
 
@@ -543,6 +624,15 @@ mod tests {
         fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
             self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
         }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn protections() -> ConfigValueProtections {
+        ConfigValueProtections::new(
+            DynKeyProvider::new_box(StubKeyProvider),
+            DynKeyProvider::new_box(StubKeyProvider),
+            KeyName::try_new("settings-config").expect("valid key name"),
+        )
     }
 
     #[allow(clippy::expect_used)]
@@ -634,7 +724,7 @@ mod tests {
         let s: PgDomainDeps<caps::Settings> = deps().for_domain();
         // 单 clock 经 Arc 扇出到 read/write 两个 config 实例；into_parts 解包三件套（纯 pool clone，无 I/O）。
         let (_configs, _writer, _secrets) = s
-            .settings_bundle(Arc::new(EpochClock) as Arc<dyn Clock>)
+            .settings_bundle(Arc::new(EpochClock) as Arc<dyn Clock>, protections())
             .into_parts();
     }
 
@@ -643,7 +733,7 @@ mod tests {
         let s: PgDomainDeps<caps::Settings> = deps().for_domain();
         let clock: Arc<dyn Clock> = Arc::new(EpochClock);
         let before = Arc::strong_count(&clock); // 1（仅本地持有）
-        let _bundle = s.settings_bundle(Arc::clone(&clock));
+        let _bundle = s.settings_bundle(Arc::clone(&clock), protections());
         // 单一注入 clock 经 Arc 扇出到 read/write 两个 PgConfigRepo（各持一 clone）⇒ 至少 +2。
         // 回归到「每 lane 各 mint 一个 clock」则只 +1 → 失败（PG-BUNDLE-SETTINGS-04 anti-vacuity）。
         assert!(

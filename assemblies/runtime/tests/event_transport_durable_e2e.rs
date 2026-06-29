@@ -393,12 +393,14 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let vault = build_vault_runtime_deps(|name| match name {
         "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
         "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
         _ => None,
     })?;
     let deps = SharedRuntimeDeps {
         pg: pg.clone(),
         redis,
         vault,
+        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
     };
     let distributed = wire_distributed(&deps)?;
     let event_runtime = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
