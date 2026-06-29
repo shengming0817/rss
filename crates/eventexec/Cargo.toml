@@ -24,6 +24,8 @@ consistency = { path = "../consistency" }
 # producer 侧 command::emit_async 仍收已编码 Vec<u8>（编码在组合根 bridge），emit 路径不经 eventexec serde。
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# tenant authority token uses compact base64url segments.
+base64 = { workspace = true }
 # WorkerHealth 三态聚合（HealthStatus/ProbeName）。
 primitives = { path = "../primitives" }
 # consumer Fresh 路径还原 producer 透传的 W3C traceparent（#1224，handle_fresh build_consume_span）；

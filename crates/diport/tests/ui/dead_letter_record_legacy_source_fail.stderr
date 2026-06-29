@@ -1,10 +1,10 @@
 error[E0308]: mismatched types
-  --> tests/ui/dead_letter_record_legacy_source_fail.rs:15:9
+  --> tests/ui/dead_letter_record_legacy_source_fail.rs:16:9
    |
  6 |     let _ = DeadLetterRecord::new(
    |             --------------------- arguments to this function are incorrect
 ...
-15 |         DeadLetterSource::Legacy,
+16 |         DeadLetterSource::Legacy,
    |         ^^^^^^^^^^^^^^^^^^^^^^^^ expected `WritableDeadLetterSource`, found `DeadLetterSource`
    |
 note: associated function defined here

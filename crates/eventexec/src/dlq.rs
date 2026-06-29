@@ -21,7 +21,8 @@ impl OperatorDlqCapability {
     /// Issue the DLQ mutation capability after the caller has verified operator authorization.
     ///
     /// This mirrors `vocab::CrossTenantCapability`: the type makes replay/redrive signatures carry
-    /// an explicit authorization witness until the HTTP/CLI admin contract lands.
+    /// an explicit authorization witness. Production callsites are restricted by the
+    /// `rss_dlq_operator_callsite` dylint allowlist to the admin/PDP boundary.
     pub fn issue_for_authorized_operator() -> Self {
         Self { _seal: () }
     }
@@ -37,7 +38,7 @@ pub enum DlqEntryKind {
 }
 
 impl DlqEntryKind {
-    const fn as_cursor_part(self) -> &'static str {
+    pub const fn cursor_part(self) -> &'static str {
         match self {
             Self::DeadLetter => "dead_letter",
             Self::OutboxDlx => "outbox_dlx",
@@ -64,6 +65,7 @@ pub struct DlqEntrySummary {
     domain: String,
     contract_id: String,
     topic: String,
+    consumer_group: Option<String>,
     payload_len: u64,
     error_summary: String,
     num_attempts: u32,
@@ -82,6 +84,7 @@ impl DlqEntrySummary {
         domain: impl Into<String>,
         contract_id: impl Into<String>,
         topic: impl Into<String>,
+        consumer_group: Option<String>,
         payload_len: u64,
         error_summary: impl Into<String>,
         num_attempts: u32,
@@ -96,6 +99,7 @@ impl DlqEntrySummary {
             domain: domain.into(),
             contract_id: contract_id.into(),
             topic: topic.into(),
+            consumer_group,
             payload_len,
             error_summary: error_summary.into(),
             num_attempts,
@@ -133,6 +137,10 @@ impl DlqEntrySummary {
 
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    pub fn consumer_group(&self) -> Option<&str> {
+        self.consumer_group.as_deref()
     }
 
     pub fn payload_len(&self) -> u64 {
@@ -177,7 +185,6 @@ impl std::fmt::Display for DeadLetterId {
 /// Cursor returned by [`DlqListResult`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DlqCursor {
-    offset: u32,
     last_epoch_secs: i64,
     last_kind: DlqEntryKind,
     last_id: String,
@@ -185,10 +192,7 @@ pub struct DlqCursor {
 
 impl DlqCursor {
     pub fn parse(raw: &str) -> Result<Self, DlqError> {
-        let mut parts = raw.splitn(4, ':');
-        let Some(offset) = parts.next() else {
-            return Err(DlqError::InvalidCursor);
-        };
+        let mut parts = raw.splitn(3, ':');
         let Some(epoch) = parts.next() else {
             return Err(DlqError::InvalidCursor);
         };
@@ -199,32 +203,37 @@ impl DlqCursor {
             return Err(DlqError::InvalidCursor);
         };
         Ok(Self {
-            offset: offset.parse().map_err(|_| DlqError::InvalidCursor)?,
             last_epoch_secs: epoch.parse().map_err(|_| DlqError::InvalidCursor)?,
             last_kind: DlqEntryKind::parse_cursor_part(kind).ok_or(DlqError::InvalidCursor)?,
             last_id: id.to_string(),
         })
     }
 
-    fn from_page(offset: u32, last: &DlqEntrySummary) -> Self {
+    fn from_page(last: &DlqEntrySummary) -> Self {
         Self {
-            offset,
             last_epoch_secs: last.last_attempt_epoch_secs(),
             last_kind: last.kind(),
             last_id: last.id().to_string(),
         }
     }
 
-    pub fn offset(&self) -> u32 {
-        self.offset
+    pub fn last_epoch_secs(&self) -> i64 {
+        self.last_epoch_secs
+    }
+
+    pub fn last_kind(&self) -> DlqEntryKind {
+        self.last_kind
+    }
+
+    pub fn last_id(&self) -> &str {
+        &self.last_id
     }
 
     pub fn encode(&self) -> String {
         format!(
-            "{}:{}:{}:{}",
-            self.offset,
+            "{}:{}:{}",
             self.last_epoch_secs,
-            self.last_kind.as_cursor_part(),
+            self.last_kind.cursor_part(),
             self.last_id
         )
     }
@@ -292,11 +301,7 @@ impl DlqListQuery {
     }
 
     pub fn fetch_limit(&self) -> u32 {
-        self.cursor
-            .as_ref()
-            .map_or(self.limit.saturating_add(1), |cursor| {
-                cursor.offset().saturating_add(self.limit).saturating_add(1)
-            })
+        self.limit.saturating_add(1)
     }
 }
 
@@ -311,16 +316,22 @@ pub struct DlqListResult {
 impl DlqListResult {
     pub fn from_sorted_rows(query: &DlqListQuery, mut rows: Vec<DlqEntrySummary>) -> Self {
         rows.sort_by(compare_summary);
-        let offset = query.cursor().map_or(0, DlqCursor::offset) as usize;
         let limit = query.limit() as usize;
-        let mut data: Vec<_> = rows.into_iter().skip(offset).take(limit + 1).collect();
+        let mut data: Vec<_> = rows
+            .into_iter()
+            .filter(|row| {
+                query
+                    .cursor()
+                    .is_none_or(|cursor| compare_summary_to_cursor(row, cursor).is_gt())
+            })
+            .take(limit + 1)
+            .collect();
         let has_more = data.len() > limit;
         if has_more {
             data.truncate(limit);
         }
         let next_cursor = if has_more {
-            data.last()
-                .map(|last| DlqCursor::from_page((offset + data.len()) as u32, last).encode())
+            data.last().map(|last| DlqCursor::from_page(last).encode())
         } else {
             None
         };
@@ -445,10 +456,12 @@ pub enum DlqError {
     NotFound,
     #[error("dlq entry source is not replayable")]
     NotReplayable,
-    #[error("dlq entry tenant mismatch")]
-    TenantMismatch,
     #[error("dlq entry payload is invalid")]
     InvalidPayload,
+    #[error("dlq payload key provider is unavailable")]
+    PayloadKeyUnavailable,
+    #[error("dlq payload key provider rejected configuration or authorization")]
+    PayloadKeyForbidden,
     #[error("dlq store failed")]
     Store,
 }
@@ -470,8 +483,15 @@ pub trait DlqStore: Send + Sync {
 fn compare_summary(a: &DlqEntrySummary, b: &DlqEntrySummary) -> std::cmp::Ordering {
     b.last_attempt_epoch_secs()
         .cmp(&a.last_attempt_epoch_secs())
-        .then_with(|| a.kind().as_cursor_part().cmp(b.kind().as_cursor_part()))
+        .then_with(|| a.kind().cursor_part().cmp(b.kind().cursor_part()))
         .then_with(|| a.id().cmp(b.id()))
+}
+
+fn compare_summary_to_cursor(a: &DlqEntrySummary, b: &DlqCursor) -> std::cmp::Ordering {
+    b.last_epoch_secs()
+        .cmp(&a.last_attempt_epoch_secs())
+        .then_with(|| a.kind().cursor_part().cmp(b.last_kind().cursor_part()))
+        .then_with(|| a.id().cmp(b.last_id()))
 }
 
 #[cfg(test)]
@@ -493,6 +513,7 @@ mod tests {
             "identity",
             "contract-session",
             "session.created",
+            Some("identity.session.consumer".to_string()),
             4,
             "max retries exhausted",
             3,
@@ -531,6 +552,7 @@ mod tests {
                     "identity",
                     "contract-session",
                     "session.created",
+                    Some("identity.session.consumer".to_string()),
                     4,
                     "max retries exhausted",
                     3,
@@ -544,6 +566,77 @@ mod tests {
         assert!(result.has_more());
         assert_eq!(result.data().len(), 2);
         assert!(result.next_cursor().is_some());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test fixture uses a known canonical tenant id.
+    fn list_cursor_is_keyset_not_offset() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        let rows: Vec<_> = (0..4)
+            .map(|i| {
+                DlqEntrySummary::new(
+                    DlqEntryKind::DeadLetter,
+                    format!("row-{i}"),
+                    DeadLetterSource::Consumer,
+                    tenant,
+                    format!("msg-{i}"),
+                    "identity",
+                    "contract-session",
+                    "session.created",
+                    Some("identity.session.consumer".to_string()),
+                    4,
+                    "max retries exhausted",
+                    3,
+                    1_700_000_000 - i,
+                )
+            })
+            .collect();
+
+        let first = DlqListResult::from_sorted_rows(&DlqListQuery::new(tenant).with_limit(2), rows);
+        let cursor = DlqCursor::parse(first.next_cursor().expect("cursor")).expect("valid cursor");
+        let mut changed_rows = first.into_data();
+        changed_rows.push(DlqEntrySummary::new(
+            DlqEntryKind::DeadLetter,
+            "new-head",
+            DeadLetterSource::Consumer,
+            tenant,
+            "msg-new",
+            "identity",
+            "contract-session",
+            "session.created",
+            Some("identity.session.consumer".to_string()),
+            4,
+            "newer row",
+            1,
+            1_700_000_100,
+        ));
+        changed_rows.push(DlqEntrySummary::new(
+            DlqEntryKind::DeadLetter,
+            "row-tail",
+            DeadLetterSource::Consumer,
+            tenant,
+            "msg-tail",
+            "identity",
+            "contract-session",
+            "session.created",
+            Some("identity.session.consumer".to_string()),
+            4,
+            "older row",
+            1,
+            1_699_999_990,
+        ));
+
+        let second = DlqListResult::from_sorted_rows(
+            &DlqListQuery::new(tenant).with_limit(10).with_cursor(cursor),
+            changed_rows,
+        );
+        assert_eq!(second.data()[0].id(), "row-tail");
+        assert!(
+            second.data().iter().all(|row| row.id() != "new-head"),
+            "new rows before the cursor must not shift the next page"
+        );
     }
 
     #[test]

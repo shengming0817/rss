@@ -1707,6 +1707,7 @@ dependencies = [
 name = "eventexec"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "consistency",
  "diport",
  "futures",
@@ -2863,6 +2864,7 @@ dependencies = [
  "memory",
  "postgres",
  "primitives",
+ "secure",
  "serde_json",
  "settings",
  "sqlx",

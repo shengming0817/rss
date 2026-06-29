@@ -9,6 +9,7 @@ fn main() {
         "identity",
         "contract-session",
         "session.created",
+        None,
         b"payload".to_vec(),
         DeadLetterSummary::new("legacy rows are read-only"),
         10,

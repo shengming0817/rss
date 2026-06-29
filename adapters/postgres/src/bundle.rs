@@ -54,15 +54,16 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use diport::{Clock, DynCasStore, DynPublisher, ManagedResource};
+use eventexec::TenantAuthority;
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo,
-    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgOutbox, PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
-    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore,
-    PgStoreGuard,
+    DlxPayloadProtector, PgAuditRepo, PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo,
+    PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
+    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgProjectionEvents,
+    PgReadinessSampler, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal,
+    PgSecretRepo, PgSessionLifecycle, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -271,8 +272,13 @@ impl PgDomainDeps<caps::Settings> {
     /// `PgOutbox` 经 `RelayConfig` 的 domain 过滤 outbox 表行，故构造仅需 store + publisher（与 identity 同形，
     /// #1251 F2：N-域 relay——每个 L2 OutboxFact 发布域各一个 relay，否则该域 outbox 在 durable runtime 静默积压）。
     #[must_use]
-    pub fn outbox(&self, publisher: Box<DynPublisher<'static>>) -> PgOutbox {
-        PgOutbox::new(&self.store, publisher)
+    pub fn outbox(
+        &self,
+        publisher: Box<DynPublisher<'static>>,
+        tenant_authority: Arc<TenantAuthority>,
+        payload_protector: DlxPayloadProtector,
+    ) -> PgOutbox {
+        PgOutbox::new(&self.store, publisher, tenant_authority, payload_protector)
     }
 }
 
@@ -331,8 +337,13 @@ impl PgDomainDeps<caps::Identity> {
 
     /// outbox relay（L2 本地事务 + 发布）。`publisher` 必填（构造器位置参）。
     #[must_use]
-    pub fn outbox(&self, publisher: Box<DynPublisher<'static>>) -> PgOutbox {
-        PgOutbox::new(&self.store, publisher)
+    pub fn outbox(
+        &self,
+        publisher: Box<DynPublisher<'static>>,
+        tenant_authority: Arc<TenantAuthority>,
+        payload_protector: DlxPayloadProtector,
+    ) -> PgOutbox {
+        PgOutbox::new(&self.store, publisher, tenant_authority, payload_protector)
     }
 
     /// 凭据仓储（credentials 表 + 折叠锁定态 + 行锁原子 RMW）。
@@ -403,7 +414,7 @@ impl PgDomainDeps<caps::Audit> {
 /// ```
 /// use postgres::PgInfraDeps;
 /// fn ok(i: PgInfraDeps) {
-///     let _ = i.dead_letter();
+///     let _ = i.outbox_maintenance();
 ///     let _ = i.projection_events();
 /// }
 /// ```
@@ -440,15 +451,15 @@ impl PgInfraDeps {
     /// dead-letter store（DLX 终态）。同时 impl `consistency::RetentionSweeper`——组合根可经此句柄取死信
     /// 保留期 sweeper（`DEAD_LETTER_RETENTION_SECONDS` 默认 30 天，#1210）。
     #[must_use]
-    pub fn dead_letter(&self) -> PgDeadLetterStore {
-        self.store.dead_letter()
+    pub fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
+        self.store.dead_letter(payload_protector)
     }
 
     /// DLQ inspection/replay API（internal Rust surface，#1214）。`dead_letter` replay 与 `outbox` redrive
     /// 由类型分开，避免把 consumer 重放误当 broker redrive。
     #[must_use]
-    pub fn dlq(&self) -> PgDlqStore {
-        self.store.dlq()
+    pub fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
+        self.store.dlq(payload_protector)
     }
 
     /// inbox_dedup 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
@@ -495,6 +506,7 @@ mod tests {
     use std::time::SystemTime;
 
     use diport::{PublishRequest, Publisher, PublisherError};
+    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     /// 测试时钟：返回 `UNIX_EPOCH`（const，不触 `disallowed_methods` 的 `SystemTime::now`）。
@@ -516,6 +528,39 @@ mod tests {
         async fn shutdown(&self) -> Result<(), PublisherError> {
             Ok(())
         }
+    }
+
+    #[derive(Debug)]
+    struct TestMac;
+
+    impl MacVerifier for TestMac {
+        fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+            let mut tag = Vec::from(key.as_bytes());
+            tag.extend_from_slice(message);
+            Mac::from_bytes(tag)
+        }
+
+        fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+            self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_authority() -> Arc<TenantAuthority> {
+        Arc::new(
+            TenantAuthority::new(
+                Arc::new(TestMac),
+                MacKey::from_bytes(vec![0x42; 32]),
+                3600,
+                60,
+                Arc::new(|| 1_700_000_000),
+            )
+            .expect("valid test tenant authority"),
+        )
+    }
+
+    fn payload_protector() -> DlxPayloadProtector {
+        crate::dead_letter_payload::tests::test_protector()
     }
 
     /// lazy pool（不发真实连接）构造 `Arc<PgStore>`——单元测专用（免 DB）。
@@ -611,7 +656,11 @@ mod tests {
     async fn identity_accessors_construct() {
         let i: PgDomainDeps<caps::Identity> = deps().for_domain();
         let _ = i.session_lifecycle(Box::new(EpochClock));
-        let _ = i.outbox(DynPublisher::new_box(StubPublisher));
+        let _ = i.outbox(
+            DynPublisher::new_box(StubPublisher),
+            tenant_authority(),
+            payload_protector(),
+        );
         // F1 补齐的 identity 域 repo（credentials / roles / refresh tokens）——纯 pool clone，无 I/O。
         let _ = i.credential_repo();
         let _ = i.role_repo();
@@ -627,7 +676,8 @@ mod tests {
         let _ = infra.emitter(Box::new(EpochClock));
         let _ = infra.inbox(group);
         let _ = infra.outbox_maintenance();
-        let _ = infra.dead_letter();
+        let _ = infra.dead_letter(payload_protector());
+        let _ = infra.dlq(payload_protector());
         let _ = infra.inbox_sweeper();
         let _ = infra.checkpoint();
         let _ = infra.saga_journal();

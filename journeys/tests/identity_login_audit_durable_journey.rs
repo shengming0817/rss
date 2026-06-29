@@ -26,7 +26,8 @@ use anyhow::Result;
 use bootstrap::SubscriberHandler;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
-    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, identity_domain, single_subscription,
+    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
+    single_subscription, tenant_authority,
 };
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
 use diagctx::{CorrelationId, DiagnosticCtx};
@@ -223,7 +224,14 @@ async fn login_audit_durable_topology() -> Result<()> {
         .subscriber()
         .subscribe(Topic::new(binding.topic), token.clone())
         .await?;
-    let meta = ConsumerMeta::new("audit", binding.contract_id, binding.topic);
+    let meta = ConsumerMeta::new(
+        "audit",
+        binding.topic.split('.').next().unwrap_or(binding.topic),
+        binding.contract_id,
+        binding.topic,
+        binding.group.as_str(),
+        tenant_authority(),
+    );
     // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。
     let captured: Arc<Mutex<Vec<EnvelopeMetadata>>> = Arc::new(Mutex::new(Vec::new()));
     let consume = run_consumer(
@@ -256,7 +264,11 @@ async fn login_audit_durable_topology() -> Result<()> {
         PASSWORD,
         tenant,
     )?;
-    let relay = id.outbox(DynPublisher::new_box(bus.publisher()));
+    let relay = id.outbox(
+        DynPublisher::new_box(bus.publisher()),
+        tenant_authority(),
+        dlx_payload_protector(),
+    );
 
     let drive = async {
         // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient

@@ -46,15 +46,15 @@ use bootstrap::{
 };
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
-    audit_domain, identity_domain, single_subscription,
+    audit_domain, identity_domain, signed_metadata, single_subscription, tenant_authority,
 };
 use consistency::{
     EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
     PermanentError, PermanentErrorKind, SeenState,
 };
 use diport::{
-    DynDeadLetterStore, DynManagedResource, Message, OutboxEmitter, OutboxEnvelopeParts,
-    Subscriber, Topic,
+    DynDeadLetterStore, DynManagedResource, Message, MessageId, OutboxEmitter, OutboxEnvelopeParts,
+    PublishRequest, Publisher, Subscriber, Topic,
 };
 use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
@@ -153,6 +153,7 @@ async fn wire_demo_consumer<H, S>(
     claimer: Arc<S>,
     contract_id: &'static str,
     topic: &'static str,
+    consumer_group: &consistency::ConsumerGroup,
     dlx: MemDeadLetterStore,
     handler: H,
     token: CancellationToken,
@@ -167,7 +168,14 @@ where
         .subscriber()
         .subscribe(Topic::new(topic), token.clone())
         .await?;
-    let meta = ConsumerMeta::new("audit", contract_id, topic);
+    let meta = ConsumerMeta::new(
+        "audit",
+        topic.split('.').next().unwrap_or(topic),
+        contract_id,
+        topic,
+        consumer_group.as_str(),
+        tenant_authority(),
+    );
     let health = Arc::new(WorkerHealth::healthy());
     let name = format!("{EVENT_CONSUMER_PROBE}:audit:{topic}");
     // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
@@ -253,12 +261,14 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     } = binding;
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    let consumer_group = group.clone();
     let claimer = Arc::new(demo_claimer(group)?);
     let health = wire_demo_consumer(
         &bus,
         claimer,
         contract_id,
         topic,
+        &consumer_group,
         MemDeadLetterStore::new(),
         adapt_subscriber_handler(handler),
         token.clone(),
@@ -366,6 +376,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     // F5：RecordingClaimer 包决策绑定的 demo claimer，暴露 try_claim/duplicate 计数供可观测等待（去固定 sleep）。
+    let consumer_group = group.clone();
     let recording = Arc::new(RecordingClaimer::new(demo_claimer(group)?));
     let claim_count = recording.claim_count();
     let duplicate_count = recording.duplicate_count();
@@ -374,6 +385,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         recording,
         contract_id,
         topic,
+        &consumer_group,
         MemDeadLetterStore::new(),
         counted,
         token.clone(),
@@ -461,12 +473,14 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     } = single_subscription(registry)?;
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    let consumer_group = group.clone();
     let claimer = Arc::new(demo_claimer(group)?);
     wire_demo_consumer(
         &bus,
         claimer,
         contract_id,
         topic,
+        &consumer_group,
         MemDeadLetterStore::new(),
         adapt_subscriber_handler(handler),
         token.clone(),
@@ -524,12 +538,14 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     let dlx = MemDeadLetterStore::new();
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
+    let consumer_group = group.clone();
     let claimer = Arc::new(demo_claimer(group)?);
     wire_demo_consumer(
         &bus,
         claimer,
         contract_id,
         topic,
+        &consumer_group,
         dlx.clone(),
         erroring,
         token.clone(),
@@ -538,23 +554,26 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     .await?;
 
     // 发一条 session-created → handler reject → DLX 写一条。
-    let entry = Entry::new(
-        consistency::Topic::parse(SESSION_CREATED_TOPIC)
-            .map_err(|_| anyhow::anyhow!("topic parse"))?,
-        IdemKey::parse("evt-dlx-fixed").map_err(|_| anyhow::anyhow!("idem parse"))?,
-        b"{}".to_vec(),
-    );
-    MemEmitter::new(bus.clone())
-        .emit(
-            entry,
-            OutboxEnvelopeParts::new(
-                generated::event::identity_v1::session_created::CONTRACT,
-                TenantId::parse(CANON_TENANT)?,
-                CANON_USER,
-            ),
+    let message_id = "evt-dlx-fixed";
+    bus.publisher()
+        .publish(
+            PublishRequest::new(
+                Topic::new(SESSION_CREATED_TOPIC),
+                MessageId::new(message_id),
+                b"{}".to_vec(),
+            )
+            .with_metadata(signed_metadata(
+                SESSION_CREATED_TOPIC
+                    .split('.')
+                    .next()
+                    .unwrap_or(SESSION_CREATED_TOPIC),
+                contract_id,
+                SESSION_CREATED_TOPIC,
+                message_id,
+            )?),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("emit"))?;
+        .map_err(|_| anyhow::anyhow!("publish"))?;
     wait_until(|| dlx.len() == 1).await?;
 
     let failures = stack.shutdown().await;

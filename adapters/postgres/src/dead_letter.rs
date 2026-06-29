@@ -8,9 +8,8 @@
 //! `dead_letter` 是**约定** append-only（非 REVOKE 强制，与 `projection_events` 不同），DB 层允许保留期 DELETE；
 //! 冷存储导出（合规归档）为 out-of-scope。
 //!
-//! **`original_entry` jsonb** 存 `{"bytes": [u8, ...]}` —— JSON 数字数组完整保留原始
-//! payload 字节供重放 / 巡检，往返无损，仅用已有的 `serde_json`（不引入额外 base64 依赖）。
-//! PII 保留策略属后续治理（backlog 跟踪）；此处不脱敏，完整存入。
+//! **`original_entry` jsonb** 只允许 `{"ciphertext": [u8, ...]}`，密文由注入的
+//! [`DlxPayloadProtector`] 经 KeyProvider/Vault Transit 产生；本 adapter 不保留 plaintext fallback。
 //!
 //! **时间戳**：`first_attempt_at` / `last_attempt_at` 用 DB DEFAULT `now()`（不注入 Clock，
 //! 与 outbox/inbox 同范式：时间源保持 DB 端单一，无跨进程偏移）。
@@ -19,11 +18,16 @@
 //! `error-handling.md §Message 与 PII`）。
 
 use consistency::{EngineError, EngineErrorKind, RetentionSweeper};
-use diport::{DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata};
+use diport::{
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata, KEY_TENANT_AUTHORITY,
+};
 use sqlx::PgPool;
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
+use crate::dead_letter_payload::{
+    DLX_ORIGINAL_ENTRY_ENCODING, DlxPayloadContext, DlxPayloadProtector,
+};
 
 /// `dead_letter` 旧死信记录保留期（秒，默认 30 天）。超期由 [`PgDeadLetterStore`] 的 [`RetentionSweeper`]
 /// 清理（合规导向膨胀控制，对标 gocell 死信 30 天清理，#1210）。
@@ -38,16 +42,18 @@ pub const DEAD_LETTER_RETENTION_SECONDS: u64 = 30 * 24 * 3600;
 pub struct PgDeadLetterStore {
     tenant_pool: PgTenantPool,
     maintenance_pool: PgPool,
+    payload_protector: DlxPayloadProtector,
 }
 
 impl PgStore {
     /// 构造 [`PgDeadLetterStore`]（pool clone 自 `PgStore`，轻量）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::dead_letter`] 收口。
-    pub(crate) fn dead_letter(&self) -> PgDeadLetterStore {
+    pub(crate) fn dead_letter(&self, payload_protector: DlxPayloadProtector) -> PgDeadLetterStore {
         PgDeadLetterStore {
             tenant_pool: PgTenantPool::new(self),
             maintenance_pool: self.pool.clone(),
+            payload_protector,
         }
     }
 }
@@ -55,14 +61,30 @@ impl PgStore {
 impl DeadLetterStore for PgDeadLetterStore {
     /// 持久化一条死信记录（immutable INSERT，不更新已有行）。
     ///
-    /// `original_entry` 存为 jsonb：`{"bytes": [u8, ...]}`（JSON 数字数组）以无损往返原始字节。
+    /// `original_entry` 存为 jsonb：`{"ciphertext": [u8, ...]}`，key_ref/len/encoding 同行原子写入。
     /// 时间戳 `first_attempt_at` / `last_attempt_at` 均走 DB DEFAULT `now()`。
     /// sqlx 错误不进 Display——经 [`DeadLetterStoreError::new`] 包成 source（PII 边界）。
     async fn write_dead_letter(
         &self,
         record: DeadLetterRecord,
     ) -> Result<(), DeadLetterStoreError> {
-        let original_entry = original_entry_json(record.original_payload());
+        let source_kind = record.source().as_str();
+        let protected = self
+            .payload_protector
+            .encrypt(
+                DlxPayloadContext::new(
+                    record.tenant(),
+                    source_kind,
+                    record.domain(),
+                    record.contract_id(),
+                    record.topic(),
+                    record.consumer_group(),
+                    record.message_id(),
+                ),
+                record.original_payload(),
+            )
+            .await
+            .map_err(DeadLetterStoreError::new)?;
         let metadata = metadata_json(record.metadata());
 
         self.tenant_pool
@@ -73,8 +95,10 @@ impl DeadLetterStore for PgDeadLetterStore {
                         sqlx::query(
                             r#"
                             INSERT INTO dead_letter
-                                (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
-                            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                (tenant_id, message_id, domain, contract_id, topic, consumer_group,
+                                 original_entry, original_entry_key_ref, original_entry_payload_len,
+                                 original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
+                            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                             "#,
                         )
                         .bind(record.tenant().to_string())
@@ -82,10 +106,14 @@ impl DeadLetterStore for PgDeadLetterStore {
                         .bind(record.domain())
                         .bind(record.contract_id())
                         .bind(record.topic())
-                        .bind(sqlx::types::Json(&original_entry))
+                        .bind(record.consumer_group())
+                        .bind(sqlx::types::Json(protected.original_entry()))
+                        .bind(protected.key_ref())
+                        .bind(protected.payload_len())
+                        .bind(DLX_ORIGINAL_ENTRY_ENCODING)
                         .bind(record.error_summary())
                         .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
-                        .bind(record.source().as_str())
+                        .bind(source_kind)
                         .bind(sqlx::types::Json(&metadata))
                         .execute(&mut *conn)
                         .await
@@ -107,19 +135,13 @@ impl DeadLetterStore for PgDeadLetterStore {
     }
 }
 
-/// 存为 `{"bytes": [u8, ...]}` JSON 数组——完整往返原始字节，只用已有 serde_json，不引入 base64 依赖。
-pub(crate) fn original_entry_json(payload: &[u8]) -> serde_json::Value {
-    let bytes_arr: Vec<serde_json::Value> = payload
-        .iter()
-        .map(|&b| serde_json::Value::Number(b.into()))
-        .collect();
-    serde_json::json!({"bytes": bytes_arr})
-}
-
 /// Envelope metadata → jsonb object。值保持 wire string 形态，避免 DLQ 重放时发生隐式类型漂移。
 pub(crate) fn metadata_json(metadata: &EnvelopeMetadata) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (key, value) in metadata.iter() {
+        if key == KEY_TENANT_AUTHORITY {
+            continue;
+        }
         map.insert(
             key.to_string(),
             serde_json::Value::String(value.to_string()),
@@ -128,20 +150,25 @@ pub(crate) fn metadata_json(metadata: &EnvelopeMetadata) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-/// 从 `dead_letter.original_entry` 解回原始 payload 字节。
-pub(crate) fn decode_original_entry(value: &serde_json::Value) -> Result<Vec<u8>, EngineError> {
-    let bytes = value
-        .get("bytes")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
-    let mut decoded = Vec::with_capacity(bytes.len());
-    for item in bytes {
-        let n = item
-            .as_u64()
-            .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
-        decoded.push(u8::try_from(n).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?);
+#[cfg(test)]
+mod metadata_tests {
+    use diport::{EnvelopeMetadata, KEY_CORRELATION, KEY_TENANT_AUTHORITY};
+
+    use super::metadata_json;
+
+    #[test]
+    fn metadata_json_drops_tenant_authority_token() {
+        let mut metadata = EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(KEY_TENANT_AUTHORITY, "SECRET_AUTHORITY");
+        metadata.insert_wire_pair(KEY_CORRELATION, "corr-1");
+        let rendered = metadata_json(&metadata);
+
+        assert_eq!(rendered[KEY_CORRELATION], "corr-1");
+        assert!(
+            rendered.get(KEY_TENANT_AUTHORITY).is_none(),
+            "tenantAuthority must not be persisted in DLX metadata: {rendered}"
+        );
     }
-    Ok(decoded)
 }
 
 impl RetentionSweeper for PgDeadLetterStore {
@@ -222,7 +249,10 @@ mod sweep_fail_closed {
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy_with(opts);
-        let r = PgStore { pool }.dead_letter().sweep(u64::MAX).await;
+        let r = PgStore { pool }
+            .dead_letter(crate::dead_letter_payload::tests::test_protector())
+            .sweep(u64::MAX)
+            .await;
         assert!(
             matches!(r, Err(e) if e.kind() == EngineErrorKind::Invariant),
             "超 i64::MAX 的保留期必须 fail-closed 拒"
@@ -237,6 +267,9 @@ mod sweep_fail_closed {
 mod integration_tests {
     use diport::{DeadLetterStore, ManagedResource};
 
+    use crate::dead_letter_payload::DLX_ORIGINAL_ENTRY_ENCODING;
+    use crate::dead_letter_payload::tests::test_protector;
+
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// 写入一条死信记录，再 SELECT 回来断言字段往返正确。
@@ -247,7 +280,7 @@ mod integration_tests {
         let (_pg, store) = crate::test_pg::connect_pg().await?;
         store.run_migrations().await?;
 
-        let dl = store.dead_letter();
+        let dl = store.dead_letter(test_protector());
         let payload = b"original message payload".to_vec();
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let record = diport::DeadLetterRecord::new(
@@ -256,6 +289,7 @@ mod integration_tests {
             "identity",
             "contract-session",
             "session.created",
+            Some("identity.session.consumer".to_string()),
             payload.clone(),
             diport::DeadLetterSummary::new("max retries exhausted after 10 attempts"),
             10,
@@ -266,8 +300,25 @@ mod integration_tests {
         dl.write_dead_letter(record).await?;
 
         // SELECT 最新一条（唯一写入）断言各字段。
-        let row: (String, String, String, String, String, serde_json::Value, String, i32, String, serde_json::Value) = sqlx::query_as(
-            r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            serde_json::Value,
+            String,
+            i64,
+            String,
+            String,
+            i32,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, consumer_group,
+                      original_entry, original_entry_key_ref, original_entry_payload_len,
+                      original_entry_encoding, error_summary, num_attempts, source_kind, metadata
                FROM dead_letter
                WHERE domain = 'identity' AND topic = 'session.created'
                ORDER BY first_attempt_at DESC
@@ -284,22 +335,44 @@ mod integration_tests {
         assert_eq!(row.2, "identity", "domain should match");
         assert_eq!(row.3, "contract-session", "contract_id should match");
         assert_eq!(row.4, "session.created", "topic should match");
+        assert_eq!(
+            row.5.as_deref(),
+            Some("identity.session.consumer"),
+            "consumer_group should match"
+        );
 
-        // original_entry 是 {"bytes": [u8, ...]}；还原原始字节验证往返。
-        let bytes_arr = row.5["bytes"].as_array().unwrap();
-        let decoded: Vec<u8> = bytes_arr
+        // original_entry 只允许 ciphertext shape；fake provider 会做可逆变换，避免密文字节等于原文。
+        assert!(
+            row.6.get("bytes").is_none(),
+            "plaintext shape must not be stored"
+        );
+        let cipher_arr = row.6["ciphertext"].as_array().unwrap();
+        let stored_ciphertext: Vec<u8> = cipher_arr
             .iter()
             .map(|v| v.as_u64().unwrap() as u8)
             .collect();
-        assert_eq!(decoded, payload, "original_payload roundtrip should match");
+        assert_ne!(
+            stored_ciphertext, payload,
+            "stored ciphertext should not equal original payload bytes"
+        );
+        assert_eq!(row.7, "dlx-test:1", "key ref should match");
+        assert_eq!(
+            row.8,
+            i64::try_from(payload.len()).unwrap(),
+            "payload length should match"
+        );
+        assert_eq!(
+            row.9, DLX_ORIGINAL_ENTRY_ENCODING,
+            "encoding should be key-provider-v1"
+        );
 
         assert_eq!(
-            row.6, "max retries exhausted after 10 attempts",
+            row.10, "max retries exhausted after 10 attempts",
             "error_summary should match"
         );
-        assert_eq!(row.7, 10, "num_attempts should match");
-        assert_eq!(row.8, "consumer", "source_kind should match");
-        assert_eq!(row.9, serde_json::json!({}), "metadata should match");
+        assert_eq!(row.11, 10, "num_attempts should match");
+        assert_eq!(row.12, "consumer", "source_kind should match");
+        assert_eq!(row.13, serde_json::json!({}), "metadata should match");
 
         store.shutdown().await?;
         Ok(())
@@ -326,11 +399,16 @@ mod integration_tests {
             crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
             sqlx::query(
                 r#"INSERT INTO dead_letter
-                   (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
-                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created', '{"bytes":[]}'::jsonb, 'permanent error', 1)"#,
+                   (tenant_id, message_id, domain, contract_id, topic,
+                    original_entry, original_entry_key_ref, original_entry_payload_len,
+                    original_entry_encoding, error_summary, num_attempts)
+                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created',
+                           '{"ciphertext":[]}'::jsonb, 'dlx-test:1', 0,
+                           $3, 'permanent error', 1)"#,
             )
             .bind(&tenant_a)
             .bind(&msg_id)
+            .bind(DLX_ORIGINAL_ENTRY_ENCODING)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -363,10 +441,15 @@ mod integration_tests {
                 .await?;
             sqlx::query(
                 r#"INSERT INTO dead_letter
-                   (message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
-                   VALUES ($1, 'identity', 'contract-session', 'session.created', '{"bytes":[]}'::jsonb, 'legacy row', 1)"#,
+                   (message_id, domain, contract_id, topic,
+                    original_entry, original_entry_key_ref, original_entry_payload_len,
+                    original_entry_encoding, error_summary, num_attempts)
+                   VALUES ($1, 'identity', 'contract-session', 'session.created',
+                           '{"ciphertext":[]}'::jsonb, 'dlx-test:1', 0,
+                           $2, 'legacy row', 1)"#,
             )
             .bind(&legacy_msg_id)
+            .bind(DLX_ORIGINAL_ENTRY_ENCODING)
             .execute(&store.pool)
             .await?;
             sqlx::query("ALTER TABLE dead_letter ENABLE ROW LEVEL SECURITY")
@@ -430,11 +513,16 @@ mod integration_tests {
             crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
             let err = sqlx::query(
                 r#"INSERT INTO dead_letter
-                   (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts)
-                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created', '{"bytes":[]}'::jsonb, 'permanent error', 1)"#,
+                   (tenant_id, message_id, domain, contract_id, topic,
+                    original_entry, original_entry_key_ref, original_entry_payload_len,
+                    original_entry_encoding, error_summary, num_attempts)
+                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created',
+                           '{"ciphertext":[]}'::jsonb, 'dlx-test:1', 0,
+                           $3, 'permanent error', 1)"#,
             )
             .bind(&tenant_b)
             .bind(format!("dlx-msg-{}", uuid::Uuid::new_v4()))
+            .bind(DLX_ORIGINAL_ENTRY_ENCODING)
             .execute(&mut *tx)
             .await;
             assert!(

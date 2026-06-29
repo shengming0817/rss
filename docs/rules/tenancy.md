@@ -41,6 +41,15 @@ upstream schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），do
 call-site 是 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立
 call-site 强制）；无豁免。符号 / 评级 / 盲区见 契约 codegen 的 tenant-in-body guard 模块 rustdoc。
 
+## Broker tenant authority
+
+broker delivery metadata 中的 `tenantId` 只是传输属性，不具备认证强度。durable event transport 的可信
+tenant 绑定来自 relay 写入的 reserved `tenantAuthority` token：HMAC payload 固定绑定
+`iss/aud/tenantId/domain/contractId/topic/messageId/iat/exp`。consumer 写 app DLX 前必须验签并同时校验
+issuer/audience、TTL、topic、contract、message id 与 tenant；失败时不信任 metadata tenant、不写 app DLX，
+释放 claim 后 broker `Reject`。这条规则只覆盖 broker→consumer→DLX 信任边界；HTTP `X-Tenant-ID` /
+service-token tenant MAC 仍按上一节治理。
+
 ## Principal claim source
 
 JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 tenant。
@@ -114,8 +123,7 @@ global infra adapter 和命名维护例外中出现。
 **命名维护例外**：`dead_letter` retention sweep 是唯一 tenant 表 raw-pool 维护例外：它按保留期
 批量删除历史 dead-letter 记录，不代表某个 tenant repository 的业务路径；该例外必须在
 `pg-tenant-tx-guard` 中有显式规则和 stale-allowlist 测试。outbox relay 将 publish 失败写入
-`dead_letter` 是全局 relay 的 DLX settlement 例外；outbox tenant partition hardening 仍属
-#1405，不在本规则中把 outbox 重新分类为 tenant RLS 表。
+`dead_letter` 必须经 tenant-scoped write funnel 执行，不再保留 raw-pool settlement 例外。
 
 **启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用
 `PgStore::verify_rls_capability()`，动态派生含 `tenant_id` 列的表集合，断言每张表满足

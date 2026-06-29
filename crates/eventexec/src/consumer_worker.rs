@@ -403,6 +403,7 @@ mod tests {
     };
     use futures::StreamExt;
     use primitives::healthz::{HealthStatus, ProbeName};
+    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
@@ -410,6 +411,7 @@ mod tests {
         Message, MessageStream, Mutex, WorkerHealth, health_reporting_dlx, spawn_consumer,
         spawn_consumer_ackable, spawn_consumer_ackable_subscriber, spawn_relay,
     };
+    use crate::TenantAuthority;
 
     /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
@@ -596,6 +598,7 @@ mod tests {
             "audit",
             "identity.session-created",
             "identity.session-created",
+            Some("audit.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("test dead letter"),
             1,
@@ -627,8 +630,44 @@ mod tests {
         Arc::new(WorkerHealth::healthy())
     }
 
+    #[derive(Debug)]
+    struct TestMac;
+
+    impl MacVerifier for TestMac {
+        fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+            let mut tag = Vec::from(key.as_bytes());
+            tag.extend_from_slice(message);
+            Mac::from_bytes(tag)
+        }
+
+        fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+            self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_authority() -> Arc<TenantAuthority> {
+        Arc::new(
+            TenantAuthority::new(
+                Arc::new(TestMac),
+                MacKey::from_bytes(vec![0x42; 32]),
+                60,
+                5,
+                Arc::new(|| 1_700_000_000),
+            )
+            .expect("valid tenant authority"),
+        )
+    }
+
     fn meta() -> ConsumerMeta {
-        ConsumerMeta::new("audit", "contract-session", "session.created")
+        ConsumerMeta::new(
+            "audit",
+            "audit",
+            "contract-session",
+            "session.created",
+            "audit.session.consumer",
+            tenant_authority(),
+        )
     }
 
     // ── tests ───────────────────────────────────────────────────────────────────

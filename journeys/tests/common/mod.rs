@@ -11,7 +11,11 @@ use std::sync::{Arc, Mutex};
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use consistency::Entry;
-use diport::{OutboxEmitError, OutboxEnvelopeParts};
+use diport::{
+    DynKeyProvider, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider, KeyProviderError,
+    KeyRef, KeyVersion, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
+};
+use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use identity::ports::{
     DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Role, RoleBinding, RoleBindingLifecycle,
     RoleId, RoleListResult, RolePage, RoleRepo,
@@ -92,6 +96,97 @@ impl MacVerifier for CapturingVerifier {
             tag.as_bytes(),
         )
     }
+}
+
+#[allow(clippy::expect_used)]
+pub fn tenant_authority() -> Arc<TenantAuthority> {
+    Arc::new(
+        TenantAuthority::new(
+            Arc::new(CapturingVerifier::default()),
+            MacKey::from_bytes(vec![0x42; 32]),
+            3600,
+            60,
+            Arc::new(|| NOW_SECS as i64),
+        )
+        .expect("32B tenant authority key satisfies minimum"),
+    )
+}
+
+pub fn signed_metadata(
+    domain: &str,
+    contract_id: &str,
+    topic: &str,
+    message_id: &str,
+) -> anyhow::Result<EnvelopeMetadata> {
+    let authority = tenant_authority();
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let token = authority.sign(TenantAuthorityBinding::new(
+        tenant,
+        domain,
+        contract_id,
+        topic,
+        message_id,
+    ))?;
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
+    metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    Ok(metadata)
+}
+
+#[derive(Clone)]
+struct JourneyKeyProvider;
+
+impl KeyProvider for JourneyKeyProvider {
+    async fn encrypt(
+        &self,
+        key: KeyName,
+        plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        let ciphertext: Vec<u8> = plaintext.expose().iter().map(|byte| byte ^ 0xA5).collect();
+        Ok(EncryptOutput::new(
+            ciphertext,
+            KeyRef::new(key, KeyVersion::new(1)),
+        ))
+    }
+
+    async fn decrypt(
+        &self,
+        ciphertext: RedactedBytes,
+        _key: KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, KeyProviderError> {
+        let plaintext: Vec<u8> = ciphertext
+            .into_bytes()
+            .into_iter()
+            .map(|byte| byte ^ 0xA5)
+            .collect();
+        Ok(secure::Plaintext::new(plaintext))
+    }
+
+    async fn rewrap(
+        &self,
+        _ciphertext: RedactedBytes,
+        _key: KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        Err(KeyProviderError::new(
+            diport::key_provider::KeyProviderErrorKind::Forbidden,
+            std::io::Error::other("journey key provider does not rewrap"),
+        ))
+    }
+
+    async fn shutdown(&self) -> Result<(), KeyProviderError> {
+        Ok(())
+    }
+}
+
+#[allow(clippy::expect_used)]
+pub fn dlx_payload_protector() -> postgres::DlxPayloadProtector {
+    postgres::DlxPayloadProtector::new(
+        DynKeyProvider::new_box(JourneyKeyProvider),
+        KeyName::try_new("journey-dlx").expect("valid journey dlx key name"),
+    )
 }
 
 /// 构造 journey 用 audit 域 + 共享捕获句柄（注入捕获 verifier + 固定 32B key）。

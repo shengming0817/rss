@@ -1,0 +1,28 @@
+[package]
+name = "rss_dlq_operator_callsite"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "RSS DLQ 治理：限定 eventexec::OperatorDlqCapability::issue_for_authorized_operator 仅 admin/PDP 边界可调用（callsite-allowlist，INVARIANT EVENTBUS-DLQ-OPERATOR-CAP-01）"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "dlq_operator_callsite_ui"
+path = "ui/disallowed.rs"
+
+[[example]]
+name = "httpserve"
+path = "ui/httpserve.rs"
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+eventexec = { path = "../../crates/eventexec" }
+
+[package.metadata.rust-analyzer]
+rustc_private = true

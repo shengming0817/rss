@@ -9,6 +9,7 @@ fn main() {
         "identity",
         "contract-session",
         "session.created",
+        Some("identity.session.consumer".to_string()),
         b"payload".to_vec(),
         DeadLetterSummary::new("max retries exhausted"),
         10,

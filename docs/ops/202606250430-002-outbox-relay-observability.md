@@ -20,8 +20,9 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_pending_depth` | Gauge | `domain` | backlog 采样器（默认 ≤60s/轮） | status=pending 且到期行数 |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain` | backlog 采样器 | `now()−min(created_at)`；**无 pending ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`poll`(扫描相)/`publish`(逐条中继+adapter 内 settle 相) |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；当前 reason=`tenant_missing` |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；reason=`tenant_authority_missing`/`tenant_authority_invalid`/`tenant_authority_expired`/`tenant_authority_binding_mismatch`；`tenant_authority_missing` 覆盖缺 token 或缺 tenant metadata |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
+| `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；consumer broker `Reject`，避免 Requeue 后被 Duplicate→Ack 吞掉 |
 
 ### Label 闭值集
 
@@ -47,10 +48,12 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | relay tick P95 耗时 | > 5s 持续 5min | warning | `OutboxRelayTickSlow` |
 | 采样器停更 | 10min 无新样本 | warning | `OutboxSamplerNoData` |
 | consumer DLX 写失败 | 5min 内 `outcome="error"` 增长 > 0 | critical | `ConsumerDlxWriteError` |
+| consumer release 失败 | 5min 内增长 > 0 | critical | `ConsumerReleaseFailed` |
 
 告警均 `by (domain)` / `by (phase)` 聚合保来源可定位。采样器停更用 `absent_over_time`（捕捉运行后卡死，非仅首启动）。
 `consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支。`consumer_dlx_write_total{outcome="error"}`
-是告警面：DLX 未落库时 consumer 会 release inbox claim 并 broker Requeue，必须由 degraded health + metric 共同暴露。
+是告警面：DLX 未落库时 consumer 会 release inbox claim；release 成功则 broker Requeue，release 失败则
+`consumer_release_failed_total{domain}` 增长并 broker Reject，必须由 degraded health + metric 共同暴露。
 
 规则文件 `docs/ops/outbox-relay-alerts.rules.yaml`，`promtool check rules` 校验。
 
@@ -107,8 +110,8 @@ funnel，未校验 config 类型层不可表达）：
 
 - 删除时间谓词均用 DB `now()`（不注入 Clock，多实例无跨进程偏移）；sweeper 日志带 `target_table` 区分清理目标（per-target readyz 名见 `SweeperWorker::adopt`）。
 - #1429 已接 runtime `outbox` published-row sweeper（`RSS_OUTBOX_RETAIN_SECONDS`，默认 7 天）+ sampler +
-  per-domain relay；#1434 已接 runtime `inbox_dedup` sweeper（PG inbox consumer bundle 同源）。`dead_letter`
-  sweeper 接线仍属后续三表清理完善项。
+  per-domain relay；#1434 已接 runtime `inbox_dedup` sweeper（PG inbox consumer bundle 同源）；#1535 接入
+  runtime `dead_letter` sweeper（`RSS_DEAD_LETTER_RETAIN_SECONDS`，默认 30 天）。
 - 无界 DELETE → post-GA 批量分页 / 分区见 #1539；inbox_dedup/dead_letter 多租户分租清理见 #1537；sweeper 删除条数 metrics 见 #1538。
 
 ## 接线（#1429）
@@ -124,6 +127,5 @@ runtime durable event transport 现在把 outbox relay / sampler / sweeper 与 c
 - consumer bundle：`event_consumer`（或按 topic 后缀区分）readyz probe，按 subscriber binding 接入
   PG `inbox_dedup`、DLX store、AckableSubscriber 与 ConsumerWorker；`inbox_sweeper` readyz probe 按同一
   sweep interval 清理超 `INBOX_DEDUP_RETENTION_SECONDS` 的 done 去重行。
-
-`dead_letter` sweeper 未纳入 #1434；虽已有 `RetentionSweeper` adapter 能力与默认保留期常量，但 runtime
-worker 接线另行收口。
+- dead-letter sweeper：`dead_letter_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
+  `RSS_DEAD_LETTER_RETAIN_SECONDS` 的 dead_letter 行。

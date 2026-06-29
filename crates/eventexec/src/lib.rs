@@ -11,6 +11,12 @@
 pub mod consumer;
 pub use consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
 
+pub mod tenant_authority;
+pub use tenant_authority::{
+    TenantAuthority, TenantAuthorityBinding, TenantAuthorityConfigError, TenantAuthorityError,
+    TenantAuthoritySignError,
+};
+
 pub mod consumer_worker;
 pub use consumer_worker::{
     ConsumerWorker, EVENT_CONSUMER_PROBE, spawn_consumer, spawn_consumer_ackable,

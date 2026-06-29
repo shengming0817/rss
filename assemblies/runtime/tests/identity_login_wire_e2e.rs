@@ -495,11 +495,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
     })
     .await?;
-    let deps = SharedRuntimeDeps {
-        pg,
-        redis: Some(redis),
-        vault,
-    };
+    let deps = SharedRuntimeDeps { pg, redis, vault };
     let identity_domain = wire_identity_with(
         &deps,
         |name| match name {

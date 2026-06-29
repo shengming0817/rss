@@ -32,7 +32,8 @@ const RUNTIME_REQUIRED: &[&str] = &[
     "let group = subscription.group().clone();",
     "let inbox = pg.infra().inbox(group);",
     "let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());",
-    "let dlx = DynDeadLetterStore::new_box(pg.infra().dead_letter());",
+    "let dlx = DynDeadLetterStore::new_box(",
+    ".dead_letter(security.dlx_payload_protector.clone()),",
     "spawn_consumer_ackable_subscriber(",
     "wire_inbox_sweeper(pg, timing, module)?;",
 ];
@@ -385,7 +386,10 @@ mod tests {
                 let group = subscription.group().clone();
                 let inbox = pg.infra().inbox(group);
                 let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
-                let dlx = DynDeadLetterStore::new_box(pg.infra().dead_letter());
+                let dlx = DynDeadLetterStore::new_box(
+                    pg.infra()
+                        .dead_letter(security.dlx_payload_protector.clone()),
+                );
                 spawn_consumer_ackable_subscriber();
                 wire_inbox_sweeper(pg, timing, module)?;
             }

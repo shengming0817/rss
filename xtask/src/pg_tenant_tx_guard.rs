@@ -193,10 +193,7 @@ pub(crate) fn scan_guard(
         }
     }
 
-    for expected in [
-        "dead-letter-retention-sweep",
-        "outbox-relay-dlx-dead-letter",
-    ] {
+    for expected in ["dead-letter-retention-sweep"] {
         if !allowed_exceptions.contains(expected) {
             findings.push(finding(
                 Rule::StaleException,
@@ -480,7 +477,7 @@ fn raw_tenant_pool_fields(content: &str) -> Vec<RawPoolFieldAccess> {
 
 fn allowed_site_exception(
     rel: &str,
-    pattern: &str,
+    _pattern: &str,
     tables: &[String],
     window: &str,
 ) -> Option<&'static str> {
@@ -491,15 +488,6 @@ fn allowed_site_exception(
         && window.contains("maintenance_pool")
     {
         return Some("dead-letter-retention-sweep");
-    }
-    if rel == "outbox.rs"
-        && pattern.contains("begin")
-        && tables == ["dead_letter"]
-        && window.contains("insert into dead_letter")
-        && window.contains("settle_dlx")
-        && window.contains("set_local_tenant")
-    {
-        return Some("outbox-relay-dlx-dead-letter");
     }
     None
 }
@@ -701,10 +689,6 @@ mod tests {
             &migrations(),
             &files(&[
                 (
-                    "outbox.rs",
-                    "fn settle_dlx(){ set_local_tenant(); sqlx::query(\"INSERT INTO dead_letter VALUES (1)\"); pool.begin().await; }",
-                ),
-                (
                     "dead_letter.rs",
                     "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
                 ),
@@ -727,10 +711,6 @@ mod tests {
             &migrations(),
             &files(&[
                 (
-                    "outbox.rs",
-                    "fn settle_dlx(){ set_local_tenant(); sqlx::query(\"INSERT INTO dead_letter VALUES (1)\"); pool.begin().await; }",
-                ),
-                (
                     "dead_letter.rs",
                     "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
                 ),
@@ -752,10 +732,6 @@ mod tests {
         let (_, findings) = scan_guard(
             &migrations(),
             &files(&[
-                (
-                    "outbox.rs",
-                    "fn settle_dlx(){ set_local_tenant(); sqlx::query(\"INSERT INTO dead_letter VALUES (1)\"); pool.begin().await; }",
-                ),
                 (
                     "dead_letter.rs",
                     "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
@@ -1030,10 +1006,6 @@ mod tests {
                 (
                     "emitter.rs",
                     "struct E { pool: PgPool } async fn f(){ self.pool.begin().await; sqlx::query(\"INSERT INTO outbox VALUES (1)\"); }",
-                ),
-                (
-                    "outbox.rs",
-                    "fn settle_dlx(){ set_local_tenant(); sqlx::query(\"INSERT INTO dead_letter VALUES (1)\"); pool.begin().await; }",
                 ),
                 (
                     "dead_letter.rs",

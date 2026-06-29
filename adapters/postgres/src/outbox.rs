@@ -17,6 +17,7 @@
 //! ref: serverlesstechnology/cqrs `persistence/postgres-es/src/event_repository.rs@main`
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use consistency::{
@@ -28,11 +29,14 @@ use diport::{
     KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, PublishRequest, Publisher,
     PublisherError, RESERVED_METADATA_KEYS,
 };
+use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use sqlx::PgConnection;
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
-use crate::dead_letter::original_entry_json;
+use crate::dead_letter_payload::{
+    DLX_ORIGINAL_ENTRY_ENCODING, DlxPayloadContext, DlxPayloadProtector,
+};
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -320,6 +324,8 @@ pub(crate) async fn append_outbox(
 pub struct PgOutbox {
     pool: sqlx::PgPool,
     publisher: Box<DynPublisher<'static>>,
+    tenant_authority: Arc<TenantAuthority>,
+    payload_protector: DlxPayloadProtector,
 }
 
 impl PgOutbox {
@@ -327,10 +333,17 @@ impl PgOutbox {
     /// pool 从 `PgStore.pool`（`pub(crate)`，同 crate 可取）clone；DynPublisher 转移所有权。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::outbox` 收口。
-    pub(crate) fn new(store: &PgStore, publisher: Box<DynPublisher<'static>>) -> Self {
+    pub(crate) fn new(
+        store: &PgStore,
+        publisher: Box<DynPublisher<'static>>,
+        tenant_authority: Arc<TenantAuthority>,
+        payload_protector: DlxPayloadProtector,
+    ) -> Self {
         Self {
             pool: store.pool.clone(),
             publisher,
+            tenant_authority,
+            payload_protector,
         }
     }
 }
@@ -439,11 +452,20 @@ impl OutboxRelay for PgOutbox {
         // 1. CAS acquire：把 pending（或 stale publishing）行翻转到 publishing，返 (retry_count, lease_token)。
         let maybe_lease = acquire_lease(&self.pool, event_id).await?;
 
-        let (retry_count, lease_token, metadata_json) = match maybe_lease {
-            // 0 行：已被他人发或已 published → 幂等 Ack，禁二次 publish。
-            None => return Ok(consistency::Disposition::Ack),
-            Some(lease) => lease,
-        };
+        let (retry_count, lease_token, metadata_json, domain, contract_id, topic, now_epoch) =
+            match maybe_lease {
+                // 0 行：已被他人发或已 published → 幂等 Ack，禁二次 publish。
+                None => return Ok(consistency::Disposition::Ack),
+                Some(lease) => lease,
+            };
+        let metadata = self.sign_metadata(
+            hydrate_envelope_metadata(&metadata_json),
+            &domain,
+            &contract_id,
+            &topic,
+            event_id,
+            now_epoch,
+        )?;
 
         // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
         //    （至少一次 + 幂等去重端到端，eventbus.md §DLX 与幂等）。
@@ -456,7 +478,7 @@ impl OutboxRelay for PgOutbox {
                     diport::MessageId::new(event_id),
                     entry.payload().to_vec(),
                 )
-                .with_metadata(hydrate_envelope_metadata(&metadata_json)),
+                .with_metadata(metadata),
             )
             .await;
 
@@ -474,9 +496,53 @@ impl OutboxRelay for PgOutbox {
             }
             // 3b. 发布失败 → dlx（预算耗尽）/ retry（退避），见 helper。
             Err(e) => {
-                settle_publish_failure(&self.pool, entry, retry_count, &lease_token, &e).await
+                settle_publish_failure(
+                    &self.pool,
+                    &self.payload_protector,
+                    entry,
+                    retry_count,
+                    &lease_token,
+                    &e,
+                )
+                .await
             }
         }
+    }
+}
+
+impl PgOutbox {
+    fn sign_metadata(
+        &self,
+        mut metadata: EnvelopeMetadata,
+        domain: &str,
+        contract_id: &str,
+        topic: &str,
+        event_id: &str,
+        now_epoch: i64,
+    ) -> Result<EnvelopeMetadata, EngineError> {
+        let tenant = metadata
+            .tenant_id()
+            .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
+        let token = self
+            .tenant_authority
+            .sign_at(
+                TenantAuthorityBinding::new(tenant, domain, contract_id, topic, event_id),
+                now_epoch,
+            )
+            .map_err(|e| {
+                tracing::error!(
+                    target: "postgres",
+                    domain,
+                    contract_id,
+                    topic,
+                    event_id,
+                    error = %secure::redact_error(&e),
+                    "outbox relay failed to sign tenant authority"
+                );
+                EngineError::new(EngineErrorKind::Invariant)
+            })?;
+        metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+        Ok(metadata)
     }
 }
 
@@ -510,6 +576,7 @@ fn hydrate_envelope_metadata(json: &str) -> EnvelopeMetadata {
 /// 后退化为 `Ack`（benign handoff，新持租者负责重投/退避），不误把 broker 失败上抛成本 worker 的降级（F3）。
 async fn settle_publish_failure(
     pool: &sqlx::PgPool,
+    payload_protector: &DlxPayloadProtector,
     entry: &Entry,
     retry_count: i32,
     lease_token: &str,
@@ -520,7 +587,7 @@ async fn settle_publish_failure(
     let permanent = err.is_permanent();
     log_publish_failed(event_id, entry.topic().as_str(), retry_count, err);
     if dlx_decision(permanent, new_count) {
-        match settle_dlx(pool, event_id, new_count, lease_token).await? {
+        match settle_dlx(pool, payload_protector, event_id, new_count, lease_token).await? {
             SettleOutcome::Settled => {
                 log_dlx(event_id, new_count, permanent);
                 Ok(consistency::Disposition::Reject)
@@ -700,8 +767,8 @@ async fn sample_outbox_backlog(
 pub(crate) async fn acquire_lease(
     pool: &sqlx::PgPool,
     event_id: &str,
-) -> Result<Option<(i32, String, String)>, EngineError> {
-    let row: Option<(i32, String, String)> = sqlx::query_as(
+) -> Result<Option<(i32, String, String, String, String, String, i64)>, EngineError> {
+    let row: Option<(i32, String, String, String, String, String, i64)> = sqlx::query_as(
         r#"
         UPDATE outbox
         SET status = $3,
@@ -712,7 +779,8 @@ pub(crate) async fn acquire_lease(
                 status = $4
              OR (status = $5 AND updated_at <= now() - make_interval(secs => $2))
           )
-        RETURNING retry_count, lease_token::text, metadata::text
+        RETURNING retry_count, lease_token::text, metadata::text, domain, contract_id, topic,
+                  EXTRACT(EPOCH FROM now())::bigint
         "#,
     )
     .bind(event_id)
@@ -783,6 +851,7 @@ pub(crate) async fn settle_published(
 /// 预算耗尽后把行置 dlx（以 `lease_token` 比对，防 stale 持租者把已被新租约结算的行误标 dlx）。
 async fn settle_dlx(
     pool: &sqlx::PgPool,
+    payload_protector: &DlxPayloadProtector,
     event_id: &str,
     new_retry_count: i32,
     lease_token: &str,
@@ -833,12 +902,31 @@ async fn settle_dlx(
         EngineError::new(EngineErrorKind::Transient)
     })?;
 
-    let original_entry = original_entry_json(&payload);
+    let protected = payload_protector
+        .encrypt(
+            DlxPayloadContext::new(
+                tenant,
+                DeadLetterSource::OutboxRelay.as_str(),
+                &domain,
+                &contract_id,
+                &topic,
+                None,
+                event_id,
+            ),
+            &payload,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx encrypt payload error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
     sqlx::query(
         r#"
         INSERT INTO dead_letter
-            (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            (tenant_id, message_id, domain, contract_id, topic, consumer_group,
+             original_entry, original_entry_key_ref, original_entry_payload_len,
+             original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
+        VALUES ($1::uuid, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(tenant.to_string())
@@ -846,7 +934,10 @@ async fn settle_dlx(
     .bind(domain)
     .bind(contract_id)
     .bind(topic)
-    .bind(sqlx::types::Json(&original_entry))
+    .bind(sqlx::types::Json(protected.original_entry()))
+    .bind(protected.key_ref())
+    .bind(protected.payload_len())
+    .bind(DLX_ORIGINAL_ENTRY_ENCODING)
     .bind(OUTBOX_RELAY_DLX_SUMMARY)
     .bind(new_retry_count)
     .bind(DeadLetterSource::OutboxRelay.as_str())

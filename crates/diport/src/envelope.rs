@@ -24,12 +24,13 @@ use std::collections::BTreeMap;
 
 /// envelope reserved key 单源（producer funnel + wire funnel + adapter 映射共用，消除漂移）。
 /// 业务 [`EnvelopeMetadata::try_insert`] 对这些 key fail-closed 拒；只 adapter 受控注入点可写。
-pub const RESERVED_METADATA_KEYS: [&str; 5] = [
+pub const RESERVED_METADATA_KEYS: [&str; 6] = [
     KEY_TRACE,
     KEY_CORRELATION,
     KEY_PRINCIPAL,
     KEY_OCCURRED_AT,
     KEY_TENANT_ID,
+    KEY_TENANT_AUTHORITY,
 ];
 
 /// reserved：事件发生时刻（unix 秒，十进制 string）。producer 经注入 `Clock` 必填（#1129）。
@@ -42,6 +43,8 @@ pub const KEY_CORRELATION: &str = "correlation";
 pub const KEY_PRINCIPAL: &str = "principal";
 /// reserved：canonical tenant id（认证 / co-tx 边界盖章，消费 DLX / RLS scope 使用）。
 pub const KEY_TENANT_ID: &str = "tenantId";
+/// reserved：tenant authority token（relay 签发，consumer 写 DLX 前验签）。
+pub const KEY_TENANT_AUTHORITY: &str = "tenantAuthority";
 /// 非-reserved 但 PII：opaque 主体标识（业务可经 envelope 携带；`Debug` 脱敏）。
 pub const KEY_SUBJECT_ID: &str = "subjectId";
 
@@ -118,14 +121,15 @@ impl EnvelopeMetadata {
     }
 }
 
-/// PII 边界（类型层，对标 [`crate::OutboxEnvelopeParts`]）：手写 `Debug` 对 `subjectId` / `principal`
-/// （opaque 主体，凭据级）值输出 `<redacted>`；`occurred_at` / `trace` / `correlation` 是路由 / 观测元数据，
-/// 可观测。INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（回归见 `pii_debug` 单测）。
+/// PII / authority 边界（类型层，对标 [`crate::OutboxEnvelopeParts`]）：手写 `Debug` 对 `subjectId` /
+/// `principal` / `tenantAuthority`（opaque 主体或授权材料）值输出 `<redacted>`；`occurred_at` / `trace` /
+/// `correlation` 是路由 / 观测元数据，可观测。INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level =
+/// "Medium", exec = "manual/opt-in", source = "code" }（回归见 `pii_debug` 单测）。
 impl std::fmt::Debug for EnvelopeMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut m = f.debug_map();
         for (k, v) in self.0.iter() {
-            if k == KEY_SUBJECT_ID || k == KEY_PRINCIPAL {
+            if k == KEY_SUBJECT_ID || k == KEY_PRINCIPAL || k == KEY_TENANT_AUTHORITY {
                 m.entry(&k, &"<redacted>");
             } else {
                 m.entry(&k, &v);
@@ -139,7 +143,7 @@ impl std::fmt::Debug for EnvelopeMetadata {
 mod tests {
     use super::{
         EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
-        KEY_TENANT_ID, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
     };
 
     #[test]
@@ -199,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_keys_single_source_is_exactly_five() {
+    fn reserved_keys_single_source_is_exactly_six() {
         // drift-lock：reserved 集恰为 trace/correlation/principal/occurredAt/tenantId（与 postgres OutboxMetadata
         // funnel + migration CHECK 同源；下游 import 本 const，不另立第二真源）。
         assert_eq!(
@@ -209,7 +213,8 @@ mod tests {
                 KEY_CORRELATION,
                 KEY_PRINCIPAL,
                 KEY_OCCURRED_AT,
-                KEY_TENANT_ID
+                KEY_TENANT_ID,
+                KEY_TENANT_AUTHORITY,
             ]
         );
     }
@@ -232,23 +237,29 @@ mod tests {
 
 #[cfg(test)]
 mod pii_debug {
-    //! `EnvelopeMetadata` 的 `subjectId` / `principal`（opaque 主体）值 Debug 脱敏回归。
+    //! `EnvelopeMetadata` 的 `subjectId` / `principal` / `tenantAuthority` 值 Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::{
         EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
+        KEY_TENANT_AUTHORITY,
     };
 
     #[test]
-    fn debug_redacts_subject_and_principal_shows_observable() {
+    fn debug_redacts_subject_principal_and_tenant_authority_shows_observable() {
         let mut md = EnvelopeMetadata::empty();
         // anti-vacuity：subjectId 值若不脱敏会出现在普通 map Debug 中。
         let _ = md.try_insert(KEY_SUBJECT_ID, "SECRET_SUBJECT");
         md.insert_wire_pair(KEY_PRINCIPAL, "SECRET_PRINCIPAL");
+        md.insert_wire_pair(KEY_TENANT_AUTHORITY, "SECRET_TENANT_AUTHORITY");
         md.insert_wire_pair(KEY_CORRELATION, "corr-observable");
         md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         let dbg = format!("{md:?}");
         assert!(!dbg.contains("SECRET_SUBJECT"), "subjectId 值泄漏: {dbg}");
         assert!(!dbg.contains("SECRET_PRINCIPAL"), "principal 值泄漏: {dbg}");
+        assert!(
+            !dbg.contains("SECRET_TENANT_AUTHORITY"),
+            "tenantAuthority 值泄漏: {dbg}"
+        );
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         // 路由 / 观测元数据可见。
         assert!(dbg.contains("corr-observable"), "correlation 应可见: {dbg}");

@@ -8,6 +8,7 @@ members = [
   "rss_domain_no_serialize",
   "rss_spawn_missing_scope",
   "rss_crosstenant_callsite",
+  "rss_dlq_operator_callsite",
   "rss_diport_impl_allowlist",
   "rss_principal_facet_impl_allowlist",
   "rss_authplan_callsite",

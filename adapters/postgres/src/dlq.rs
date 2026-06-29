@@ -1,5 +1,6 @@
 //! PostgreSQL DLQ inspection/replay adapter (#1214).
 
+use diport::key_provider::{KeyProviderError, KeyProviderErrorKind};
 use diport::{DeadLetterSource, KEY_TENANT_ID};
 use eventexec::{
     DlqEntryKind, DlqEntrySummary, DlqError, DlqListQuery, DlqListResult, DlqRedriveOutcome,
@@ -8,21 +9,59 @@ use eventexec::{
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
-use crate::dead_letter::decode_original_entry;
+use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 use crate::outbox::{STATUS_DLX, STATUS_PENDING};
+
+#[cfg(test)]
+const LIST_DEAD_LETTER_BIND_COUNT: u32 = 9;
+const LIST_DEAD_LETTER_SQL: &str = r#"
+    SELECT id::text,
+           message_id,
+           domain,
+           contract_id,
+           topic,
+           consumer_group,
+           original_entry_payload_len,
+           error_summary,
+           num_attempts,
+           source_kind,
+           EXTRACT(EPOCH FROM last_attempt_at)::bigint
+    FROM dead_letter
+    WHERE tenant_id = $1::uuid
+      AND source_kind <> $4
+      AND ($2::text IS NULL OR domain = $2)
+      AND ($3::text IS NULL OR source_kind = $3)
+      AND (
+            $5::bigint IS NULL
+         OR EXTRACT(EPOCH FROM last_attempt_at)::bigint < $5
+         OR (
+                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $5
+            AND $6::text > $7
+            )
+         OR (
+                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $5
+            AND $6::text = $7
+            AND id::text > $8
+            )
+      )
+    ORDER BY last_attempt_at DESC, id ASC
+    LIMIT $9
+    "#;
 
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
     tenant_pool: PgTenantPool,
     global_pool: sqlx::PgPool,
+    payload_protector: DlxPayloadProtector,
 }
 
 impl PgStore {
     /// 构造 DLQ inspection/replay adapter（pool clone 自 `PgStore`，轻量）。
-    pub(crate) fn dlq(&self) -> PgDlqStore {
+    pub(crate) fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
         PgDlqStore {
             tenant_pool: PgTenantPool::new(self),
             global_pool: self.pool.clone(),
+            payload_protector,
         }
     }
 }
@@ -38,22 +77,17 @@ impl DlqStore for PgDlqStore {
         &self,
         request: DlqReplayRequest,
     ) -> Result<DlqReplayOutcome, DlqError> {
+        let payload_protector = self.payload_protector.clone();
         self.tenant_pool
             .write(
                 request.tenant(),
                 move |conn| {
+                    let payload_protector = payload_protector.clone();
                     Box::pin(async move {
-                        let row: Option<(
-                            String,
-                            String,
-                            String,
-                            String,
-                            serde_json::Value,
-                            String,
-                            serde_json::Value,
-                        )> = sqlx::query_as(
+                        let row: Option<ReplayDeadLetterRow> = sqlx::query_as(
                             r#"
-                            SELECT source_kind, message_id, domain, contract_id, original_entry, topic, metadata
+                            SELECT source_kind, message_id, domain, contract_id, original_entry,
+                                   original_entry_key_ref, topic, consumer_group, metadata
                             FROM dead_letter
                             WHERE id = $1::uuid
                               AND tenant_id = $2::uuid
@@ -65,7 +99,7 @@ impl DlqStore for PgDlqStore {
                         .await
                         .map_err(db_error("replay.fetch_dead_letter"))?;
 
-                        let Some((source, message_id, domain, contract_id, original_entry, topic, metadata)) =
+                        let Some((source, message_id, domain, contract_id, original_entry, key_ref, topic, consumer_group, metadata)) =
                             row
                         else {
                             return Err(DlqError::NotFound);
@@ -78,16 +112,29 @@ impl DlqStore for PgDlqStore {
                             }
                         }
 
-                        let payload = decode_original_entry(&original_entry).map_err(|_| {
-                            tracing::warn!(
-                                target: "postgres",
-                                operation = "replay.decode_original_entry",
-                                dead_letter_id = %request.dead_letter_id(),
-                                tenant_id = %request.tenant(),
-                                "dlq: invalid original_entry payload"
-                            );
-                            DlqError::InvalidPayload
-                        })?;
+                        let payload = payload_protector
+                            .decrypt(
+                                DlxPayloadContext::new(
+                                    request.tenant(),
+                                    &source,
+                                    &domain,
+                                    &contract_id,
+                                    &topic,
+                                    consumer_group.as_deref(),
+                                    &message_id,
+                                ),
+                                &original_entry,
+                                &key_ref,
+                            )
+                            .await
+                            .map_err(|err| {
+                                dlq_payload_error(
+                                    "replay.decrypt_original_entry",
+                                    request.dead_letter_id().as_str(),
+                                    request.tenant(),
+                                    err,
+                                )
+                            })?;
                         let metadata = replay_metadata(
                             metadata,
                             request.tenant(),
@@ -175,38 +222,27 @@ impl PgDlqStore {
         let tenant = query.tenant();
         let domain = query.domain().map(str::to_owned);
         let fetch_limit = query.fetch_limit();
+        let cursor_epoch = query.cursor().map(|cursor| cursor.last_epoch_secs());
+        let cursor_kind = query
+            .cursor()
+            .map(|cursor| cursor.last_kind().cursor_part().to_string());
+        let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
         let rows: Vec<DeadLetterRow> = self
             .tenant_pool
             .read(tenant, move |conn| {
                 Box::pin(async move {
-                    sqlx::query_as(
-                        r#"
-                        SELECT id::text,
-                               message_id,
-                               domain,
-                               contract_id,
-                               topic,
-                               COALESCE(jsonb_array_length(original_entry -> 'bytes'), 0)::bigint,
-                               error_summary,
-                               num_attempts,
-                               source_kind,
-                               EXTRACT(EPOCH FROM last_attempt_at)::bigint
-                        FROM dead_letter
-                        WHERE tenant_id = $1::uuid
-                          AND source_kind <> $5
-                          AND ($2::text IS NULL OR domain = $2)
-                          AND ($3::text IS NULL OR source_kind = $3)
-                        ORDER BY last_attempt_at DESC
-                        LIMIT $4
-                        "#,
-                    )
-                    .bind(tenant.to_string())
-                    .bind(domain)
-                    .bind(source)
-                    .bind(i64::from(fetch_limit))
-                    .bind(DeadLetterSource::OutboxRelay.as_str())
-                    .fetch_all(&mut *conn)
-                    .await
+                    sqlx::query_as(LIST_DEAD_LETTER_SQL)
+                        .bind(tenant.to_string())
+                        .bind(domain)
+                        .bind(source)
+                        .bind(DeadLetterSource::OutboxRelay.as_str())
+                        .bind(cursor_epoch)
+                        .bind(DlqEntryKind::DeadLetter.cursor_part())
+                        .bind(cursor_kind)
+                        .bind(cursor_id)
+                        .bind(i64::from(fetch_limit))
+                        .fetch_all(&mut *conn)
+                        .await
                 })
             })
             .await
@@ -238,16 +274,37 @@ impl PgDlqStore {
                    EXTRACT(EPOCH FROM o.updated_at)::bigint
             FROM outbox o
             WHERE o.status = $1
-              AND o.metadata ->> $2 = $3
+            AND o.metadata ->> $2 = $3
               AND ($4::text IS NULL OR o.domain = $4)
-            ORDER BY o.updated_at DESC
-            LIMIT $5
+              AND (
+                    $5::bigint IS NULL
+                 OR EXTRACT(EPOCH FROM o.updated_at)::bigint < $5
+                 OR (
+                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
+                    AND $6::text > $7
+                    )
+                 OR (
+                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
+                    AND $6::text = $7
+                    AND o.event_id > $8
+                    )
+              )
+            ORDER BY o.updated_at DESC, o.event_id ASC
+            LIMIT $9
             "#,
         )
         .bind(STATUS_DLX)
         .bind(KEY_TENANT_ID)
         .bind(query.tenant().to_string())
         .bind(query.domain())
+        .bind(query.cursor().map(|cursor| cursor.last_epoch_secs()))
+        .bind(DlqEntryKind::OutboxDlx.cursor_part())
+        .bind(
+            query
+                .cursor()
+                .map(|cursor| cursor.last_kind().cursor_part().to_string()),
+        )
+        .bind(query.cursor().map(|cursor| cursor.last_id().to_string()))
         .bind(i64::from(query.fetch_limit()))
         .fetch_all(&self.global_pool)
         .await
@@ -265,11 +322,23 @@ type DeadLetterRow = (
     String,
     String,
     String,
+    Option<String>,
     i64,
     String,
     i32,
     String,
     i64,
+);
+type ReplayDeadLetterRow = (
+    String,
+    String,
+    String,
+    String,
+    serde_json::Value,
+    String,
+    String,
+    Option<String>,
+    serde_json::Value,
 );
 type OutboxRow = (String, String, String, String, i64, i32, i64);
 
@@ -293,6 +362,7 @@ impl DeadLetterRowExt for DeadLetterRow {
             domain,
             contract_id,
             topic,
+            consumer_group,
             payload_len,
             summary,
             attempts,
@@ -308,6 +378,7 @@ impl DeadLetterRowExt for DeadLetterRow {
             domain,
             contract_id,
             topic,
+            consumer_group,
             u64_from_i64(payload_len)?,
             summary,
             u32::try_from(attempts).map_err(|_| DlqError::Store)?,
@@ -332,6 +403,7 @@ impl OutboxRowExt for OutboxRow {
             domain,
             contract_id,
             topic,
+            None,
             u64_from_i64(payload_len)?,
             "outbox relay dlx",
             u32::try_from(attempts).map_err(|_| DlqError::Store)?,
@@ -385,6 +457,33 @@ fn db_error(operation: &'static str) -> impl Fn(sqlx::Error) -> DlqError {
     }
 }
 
+fn dlq_payload_error(
+    operation: &'static str,
+    dead_letter_id: &str,
+    tenant: vocab::TenantId,
+    err: KeyProviderError,
+) -> DlqError {
+    let kind = err.kind();
+    tracing::warn!(
+        target: "postgres",
+        operation,
+        dead_letter_id,
+        tenant_id = %tenant,
+        key_provider_kind = ?kind,
+        "dlq: original_entry payload decrypt failed"
+    );
+    match kind {
+        KeyProviderErrorKind::Rejected => DlqError::InvalidPayload,
+        KeyProviderErrorKind::Unavailable | KeyProviderErrorKind::Timeout => {
+            DlqError::PayloadKeyUnavailable
+        }
+        KeyProviderErrorKind::Forbidden | KeyProviderErrorKind::NotFound => {
+            DlqError::PayloadKeyForbidden
+        }
+        _ => DlqError::PayloadKeyUnavailable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +509,14 @@ mod tests {
     }
 
     #[test]
+    fn list_dead_letter_sql_placeholders_match_bind_count() {
+        assert_eq!(
+            max_pg_placeholder(LIST_DEAD_LETTER_SQL),
+            LIST_DEAD_LETTER_BIND_COUNT
+        );
+    }
+
+    #[test]
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id and summary result.
     fn legacy_outbox_summary_has_no_payload() {
@@ -428,5 +535,75 @@ mod tests {
         assert_eq!(summary.kind(), DlqEntryKind::OutboxDlx);
         assert_eq!(summary.payload_len(), 9);
         assert!(!format!("{summary:?}").contains("payload:"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test fixture uses a known canonical tenant id.
+    fn key_provider_rejected_maps_to_invalid_payload() {
+        let err = KeyProviderError::new(
+            KeyProviderErrorKind::Rejected,
+            std::io::Error::other("bad ciphertext"),
+        );
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        assert!(matches!(
+            dlq_payload_error("test", "dl-1", tenant, err),
+            DlqError::InvalidPayload
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test fixture uses a known canonical tenant id.
+    fn key_provider_unavailable_stays_retryable_dependency_error() {
+        let err = KeyProviderError::new(
+            KeyProviderErrorKind::Unavailable,
+            std::io::Error::other("kms unavailable"),
+        );
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        assert!(matches!(
+            dlq_payload_error("test", "dl-1", tenant, err),
+            DlqError::PayloadKeyUnavailable
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test fixture uses a known canonical tenant id.
+    fn key_provider_forbidden_stays_operator_config_error() {
+        let err = KeyProviderError::new(
+            KeyProviderErrorKind::Forbidden,
+            std::io::Error::other("policy denied"),
+        );
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        assert!(matches!(
+            dlq_payload_error("test", "dl-1", tenant, err),
+            DlqError::PayloadKeyForbidden
+        ));
+    }
+
+    fn max_pg_placeholder(sql: &str) -> u32 {
+        let mut max = 0;
+        let mut chars = sql.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                continue;
+            }
+            let mut n = String::new();
+            while let Some(next) = chars.peek().copied() {
+                if !next.is_ascii_digit() {
+                    break;
+                }
+                n.push(next);
+                chars.next();
+            }
+            if let Ok(value) = n.parse::<u32>() {
+                max = max.max(value);
+            }
+        }
+        max
     }
 }

@@ -1,0 +1,19 @@
+warning: DLQ mutation capability 仅 admin/PDP 边界可签发：`OperatorDlqCapability::issue_for_authorized_operator` 不得在此 crate 调用
+  --> $DIR/disallowed.rs:5:16
+   |
+LL |     let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 在 allowlist 的 admin/PDP 授权路径中签发 capability，其它 crate 经请求 DTO 接收；确需扩项须治理评审扩 `ALLOWED_CALLER_CRATES`
+   = note: `#[warn(rss_dlq_operator_callsite)]` on by default
+
+warning: DLQ mutation capability 仅 admin/PDP 边界可签发：`OperatorDlqCapability::issue_for_authorized_operator` 不得在此 crate 调用
+  --> $DIR/disallowed.rs:7:17
+   |
+LL |     let issue = eventexec::OperatorDlqCapability::issue_for_authorized_operator;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 在 allowlist 的 admin/PDP 授权路径中签发 capability，其它 crate 经请求 DTO 接收；确需扩项须治理评审扩 `ALLOWED_CALLER_CRATES`
+
+warning: 2 warnings emitted
+

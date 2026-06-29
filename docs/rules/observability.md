@@ -167,8 +167,9 @@ at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker �
 | metric | 类型 | label | 语义 |
 |--------|------|-------|------|
 | `consumer_settle_total` | Counter | `domain`,`action`,`outcome` | 单条 broker 结算（action=ack/requeue/reject；outcome=ok/error） |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed 路径主动跳过 app DLX 写入（当前 reason=`tenant_missing`） |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed 路径主动跳过 app DLX 写入（reason=`tenant_authority_missing`/`tenant_authority_invalid`/`tenant_authority_expired`/`tenant_authority_binding_mismatch`；missing 覆盖缺 token 或缺 tenant metadata） |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | app DLX store 写入结果（outcome=ok/error）；error 同时把 consumer health 标为 degraded |
+| `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release claim 也失败；consumer 必须 broker `Reject`，不能 `Ack` 或 `Requeue` |
 
 label 闭值集纪律：
 
@@ -187,7 +188,10 @@ label 闭值集纪律：
   Prometheus 告警。原因：该路径已经 fail-closed 到 broker `Reject`/drop 语义，告警应看 settle/reject 或业务
   DLQ 增长，skip metric 只用于解释「为什么没有 app DLX row」。
 - `consumer_dlx_write_total` emit site = `eventexec::consumer_worker` 的 health-reporting DLX wrapper；告警面 =
-  `outcome="error"`（DLX 未落库，consumer 会 release inbox claim 并 broker Requeue）。
+  `outcome="error"`（DLX 未落库；release 成功则 broker Requeue，release 失败则发
+  `consumer_release_failed_total{domain}` 并 broker Reject）。
+- `consumer_release_failed_total` emit site = `eventexec::consumer::emit_release_failed`；这是 DLX 写失败叠加
+  release 失败的正确性告警面，label 仅含低基数 `domain`。
 
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
@@ -263,6 +267,15 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
 broker header（AMQP `with_timestamp`(occurred_at) + `FieldTable` headers / MQTT v5 `user_properties` /
 memory 直传），subscriber 反向读回填 `Message.metadata`，handler 经 `msg.metadata.get(..)` 消费。
 ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、CloudEvents binary content-mode。
+
+**Tenant authority token（#1535）**：relay 发布 broker 消息前在 reserved metadata `tenantAuthority`
+写入 `v1.<payload_b64url>.<mac_b64url>`。payload 固定为
+`iss/aud/tenantId/domain/contractId/topic/messageId/iat/exp`，MAC 为 HMAC-SHA256；durable runtime
+必须配置 `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`（base64url no-pad，解码后 ≥32 bytes），TTL 由
+`RSS_TENANT_AUTHORITY_TTL_SECS` 控制，默认 3600s。consumer 写 app DLX 前必须验签并校验
+issuer/audience、TTL、topic、contract、message id 与 tenant 绑定；缺失、篡改、过期或绑定不匹配时
+不信任 metadata `tenantId`、不写 app DLX，释放 claim 后 broker `Reject`，并记录
+`consumer_dlx_skip_total{reason=tenant_authority_*}`。不保留 unsigned metadata tenant 兼容路径。
 
 envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed `vocab::ContractBinding`** 承载（#1193）：
 两字段同源一份 `contract.toml`，经 `cargo xtask codegen` 派生为 `generated::event::{domain}_v1::CONTRACT`

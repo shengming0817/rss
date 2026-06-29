@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context as _, Result};
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
+use base64::Engine as _;
 use consistency::OutboxSource;
 use diport::{DynPublisher, MessageId, PublishRequest, Publisher, Topic};
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
@@ -32,7 +33,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode
 use tokio_util::sync::CancellationToken;
 
 use runtime::event_transport::{
-    EventTransportConfig, bridge_generated_subscriptions, wire_event_transport,
+    bridge_generated_subscriptions, build_event_transport_config_from, wire_event_transport,
 };
 use runtime::{
     SharedRuntimeDeps, build_redis_runtime_deps, build_vault_runtime_deps, wire_distributed,
@@ -351,25 +352,36 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .map(|spec| spec.group.to_owned())
         .context("e2e must declare audit session-created subscriber")?;
 
-    // ── 步骤 5：构造 EventTransportConfig（直接赋值，无 env 侧效应）────────────────────────────
+    // ── 步骤 5：构造 EventTransportConfig（注入式 env builder，无 ambient env 侧效应）────────────
 
     let vhost_url = rmq.vhost_url("rss_evt_e2e").await?;
 
     // relay_poll_interval=2s：在 [100ms, 300s] 范围内；2s 窗口使步骤 6 poll 能赢过 relay 第二次轮询。
     // relay_sample_interval=30s：在 [1s, 60s] 范围内。
-    let transport = bootstrap::eventtransport::TransportConfig::new(
-        std::collections::BTreeMap::new(),
-        Some(bootstrap::AmqpUrl::new(vhost_url.clone())),
-    );
-    let cfg = EventTransportConfig {
-        topology: bootstrap::Topology::DurableShared,
-        transport,
-        relay_poll_interval: Duration::from_secs(2),
-        relay_batch: 16,
-        relay_sample_interval: Duration::from_secs(30),
-        outbox_sweep_interval: Duration::from_secs(60),
-        outbox_retain_seconds: 604_800,
-    };
+    let hmac_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42u8; 32]);
+    let cfg = build_event_transport_config_from(|name| match name {
+        "RSS_TOPOLOGY" => Some("durable-shared".to_string()),
+        "RSS_AMQP_URL" => Some(vhost_url.clone()),
+        "RSS_RELAY_POLL_INTERVAL_MS" => Some("2000".to_string()),
+        "RSS_RELAY_BATCH_SIZE" => Some("16".to_string()),
+        "RSS_RELAY_SAMPLE_INTERVAL_MS" => Some("30000".to_string()),
+        "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("60000".to_string()),
+        "RSS_OUTBOX_RETAIN_SECONDS" => Some("604800".to_string()),
+        "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL" => Some(hmac_key.clone()),
+        "RSS_DLX_PAYLOAD_KEY_NAME" => Some("dlx-payload".to_string()),
+        "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
+        "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
+        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
+        _ => None,
+    })?;
+    let poll_tenant_authority = cfg
+        .tenant_authority
+        .clone()
+        .context("durable e2e tenant authority missing")?;
+    let poll_dlx_payload_protector = cfg
+        .dlx_payload_protector
+        .clone()
+        .context("durable e2e dlx payload protector missing")?;
 
     // ── 步骤 6：wire_event_transport → EventRuntime（relay OS 线程 + consumer worker 启动）──────
 
@@ -396,8 +408,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     );
     assert_eq!(
         event_runtime.module.workers.len(),
-        6,
-        "identity relay + settings relay + consumer + sampler + outbox sweeper + inbox sweeper"
+        7,
+        "identity relay + settings relay + consumer + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
     );
 
     // ── 步骤 7：注册 ShutdownStack（infra_guards 先注册 → LIFO 最后关；workers 后注册 → LIFO 最先 drain）
@@ -449,7 +461,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // 独立 PgOutbox 实例（只读 poll 视图；relay worker 已持有另一实例负责实际发布）。
     // NoopPublisher 的 publish 设计上不被调用——此 outbox 句柄仅 OutboxSource::poll_pending 用。
-    let poll_view = id.outbox(DynPublisher::new_box(NoopPublisher));
+    let poll_view = id.outbox(
+        DynPublisher::new_box(NoopPublisher),
+        poll_tenant_authority,
+        poll_dlx_payload_protector,
+    );
 
     // bounded 轮询（最多 50 次 × 100ms = 5s），按 payload.sessionId 关联本轮 entry。
     // 2s relay 间隔保证：登录后立即 poll 时，relay 的下一次轮询还未到来，pending entry 仍存在。

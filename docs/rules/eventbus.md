@@ -47,6 +47,11 @@ per-domain URL（`RSS_<DOMAIN>_AMQP_URL`，DOMAIN 大写，缺省回退 `RSS_AMQ
 在 **split/per-domain 隔离拓扑**下，per-domain URL（`RSS_<DOMAIN>_AMQP_URL`）缺失必须**启动期 fail-closed**，不静默降级回共享 `RSS_AMQP_URL` / 共享凭据；非隔离（共享 broker）拓扑才允许回退 `RSS_AMQP_URL`。URL 含 user:pass，凭据 non-leak
 由 typed redaction funnel（Medium）守。权威语义见 `bootstrap::eventtransport` 模块的 rustdoc。
 
+Broker ACL 必须和 domain 绑定：relay producer 凭据只允许 publish 该 domain 的 exchange / routing key；
+consumer 凭据只允许 consume runtime 为其 declared 的 queue，并只能 bind contract registry 声明的 topic。
+AMQP header / MQTT user property 中的 `tenantId` 不是授权凭据；消费侧写 app DLX 前只信任 relay 签发的
+`tenantAuthority`，不能把 broker header tenant 当作 authority。
+
 ## 复用层选型（claimer / nonce，topology-gated）
 
 组合根的 outbox 消费幂等 claimer + 内部 listener service-token nonce store 同样经
@@ -175,7 +180,8 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
 |------|---------|--------|
 | handler `Ack` | commit key | `Ack` |
 | `Reject` / `Requeue` 耗尽 → DLX 写成功 | commit key | `Ack`（引擎自持 DLX，broker 移除） |
-| DLX 写失败 | release key | `Requeue`（broker 重投重试 DLX，防静默丢失） |
+| DLX 写失败 + release 成功 | release key | `Requeue`（broker 重投重试 DLX，防静默丢失） |
+| DLX 写失败 + release 失败 | release 失败，发 `consumer_release_failed_total{domain}` | `Reject`（避免 claim TTL 窗口内重投被 Duplicate→Ack 吞掉） |
 | 幂等 `try_claim` 瞬态 Err（`Transient`） | 不 commit | `Requeue`（退避重投） |
 | 幂等 `try_claim` 永久 Err（`Permanent`/`Invariant`，如鉴权/协议配置错） | 不 commit | `Reject`（→DLX，不无限重投，#1354） |
 | 租约丢失（续租或 commit CAS 返 `LeaseOutcome::Lost`，#1213） | cancel handler / 不 commit（hard-fence） | `Requeue`（claim 已被他人重捞，不双写 done） |
@@ -222,14 +228,28 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
 ## DLX 与幂等
 
 - 永久错误进入 DLX。统一审计表为 `dead_letter`，`source_kind` 闭值集为 `consumer` / `outbox_relay` / `saga`
-  （`legacy` 仅迁移前历史行）。`dead_letter.metadata` 保留 delivery envelope metadata；list API 只返回
-  payload 长度，不返回 payload 内容；返回 `DlqListResult { data, has_more, next_cursor }`，调用方必须用
-  `next_cursor` 分页，不能假设一次 `Vec` 即完整队列。
+  （`legacy` 仅迁移前历史行）。`dead_letter.metadata` 保留 delivery envelope metadata；`consumer`
+  来源必须记录 subscription `consumer_group`，非 consumer 来源写 `NULL`。PG `original_entry` 只允许
+  `KeyProvider`/Vault transit 加密后的 `{"ciphertext":[...]}` shape，并同时写
+  `original_entry_key_ref`、`original_entry_payload_len`、`original_entry_encoding='key-provider-v1'`；
+  `{"bytes":[...]}` 明文 shape 禁止写入且 replay 必须拒绝。新增 migration 若发现既有 `dead_letter`
+  行直接 fail-fast，不做 plaintext 迁移。
+- durable runtime 必须配置 `RSS_DLX_PAYLOAD_KEY_NAME` 以及 Vault transit provider
+  `RSS_VAULT_ADDR` / `RSS_VAULT_TOKEN` / `RSS_VAULT_TRANSIT_MOUNT`；broker tenant authority 另必填
+  `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`，可选 `RSS_TENANT_AUTHORITY_TTL_SECS`（默认 3600）和
+  `RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS`（默认 60，上限 300）。DLX list API 只返回 payload 长度与摘要元数据，
+  不返回 payload 内容；返回 `DlqListResult { data, has_more, next_cursor }`，`next_cursor` 是
+  `(last_attempt_epoch_secs DESC, kind, id)` keyset cursor，调用方必须用它稳定续页，不能用 offset 或假设一次
+  `Vec` 即完整队列。
 - 当前只提供内部 Rust API：`eventexec::DlqStore` + `PgInfraDeps::dlq()`。CLI / HTTP 管控面不在本轮。
 - Consumer/saga `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
-  `IdemKey`，插入一条新的 outbox 行；不得删除原 `dead_letter`，不得重置 `inbox_dedup done`，不得直接
-  broker replay。Outbox relay DLX redrive 同样必须传 `OperatorDlqCapability`，只恢复原 outbox 行为
-  `pending`。
+  `IdemKey`，由同一 `KeyProvider` 解密原 payload 后插入一条新的 outbox 行；不得删除原 `dead_letter`，
+  不得重置 `inbox_dedup done`，不得直接 broker replay。Outbox relay DLX redrive 同样必须传
+  `OperatorDlqCapability`，只恢复原 outbox 行为 `pending`；outbox DLX payload 副本保留在 `dead_letter`
+  用于审计，不参与 redrive。`OperatorDlqCapability::issue_for_authorized_operator()` 只能在 admin/PDP 边界
+  签发，调用点由 dylint `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；replay decrypt
+  只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与 `Forbidden/NotFound`
+  保留为 operator 可区分的依赖/配置错误。
 - PG outbox relay claim **与** consumer inbox claim 均写入 lease/fencing token；所有状态回写（commit / extend /
   release）以 lease 做 CAS。inbox lease 带 TTL，过期可重捞（crash-recovery），长 handler 经 `extend` 续租（#1213）。
 - crash-after-claim 后消息最多延迟 `INBOX_LEASE_TTL_SECONDS`（当前 60s）才被 TTL 重捞重跑（此前是永久静默丢失）；该上界当前不可按消费者配置，低延迟工作流需关注。

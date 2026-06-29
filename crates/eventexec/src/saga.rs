@@ -539,6 +539,7 @@ where
             self.owner.as_str(),
             self.contract_id,
             self.saga_id.as_uuid().to_string(),
+            None,
             payload,
             DeadLetterSummary::new(SAGA_COMPENSATION_FAILED),
             1,

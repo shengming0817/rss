@@ -27,6 +27,7 @@ use diport::{
 };
 
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
+use crate::tenant_authority::TenantAuthority;
 
 /// 命令幂等 key（DispatchId）—— producer mint、consumer claim 同源。包私有 [`IdemKey`]；无 public 裸构造，
 /// 仅经 [`from_idempotency_key`](Self::from_idempotency_key) funnel（业务无法把任意裸 `IdemKey` 当 DispatchId
@@ -124,6 +125,8 @@ pub async fn register_command_handler<S, R, H, Fut>(
     domain: impl Into<String>,
     contract_id: impl Into<String>,
     topic: impl Into<String>,
+    consumer_group: impl Into<String>,
+    tenant_authority: Arc<TenantAuthority>,
     handler: H,
     lease_cfg: LeaseConfig,
 ) where
@@ -134,7 +137,14 @@ pub async fn register_command_handler<S, R, H, Fut>(
 {
     let contract_id_s: Arc<str> = contract_id.into().into();
     let topic_s: Arc<str> = topic.into().into();
-    let meta = ConsumerMeta::new(domain, &*contract_id_s, &*topic_s);
+    let meta = ConsumerMeta::new(
+        domain.into(),
+        topic_owner(&topic_s),
+        &*contract_id_s,
+        &*topic_s,
+        consumer_group,
+        tenant_authority,
+    );
     let handler = Arc::new(handler);
     run_consumer(
         stream,
@@ -161,6 +171,10 @@ pub async fn register_command_handler<S, R, H, Fut>(
     .await;
 }
 
+fn topic_owner(topic: &str) -> &str {
+    topic.split('.').next().unwrap_or(topic)
+}
+
 /// 命令 payload 解码失败结构化 warn（contract_id/topic/message_id 归因；无 payload 字节，PII 边界同 DLX log）。
 fn log_decode_failed(message_id: &str, contract_id: &str, topic: &str) {
     tracing::warn!(
@@ -184,12 +198,15 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{
-        DynOutboxEmitter, EnvelopeMetadata, KEY_TENANT_ID, Message, OutboxEmitError, OutboxEmitter,
-        OutboxEnvelopeParts,
+        DynOutboxEmitter, EnvelopeMetadata, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message,
+        OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
     };
+    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{DispatchId, LeaseConfig, emit_async, register_command_handler};
     use crate::MAX_REDELIVERY;
+    use crate::TenantAuthority;
+    use crate::tenant_authority::TenantAuthorityBinding;
 
     /// 测试用 lease 配置（续租间隔大，命令消费测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
@@ -199,6 +216,35 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    }
+
+    #[derive(Debug)]
+    struct TestMac;
+
+    impl MacVerifier for TestMac {
+        fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+            let mut tag = Vec::from(key.as_bytes());
+            tag.extend_from_slice(message);
+            Mac::from_bytes(tag)
+        }
+
+        fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+            self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_authority() -> Arc<TenantAuthority> {
+        Arc::new(
+            TenantAuthority::new(
+                Arc::new(TestMac),
+                MacKey::from_bytes(vec![0x42; 32]),
+                60,
+                5,
+                Arc::new(|| 1_700_000_000),
+            )
+            .expect("valid tenant authority"),
+        )
     }
 
     // ── producer 侧 fake：捕获 emit 的 Entry topic/idem_key/payload + envelope ──────
@@ -436,12 +482,23 @@ mod tests {
         DynDeadLetterStore::new_box(ArcProxy(store))
     }
 
+    #[allow(clippy::expect_used)]
     fn stream_of(items: &[(&str, &[u8])]) -> diport::MessageStream {
         let msgs: Vec<Message> = items
             .iter()
             .map(|(id, p)| {
                 let mut md = EnvelopeMetadata::empty();
+                let token = tenant_authority()
+                    .sign(TenantAuthorityBinding::new(
+                        tenant(),
+                        "seed",
+                        "seed.do-thing",
+                        "seed.commands.do-thing",
+                        id,
+                    ))
+                    .expect("tenant authority test signing cannot fail");
                 md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+                md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
                 Message::new_with_metadata(*id, p.to_vec(), md)
             })
             .collect();
@@ -467,6 +524,8 @@ mod tests {
             "seed",
             "seed.do-thing",
             "seed.commands.do-thing",
+            "seed.do-thing.consumer",
+            tenant_authority(),
             move |req: DoThing| {
                 let seen2 = seen2.clone();
                 async move {
@@ -501,6 +560,8 @@ mod tests {
             "seed",
             "seed.do-thing",
             "seed.commands.do-thing",
+            "seed.do-thing.consumer",
+            tenant_authority(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {
@@ -531,6 +592,8 @@ mod tests {
             "seed",
             "seed.do-thing",
             "seed.commands.do-thing",
+            "seed.do-thing.consumer",
+            tenant_authority(),
             move |_req: DoThing| async move { HandleResult::ack() },
             lease_cfg(),
         )
@@ -592,6 +655,8 @@ mod tests {
             "seed",
             "seed.do-thing",
             "seed.commands.do-thing",
+            "seed.do-thing.consumer",
+            tenant_authority(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {

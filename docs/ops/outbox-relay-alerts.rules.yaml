@@ -1,8 +1,8 @@
 # Outbox relay 可观测性告警规则（#1209，归属 Feature #1208）。
 #
 # Prometheus rule_files 格式。metric/label 契约单源见 docs/rules/observability.md §Outbox Relay Metrics
-# 与 docs/ops/202606250430-002-outbox-relay-observability.md。改 metric 名/label 须同步 emit site
-# （crates/eventexec relay_metrics.rs）+ 本文件 + 上述文档。
+# 与 docs/ops/202606250430-002-outbox-relay-observability.md。改 metric 名/label 须同步 eventexec emit site
+# （relay / consumer metrics）+ 本文件 + 上述文档。
 #
 # 校验：promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
 #
@@ -75,3 +75,23 @@ groups:
         annotations:
           summary: "Outbox backlog 采样近 10min 无数据（采样器未运行/卡死或未接入 /metrics）"
           description: "10min 内无 outbox_pending_depth 新样本；检查 outbox_sampler probe 健康与 metrics-facade 装配。"
+
+      # Consumer app DLX store 写失败：死信未落库，worker health 已降级；必须人工排查 PG/Vault/KeyProvider。
+      - alert: ConsumerDlxWriteError
+        expr: sum by (domain) (increase(consumer_dlx_write_total{outcome="error"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consumer app DLX 写失败（domain={{ $labels.domain }}）"
+          description: "近 5min consumer_dlx_write_total{outcome=\"error\"} 增长 {{ $value }}（domain={{ $labels.domain }}）；检查 dead_letter 写入、Vault transit 与 consumer worker readyz。"
+
+      # DLX 写失败后 release claim 也失败：不能 Requeue，否则 claim TTL 窗口内可能 Duplicate→Ack 吞掉。
+      - alert: ConsumerReleaseFailed
+        expr: sum by (domain) (increase(consumer_release_failed_total[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consumer release claim 失败（domain={{ $labels.domain }}）"
+          description: "近 5min consumer_release_failed_total 增长 {{ $value }}（domain={{ $labels.domain }}）；该路径会 broker Reject，需检查 inbox claim store 和 DLX 写失败根因。"

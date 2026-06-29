@@ -119,6 +119,7 @@ pub struct DeadLetterRecord {
     domain: String,
     contract_id: String,
     topic: String,
+    consumer_group: Option<String>,
     tenant: vocab::TenantId,
     message_id: String,
     original_payload: RedactedBytes,
@@ -136,6 +137,7 @@ impl std::fmt::Debug for DeadLetterRecord {
             .field("domain", &self.domain)
             .field("contract_id", &self.contract_id)
             .field("topic", &self.topic)
+            .field("consumer_group", &self.consumer_group)
             .field("tenant", &self.tenant)
             .field("message_id", &self.message_id)
             .field("original_payload", &self.original_payload)
@@ -164,6 +166,7 @@ impl DeadLetterRecord {
         domain: impl Into<String>,
         contract_id: impl Into<String>,
         topic: impl Into<String>,
+        consumer_group: Option<String>,
         original_payload: Vec<u8>,
         error_summary: DeadLetterSummary,
         num_attempts: u32,
@@ -174,6 +177,7 @@ impl DeadLetterRecord {
             domain: domain.into(),
             contract_id: contract_id.into(),
             topic: topic.into(),
+            consumer_group,
             tenant,
             message_id: message_id.into(),
             original_payload: RedactedBytes::new(original_payload),
@@ -197,6 +201,11 @@ impl DeadLetterRecord {
     /// 借出 topic。
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    /// 借出 consumer group（consumer 来源有值；非 consumer 来源为 `None`）。
+    pub fn consumer_group(&self) -> Option<&str> {
+        self.consumer_group.as_deref()
     }
 
     /// 借出租户标识（DLX RLS scope）。
@@ -315,6 +324,7 @@ mod smoke {
             "identity",
             "contract-session",
             "session.created",
+            Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -397,6 +407,7 @@ mod pii_debug {
             "identity",
             "contract-session",
             "session.created",
+            Some("identity.session.consumer".to_string()),
             vec![0xDE, 0xAD, 0xBE, 0xEF],
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -436,6 +447,7 @@ mod pii_debug {
             "identity",
             "contract-session",
             "session.created",
+            Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -491,6 +503,7 @@ mod tenant_scope {
             "identity",
             "contract-session",
             "session.created",
+            Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -499,6 +512,7 @@ mod tenant_scope {
         );
         assert_eq!(record.tenant(), tenant);
         assert_eq!(record.message_id(), "msg-tenant-1");
+        assert_eq!(record.consumer_group(), Some("identity.session.consumer"));
         assert_eq!(record.source(), DeadLetterSource::Consumer);
     }
 }

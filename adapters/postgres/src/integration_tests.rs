@@ -77,6 +77,45 @@ async fn migrator_applies_and_is_idempotent() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE dead_letter (
+            tenant_id uuid NOT NULL,
+            message_id text NOT NULL,
+            original_entry jsonb NOT NULL
+        )
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO dead_letter (tenant_id, message_id, original_entry)
+        VALUES ($1::uuid, 'legacy-dlx-row', '{"bytes":[1,2,3]}'::jsonb)
+        "#,
+    )
+    .bind(COTX_TENANT_A)
+    .execute(&store.pool)
+    .await?;
+
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0028_encrypt_dead_letter_original_entry.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let err = result.expect_err("0028 must reject non-empty dead_letter");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("dead_letter must be empty before enabling encrypted original_entry"),
+        "unexpected migration error: {rendered}"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// RLS 能力门反例（**连接角色绕过**，最先 fail-fast）：superuser 连接（容器默认 `postgres`）→
 /// `Err(RlsBypassRole)`。superuser / BYPASSRLS 绕过 FORCE RLS，能力门须先拒（tenancy.md「生产 owner 须为
 /// 非 superuser」的运行期强制）。本测试**用默认 superuser 连接**直证绕过检测。
@@ -312,12 +351,17 @@ use consistency::{
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
-    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata, KEY_TENANT_ID,
-    Message, PublishRequest, Publisher, PublisherError,
+    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata,
+    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, PublishRequest, Publisher, PublisherError,
 };
-use eventexec::{ConsumerMeta, LeaseConfig, MAX_REDELIVERY, run_consumer_ackable};
+use eventexec::{
+    ConsumerMeta, LeaseConfig, MAX_REDELIVERY, TenantAuthority, TenantAuthorityBinding,
+    run_consumer_ackable,
+};
+use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use testkit::eventing_conformance as eventconf;
 
+use crate::dead_letter_payload::tests::test_protector;
 use crate::outbox::{
     MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, PgOutbox, SettleOutcome, append_outbox,
 };
@@ -395,6 +439,39 @@ fn make_test_env(domain: &str, contract_id: &str) -> OutboxEnvelope {
     )
 }
 
+#[derive(Debug)]
+struct TestMac;
+
+impl MacVerifier for TestMac {
+    fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+        let mut tag = Vec::from(key.as_bytes());
+        tag.extend_from_slice(message);
+        Mac::from_bytes(tag)
+    }
+
+    fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+        self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn test_tenant_authority() -> Arc<TenantAuthority> {
+    Arc::new(
+        TenantAuthority::new(
+            Arc::new(TestMac),
+            MacKey::from_bytes(vec![0x42; 32]),
+            3600,
+            60,
+            Arc::new(|| 1_700_000_000),
+        )
+        .expect("valid test tenant authority"),
+    )
+}
+
+fn test_dlx_payload_protector() -> crate::DlxPayloadProtector {
+    test_protector()
+}
+
 /// Fake publisher：记录调用次数，返回可控 Result。
 struct RecordingPublisher {
     result: fn() -> Result<(), PublisherError>,
@@ -465,7 +542,19 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
         result: pub_result_fn,
         calls: Arc::new(Mutex::new(0)),
     };
-    PgOutbox::new(store, DynPublisher::new_box(pub_))
+    make_pg_outbox_with_publisher(store, pub_)
+}
+
+fn make_pg_outbox_with_publisher(
+    store: &PgStore,
+    publisher: impl Publisher + Send + Sync + 'static,
+) -> PgOutbox {
+    PgOutbox::new(
+        store,
+        DynPublisher::new_box(publisher),
+        test_tenant_authority(),
+        test_dlx_payload_protector(),
+    )
 }
 
 /// Conformance publisher：记录 broker-visible message_id，并按脚本返回 publish 结果。
@@ -536,7 +625,7 @@ async fn conf_relay(
     mode: eventconf::PublishMode,
 ) -> Result<eventconf::RelayObservation, String> {
     let (publisher, messages) = ConformancePublisher::new(mode);
-    let outbox = PgOutbox::new(store, DynPublisher::new_box(publisher));
+    let outbox = make_pg_outbox_with_publisher(store, publisher);
     let entry = make_entry(&event_id);
     let disposition = outbox.relay(&entry).await.map_err(|e| format!("{e:?}"))?;
     let messages = messages.lock().unwrap_or_else(|e| e.into_inner());
@@ -953,9 +1042,22 @@ impl DeadLetterStore for FailingDlx {
     }
 }
 
-fn conf_consumer_metadata() -> EnvelopeMetadata {
+#[allow(clippy::expect_used)]
+fn conf_consumer_metadata(event_id: &str) -> EnvelopeMetadata {
+    let authority = test_tenant_authority();
+    let tenant = test_tenant();
+    let token = authority
+        .sign(TenantAuthorityBinding::new(
+            tenant,
+            "eventing-conf-consumer-domain",
+            "eventing-conf-consumer-contract",
+            "eventing.conf.consumer",
+            event_id,
+        ))
+        .expect("tenant authority test signing cannot fail");
     let mut metadata = EnvelopeMetadata::empty();
     metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
+    metadata.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
     metadata
 }
 
@@ -964,7 +1066,7 @@ fn conf_delivery_stream(event_id: &str) -> (DeliveryStream, Arc<ConformanceAcker
     let message = Message::new_with_metadata(
         event_id,
         b"eventing-conformance-payload".to_vec(),
-        conf_consumer_metadata(),
+        conf_consumer_metadata(event_id),
     );
     (
         Box::pin(futures::stream::iter(vec![Delivery::new(message, boxed)])),
@@ -972,11 +1074,14 @@ fn conf_delivery_stream(event_id: &str) -> (DeliveryStream, Arc<ConformanceAcker
     )
 }
 
-fn conf_consumer_meta() -> ConsumerMeta {
+fn conf_consumer_meta(group: &str) -> ConsumerMeta {
     ConsumerMeta::new(
+        "eventing-conf-consumer-domain",
         "eventing-conf-consumer-domain",
         "eventing-conf-consumer-contract",
         "eventing.conf.consumer",
+        group,
+        test_tenant_authority(),
     )
 }
 
@@ -1120,8 +1225,8 @@ async fn conf_duplicate_delivery(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
-        DynDeadLetterStore::new_box(store.dead_letter()),
-        conf_consumer_meta(),
+        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
+        conf_consumer_meta(&group),
         conf_ack_handler(Arc::clone(&calls)),
         conf_lease_cfg(),
     )
@@ -1153,8 +1258,8 @@ async fn conf_poison_delivery(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
-        DynDeadLetterStore::new_box(store.dead_letter()),
-        conf_consumer_meta(),
+        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
+        conf_consumer_meta(&group),
         conf_requeue_handler(Arc::clone(&calls)),
         conf_lease_cfg(),
     )
@@ -1189,7 +1294,7 @@ async fn conf_dlx_failure(
         stream,
         Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
         DynDeadLetterStore::new_box(FailingDlx::new(Arc::clone(&captured))),
-        conf_consumer_meta(),
+        conf_consumer_meta(&group),
         conf_requeue_handler(Arc::clone(&calls)),
         conf_lease_cfg(),
     )
@@ -1226,8 +1331,8 @@ async fn conf_malformed_delivery(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
-        DynDeadLetterStore::new_box(store.dead_letter()),
-        conf_consumer_meta(),
+        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
+        conf_consumer_meta(&group),
         conf_ack_handler(Arc::clone(&calls)),
         conf_lease_cfg(),
     )
@@ -1412,7 +1517,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
         .await?;
 
     let (pub_, calls) = RecordingPublisher::always_ok();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
     let disposition = outbox.relay(&entry).await?;
     assert_eq!(disposition, Disposition::Ack, "should Ack on publish Ok");
@@ -1460,7 +1565,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
         .await?;
 
     let (pub_, _) = RecordingPublisher::always_transient();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
     let disposition = outbox.relay(&entry).await?;
     assert_eq!(
@@ -1538,7 +1643,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
         .await?;
 
     let (pub_, _) = RecordingPublisher::always_transient();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
     let disposition = outbox.relay(&entry).await?;
     assert_eq!(
@@ -1590,7 +1695,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
         .await?;
 
     let (pub_, calls) = RecordingPublisher::always_permanent();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
     let disposition = outbox.relay(&entry).await?;
     assert_eq!(
@@ -1676,7 +1781,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
 
     // poll_pending 能捞回 stale publishing 行。
     let (pub_, calls) = RecordingPublisher::always_ok();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
     let entries = outbox.poll_pending("crash-domain", 10).await?;
     assert_eq!(
@@ -1751,8 +1856,8 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
         calls: calls_clone,
     };
 
-    let outbox1 = PgOutbox::new(&store, DynPublisher::new_box(pub1));
-    let outbox2 = PgOutbox::new(&store, DynPublisher::new_box(pub2));
+    let outbox1 = make_pg_outbox_with_publisher(&store, pub1);
+    let outbox2 = make_pg_outbox_with_publisher(&store, pub2);
 
     // 两个 relay 并发执行：只有一个能 CAS acquire 成功，另一个返回 Ack（0 行更新）。
     let entry_clone = entry.clone();
@@ -1993,7 +2098,7 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
     };
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let dl = store.dead_letter();
+    let dl = store.dead_letter(test_dlx_payload_protector());
     let domain = unique_domain("dl-sweep");
 
     // old 死信：写入 → 回拨 last_attempt_at 过期（2h 前）。
@@ -2003,6 +2108,7 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
         domain.as_str(),
         "contract-x",
         "dl.old",
+        Some("dl-sweep-consumer".to_string()),
         b"payload".to_vec(),
         DeadLetterSummary::new("aged dead letter"),
         10,
@@ -2027,6 +2133,7 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
         domain.as_str(),
         "contract-x",
         "dl.recent",
+        Some("dl-sweep-consumer".to_string()),
         b"payload".to_vec(),
         DeadLetterSummary::new("recent dead letter"),
         10,
@@ -2074,8 +2181,8 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
-    let dl = store.dead_letter();
-    let dlq = store.dlq();
+    let dl = store.dead_letter(test_dlx_payload_protector());
+    let dlq = store.dlq(test_dlx_payload_protector());
     let domain = unique_domain("dlq-replay");
     let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("consumer-msg");
@@ -2089,6 +2196,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         domain.as_str(),
         "contract-dlq",
         "test.event",
+        Some("dlq-replay-consumer".to_string()),
         b"consumer-payload".to_vec(),
         DeadLetterSummary::new("consumer exhausted"),
         3,
@@ -2110,6 +2218,53 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
 
     let replay_id = IdemKey::parse(&unique_event_id("replay")).unwrap();
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
+
+    sqlx::query("UPDATE dead_letter SET contract_id = $1 WHERE id = $2::uuid")
+        .bind("contract-dlq-tampered")
+        .bind(&dead_letter_id)
+        .execute(&store.pool)
+        .await?;
+    let tampered_contract = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&dead_letter_id)?,
+            IdemKey::parse(&unique_event_id("replay-contract-tampered")).unwrap(),
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(tampered_contract, Err(DlqError::InvalidPayload)),
+        "contract_id tamper must fail closed during decrypt"
+    );
+    sqlx::query("UPDATE dead_letter SET contract_id = $1 WHERE id = $2::uuid")
+        .bind("contract-dlq")
+        .bind(&dead_letter_id)
+        .execute(&store.pool)
+        .await?;
+
+    sqlx::query("UPDATE dead_letter SET consumer_group = $1 WHERE id = $2::uuid")
+        .bind("dlq-replay-consumer-tampered")
+        .bind(&dead_letter_id)
+        .execute(&store.pool)
+        .await?;
+    let tampered_group = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&dead_letter_id)?,
+            IdemKey::parse(&unique_event_id("replay-group-tampered")).unwrap(),
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(tampered_group, Err(DlqError::InvalidPayload)),
+        "consumer_group tamper must fail closed during decrypt"
+    );
+    sqlx::query("UPDATE dead_letter SET consumer_group = $1 WHERE id = $2::uuid")
+        .bind("dlq-replay-consumer")
+        .bind(&dead_letter_id)
+        .execute(&store.pool)
+        .await?;
+
     let outcome = dlq
         .replay_dead_letter(DlqReplayRequest::new(
             tenant,
@@ -2175,6 +2330,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         domain.as_str(),
         "contract-dlq",
         "test.saga",
+        None,
         b"saga-payload".to_vec(),
         DeadLetterSummary::new("saga compensation failed"),
         2,
@@ -2203,14 +2359,18 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     assert_eq!(saga_replay, DlqReplayOutcome::Inserted);
 
     let invalid_payload_id = unique_event_id("invalid-payload-dl");
-    let invalid_entry = serde_json::json!({"unexpected": true});
+    let invalid_entry = serde_json::json!({"ciphertext": true});
     let mut tx = store.pool.begin().await?;
     crate::cotx::set_local_tenant(&mut tx, tenant).await?;
     let (invalid_dead_letter_id,): (String,) = sqlx::query_as(
         r#"
         INSERT INTO dead_letter
-            (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, 'consumer', '{}'::jsonb)
+            (tenant_id, message_id, domain, contract_id, topic,
+             original_entry, original_entry_key_ref, original_entry_payload_len,
+             original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
+        VALUES ($1::uuid, $2, $3, $4, $5,
+                $6, 'dlx-test:1', 3,
+                $7, $8, $9, 'consumer', '{}'::jsonb)
         RETURNING id::text
         "#,
     )
@@ -2220,6 +2380,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     .bind("contract-dlq")
     .bind("test.invalid")
     .bind(sqlx::types::Json(&invalid_entry))
+    .bind(crate::dead_letter_payload::DLX_ORIGINAL_ENTRY_ENCODING)
     .bind("invalid payload row")
     .bind(1_i32)
     .fetch_one(&mut *tx)
@@ -2267,14 +2428,18 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     );
 
     let legacy_id = unique_event_id("legacy-dl");
-    let legacy_entry = serde_json::json!({"bytes": [1, 2, 3]});
+    let legacy_entry = serde_json::json!({"ciphertext": []});
     let mut tx = store.pool.begin().await?;
     crate::cotx::set_local_tenant(&mut tx, tenant).await?;
     let (legacy_dead_letter_id,): (String,) = sqlx::query_as(
         r#"
         INSERT INTO dead_letter
-            (tenant_id, message_id, domain, contract_id, topic, original_entry, error_summary, num_attempts, source_kind, metadata)
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, 'legacy', '{}'::jsonb)
+            (tenant_id, message_id, domain, contract_id, topic,
+             original_entry, original_entry_key_ref, original_entry_payload_len,
+             original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
+        VALUES ($1::uuid, $2, $3, $4, $5,
+                $6, 'dlx-test:1', 0,
+                $7, $8, $9, 'legacy', '{}'::jsonb)
         RETURNING id::text
         "#,
     )
@@ -2284,6 +2449,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     .bind("contract-dlq")
     .bind("test.event")
     .bind(sqlx::types::Json(&legacy_entry))
+    .bind(crate::dead_letter_payload::DLX_ORIGINAL_ENTRY_ENCODING)
     .bind("legacy row")
     .bind(1_i32)
     .fetch_one(&mut *tx)
@@ -2337,7 +2503,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .await?;
 
     let (publisher, calls) = RecordingPublisher::always_permanent();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(publisher));
+    let outbox = make_pg_outbox_with_publisher(&store, publisher);
     let disposition = outbox.relay(&entry).await?;
     assert_eq!(disposition, Disposition::Reject);
     assert_eq!(*calls.lock().unwrap(), 1);
@@ -2362,7 +2528,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(row.3, 1);
     assert_eq!(row.4["tenantId"], COTX_TENANT_A);
 
-    let dlq = store.dlq();
+    let dlq = store.dlq(test_dlx_payload_protector());
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let replay_id = IdemKey::parse(&unique_event_id("bad-replay")).unwrap();
     let replay = dlq
@@ -2457,7 +2623,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 
     // A 取租约 → tokenA（行置 publishing）。
     let lease = crate::outbox::acquire_lease(&store.pool, &event_id).await?;
-    let (_rc, token_a, _metadata_json) =
+    let (_rc, token_a, _metadata_json, _domain, _contract_id, _topic, _now_epoch) =
         lease.ok_or("acquire_lease should return a lease for pending row")?;
 
     // 模拟 B 重新 acquire：覆盖 lease_token = tokenB，A 的 tokenA 变 stale。
@@ -3233,7 +3399,7 @@ async fn t25_partition_serial_in_order() -> TestResult {
     }
 
     let (pub_ok, _) = RecordingPublisher::always_ok();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_ok));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_ok);
 
     // poll → 仅 H（S2/S3 被 gate）。
     let entries = outbox.poll_pending(&domain, 10).await?;
@@ -3536,7 +3702,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
     .await?;
 
     let (pub_ok, _) = RecordingPublisher::always_ok();
-    let outbox = PgOutbox::new(&store, DynPublisher::new_box(pub_ok));
+    let outbox = make_pg_outbox_with_publisher(&store, pub_ok);
 
     // poll → 仅 H（stale publishing 可捞，S2 被 gate）。
     let entries = outbox.poll_pending(&domain, 10).await?;

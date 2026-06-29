@@ -23,6 +23,7 @@ use diport::{Acker as _, Message, MessageStream, WritableDeadLetterSource};
 use tracing::Instrument as _;
 
 use crate::MAX_REDELIVERY;
+use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
 
 // ── LeaseConfig（消费侧租约续租配置，#1213）────────────────────────────────────
 
@@ -68,26 +69,39 @@ const SUMMARY_PERMANENT_REJECTION: &str = "permanent rejection";
 /// 用于 DLX 记录与结构化日志归因（domain / contract_id / topic 三元组稳定标识消费场景）。
 pub struct ConsumerMeta {
     domain: String,
+    authority_domain: String,
     contract_id: String,
     topic: String,
+    consumer_group: String,
+    tenant_authority: Arc<TenantAuthority>,
 }
 
 impl ConsumerMeta {
     /// 构造消费契约元数据。
     pub fn new(
         domain: impl Into<String>,
+        authority_domain: impl Into<String>,
         contract_id: impl Into<String>,
         topic: impl Into<String>,
+        consumer_group: impl Into<String>,
+        tenant_authority: Arc<TenantAuthority>,
     ) -> Self {
         Self {
             domain: domain.into(),
+            authority_domain: authority_domain.into(),
             contract_id: contract_id.into(),
             topic: topic.into(),
+            consumer_group: consumer_group.into(),
+            tenant_authority,
         }
     }
 
     pub(crate) fn domain(&self) -> &str {
         &self.domain
+    }
+
+    pub(crate) fn authority_domain(&self) -> &str {
+        &self.authority_domain
     }
 
     pub(crate) fn contract_id(&self) -> &str {
@@ -97,14 +111,38 @@ impl ConsumerMeta {
     pub(crate) fn topic(&self) -> &str {
         &self.topic
     }
+
+    pub(crate) fn consumer_group(&self) -> &str {
+        &self.consumer_group
+    }
+
+    fn verify_tenant_authority(
+        &self,
+        msg: &Message,
+    ) -> Result<vocab::TenantId, TenantAuthorityError> {
+        let tenant = msg
+            .metadata
+            .tenant_id()
+            .ok_or(TenantAuthorityError::TenantMissing)?;
+        self.tenant_authority.verify(
+            TenantAuthorityBinding::new(
+                tenant,
+                self.authority_domain(),
+                self.contract_id(),
+                self.topic(),
+                msg.id.as_str(),
+            ),
+            &msg.metadata,
+        )
+    }
 }
 
 // ── run_consumer（消费驱动入口）─────────────────────────────────────────────
 
 /// 消费驱动：逐条 claim→handle→commit/dlx（bounded 重投，幂等去重）。
 ///
-/// `group` 参数仅用于结构化日志归因（`IdempotencyStore` 实现在构造时已绑 group，
-/// try_claim/commit/release 以 `IdemKey` 为维度；group 重复传参会破坏简洁，故此处仅日志用）。
+/// consumer group 由 [`ConsumerMeta::consumer_group`] 承载并写入 DLX；`IdempotencyStore` 实现在构造时
+/// 已绑 group，try_claim/commit/release 以 `IdemKey` 为维度。
 /// 下游事件经 handler 自持 Publisher 发，不经本驱动中转（对齐 RSS DI port 隔离）。
 ///
 /// **重投次数**：handler 最多被调用 [`MAX_REDELIVERY`] 次（含首投），耗尽后消息进 DLX
@@ -147,7 +185,8 @@ pub async fn run_consumer<S, H>(
 ///
 /// **终态→AckAction 映射**（见 `consume_one`/`handle_fresh`/`dead_letter` 的 acker 传递）：
 /// - handler Ack / DLX 写成功 → broker `Ack`
-/// - DLX 写失败 / try_claim 返 Err / unknown SeenState → broker `Requeue`
+/// - DLX 写失败且 release 成功 / try_claim 返 Err / unknown SeenState → broker `Requeue`
+/// - DLX 写失败且 release 失败 → broker `Reject` + `consumer_release_failed_total{domain}`
 /// - Duplicate → broker `Ack`（幂等短路，已处理）
 /// - IdemKey parse 失败 → broker `Reject`（malformed，不重投）
 ///
@@ -502,18 +541,24 @@ async fn release_key<S>(
     key: &IdemKey,
     lease: &LeaseToken,
     message_id: &str,
-) where
+) -> bool
+where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
-    if let Err(e) = idempotency.release(key, lease).await {
-        tracing::error!(
-            message_id,
-            domain = meta.domain(),
-            contract_id = meta.contract_id(),
-            topic = meta.topic(),
-            error = %e,
-            "consumer: idempotency release failed after dlx write error"
-        );
+    match idempotency.release(key, lease).await {
+        Ok(()) => true,
+        Err(e) => {
+            emit_release_failed(meta.domain());
+            tracing::error!(
+                message_id,
+                domain = meta.domain(),
+                contract_id = meta.contract_id(),
+                topic = meta.topic(),
+                error = %e,
+                "consumer: idempotency release failed after dlx write error"
+            );
+            false
+        }
     }
 }
 
@@ -545,18 +590,21 @@ async fn dead_letter<S>(
 ) where
     S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
 {
-    let Some(tenant) = msg.metadata.tenant_id() else {
-        record_dead_letter_skip(meta, "tenant_missing");
-        log_dead_letter_tenant_missing(meta, msg.id.as_str());
-        release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
-        settle(
-            acker,
-            diport::AckAction::Reject,
-            meta.domain(),
-            msg.id.as_str(),
-        )
-        .await;
-        return;
+    let tenant = match meta.verify_tenant_authority(msg) {
+        Ok(tenant) => tenant,
+        Err(err) => {
+            record_dead_letter_skip(meta, err.skip_reason());
+            log_dead_letter_tenant_authority_failed(meta, msg.id.as_str(), err);
+            release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
+            settle(
+                acker,
+                diport::AckAction::Reject,
+                meta.domain(),
+                msg.id.as_str(),
+            )
+            .await;
+            return;
+        }
     };
 
     // T007.5：结构化 error，五字段全部出现（domain/contract_id/topic/num_attempts/error_summary）；
@@ -570,6 +618,7 @@ async fn dead_letter<S>(
         meta.domain(),
         meta.contract_id(),
         meta.topic(),
+        Some(meta.consumer_group().to_string()),
         msg.payload.as_bytes().to_vec(),
         // 类型层收口：摘要只能是编译期 const literal（SUMMARY_* 常量），不可由 runtime 数据伪造
         // （review #216 F7，INVARIANT DIPORT-DLX-SUMMARY-STATIC-01）。
@@ -594,15 +643,14 @@ async fn dead_letter<S>(
             // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 try_claim 回 Fresh、
             // 重新尝试 DLX，避免静默丢失（消息进 done + 死信未落 DB = 不可恢复审计盲点）。
             log_dlx_write_failed(meta, &e);
-            release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
-            // broker Requeue：DLX 未落，原投递重投等待再次尝试。
-            settle(
-                acker,
-                diport::AckAction::Requeue,
-                meta.domain(),
-                msg.id.as_str(),
-            )
-            .await;
+            let action = if release_key(idempotency, meta, key, lease, msg.id.as_str()).await {
+                // broker Requeue：DLX 未落，原投递重投等待再次尝试。
+                diport::AckAction::Requeue
+            } else {
+                // release 失败时 claim 仍可能存活；Requeue 会在 TTL 窗口内被 Duplicate→Ack 吞掉。
+                diport::AckAction::Reject
+            };
+            settle(acker, action, meta.domain(), msg.id.as_str()).await;
         }
     }
 }
@@ -737,14 +785,19 @@ fn log_dead_lettered(
     );
 }
 
-/// DLX tenant 信封缺失 / 非法：不写 app DLX，避免把 tenantless 行落入持久层。
-fn log_dead_letter_tenant_missing(meta: &ConsumerMeta, message_id: &str) {
+/// DLX tenant authority 缺失 / 非法：不写 app DLX，避免把不可信 tenant 落入持久层。
+fn log_dead_letter_tenant_authority_failed(
+    meta: &ConsumerMeta,
+    message_id: &str,
+    error: TenantAuthorityError,
+) {
     tracing::warn!(
         message_id,
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
-        "consumer: dead-letter skipped because tenantId metadata is missing or invalid"
+        reason = error.skip_reason(),
+        "consumer: dead-letter skipped because tenant authority is missing or invalid"
     );
 }
 
@@ -843,6 +896,16 @@ fn emit_lease_lost(domain: &str) {
     .increment(1);
 }
 
+/// release 失败事件 counter（#1356）：DLX 写失败后 claim 未释放，若继续 Requeue 会在 TTL 窗口内被
+/// Duplicate→Ack 吞掉；该指标驱动告警，结算路径同步改为 Reject。
+fn emit_release_failed(domain: &str) {
+    metrics::counter!(
+        "consumer_release_failed_total",
+        "domain" => domain.to_owned(),
+    )
+    .increment(1);
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -859,12 +922,14 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{AckAction, Acker, DeliveryStream, DynAcker};
-    use diport::{EnvelopeMetadata, KEY_TENANT_ID, Message};
+    use diport::{EnvelopeMetadata, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message};
+    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
         ConsumerMeta, LeaseConfig, record_dead_letter_skip, run_consumer, run_consumer_ackable,
     };
     use crate::MAX_REDELIVERY;
+    use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding};
 
     /// 测试用 lease 配置：续租间隔大（60s/3=20s），普通快测中续租永不触发（不干扰原终态断言）。
     fn lease_cfg_test() -> LeaseConfig {
@@ -884,18 +949,96 @@ mod tests {
         Box::pin(futures::stream::iter(msgs))
     }
 
-    fn tenant_metadata() -> EnvelopeMetadata {
+    #[derive(Debug)]
+    struct TestMac;
+
+    impl MacVerifier for TestMac {
+        fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
+            let mut tag = Vec::from(key.as_bytes());
+            tag.extend_from_slice(message);
+            Mac::from_bytes(tag)
+        }
+
+        fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
+            self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_authority() -> Arc<TenantAuthority> {
+        Arc::new(
+            TenantAuthority::new(
+                Arc::new(TestMac),
+                MacKey::from_bytes(vec![0x42; 32]),
+                60,
+                5,
+                Arc::new(|| 1_700_000_000),
+            )
+            .expect("valid tenant authority"),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_metadata_for(
+        message_id: &str,
+        domain: &str,
+        contract_id: &str,
+        topic: &str,
+    ) -> EnvelopeMetadata {
         let mut md = EnvelopeMetadata::empty();
-        md.insert_wire_pair(KEY_TENANT_ID, "f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        let authority = tenant_authority();
+        let token = authority
+            .sign(TenantAuthorityBinding::new(
+                tenant(),
+                domain,
+                contract_id,
+                topic,
+                message_id,
+            ))
+            .expect("tenant authority test signing cannot fail");
+        md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+        md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
         md
     }
 
+    fn tenant_metadata(message_id: &str) -> EnvelopeMetadata {
+        tenant_metadata_for(
+            message_id,
+            "identity",
+            "contract-session",
+            "session.created",
+        )
+    }
+
     fn message(id: &str, payload: &[u8]) -> Message {
-        Message::new_with_metadata(id, payload.to_vec(), tenant_metadata())
+        Message::new_with_metadata(id, payload.to_vec(), tenant_metadata(id))
     }
 
     fn meta() -> ConsumerMeta {
-        ConsumerMeta::new("identity", "contract-session", "session.created")
+        ConsumerMeta::new(
+            "identity",
+            "identity",
+            "contract-session",
+            "session.created",
+            "identity.session.consumer",
+            tenant_authority(),
+        )
+    }
+
+    fn cross_domain_meta() -> ConsumerMeta {
+        ConsumerMeta::new(
+            "audit",
+            "identity",
+            "contract-session",
+            "session.created",
+            "audit.session-created",
+            tenant_authority(),
+        )
     }
 
     // ── FakeIdempotencyStore ─────────────────────────────────────────────────
@@ -920,6 +1063,8 @@ mod tests {
         commit_fails: bool,
         /// commit 恒返 `LeaseOutcome::Lost`（#1213 commit 侧 hard-fence：租约丢失 → Requeue 不 Ack）。
         commit_loses_lease: bool,
+        /// release 恒失败 Err（#1356：DLX 写失败 + release 失败 → Reject）。
+        release_fails: bool,
         /// extend 在前 N 次返 `Held`、第 N+1 次起返 `Lost`（#1213 续租侧 hard-fence：模拟 handler 执行中租约被重捞）。
         extend_lost_after: Option<u32>,
         /// extend 前 N 次返 `Err`（瞬态后端故障，模拟续租抖动）；之后按 `extend_lost_after` 判定。
@@ -936,6 +1081,7 @@ mod tests {
                 extend_count: AtomicU32::new(0),
                 commit_fails,
                 commit_loses_lease: false,
+                release_fails: false,
                 extend_lost_after: None,
                 extend_errs_before: 0,
             })
@@ -980,6 +1126,7 @@ mod tests {
                 extend_count: AtomicU32::new(0),
                 commit_fails: false,
                 commit_loses_lease: true,
+                release_fails: false,
                 extend_lost_after: None,
                 extend_errs_before: 0,
             })
@@ -995,6 +1142,7 @@ mod tests {
                 extend_count: AtomicU32::new(0),
                 commit_fails: false,
                 commit_loses_lease: false,
+                release_fails: false,
                 extend_lost_after: Some(n),
                 extend_errs_before: 0,
             })
@@ -1010,6 +1158,7 @@ mod tests {
                 extend_count: AtomicU32::new(0),
                 commit_fails: false,
                 commit_loses_lease: false,
+                release_fails: false,
                 extend_lost_after: None,
                 extend_errs_before: n,
             })
@@ -1028,6 +1177,21 @@ mod tests {
 
         fn release_count(&self) -> u32 {
             self.release_count.load(Ordering::Acquire)
+        }
+
+        fn fresh_release_fails() -> Arc<Self> {
+            Arc::new(Self {
+                check_result: CheckResult::Fresh,
+                claim_count: AtomicU32::new(0),
+                commit_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                extend_count: AtomicU32::new(0),
+                commit_fails: false,
+                commit_loses_lease: false,
+                release_fails: true,
+                extend_lost_after: None,
+                extend_errs_before: 0,
+            })
         }
 
         fn extend_count(&self) -> u32 {
@@ -1092,6 +1256,11 @@ mod tests {
             _lease: &LeaseToken,
         ) -> Result<(), consistency::error::EngineError> {
             self.release_count.fetch_add(1, Ordering::Release);
+            if self.release_fails {
+                return Err(consistency::error::EngineError::new(
+                    consistency::error::EngineErrorKind::Transient,
+                ));
+            }
             Ok(())
         }
     }
@@ -1103,6 +1272,8 @@ mod tests {
     struct CapturedDlxRecord {
         tenant_id: String,
         message_id: String,
+        domain: String,
+        consumer_group: Option<String>,
         error_summary: String,
         num_attempts: u32,
     }
@@ -1141,6 +1312,8 @@ mod tests {
             self.written.lock().unwrap().push(CapturedDlxRecord {
                 tenant_id: record.tenant().to_string(),
                 message_id: record.message_id().to_string(),
+                domain: record.domain().to_string(),
+                consumer_group: record.consumer_group().map(str::to_string),
                 error_summary: record.error_summary().to_string(),
                 num_attempts: record.num_attempts(),
             });
@@ -1414,6 +1587,11 @@ mod tests {
             record.tenant_id, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
             "tenant_id 应来自 Message.metadata.tenantId"
         );
+        assert_eq!(
+            record.consumer_group.as_deref(),
+            Some("identity.session.consumer"),
+            "consumer_group 应来自 ConsumerMeta"
+        );
         assert_eq!(idem.commit_count(), 1, "commit 应调 1 次（dlx 终态收口）");
     }
 
@@ -1457,6 +1635,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tc3_cross_domain_authority_uses_producer_domain_but_records_consumer_domain() {
+        let idem = FakeIdempotencyStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+
+        run_consumer(
+            stream_of(&[("msg-cross-domain", b"payload")]),
+            idem.clone(),
+            dlx,
+            cross_domain_meta(),
+            handler_reject(handler_count.clone()),
+            lease_cfg_test(),
+        )
+        .await;
+
+        assert_eq!(dlx_store.write_count(), 1, "cross-domain DLX must verify");
+        #[allow(clippy::unwrap_used)]
+        let record = dlx_store.last_record().unwrap();
+        assert_eq!(
+            record.domain, "audit",
+            "DLX attribution remains consumer domain"
+        );
+        assert_eq!(idem.commit_count(), 1, "verified DLX should commit");
+    }
+
+    #[tokio::test]
     async fn tc3b_reject_missing_tenant_skips_app_dlx_and_settles_reject() {
         let idem = FakeIdempotencyStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
@@ -1491,6 +1696,120 @@ mod tests {
             vec![AckAction::Reject],
             "ackable 缺 tenant 应 settle Reject"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    // reason: table-driven test fixtures use known-valid authority inputs; failures should panic loudly.
+    fn tc3c_invalid_authority_tokens_skip_app_dlx_and_settle_reject() {
+        let cases: [(&str, EnvelopeMetadata, &str); 3] = [
+            {
+                let mut md = tenant_metadata("msg-bad-mac");
+                let mut token = md.get(KEY_TENANT_AUTHORITY).unwrap().to_string();
+                token.push('x');
+                md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+                ("msg-bad-mac", md, "tenant_authority_invalid")
+            },
+            {
+                let signer = TenantAuthority::new(
+                    Arc::new(TestMac),
+                    MacKey::from_bytes(vec![0x42; 32]),
+                    60,
+                    5,
+                    Arc::new(|| 1_699_999_900),
+                )
+                .expect("valid expired signer");
+                let mut md = EnvelopeMetadata::empty();
+                let token = signer
+                    .sign(TenantAuthorityBinding::new(
+                        tenant(),
+                        "identity",
+                        "contract-session",
+                        "session.created",
+                        "msg-expired",
+                    ))
+                    .expect("sign expired token");
+                md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+                md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+                ("msg-expired", md, "tenant_authority_expired")
+            },
+            {
+                let mut md = EnvelopeMetadata::empty();
+                let token = tenant_authority()
+                    .sign(TenantAuthorityBinding::new(
+                        tenant(),
+                        "settings",
+                        "contract-session",
+                        "session.created",
+                        "msg-binding",
+                    ))
+                    .expect("sign mismatched token");
+                md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+                md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+                ("msg-binding", md, "tenant_authority_binding_mismatch")
+            },
+        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for (message_id, metadata, reason) in cases {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let idem = FakeIdempotencyStore::fresh();
+            let dlx_store = FakeDeadLetterStore::new();
+            let dlx = fake_dlx(dlx_store.clone());
+            let handler_count = Arc::new(AtomicU32::new(0));
+            let (acker, boxed) = FakeAcker::new();
+            let stream: DeliveryStream =
+                Box::pin(futures::stream::iter(vec![diport::Delivery::new(
+                    Message::new_with_metadata(message_id, b"payload".to_vec(), metadata),
+                    boxed,
+                )]));
+
+            metrics::with_local_recorder(&recorder, || {
+                rt.block_on(run_consumer_ackable(
+                    stream,
+                    idem.clone(),
+                    dlx,
+                    meta(),
+                    handler_reject(handler_count.clone()),
+                    lease_cfg_test(),
+                ));
+            });
+
+            assert_eq!(
+                handler_count.load(Ordering::Relaxed),
+                1,
+                "{message_id}: handler 应调 1 次"
+            );
+            assert_eq!(
+                dlx_store.write_count(),
+                0,
+                "{message_id}: invalid authority 不得写 DLX"
+            );
+            assert_eq!(
+                idem.commit_count(),
+                0,
+                "{message_id}: invalid authority 不得 commit"
+            );
+            assert_eq!(
+                idem.release_count(),
+                1,
+                "{message_id}: invalid authority 应 release"
+            );
+            assert_eq!(acker.settled_actions(), vec![AckAction::Reject]);
+            let rendered = handle.render();
+            assert!(
+                rendered.contains("consumer_dlx_skip_total"),
+                "{message_id}: 缺 skip metric: {rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("reason=\"{reason}\"")),
+                "{message_id}: 缺 reason={reason}: {rendered}"
+            );
+        }
     }
 
     // ── TC9：reject(Invariant) → DLX 摘要反映 Invariant kind（#1125 anti-vacuity）──
@@ -1757,10 +2076,22 @@ mod tests {
             let handler_count = Arc::new(AtomicU32::new(0));
 
             // 唯一 meta（domain="tc5-domain"），与 TC2/TC3 "identity" 区分——anti-vacuity 核心。
-            let tc5_meta = ConsumerMeta::new("tc5-domain", "tc5-contract", "tc5-topic");
+            let tc5_meta = ConsumerMeta::new(
+                "tc5-domain",
+                "tc5-domain",
+                "tc5-contract",
+                "tc5-topic",
+                "tc5-group",
+                tenant_authority(),
+            );
             let payload = b"SENSITIVE_PAYLOAD_BYTES";
+            let msg = Message::new_with_metadata(
+                "msg-t007-tc5",
+                payload.to_vec(),
+                tenant_metadata_for("msg-t007-tc5", "tc5-domain", "tc5-contract", "tc5-topic"),
+            );
             run_consumer(
-                stream_of(&[("msg-t007-tc5", payload.as_ref())]),
+                Box::pin(futures::stream::iter(vec![msg])),
                 idem,
                 dlx,
                 tc5_meta,
@@ -1941,6 +2272,52 @@ mod tests {
             ackers[0].settled_actions(),
             vec![AckAction::Requeue],
             "DLX 写失败后 settle 应为 [Requeue]"
+        );
+    }
+
+    /// ACK-4b/#1356：handler Reject + DLX 写失败 + release 失败 → settle=[Reject]，不 Requeue。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn ack4b_dlx_fail_and_release_fail_settles_reject() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let idem = FakeIdempotencyStore::fresh_release_fails();
+        let dlx_store = AlwaysErrDeadLetterStore::new();
+        let dlx = fake_dlx_always_err(dlx_store.clone());
+        let handler_count = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("msg-ack-4b", b"payload")]);
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(run_consumer_ackable(
+                stream,
+                idem.clone(),
+                dlx,
+                meta(),
+                handler_reject(handler_count),
+                lease_cfg_test(),
+            ));
+        });
+
+        assert_eq!(dlx_store.write_count(), 1, "dlx write 应尝试 1 次");
+        assert_eq!(idem.commit_count(), 0, "双重失败时 commit 应 0");
+        assert_eq!(idem.release_count(), 1, "release 应尝试 1 次");
+        assert_eq!(
+            ackers[0].settled_actions(),
+            vec![AckAction::Reject],
+            "DLX 写失败叠加 release 失败必须 Reject，不能 Requeue 后被 Duplicate→Ack 吞掉"
+        );
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("consumer_release_failed_total"),
+            "缺 consumer_release_failed_total: {rendered}"
+        );
+        assert!(
+            rendered.contains("domain=\"identity\""),
+            "缺 domain label: {rendered}"
         );
     }
 
@@ -2174,11 +2551,11 @@ mod tests {
 
     /// Missing/invalid tenant on DLX path emits a dedicated skip metric so it is visible independently from Reject settle.
     #[test]
-    fn dead_letter_tenant_missing_emits_skip_metric() {
+    fn dead_letter_tenant_authority_binding_mismatch_emits_skip_metric() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_dead_letter_skip(&meta(), "tenant_missing");
+            record_dead_letter_skip(&meta(), "tenant_authority_binding_mismatch");
         });
         let rendered = handle.render();
         assert!(
@@ -2190,8 +2567,8 @@ mod tests {
             "缺 domain label: {rendered}"
         );
         assert!(
-            rendered.contains("reason=\"tenant_missing\""),
-            "缺 reason=tenant_missing label: {rendered}"
+            rendered.contains("reason=\"tenant_authority_binding_mismatch\""),
+            "缺 reason=tenant_authority_binding_mismatch label: {rendered}"
         );
     }
 

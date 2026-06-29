@@ -20,6 +20,8 @@
 
 #![cfg(feature = "integration")]
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,7 +79,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let group =
         ConsumerGroup::parse("audit.consumer-alo").map_err(|_| anyhow!("consumer group parse"))?;
     // 决策绑定（F6/C6）：经 resolve(Topology::Demo) 决策臂构造 in-mem claimer，不直接 raw-new。
-    let claimer = Arc::new(demo_claimer(group)?);
+    let claimer = Arc::new(demo_claimer(group.clone())?);
     let consumed = Arc::new(Mutex::new(Vec::<String>::new()));
     let consumed_for_handler = consumed.clone();
     let handler = move |message: Message| -> BoxFuture<'static, HandleResult> {
@@ -90,7 +92,14 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
             HandleResult::ack()
         })
     };
-    let meta = ConsumerMeta::new("audit", TOPIC, TOPIC);
+    let meta = ConsumerMeta::new(
+        "audit",
+        TOPIC.split('.').next().unwrap_or(TOPIC),
+        TOPIC,
+        TOPIC,
+        group.as_str(),
+        common::tenant_authority(),
+    );
 
     let drive = async {
         // 发布单条消息。
