@@ -9,7 +9,8 @@
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde::Serialize;
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 use vocab::{CoreError, CoreErrorKind, PublicDetail};
 
 /// Wire 错误响应 envelope（camelCase；error-handling.md §Wire 格式）。
@@ -24,8 +25,40 @@ struct ErrorEnvelope {
 struct ErrorBody {
     code: &'static str,
     message: &'static str,
-    details: Vec<serde_json::Value>,
+    details: Vec<WireDetail>,
     request_id: String,
+}
+
+/// 单条公开明细的 wire DTO：序列化为单键对象 `{ "<key>": <typed value> }`。
+struct WireDetail {
+    key: &'static str,
+    value: WireDetailValue,
+}
+
+enum WireDetailValue {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+    DurationMillis(u64),
+    UnixSecs(i64),
+}
+
+impl Serialize for WireDetail {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(1))?;
+        match &self.value {
+            WireDetailValue::Str(v) => map.serialize_entry(self.key, v)?,
+            WireDetailValue::Int(v) | WireDetailValue::UnixSecs(v) => {
+                map.serialize_entry(self.key, v)?;
+            }
+            WireDetailValue::Bool(v) => map.serialize_entry(self.key, v)?,
+            WireDetailValue::DurationMillis(v) => map.serialize_entry(self.key, v)?,
+        }
+        map.end()
+    }
 }
 
 /// kind → HTTP status 的**单一来源**（全 6 kind）。code 取 `kind.code()`、status 取此——二者同出 `kind`，
@@ -56,23 +89,21 @@ fn unix_secs(t: &std::time::SystemTime) -> i64 {
     }
 }
 
-/// 单条 `PublicDetail` → wire JSON `{ "<key>": <typed value> }`。typed 值形固定（wire 契约，golden 锁）：
+/// 单条 `PublicDetail` → wire DTO `{ "<key>": <typed value> }`。typed 值形固定（wire 契约，golden 锁）：
 /// `Duration`→毫秒 `u64`、`Time`→epoch 秒 `i64`。未知未来 variant（`#[non_exhaustive]`）fail-closed 丢弃。
-fn render_public_detail(detail: &PublicDetail) -> Option<serde_json::Value> {
-    let (key, value): (&'static str, serde_json::Value) = match detail {
-        PublicDetail::Str(k, v) => (k, serde_json::Value::from(v.as_str())),
-        PublicDetail::Int(k, v) => (k, serde_json::Value::from(*v)),
-        PublicDetail::Bool(k, v) => (k, serde_json::Value::from(*v)),
-        PublicDetail::Duration(k, d) => (
-            k,
-            serde_json::Value::from(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
-        ),
-        PublicDetail::Time(k, t) => (k, serde_json::Value::from(unix_secs(t))),
+fn render_public_detail(detail: &PublicDetail) -> Option<WireDetail> {
+    let (key, value) = match detail {
+        PublicDetail::Str(k, v) => (k, WireDetailValue::Str(v.clone())),
+        PublicDetail::Int(k, v) => (k, WireDetailValue::Int(*v)),
+        PublicDetail::Bool(k, v) => (k, WireDetailValue::Bool(*v)),
+        PublicDetail::Duration(k, d) => {
+            let millis = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+            (k, WireDetailValue::DurationMillis(millis))
+        }
+        PublicDetail::Time(k, t) => (k, WireDetailValue::UnixSecs(unix_secs(t))),
         _ => return None,
     };
-    let mut map = serde_json::Map::new();
-    map.insert(key.to_owned(), value);
-    Some(serde_json::Value::Object(map))
+    Some(WireDetail { key, value })
 }
 
 /// 构造 axum 错误响应：`CoreError` → JSON envelope。**4xx 下发 `public_details`、5xx 强制 strip**
@@ -287,6 +318,19 @@ mod tests {
         assert_eq!(d[2]["b"], true);
         assert_eq!(d[3]["d"], 1500, "Duration→毫秒"); // millis
         assert_eq!(d[4]["t"], 1000, "Time→epoch 秒"); // epoch secs
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn wire_public_detail_renderer_returns_typed_dto() {
+        let detail = render_public_detail(&PublicDetail::Duration(
+            "retryAfter",
+            std::time::Duration::from_millis(2500),
+        ))
+        .expect("known detail variant renders");
+        let typed: &WireDetail = &detail;
+        let json = serde_json::to_value(typed).expect("serialize typed detail");
+        assert_eq!(json["retryAfter"], 2500);
     }
 
     #[test]

@@ -1070,7 +1070,8 @@ const METRICS_CONTRACT_ID: &str = "framework.metrics";
 ///
 /// Health 是**框架/组合根**归属：域 crate 不声明 health 路由组，组合根在此经公开 funnel
 /// （`UnfinalizedRoutes::empty().nest_group::<Health>` → `finalize_auth`）挂载——产物仍是 `AuthenticatedRoutes`
-/// （ROUTE-AUTH-FUNNEL：health router 也经 finalize_auth + request_id/trace 中间件，与业务 listener 一致）。
+/// （ROUTE-AUTH-FUNNEL：health router 也经 finalize_auth + request_id/correlation 封口；trace 由
+/// `httpserve` 的 listener policy 对 Health 禁用，避免 probe/scrape span 噪声）。
 /// `NoAuth` plan（Health listener 无验签桥）。readyz handler 闭包持 `Arc<HealthReporter>`（`Send + Sync`，
 /// 整体非 `Sync` 的 `Registry` 无法进 handler）每请求 `report`（worst-of 聚合所有已注册探针，含 `configs_ready`）。
 ///

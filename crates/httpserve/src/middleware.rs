@@ -583,12 +583,8 @@ mod tests {
         );
     }
 
-    // F2（review）：`http.request` span 的 `correlation` 字段记录 `diagctx::correlation()`（入口 span ↔
-    // outbox envelope 同 `correlation` key，事件链路可反查入口请求）。字段写入是 `info_span!` 宏的编译期事实；
-    // 「correlation 在 trace 中间件层可读」由上方 `diagctx_correlation_visible_in_inner_middleware` 覆盖
-    // （trace 与该探针同为 correlation scope 内层）。span 字段值的运行期断言需 process-isolated tracing
-    // subscriber harness（`cargo test` 线程并行与 tracing 全局 callsite interest 缓存竞争）——本仓无此先例
-    // （既有 `request_id` 进 span 同样未做字段级单测），不为单字段引入 racy harness。
+    // `http.request` span 字段（method/path/request_id/correlation/status）的独立断言在 routes.rs 覆盖；
+    // 这里保留 correlation scope 层序的局部探针。
 
     // ── body_limit 测试 ──────────────────────────────────────────────────────────────────────────
 

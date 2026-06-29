@@ -250,7 +250,7 @@ impl AuthenticatedRoutes {
     /// 含 413 均追加安全头）。
     ///
     /// 层序（外→内）：`request_id` → `correlation` → security-headers → body-limit → 验签桥
-    /// → `trace` → `panic_recovery` → `Extension(plan)` → enforce → handler。
+    /// → listener trace policy（Health 无 `trace`）→ `panic_recovery` → `Extension(plan)` → enforce → handler。
     ///
     /// 生产出口 [`into_make_service`](Self::into_make_service) 与 test 出口
     /// [`into_router_for_test`](Self::into_router_for_test) 共用本 fn ⇒ 层序一致（test 不漂移）。
@@ -296,16 +296,36 @@ impl AuthenticatedRoutes {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TracePolicy {
+    Enabled,
+    Disabled,
+}
+
+impl TracePolicy {
+    /// 从 listener auth plan 派生 trace 策略。Health listener 是高频 probe/scrape 面，禁用
+    /// `http.request` span；未知未来 listener fail-closed 为 Enabled，避免静默丢可观测性。
+    fn from_plan(plan: AuthPlan) -> Self {
+        match plan.listener() {
+            ListenerKind::Health => Self::Disabled,
+            ListenerKind::Primary | ListenerKind::Internal | ListenerKind::Admin => Self::Enabled,
+            _ => Self::Enabled,
+        }
+    }
+}
+
 /// 所有 route 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 `AuthPlan`）。
 ///
 /// #1113 funnel transform：消费 [`UnfinalizedRoutes`] 产 [`AuthenticatedRoutes`]——本 fn 是后者**唯一**
 /// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
-/// （request-aware panic → 500 envelope）→ `trace`（最外）。`request_id` / `correlation` **不**在此挂——
-/// 二者均由唯一 bindable 出口 [`AuthenticatedRoutes::sealed_router`] 封为最外两层（ROUTE-REQUESTID-OUTERMOST-01 /
+/// （request-aware panic → 500 envelope）→ listener 派生 `trace`（Health listener 禁用；其余 listener 启用）。
+/// `request_id` / `correlation` **不**在此挂——二者均由唯一 bindable 出口
+/// [`AuthenticatedRoutes::sealed_router`] 封为最外两层（ROUTE-REQUESTID-OUTERMOST-01 /
 /// ROUTE-CORRELATION-INNER-REQUESTID-01 / #1320）。完整请求流（外→内）：`request_id` → `correlation` →
-/// 验签桥 → `trace` → `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService` → handler。
+/// 验签桥 → listener trace（Health 无）→ `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService`
+/// → handler。
 ///
 /// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
 /// `EnforceService`），其注入的 [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位；request_id
@@ -335,13 +355,16 @@ fn finalize_auth_inner(
     plan: AuthPlan,
     audit: Option<AuthAudit>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    let trace_policy = TracePolicy::from_plan(plan);
     let mut router = routes.router.layer(axum::Extension(plan));
     if let Some(audit) = audit {
         router = router.layer(axum::Extension(audit));
     }
-    let router = router
-        .layer(axum::middleware::from_fn(crate::middleware::panic_recovery))
-        .layer(axum::middleware::from_fn(crate::middleware::trace));
+    let router = router.layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
+    let router = match trace_policy {
+        TracePolicy::Enabled => router.layer(axum::middleware::from_fn(crate::middleware::trace)),
+        TracePolicy::Disabled => router,
+    };
     Ok(AuthenticatedRoutes::new(router))
 }
 
@@ -371,6 +394,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt as _;
 
     // 测试断言用 expect/unwrap：item-level carve-out（error-handling.md §Carve-out）。
@@ -391,12 +416,253 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct CapturedSpan {
+        name: &'static str,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct CapturedSpans {
+        spans: Mutex<Vec<CapturedSpan>>,
+    }
+
+    impl CapturedSpans {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        #[allow(clippy::expect_used)]
+        fn snapshot(&self) -> Vec<CapturedSpan> {
+            self.spans.lock().expect("capture lock").clone()
+        }
+    }
+
+    struct SpanVisit {
+        fields: HashMap<String, String>,
+    }
+
+    impl tracing::field::Visit for SpanVisit {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct SpanCapture {
+        captured: Arc<CapturedSpans>,
+    }
+
+    impl tracing::Subscriber for SpanCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        #[allow(clippy::expect_used)]
+        fn new_span(&self, attrs: &tracing::span::Attributes<'_>) -> tracing::Id {
+            let mut visitor = SpanVisit {
+                fields: HashMap::new(),
+            };
+            attrs.record(&mut visitor);
+            let mut spans = self.captured.spans.lock().expect("capture lock");
+            let id = u64::try_from(spans.len() + 1).unwrap_or(u64::MAX);
+            spans.push(CapturedSpan {
+                name: attrs.metadata().name(),
+                fields: visitor.fields,
+            });
+            tracing::Id::from_u64(id)
+        }
+
+        #[allow(clippy::expect_used)]
+        fn record(&self, span: &tracing::Id, values: &tracing::span::Record<'_>) {
+            let mut visitor = SpanVisit {
+                fields: HashMap::new(),
+            };
+            values.record(&mut visitor);
+            let idx = usize::try_from(span.into_u64())
+                .expect("span id fits usize")
+                .saturating_sub(1);
+            let mut spans = self.captured.spans.lock().expect("capture lock");
+            if let Some(existing) = spans.get_mut(idx) {
+                existing.fields.extend(visitor.fields);
+            }
+        }
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+    }
+
+    #[allow(clippy::expect_used)]
+    fn run_with_span_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedSpan>) {
+        let captured = CapturedSpans::new();
+        let subscriber = SpanCapture {
+            captured: Arc::clone(&captured),
+        };
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let result = tracing::dispatcher::with_default(&dispatch, f);
+        (result, captured.snapshot())
+    }
+
     #[test]
     fn listener_kind_maps_marker_to_value() {
         assert_eq!(Primary::KIND, ListenerKind::Primary);
         assert_eq!(Internal::KIND, ListenerKind::Internal);
         assert_eq!(Admin::KIND, ListenerKind::Admin);
         assert_eq!(Health::KIND, ListenerKind::Health);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn primary_listener_emits_http_request_span_fields() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (_, spans) = run_with_span_capture(|| {
+            rt.block_on(async {
+                let routes = UnfinalizedRoutes::empty()
+                    .nest_group::<Primary, core::convert::Infallible>("/api/v1", |rb| {
+                        Ok(rb.mount_primary(
+                            PrimaryRoute {
+                                method: Method::GET,
+                                path: "/x",
+                                contract_id: "test.primary.x",
+                                opt_out: Some(primitives::RouteAuthOptOut::Public),
+                            },
+                            get(|| async { "ok" }),
+                        ))
+                    })
+                    .expect("nest ok");
+                let plan =
+                    primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+                        .expect("plan");
+                let router = finalize_auth(routes, plan)
+                    .expect("finalize_auth")
+                    .into_router_for_test();
+                let req = Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/x")
+                    .header("x-request-id", "rid-span-1")
+                    .header("x-correlation-id", "corr-span-1")
+                    .body(Body::empty())
+                    .expect("request");
+                let resp = router.oneshot(req).await.expect("oneshot");
+                assert_eq!(resp.status(), StatusCode::OK);
+            });
+        });
+        let http_spans: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "http.request")
+            .collect();
+        assert_eq!(http_spans.len(), 1, "Primary request emits one span");
+        let fields = &http_spans[0].fields;
+        assert_eq!(fields.get("method").map(String::as_str), Some("GET"));
+        assert_eq!(fields.get("path").map(String::as_str), Some("/api/v1/x"));
+        assert_eq!(
+            fields.get("request_id").map(String::as_str),
+            Some("rid-span-1")
+        );
+        assert_eq!(
+            fields.get("correlation").map(String::as_str),
+            Some("corr-span-1")
+        );
+        assert_eq!(fields.get("status").map(String::as_str), Some("200"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn health_listener_serves_probe_routes_without_http_request_spans() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (_, spans) = run_with_span_capture(|| {
+            rt.block_on(async {
+                let routes = UnfinalizedRoutes::empty()
+                    .nest_group::<Health, core::convert::Infallible>("/health/v1", |rb| {
+                        Ok(rb
+                            .mount(
+                                Route {
+                                    method: Method::GET,
+                                    path: "/healthz",
+                                    contract_id: "framework.healthz",
+                                },
+                                crate::health::healthz(),
+                            )
+                            .mount(
+                                Route {
+                                    method: Method::GET,
+                                    path: "/readyz",
+                                    contract_id: "framework.readyz",
+                                },
+                                crate::health::readyz(|| {
+                                    primitives::HealthReport::aggregate(vec![
+                                        primitives::HealthCheck::new(
+                                            primitives::ProbeName::parse("db").expect("probe"),
+                                            primitives::HealthStatus::Healthy,
+                                            "ok",
+                                        ),
+                                    ])
+                                }),
+                            )
+                            .mount(
+                                Route {
+                                    method: Method::GET,
+                                    path: "/metrics",
+                                    contract_id: "framework.metrics",
+                                },
+                                crate::health::metrics(|| String::from("# HELP test_metric\n")),
+                            ))
+                    })
+                    .expect("nest ok");
+                let plan =
+                    primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+                        .expect("plan");
+                let router = finalize_auth(routes, plan)
+                    .expect("finalize_auth")
+                    .into_router_for_test();
+                for path in [
+                    "/health/v1/healthz",
+                    "/health/v1/readyz",
+                    "/health/v1/metrics",
+                ] {
+                    let resp = router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(Method::GET)
+                                .uri(path)
+                                .header("x-request-id", "rid-health")
+                                .body(Body::empty())
+                                .expect("request"),
+                        )
+                        .await
+                        .expect("oneshot");
+                    assert_eq!(resp.status(), StatusCode::OK, "{path}");
+                }
+            });
+        });
+        assert!(
+            spans.iter().all(|span| span.name != "http.request"),
+            "Health listener should not emit http.request spans: {spans:?}"
+        );
     }
 
     /// funnel round-trip：`unfinalized_for_test` → `finalize_auth` → `AuthenticatedRoutes` → 取回裸 Router

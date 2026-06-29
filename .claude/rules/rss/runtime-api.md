@@ -79,6 +79,10 @@ listener auth chain 必须显式声明。无认证使用 `AuthNone`，`None` 是
 request_id → correlation → security-headers → body-limit → rate-limit → 验签桥 → trace → panic_recovery → Extension(plan) → 路由匹配 → enforce → handler
 ```
 
+Health listener 例外：`finalize_auth` 从 `AuthPlan::listener()` 派生 trace policy，Health listener 不挂 `trace`
+（`/healthz` / `/readyz` / `/metrics` probe/scrape 不产生 `http.request` span）；未知未来 listener fail-closed
+为启用 trace。
+
 - **body-limit + security-headers**：由 `AuthenticatedRoutes::sealed_router`（唯一 bindable funnel）**无条件叠默认**——
   每个 bind / 测试出口的 router 都带且不可遗漏（can't-forget funnel，同 `request_id`，Hard）。策略经 typed
   `httpserve::EdgeHardening { body_limit: BodyLimit, headers: SecurityHeaders }`（两字段非 `Option`、必有值），
