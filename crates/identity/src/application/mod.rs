@@ -61,8 +61,14 @@ use generated::http::identity_v1::{
         IdentityRolesRevokeData, IdentityRolesRevokeResponse, SPEC as ROLES_REVOKE_HTTP_SPEC,
     },
 };
-use generated::http::{HttpAuthMode, HttpHeaderMode, HttpSpec};
-use httpserve::{Authenticated, Primary, PrimaryRoute};
+use generated::http::{
+    HttpAuthMode, HttpHeaderMode, HttpSpec, settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC,
+    settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
+};
+use httpserve::{
+    AuthorizedSubject, Primary, PrimaryRoute, RouteAuthorizationDecision,
+    RouteAuthorizationRequest, RouteAuthorizer, RoutePermission, RouteResourceScope,
+};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -752,24 +758,45 @@ fn spec_method(spec: &HttpSpec) -> Result<Method, KernelError> {
     Method::from_bytes(spec.method.as_bytes()).map_err(|_| KernelError::RouteGroup)
 }
 
-/// 从 generated SPEC 派生 PrimaryRoute；public 端点 opt-out，其余 permission 端点由 listener auth enforce。
-fn spec_opt_out(spec: &HttpSpec) -> Result<Option<RouteAuthOptOut>, KernelError> {
+fn spec_opt_out(spec: &HttpSpec) -> Result<RouteAuthOptOut, KernelError> {
     match spec.auth.mode {
-        HttpAuthMode::Public => Ok(Some(RouteAuthOptOut::Public)),
-        HttpAuthMode::Permission => Ok(None),
+        HttpAuthMode::Public => Ok(RouteAuthOptOut::Public),
         HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
             Err(KernelError::RouteGroup)
         }
+        HttpAuthMode::Permission => Err(KernelError::RouteGroup),
     }
 }
 
 fn primary_route_from_spec(spec: &HttpSpec) -> Result<PrimaryRoute, KernelError> {
-    Ok(PrimaryRoute {
-        method: spec_method(spec)?,
-        path: spec_relative_path(spec)?,
-        contract_id: spec.contract_id,
-        opt_out: spec_opt_out(spec)?,
-    })
+    let method = spec_method(spec)?;
+    let path = spec_relative_path(spec)?;
+    match spec.auth.mode {
+        HttpAuthMode::Permission => {
+            let permission = spec.auth.permission.ok_or(KernelError::RouteGroup)?;
+            let scope = match (spec.resource, spec.self_scoped) {
+                (Some(resource), false) => RouteResourceScope::PathParam(resource),
+                (None, true) => RouteResourceScope::SelfSubject,
+                (None, false) => RouteResourceScope::None,
+                (Some(_), true) => return Err(KernelError::RouteGroup),
+            };
+            Ok(PrimaryRoute::permission(
+                method,
+                path,
+                spec.contract_id,
+                RoutePermission { permission, scope },
+            ))
+        }
+        HttpAuthMode::Public => Ok(PrimaryRoute::opt_out(
+            method,
+            path,
+            spec.contract_id,
+            spec_opt_out(spec)?,
+        )),
+        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
+            Err(KernelError::RouteGroup)
+        }
+    }
 }
 
 fn tenant_header_name(spec: &HttpSpec) -> Result<&'static str, KernelError> {
@@ -950,45 +977,54 @@ enum ContractAuthPolicy {
     RolePermission(&'static str),
 }
 
-fn permission_from_spec(
+fn permission_from_request(
+    request: &RouteAuthorizationRequest,
     spec: &HttpSpec,
-    expected: &'static str,
 ) -> Result<&'static str, AuthReject> {
-    if spec.auth.mode != HttpAuthMode::Permission {
-        return Err(AuthReject::Forbidden);
-    }
-    let permission = spec.auth.permission.ok_or(AuthReject::Forbidden)?;
-    if permission == expected {
-        Ok(permission)
+    let expected = spec.auth.permission.ok_or(AuthReject::Forbidden)?;
+    if request.permission == expected {
+        Ok(request.permission)
     } else {
         Err(AuthReject::Forbidden)
     }
 }
 
-fn contract_auth_policy(spec: &HttpSpec) -> Result<ContractAuthPolicy, AuthReject> {
-    match spec.contract_id {
+fn builtin_admin_permission(contract_id: &'static str, permission: &str) -> bool {
+    [SETTINGS_CONFIG_HTTP_SPEC, SETTINGS_SECRET_HTTP_SPEC]
+        .iter()
+        .any(|spec| spec.contract_id == contract_id && spec.auth.permission == Some(permission))
+}
+
+fn contract_auth_policy(
+    request: &RouteAuthorizationRequest,
+) -> Result<ContractAuthPolicy, AuthReject> {
+    match request.contract_id {
         id if id == PROFILE_HTTP_SPEC.contract_id => {
-            permission_from_spec(spec, "identity:profile:read")?;
+            permission_from_request(request, &PROFILE_HTTP_SPEC)?;
             Ok(ContractAuthPolicy::SelfScoped)
         }
         id if id == PASSWORD_CHANGE_HTTP_SPEC.contract_id => {
-            permission_from_spec(spec, "identity:profile:write")?;
+            permission_from_request(request, &PASSWORD_CHANGE_HTTP_SPEC)?;
             Ok(ContractAuthPolicy::SelfScoped)
         }
         id if id == LOGOUT_HTTP_SPEC.contract_id => {
-            permission_from_spec(spec, "identity:session:write")?;
+            permission_from_request(request, &LOGOUT_HTTP_SPEC)?;
             Ok(ContractAuthPolicy::SelfScoped)
         }
         id if id == ROLES_ASSIGN_HTTP_SPEC.contract_id => {
-            permission_from_spec(spec, "identity:role:assign")
+            permission_from_request(request, &ROLES_ASSIGN_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
         id if id == ROLES_LIST_HTTP_SPEC.contract_id => {
-            permission_from_spec(spec, "identity:role:read").map(ContractAuthPolicy::RolePermission)
+            permission_from_request(request, &ROLES_LIST_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
         }
         id if id == ROLES_REVOKE_HTTP_SPEC.contract_id => {
-            permission_from_spec(spec, "identity:role:revoke")
+            permission_from_request(request, &ROLES_REVOKE_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
+        }
+        _ if request.resource.is_none() => {
+            Ok(ContractAuthPolicy::RolePermission(request.permission))
         }
         _ => Err(AuthReject::Forbidden),
     }
@@ -1002,13 +1038,24 @@ impl ContractAuthorizer {
         Self { roles, bindings }
     }
 
-    async fn authorize(&self, ctx: &AuthSubjectContext, spec: &HttpSpec) -> Result<(), AuthReject> {
-        match contract_auth_policy(spec)? {
+    async fn authorize_request(
+        &self,
+        request: &RouteAuthorizationRequest,
+    ) -> Result<(), AuthReject> {
+        let ctx = AuthSubjectContext {
+            tenant: request.tenant_id.ok_or(AuthReject::Forbidden)?,
+            subject: request.principal_id.clone(),
+            kind: request.principal_kind,
+        };
+        match contract_auth_policy(request)? {
             ContractAuthPolicy::SelfScoped => {
                 if matches!(
                     ctx.kind,
                     vocab::PrincipalKind::User | vocab::PrincipalKind::Admin
-                ) && !ctx.subject.is_empty()
+                ) && request
+                    .resource
+                    .as_ref()
+                    .is_some_and(|resource| resource.id() == ctx.subject)
                 {
                     Ok(())
                 } else {
@@ -1016,7 +1063,7 @@ impl ContractAuthorizer {
                 }
             }
             ContractAuthPolicy::RolePermission(permission) => {
-                self.authorize_role_permission(ctx, spec.contract_id, permission)
+                self.authorize_role_permission(&ctx, request.contract_id, permission)
                     .await
             }
         }
@@ -1030,6 +1077,9 @@ impl ContractAuthorizer {
     ) -> Result<(), AuthReject> {
         if ctx.kind != vocab::PrincipalKind::Admin {
             return Err(AuthReject::Forbidden);
+        }
+        if builtin_admin_permission(contract_id, permission) {
+            return Ok(());
         }
         let bindings = self
             .bindings
@@ -1071,22 +1121,34 @@ impl ContractAuthorizer {
     }
 }
 
+impl RouteAuthorizer for ContractAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        request: RouteAuthorizationRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RouteAuthorizationDecision> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match self.authorize_request(&request).await {
+                Ok(()) => RouteAuthorizationDecision::Allow,
+                Err(_) => RouteAuthorizationDecision::Deny,
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
 struct RbacHandlerState {
     service: Arc<RbacAdminService>,
-    authorizer: Arc<ContractAuthorizer>,
 }
 
 struct SelfServiceHandlerState<S> {
     service: Arc<LoginService<S>>,
-    authorizer: Arc<ContractAuthorizer>,
 }
 
 impl<S> Clone for SelfServiceHandlerState<S> {
     fn clone(&self) -> Self {
         Self {
             service: Arc::clone(&self.service),
-            authorizer: Arc::clone(&self.authorizer),
         }
     }
 }
@@ -1094,7 +1156,6 @@ impl<S> Clone for SelfServiceHandlerState<S> {
 #[derive(Clone)]
 struct RolesListHandlerState {
     roles: Arc<DynRoleRepo<'static>>,
-    authorizer: Arc<ContractAuthorizer>,
 }
 
 /// 认证拒因（small；避免 `Result<_, Response>` 触 clippy `result_large_err`）。
@@ -1127,35 +1188,19 @@ fn profile_kind_wire(kind: vocab::PrincipalKind) -> Result<IdentityProfileDataKi
 fn authenticated_subject_context(req: &Request<Body>) -> Result<AuthSubjectContext, AuthReject> {
     let auth = req
         .extensions()
-        .get::<Authenticated>()
+        .get::<AuthorizedSubject>()
         .ok_or(AuthReject::Unauthenticated)?;
-    let tenant = auth.tenant_id().ok_or(AuthReject::Forbidden)?;
-    let kind = auth.principal_kind();
     Ok(AuthSubjectContext {
-        tenant,
-        subject: auth.self_scoped_principal_id().to_string(),
-        kind,
+        tenant: auth.tenant_id(),
+        subject: auth.principal_id().to_string(),
+        kind: auth.principal_kind(),
     })
 }
 
-async fn authorized_subject_context(
-    ctx: AuthSubjectContext,
-    spec: &HttpSpec,
-    authorizer: &ContractAuthorizer,
-) -> Result<AuthSubjectContext, AuthReject> {
-    authorizer.authorize(&ctx, spec).await?;
-    Ok(ctx)
-}
-
-async fn authorized_user_context(
-    ctx: AuthSubjectContext,
-    spec: &HttpSpec,
-    authorizer: &ContractAuthorizer,
-) -> Result<AuthUserContext, AuthReject> {
-    let auth = authorized_subject_context(ctx, spec, authorizer).await?;
-    let user_id = ids::UserId::parse(&auth.subject).map_err(|_| AuthReject::Forbidden)?;
+fn authorized_user_context(ctx: AuthSubjectContext) -> Result<AuthUserContext, AuthReject> {
+    let user_id = ids::UserId::parse(&ctx.subject).map_err(|_| AuthReject::Forbidden)?;
     Ok(AuthUserContext {
-        tenant: auth.tenant,
+        tenant: ctx.tenant,
         user_id,
     })
 }
@@ -1198,11 +1243,10 @@ async fn roles_assign_handler(
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
-    let auth =
-        match authorized_user_context(subject, &ROLES_ASSIGN_HTTP_SPEC, &state.authorizer).await {
-            Ok(auth) => auth,
-            Err(reject) => return reject.into_response(&request_id),
-        };
+    let auth = match authorized_user_context(subject) {
+        Ok(auth) => auth,
+        Err(reject) => return reject.into_response(&request_id),
+    };
     let body = match body_bytes(req, &request_id).await {
         Ok(body) => body,
         Err(resp) => return resp,
@@ -1244,11 +1288,10 @@ async fn roles_revoke_handler(
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
-    let auth =
-        match authorized_user_context(subject, &ROLES_REVOKE_HTTP_SPEC, &state.authorizer).await {
-            Ok(auth) => auth,
-            Err(reject) => return reject.into_response(&request_id),
-        };
+    let auth = match authorized_user_context(subject) {
+        Ok(auth) => auth,
+        Err(reject) => return reject.into_response(&request_id),
+    };
     let role_id = match role_id_from_wire(&role_id_raw) {
         Ok(role_id) => role_id,
         Err(()) => return httpserve::error::validation_bad_request(&request_id),
@@ -1281,11 +1324,7 @@ async fn roles_list_handler(
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
-    let auth =
-        match authorized_subject_context(subject, &ROLES_LIST_HTTP_SPEC, &state.authorizer).await {
-            Ok(auth) => auth,
-            Err(reject) => return reject.into_response(&request_id),
-        };
+    let auth = subject;
     let request = match Query::<IdentityRolesListRequest>::try_from_uri(req.uri()) {
         Ok(Query(request)) => request,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
@@ -1353,19 +1392,13 @@ async fn roles_list_handler(
         .into_response()
 }
 
-async fn profile_handler(
-    State(authorizer): State<Arc<ContractAuthorizer>>,
-    req: Request<Body>,
-) -> Response {
+async fn profile_handler(req: Request<Body>) -> Response {
     let request_id = request_id_from(&req);
     let subject = match authenticated_subject_context(&req) {
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
-    let auth = match authorized_subject_context(subject, &PROFILE_HTTP_SPEC, &authorizer).await {
-        Ok(auth) => auth,
-        Err(reject) => return reject.into_response(&request_id),
-    };
+    let auth = subject;
     let kind = match profile_kind_wire(auth.kind) {
         Ok(kind) => kind,
         Err(reject) => return reject.into_response(&request_id),
@@ -1392,9 +1425,7 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
-    let auth = match authorized_user_context(subject, &PASSWORD_CHANGE_HTTP_SPEC, &state.authorizer)
-        .await
-    {
+    let auth = match authorized_user_context(subject) {
         Ok(auth) => auth,
         Err(reject) => return reject.into_response(&request_id),
     };
@@ -1436,7 +1467,7 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
-    let auth = match authorized_user_context(subject, &LOGOUT_HTTP_SPEC, &state.authorizer).await {
+    let auth = match authorized_user_context(subject) {
         Ok(auth) => auth,
         Err(reject) => return reject.into_response(&request_id),
     };
@@ -1560,6 +1591,10 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             authorizer,
         }
     }
+
+    pub fn primary_authorizer(&self) -> Arc<dyn RouteAuthorizer> {
+        self.authorizer.clone()
+    }
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
@@ -1568,17 +1603,13 @@ impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
         let refresh = Arc::clone(&self.refresh);
         let rbac_assign = RbacHandlerState {
             service: Arc::clone(&self.rbac_admin),
-            authorizer: Arc::clone(&self.authorizer),
         };
         let rbac_revoke = rbac_assign.clone();
         let roles = RolesListHandlerState {
             roles: Arc::clone(&self.roles),
-            authorizer: Arc::clone(&self.authorizer),
         };
-        let profile = Arc::clone(&self.authorizer);
         let password = SelfServiceHandlerState {
             service: Arc::clone(&self.login),
-            authorizer: Arc::clone(&self.authorizer),
         };
         let logout = password.clone();
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
@@ -1604,7 +1635,7 @@ impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
             );
             let rb = rb.mount_primary(
                 primary_route_from_spec(&PROFILE_HTTP_SPEC)?,
-                get(profile_handler).with_state(profile),
+                get(profile_handler),
             );
             let rb = rb.mount_primary(
                 primary_route_from_spec(&PASSWORD_CHANGE_HTTP_SPEC)?,
@@ -1777,46 +1808,27 @@ mod tests {
         IdentityDomain::new(login, refresh, rbac_admin, roles_for_list, bindings)
     }
 
-    fn user_evidence(subject: &str) -> Authenticated {
-        Authenticated::new(
-            primitives::RequiredScheme::Jwt,
-            vocab::PrincipalKind::User,
-            subject,
-            Some(tid(CANON_TENANT)),
-        )
+    fn user_evidence(subject: &str) -> AuthorizedSubject {
+        AuthorizedSubject::for_test(tid(CANON_TENANT), vocab::PrincipalKind::User, subject, None)
     }
 
-    fn admin_evidence(subject: &str) -> Authenticated {
-        Authenticated::new(
-            primitives::RequiredScheme::Jwt,
+    fn admin_evidence(subject: &str) -> AuthorizedSubject {
+        AuthorizedSubject::for_test(
+            tid(CANON_TENANT),
             vocab::PrincipalKind::Admin,
             subject,
-            Some(tid(CANON_TENANT)),
+            None,
         )
     }
 
-    fn with_auth(router: axum::Router, auth: Authenticated) -> axum::Router {
+    fn with_auth(router: axum::Router, auth: AuthorizedSubject) -> axum::Router {
         router.layer(axum::Extension(auth))
-    }
-
-    fn empty_authorizer() -> Arc<ContractAuthorizer> {
-        Arc::new(ContractAuthorizer::new(
-            Arc::from(DynRoleRepo::new_box(
-                crate::internal::mem::InMemRoleRepo::new(),
-            )),
-            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
-                crate::internal::mem::InMemRoleBindingLifecycle::new(),
-            )),
-        ))
     }
 
     fn self_service_state(
         service: Arc<LoginService<TestSigner>>,
     ) -> SelfServiceHandlerState<TestSigner> {
-        SelfServiceHandlerState {
-            service,
-            authorizer: empty_authorizer(),
-        }
+        SelfServiceHandlerState { service }
     }
 
     #[allow(clippy::expect_used)]
@@ -1852,22 +1864,12 @@ mod tests {
         let binding_lifecycle: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(
             crate::ports::DynRoleBindingLifecycle::new_box(bindings.clone()),
         );
-        let authorizer = Arc::new(ContractAuthorizer::new(
-            Arc::clone(&roles),
-            Arc::clone(&binding_lifecycle),
-        ));
         let service = Arc::new(RbacAdminService::new(
             roles,
             binding_lifecycle,
             make_clock(1_000),
         ));
-        (
-            RbacHandlerState {
-                service,
-                authorizer,
-            },
-            bindings,
-        )
+        (RbacHandlerState { service }, bindings)
     }
 
     #[test]
@@ -2588,12 +2590,10 @@ mod tests {
         assert_eq!(LOGIN_HTTP_SPEC.method, "POST");
         assert_eq!(
             spec_opt_out(&LOGIN_HTTP_SPEC).expect("opt out"),
-            Some(RouteAuthOptOut::Public)
+            RouteAuthOptOut::Public
         );
         assert!(
-            spec_opt_out(&ROLES_ASSIGN_HTTP_SPEC)
-                .expect("permission opt out")
-                .is_none(),
+            spec_opt_out(&ROLES_ASSIGN_HTTP_SPEC).is_err(),
             "permission endpoint 不 opt-out"
         );
     }
@@ -2648,12 +2648,12 @@ mod tests {
             assert_eq!(spec.auth.permission, permission);
             if permission.is_some() {
                 assert_eq!(spec.auth.mode, HttpAuthMode::Permission);
-                assert_eq!(spec_opt_out(spec).expect("permission opt-out"), None);
+                assert!(spec_opt_out(spec).is_err());
             } else {
                 assert_eq!(spec.auth.mode, HttpAuthMode::Public);
                 assert_eq!(
                     spec_opt_out(spec).expect("public opt-out"),
-                    Some(RouteAuthOptOut::Public)
+                    RouteAuthOptOut::Public
                 );
             }
         }
@@ -2696,36 +2696,101 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn roles_assign_handler_user_without_permission_returns_403_and_zero_writes() {
-        let (service, bindings) =
-            rbac_state_with_role(role("role-admin", "Admin", &["identity:role:assign"])).await;
-        let router = with_auth(
-            axum::Router::new().route(
-                "/roles/{roleId}/bindings",
-                post(roles_assign_handler).with_state(service),
-            ),
-            user_evidence(CANON_USER),
-        );
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/roles/role-admin/bindings").json(&IdentityRolesAssignRequest {
-                subject: "target-user".to_string(),
-            }),
+    async fn contract_authorizer_denies_user_role_assign_permission() {
+        let repo = crate::internal::mem::InMemRoleRepo::new();
+        repo.save(
+            tid(CANON_TENANT),
+            role("role-admin", "Admin", &["identity:role:assign"]),
         )
         .await
-        .expect("call");
+        .expect("save role");
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    role("role-admin", "Admin", &[]).id(),
+                    CANON_USER,
+                ),
+            ));
+        let authorizer = ContractAuthorizer::new(roles, bindings);
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                permission: "identity:role:assign",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
 
-        resp.ensure_status(StatusCode::FORBIDDEN)
-            .expect("user lacks role assign permission");
-        assert_eq!(bindings.emitted().len(), 0, "forbidden role assign 零事件");
-        assert!(
-            !bindings.has_binding(
-                tid(CANON_TENANT),
-                role("role-admin", "Admin", &[]).id(),
-                "target-user"
-            ),
-            "forbidden role assign 不写 binding"
-        );
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_allows_builtin_admin_settings_permissions_without_role_binding() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let authorizer = ContractAuthorizer::new(roles, bindings);
+
+        for spec in [SETTINGS_CONFIG_HTTP_SPEC, SETTINGS_SECRET_HTTP_SPEC] {
+            let decision = authorizer
+                .authorize(RouteAuthorizationRequest {
+                    contract_id: spec.contract_id,
+                    permission: spec.auth.permission.expect("settings permission"),
+                    tenant_id: Some(tid(CANON_TENANT)),
+                    principal_kind: vocab::PrincipalKind::Admin,
+                    principal_id: CANON_USER.to_string(),
+                    resource: None,
+                })
+                .await;
+            assert_eq!(
+                decision,
+                RouteAuthorizationDecision::Allow,
+                "trusted Admin gets built-in settings permission for {}",
+                spec.contract_id
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_allows_non_identity_permission_route_by_rbac() {
+        let external_permission = "other:read";
+        let repo = crate::internal::mem::InMemRoleRepo::new();
+        repo.save(
+            tid(CANON_TENANT),
+            role("role-admin", "Admin", &[external_permission]),
+        )
+        .await
+        .expect("save role");
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    role("role-admin", "Admin", &[]).id(),
+                    CANON_USER,
+                ),
+            ));
+        let authorizer = ContractAuthorizer::new(roles, bindings);
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: external_permission,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
     }
 
     #[tokio::test]
@@ -2811,10 +2876,7 @@ mod tests {
             Arc::clone(&binding_lifecycle),
             make_clock(1_000),
         ));
-        let state = RbacHandlerState {
-            service,
-            authorizer: Arc::new(ContractAuthorizer::new(roles, binding_lifecycle)),
-        };
+        let state = RbacHandlerState { service };
         let router = with_auth(
             axum::Router::new().route(
                 "/roles/{roleId}/bindings/{subject}",
@@ -2865,10 +2927,7 @@ mod tests {
             Arc::clone(&binding_lifecycle),
             make_clock(1_000),
         ));
-        let state = RbacHandlerState {
-            service,
-            authorizer: Arc::new(ContractAuthorizer::new(roles, binding_lifecycle)),
-        };
+        let state = RbacHandlerState { service };
         let router = axum::Router::new().route(
             "/roles/{roleId}/bindings/{subject}",
             delete(roles_revoke_handler).with_state(state),
@@ -2919,18 +2978,9 @@ mod tests {
         repo.save(tid(CANON_TENANT), role("role-b", "B", &["docs:write"]))
             .await
             .expect("save b");
-        let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-            tid(CANON_TENANT),
-            role("role-a", "A", &[]).id(),
-            CANON_USER,
-        );
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
         let state = RolesListHandlerState {
             roles: Arc::clone(&roles),
-            authorizer: Arc::new(ContractAuthorizer::new(
-                roles,
-                Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(bindings)),
-            )),
         };
         let router = with_auth(
             axum::Router::new().route("/roles", get(roles_list_handler).with_state(state)),
@@ -2957,7 +3007,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn roles_list_handler_rejects_user_and_invalid_limit() {
+    async fn roles_list_handler_rejects_invalid_limit() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
             tid(CANON_TENANT),
@@ -2965,30 +3015,11 @@ mod tests {
         )
         .await
         .expect("save role");
-        let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-            tid(CANON_TENANT),
-            role("role-a", "A", &[]).id(),
-            CANON_USER,
-        );
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
         let state = RolesListHandlerState {
             roles: Arc::clone(&roles),
-            authorizer: Arc::new(ContractAuthorizer::new(
-                roles,
-                Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(bindings)),
-            )),
         };
         let router = axum::Router::new().route("/roles", get(roles_list_handler).with_state(state));
-
-        let forbidden = testkit::call(
-            with_auth(router.clone(), user_evidence(CANON_USER)),
-            ContractRequest::get("/roles"),
-        )
-        .await
-        .expect("call forbidden");
-        forbidden
-            .ensure_status(StatusCode::FORBIDDEN)
-            .expect("user lacks role read permission");
 
         let invalid_limit = testkit::call(
             with_auth(router, admin_evidence(CANON_USER)),
@@ -3005,10 +3036,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn profile_handler_returns_authenticated_self() {
         let router = with_auth(
-            axum::Router::new().route(
-                "/profile",
-                get(profile_handler).with_state(empty_authorizer()),
-            ),
+            axum::Router::new().route("/profile", get(profile_handler)),
             user_evidence(CANON_USER),
         );
         let resp = testkit::call(router, ContractRequest::get("/profile"))
@@ -3026,10 +3054,7 @@ mod tests {
     async fn profile_handler_uses_generated_path_and_allows_non_uuid_subject() {
         let subject = "opaque-user-subject";
         let router = with_auth(
-            axum::Router::new().route(
-                PROFILE_HTTP_SPEC.path,
-                get(profile_handler).with_state(empty_authorizer()),
-            ),
+            axum::Router::new().route(PROFILE_HTTP_SPEC.path, get(profile_handler)),
             user_evidence(subject),
         );
         let resp = testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.path))
@@ -3044,10 +3069,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn profile_handler_missing_auth_returns_401() {
-        let router = axum::Router::new().route(
-            PROFILE_HTTP_SPEC.path,
-            get(profile_handler).with_state(empty_authorizer()),
-        );
+        let router = axum::Router::new().route(PROFILE_HTTP_SPEC.path, get(profile_handler));
         let resp = testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.path))
             .await
             .expect("call");

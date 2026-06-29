@@ -200,6 +200,8 @@ pub mod login {
             reason: Some("login is pre-auth; tenant scope is populated from X-Tenant-ID"),
             permission: None,
         },
+        resource: None,
+        self_scoped: false,
         headers: &[super::super::HttpHeaderSpec {
             name: "X-Tenant-ID",
             mode: super::super::HttpHeaderMode::PopulateOnly,
@@ -348,6 +350,8 @@ pub mod logout {
             reason: None,
             permission: Some("identity:session:write"),
         },
+        resource: None,
+        self_scoped: true,
         headers: &[],
     };
 }
@@ -500,6 +504,8 @@ pub mod password_change {
             reason: None,
             permission: Some("identity:profile:write"),
         },
+        resource: None,
+        self_scoped: true,
         headers: &[],
     };
 }
@@ -768,6 +774,8 @@ pub mod profile {
             reason: None,
             permission: Some("identity:profile:read"),
         },
+        resource: None,
+        self_scoped: true,
         headers: &[],
     };
 }
@@ -943,6 +951,8 @@ pub mod refresh {
             ),
             permission: None,
         },
+        resource: None,
+        self_scoped: false,
         headers: &[super::super::HttpHeaderSpec {
             name: "X-Tenant-ID",
             mode: super::super::HttpHeaderMode::PopulateOnly,
@@ -1089,6 +1099,8 @@ pub mod roles_assign {
             reason: None,
             permission: Some("identity:role:assign"),
         },
+        resource: None,
+        self_scoped: false,
         headers: &[],
     };
 }
@@ -1308,6 +1320,8 @@ pub mod roles_list {
             reason: None,
             permission: Some("identity:role:read"),
         },
+        resource: None,
+        self_scoped: false,
         headers: &[],
     };
 }
@@ -1445,6 +1459,8 @@ pub mod roles_revoke {
             reason: None,
             permission: Some("identity:role:revoke"),
         },
+        resource: None,
+        self_scoped: false,
         headers: &[],
     };
 }

@@ -8,6 +8,8 @@ pub struct HttpSpec {
     pub path: &'static str,
     pub method: &'static str,
     pub auth: HttpAuthSpec,
+    pub resource: Option<&'static str>,
+    pub self_scoped: bool,
     pub headers: &'static [HttpHeaderSpec],
 }
 

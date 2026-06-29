@@ -1630,6 +1630,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_handler_local_principal_authz"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "httpserve",
+ "primitives",
+ "vocab",
+]
+
+[[package]]
 name = "rss_partition_serial_allowlist"
 version = "0.0.0"
 dependencies = [

@@ -244,11 +244,13 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
     )
 }
 
-/// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 `finalize_auth` + 外层验签桥
+/// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 auth finalizer + 外层验签桥
 /// + rate-limit 中间件（组合根叠加点，INVARIANT RATELIMIT-BEFORE-AUTH-01）。
 ///
-/// 每 listener：`finalize_auth(routes, plan)`（消费 `UnfinalizedRoutes` 产 `AuthenticatedRoutes`，注入
-/// AuthPlan 与 framework 中间件）→ 据 `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
+/// Primary listener：`finalize_primary_auth_with_audit(routes, plan, ..., primary_authorizer)` 注入
+/// `RouteAuthorizer`；非 Primary listener：`finalize_auth_with_audit(routes, plan, ...)`。两者均消费
+/// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
+/// `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
 /// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
 /// 产出 `AuthenticatedRoutes` 经 `into_make_service` 绑 socket + serve（[`serve_until_signal`]）——bind 点
 /// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
@@ -269,6 +271,7 @@ pub fn assemble_authed_routers(
     provider: Arc<OidcProvider>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
+    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
 ) -> anyhow::Result<Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>> {
     // 默认限流配额（owner=组合根，可调）：10 req/s，burst 20。peer-IP keyed（见 #1106 / RealIP follow-up）。
     // 共享跨所有 listener——统一 per-IP 预算，避免分散 listener 各自独立 bucket 使 burst 预算 N 倍膨胀。
@@ -281,12 +284,22 @@ pub fn assemble_authed_routers(
     for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
         let scheme = auth_scheme(listener);
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
-        let authed = httpserve::finalize_auth_with_audit(
-            routes,
-            plan,
-            audit_sink.clone(),
-            audit_clock.clone(),
-        )
+        let authed = if listener == ListenerKind::Primary {
+            httpserve::finalize_primary_auth_with_audit(
+                routes,
+                plan,
+                audit_sink.clone(),
+                audit_clock.clone(),
+                primary_authorizer.clone(),
+            )
+        } else {
+            httpserve::finalize_auth_with_audit(
+                routes,
+                plan,
+                audit_sink.clone(),
+                audit_clock.clone(),
+            )
+        }
         .context("finalize_auth")?;
         let required = required_scheme(listener);
         let wired = match required {
@@ -1513,9 +1526,14 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let auth_audit_sink =
         httpserve::AuditSinkHandle::new(pg.for_domain::<caps::Audit>().auth_audit_sink());
     let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
-    let mut listeners =
-        assemble_authed_routers(&mut registry, provider, auth_audit_sink, auth_audit_clock)
-            .context("assemble authed routers")?;
+    let mut listeners = assemble_authed_routers(
+        &mut registry,
+        provider,
+        auth_audit_sink,
+        auth_audit_clock,
+        identity_domain.primary_authorizer(),
+    )
+    .context("assemble authed routers")?;
 
     // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
     // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
@@ -1558,6 +1576,8 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1565,6 +1585,23 @@ mod tests {
     /// 测试时钟（这些测试只验构造成功/失败，不验 token exp，故 SystemClock 即可）。
     fn clk() -> Box<dyn diport::Clock> {
         Box::new(SystemClock)
+    }
+
+    #[derive(Clone)]
+    struct AllowAuthorizer;
+
+    impl httpserve::RouteAuthorizer for AllowAuthorizer {
+        fn authorize<'a>(
+            &'a self,
+            _request: httpserve::RouteAuthorizationRequest,
+        ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
+        {
+            Box::pin(async { httpserve::RouteAuthorizationDecision::Allow })
+        }
+    }
+
+    fn allow_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
+        Arc::new(AllowAuthorizer)
     }
 
     /// settings 域产物：恰一条 `configs_ready` 探针、resources / workers 空。
@@ -1931,6 +1968,7 @@ mod tests {
             provider,
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             Arc::new(SystemClock),
+            allow_authorizer(),
         )
         .expect("assemble ok");
         assert!(routers.is_empty(), "空域图 ⇒ 无 per-listener router");

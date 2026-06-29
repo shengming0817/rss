@@ -147,9 +147,9 @@ NOBYPASSRLS` 已 provision，dual-pool bootstrap 接线是独立 follow-up。
 
 业务端点授权走 PDP 决策，不在 handler 硬编 role-name 字面量。
 
-- 路由门禁用 `authn::require_permission(authz::Permission)`、
-  `authn::require_permission_for_resource(path_param, perm)` 或
-  `authn::require_permission_for_contract(...)`，不用 `authn::any_role` / `authn::self_or` /
+- HTTP 路由门禁用 generated `HttpSpec` 派生 `httpserve::RoutePermission`，经
+  `httpserve::RouteAuthorizer` 单一入口授权；handler 只消费 route gate 插入的
+  `httpserve::AuthorizedSubject`，不用 `authn::any_role` / `authn::self_or` /
   `authn::require_any_role` 做授权分支。
 - `authz::Permission` 是 sealed 闭值集（枚举 / sealed 类型）；业务代码经 accessor 函数
   （如 `authz::perm_audit_read()`）取得 permission，不传 role 字符串。
@@ -164,11 +164,15 @@ NOBYPASSRLS` 已 provision，dual-pool bootstrap 接线是独立 follow-up。
 path-param 标识的 resource ownership 是 PDP ABAC 决策，不是 handler 短路。owner-scoped /
 self-scoped gate **contract-derived**：契约声明 `endpoints.http.resource:
 <pathParam>`（owner-scoped）或 `endpoints.http.selfScoped: true`（self-scoped），生成
-handler 经单一 `authn::require_permission_for_contract(contract_spec, resolver)` funnel 派生
-`require_permission_for_resource(path_param, perm)` / `require_permission_for_self(perm)`——业务
-handler / 域 crate 不手写 gate。`resource`/`selfScoped` 各 ⇒ permission、二者互斥（schema + `ContractSpec::validate`
-+ `cargo xtask` 治理校验 三重）。owner-scoped gate 把 canonical resource id（self-scoped 把
+handler 经 `httpserve::PrimaryRoute::permission` + `RouteResourceScope` funnel 派生
+path-param resource / self subject resource——业务 handler / 域 crate 不手写 gate。
+`resource`/`selfScoped` 各 ⇒ permission、二者互斥（contract validate、codegen check
+和 `cargo xtask` 治理校验）。owner-scoped gate 把 canonical resource id（self-scoped 把
 调用者自身 subject）转发给 PDP。
+
+当前 HTTP `RouteResource` canonical parser 只接受 lowercase-hyphenated、非 nil UUID 字符串；空值、
+非 UUID、非 canonical UUID 在 route gate 内 fail-closed，且不调用 PDP。按 contract 声明不同
+resource type 的 typed parser/codegen 是后续架构项。
 
 - baseline ownership 用 `subject.sub == resource.id` 判定。
 - **owner vs admin 同 permission**：同一 owner-scoped action（如 `user:write`）既用于带
@@ -188,16 +192,21 @@ ownership 规则。
 
 ## Authorizer 与 PDP
 
-Authorizer 经组合根（bootstrap 的 `with_primary_authorizer`）注入 primary listener
-request context。域 crate 不依赖兄弟域 crate 的 Authorizer。
+Authorizer 经组合根注入 primary listener request context：runtime assembly 从 identity
+domain 取得 `Arc<dyn httpserve::RouteAuthorizer>`，并调用
+`httpserve::finalize_primary_auth_with_audit` 装配。域 crate 不依赖兄弟域 crate 的 Authorizer。
 
-强依赖缺失必须 fail-fast；可解析的 Authorizer 在 bootstrap router build（Init 后、
-serve 前）预解析。缺失的 provider 在启动期 fail-fast（构造器必填参数缺失即编译期 / 启动期
-报错），而不是首请求暴露。
+强依赖缺失必须 fail-fast；可解析的 Authorizer 在 runtime router build（Init 后、
+serve 前）预解析。生产 Primary active route 通过必填 authorizer finalizer 装配；缺失 provider
+在启动期 fail-fast（构造器必填参数缺失即编译期 / 启动期报错），而不是首请求暴露。
 
 PDP 默认 fail-closed：缺 Authorizer、缺租户、store 不可用或无适用 permit 都 deny。
 baseline 是 action-scoped + role-conditioned 的 allow 规则，不是 allow-all。租户 policy
 可以叠加 allow / deny；deny 优先。
+
+新装环境的 active settings publish API 在 role 管理面完整前有窄兜底：trusted `Admin` 主体对
+generated settings `config-publish` / `secret-publish` 两条无 resource route 内置 Allow；其它权限仍必须经
+role binding 命中，普通 user/device/service 不享有该兜底。
 
 租户 allow 可以放宽路由门禁，但不能扩大数据访问。读端点的数据可见性由 principal
 派生的 `RowScope` 决定；写端点没有 RowScope 维度，必须依赖 typed tenant 参数和 FORCE
@@ -225,14 +234,17 @@ RLS 维护 tenant 边界。
 ## HTTP 授权
 
 HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
-`endpoints.http.permission` overlay 派生，生成 handler 通过
-`authn::require_permission_for_contract(contract_spec, resolver)` 解析并进入同一 PDP 路径。owner-scoped
-（`endpoints.http.resource`）/ self-scoped（`endpoints.http.selfScoped`）由该同一 funnel 按
-`contract_spec.{resource, self_scoped}` 三分支派生，见 §Resource ownership。
+`endpoints.http.auth.permission` overlay 派生。codegen 将契约渲染为 `generated::http::HttpSpec`
+的 `auth.permission` / `resource` / `self_scoped`，域 route 装配只能经
+`PrimaryRoute::permission(RoutePermission { permission, scope })` 声明进入 primary route gate。
+`httpserve::RouteAuthorizer` 在 handler 前做统一判定，允许后插入 `AuthorizedSubject`；handler 只消费
+该授权主体上下文，不回读 `Authenticated`。owner-scoped（`endpoints.http.resource`）/ self-scoped
+（`endpoints.http.selfScoped`）由 `RouteResourceScope::{PathParam,SelfSubject}` 三分支派生，见
+§Resource ownership。
 
 每个 `lifecycle: active` 且 `codegen` 的 HTTP 契约必须声明恰好一个 AuthZ mode：
 
-- ABAC 默认：`endpoints.http.permission`
+- ABAC 默认：`endpoints.http.auth.permission`
 - 显式 opt-out：`public` / `bootstrap` / `clientsOnly` / `serviceOwned`
 
 opt-out 必须带非空 `endpoints.http.auth.reason`。ABAC mode 不带 reason；

@@ -1,23 +1,23 @@
 error[E0599]: no method named `mount_primary` found for struct `ListenerRouter<Internal>` in the current scope
- --> tests/ui/nonprimary_cannot_mount_primary.rs:7:12
+ --> tests/ui/nonprimary_cannot_mount_primary.rs:8:12
   |
-7 |         rb.mount_primary(
+8 |         rb.mount_primary(
   |         ---^^^^^^^^^^^^^ method not found in `ListenerRouter<Internal>`
   |
   = note: the method was found for `ListenerRouter<Primary>`
 
 error[E0599]: no method named `mount_primary` found for struct `ListenerRouter<Admin>` in the current scope
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:18:12
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:14:12
    |
-18 |         rb.mount_primary(
+14 |         rb.mount_primary(
    |         ---^^^^^^^^^^^^^ method not found in `ListenerRouter<Admin>`
    |
    = note: the method was found for `ListenerRouter<Primary>`
 
 error[E0599]: no method named `mount_primary` found for struct `ListenerRouter<Health>` in the current scope
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:29:12
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:20:12
    |
-29 |         rb.mount_primary(
+20 |         rb.mount_primary(
    |         ---^^^^^^^^^^^^^ method not found in `ListenerRouter<Health>`
    |
    = note: the method was found for `ListenerRouter<Primary>`

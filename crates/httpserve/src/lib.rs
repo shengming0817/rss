@@ -15,14 +15,16 @@ pub mod protect;
 pub mod routes;
 
 pub use auth::{
-    AuditSinkHandle, Authenticated, PendingScopeCtx, RouteMeta, ServiceTokenTenantBindingError,
-    service_token_tenant_binding,
+    AuditSinkHandle, Authenticated, AuthorizedSubject, PendingScopeCtx, RouteAuthorizationDecision,
+    RouteAuthorizationRequest, RouteAuthorizer, RouteMeta, RouteResource,
+    ServiceTokenTenantBindingError, service_token_tenant_binding,
 };
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
     Admin, AuthenticatedRoutes, Health, Internal, Listener, ListenerRouter, NonPrimaryListener,
-    Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
+    Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit, finalize_primary_auth,
+    finalize_primary_auth_with_audit,
 };
 
 /// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
@@ -64,12 +66,85 @@ pub struct Route {
 /// 误用类，运行期兜异常接线）。
 #[derive(Debug, Clone)]
 pub struct PrimaryRoute {
-    pub method: axum::http::Method,
-    pub path: &'static str,
-    pub contract_id: &'static str,
-    /// `Some(..)` = 显式 opt-out 降级（`Public` / `PasswordResetExempt`，runtime-api.md §Auth plan 优先级 1）；
-    /// `None` = 正常认证。`mount_primary` body 落地时透传给 `resolve_requirement(plan, opt_out)`。
-    pub opt_out: Option<RouteAuthOptOut>,
+    pub(crate) method: axum::http::Method,
+    pub(crate) path: &'static str,
+    pub(crate) contract_id: &'static str,
+    pub(crate) authz: PrimaryRouteAuthz,
+}
+
+impl PrimaryRoute {
+    pub fn permission(
+        method: axum::http::Method,
+        path: &'static str,
+        contract_id: &'static str,
+        permission: RoutePermission,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            contract_id,
+            authz: PrimaryRouteAuthz::Permission(permission),
+        }
+    }
+
+    pub fn opt_out(
+        method: axum::http::Method,
+        path: &'static str,
+        contract_id: &'static str,
+        opt_out: RouteAuthOptOut,
+    ) -> Self {
+        Self {
+            method,
+            path,
+            contract_id,
+            authz: PrimaryRouteAuthz::OptOut(opt_out),
+        }
+    }
+
+    pub fn method(&self) -> &axum::http::Method {
+        &self.method
+    }
+
+    pub fn path(&self) -> &'static str {
+        self.path
+    }
+
+    pub fn contract_id(&self) -> &'static str {
+        self.contract_id
+    }
+
+    pub fn route_permission(&self) -> Option<RoutePermission> {
+        match self.authz {
+            PrimaryRouteAuthz::Permission(permission) => Some(permission),
+            PrimaryRouteAuthz::OptOut(_) => None,
+        }
+    }
+
+    pub fn opt_out_kind(&self) -> Option<RouteAuthOptOut> {
+        match self.authz {
+            PrimaryRouteAuthz::OptOut(opt_out) => Some(opt_out),
+            PrimaryRouteAuthz::Permission(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutePermission {
+    pub permission: &'static str,
+    pub scope: RouteResourceScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteResourceScope {
+    None,
+    PathParam(&'static str),
+    SelfSubject,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PrimaryRouteAuthz {
+    Permission(RoutePermission),
+    OptOut(RouteAuthOptOut),
 }
 
 // 旧 `RouteGroup` struct（接受裸 `axum::Router` 的 register 闭包）已随 ADR-009 typed funnel 退役——

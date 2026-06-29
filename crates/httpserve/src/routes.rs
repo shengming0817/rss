@@ -7,14 +7,15 @@
 //!   register 闭包绑定到具体 [`Listener`] marker；`mount`（无 opt-out）仅 [`NonPrimaryListener`] 可用，
 //!   `mount_primary`（唯一 opt-out 入口）仅 `ListenerRouter<Primary>` 可用 ⇒ Internal/Admin/Health 路由
 //!   类型层不可能落进 Primary（对外）Router，跨 listener 泄漏不可表达（typed function choice，Hard）。
-//! - **#1113 auth-finalize-before-bind funnel（Hard）**：[`finalize_auth`] 是 [`AuthenticatedRoutes`] 的
+//! - **#1113 auth-finalize-before-bind funnel（Hard）**：finalizer 函数是 [`AuthenticatedRoutes`] 的
 //!   **唯一**生产者（构造 `pub(crate)`），[`AuthenticatedRoutes::into_make_service`] 是**唯一** bindable
 //!   出口；[`UnfinalizedRoutes`] 无 public bindable 出口 ⇒ 未跑 auth 装配的 router 无法 bind。
 //!
 //! 与兄弟 crate `bootstrap` 的协同：`bootstrap::Registry::finalize_routes` 经受控 `bootstrap → httpserve`
-//! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根跑 [`finalize_auth`] 产 [`AuthenticatedRoutes`]。
+//! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根按 listener 选择
+//! [`finalize_auth`] 或 [`finalize_primary_auth`] 产 [`AuthenticatedRoutes`]。
 
-use crate::auth::{AuditSinkHandle, AuthAudit, enforce_layer};
+use crate::auth::{AuditSinkHandle, AuthAudit, RouteAuthorizer, enforce_layer};
 use crate::{PrimaryRoute, Route, RouteGroupError};
 use core::marker::PhantomData;
 use primitives::{AuthPlan, ListenerKind};
@@ -116,7 +117,7 @@ impl ListenerRouter<Primary> {
             inner: self.inner.route(
                 route.path,
                 handler.layer(enforce_layer(
-                    route.opt_out,
+                    Some(route.authz.clone()),
                     route.method,
                     route.contract_id,
                 )),
@@ -136,6 +137,7 @@ impl ListenerRouter<Primary> {
 #[must_use = "UnfinalizedRoutes 须经 finalize_auth 换 AuthenticatedRoutes 才能 bind"]
 pub struct UnfinalizedRoutes {
     router: axum::Router,
+    listener: Option<ListenerKind>,
 }
 
 impl UnfinalizedRoutes {
@@ -143,6 +145,7 @@ impl UnfinalizedRoutes {
     pub fn empty() -> Self {
         Self {
             router: axum::Router::new(),
+            listener: None,
         }
     }
 
@@ -160,8 +163,10 @@ impl UnfinalizedRoutes {
         L: Listener,
     {
         let group = register(ListenerRouter::<L>::new(axum::Router::new()))?.into_inner();
+        let listener = self.listener.or(Some(L::KIND));
         Ok(Self {
             router: self.router.nest(prefix, group),
+            listener,
         })
     }
 
@@ -178,7 +183,7 @@ impl UnfinalizedRoutes {
 
 /// auth-finalize 后的 per-listener Router（#1113 funnel 出态，可 bind）。
 ///
-/// INVARIANT: ROUTE-AUTH-FUNNEL-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 唯一生产者 = [`finalize_auth`]（构造 `pub(crate)`，外部 crate 无法
+/// INVARIANT: ROUTE-AUTH-FUNNEL-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 唯一生产者 = finalizer 函数（构造 `pub(crate)`，外部 crate 无法
 /// mint）；[`into_make_service`](Self::into_make_service) 是唯一 bindable 出口。验签桥（#1109）经
 /// [`layer`](Self::layer) 叠在外层、保持封印（产物仍是 `AuthenticatedRoutes`，只能加层不能替换）。
 ///
@@ -193,7 +198,7 @@ pub struct AuthenticatedRoutes {
 }
 
 impl AuthenticatedRoutes {
-    /// 唯一生产入口（`pub(crate)`）——仅 [`finalize_auth`] 可构造，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
+    /// 唯一生产入口（`pub(crate)`）——仅本模块 finalizer 可构造，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
     pub(crate) fn new(router: axum::Router) -> Self {
         Self {
             router,
@@ -296,6 +301,10 @@ impl AuthenticatedRoutes {
     }
 }
 
+/// 所有非 Primary route 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 `AuthPlan`）。
+/// Primary listener 必须使用 [`finalize_primary_auth`] / [`finalize_primary_auth_with_audit`] 注入
+/// [`RouteAuthorizer`]，避免 permission route 误装配成缺 authorizer 的请求期 403。
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TracePolicy {
     Enabled,
@@ -314,7 +323,6 @@ impl TracePolicy {
     }
 }
 
-/// 所有 route 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 `AuthPlan`）。
 ///
 /// #1113 funnel transform：消费 [`UnfinalizedRoutes`] 产 [`AuthenticatedRoutes`]——本 fn 是后者**唯一**
 /// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
@@ -334,7 +342,10 @@ pub fn finalize_auth(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    finalize_auth_inner(routes, plan, None)
+    if plan.listener() == primitives::ListenerKind::Primary {
+        return Err(RouteGroupError::ListenerMismatch);
+    }
+    finalize_auth_inner(routes, plan, None, None)
 }
 
 /// #1113 funnel transform with auth decision audit sink.
@@ -347,18 +358,60 @@ pub fn finalize_auth_with_audit(
     audit_sink: AuditSinkHandle,
     clock: Arc<dyn diport::Clock>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    finalize_auth_inner(routes, plan, Some(AuthAudit::new(audit_sink, clock)))
+    if plan.listener() == primitives::ListenerKind::Primary {
+        return Err(RouteGroupError::ListenerMismatch);
+    }
+    finalize_auth_inner(routes, plan, Some(AuthAudit::new(audit_sink, clock)), None)
+}
+
+pub fn finalize_primary_auth(
+    routes: UnfinalizedRoutes,
+    plan: AuthPlan,
+    authorizer: Arc<dyn RouteAuthorizer>,
+) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    if plan.listener() != primitives::ListenerKind::Primary {
+        return Err(RouteGroupError::ListenerMismatch);
+    }
+    finalize_auth_inner(routes, plan, None, Some(authorizer))
+}
+
+pub fn finalize_primary_auth_with_audit(
+    routes: UnfinalizedRoutes,
+    plan: AuthPlan,
+    audit_sink: AuditSinkHandle,
+    clock: Arc<dyn diport::Clock>,
+    authorizer: Arc<dyn RouteAuthorizer>,
+) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    if plan.listener() != primitives::ListenerKind::Primary {
+        return Err(RouteGroupError::ListenerMismatch);
+    }
+    finalize_auth_inner(
+        routes,
+        plan,
+        Some(AuthAudit::new(audit_sink, clock)),
+        Some(authorizer),
+    )
 }
 
 fn finalize_auth_inner(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,
     audit: Option<AuthAudit>,
+    authorizer: Option<Arc<dyn RouteAuthorizer>>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    if routes
+        .listener
+        .is_some_and(|listener| listener != plan.listener())
+    {
+        return Err(RouteGroupError::ListenerMismatch);
+    }
     let trace_policy = TracePolicy::from_plan(plan);
     let mut router = routes.router.layer(axum::Extension(plan));
     if let Some(audit) = audit {
         router = router.layer(axum::Extension(audit));
+    }
+    if let Some(authorizer) = authorizer {
+        router = router.layer(axum::Extension(authorizer));
     }
     let router = router.layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
     let router = match trace_policy {
@@ -382,6 +435,7 @@ pub fn unfinalized_for_test<L: Listener>(
 ) -> UnfinalizedRoutes {
     UnfinalizedRoutes {
         router: build(ListenerRouter::<L>::new(axum::Router::new())).into_inner(),
+        listener: Some(L::KIND),
     }
 }
 
@@ -395,6 +449,8 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt as _;
 
@@ -414,6 +470,22 @@ mod tests {
             path: "/list",
             contract_id: "test.admin.list",
         }
+    }
+
+    #[derive(Clone)]
+    struct AllowAuthorizer;
+
+    impl RouteAuthorizer for AllowAuthorizer {
+        fn authorize<'a>(
+            &'a self,
+            _request: crate::RouteAuthorizationRequest,
+        ) -> Pin<Box<dyn Future<Output = crate::RouteAuthorizationDecision> + Send + 'a>> {
+            Box::pin(async { crate::RouteAuthorizationDecision::Allow })
+        }
+    }
+
+    fn allow_authorizer() -> Arc<dyn RouteAuthorizer> {
+        Arc::new(AllowAuthorizer)
     }
 
     #[derive(Clone, Debug)]
@@ -540,12 +612,12 @@ mod tests {
                 let routes = UnfinalizedRoutes::empty()
                     .nest_group::<Primary, core::convert::Infallible>("/api/v1", |rb| {
                         Ok(rb.mount_primary(
-                            PrimaryRoute {
-                                method: Method::GET,
-                                path: "/x",
-                                contract_id: "test.primary.x",
-                                opt_out: Some(primitives::RouteAuthOptOut::Public),
-                            },
+                            PrimaryRoute::opt_out(
+                                Method::GET,
+                                "/x",
+                                "test.primary.x",
+                                primitives::RouteAuthOptOut::Public,
+                            ),
                             get(|| async { "ok" }),
                         ))
                     })
@@ -553,7 +625,7 @@ mod tests {
                 let plan =
                     primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
                         .expect("plan");
-                let router = finalize_auth(routes, plan)
+                let router = finalize_primary_auth(routes, plan, allow_authorizer())
                     .expect("finalize_auth")
                     .into_router_for_test();
                 let req = Request::builder()

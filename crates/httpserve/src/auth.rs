@@ -1,11 +1,12 @@
-//! 每路由鉴权闸：`resolve_requirement` 纯决策 → HTTP 落地。
+//! 每路由鉴权闸：route authz metadata + `resolve_requirement` 纯决策 → HTTP 落地。
 //!
 //! 偏离说明（相对于任务文档 `from_fn` 方案）：axum 0.8 `from_fn` 生成的 `FromFnLayer`
 //! 不满足 `MethodRouter::layer` 的 trait bound（`Next: FromRequest` 不成立）；
 //! 改用手写 `EnforceLayer`（`impl tower::Layer`）+ `EnforceService`（`impl tower::Service`），
 //! 通过 `tower = { workspace = true }` 引入 Layer/Service trait。
-//! opt_out 存于 `EnforceLayer`（Copy 字段），不经 extension 传递——这样 enforce 在
-//! MethodRouter 层执行时可直接读捕获的 opt_out 和外层注入的 AuthPlan extension。
+//! `PrimaryRouteAuthz::{OptOut, Permission(RoutePermission)}` 存于 `EnforceLayer`，不经 extension 传递——
+//! 这样 enforce 在 MethodRouter 层执行时可直接读捕获的 route authz metadata 和外层注入的 AuthPlan /
+//! RouteAuthorizer extension。
 //!
 //! INVARIANT: AUTH-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 缺 AuthPlan（finalize_auth 未跑） → fail-closed Deny → 403；
 //! 控制面 listener opt-out → Deny → 403（不 Allow，永不降级）。
@@ -33,7 +34,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axum::extract::Request;
+use axum::body::Body;
+use axum::extract::{FromRequestParts, RawPathParams, Request};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
@@ -43,6 +45,7 @@ use tower::Service;
 use vocab::{PrincipalKind, TenantId};
 
 use crate::middleware::RequestId;
+use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope};
 
 /// service-token tenant header binding 解析错误（不携 header 值，避免 PII 进入日志）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,99 @@ fn short_circuit<E>(
 pub struct RouteMeta {
     pub method: axum::http::Method,
     pub contract_id: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteResource {
+    id: String,
+}
+
+impl RouteResource {
+    pub fn new(id: impl Into<String>) -> Option<Self> {
+        let id = id.into();
+        let uuid = uuid::Uuid::try_parse(&id).ok()?;
+        if uuid.is_nil() || uuid.hyphenated().to_string() != id {
+            return None;
+        }
+        Some(Self { id })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedSubject {
+    tenant_id: TenantId,
+    principal_kind: PrincipalKind,
+    principal_id: String,
+    resource: Option<RouteResource>,
+}
+
+impl AuthorizedSubject {
+    fn new(
+        tenant_id: TenantId,
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        resource: Option<RouteResource>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            principal_kind,
+            principal_id: principal_id.into(),
+            resource,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn for_test(
+        tenant_id: TenantId,
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        resource: Option<RouteResource>,
+    ) -> Self {
+        Self::new(tenant_id, principal_kind, principal_id, resource)
+    }
+
+    pub fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    pub fn principal_kind(&self) -> PrincipalKind {
+        self.principal_kind
+    }
+
+    pub fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    pub fn resource(&self) -> Option<&RouteResource> {
+        self.resource.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteAuthorizationRequest {
+    pub contract_id: &'static str,
+    pub permission: &'static str,
+    pub tenant_id: Option<TenantId>,
+    pub principal_kind: PrincipalKind,
+    pub principal_id: String,
+    pub resource: Option<RouteResource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteAuthorizationDecision {
+    Allow,
+    Deny,
+}
+
+pub trait RouteAuthorizer: Send + Sync + 'static {
+    fn authorize<'a>(
+        &'a self,
+        request: RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>>;
 }
 
 /// 认证证据 extension：验签桥在凭据校验通过后注入请求 extension，enforce 层据此对 `Require` 路由放行
@@ -257,18 +353,18 @@ impl PendingScopeCtx {
 /// 鉴权 enforce tower Layer（每路由 opt_out + RouteMeta；Copy + Clone 满足 MethodRouter::layer 约束）。
 #[derive(Clone)]
 pub(crate) struct EnforceLayer {
-    opt_out: Option<RouteAuthOptOut>,
+    authz: Option<PrimaryRouteAuthz>,
     meta: RouteMeta,
 }
 
 /// 返回每路由 enforce layer，可直接用于 `MethodRouter::layer()`。
 pub(crate) fn enforce_layer(
-    opt_out: Option<RouteAuthOptOut>,
+    authz: Option<PrimaryRouteAuthz>,
     method: axum::http::Method,
     contract_id: &'static str,
 ) -> EnforceLayer {
     EnforceLayer {
-        opt_out,
+        authz,
         meta: RouteMeta {
             method,
             contract_id,
@@ -279,7 +375,7 @@ pub(crate) fn enforce_layer(
 /// 鉴权 enforce tower Service（包裹内层 Service，包含捕获的 opt_out + RouteMeta）。
 pub(crate) struct EnforceService<S> {
     inner: S,
-    opt_out: Option<RouteAuthOptOut>,
+    authz: Option<PrimaryRouteAuthz>,
     meta: RouteMeta,
 }
 
@@ -287,7 +383,7 @@ impl<S: Clone> Clone for EnforceService<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            opt_out: self.opt_out,
+            authz: self.authz.clone(),
             meta: self.meta.clone(),
         }
     }
@@ -299,7 +395,7 @@ impl<S> Layer<S> for EnforceLayer {
     fn layer(&self, inner: S) -> Self::Service {
         EnforceService {
             inner,
-            opt_out: self.opt_out,
+            authz: self.authz.clone(),
             meta: self.meta.clone(),
         }
     }
@@ -454,6 +550,79 @@ fn reject_response<E>(decision: AuthDecision, rid: &str) -> DenyFuture<E> {
     }
 }
 
+fn route_opt_out(authz: &Option<PrimaryRouteAuthz>) -> Option<RouteAuthOptOut> {
+    match authz {
+        Some(PrimaryRouteAuthz::OptOut(opt_out)) => Some(*opt_out),
+        Some(PrimaryRouteAuthz::Permission(_)) | None => None,
+    }
+}
+
+fn route_permission(authz: &Option<PrimaryRouteAuthz>) -> Option<RoutePermission> {
+    match authz {
+        Some(PrimaryRouteAuthz::Permission(permission)) => Some(*permission),
+        Some(PrimaryRouteAuthz::OptOut(_)) | None => None,
+    }
+}
+
+async fn route_resource(
+    req: &mut Request,
+    scope: RouteResourceScope,
+    evidence: &Authenticated,
+) -> Option<Option<RouteResource>> {
+    match scope {
+        RouteResourceScope::None => Some(None),
+        RouteResourceScope::SelfSubject => {
+            RouteResource::new(evidence.self_scoped_principal_id()).map(Some)
+        }
+        RouteResourceScope::PathParam(name) => {
+            let current = std::mem::replace(req, Request::new(Body::empty()));
+            let (mut parts, body) = current.into_parts();
+            let params = RawPathParams::from_request_parts(&mut parts, &())
+                .await
+                .ok();
+            *req = Request::from_parts(parts, body);
+            params
+                .and_then(|params| {
+                    params
+                        .iter()
+                        .find_map(|(param, value)| (param == name).then_some(value))
+                        .and_then(RouteResource::new)
+                })
+                .map(Some)
+        }
+    }
+}
+
+async fn authorize_route_permission(
+    req: &mut Request,
+    meta: &RouteMeta,
+    permission: RoutePermission,
+    evidence: &Authenticated,
+    authorizer: Option<Arc<dyn RouteAuthorizer>>,
+) -> Option<Option<AuthorizedSubject>> {
+    let resource = route_resource(req, permission.scope, evidence).await?;
+    let principal_id = evidence.self_scoped_principal_id().to_string();
+    let principal_kind = evidence.principal_kind();
+    let tenant_id = evidence.tenant_id();
+    let decision = authorizer?
+        .authorize(RouteAuthorizationRequest {
+            contract_id: meta.contract_id,
+            permission: permission.permission,
+            tenant_id,
+            principal_kind,
+            principal_id: principal_id.clone(),
+            resource: resource.clone(),
+        })
+        .await;
+    if decision == RouteAuthorizationDecision::Allow {
+        Some(tenant_id.map(|tenant_id| {
+            AuthorizedSubject::new(tenant_id, principal_kind, principal_id, resource)
+        }))
+    } else {
+        None
+    }
+}
+
 impl<S> Service<Request> for EnforceService<S>
 where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
@@ -474,7 +643,7 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
-        let opt_out = self.opt_out;
+        let authz = self.authz.clone();
         let meta = self.meta.clone();
         let plan = req.extensions().get::<primitives::AuthPlan>().copied();
         let audit = req.extensions().get::<AuthAudit>().cloned();
@@ -510,7 +679,7 @@ where
         let requirement = match plan {
             // fail-closed：finalize_auth 未跑，没有 plan → 拒（AUTH-FAILCLOSED-01）。
             None => AuthRequirement::Deny,
-            Some(p) => resolve_requirement(p, opt_out),
+            Some(p) => resolve_requirement(p, route_opt_out(&authz)),
         };
         // 仅**认证路由**（`Require`）放行后建 ambient scope；Public opt-out（`requirement=Allow`）不建——
         // 杜绝 Public 路由因携有效 Bearer 被误绑 ambient tenant（#1105 F2，scope 与 route auth 决策对齐）。
@@ -535,14 +704,52 @@ where
                 reject_response(decision, &rid).await
             });
         }
-        // PendingScopeCtx 总是取走（不残留 extension）；仅 `Require`-Allow 用它建 scope，Public opt-out 丢弃（F2）。
-        let pending_ctx = req.extensions_mut().remove::<PendingScopeCtx>();
-        let scope_ctx = if is_require {
-            pending_ctx.map(PendingScopeCtx::into_ctx)
-        } else {
-            None
-        };
+        let permission = route_permission(&authz);
+        let route_authorizer = req.extensions().get::<Arc<dyn RouteAuthorizer>>().cloned();
         Box::pin(async move {
+            if let Some(permission) = permission {
+                let Some(evidence_ref) = evidence.as_ref() else {
+                    return reject_response(AuthDecision::Deny, &rid).await;
+                };
+                let authorized = authorize_route_permission(
+                    &mut req,
+                    &meta,
+                    permission,
+                    evidence_ref,
+                    route_authorizer,
+                )
+                .await;
+                let Some(authorized) = authorized else {
+                    if let Err(error) = record_auth_audit(
+                        audit,
+                        AuthDecision::Deny,
+                        meta.contract_id,
+                        rid.clone(),
+                        evidence.clone(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            contract_id = meta.contract_id,
+                            authz.decision = AuthDecision::Deny.as_label(),
+                            error = %error,
+                            "auth audit record failed before route authz reject"
+                        );
+                        return Ok(crate::error::internal_error(&rid));
+                    }
+                    return reject_response(AuthDecision::Deny, &rid).await;
+                };
+                if let Some(authorized) = authorized {
+                    req.extensions_mut().insert(authorized);
+                }
+            }
+            // PendingScopeCtx 总是取走（不残留 extension）；仅 `Require`-Allow 用它建 scope，Public opt-out 丢弃（F2）。
+            let pending_ctx = req.extensions_mut().remove::<PendingScopeCtx>();
+            let scope_ctx = if is_require {
+                pending_ctx.map(PendingScopeCtx::into_ctx)
+            } else {
+                None
+            };
             if let Err(error) =
                 record_auth_audit(audit, decision, meta.contract_id, rid.clone(), evidence).await
             {
@@ -657,7 +864,11 @@ mod tests {
     fn build_router(opt_out: Option<RouteAuthOptOut>, plan: Option<AuthPlan>) -> Router {
         let mut router = Router::new().route(
             "/test",
-            get(|| async { "ok" }).layer(enforce_layer(opt_out, Method::GET, TEST_CONTRACT)),
+            get(|| async { "ok" }).layer(enforce_layer(
+                opt_out.map(PrimaryRouteAuthz::OptOut),
+                Method::GET,
+                TEST_CONTRACT,
+            )),
         );
         if let Some(p) = plan {
             router = router.layer(Extension(p));

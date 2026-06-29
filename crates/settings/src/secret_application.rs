@@ -294,7 +294,7 @@ pub(crate) async fn publish_secret_to_repo(
     Ok(version)
 }
 
-/// `settings.secret-publish` handler（Primary listener，JWT 认证）：认证证据取租户 → parse body →
+/// `settings.secret-publish` handler（Primary listener，JWT 认证）：route gate 授权证据取租户 → parse body →
 /// domain newtype funnel（`SecretKey` / `StoreId` / `SecretRef::parse` 权威校验，路径穿越在此 fail-closed）→
 /// [`publish_secret_to_repo`]（CAS 写引用坐标，L1 无 outbox）→ 201。请求 / 响应**绝无 secret 材料**（只写坐标）。
 /// State 仅持 `Arc<DynSecretRepo>`（见 [`publish_secret_to_repo`] 说明：避开 `SecretService` 非 `Sync`）。
@@ -399,8 +399,7 @@ mod tests {
     use crate::ports::DynSecretRepo;
 
     use axum::routing::post;
-    use httpserve::Authenticated;
-    use primitives::RequiredScheme;
+    use httpserve::AuthorizedSubject;
     use testkit::ContractRequest;
     use vocab::PrincipalKind;
 
@@ -479,14 +478,14 @@ mod tests {
         )))
     }
 
-    /// post-auth 认证证据（`Authenticated::new` 在 `#[cfg(test)]` 不被 dylint 扫，模拟验签桥注入）。
-    fn user_evidence(t: TenantId) -> Authenticated {
-        Authenticated::new(RequiredScheme::Jwt, PrincipalKind::User, "subject", Some(t))
+    /// post-authz 授权证据（Primary route gate 注入）。
+    fn user_evidence(t: TenantId) -> AuthorizedSubject {
+        AuthorizedSubject::for_test(t, PrincipalKind::User, "subject", None)
     }
 
     fn secret_router(
         repo: Arc<DynSecretRepo<'static>>,
-        auth: Option<Authenticated>,
+        auth: Option<AuthorizedSubject>,
     ) -> axum::Router {
         let router =
             axum::Router::new().route("/secrets", post(secret_publish_handler).with_state(repo));
@@ -610,22 +609,6 @@ mod tests {
                 "{err:?}"
             );
         }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn secret_publish_handler_principal_without_tenant_returns_403() {
-        // 跨租主体（Service，tenant=None）→ secret 写是租户作用域资源 → 403（与 config handler 对称）。
-        let auth = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Service, "svc", None);
-        let router = secret_router(secret_repo_arc(), Some(auth));
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/secrets").json(&publish_request(None)),
-        )
-        .await
-        .expect("call");
-        resp.ensure_status(StatusCode::FORBIDDEN)
-            .expect("无租户作用域 → 403");
     }
 
     // ── resolve_secret：resolver 恰调一次 ─────────────────────────────────────────────────

@@ -55,8 +55,8 @@ use std::path::Path;
 use super::manifest::{
     ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery, FIELD_DELIVERY,
     FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_METHOD, FIELD_PATH, FIELD_SAGA,
-    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuthMode, HttpHeaderMode, Lifecycle, SCHEMA_KEY_PAYLOAD,
-    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
+    Lifecycle, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
 };
 use super::protection;
 use super::redaction;
@@ -640,22 +640,7 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
         return out;
     };
 
-    for (name, mode) in &http.headers {
-        let allowed_mode = matches!(
-            mode,
-            HttpHeaderMode::PopulateOnly | HttpHeaderMode::ServiceTokenTenantBound
-        );
-        if name != "X-Tenant-ID" || !allowed_mode {
-            out.push(finding(
-                Rule::HttpAuth,
-                label,
-                format!(
-                    "{FIELD_ENDPOINTS_HTTP_HEADERS} 当前仅接受 \"X-Tenant-ID\" = \"populate-only\" 或 \"service-token-tenant-bound\"，实为 {name:?} = {:?}",
-                    mode
-                ),
-            ));
-        }
-    }
+    rule_http_header_modes(http, label, &mut out);
 
     if m.kind != ContractKind::Http || m.lifecycle != Lifecycle::Active {
         return out;
@@ -673,47 +658,16 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
         .permission
         .as_ref()
         .is_some_and(|s| !s.trim().is_empty());
+    rule_http_resource_shape(http, label, &mut out);
     match auth.mode {
         HttpAuthMode::Permission => {
-            if !permission_present {
-                out.push(finding(
-                    Rule::HttpAuth,
-                    label,
-                    "endpoints.http.auth mode=permission 必须声明非空 permission".to_string(),
-                ));
-            }
-            if auth.reason.is_some() {
-                out.push(finding(
-                    Rule::HttpAuth,
-                    label,
-                    "endpoints.http.auth mode=permission 禁止 reason".to_string(),
-                ));
-            }
+            rule_http_permission_auth(m, http, auth, permission_present, label, &mut out)
         }
         HttpAuthMode::Public
         | HttpAuthMode::Bootstrap
         | HttpAuthMode::ClientsOnly
         | HttpAuthMode::ServiceOwned => {
-            if !reason_present {
-                out.push(finding(
-                    Rule::HttpAuth,
-                    label,
-                    format!(
-                        "endpoints.http.auth mode={} 必须声明非空 reason",
-                        auth.mode.as_wire()
-                    ),
-                ));
-            }
-            if auth.permission.is_some() {
-                out.push(finding(
-                    Rule::HttpAuth,
-                    label,
-                    format!(
-                        "endpoints.http.auth mode={} 禁止 permission",
-                        auth.mode.as_wire()
-                    ),
-                ));
-            }
+            rule_http_opt_out_auth(http, auth, reason_present, label, &mut out);
         }
     }
     let tenant_header_mode = http.headers.get("X-Tenant-ID").copied();
@@ -729,6 +683,135 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
         ));
     }
     out
+}
+
+fn rule_http_header_modes(http: &HttpEndpoint, label: &str, out: &mut Vec<Finding>) {
+    for (name, mode) in &http.headers {
+        let allowed_mode = matches!(
+            mode,
+            HttpHeaderMode::PopulateOnly | HttpHeaderMode::ServiceTokenTenantBound
+        );
+        if name != "X-Tenant-ID" || !allowed_mode {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_HEADERS} 当前仅接受 \"X-Tenant-ID\" = \"populate-only\" 或 \"service-token-tenant-bound\"，实为 {name:?} = {:?}",
+                    mode
+                ),
+            ));
+        }
+    }
+}
+
+fn rule_http_resource_shape(http: &HttpEndpoint, label: &str, out: &mut Vec<Finding>) {
+    let resource_present = http.resource.as_ref().is_some_and(|s| !s.trim().is_empty());
+    if http.resource.is_some() && !resource_present {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "endpoints.http.resource 必须为非空 path 参数名".to_string(),
+        ));
+    }
+    if resource_present && http.self_scoped {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "endpoints.http.resource 与 endpoints.http.selfScoped 互斥".to_string(),
+        ));
+    }
+}
+
+fn rule_http_permission_auth(
+    m: &ContractManifest,
+    http: &HttpEndpoint,
+    auth: &HttpAuth,
+    permission_present: bool,
+    label: &str,
+    out: &mut Vec<Finding>,
+) {
+    if !permission_present {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "endpoints.http.auth mode=permission 必须声明非空 permission".to_string(),
+        ));
+    }
+    if auth.reason.is_some() {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            "endpoints.http.auth mode=permission 禁止 reason".to_string(),
+        ));
+    }
+    if let Some(resource) = http.resource.as_ref().filter(|s| !s.trim().is_empty()) {
+        let path = m.path.as_deref().unwrap_or_default();
+        if !http_path_params(path).any(|param| param == resource.trim()) {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!("endpoints.http.resource={resource:?} 必须匹配 HTTP path 中的 {{param}}"),
+            ));
+        }
+    }
+}
+
+fn rule_http_opt_out_auth(
+    http: &HttpEndpoint,
+    auth: &HttpAuth,
+    reason_present: bool,
+    label: &str,
+    out: &mut Vec<Finding>,
+) {
+    if !reason_present {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            format!(
+                "endpoints.http.auth mode={} 必须声明非空 reason",
+                auth.mode.as_wire()
+            ),
+        ));
+    }
+    if auth.permission.is_some() {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            format!(
+                "endpoints.http.auth mode={} 禁止 permission",
+                auth.mode.as_wire()
+            ),
+        ));
+    }
+    if http.resource.is_some() {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            format!(
+                "endpoints.http.auth mode={} 禁止 resource",
+                auth.mode.as_wire()
+            ),
+        ));
+    }
+    if http.self_scoped {
+        out.push(finding(
+            Rule::HttpAuth,
+            label,
+            format!(
+                "endpoints.http.auth mode={} 禁止 selfScoped",
+                auth.mode.as_wire()
+            ),
+        ));
+    }
+}
+
+fn http_path_params(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/').filter_map(|segment| {
+        segment
+            .strip_prefix('{')
+            .and_then(|s| s.strip_suffix('}'))
+            .filter(|s| !s.is_empty())
+    })
 }
 
 fn rule_http_service_token_header_coupling(
@@ -1189,6 +1272,8 @@ mod tests {
                     reason: Some("public endpoint".to_string()),
                     permission: None,
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::PopulateOnly,
@@ -1967,6 +2052,8 @@ mod tests {
                     reason: Some(" ".to_string()),
                     permission: None,
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::PopulateOnly,
@@ -2000,12 +2087,192 @@ mod tests {
                     reason: Some("not allowed".to_string()),
                     permission: Some("identity.login".to_string()),
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::new(),
             }),
         });
         let findings = rule_http_auth(&m, "x");
         assert!(
             findings.iter().any(|f| f.detail.contains("禁止 reason")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_permission_self_scoped_is_allowed() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/profile".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.profile.read".to_string()),
+                }),
+                resource: None,
+                self_scoped: true,
+                headers: BTreeMap::new(),
+            }),
+        });
+        assert!(rule_http_auth(&m, "x").is_empty());
+    }
+
+    #[test]
+    fn r18_permission_resource_must_match_path_param() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/roles/{roleId}".to_string());
+        m.method = Some(HttpMethod::Delete);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.role.delete".to_string()),
+                }),
+                resource: Some("subject".to_string()),
+                self_scoped: false,
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("必须匹配")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_resource_and_self_scoped_are_mutually_exclusive() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/roles/{roleId}".to_string());
+        m.method = Some(HttpMethod::Delete);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.role.delete".to_string()),
+                }),
+                resource: Some("roleId".to_string()),
+                self_scoped: true,
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("互斥")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_public_route_forbids_self_scoped_metadata() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/echo".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Public,
+                    reason: Some("public".to_string()),
+                    permission: None,
+                }),
+                resource: None,
+                self_scoped: true,
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("禁止 selfScoped")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_public_route_forbids_resource_metadata() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/echo/{id}".to_string());
+        m.method = Some(HttpMethod::Post);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Public,
+                    reason: Some("public".to_string()),
+                    permission: None,
+                }),
+                resource: Some("id".to_string()),
+                self_scoped: false,
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("禁止 resource")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_empty_resource_is_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/roles/{roleId}".to_string());
+        m.method = Some(HttpMethod::Delete);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.role.delete".to_string()),
+                }),
+                resource: Some(" ".to_string()),
+                self_scoped: false,
+                headers: BTreeMap::new(),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("必须为非空")),
             "{findings:?}"
         );
     }
@@ -2028,6 +2295,8 @@ mod tests {
                     reason: Some("internal service-token route".to_string()),
                     permission: None,
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
@@ -2055,6 +2324,8 @@ mod tests {
                     reason: None,
                     permission: Some("internal.call".to_string()),
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
@@ -2088,6 +2359,8 @@ mod tests {
                     reason: Some("internal service-token route".to_string()),
                     permission: None,
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::new(),
             }),
         });
@@ -2118,6 +2391,8 @@ mod tests {
                     reason: None,
                     permission: Some("internal.call".to_string()),
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::from([(
                     "X-Other-Tenant".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
@@ -2151,6 +2426,8 @@ mod tests {
                     reason: Some("public login".to_string()),
                     permission: None,
                 }),
+                resource: None,
+                self_scoped: false,
                 headers: BTreeMap::new(),
             }),
         });

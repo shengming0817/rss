@@ -1,0 +1,170 @@
+#![feature(rustc_private)]
+//! `rss_handler_local_principal_authz` — RSS G0.4 治理 dylint lint：禁止 handler/domain
+//! 直接读取 `Authenticated` tenant / principal kind / self subject 做本地授权。
+//!
+//! INVARIANT: HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 { level = "Medium", exec = "verify", source = "dylint" }
+//!
+//! `Authenticated` 是 listener 级认证证据，只能表达「谁通过了入口认证」。域 crate 若直接读取
+//! `tenant_id` / `principal_kind` / `self_scoped_principal_id` 做权限判断，会绕过 primary route gate 的
+//! `RouteAuthorizer` / `AuthorizedSubject` 资源授权链路。
+//!
+//! `tenancy.md` 明文：primary handler 只能消费 `AuthorizedSubject` 中的已授权主体上下文；
+//! `Authenticated` 的 tenant/principal getter 仅允许 httpserve 内部 route gate 与 runtime 组合根审计链路使用。
+//!
+//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! - 上游：primary 路由统一在 `httpserve` route gate 调 `RouteAuthorizer`，成功后插入 `AuthorizedSubject`。
+//! - 下游：handler/domain 若绕回 `Authenticated` getter 做 principal/subject 分支，即绕开 funnel；
+//!   因 getter 本身是公开 API，必须经 callsite lint 约束。
+//!
+//! 关键差异（vs `rss_crosstenant_callsite`）：`tenant_id` / `principal_kind` / `self_scoped_principal_id` 是常见 fn 名，
+//! 必须额外验证关联 fn 的 parent impl 的 self 类型确实是 `Authenticated`，否则同名方法会误报。
+//! 判定四步：① callee crate 名 == "httpserve"；② item 名 ∈ {"tenant_id","principal_kind","self_scoped_principal_id"}；③ parent 是 Impl；
+//! ④ impl self 类型的 adt 名 == "Authenticated"（self-ty 检查，本 lint 与 crosstenant 的唯一实质差异）。
+//!
+//! 检测面：捕获直接 method call，以及对这些 getter assoc fn 的 path 引用——`let f = Authenticated::principal_kind`
+//! 函数项别名、fn-pointer 强转都解析到同一 `DefId`。
+//!
+//! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；
+//! ② `ALLOWED_CALLER_CRATES` 扩项无机器复核，靠 greppable + 治理评审；③ **跨函数**洗白仍未覆盖
+//! （intraprocedural）：allowlist crate 内 `pub fn wrap(ev: Authenticated) -> PrincipalKind { ev.principal_kind() }`
+//! 被外部调用，lint 只见各自直接引用、不跨函数追（跟踪 #1085）；④ `#[cfg(test)]` 树不扫，httpserve
+//! 内自测调用不命中（与 crosstenant 同）。
+
+extern crate rustc_hir;
+extern crate rustc_middle;
+extern crate rustc_span;
+
+use clippy_utils::diagnostics::span_lint_hir_and_then;
+use rustc_hir::def::{DefKind, Res};
+use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+use rustc_hir::{Expr, ExprKind, HirId};
+use rustc_lint::{LateContext, LateLintPass};
+use rustc_span::Span;
+
+/// 仅这些 crate 可读取 `Authenticated` tenant / principal kind / self subject——单一 greppable 真源，扩项须治理评审。
+/// `httpserve` route gate 负责把认证证据升级为 `AuthorizedSubject`；runtime 组合根保留审计链路读取权。
+/// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
+/// `httpserve` 本身定义 `Authenticated`，并在 route gate 内构造授权请求，合法豁免。
+const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve", "runtime"];
+
+dylint_linting::declare_late_lint! {
+    /// ### What it does
+    /// 标记非 allowlist crate 对 `httpserve::Authenticated::{tenant_id,principal_kind,self_scoped_principal_id}` 的
+    /// 直接 method call 或 path 引用（`let f = Authenticated::principal_kind` 别名、fn-pointer 强转）。
+    ///
+    /// ### Why is this bad?
+    /// `Authenticated` 只能表达入口认证结果；tenant、权限、资源、自服务授权必须由 primary route gate 统一完成。
+    /// handler/domain 直接读取 tenant/principal/subject 做本地授权，会绕过 `RouteAuthorizer` 和 `AuthorizedSubject`。
+    /// INVARIANT: HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 { level = "Medium", exec = "verify", source = "dylint" }。
+    ///
+    /// ### Known problems
+    /// 仍 intraprocedural：allowlist crate 内 wrapper fn（`pub fn kind(ev: Authenticated) { ev.principal_kind() }`）被外部
+    /// 调用会**跨函数**洗白（lint 只见各自直接引用，跟踪 #1085）。`ALLOWED_CALLER_CRATES` 扩项
+    /// 无机器复核（靠 greppable + 治理）。确需在 allowlist 外引用加
+    /// `#[allow(rss_handler_local_principal_authz)] // reason: ...`。
+    ///
+    /// ### Example
+    /// ```ignore
+    /// // 域 crate（非组合根）：
+    /// if ev.principal_kind() == PrincipalKind::Admin { /* 本地授权 */ } // 触发
+    /// ```
+    /// Use instead: handler 读取 route gate 插入的 `AuthorizedSubject`。
+    pub RSS_HANDLER_LOCAL_PRINCIPAL_AUTHZ,
+    Warn,
+    "handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权（callsite-allowlist）"
+}
+
+impl<'tcx> LateLintPass<'tcx> for RssHandlerLocalPrincipalAuthz {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        if let ExprKind::MethodCall(..) = expr.kind {
+            if let Some(did) = cx.typeck_results().type_dependent_def_id(expr.hir_id)
+                && is_authenticated_context_getter_did(cx, did)
+                && !caller_is_allowed(cx)
+            {
+                emit(cx, expr.hir_id, expr.span);
+            }
+            return;
+        }
+        // 捕获对 getter fn-item 的**任意** path 引用——直接 call 的 callee、`let f = Authenticated::principal_kind` 别名、
+        // fn-pointer 强转都是 `ExprKind::Path` 解析到该 assoc fn `DefId`；只拦表面 call 会被「先别名再调用」绕过。
+        let ExprKind::Path(ref qpath) = expr.kind else {
+            return;
+        };
+        let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
+            return;
+        };
+        if is_authenticated_context_getter_did(cx, did) && !caller_is_allowed(cx) {
+            emit(cx, expr.hir_id, expr.span);
+        }
+    }
+}
+
+/// `did` 是 `httpserve::Authenticated` 的关联 fn `tenant_id`、`principal_kind` 或 `self_scoped_principal_id`。
+/// 四步判定——缺第 4 步会误命中所有同名 getter：
+/// 1. callee crate 名 == "httpserve"
+/// 2. item 名 ∈ {"tenant_id", "principal_kind", "self_scoped_principal_id"}
+/// 3. parent def_kind 是 Impl（assoc fn）
+/// 4. impl self 类型的 adt 名 == "Authenticated"
+fn is_authenticated_context_getter_did(cx: &LateContext<'_>, did: DefId) -> bool {
+    // 步骤 1：callee 属于 httpserve crate
+    if cx.tcx.crate_name(did.krate).as_str() != "httpserve" {
+        return false;
+    }
+    // 步骤 2：item 名是受治理的 Authenticated 上下文 getter
+    let item_name = cx.tcx.item_name(did);
+    if item_name.as_str() != "tenant_id"
+        && item_name.as_str() != "principal_kind"
+        && item_name.as_str() != "self_scoped_principal_id"
+    {
+        return false;
+    }
+    // 步骤 3：parent 是 Impl（assoc fn，非自由 fn）
+    let parent_did = cx.tcx.parent(did);
+    if !matches!(cx.tcx.def_kind(parent_did), DefKind::Impl { .. }) {
+        return false;
+    }
+    // 步骤 4：impl self 类型的 adt 名 == "Authenticated"（杜绝同名 getter 误报）
+    let self_ty = cx.tcx.type_of(parent_did).skip_binder();
+    if let Some(adt_def) = self_ty.ty_adt_def() {
+        cx.tcx.item_name(adt_def.did()).as_str() == "Authenticated"
+    } else {
+        false
+    }
+}
+
+/// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
+/// 按 crate 名判定不可被「在别的 crate 里 `mod server`」伪造。
+fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
+    ALLOWED_CALLER_CRATES.contains(&cx.tcx.crate_name(LOCAL_CRATE).as_str())
+}
+
+/// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
+/// `#[allow(rss_handler_local_principal_authz)]` 逃生门生效（同 rss_crosstenant_callsite）。
+fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
+    span_lint_hir_and_then(
+        cx,
+        RSS_HANDLER_LOCAL_PRINCIPAL_AUTHZ,
+        hir_id,
+        span,
+        "handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权",
+        |diag| {
+            diag.help(
+                "改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`",
+            );
+        },
+    );
+}
+
+#[test]
+fn ui_disallowed() {
+    // example target 名 `handler_local_principal_authz_ui`（非 allowlist）→ 调 Authenticated getter 触发；
+    // 含 anti-vacuity（同名本地 getter 不触发，证明 lint 非「任意同名方法」）。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "handler_local_principal_authz_ui");
+}
+
+#[test]
+fn ui_httpserve_allowed() {
+    // example target 名 `httpserve`（= allowlist 项，定义 crate 内部豁免）⇒ crate_name(LOCAL_CRATE)=="httpserve"
+    // ⇒ 调 funnel 不触发，验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/httpserve.stderr 为空。
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "httpserve");
+}

@@ -221,6 +221,10 @@ pub(crate) struct HttpEndpoint {
     #[serde(default)]
     pub(crate) auth: Option<HttpAuth>,
     #[serde(default)]
+    pub(crate) resource: Option<String>,
+    #[serde(default, rename = "selfScoped")]
+    pub(crate) self_scoped: bool,
+    #[serde(default)]
     pub(crate) headers: BTreeMap<String, HttpHeaderMode>,
 }
 

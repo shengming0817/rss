@@ -48,6 +48,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 mockall = { workspace = true }
 # 域纯逻辑表驱动参数化测试（rust-standards §一致性级别 L0）。
 rstest = { workspace = true }
+httpserve = { path = "../httpserve", features = ["test-util"] }
 # config/secret publish 契约 HTTP 测试（对标 identity login_contract）：testkit oneshot harness + axum 样板 router。
 # testkit 零 adapter 依赖（dev-dep 消费不破「域单测不依赖 adapter crate」）。
 testkit = { path = "../testkit" }

@@ -19,17 +19,21 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
+use generated::event::settings_v1::TOPIC as SETTINGS_VERSION_CHANGED_TOPIC;
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
 use generated::http::identity_v1::roles_assign::SPEC as ROLES_ASSIGN_SPEC;
 use generated::http::identity_v1::roles_list::SPEC as ROLES_LIST_SPEC;
 use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
+use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
 use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleRepo};
 use identity::ports::{Role, RoleRepo as _, TenantId};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::ListenerKind;
-use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity_with};
+use runtime::{
+    SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity_with, wire_settings,
+};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
@@ -78,6 +82,15 @@ fn admin_jwt() -> String {
         &sk_jwt(),
         &format!(
             r#"{{"sub":"{CANON_USER}","exp":{JWT_EXP_FAR_FUTURE},"iss":"https://issuer.test","aud":"rss","kind":"admin","tenant_id":"{CANON_TENANT}"}}"#
+        ),
+    )
+}
+
+fn operator_jwt() -> String {
+    mint_es256(
+        &sk_jwt(),
+        &format!(
+            r#"{{"sub":"{CANON_USER}","exp":{JWT_EXP_FAR_FUTURE},"iss":"https://issuer.test","aud":"rss","kind":"user","tenant_id":"{CANON_TENANT}"}}"#
         ),
     )
 }
@@ -227,10 +240,12 @@ fn test_provider() -> oidc::OidcProvider {
 
 async fn outbox_topic_count(
     pool: &PgPool,
+    domain: &str,
     topic: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     let (count,): (i64,) =
-        sqlx::query_as("SELECT count(*) FROM outbox WHERE domain = 'identity' AND topic = $1")
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE domain = $1 AND topic = $2")
+            .bind(domain)
             .bind(topic)
             .fetch_one(pool)
             .await?;
@@ -248,6 +263,20 @@ async fn role_binding_count(
     .bind(CANON_TENANT)
     .bind(role_id)
     .bind(subject)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+async fn config_entry_count(
+    pool: &PgPool,
+    key: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+    )
+    .bind(CANON_TENANT)
+    .bind(key)
     .fetch_one(pool)
     .await?;
     Ok(count)
@@ -329,6 +358,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
+        identity_domain.primary_authorizer(),
     )? {
         if listener == ListenerKind::Primary {
             primary = Some(routes.into_router_for_test());
@@ -481,8 +511,14 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         .assign_role(tenant, actor, CANON_USER.to_string(), admin_role_id)
         .await?;
 
-    let assigned_before = outbox_topic_count(&assertion_pool, "identity.role-assigned").await?;
-    let revoked_before = outbox_topic_count(&assertion_pool, "identity.role-revoked").await?;
+    let assigned_before =
+        outbox_topic_count(&assertion_pool, "identity", "identity.role-assigned").await?;
+    let revoked_before =
+        outbox_topic_count(&assertion_pool, "identity", "identity.role-revoked").await?;
+    let settings_key = "app.timeout";
+    let settings_before = config_entry_count(&assertion_pool, settings_key).await?;
+    let settings_outbox_before =
+        outbox_topic_count(&assertion_pool, "settings", SETTINGS_VERSION_CHANGED_TOPIC).await?;
 
     // 3. production runtime deps + Primary router/auth middleware.
     let vault = runtime::build_vault_runtime_deps(|name| match name {
@@ -511,30 +547,135 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         },
         true,
     )?;
-    let mut registry = bootstrap::compose(&[&identity_domain])?;
+    let (settings_domain, _settings_module) = wire_settings(&deps).await?;
+    let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &settings_domain];
+    let mut registry = bootstrap::compose(&domains)?;
     let mut primary = None;
     for (listener, routes) in runtime::assemble_authed_routers(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
+        identity_domain.primary_authorizer(),
     )? {
         if listener == ListenerKind::Primary {
             primary = Some(routes.into_router_for_test());
         }
     }
     let app = primary.ok_or("identity domain did not produce Primary router")?;
-    let bearer = format!("Bearer {}", admin_jwt());
 
-    // 4. POST /roles/{roleId}/bindings：真实 auth middleware 放行 admin JWT，binding + role-assigned outbox 同事务落库。
+    // 4. POST /roles/{roleId}/bindings：operator JWT 无 role:assign 权限 → route gate 403，且 zero-write。
     let assign_path = ROLES_ASSIGN_SPEC.path.replace("{roleId}", OPERATOR_ROLE);
+    let operator_bearer = format!("Bearer {}", operator_jwt());
+    let denied_assign_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(assign_path.clone())
+                .header(header::AUTHORIZATION, &operator_bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "subject": TARGET_SUBJECT,
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        denied_assign_resp.status(),
+        StatusCode::FORBIDDEN,
+        "user without role:assign must be denied by Primary route gate"
+    );
+    assert_eq!(
+        role_binding_count(&assertion_pool, OPERATOR_ROLE, TARGET_SUBJECT).await?,
+        0,
+        "denied role assign must not commit binding"
+    );
+    assert_eq!(
+        outbox_topic_count(&assertion_pool, "identity", "identity.role-assigned").await?,
+        assigned_before,
+        "denied role assign must not append identity.role-assigned outbox"
+    );
+
+    // 5. POST /settings/configs：user JWT 无 settings permission → route gate 403，且 config/outbox 零写。
+    let denied_settings_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(SETTINGS_CONFIG_SPEC.path)
+                .header(header::AUTHORIZATION, &operator_bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "key": settings_key,
+                        "value": "30s",
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        denied_settings_resp.status(),
+        StatusCode::FORBIDDEN,
+        "user without settings permission must be denied by Primary route gate"
+    );
+    assert_eq!(
+        config_entry_count(&assertion_pool, settings_key).await?,
+        settings_before,
+        "denied settings publish must not write config_entries"
+    );
+    assert_eq!(
+        outbox_topic_count(&assertion_pool, "settings", SETTINGS_VERSION_CHANGED_TOPIC).await?,
+        settings_outbox_before,
+        "denied settings publish must not append settings outbox"
+    );
+
+    // 6. POST /settings/configs：trusted Admin 内置 settings permission → route gate 放行，config + outbox 同事务落库。
+    let admin_bearer = format!("Bearer {}", admin_jwt());
+    let settings_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(SETTINGS_CONFIG_SPEC.path)
+                .header(header::AUTHORIZATION, &admin_bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "key": settings_key,
+                        "value": "30s",
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        settings_resp.status(),
+        StatusCode::CREATED,
+        "admin settings config publish should pass through Primary auth"
+    );
+    assert_eq!(
+        config_entry_count(&assertion_pool, settings_key).await?,
+        settings_before + 1,
+        "settings config publish must commit config entry"
+    );
+    assert_eq!(
+        outbox_topic_count(&assertion_pool, "settings", SETTINGS_VERSION_CHANGED_TOPIC).await?,
+        settings_outbox_before + 1,
+        "settings config publish must append settings outbox"
+    );
+
+    // 7. POST /roles/{roleId}/bindings：真实 auth middleware 放行 admin JWT，binding + role-assigned outbox 同事务落库。
     let assign_resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri(assign_path)
-                .header(header::AUTHORIZATION, &bearer)
+                .header(header::AUTHORIZATION, &admin_bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -555,12 +696,12 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         "role binding row must be committed"
     );
     assert_eq!(
-        outbox_topic_count(&assertion_pool, "identity.role-assigned").await?,
+        outbox_topic_count(&assertion_pool, "identity", "identity.role-assigned").await?,
         assigned_before + 1,
         "role assign must append identity.role-assigned outbox"
     );
 
-    // 5. GET /roles：同一 admin JWT 通过 role:read 权限，真实 repo list 返回 seeded roles。
+    // 8. GET /roles：同一 admin JWT 通过 role:read 权限，真实 repo list 返回 seeded roles。
     let list_uri = format!("{}?limit=20", ROLES_LIST_SPEC.path);
     let list_resp = app
         .clone()
@@ -568,7 +709,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
             Request::builder()
                 .method(Method::GET)
                 .uri(list_uri)
-                .header(header::AUTHORIZATION, &bearer)
+                .header(header::AUTHORIZATION, &admin_bearer)
                 .body(Body::empty())?,
         )
         .await?;
@@ -580,7 +721,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         "roles list should include seeded roles; body: {list_text}"
     );
 
-    // 6. DELETE /roles/{roleId}/bindings/{subject}：真实 auth + Pg lifecycle 删除 binding 并写 revoked outbox。
+    // 9. DELETE /roles/{roleId}/bindings/{subject}：真实 auth + Pg lifecycle 删除 binding 并写 revoked outbox。
     let revoke_path = ROLES_REVOKE_SPEC
         .path
         .replace("{roleId}", OPERATOR_ROLE)
@@ -590,7 +731,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
             Request::builder()
                 .method(Method::DELETE)
                 .uri(revoke_path)
-                .header(header::AUTHORIZATION, &bearer)
+                .header(header::AUTHORIZATION, &admin_bearer)
                 .body(Body::empty())?,
         )
         .await?;
@@ -605,7 +746,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         "role binding row must be removed"
     );
     assert_eq!(
-        outbox_topic_count(&assertion_pool, "identity.role-revoked").await?,
+        outbox_topic_count(&assertion_pool, "identity", "identity.role-revoked").await?,
         revoked_before + 1,
         "role revoke must append identity.role-revoked outbox"
     );

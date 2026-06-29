@@ -82,11 +82,11 @@
 
 **Independent Test**: modeless active route is rejected; owner/self route authorization sends canonical resource context to PDP.
 
-- [ ] T024 [P] [US4] Add route modeless rejection tests in xtask contract/codegen validation
-- [ ] T025 [US4] Wire primary Authorizer into HTTP route context before serving in crates/httpserve and runtime composition
-- [ ] T026 [US4] Replace handler-local role/self authorization branches with contract-derived permission funnels in crates/authn and crates/httpserve
-- [ ] T027 [P] [US4] Add governance search/lint for handler-local Principal role checks in xtask or dylint
-- [ ] T028 [US4] Add owner/self scoped PDP resource canonicalization tests in crates/authn or crates/httpserve
+- [x] T024 [P] [US4] Add route modeless rejection tests in xtask contract/codegen validation
+- [x] T025 [US4] Wire primary Authorizer into HTTP route context before serving in crates/httpserve and runtime composition
+- [x] T026 [US4] Replace handler-local role/self authorization branches with contract-derived permission funnels in crates/authn and crates/httpserve
+- [x] T027 [P] [US4] Add governance search/lint for handler-local Principal role checks in xtask or dylint
+- [x] T028 [US4] Add owner/self scoped PDP resource canonicalization tests in crates/authn or crates/httpserve
 
 ---
 

@@ -1066,19 +1066,22 @@ mod finalize {
         use axum::body::Body;
         use axum::http::{Method, Request, StatusCode};
         use axum::routing::get;
-        use httpserve::{PrimaryRoute, Route};
+        use httpserve::{PrimaryRoute, Route, RoutePermission, RouteResourceScope};
         use tower::ServiceExt;
 
         let mut reg = Registry::new();
         // register 闭包经 typed builder 在 fresh Router 上 mount 相对 prefix 的路由；finalize nest 到声明 prefix 下。
         reg.route_group::<Primary>("/api/v1/p", |rb| {
             Ok(rb.mount_primary(
-                PrimaryRoute {
-                    method: Method::GET,
-                    path: "/primary-only",
-                    contract_id: "test.primary",
-                    opt_out: None,
-                },
+                PrimaryRoute::permission(
+                    Method::GET,
+                    "/primary-only",
+                    "test.primary",
+                    RoutePermission {
+                        permission: "test:read",
+                        scope: RouteResourceScope::None,
+                    },
+                ),
                 get(|| async { "p" }),
             ))
         })

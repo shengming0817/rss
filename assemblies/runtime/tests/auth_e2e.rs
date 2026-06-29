@@ -10,6 +10,8 @@
 //!
 //! NOTE: `bins/rss` 与 `bins/server` 已成薄壳（#1309）；验签桥逻辑现集中在 `assemblies/runtime`。
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +22,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use diport::{AuditEvent, AuditSink, AuditSinkError};
 use futures::FutureExt as _;
+use httpserve::{
+    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer, RoutePermission,
+    RouteResourceScope,
+};
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
@@ -41,6 +47,22 @@ impl diport::Clock for FixedClock {
     fn now(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.0 as u64)
     }
+}
+
+#[derive(Clone)]
+struct AllowAuthorizer;
+
+impl RouteAuthorizer for AllowAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _request: RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+        Box::pin(async { RouteAuthorizationDecision::Allow })
+    }
+}
+
+fn allow_authorizer() -> Arc<dyn RouteAuthorizer> {
+    Arc::new(AllowAuthorizer)
 }
 
 #[derive(Clone, Default)]
@@ -198,26 +220,30 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
     // typed Primary builder（`ListenerRouter::new` 是 pub(crate)，外部测试经 `unfinalized_for_test` 构造 funnel 输入）。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            httpserve::PrimaryRoute {
-                method: Method::GET,
-                path: "/protected",
-                contract_id: "test.protected",
-                opt_out: None,
-            },
+            httpserve::PrimaryRoute::permission(
+                Method::GET,
+                "/protected",
+                "test.protected",
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(|| async { "ok" }),
         )
         .mount_primary(
-            httpserve::PrimaryRoute {
-                method: Method::GET,
-                path: "/public",
-                contract_id: "test.public",
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            httpserve::PrimaryRoute::opt_out(
+                Method::GET,
+                "/public",
+                "test.public",
+                RouteAuthOptOut::Public,
+            ),
             get(|| async { "pub" }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
-    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
     match bridge {
         Some(scheme) => apply_verify_bridge(authed, Arc::new(es256_provider()), scheme),
         None => authed,
@@ -228,21 +254,25 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
 fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRoutes {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            httpserve::PrimaryRoute {
-                method: Method::GET,
-                path: "/protected",
-                contract_id: "test.protected",
-                opt_out: None,
-            },
+            httpserve::PrimaryRoute::permission(
+                Method::GET,
+                "/protected",
+                "test.protected",
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(|| async { "ok" }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
-    let authed = httpserve::finalize_auth_with_audit(
+    let authed = httpserve::finalize_primary_auth_with_audit(
         routes,
         plan,
         httpserve::AuditSinkHandle::new(sink),
         Arc::new(FixedClock(NOW)),
+        allow_authorizer(),
     )
     .expect("finalize_auth_with_audit");
     apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Jwt)
@@ -466,26 +496,30 @@ async fn scope_probe() -> String {
 fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            httpserve::PrimaryRoute {
-                method: Method::GET,
-                path: "/scope",
-                contract_id: "test.scope",
-                opt_out: None,
-            },
+            httpserve::PrimaryRoute::permission(
+                Method::GET,
+                "/scope",
+                "test.scope",
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(scope_probe),
         )
         .mount_primary(
-            httpserve::PrimaryRoute {
-                method: Method::GET,
-                path: "/scope-public",
-                contract_id: "test.scope.public",
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            httpserve::PrimaryRoute::opt_out(
+                Method::GET,
+                "/scope-public",
+                "test.scope.public",
+                RouteAuthOptOut::Public,
+            ),
             get(scope_probe),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
-    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
     apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Jwt)
 }
 

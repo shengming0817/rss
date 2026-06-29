@@ -354,6 +354,8 @@ pub const CONTRACT: ::vocab::ContractBinding =
     };
     let reason = render_option_str(auth.reason.as_deref(), "reason")?;
     let permission = render_option_str(auth.permission.as_deref(), "permission")?;
+    let resource = render_option_str(http.resource.as_deref(), "resource")?;
+    let self_scoped = http.self_scoped;
     let mut headers = Vec::with_capacity(http.headers.len());
     for (name, mode) in &http.headers {
         if !is_safe_codegen_string(name) {
@@ -393,6 +395,8 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
         reason: {reason},
         permission: {permission},
     }},
+    resource: {resource},
+    self_scoped: {self_scoped},
     headers: &[{headers_body}],
 }};
 "#,
@@ -885,6 +889,8 @@ pub struct HttpSpec {
     pub path: &'static str,
     pub method: &'static str,
     pub auth: HttpAuthSpec,
+    pub resource: Option<&'static str>,
+    pub self_scoped: bool,
     pub headers: &'static [HttpHeaderSpec],
 }
 

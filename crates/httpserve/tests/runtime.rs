@@ -14,10 +14,17 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::routing::get;
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt; // oneshot
 use vocab::PrincipalKind;
 
-use httpserve::{Authenticated, PrimaryRoute, Route, RouteMeta, finalize_auth};
+use httpserve::{
+    Authenticated, AuthenticatedRoutes, PrimaryRoute, Route, RouteAuthorizationDecision,
+    RouteAuthorizationRequest, RouteAuthorizer, RouteGroupError, RouteMeta, RoutePermission,
+    RouteResourceScope, UnfinalizedRoutes, finalize_auth, finalize_primary_auth,
+};
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -56,6 +63,7 @@ async fn panicking_handler() -> axum::response::Response {
 const C: &str = "httpserve.test";
 const X_REQUEST_ID: &str = "x-request-id";
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const PRINCIPAL: &str = "11111111-2222-4333-8444-555555555555";
 
 #[allow(clippy::unwrap_used)]
 fn tenant() -> vocab::TenantId {
@@ -63,7 +71,58 @@ fn tenant() -> vocab::TenantId {
 }
 
 fn authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
-    Authenticated::new(scheme, kind, "principal-1", Some(tenant()))
+    Authenticated::new(scheme, kind, PRINCIPAL, Some(tenant()))
+}
+
+#[derive(Clone)]
+struct AllowAuthorizer;
+
+impl RouteAuthorizer for AllowAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _request: RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+        Box::pin(async { RouteAuthorizationDecision::Allow })
+    }
+}
+
+fn allow_authorizer() -> Arc<dyn RouteAuthorizer> {
+    Arc::new(AllowAuthorizer)
+}
+
+#[allow(clippy::unwrap_used)]
+fn finalize_primary_test(routes: UnfinalizedRoutes, plan: AuthPlan) -> AuthenticatedRoutes {
+    finalize_primary_auth(routes, plan, allow_authorizer()).unwrap()
+}
+
+#[derive(Clone)]
+struct DenyAuthorizer;
+
+impl RouteAuthorizer for DenyAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _request: RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+        Box::pin(async { RouteAuthorizationDecision::Deny })
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingAuthorizer {
+    seen: Arc<Mutex<Vec<RouteAuthorizationRequest>>>,
+}
+
+impl RouteAuthorizer for RecordingAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        request: RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(request);
+        Box::pin(async { RouteAuthorizationDecision::Allow })
+    }
 }
 
 // ── mount / 路由匹配 ─────────────────────────────────────────────────────────
@@ -107,18 +166,12 @@ async fn mount_non_primary_route_is_reachable_after_finalize() {
 async fn primary_public_opt_out_allows() {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/x", C, RouteAuthOptOut::Public),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     // Public opt-out → Allow → 200，即便 plan 要求 Jwt 且无 Authorization。
     let resp = router
@@ -134,18 +187,12 @@ async fn primary_public_opt_out_with_evidence_is_200() {
     // 保险：opt_out=Public 是 Allow 分支，存在 Authenticated 证据不改变结论（证据不破坏 Allow）→ 仍 200。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/x", C, RouteAuthOptOut::Public),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -163,18 +210,20 @@ async fn primary_public_opt_out_with_evidence_is_200() {
 async fn primary_require_without_credential_is_401() {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     // Require(Jwt) + 无 Authorization → 401 + ERR_CORE_UNAUTHENTICATED。
     let resp = router
@@ -193,18 +242,20 @@ async fn primary_require_is_fail_closed_401() {
     // extension（验签桥外层 layer 注入）才放行，故带 header 仍 401（AUTH-EVIDENCE-REQUIRE-01）。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -223,18 +274,20 @@ async fn primary_require_with_authenticated_evidence_allows() {
     // 证据由组合根验签桥（外层 layer）注入；此处直接 insert 到请求 extension 模拟该接缝。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -249,23 +302,158 @@ async fn primary_require_with_authenticated_evidence_allows() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
+async fn primary_permission_authorizer_deny_is_403() {
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
+            get(ok_handler),
+        )
+    });
+    let router = finalize_primary_auth(
+        routes,
+        primary_plan(AuthScheme::Jwt),
+        Arc::new(DenyAuthorizer),
+    )
+    .unwrap()
+    .into_router_for_test();
+    let mut req = empty_req(Method::GET, "/api/v1/x");
+    req.extensions_mut()
+        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn primary_self_scoped_permission_uses_principal_subject_resource() {
+    let recorder = RecordingAuthorizer::default();
+    let seen = Arc::clone(&recorder.seen);
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/me",
+                C,
+                RoutePermission {
+                    permission: "test:self",
+                    scope: RouteResourceScope::SelfSubject,
+                },
+            ),
+            get(|axum::Extension(subject): axum::Extension<httpserve::AuthorizedSubject>| async move {
+                subject.principal_id().to_string()
+            }),
+        )
+    });
+    let router = finalize_primary_auth(routes, primary_plan(AuthScheme::Jwt), Arc::new(recorder))
+        .unwrap()
+        .into_router_for_test();
+    let mut req = empty_req(Method::GET, "/api/v1/me");
+    req.extensions_mut().insert(Authenticated::new(
+        RequiredScheme::Jwt,
+        PrincipalKind::User,
+        PRINCIPAL,
+        Some(tenant()),
+    ));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(seen[0].resource.as_ref().map(|r| r.id()), Some(PRINCIPAL));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn primary_path_param_permission_uses_axum_decoded_resource() {
+    let recorder = RecordingAuthorizer::default();
+    let seen = Arc::clone(&recorder.seen);
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/roles/{roleId}",
+                C,
+                RoutePermission {
+                    permission: "test:role",
+                    scope: RouteResourceScope::PathParam("roleId"),
+                },
+            ),
+            get(ok_handler),
+        )
+    });
+    let router = finalize_primary_auth(routes, primary_plan(AuthScheme::Jwt), Arc::new(recorder))
+        .unwrap()
+        .into_router_for_test();
+    let resource = "22222222-3333-4444-8555-666666666666";
+    let mut req = empty_req(Method::GET, &format!("/api/v1/roles/{resource}"));
+    req.extensions_mut()
+        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(seen[0].resource.as_ref().map(|r| r.id()), Some(resource));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn primary_path_param_noncanonical_resource_denies_before_authorizer() {
+    let recorder = RecordingAuthorizer::default();
+    let seen = Arc::clone(&recorder.seen);
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/roles/{roleId}",
+                C,
+                RoutePermission {
+                    permission: "test:role",
+                    scope: RouteResourceScope::PathParam("roleId"),
+                },
+            ),
+            get(ok_handler),
+        )
+    });
+    let router = finalize_primary_auth(routes, primary_plan(AuthScheme::Jwt), Arc::new(recorder))
+        .unwrap()
+        .into_router_for_test();
+    let mut req = empty_req(Method::GET, "/api/v1/roles/role-123");
+    req.extensions_mut()
+        .insert(authed(RequiredScheme::Jwt, PrincipalKind::User));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(
+        seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+        "non-canonical resource must fail before PDP call"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
 async fn primary_require_with_mismatched_scheme_is_401() {
     // AUTH-EVIDENCE-REQUIRE-01 scheme exact-match：Require(Jwt) 路由 + Mtls 方案证据 → scheme 不匹配 → 401
     // （#1109 验签桥接入后杜绝 Jwt 证据过 Require(Mtls) 类 scheme 混淆）。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -280,30 +468,17 @@ async fn primary_require_with_mismatched_scheme_is_401() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
-async fn primary_route_finalized_under_control_plane_plan_is_403() {
-    // 残留 seam fail-closed：Primary route 带 opt-out，却在控制面（Internal）plan 下 finalize
-    // → resolve_requirement = Deny → 403 ERR_CORE_FORBIDDEN（AUTH-FAILCLOSED-01 的 HTTP 落地）。
+async fn primary_route_under_control_plane_plan_is_finalize_error() {
+    // Primary route 不得用控制面 plan 装配；listener mismatch 在 finalize 阶段 fail-fast。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/x", C, RouteAuthOptOut::Public),
             get(ok_handler),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::ServiceToken).unwrap();
-    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
-
-    let resp = router
-        .oneshot(empty_req(Method::GET, "/api/v1/x"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    let json = body_json(resp).await;
-    assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN");
+    let result = finalize_auth(routes, plan);
+    assert!(matches!(result, Err(RouteGroupError::ListenerMismatch)));
 }
 
 #[tokio::test]
@@ -312,12 +487,15 @@ async fn missing_finalize_auth_is_fail_closed_403() {
     // finalize_auth 未跑 → enforce 层读不到 AuthPlan → fail-closed Deny → 403。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(ok_handler),
         )
     });
@@ -337,18 +515,12 @@ async fn missing_finalize_auth_is_fail_closed_403() {
 async fn request_id_is_generated_on_response() {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/x", C, RouteAuthOptOut::Public),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -365,18 +537,20 @@ async fn incoming_request_id_is_echoed_and_in_envelope() {
     // 入站 X-Request-Id 透传到响应 header + 4xx envelope.requestId（enforce 层有 request 上下文）。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::permission(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -402,18 +576,12 @@ async fn handler_panic_becomes_500_envelope_without_leaking_payload() {
     // F2：request-aware panic 中间件——requestId 来自请求上下文，panic payload 不泄漏 wire。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/boom",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/boom", C, RouteAuthOptOut::Public),
             get(panicking_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -444,29 +612,16 @@ async fn handler_panic_becomes_500_envelope_without_leaking_payload() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn admin_opt_out_is_403() {
-    // Admin listener + opt-out Public → Deny → 403（控制面 listener 永不降级）。
-    // 使用 Primary listener 挂载 PrimaryRoute（带 opt_out），但以 Admin plan finalize。
+    // PrimaryRoute opt-out 不能被 Admin plan 装配，避免把 listener mismatch 固化成请求期 403 seam。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/x", C, RouteAuthOptOut::Public),
             get(ok_handler),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).unwrap();
-    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
-
-    let resp = router
-        .oneshot(empty_req(Method::GET, "/api/v1/x"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    let json = body_json(resp).await;
-    assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN");
+    let result = finalize_auth(routes, plan);
+    assert!(matches!(result, Err(RouteGroupError::ListenerMismatch)));
 }
 
 #[tokio::test]
@@ -475,18 +630,17 @@ async fn primary_password_reset_exempt_allows() {
     // Primary + PasswordResetExempt opt-out → Allow → 200（无需 Authorization）。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: Some(RouteAuthOptOut::PasswordResetExempt),
-            },
+            PrimaryRoute::opt_out(
+                Method::GET,
+                "/api/v1/x",
+                C,
+                RouteAuthOptOut::PasswordResetExempt,
+            ),
             get(ok_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -498,20 +652,15 @@ async fn primary_password_reset_exempt_allows() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn primary_noauth_plan_allows() {
-    // Primary + NoAuth scheme（AuthPlan::none）→ Allow → 200（无需 Authorization header）。
+    // Primary + NoAuth scheme + explicit opt-out → Allow → 200（无需 Authorization header）。
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/x",
-                contract_id: C,
-                opt_out: None,
-            },
+            PrimaryRoute::opt_out(Method::GET, "/api/v1/x", C, RouteAuthOptOut::Public),
             get(ok_handler),
         )
     });
     let plan = AuthPlan::none(ListenerKind::Primary).unwrap();
-    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
+    let router = finalize_primary_test(routes, plan).into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -534,18 +683,17 @@ async fn route_meta_in_request_extension() {
 
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            PrimaryRoute {
-                method: Method::GET,
-                path: "/api/v1/meta",
-                contract_id: META_CONTRACT,
-                opt_out: Some(RouteAuthOptOut::Public),
-            },
+            PrimaryRoute::opt_out(
+                Method::GET,
+                "/api/v1/meta",
+                META_CONTRACT,
+                RouteAuthOptOut::Public,
+            ),
             get(meta_handler),
         )
     });
-    let router = finalize_auth(routes, primary_plan(AuthScheme::Jwt))
-        .unwrap()
-        .into_router_for_test();
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/meta"))

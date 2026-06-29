@@ -1,0 +1,51 @@
+warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
+  --> $DIR/disallowed.rs:25:19
+   |
+LL |     let _tenant = auth.tenant_id();
+   |                   ^^^^^^^^^^^^^^^^
+   |
+   = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
+   = note: `#[warn(rss_handler_local_principal_authz)]` on by default
+
+warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
+  --> $DIR/disallowed.rs:26:17
+   |
+LL |     let _kind = auth.principal_kind();
+   |                 ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
+
+warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
+  --> $DIR/disallowed.rs:27:20
+   |
+LL |     let _subject = auth.self_scoped_principal_id();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
+
+warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
+  --> $DIR/disallowed.rs:28:62
+   |
+LL |     let _tenant_fn: fn(&Authenticated) -> Option<TenantId> = Authenticated::tenant_id;
+   |                                                              ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
+
+warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
+  --> $DIR/disallowed.rs:29:57
+   |
+LL |     let _kind_fn: fn(&Authenticated) -> PrincipalKind = Authenticated::principal_kind;
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
+
+warning: handler/domain 不得直接读取 Authenticated tenant/principal/self subject 做本地授权
+  --> $DIR/disallowed.rs:30:51
+   |
+LL |     let _subject_fn: fn(&Authenticated) -> &str = Authenticated::self_scoped_principal_id;
+   |                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
+
+warning: 6 warnings emitted
+

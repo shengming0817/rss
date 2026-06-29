@@ -186,5 +186,7 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
         reason: None,
         permission: Some("settings.secret-publish"),
     },
+    resource: None,
+    self_scoped: false,
     headers: &[],
 };

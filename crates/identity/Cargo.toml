@@ -61,6 +61,7 @@ mockall = { workspace = true }
 rstest = { workspace = true }
 # authz 纯逻辑单测构造 Principal（test-support feature 仅 dev/test 生效，生产 seal 不变）。
 authn = { path = "../authn", features = ["test-support"] }
+httpserve = { path = "../httpserve", features = ["test-util"] }
 # identity.login 契约测试样板（#1136 login_contract）：testkit oneshot harness + axum 挂载样板 handler。
 # testkit 零 adapter 依赖（dev-dep 消费不破「域单测不依赖 adapter crate」）；axum 构建样板 router。
 testkit = { path = "../testkit" }

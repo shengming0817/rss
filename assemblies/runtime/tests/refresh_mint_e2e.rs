@@ -11,6 +11,8 @@
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master（refresh rotation 先 mint 后 CAS，概念谱系）
 //! ref: jmgilman/vaultrs vaultrs/src/api/transit/requests.rs@master（Transit `sign`：`{mount}/sign/{name}` + base64 input）
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +21,10 @@ use axum::http::{Method, StatusCode, header};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
+use httpserve::{
+    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer, RoutePermission,
+    RouteResourceScope,
+};
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
@@ -37,6 +43,22 @@ const NOW: i64 = 1_700_000_000;
 const TTL_SECS: u64 = 900;
 /// JOSE `kid` = vault Transit sign key 名（mock 不校验 key 名，仅证 issuer 把 kid 注入 header）。
 const KEY_ID: &str = "rss-jwt-es256";
+
+#[derive(Clone)]
+struct AllowAuthorizer;
+
+impl RouteAuthorizer for AllowAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _request: RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+        Box::pin(async { RouteAuthorizationDecision::Allow })
+    }
+}
+
+fn allow_authorizer() -> Arc<dyn RouteAuthorizer> {
+    Arc::new(AllowAuthorizer)
+}
 
 /// 注入时钟替身（确定性 iat/exp；非系统时钟）。
 struct FixedClock(i64);
@@ -134,17 +156,21 @@ fn oidc_provider() -> OidcProvider {
 async fn verify_status(token: &str) -> StatusCode {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
-            httpserve::PrimaryRoute {
-                method: Method::GET,
-                path: "/protected",
-                contract_id: "test.protected",
-                opt_out: None,
-            },
+            httpserve::PrimaryRoute::permission(
+                Method::GET,
+                "/protected",
+                "test.protected",
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
             get(|| async { "ok" }),
         )
     });
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
-    let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
+    let authed =
+        httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
     let app = apply_verify_bridge(authed, Arc::new(oidc_provider()), RequiredScheme::Jwt);
     let req = axum::http::Request::builder()
         .method(Method::GET)

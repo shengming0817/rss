@@ -10,7 +10,7 @@
 //! HTTP 接缝（#1430 PERSIST-009 settings 首条 durable module 闭环）：[`SettingsDomain`] 持 config + secret
 //! 应用服务，`init` 经 typed `route_group::<Primary>` + `mount_primary`（`ListenerRouter<Primary>` 方法，
 //! #1113/#1103 typed route funnel）从 generated SPEC 挂 `settings.config-publish` / `settings.secret-publish`
-//! 两条认证路由（鉴权 = permission，租户来自验签 [`httpserve::Authenticated`] 证据、非 pre-auth header）。
+//! 两条认证路由（鉴权 = permission，租户来自 route gate 注入的 [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
 //! 域错误经 generic `vocab::CoreErrorKind` 映射状态码（4xx 客户端 / 5xx 内部，不铸 `ERR_SETTINGS_` 命名空间）。
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
@@ -39,7 +39,7 @@ use generated::http::settings_v1::{
     SettingsConfigPublishResponse,
 };
 use generated::http::settings_v2::SPEC as SECRET_HTTP_SPEC;
-use httpserve::{Authenticated, Primary, PrimaryRoute};
+use httpserve::{AuthorizedSubject, Primary, PrimaryRoute, RoutePermission, RouteResourceScope};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -397,30 +397,27 @@ pub(crate) fn request_id_from(req: &Request<Body>) -> String {
         .to_string()
 }
 
-/// 认证拒因（small；避免 `Result<_, Response>` 触 clippy `result_large_err`——`Response` ≥128B）：
-/// `Unauthenticated` → 401、`Forbidden` → 403。config / secret handler 共用，经 [`AuthReject::into_response`] 落地。
+/// 认证拒因（small；避免 `Result<_, Response>` 触 clippy `result_large_err`——`Response` ≥128B）。
+/// config / secret handler 共用，经 [`AuthReject::into_response`] 落地。
 pub(crate) enum AuthReject {
-    /// 无 [`Authenticated`] 证据（fail-closed；正常经 enforce 层后必有，缺失即框架接线异常）→ 401。
+    /// 无 [`AuthorizedSubject`] 证据（fail-closed；正常经 primary route gate 后必有，缺失即框架接线异常）→ 401。
     Unauthenticated,
-    /// 证据存在但租户 `None`（跨租 service / super-admin 主体）→ 403（settings 写是租户作用域资源）。
-    Forbidden,
 }
 
 impl AuthReject {
     pub(crate) fn into_response(self, request_id: &str) -> Response {
         match self {
             AuthReject::Unauthenticated => httpserve::error::unauthenticated(request_id),
-            AuthReject::Forbidden => httpserve::error::forbidden(request_id),
         }
     }
 }
 
-/// 从请求认证证据取租户（post-auth 单源，对标零信任）。**不读** pre-auth `X-Tenant-ID` header——租户来自验签
-/// claim。拒因经 small [`AuthReject`] 出向（handler 映射到响应），避开 `Result<_, Response>` 的大 Err。
+/// 从 route gate 授权证据取租户（post-auth/post-authz 单源，对标零信任）。**不读** pre-auth
+/// `X-Tenant-ID` header，也不回读 [`httpserve::Authenticated`]。
 pub(crate) fn authenticated_tenant(req: &Request<Body>) -> Result<TenantId, AuthReject> {
-    match req.extensions().get::<Authenticated>() {
+    match req.extensions().get::<AuthorizedSubject>() {
         None => Err(AuthReject::Unauthenticated),
-        Some(auth) => auth.tenant_id().ok_or(AuthReject::Forbidden),
+        Some(auth) => Ok(auth.tenant_id()),
     }
 }
 
@@ -433,24 +430,36 @@ fn primary_route_from_spec(spec: &generated::http::HttpSpec) -> Result<PrimaryRo
         .filter(|rel| rel.starts_with('/') && rel.len() > 1)
         .ok_or(KernelError::RouteGroup)?;
     let method = Method::from_bytes(spec.method.as_bytes()).map_err(|_| KernelError::RouteGroup)?;
-    // permission ⇒ 无 opt-out（listener JWT 强制）；public ⇒ Public 降级；其它降级 settings 端点不支持。
-    let opt_out = match spec.auth.mode {
-        HttpAuthMode::Permission => None,
-        HttpAuthMode::Public => Some(RouteAuthOptOut::Public),
-        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
-            return Err(KernelError::RouteGroup);
+    match spec.auth.mode {
+        HttpAuthMode::Permission => {
+            let permission = spec.auth.permission.ok_or(KernelError::RouteGroup)?;
+            let scope = match (spec.resource, spec.self_scoped) {
+                (Some(resource), false) => RouteResourceScope::PathParam(resource),
+                (None, true) => RouteResourceScope::SelfSubject,
+                (None, false) => RouteResourceScope::None,
+                (Some(_), true) => return Err(KernelError::RouteGroup),
+            };
+            Ok(PrimaryRoute::permission(
+                method,
+                rel,
+                spec.contract_id,
+                RoutePermission { permission, scope },
+            ))
         }
-    };
-    Ok(PrimaryRoute {
-        method,
-        path: rel,
-        contract_id: spec.contract_id,
-        opt_out,
-    })
+        HttpAuthMode::Public => Ok(PrimaryRoute::opt_out(
+            method,
+            rel,
+            spec.contract_id,
+            RouteAuthOptOut::Public,
+        )),
+        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
+            Err(KernelError::RouteGroup)
+        }
+    }
 }
 
-/// `settings.config-publish` handler（Primary listener，JWT 认证）：认证证据取租户 → parse body →
-/// `publish_config`（CAS 写 + outbox co-tx，L2）→ 201。租户来自验签证据（post-auth），非 pre-auth header。
+/// `settings.config-publish` handler（Primary listener，JWT 认证）：route gate 授权证据取租户 → parse body →
+/// `publish_config`（CAS 写 + outbox co-tx，L2）→ 201。租户来自 `AuthorizedSubject`，非 pre-auth header。
 async fn config_publish_handler(
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -844,7 +853,6 @@ mod tests {
 
     // ── #1430 settings durable module：HTTP handler / route 装配测试 ──────────────────
     use crate::internal::mem::{InMemSecretRepo, new_secret_store};
-    use primitives::RequiredScheme;
     use testkit::ContractRequest;
     use vocab::PrincipalKind;
 
@@ -864,18 +872,15 @@ mod tests {
         )
     }
 
-    /// post-auth 认证证据（JWT / User / 带租户）。`Authenticated::new` 在 `#[cfg(test)]` 不被
-    /// `rss_authenticated_callsite` dylint 扫（模拟验签桥注入）。
-    fn user_evidence(t: TenantId) -> Authenticated {
-        Authenticated::new(
-            RequiredScheme::Jwt,
-            PrincipalKind::User,
-            "test-subject",
-            Some(t),
-        )
+    /// post-authz 授权证据（Primary route gate 注入）。
+    fn user_evidence(t: TenantId) -> AuthorizedSubject {
+        AuthorizedSubject::for_test(t, PrincipalKind::User, "test-subject", None)
     }
 
-    fn config_router(service: Arc<SettingsService>, auth: Option<Authenticated>) -> axum::Router {
+    fn config_router(
+        service: Arc<SettingsService>,
+        auth: Option<AuthorizedSubject>,
+    ) -> axum::Router {
         let router =
             axum::Router::new().route("/configs", post(config_publish_handler).with_state(service));
         match auth {
@@ -903,10 +908,51 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn primary_route_from_config_spec_derives_relative_path_no_optout() {
         let route = primary_route_from_spec(&CONFIG_HTTP_SPEC).expect("route");
-        assert_eq!(route.path, "/configs", "SPEC 绝对 path 剥前缀得相对挂载段");
-        assert_eq!(route.method, Method::POST);
-        assert_eq!(route.contract_id, "settings.config-publish");
-        assert!(route.opt_out.is_none(), "permission 模式无 opt-out 降级");
+        assert_eq!(
+            route.path(),
+            "/configs",
+            "SPEC 绝对 path 剥前缀得相对挂载段"
+        );
+        assert_eq!(*route.method(), Method::POST);
+        assert_eq!(route.contract_id(), "settings.config-publish");
+        assert!(
+            route.opt_out_kind().is_none(),
+            "permission 模式无 opt-out 降级"
+        );
+        assert!(
+            route.route_permission().is_some(),
+            "permission 模式携带 route permission"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn primary_route_from_spec_preserves_resource_scope() {
+        let spec = generated::http::HttpSpec {
+            resource: Some("configId"),
+            ..CONFIG_HTTP_SPEC
+        };
+        let route = primary_route_from_spec(&spec).expect("route");
+        assert_eq!(
+            route.route_permission().map(|p| p.scope),
+            Some(RouteResourceScope::PathParam("configId")),
+            "generated resource path-param must flow into route gate"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn primary_route_from_spec_preserves_self_scope() {
+        let spec = generated::http::HttpSpec {
+            self_scoped: true,
+            ..CONFIG_HTTP_SPEC
+        };
+        let route = primary_route_from_spec(&spec).expect("route");
+        assert_eq!(
+            route.route_permission().map(|p| p.scope),
+            Some(RouteResourceScope::SelfSubject),
+            "generated selfScoped must flow into route gate"
+        );
     }
 
     #[tokio::test]
@@ -943,24 +989,6 @@ mod tests {
         resp.ensure_status(StatusCode::UNAUTHORIZED)
             .expect("缺认证证据 → 401");
         assert_eq!(emitted_facts(&capture).len(), 0, "未认证 → 零写");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn config_publish_handler_principal_without_tenant_returns_403() {
-        let capture = CapturingEmitter::default();
-        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
-        // 跨租主体（Service，tenant=None）→ settings 写是租户作用域资源 → 403。
-        let auth = Authenticated::new(RequiredScheme::Jwt, PrincipalKind::Service, "svc", None);
-        let router = config_router(svc, Some(auth));
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/configs").json(&publish_req("app.k", "v")),
-        )
-        .await
-        .expect("call");
-        resp.ensure_status(StatusCode::FORBIDDEN)
-            .expect("无租户作用域 → 403");
     }
 
     #[tokio::test]

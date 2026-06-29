@@ -13,6 +13,9 @@ method = "POST"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[endpoints.http]
+selfScoped = true
+
 [endpoints.http.auth]
 mode = "permission"
 permission = "identity:profile:write"
