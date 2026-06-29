@@ -27,6 +27,10 @@
 //! ref: adapters/postgres/src/role_repo.rs（#1250 pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
 //! ref: adapters/postgres/src/session_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
 
+#[cfg(all(test, feature = "integration"))]
+use std::sync::Mutex;
+#[cfg(all(test, feature = "integration"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use identity::ports::{
@@ -38,6 +42,14 @@ use sqlx::{PgConnection, Row};
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{epoch_secs_to_time, unix_secs};
+use crate::tx_retry::{IDENTITY_CREDENTIAL_BOUNDARY, classify_identity_error, run_pg_tx_retry};
+
+#[cfg(all(test, feature = "integration"))]
+static CREDENTIAL_RETRY_FAIL_REMAINING: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
+static CREDENTIAL_RETRY_FAIL_HITS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
+static CREDENTIAL_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// identity 凭据仓储的 PostgreSQL adapter。
 ///
@@ -62,6 +74,42 @@ impl PgCredentialRepo {
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。
 fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) fn arm_credential_retry_failpoint(target_login: &'static str, failures: usize) {
+    if let Ok(mut target) = CREDENTIAL_RETRY_FAIL_TARGET.lock() {
+        *target = Some(target_login);
+    }
+    CREDENTIAL_RETRY_FAIL_HITS.store(0, Ordering::Release);
+    CREDENTIAL_RETRY_FAIL_REMAINING.store(failures, Ordering::Release);
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) fn credential_retry_failpoint_hits() -> usize {
+    CREDENTIAL_RETRY_FAIL_HITS.load(Ordering::Acquire)
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn maybe_fail_credential_retry(login: &str) -> Result<(), IdentityError> {
+    let target_matches = CREDENTIAL_RETRY_FAIL_TARGET
+        .lock()
+        .map(|target| target.is_some_and(|target| target == login))
+        .unwrap_or(false);
+    if !target_matches {
+        return Ok(());
+    }
+    CREDENTIAL_RETRY_FAIL_HITS.fetch_add(1, Ordering::AcqRel);
+    if CREDENTIAL_RETRY_FAIL_REMAINING
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        Err(storage(sqlx::Error::PoolTimedOut))
+    } else {
+        Ok(())
+    }
 }
 
 /// `TenantId` → SQL bind 参数（stringify UUID 绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature）。
@@ -229,17 +277,36 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant_uuid = tenant_param(next.tenant());
         let login_str = next.login().as_str().to_owned();
         let tenant = next.tenant();
-        self.pool
-            .write(
-                tenant,
-                move |conn| {
-                    Box::pin(async move {
-                        bump_version_in_tx(conn, &tenant_uuid, &login_str, expected, &next).await
-                    })
-                },
-                storage,
-            )
-            .await
+        run_pg_tx_retry(
+            IDENTITY_CREDENTIAL_BOUNDARY,
+            |_attempt| {
+                let tenant_uuid = tenant_uuid.clone();
+                let login_str = login_str.clone();
+                let next = next.clone();
+                async move {
+                    self.pool
+                        .retry_write(
+                            tenant,
+                            move |conn| {
+                                Box::pin(async move {
+                                    bump_version_in_tx(
+                                        conn,
+                                        &tenant_uuid,
+                                        &login_str,
+                                        expected,
+                                        &next,
+                                    )
+                                    .await
+                                })
+                            },
+                            storage,
+                        )
+                        .await
+                }
+            },
+            classify_identity_error,
+        )
+        .await
     }
 
     async fn lockout_status(
@@ -413,6 +480,8 @@ async fn bump_version_in_tx(
     .execute(&mut *tx)
     .await
     .map_err(storage)?;
+    #[cfg(all(test, feature = "integration"))]
+    maybe_fail_credential_retry(login)?;
     Ok(())
 }
 

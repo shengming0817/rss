@@ -40,6 +40,7 @@ mod saga_journal;
 mod secret_repo;
 mod session_lifecycle;
 mod tx;
+mod tx_retry;
 
 pub use audit_repo::PgAuditRepo;
 pub use auth_audit_sink::PgAuthAuditSink;

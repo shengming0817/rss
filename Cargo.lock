@@ -3671,6 +3671,8 @@ dependencies = [
  "futures",
  "identity",
  "ids",
+ "metrics",
+ "metrics-exporter-prometheus",
  "primitives",
  "runctx",
  "secure",

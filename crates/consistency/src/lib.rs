@@ -30,6 +30,7 @@ pub mod outbox;
 pub mod projection;
 pub mod reconcile;
 pub mod saga;
+pub mod tx_retry;
 
 pub use error::{EngineError, EngineErrorKind};
 pub use idempotency::{
@@ -48,6 +49,10 @@ pub use reconcile::{
     Context, EntityId, EntityIdError, Outcome, ReconcileError, Reconciler, Request,
 };
 pub use saga::{CompensationOutcome, SagaOutcome, SagaStep, StepName, StepNameError};
+pub use tx_retry::{
+    TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError, TxRetryReport,
+    run_tx_retry,
+};
 
 #[cfg(test)]
 mod static_dispatch_smoke {

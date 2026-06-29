@@ -17,6 +17,10 @@
 //! ref: crates/identity 域形 UoW 端口范式 + adapters/postgres/src/session_lifecycle.rs（co-tx 范式）
 
 use std::sync::Arc;
+#[cfg(all(test, feature = "integration"))]
+use std::sync::Mutex;
+#[cfg(all(test, feature = "integration"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use consistency::Entry;
 use diport::{Clock, OutboxEnvelopeParts};
@@ -28,6 +32,14 @@ use sqlx::{Executor, Postgres, Row};
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
+use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error, run_pg_tx_retry};
+
+#[cfg(all(test, feature = "integration"))]
+static CONFIG_RETRY_FAIL_REMAINING: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
+static CONFIG_RETRY_FAIL_HITS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
+static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
 ///
@@ -58,6 +70,52 @@ impl PgConfigRepo {
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，故在 adapter 边界收口）。
 fn storage(e: sqlx::Error) -> ConfigRepoError {
     ConfigRepoError::Storage(Box::new(e))
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) fn arm_config_retry_failpoint(target_key: &'static str, failures: usize) {
+    if let Ok(mut target) = CONFIG_RETRY_FAIL_TARGET.lock() {
+        *target = Some(target_key);
+    }
+    CONFIG_RETRY_FAIL_HITS.store(0, Ordering::Release);
+    CONFIG_RETRY_FAIL_REMAINING.store(failures, Ordering::Release);
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) fn config_retry_failpoint_hits() -> usize {
+    CONFIG_RETRY_FAIL_HITS.load(Ordering::Acquire)
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn maybe_fail_config_retry(key: &SettingKey) -> Result<(), ConfigRepoError> {
+    let target_matches = CONFIG_RETRY_FAIL_TARGET
+        .lock()
+        .map(|target| target.is_some_and(|target| target == key.as_str()))
+        .unwrap_or(false);
+    if !target_matches {
+        return Ok(());
+    }
+    CONFIG_RETRY_FAIL_HITS.fetch_add(1, Ordering::AcqRel);
+    if CONFIG_RETRY_FAIL_REMAINING
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        Err(storage(sqlx::Error::PoolTimedOut))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_unique_violation(error: &ConfigRepoError) -> bool {
+    match error {
+        ConfigRepoError::Storage(source) => source
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|db| db.is_unique_violation()),
+        _ => false,
+    }
 }
 
 fn tenant_mismatch_storage_error(path: &'static str) -> ConfigRepoError {
@@ -155,6 +213,36 @@ fn hydrate_active(
             }
         }
     }
+}
+
+async fn latest_deleted(
+    pool: &PgTenantPool,
+    tenant: TenantId,
+    key: &SettingKey,
+) -> Result<bool, ConfigRepoError> {
+    let tenant_uuid = tenant_param(tenant);
+    let key_str = key.as_str().to_owned();
+    let deleted = pool
+        .read(tenant, move |conn| {
+            Box::pin(async move {
+                sqlx::query_scalar(
+                    r#"
+                    SELECT deleted
+                    FROM config_entries
+                    WHERE tenant_id = $1::uuid AND config_key = $2
+                    ORDER BY version DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(tenant_uuid)
+                .bind(key_str)
+                .fetch_optional(&mut *conn)
+                .await
+            })
+        })
+        .await
+        .map_err(storage)?;
+    Ok(deleted.unwrap_or(false))
 }
 
 impl ConfigRepo for PgConfigRepo {
@@ -263,13 +351,25 @@ impl ConfigRepo for PgConfigRepo {
 
     async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError> {
         // F3：plain CAS 写经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致。
-        self.pool
-            .write(
-                tenant,
-                move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
-                storage,
-            )
-            .await
+        run_pg_tx_retry(
+            SETTINGS_CONFIG_BOUNDARY,
+            |_attempt| {
+                let entry = entry.clone();
+                async move {
+                    self.pool
+                        .retry_write(
+                            tenant,
+                            move |conn| {
+                                Box::pin(async move { cas_insert(conn, tenant, &entry).await })
+                            },
+                            storage,
+                        )
+                        .await
+                }
+            },
+            classify_config_repo_error,
+        )
+        .await
     }
 
     async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError> {
@@ -277,13 +377,19 @@ impl ConfigRepo for PgConfigRepo {
         // 复用）。F3：经 tenant-scoped 事务（SET LOCAL）。
         let tu = tenant_param(tenant);
         let key_str = key.as_str().to_string();
-        self.pool
-            .write(
-                tenant,
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            r#"
+        let result = run_pg_tx_retry(
+            SETTINGS_CONFIG_BOUNDARY,
+            |_attempt| {
+                let tu = tu.clone();
+                let key_str = key_str.clone();
+                async move {
+                    self.pool
+                        .retry_write(
+                            tenant,
+                            move |conn| {
+                                Box::pin(async move {
+                                    sqlx::query(
+                                        r#"
                     INSERT INTO config_entries (tenant_id, config_key, version, value, deleted)
                     SELECT $1::uuid, $2, 1 + COALESCE(max(version), 0), '', true
                     FROM config_entries
@@ -294,18 +400,32 @@ impl ConfigRepo for PgConfigRepo {
                          ORDER BY version DESC LIMIT 1),
                         true)
                     "#,
+                                    )
+                                    .bind(&tu)
+                                    .bind(&key_str)
+                                    .execute(&mut *conn)
+                                    .await
+                                    .map_err(storage)
+                                    .map(|_| ())
+                                })
+                            },
+                            storage,
                         )
-                        .bind(&tu)
-                        .bind(&key_str)
-                        .execute(&mut *conn)
                         .await
-                        .map_err(storage)
-                        .map(|_| ())
-                    })
-                },
-                storage,
-            )
-            .await
+                }
+            },
+            classify_config_repo_error,
+        )
+        .await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(e)
+                if is_unique_violation(&e) && latest_deleted(&self.pool, tenant, key).await? =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -333,14 +453,33 @@ impl ConfigUnitOfWork for PgConfigRepo {
         .with_partition_key_opt(partition_key);
         // co-tx：CAS 配置写 + outbox append 同事务（OUTBOX-COTX-CONFIG-01）。CAS 冲突 → VersionConflict 使整
         // 事务回滚（outbox 不落库）；storage 失败 → Storage。
-        self.pool
-            .co_tx_with_outbox(
-                tenant,
-                &outbox_entry,
-                &env,
-                move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
-                storage,
-            )
-            .await
+        run_pg_tx_retry(
+            SETTINGS_CONFIG_BOUNDARY,
+            |_attempt| {
+                let entry = entry.clone();
+                let outbox_entry = outbox_entry.clone();
+                let env = env.clone();
+                async move {
+                    self.pool
+                        .retry_co_tx_with_outbox(
+                            tenant,
+                            &outbox_entry,
+                            &env,
+                            move |conn| {
+                                Box::pin(async move {
+                                    cas_insert(conn, tenant, &entry).await?;
+                                    #[cfg(all(test, feature = "integration"))]
+                                    maybe_fail_config_retry(entry.key())?;
+                                    Ok(())
+                                })
+                            },
+                            storage,
+                        )
+                        .await
+                }
+            },
+            classify_config_repo_error,
+        )
+        .await
     }
 }

@@ -25,6 +25,29 @@ use vocab::TenantId;
 use crate::PgStore;
 use crate::outbox::{OutboxEnvelope, append_outbox};
 
+const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
+
+/// Commit returned an error after the server may already have accepted the transaction.
+///
+/// Callers must not treat this like a pre-commit transient error: retrying the same UoW can turn
+/// "committed but response lost" into a false CAS conflict or duplicate side effect.
+#[derive(Debug, thiserror::Error)]
+#[error("postgres transaction commit result is unknown")]
+pub(crate) struct PgTxCommitError {
+    #[source]
+    source: sqlx::Error,
+}
+
+impl PgTxCommitError {
+    fn new(source: sqlx::Error) -> Self {
+        Self { source }
+    }
+}
+
+pub(crate) fn commit_unknown(source: sqlx::Error) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(PgTxCommitError::new(source)))
+}
+
 /// tenant-scoped Postgres pool wrapper.
 ///
 /// This is the typed production entry for RLS tenant-table access. It is cloneable for repo
@@ -87,7 +110,22 @@ impl PgTenantPool {
         E: Send,
         T: Send,
     {
-        tenant_scoped_write(&self.pool, tenant, write, map_storage).await
+        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, false).await
+    }
+
+    /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
+    pub(crate) async fn retry_write<T, F, E>(
+        &self,
+        tenant: TenantId,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: Send,
+        T: Send,
+    {
+        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, true).await
     }
 
     /// Run a tenant-scoped business write followed by outbox append in the same transaction.
@@ -104,6 +142,31 @@ impl PgTenantPool {
         E: Send,
     {
         co_tx_with_outbox(&self.pool, tenant, entry, env, business_write, map_storage).await
+    }
+
+    /// Run a tenant-scoped co-transaction with a per-attempt lock wait bound.
+    pub(crate) async fn retry_co_tx_with_outbox<F, E>(
+        &self,
+        tenant: TenantId,
+        entry: &Entry,
+        env: &OutboxEnvelope,
+        business_write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<(), E>
+    where
+        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+        E: Send,
+    {
+        co_tx_with_outbox_inner(
+            &self.pool,
+            tenant,
+            entry,
+            env,
+            business_write,
+            map_storage,
+            true,
+        )
+        .await
     }
 }
 
@@ -223,22 +286,27 @@ pub(crate) async fn set_local_tenant(
         .map(|_| ())
 }
 
-/// 在单事务内执行 tenant-scoped 写：begin → SET LOCAL tenant → write → commit。
-pub(crate) async fn tenant_scoped_write<T, F, E>(
+async fn set_local_retry_lock_timeout(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(TX_RETRY_LOCK_TIMEOUT)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
+async fn tenant_scoped_write_inner<T, F, E>(
     pool: &PgPool,
     tenant: TenantId,
     write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
+    bound_lock_wait: bool,
 ) -> Result<T, E>
 where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
     E: Send,
     T: Send,
 {
-    let mut tx = pool.begin().await.map_err(&map_storage)?;
-    set_local_tenant(&mut tx, tenant)
-        .await
-        .map_err(&map_storage)?;
+    let mut tx = begin_tenant_scoped_write(pool, tenant, &map_storage, bound_lock_wait).await?;
     match write(&mut tx).await {
         Ok(v) => {
             tx.commit().await.map_err(|e| {
@@ -248,7 +316,7 @@ where
                     error = %secure::redact_error(&e),
                     "tenant_scoped_write: commit failed"
                 );
-                map_storage(e)
+                map_storage(commit_unknown(e))
             })?;
             Ok(v)
         }
@@ -264,6 +332,24 @@ where
             Err(e)
         }
     }
+}
+
+async fn begin_tenant_scoped_write<'p, E>(
+    pool: &'p PgPool,
+    tenant: TenantId,
+    map_storage: &(impl Fn(sqlx::Error) -> E + Send),
+    bound_lock_wait: bool,
+) -> Result<Transaction<'p, Postgres>, E> {
+    let mut tx = pool.begin().await.map_err(map_storage)?;
+    set_local_tenant(&mut tx, tenant)
+        .await
+        .map_err(map_storage)?;
+    if bound_lock_wait {
+        set_local_retry_lock_timeout(&mut tx)
+            .await
+            .map_err(map_storage)?;
+    }
+    Ok(tx)
 }
 
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
@@ -295,8 +381,24 @@ where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
     E: Send,
 {
+    co_tx_with_outbox_inner(pool, tenant, entry, env, business_write, map_storage, false).await
+}
+
+async fn co_tx_with_outbox_inner<F, E>(
+    pool: &PgPool,
+    tenant: TenantId,
+    entry: &Entry,
+    env: &OutboxEnvelope,
+    business_write: F,
+    map_storage: impl Fn(sqlx::Error) -> E + Send,
+    bound_lock_wait: bool,
+) -> Result<(), E>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+    E: Send,
+{
     let mut tx = pool.begin().await.map_err(&map_storage)?;
-    match write_in_tx(&mut tx, tenant, entry, env, business_write).await {
+    match write_in_tx(&mut tx, tenant, entry, env, business_write, bound_lock_wait).await {
         Ok(()) => tx.commit().await.map_err(|e| {
             tracing::warn!(
                 target: "postgres",
@@ -306,7 +408,7 @@ where
                 error = %secure::redact_error(&e),
                 "co-tx: commit failed"
             );
-            map_storage(e)
+            map_storage(commit_unknown(e))
         }),
         Err(e) => {
             log_cotx_write_error(entry, env, &e);
@@ -334,6 +436,7 @@ async fn write_in_tx<F, E>(
     entry: &Entry,
     env: &OutboxEnvelope,
     business_write: F,
+    bound_lock_wait: bool,
 ) -> Result<(), CoTxWriteError<E>>
 where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
@@ -342,6 +445,11 @@ where
     set_local_tenant(tx, tenant)
         .await
         .map_err(CoTxWriteError::TenantScope)?;
+    if bound_lock_wait {
+        set_local_retry_lock_timeout(tx)
+            .await
+            .map_err(CoTxWriteError::RetryLockTimeout)?;
+    }
     // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。`tx: &mut Transaction` 经 DerefMut 自动强制成
     // 闭包参数 `&mut PgConnection`（reborrow，非 move——append_outbox 仍可再借）。
     business_write(tx)
@@ -355,6 +463,7 @@ where
 
 enum CoTxWriteError<E> {
     TenantScope(sqlx::Error),
+    RetryLockTimeout(sqlx::Error),
     BusinessWrite(E),
     AppendOutbox(sqlx::Error),
 }
@@ -363,6 +472,7 @@ impl<E> CoTxWriteError<E> {
     fn stage(&self) -> &'static str {
         match self {
             Self::TenantScope(_) => "set-local-tenant",
+            Self::RetryLockTimeout(_) => "set-local-retry-lock-timeout",
             Self::BusinessWrite(_) => "business-write",
             Self::AppendOutbox(_) => "append-outbox",
         }
@@ -370,14 +480,16 @@ impl<E> CoTxWriteError<E> {
 
     fn sqlx_source(&self) -> Option<&sqlx::Error> {
         match self {
-            Self::TenantScope(e) | Self::AppendOutbox(e) => Some(e),
+            Self::TenantScope(e) | Self::RetryLockTimeout(e) | Self::AppendOutbox(e) => Some(e),
             Self::BusinessWrite(_) => None,
         }
     }
 
     fn into_domain(self, map_storage: &(impl Fn(sqlx::Error) -> E + Send)) -> E {
         match self {
-            Self::TenantScope(e) | Self::AppendOutbox(e) => map_storage(e),
+            Self::TenantScope(e) | Self::RetryLockTimeout(e) | Self::AppendOutbox(e) => {
+                map_storage(e)
+            }
             Self::BusinessWrite(e) => e,
         }
     }

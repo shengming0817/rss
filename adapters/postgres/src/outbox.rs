@@ -68,6 +68,7 @@ const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
 ///
 /// envelope metadata 只能经此 funnel 构造（Hard：无 raw `Value` 入口，reserved/PII 不可表达）；
 /// reserved key 拒绝由 `metadata_try_insert_rejects_reserved_key` 负向单测守 anti-vacuity。
+#[derive(Clone)]
 pub(crate) struct OutboxMetadata(serde_json::Map<String, serde_json::Value>);
 
 impl OutboxMetadata {
@@ -216,6 +217,7 @@ pub(crate) fn epoch_secs_to_time(secs: i64) -> SystemTime {
 /// PII 边界；`observability.md` §outbox envelope）。
 /// `partition_key` 来自 [`diport::OutboxEnvelopeParts::partition_key`]，`None` = 无序并行（DB NULL）、
 /// `Some(s)` = 串行有序（head-of-partition gating，#1211）。
+#[derive(Clone)]
 pub(crate) struct OutboxEnvelope {
     domain: String,
     contract_id: String,

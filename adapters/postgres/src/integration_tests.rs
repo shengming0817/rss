@@ -4057,7 +4057,9 @@ async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
 use settings::ports::{ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey};
 
 use crate::PgConfigRepo;
+use crate::config_repo::{arm_config_retry_failpoint, config_retry_failpoint_hits};
 use crate::cotx::co_tx_with_outbox;
+use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
 
 /// config 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值，避免两 const 漂移）。
 const CONFIG_TENANT: &str = COTX_TENANT_A;
@@ -4349,6 +4351,58 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
         },
     )
     .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc4b：并发 delete/delete 应保持幂等——唯一键抢占 tombstone 版本时，失败方重读 latest tombstone 后 no-op。
+#[tokio::test(flavor = "multi_thread")]
+async fn tc4b_config_concurrent_delete_is_idempotent() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = Arc::new(PgConfigRepo::new(&store, fixed_clock_arc()));
+    let tenant = config_tenant();
+    let key = Arc::new(SettingKey::parse("app.concurrent-delete")?);
+
+    repo.save(tenant, config_entry("app.concurrent-delete", "v1", 1))
+        .await?;
+
+    let workers = 12;
+    let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let repo = Arc::clone(&repo);
+        let key = Arc::clone(&key);
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            repo.delete(tenant, &key).await
+        }));
+    }
+    for handle in handles {
+        handle.await??;
+    }
+
+    assert!(
+        repo.find(tenant, &key).await?.is_none(),
+        "concurrent delete leaves key deleted"
+    );
+    assert_eq!(
+        repo.latest_version(tenant, &key).await?,
+        Some(2),
+        "only one tombstone version is appended"
+    );
+    let tombstones: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 AND deleted",
+    )
+    .bind(CONFIG_TENANT)
+    .bind(key.as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(tombstones.0, 1, "delete/delete race creates one tombstone");
 
     store.shutdown().await?;
     Ok(())
@@ -4705,6 +4759,136 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
             },
         },
         |e| matches!(e, ConfigRepoError::VersionConflict),
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc7c：settings config 的 Postgres retry 边界 conformance。
+///
+/// transient：第一轮事务内写 config + outbox 后返回 transient storage error，必须整体 rollback；第二轮重建
+/// 事务后提交，最终 config/outbox 各 1 行。conflict/permanent：不重试、不提交副作用。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc7c_config_retry_boundary_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc());
+    let tenant = config_tenant();
+    let transient_event = unique_event_id("cfg-tc7c-transient");
+    let conflict_event = unique_event_id("cfg-tc7c-conflict");
+    let permanent_event = unique_event_id("cfg-tc7c-permanent");
+
+    repo.save(tenant, config_entry("app.retry-conflict", "v1", 1))
+        .await?;
+
+    testkit::repo_conformance::assert_retry_boundary_policy(
+        testkit::repo_conformance::RetryBoundaryCase {
+            transient_then_success: || {
+                let repo = &repo;
+                let transient_event = transient_event.clone();
+                arm_config_retry_failpoint("app.retry-transient", 1);
+                async move {
+                    repo.save_and_append_outbox(
+                        tenant,
+                        config_entry("app.retry-transient", "v1", 1),
+                        config_outbox_entry(&transient_event),
+                        config_envelope("app.retry-transient"),
+                    )
+                    .await
+                }
+            },
+            transient_attempts: config_retry_failpoint_hits,
+            expected_transient_attempts: 2,
+            transient_visible: || async {
+                let cfg: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                        .bind("app.retry-transient")
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                let outbox: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                        .bind(&transient_event)
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(
+                    cfg.0 == 1 && outbox.0 == 1 && config_retry_failpoint_hits() == 2,
+                )
+            },
+            conflict_action: || async {
+                repo.save_and_append_outbox(
+                    tenant,
+                    config_entry("app.retry-conflict", "stale", 1),
+                    config_outbox_entry(&conflict_event),
+                    config_envelope("app.retry-conflict"),
+                )
+                .await
+            },
+            conflict_visible: || async {
+                let cfg: (i64,) = sqlx::query_as(
+                    "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
+                )
+                .bind("app.retry-conflict")
+                .bind("stale")
+                .fetch_one(&store.pool)
+                .await
+                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                let outbox: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                        .bind(&conflict_event)
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cfg.0 != 0 || outbox.0 != 0)
+            },
+            permanent_action: || async {
+                repo.save_and_append_outbox(
+                    tenant,
+                    config_entry("app.retry-permanent", "v1", 1),
+                    config_outbox_entry(&permanent_event),
+                    OutboxEnvelopeParts::new(
+                        vocab::ContractBinding::from_static(
+                            "settings",
+                            CONFIG_VERSION_CHANGED_TOPIC,
+                        ),
+                        TenantId::parse(CONFIG_TENANT_B).unwrap(),
+                        "app.retry-permanent",
+                    ),
+                )
+                .await
+            },
+            permanent_visible: || async {
+                let cfg: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                        .bind("app.retry-permanent")
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                let outbox: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                        .bind(&permanent_event)
+                        .fetch_one(&store.pool)
+                        .await
+                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                Ok::<bool, ConfigRepoError>(cfg.0 != 0 || outbox.0 != 0)
+            },
+        },
+        |e| {
+            matches!(
+                classify_config_repo_error(e),
+                consistency::TxRetryClass::Conflict
+            )
+        },
+        |e| {
+            matches!(
+                classify_config_repo_error(e),
+                consistency::TxRetryClass::Permanent
+            )
+        },
     )
     .await?;
 
@@ -7360,11 +7544,13 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
 use identity::ports::{AuthOutcome, Credential, CredentialRepo, IdentityError, LoginIdentifier};
 
 use crate::PgCredentialRepo;
+use crate::credential_repo::{arm_credential_retry_failpoint, credential_retry_failpoint_hits};
 
 const CRED_TENANT_A: &str = "a1a2a3a4-b1b2-4c3c-8d4d-e1e2e3e4e5e6";
 const CRED_TENANT_B: &str = "b9b8b7b6-c5c4-4a3a-8f2f-d1d2d3d4d5d6";
 const CRED_USER_ALICE: &str = "11111111-2222-4333-8444-555555555555";
 const CRED_USER_BOB: &str = "22222222-3333-4444-8555-666666666666";
+const CRED_USER_RETRY: &str = "33333333-4444-4555-8666-777777777777";
 // 锁定 TTL（域 AccountLockout 单源镜像；仅供测试时间步进推算，非生产复刻）。
 const LOCK_TTL_SECS: u64 = 15 * 60;
 // 测试基准时刻（well-after-epoch，避开 unix_secs 的 epoch 前钳零边界）。
@@ -7886,6 +8072,74 @@ async fn credential_repo_bump_version_cas() -> TestResult {
         return Err("tenant A credential still present after cross-tenant bump".into());
     };
     assert_eq!(still_a.version(), 2, "跨租 bump 不动 A（仍 v2）");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// identity credential 的 Postgres retry 边界 conformance。
+///
+/// transient 用真实 tenant-scoped 事务更新 credentials：第一轮更新后返回 transient storage error，事务回滚；
+/// 第二轮重建事务后提交。CAS conflict / permanent 走 production `bump_version`，证明不会盲目重试或提交副作用。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_retry_boundary_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgCredentialRepo::new(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let retry_uid = cred_uid(CRED_USER_RETRY)?;
+    let bob_uid = cred_uid(CRED_USER_BOB)?;
+    let transient_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-transient", 2, tenant)?;
+    let conflict_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-conflict", 3, tenant)?;
+    let ghost_next = make_cred("ghost", CRED_USER_BOB, "pw-ghost", 1, tenant)?;
+
+    repo.save(make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?)
+        .await?;
+
+    testkit::repo_conformance::assert_retry_boundary_policy(
+        testkit::repo_conformance::RetryBoundaryCase {
+            transient_then_success: || {
+                let repo = &repo;
+                let transient_next = transient_next.clone();
+                arm_credential_retry_failpoint("retry-alice", 1);
+                async move { repo.bump_version(1, transient_next).await }
+            },
+            transient_attempts: credential_retry_failpoint_hits,
+            expected_transient_attempts: 2,
+            transient_visible: || async {
+                let Some(got) = repo.find_by_user_id(tenant, retry_uid).await? else {
+                    return Ok::<bool, IdentityError>(false);
+                };
+                Ok::<bool, IdentityError>(
+                    got.version() == 2 && credential_retry_failpoint_hits() == 2,
+                )
+            },
+            conflict_action: || async { repo.bump_version(99, conflict_next.clone()).await },
+            conflict_visible: || async {
+                let Some(got) = repo.find_by_user_id(tenant, retry_uid).await? else {
+                    return Ok::<bool, IdentityError>(false);
+                };
+                Ok::<bool, IdentityError>(got.version() == 3)
+            },
+            permanent_action: || async { repo.bump_version(1, ghost_next.clone()).await },
+            permanent_visible: || async {
+                Ok::<bool, IdentityError>(repo.find_by_user_id(tenant, bob_uid).await?.is_some())
+            },
+        },
+        |e| {
+            matches!(
+                classify_identity_error(e),
+                consistency::TxRetryClass::Conflict
+            )
+        },
+        |e| {
+            matches!(
+                classify_identity_error(e),
+                consistency::TxRetryClass::Permanent
+            )
+        },
+    )
+    .await?;
 
     store.shutdown().await?;
     Ok(())

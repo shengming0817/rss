@@ -41,6 +41,8 @@ sqlx = { workspace = true }
 futures = { workspace = true }
 # 连接 / 迁移成功的结构化日志。
 tracing = { workspace = true }
+# UoW retry metrics facade; recorder is installed by the executable when enabled.
+metrics = { workspace = true }
 # PgError 库错误枚举（error-handling.md：库错误用 thiserror）。
 thiserror = { workspace = true }
 # outbox envelope metadata 序列化（OutboxEnvelope.metadata: serde_json::Value）；
@@ -66,6 +68,8 @@ tracewire = { path = "../../crates/tracewire", features = ["test-util"] }
 # test-util 提供 tokio::time::advance / start_paused（采样 loop 时间控制单元测试）。
 # 集成测试用唯一 event_id 法（inbox_dedup 去重隔离验证，避免跨轮次清理）。
 uuid = { workspace = true, features = ["v4"] }
+# Local recorder assertions for retry metrics.
+metrics-exporter-prometheus = { workspace = true }
 # 会话生命周期集成测试（co-tx t11-t14 + durable find/revoke t20-t22）构造 `ports::Session` 经 `identity::test_support::session`
 # （funnel `Session::new` 为 pub(crate)；test-support feature 仅 dev/test 生效，生产 seal 不变）。同范式见
 # identity 自身 dev-dep `authn = { features = ["test-support"] }`。

@@ -113,6 +113,26 @@ tests、dashboard、alert 与 emit site。
 `idempotency_requests_total{state}` 的 state 值集必须闭合；新增或改名必须同步 schema、
 tests、dashboard、alert 与 middleware emit site。
 
+### Transaction Retry Metrics（#1439）
+
+postgres UoW retry boundary 发射下列 metric（bare 名，emit site = `adapters/postgres::tx_retry`，
+经 `metrics` facade；无 recorder 时 no-op）：
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `tx_retry_attempts_total` | Counter | `boundary`,`class` | 失败 attempt 按错误分类计数 |
+| `tx_retry_final_total` | Counter | `boundary`,`status` | 每次 UoW retry loop 的最终状态 |
+| `tx_retry_attempts` | Histogram | `boundary`,`status` | 每次 UoW 实际 attempt 数 |
+
+label 闭值集纪律：
+
+- `class` 闭合于 `consistency::TxRetryClass::as_label()`（`transient`/`conflict`/`permanent`/
+  `ownership_lost`）。
+- `status` 闭合于 `consistency::TxRetryFinalStatus::as_label()`（`success`/`exhausted`/`conflict`/
+  `permanent`/`ownership_lost`/`transient_not_retried`）。
+- `boundary` 只允许 adapter 内常量（当前 `settings.config` / `identity.credential`），不得从租户、key、
+  SQL、handler 或请求输入派生。
+
 ### Outbox Relay Metrics（#1209）
 
 outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` 注入式 `OutboxMetrics` 端口，

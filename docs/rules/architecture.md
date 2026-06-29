@@ -203,6 +203,17 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   `DomainModule`)、暂无 `name/domain` 与 `services/routes` 字段(域 service 留 `wire_X` 内部经 route 闭包捕获、不出向)。
   「`SharedRuntimeDeps` 字段仅基础设施」是**约定、非 INVARIANT**(无机器门,`ai-robust.md` 不停留 Soft ⇒ 不作现行规则);
   升 Medium 字段扫描 guard 见 #1448。
+- **Transaction retry policy([PERSIST-018] #1439)**:`consistency::tx_retry` 持有闭值集
+  `TxRetryClass::{Transient, Conflict, Permanent, OwnershipLost}` + `TxRetryPolicy` + runtime-neutral
+  `run_tx_retry`。adapter 只在明确 UoW 边界套 retry（当前 postgres `settings.config` /
+  `identity.credential` 写边界），每次 attempt 必须重建完整事务；repo 方法内部、handler 内部、outbox
+  publish/settle、consumer commit/release 内部不得隐式 retry 带副作用写入。分类规则：`Transient`
+  （如 PG `40001`/`40P01`/连接瞬断/池获取超时）可在预算内重试；`Conflict`（CAS/version 冲突）必须向上返回，
+  由 command 层显式 refetch/recompute；`Permanent`（约束/解码/租户 envelope mismatch/损坏行）fail-closed；
+  `OwnershipLost`（lease lost/fencing miss/stale owner）是终态围栏，不得把当前 side effect 当 transient 重跑。
+  **INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }**:
+  闭枚举 + postgres SQLSTATE 单源映射 + `testkit::repo_conformance::assert_retry_boundary_policy` 防止
+  retry 规则散落为 bool/string 约定。
 - **Init fail-fast**:`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`;必填依赖走构造器必填参数
   (编译期);init 内不做 I/O、不 spawn task。
 - **Assembly provider declaration**:`assemblies/{name}/assembly.toml` 只声明组合根选择了哪个 DI provider

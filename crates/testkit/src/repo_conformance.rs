@@ -38,6 +38,12 @@ pub enum RepoConformanceError {
         expected: Option<u64>,
         actual: Option<u64>,
     },
+    #[error("repo conformance: {stage} attempts mismatch; expected {expected}, got {actual}")]
+    AttemptMismatch {
+        stage: &'static str,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 fn provider<E: Debug>(stage: &'static str, e: E) -> RepoConformanceError {
@@ -543,6 +549,110 @@ pub struct CotxCase<A, B, O> {
     pub action: A,
     pub business_exists: B,
     pub outbox_exists: O,
+}
+
+/// Provider-specific retry boundary conformance scenario.
+pub struct RetryBoundaryCase<TA, TT, TV, CA, CV, PA, PV> {
+    pub transient_then_success: TA,
+    pub transient_attempts: TT,
+    pub expected_transient_attempts: usize,
+    pub transient_visible: TV,
+    pub conflict_action: CA,
+    pub conflict_visible: CV,
+    pub permanent_action: PA,
+    pub permanent_visible: PV,
+}
+
+/// Retry boundary: transient may retry to success; conflict/permanent must not commit side effects.
+pub async fn assert_retry_boundary_policy<
+    TA,
+    TT,
+    TV,
+    CA,
+    CV,
+    PA,
+    PV,
+    TAF,
+    TVF,
+    CAF,
+    CVF,
+    PAF,
+    PVF,
+    E,
+    IC,
+    IP,
+>(
+    case: RetryBoundaryCase<TA, TT, TV, CA, CV, PA, PV>,
+    is_conflict: IC,
+    is_permanent: IP,
+) -> Result<(), RepoConformanceError>
+where
+    TA: FnOnce() -> TAF,
+    TT: FnOnce() -> usize,
+    TV: FnOnce() -> TVF,
+    CA: FnOnce() -> CAF,
+    CV: FnOnce() -> CVF,
+    PA: FnOnce() -> PAF,
+    PV: FnOnce() -> PVF,
+    TAF: Future<Output = Result<(), E>>,
+    TVF: Future<Output = Result<bool, E>>,
+    CAF: Future<Output = Result<(), E>>,
+    CVF: Future<Output = Result<bool, E>>,
+    PAF: Future<Output = Result<(), E>>,
+    PVF: Future<Output = Result<bool, E>>,
+    E: Debug,
+    IC: Fn(&E) -> bool,
+    IP: Fn(&E) -> bool,
+{
+    (case.transient_then_success)()
+        .await
+        .map_err(|e| provider("retry transient then success", e))?;
+    expect_visible(
+        "retry transient committed once",
+        (case.transient_visible)()
+            .await
+            .map_err(|e| provider("retry transient visible", e))?,
+        true,
+    )?;
+    let transient_attempts = (case.transient_attempts)();
+    if transient_attempts != case.expected_transient_attempts {
+        return Err(RepoConformanceError::AttemptMismatch {
+            stage: "retry transient attempts",
+            expected: case.expected_transient_attempts,
+            actual: transient_attempts,
+        });
+    }
+
+    expect_conflict(
+        "retry conflict action",
+        (case.conflict_action)(),
+        &is_conflict,
+    )
+    .await?;
+    expect_visible(
+        "retry conflict side effect",
+        (case.conflict_visible)()
+            .await
+            .map_err(|e| provider("retry conflict visible", e))?,
+        false,
+    )?;
+
+    match (case.permanent_action)().await {
+        Ok(()) => Err(RepoConformanceError::ExpectedErrorMissing {
+            stage: "retry permanent action",
+        }),
+        Err(e) if is_permanent(&e) => expect_visible(
+            "retry permanent side effect",
+            (case.permanent_visible)()
+                .await
+                .map_err(|e| provider("retry permanent visible", e))?,
+            false,
+        ),
+        Err(e) => Err(RepoConformanceError::WrongErrorKind {
+            stage: "retry permanent action",
+            error: format!("{e:?}"),
+        }),
+    }
 }
 
 /// L2 co-tx：成功两边皆在；业务失败两边皆无。
@@ -1191,6 +1301,84 @@ mod tests {
             RepoConformanceError::WrongErrorKind {
                 stage: "storage operation",
                 ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn retry_boundary_fake_checks_classes() {
+        let transient_visible = RefCell::new(false);
+        let conflict_visible = RefCell::new(false);
+        let permanent_visible = RefCell::new(false);
+
+        assert_retry_boundary_policy(
+            RetryBoundaryCase {
+                transient_then_success: || async {
+                    *transient_visible.borrow_mut() = true;
+                    Ok::<_, FakeError>(())
+                },
+                transient_attempts: || 2,
+                expected_transient_attempts: 2,
+                transient_visible: || async { Ok::<_, FakeError>(*transient_visible.borrow()) },
+                conflict_action: || async { Err::<(), _>(FakeError::Conflict) },
+                conflict_visible: || async { Ok::<_, FakeError>(*conflict_visible.borrow()) },
+                permanent_action: || async { Err::<(), _>(FakeError::Storage) },
+                permanent_visible: || async { Ok::<_, FakeError>(*permanent_visible.borrow()) },
+            },
+            is_conflict,
+            is_storage,
+        )
+        .await
+        .expect("retry boundary fake passes");
+
+        *conflict_visible.borrow_mut() = true;
+        let err = assert_retry_boundary_policy(
+            RetryBoundaryCase {
+                transient_then_success: || async { Ok::<_, FakeError>(()) },
+                transient_attempts: || 2,
+                expected_transient_attempts: 2,
+                transient_visible: || async { Ok::<_, FakeError>(true) },
+                conflict_action: || async { Err::<(), _>(FakeError::Conflict) },
+                conflict_visible: || async { Ok::<_, FakeError>(*conflict_visible.borrow()) },
+                permanent_action: || async { Err::<(), _>(FakeError::Storage) },
+                permanent_visible: || async { Ok::<_, FakeError>(false) },
+            },
+            is_conflict,
+            is_storage,
+        )
+        .await
+        .expect_err("conflict side effect must fail");
+        assert!(matches!(
+            err,
+            RepoConformanceError::VisibilityMismatch {
+                stage: "retry conflict side effect",
+                ..
+            }
+        ));
+
+        let err = assert_retry_boundary_policy(
+            RetryBoundaryCase {
+                transient_then_success: || async { Ok::<_, FakeError>(()) },
+                transient_attempts: || 1,
+                expected_transient_attempts: 2,
+                transient_visible: || async { Ok::<_, FakeError>(true) },
+                conflict_action: || async { Err::<(), _>(FakeError::Conflict) },
+                conflict_visible: || async { Ok::<_, FakeError>(false) },
+                permanent_action: || async { Err::<(), _>(FakeError::Storage) },
+                permanent_visible: || async { Ok::<_, FakeError>(false) },
+            },
+            is_conflict,
+            is_storage,
+        )
+        .await
+        .expect_err("transient case must prove retry happened");
+        assert!(matches!(
+            err,
+            RepoConformanceError::AttemptMismatch {
+                stage: "retry transient attempts",
+                expected: 2,
+                actual: 1,
             }
         ));
     }
