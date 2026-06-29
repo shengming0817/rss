@@ -554,8 +554,11 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             );
         }
         subs.push(format!(
-            "    {sup}SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, consumer: \"{}\", group: \"{}\" }}",
-            s.consumer, s.group
+            "    {sup}SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
+            s.consumer,
+            s.group,
+            s.topology.partition_key.as_wire(),
+            s.topology.readiness.as_wire()
         ));
     }
     let subs_body = if subs.is_empty() {
@@ -581,7 +584,8 @@ pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
+/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
+/// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
 /// `SubscriptionSpec` 类型定义见父 `{kind}/mod.rs`（经 `{sup}` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SUBSCRIPTIONS: &[{sup}SubscriptionSpec] = &[{subs_body}];
@@ -864,6 +868,10 @@ pub struct SubscriptionSpec {
     pub consumer: &'static str,
     /// 稳定 consumer group 名（broker 消费位点唯一键）。
     pub group: &'static str,
+    /// Partition key 策略（`none` 或 `aggregate`）。
+    pub partition_key: &'static str,
+    /// Subscriber/provisioning readiness 要求（当前为 `required`）。
+    pub readiness: &'static str,
 }
 "#;
 
@@ -1233,6 +1241,9 @@ mod tests {
                 "[[subscriptions]]\n",
                 "consumer = \"audit\"\n",
                 "group = \"audit.seed-happened\"\n",
+                "[subscriptions.topology]\n",
+                "partitionKey = \"none\"\n",
+                "readiness = \"required\"\n",
             ),
         )?;
         let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
@@ -1811,6 +1822,14 @@ mod tests {
             rendered.contains(r#"group: "audit.seed-happened""#),
             "SUBSCRIPTIONS 缺 group 字面量:\n{rendered}"
         );
+        assert!(
+            rendered.contains(r#"partition_key: "none""#),
+            "SUBSCRIPTIONS 缺 partition_key 字面量:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"readiness: "required""#),
+            "SUBSCRIPTIONS 缺 readiness 字面量:\n{rendered}"
+        );
         // SubscriptionSpec 定义在 mod.rs（子模块经 super:: 引用）
         assert!(
             mod_rs.contains("pub struct SubscriptionSpec"),
@@ -2016,6 +2035,9 @@ mod tests {
                 "[[subscriptions]]\n",
                 "consumer = \"audit\"\n",
                 "group = \"audit\\\"; evil\"\n", // TOML 转义 → group 值含引号（注入面）
+                "[subscriptions.topology]\n",
+                "partitionKey = \"none\"\n",
+                "readiness = \"required\"\n",
             ),
         )?;
         let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";

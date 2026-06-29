@@ -323,10 +323,11 @@ pub(crate) struct SagaStep {
     pub(crate) output_schema: String,
 }
 
-/// event 订阅声明（#1120）——TOML `[[subscriptions]]` 数组元素。
+/// event 订阅声明（#1120/#1438）——TOML `[[subscriptions]]` 数组元素。
 ///
 /// `consumer`：消费者域 DomainId（如 `audit`）。`group`：稳定 consumer group 名（如 `audit.session-created`）。
-/// 两字段均为必填，未知子键由 `deny_unknown_fields` 拒（CONTRACT-FREEZE-01 扩展）。
+/// `[subscriptions.topology]`：该 consumer 的 L2 topology gate，声明 partition key 策略与 readiness 要求。
+/// 三者均为必填，未知子键由 `deny_unknown_fields` 拒（CONTRACT-FREEZE-01 扩展）。
 ///
 /// 供 codegen 派生订阅注册 glue（`SUBSCRIPTIONS: &[SubscriptionSpec]`）；bootstrap 消费 glue 接线。
 /// EVENT-ACTIVE-SUB-01（R12）：active event 必须 `!subscriptions.is_empty()`。
@@ -337,6 +338,48 @@ pub(crate) struct Subscription {
     pub(crate) consumer: String,
     /// 稳定 consumer group 名（如 `audit.session-created`）——broker 用此键唯一标识消费位点。
     pub(crate) group: String,
+    /// L2 topology gate：partition key 策略 + subscriber readiness 要求。
+    pub(crate) topology: SubscriptionTopology,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct SubscriptionTopology {
+    /// producer 是否必须提供 partition key。`aggregate` 表示应用层用 tenant-scoped aggregate key
+    /// 调 `OutboxEnvelopeParts::with_partition_key`，`none` 表示无序并行。
+    pub(crate) partition_key: PartitionKeyStrategy,
+    /// active subscriber/provisioning readiness 要求。当前闭值集仅 `required`，表示组合根必须 fail-closed。
+    pub(crate) readiness: SubscriberReadiness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PartitionKeyStrategy {
+    None,
+    Aggregate,
+}
+
+impl PartitionKeyStrategy {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            PartitionKeyStrategy::None => "none",
+            PartitionKeyStrategy::Aggregate => "aggregate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SubscriberReadiness {
+    Required,
+}
+
+impl SubscriberReadiness {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            SubscriberReadiness::Required => "required",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -575,16 +618,38 @@ mod tests {
             [[subscriptions]]
             consumer = "audit"
             group = "audit.session-created"
+            [subscriptions.topology]
+            partitionKey = "none"
+            readiness = "required"
             [[subscriptions]]
             consumer = "devicestate"
             group = "devicestate.session-watch"
+            [subscriptions.topology]
+            partitionKey = "aggregate"
+            readiness = "required"
         "#;
         let m = ContractManifest::from_toml_str(toml)?;
         assert_eq!(m.subscriptions.len(), 2);
         assert_eq!(m.subscriptions[0].consumer, "audit");
         assert_eq!(m.subscriptions[0].group, "audit.session-created");
+        assert_eq!(
+            m.subscriptions[0].topology.partition_key,
+            PartitionKeyStrategy::None
+        );
+        assert_eq!(
+            m.subscriptions[0].topology.readiness,
+            SubscriberReadiness::Required
+        );
         assert_eq!(m.subscriptions[1].consumer, "devicestate");
         assert_eq!(m.subscriptions[1].group, "devicestate.session-watch");
+        assert_eq!(
+            m.subscriptions[1].topology.partition_key,
+            PartitionKeyStrategy::Aggregate
+        );
+        assert_eq!(
+            m.subscriptions[1].topology.readiness,
+            SubscriberReadiness::Required
+        );
         Ok(())
     }
 
@@ -600,7 +665,7 @@ mod tests {
         Ok(())
     }
 
-    /// 红用例：[[subscriptions]] 含未知子键时，`deny_unknown_fields` 应拒绝解析（CONTRACT-FREEZE-01）。
+    /// 红用例：[[subscriptions]] 顶层含未知子键时，`deny_unknown_fields` 应拒绝解析（CONTRACT-FREEZE-01）。
     #[test]
     fn subscription_rejects_unknown_field() {
         let toml = r#"
@@ -619,10 +684,42 @@ mod tests {
             consumer = "audit"
             group = "audit.session-created"
             bogus = "unexpected"
+            [subscriptions.topology]
+            partitionKey = "none"
+            readiness = "required"
         "#;
         assert!(
             ContractManifest::from_toml_str(toml).is_err(),
-            "未知子键应使解析失败（deny_unknown_fields）"
+            "[[subscriptions]] 顶层未知子键应使解析失败（deny_unknown_fields）"
+        );
+    }
+
+    /// 红用例：[subscriptions.topology] 含未知子键时，`deny_unknown_fields` 应拒绝解析。
+    #[test]
+    fn subscription_topology_rejects_unknown_field() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+            group = "audit.session-created"
+            [subscriptions.topology]
+            partitionKey = "none"
+            readiness = "required"
+            bogus = "unexpected"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "[subscriptions.topology] 未知子键应使解析失败（deny_unknown_fields）"
         );
     }
 
@@ -643,6 +740,9 @@ mod tests {
             payload = "payload.schema.json"
             [[subscriptions]]
             group = "audit.session-created"
+            [subscriptions.topology]
+            partitionKey = "none"
+            readiness = "required"
         "#;
         assert!(
             ContractManifest::from_toml_str(toml).is_err(),
@@ -667,10 +767,92 @@ mod tests {
             payload = "payload.schema.json"
             [[subscriptions]]
             consumer = "audit"
+            [subscriptions.topology]
+            partitionKey = "none"
+            readiness = "required"
         "#;
         assert!(
             ContractManifest::from_toml_str(toml).is_err(),
             "缺 group 字段应使解析失败"
+        );
+    }
+
+    /// 红用例：[[subscriptions]] 缺 topology block 时应拒绝解析（L2 topology contract gate）。
+    #[test]
+    fn subscription_rejects_missing_topology() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+            group = "audit.session-created"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "缺 [subscriptions.topology] 应使解析失败"
+        );
+    }
+
+    #[test]
+    fn subscription_rejects_unknown_partition_key_strategy() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+            group = "audit.session-created"
+            [subscriptions.topology]
+            partitionKey = "payload-field"
+            readiness = "required"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "未知 partitionKey 策略应使解析失败"
+        );
+    }
+
+    #[test]
+    fn subscription_rejects_unknown_readiness() {
+        let toml = r#"
+            id = "identity.session-created"
+            kind = "event"
+            domain = "identity"
+            version = "v1"
+            owner = "identity"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "identity.session-created"
+            delivery = "at-least-once"
+            [schemas]
+            payload = "payload.schema.json"
+            [[subscriptions]]
+            consumer = "audit"
+            group = "audit.session-created"
+            [subscriptions.topology]
+            partitionKey = "none"
+            readiness = "best-effort"
+        "#;
+        assert!(
+            ContractManifest::from_toml_str(toml).is_err(),
+            "未知 readiness 策略应使解析失败"
         );
     }
 }

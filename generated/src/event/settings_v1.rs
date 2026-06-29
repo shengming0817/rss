@@ -186,7 +186,8 @@ pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("settings", "settings.config-version-changed");
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）。
+/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
+/// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
 /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];

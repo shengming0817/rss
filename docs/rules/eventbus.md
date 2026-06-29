@@ -150,7 +150,10 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
 聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 poll-only，
 被 gate 的后继仍计入 backlog depth（否则 stalled partition 对 SLO 失明）。INVARIANT: OUTBOX-PARTITION-ORDER-01。
 
-> 机制本 PR 交付；哪些域事件 opt-in 声明 `partition_key` 是应用层决策，独立推进（**#1404**）。
+> 机制本 PR 交付；哪些域事件 opt-in `partition_key` 仍是应用层决策，但决策必须前移到
+> `contract.toml` 的 `[subscriptions.topology] partitionKey` 声明面。`partitionKey = "aggregate"` 表示 producer
+> 须提供 tenant-scoped aggregate key；`partitionKey = "none"` 表示无序并行。generated topology registry 到 runtime
+> consumer bundle/readiness 的桥接由 #1442/#1434 负责，不在本规则段实现。
 
 ## Acker / 投递结算 seam（at-least-once）
 

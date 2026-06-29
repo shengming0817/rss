@@ -17,7 +17,11 @@ delivery = "at-least-once"
 payload = "payload.schema.json"
 
 # active event 须有 subscriber（R14，EVENT-ACTIVE-SUB-01）：audit 域消费，consumer group 稳定。
-# codegen 据此派生 SUBSCRIPTIONS；audit 订阅注册单源读 generated SUBSCRIPTIONS（不再手维护平行 const）。
+# topology 声明 partition/readiness gate；audit 订阅注册单源读 generated SUBSCRIPTIONS（不再手维护平行 const）。
 [[subscriptions]]
 consumer = "audit"
 group = "audit.session-created"
+
+[subscriptions.topology]
+partitionKey = "none"
+readiness = "required"

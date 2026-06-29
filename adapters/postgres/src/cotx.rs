@@ -385,23 +385,36 @@ impl<E> CoTxWriteError<E> {
 
 fn log_cotx_write_error<E>(entry: &Entry, env: &OutboxEnvelope, error: &CoTxWriteError<E>) {
     if let Some(source) = error.sqlx_source() {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            topic = entry.topic().as_str(),
-            stage = error.stage(),
-            error = %secure::redact_error(source),
-            "co-tx: write failed; rolling back"
-        );
+        log_cotx_storage_error(entry, env, error.stage(), source);
     } else {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            topic = entry.topic().as_str(),
-            stage = error.stage(),
-            "co-tx: write failed; rolling back"
-        );
+        log_cotx_business_error(entry, env, error.stage());
     }
+}
+
+fn log_cotx_storage_error(
+    entry: &Entry,
+    env: &OutboxEnvelope,
+    stage: &'static str,
+    source: &sqlx::Error,
+) {
+    tracing::warn!(
+        target: "postgres",
+        event_id = entry.idem_key().as_str(),
+        domain = env.domain(),
+        topic = entry.topic().as_str(),
+        stage,
+        error = %secure::redact_error(source),
+        "co-tx: write failed; rolling back"
+    );
+}
+
+fn log_cotx_business_error(entry: &Entry, env: &OutboxEnvelope, stage: &'static str) {
+    tracing::warn!(
+        target: "postgres",
+        event_id = entry.idem_key().as_str(),
+        domain = env.domain(),
+        topic = entry.topic().as_str(),
+        stage,
+        "co-tx: write failed; rolling back"
+    );
 }

@@ -16,6 +16,10 @@ pub struct SubscriptionSpec {
     pub consumer: &'static str,
     /// 稳定 consumer group 名（broker 消费位点唯一键）。
     pub group: &'static str,
+    /// Partition key 策略（`none` 或 `aggregate`）。
+    pub partition_key: &'static str,
+    /// Subscriber/provisioning readiness 要求（当前为 `required`）。
+    pub readiness: &'static str,
 }
 pub mod _seed_v1;
 pub mod identity_v1;

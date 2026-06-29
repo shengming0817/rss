@@ -1149,7 +1149,8 @@ mod tests {
     use super::*;
     use crate::contract::manifest::{
         CompensationOrder, Delivery, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint,
-        HttpHeaderMode, HttpMethod, Lifecycle, SagaBlock, SagaStep, Schemas, Subscription,
+        HttpHeaderMode, HttpMethod, Lifecycle, PartitionKeyStrategy, SagaBlock, SagaStep, Schemas,
+        SubscriberReadiness, Subscription, SubscriptionTopology,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -1200,6 +1201,10 @@ mod tests {
         Subscription {
             consumer: "audit".to_string(),
             group: "audit.session-created".to_string(),
+            topology: SubscriptionTopology {
+                partition_key: PartitionKeyStrategy::None,
+                readiness: SubscriberReadiness::Required,
+            },
         }
     }
 
@@ -1780,6 +1785,10 @@ mod tests {
         m.subscriptions = vec![Subscription {
             consumer: consumer.to_string(),
             group: group.to_string(),
+            topology: SubscriptionTopology {
+                partition_key: PartitionKeyStrategy::None,
+                readiness: SubscriberReadiness::Required,
+            },
         }];
         let findings = rule_ident_syntax(&m, "x");
         assert!(

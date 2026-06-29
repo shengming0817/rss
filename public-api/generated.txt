@@ -624,6 +624,8 @@ pub struct generated::event::SubscriptionSpec
 pub generated::event::SubscriptionSpec::consumer: &'static str
 pub generated::event::SubscriptionSpec::contract_id: &'static str
 pub generated::event::SubscriptionSpec::group: &'static str
+pub generated::event::SubscriptionSpec::partition_key: &'static str
+pub generated::event::SubscriptionSpec::readiness: &'static str
 pub generated::event::SubscriptionSpec::topic: &'static str
 impl core::clone::Clone for generated::event::SubscriptionSpec
 pub fn generated::event::SubscriptionSpec::clone(&self) -> generated::event::SubscriptionSpec
@@ -1791,6 +1793,7 @@ impl<T> typenum::type_operators::Same for generated::http::HttpAuthMode
 pub type generated::http::HttpAuthMode::Output = T
 pub enum generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderMode::PopulateOnly
+pub generated::http::HttpHeaderMode::ServiceTokenTenantBound
 impl core::clone::Clone for generated::http::HttpHeaderMode
 pub fn generated::http::HttpHeaderMode::clone(&self) -> generated::http::HttpHeaderMode
 impl core::cmp::Eq for generated::http::HttpHeaderMode
