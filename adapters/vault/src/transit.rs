@@ -34,6 +34,7 @@ const OP_SIGN_SEND: &str = "sign-send";
 const OP_SIGN_READ: &str = "sign-read";
 const OP_KEY_PROVIDER_SEND: &str = "key-provider-send";
 const OP_KEY_PROVIDER_READ: &str = "key-provider-read";
+/// Vault Transit sentinel：`key_version = 0` means "use latest/current primary" for encrypt/rewrap.
 const LATEST_KEY_VERSION: u32 = 0;
 
 /// `addr` 不是合法 base URL（无法作 Transit 端点基地址）。
@@ -201,6 +202,8 @@ pub(crate) fn build_encrypt_body(plaintext: &Plaintext, aad: &DerivedAad) -> ser
     serde_json::json!({
         "plaintext": BASE64.encode(plaintext.expose()),
         "context": build_context(aad),
+        // `0` is Vault's latest/current-primary selector. New ciphertext must never pin an old
+        // key version after rotation.
         "key_version": LATEST_KEY_VERSION,
     })
 }
@@ -208,6 +211,8 @@ pub(crate) fn build_encrypt_body(plaintext: &Plaintext, aad: &DerivedAad) -> ser
 pub(crate) fn build_decrypt_body(ciphertext: &str, aad: &DerivedAad) -> serde_json::Value {
     serde_json::json!({
         "ciphertext": ciphertext,
+        // No key_version override on decrypt: Vault derives the previous-read key from
+        // `vault:vN:` and enforces min_decryption_version policy.
         "context": build_context(aad),
     })
 }
@@ -216,6 +221,7 @@ pub(crate) fn build_rewrap_body(ciphertext: &str, aad: &DerivedAad) -> serde_jso
     serde_json::json!({
         "ciphertext": ciphertext,
         "context": build_context(aad),
+        // Rewrap always targets the current primary.
         "key_version": LATEST_KEY_VERSION,
     })
 }
@@ -903,6 +909,10 @@ mod tests {
             body["context"].as_str(),
             Some(BASE64.encode(aad.as_canonical_bytes()).as_str())
         );
+        assert!(
+            body.get("key_version").is_none(),
+            "decrypt must rely on vault:vN + stored KeyRef, not override key_version"
+        );
         assert_no_associated_data(&body);
     }
 
@@ -1177,7 +1187,7 @@ mod key_provider_impl_tests {
     //! AAD→context 单一 funnel、禁止 associated_data、非 2xx kind 映射。
     #![allow(clippy::expect_used)]
 
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
 
     use base64::Engine as _;
@@ -1248,6 +1258,14 @@ mod key_provider_impl_tests {
                 .expect("span field recorder mutex is not poisoned")
                 .clone()
         }
+
+        #[allow(clippy::expect_used)]
+        fn clear(&self) {
+            self.records
+                .lock()
+                .expect("span field recorder mutex is not poisoned")
+                .clear();
+        }
     }
 
     impl<S> Layer<S> for SpanFieldRecorder
@@ -1270,6 +1288,16 @@ mod key_provider_impl_tests {
                 .expect("span field recorder mutex is not poisoned")
                 .push(fields.join(" "));
         }
+    }
+
+    fn global_span_recorder() -> &'static SpanFieldRecorder {
+        static RECORDER: OnceLock<SpanFieldRecorder> = OnceLock::new();
+        RECORDER.get_or_init(|| {
+            let recorder = SpanFieldRecorder::default();
+            let subscriber = tracing_subscriber::registry().with(recorder.clone());
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            recorder
+        })
     }
 
     #[derive(Default)]
@@ -1375,20 +1403,23 @@ mod key_provider_impl_tests {
             body["context"].as_str(),
             Some(BASE64.encode(aad.as_canonical_bytes()).as_str())
         );
+        assert!(
+            body.get("key_version").is_none(),
+            "decrypt must not pin latest or override the ciphertext's previous-read version"
+        );
         assert!(body.get("associated_data").is_none());
     }
 
     #[allow(clippy::expect_used)]
     #[tokio::test]
     async fn decrypt_span_records_aad_coordinates() {
+        let recorder = global_span_recorder();
+        recorder.clear();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"errors":["x"]}"#))
             .mount(&server)
             .await;
-        let recorder = SpanFieldRecorder::default();
-        let subscriber = tracing_subscriber::registry().with(recorder.clone());
-        let _guard = tracing::subscriber::set_default(subscriber);
         let client = reqwest::Client::new();
         let base = base_url(&server);
         let mount = ["transit".to_string()];
@@ -1523,6 +1554,36 @@ mod key_provider_impl_tests {
             assert_eq!(err.kind(), kind, "status {status}");
             assert_eq!(err.to_string(), "key provider operation failed");
         }
+    }
+
+    #[tokio::test]
+    async fn decrypt_after_previous_key_disabled_maps_to_rejected_without_detail() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"errors":["ciphertext or key version is disallowed"]}"#),
+            )
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let base = base_url(&server);
+        let mount = ["transit".to_string()];
+        let err = decrypt_impl(
+            TransitHttp::new(&client, &base, TOKEN, &mount, Duration::from_secs(5)),
+            RedactedBytes::new(b"vault:v6:Y2lwaGVy".to_vec()),
+            key_ref("field-key", 6),
+            aad("settings/db", "value", 7),
+        )
+        .await
+        .expect_err("Vault min_decryption_version should close the previous-read window");
+
+        assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
+        assert_eq!(err.to_string(), "key provider operation failed");
+        assert!(
+            !format!("{err:?}").contains("disallowed"),
+            "Vault error body must not leak through KeyProviderError Debug"
+        );
     }
 
     #[tokio::test]

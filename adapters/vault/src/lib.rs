@@ -28,6 +28,13 @@
 //! `context` 生效，但非 batch rewrap 不实际使用 `associated_data`；用 `context` 可保留原生 rewrap，避免
 //! decrypt+encrypt fallback 把明文拉回 adapter。
 //!
+//! **keyset / rotation 语义（#1474）**：`diport::KeyName` 对应 Vault Transit key name；`diport::KeyVersion`
+//! 对应 Vault tagged ciphertext 的 `vault:vN:` version；`diport::KeyRef` 是调用方随密文持久化的稳定
+//! envelope reference。encrypt / rewrap 请求显式传 `key_version = 0`，表示写入 Vault current-primary；
+//! decrypt 不传 `key_version` override，而是用密文 `vault:vN:` + stored `KeyRef` 验证 previous-read 窗口。
+//! 禁旧版本由运维提升 Vault `min_decryption_version` 完成，adapter 只把 Vault 拒绝收敛成 provider-agnostic
+//! `Rejected`。
+//!
 //! crate 保持 forbid(unsafe_code)（继承 workspace lints）。
 
 #[cfg(feature = "backend")]
@@ -116,7 +123,8 @@ pub struct VaultSigner {
 ///
 /// 与 [`VaultSigner`] 共享构造安全边界：`https` 默认强制、`new_allow_http` 显式 opt-in、mount 分段校验、
 /// token zeroize、请求级 timeout。`DerivedAad` 在执行体内只经 `transit::build_context` 编码为 Vault
-/// `context`，请求体不生成 `associated_data` 字段。
+/// `context`，请求体不生成 `associated_data` 字段。轮换时写路径使用 Vault current-primary，读路径依赖
+/// Vault previous-read policy，rewrap 路径返回新的 `KeyRef` 供调用方原子替换。
 pub struct VaultKeyProvider {
     #[cfg(feature = "backend")]
     client: reqwest::Client,

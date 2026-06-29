@@ -29,6 +29,14 @@
 //!   `==` 匹配 key 标识。常数时间**严格性**按维度分级：[`KeyVersion`]（定长 4-byte u32 BE）严格常数时间，是
 //!   timing oracle 防护核心维度；[`KeyName`] 对变长字符串经 `constant_time_eq` 比内容、但长度差异会短路（key 名是
 //!   非机密配置元数据，长度泄漏可接受）。
+//!
+//! ## Keyset / rotation 模型（#1474）
+//!
+//! [`KeyName`] 是 provider keyset 名称；[`KeyVersion`] 是该 keyset 下的 cryptographic key version；
+//! [`KeyRef`] 是调用方随密文持久化的稳定 envelope reference。新写只通过 [`KeyProviderLocal::encrypt`] 选择
+//! provider current-primary，旧密文只通过持久化的 [`KeyRef`] 读取 previous-read 窗口，重包裹只通过
+//! [`KeyProviderLocal::rewrap`] 写回 current-primary。禁旧 key 属 provider policy（例如 Vault
+//! `min_decryption_version`），不是 runtime adapter 的兼容分支。
 
 use dynosaur::dynosaur;
 use primitives::crypto::constant_time_eq;
@@ -171,6 +179,10 @@ impl KeyVersion {
 /// 完整 key 引用（name + version）——decrypt / rewrap 入参（按 version 选 previous-read key）+ encrypt 输出
 /// （携「实际用了哪个 key/version」供调用方存储）。
 ///
+/// 调用方必须把该引用与密文原子持久化；rotate 后新写返回新版本，旧记录在 provider previous-read window 内
+/// 继续按旧版本解，rewrap 成功后用新返回值替换旧引用。若 provider 禁旧版本，旧 [`KeyRef`] 解密应
+/// fail-closed 为 [`KeyProviderErrorKind::Rejected`]。
+///
 /// `parse` ⇄ [`KeyRef::to_token`] / [`Display`](std::fmt::Display) 对称的 `<name>:<version>` token 是其存储/线
 /// 形态单源（调用方与密文一并落库 + 读回解析）。**不** derive `PartialEq`/`Eq`——经 `ct_eq` 等值-only 匹配
 /// （name + version **均**比对、非短路；version 定长严格常数时间，ADR-011 §D3 防 timing oracle）。
@@ -258,8 +270,9 @@ impl EncryptOutput {
 /// dyn-compatible wrapper（组合根经 `Box<DynKeyProvider>` 注入）。非 Send 基 trait `KeyProviderLocal` 不在 crate
 /// 根 re-export。所有参数 by-value（无生命周期）→ dynosaur `dyn(box)` dyn-compatible 保证。
 ///
-/// 轮换语义（ADR-011 §D3，**impl 落 #1466**）：`encrypt` 用 current-primary 版本；`decrypt` 按 [`KeyRef`] 的
-/// version 选 previous-read key；`rewrap` 把旧密文重包裹到 current-primary（不重新加密 plaintext）。
+/// 轮换语义（ADR-011 §D3 / #1474）：`encrypt` 用 provider current-primary 版本；`decrypt` 按 [`KeyRef`]
+/// 的 version 读取 provider previous-read 窗口；`rewrap` 把旧密文重包裹到 current-primary（不把 plaintext
+/// 带回 adapter）。
 #[trait_variant::make(KeyProvider: Send)]
 #[dynosaur(pub DynKeyProvider = dyn(box) KeyProvider, bridge(dyn))]
 #[allow(async_fn_in_trait)]
