@@ -1,0 +1,55 @@
+# .github/workflows/integration.yml — RSS real integration lane.
+#
+# Testcontainers self-provisions Postgres/Redis/RabbitMQ/Mosquitto through
+# `cargo xtask integration`; workflow YAML does not inline service setup.
+name: Integration
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integration:
+    name: cargo xtask integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup component add rustfmt clippy llvm-tools-preview
+          rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-integration-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-integration-${{ runner.os }}-
+
+      - name: Install integration tools
+        run: |
+          set -euo pipefail
+          cargo install cargo-binstall@1.20.1 --locked
+          cargo binstall -y --locked cargo-nextest@0.9.137
+
+      - name: cargo xtask integration
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xtask -- integration

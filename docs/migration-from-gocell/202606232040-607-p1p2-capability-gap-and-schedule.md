@@ -49,7 +49,7 @@ eventexec/Join 为 New。
 
 | 缺口 | 证据 | 新 issue |
 |---|---|---|
-| CI/CD 未落地 | `gocell-rust-ci-plan.md` 归档·冻结；无 pipeline 文件；`AZURE_HAS_CI=false`；治理全靠本地 `make verify`——AI 协作下无自动门 | **#1132**(p1) |
+| CI/CD | `cargo xtask` 门集已由 GitHub Actions 承载；治理入口仍为本地/CI 共用的 `make verify` / `make ci` | **#1132**(p1) |
 | 供应链安全门未落地 | ci-plan 设计 `cargo-deny advisories`+`cargo-audit` 无 live lane | **#1133**(p2) |
 | 云原生部署产物缺失 | 无 Dockerfile/deploy/Helm/K8s；syshealth 探针无 manifest 接线 | **#1134**→**#1135**(p2) |
 | 契约/集成测试 harness 缺失 | domain-patterns 要求 per-contract 测试，仅 1 条 journey；无 testkit/testcontainers | **#1136**→**#1137**(p2) |

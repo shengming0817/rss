@@ -161,10 +161,10 @@ ADR-011 D2 的复合维度对**多字段结构 + per-field `x-protection`** 描�
 ### D5 — 存储列策略 = **新增列**（dual-read，scheme 驱动检测）
 
 **推荐 Option (b)：在 `config_entries` 上加列，`value` 保留作 legacy dual-read，检测靠权威的 `protection_scheme` 列、
-不靠前缀嗅探。#1477 落地 migration 编号为 `0029_add_config_value_encryption.sql`：
+不靠前缀嗅探。#1477 落地 migration 编号为 `0030_add_config_value_encryption.sql`：
 
 ```sql
--- 0029_add_config_value_encryption.sql （forward-only；本迁移不做 backfill/rewrite）
+-- 0030_add_config_value_encryption.sql （forward-only；本迁移不做 backfill/rewrite）
 ALTER TABLE config_entries
     ALTER COLUMN value DROP NOT NULL,
     ADD COLUMN protection_scheme integer  NOT NULL DEFAULT 0, -- 0=legacy 明文在 value；1=envelope 在 value_enc

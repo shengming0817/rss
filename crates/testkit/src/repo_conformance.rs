@@ -564,6 +564,9 @@ pub struct RetryBoundaryCase<TA, TT, TV, CA, CV, PA, PV> {
 }
 
 /// Retry boundary: transient may retry to success; conflict/permanent must not commit side effects.
+///
+/// INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" } -
+/// provider conformance proves transient retries and non-retryable side-effect boundaries.
 pub async fn assert_retry_boundary_policy<
     TA,
     TT,

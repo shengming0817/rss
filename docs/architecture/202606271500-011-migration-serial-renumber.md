@@ -19,7 +19,7 @@ develop 历史上有 **4 对重复序号**：`0002`（inbox_dedup + outbox）、
 
 重号在任意 fresh DB 上**直接破坏迁移**：sqlx 对同 `version` 的第二个文件触发 `VersionMismatch`（checksum 与已记账
 不符）或 `_sqlx_migrations` 主键冲突 ⇒ `run_migrations` fail-fast、server 永远起不来、`/readyz` 到不了 200。
-因 azure 集成 CI 未激活（`AZURE_HAS_CI=false`，integration lane 仅手动），此前无任何自动路径对真实 PG 跑全量迁移，
+因当时集成 CI 尚未激活（integration lane 仅手动），此前无任何自动路径对真实 PG 跑全量迁移，
 缺陷潜伏至 #1134 容器化首次 E2E 才暴露。**即：server 从未成功对一个 fresh PG 完成迁移。**
 
 ## 2. 决策

@@ -153,6 +153,19 @@ mod integration_tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+    fn count_cas_create_outcome(
+        outcome: CasStoreOutcome,
+        applied: &mut usize,
+        conflicts: &mut usize,
+    ) -> TestResult {
+        match outcome {
+            CasStoreOutcome::Applied { .. } => *applied += 1,
+            CasStoreOutcome::Conflict { current: Some(_) } => *conflicts += 1,
+            other => return Err(format!("unexpected outcome: {other:?}").into()),
+        }
+        Ok(())
+    }
+
     fn request(
         key: &str,
         expected: Option<&[u8]>,
@@ -272,11 +285,7 @@ mod integration_tests {
         let mut applied = 0;
         let mut conflicts = 0;
         for task in tasks {
-            match task.await?? {
-                CasStoreOutcome::Applied { .. } => applied += 1,
-                CasStoreOutcome::Conflict { current: Some(_) } => conflicts += 1,
-                other => panic!("unexpected outcome: {other:?}"),
-            }
+            count_cas_create_outcome(task.await??, &mut applied, &mut conflicts)?;
         }
         assert_eq!(applied, 1, "create-if-absent 应只有一个 winner");
         assert_eq!(conflicts, 7, "其余并发创建应观察到已有值");
@@ -352,11 +361,7 @@ mod integration_tests {
         let mut applied = 0;
         let mut conflicts = 0;
         for task in tasks {
-            match task.await?? {
-                CasStoreOutcome::Applied { .. } => applied += 1,
-                CasStoreOutcome::Conflict { current: Some(_) } => conflicts += 1,
-                other => panic!("unexpected outcome: {other:?}"),
-            }
+            count_cas_create_outcome(task.await??, &mut applied, &mut conflicts)?;
         }
         assert_eq!(applied, 1, "rss_app 并发 create 应只有一个 winner");
         assert_eq!(conflicts, 7, "rss_app 其余并发 create 应 Conflict");

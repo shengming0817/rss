@@ -1,7 +1,7 @@
 //! `cargo xtask verify` —— 本地全量治理门聚合入口。
 //!
-//! RSS 激活 forge=azure **无 CI**（见 issue #1023），CI 收敛降级为本地 `make verify` ⇒ 本命令是
-//! 治理门的**唯一**实际 gate。聚合（fail-fast，无编译的步最先）：
+//! RSS 本地全量治理门。GitHub Actions 调 `cargo xtask ci` 作为合入阻断门；本命令保留为
+//! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
 //!   2. in-process meta：contract validate + assembly validate + archrules + layer-deps + codegen --check
@@ -19,14 +19,14 @@
 //! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
 //! 外部工具时显式宽限（默认 fail-closed）。
 //!
-//! **`cargo xtask ci`（[`run_ci`]）= CI lane 超集**（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
+//! **`cargo xtask ci`（[`run_ci`]）= CI lane 超集**（issue #1132，GitHub Actions 薄壳唯一调用入口）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 是 **CI 全工具超集**——二者经
 //! [`full_plan`] / [`ci_plan`] 共享 fmt/meta/deny/dylint 同一构造，杜绝两份计划漂移。
 //!
-//! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，azure-pipelines.yml
-//! 每日 `schedules:` cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
+//! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
+//! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
 //! （皆 no-compile、快）。PR 门（ci）已含全量 `deny check`（advisories+licenses+bans+sources）+ cargo-audit；
 //! audit lane 专攻**时间维度**——对「未变依赖」新披露的 CVE，PR 门要等下个 PR 才捕获，故每日重跑漏洞维度。
 //! audit lane = **告警**（无 PR 可阻断）；PR 门 ci = **合入阻断**。
@@ -37,8 +37,8 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— azure-pipelines.yml 只调 `cargo xtask ci`、不逐条重列门 run
-//!   命令（门逻辑单源在 xtask）；由 `azure_pipeline_delegates_to_xtask_ci` 治理测试守。
+//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow 只调 `cargo xtask ci`、不逐条重列门 run
+//!   命令（门逻辑单源在 xtask）；由 `github_ci_workflow_delegates_to_xtask_ci` 治理测试守。
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
@@ -796,13 +796,13 @@ pub(crate) fn ci_plan() -> Vec<Step> {
     plan
 }
 
-/// audit 精简供应链门步计划（issue #1133；azure-pipelines.yml 每日 cron 调 `cargo xtask audit`）。
+/// audit 精简供应链门步计划（issue #1133；GitHub Actions schedule 调 `cargo xtask audit`）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
 /// [`ci_plan`] 已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一 [`step_cargo_audit`] 构造。
 ///
 /// INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
-/// 由 `azure_pipeline_has_scheduled_audit_lane` 守。
+/// 由 `github_audit_workflow_has_scheduled_audit_lane` 守。
 fn audit_plan() -> Vec<Step> {
     vec![step_deny_advisories(), step_cargo_audit()]
 }
@@ -850,8 +850,8 @@ fn docker_available() -> bool {
 /// integration 入口（#1137 真集成 lane，opt-in）：docker 门把守后按 [`integration_plan`] 跑。
 /// **docker-gated（fail-closed，对齐 VERIFY-TOOL-GATE-01）**：三 env URL 全在 → 跳过 docker 探测（env 路径
 /// 不 self-provision）；否则探测 docker，缺 + 未宽限 → fail-closed（清晰指引），缺 + `--allow-missing-tools`
-/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；**已接入 azure-pipelines PR/push lane**（#1145，
-/// CI-INTEGRATION-LANE-01；ubuntu-latest agent 预装 docker ⇒ testkit self-provision，由 `azure_pipeline_has_integration_lane` 守）。
+/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；**已接入 GitHub Actions PR/push lane**（#1145，
+/// CI-INTEGRATION-LANE-01；ubuntu-latest runner 预装 docker ⇒ testkit self-provision，由 `github_integration_workflow_has_integration_lane` 守）。
 pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
@@ -1040,7 +1040,7 @@ pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
     Ok(())
 }
 
-/// ci 入口（issue #1132 CI lane 超集）：按 [`ci_plan`] 顺序跑每步，fail-fast。CI 由 azure-pipelines.yml
+/// ci 入口（issue #1132 CI lane 超集）：按 [`ci_plan`] 顺序跑每步，fail-fast。CI 由 GitHub Actions
 /// 调 `cargo xtask ci`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01）；本地全工具机器亦可 `make ci`。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
 pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
@@ -1060,7 +1060,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
 }
 
 /// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
-/// azure-pipelines.yml 每日 cron 调 `cargo xtask audit`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01 同族）。
+/// GitHub Actions schedule 调 `cargo xtask audit`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01 同族）。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
 pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -1571,7 +1571,7 @@ mod tests {
         }
     }
 
-    // ---- CI-PIPELINE-DELEGATE-01：azure-pipelines.yml 委托 `cargo xtask ci`、不逐条重列门 ----
+    // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托 `cargo xtask ci`、不逐条重列门 ----
 
     /// 委托豁免的 cargo 子命令**正向白名单**：`xtask`（alias 形）+ `run`（CI 锁定入口 `cargo run --locked
     /// -p xtask -- ci`——run 跑 xtask 而非门）+ 工具安装（install/binstall）。除此之外任何裸 `cargo <sub>`
@@ -1606,20 +1606,24 @@ mod tests {
             .collect()
     }
 
-    /// 单条已剥注释 / 去缩进的 code 行是否承载某委托命令形（**真实 script 命令**，非 displayName / name 等
-    /// 字符串字段）。命令形态：`script: |` block 的命令体行（trimmed 以委托形起头），或 inline `- script: <cmd>`
-    /// （`script:` 冒号后含委托形）。displayName/name 行的引号内文本既不以委托形起头、也无 `script:` 前缀 ⇒ 被
+    /// 单条已剥注释 / 去缩进的 code 行是否承载某委托命令形（**真实 run/script 命令**，非 displayName / name 等
+    /// 字符串字段）。命令形态：`run: |` / `script: |` block 的命令体行（trimmed 以委托形起头），或 inline
+    /// `- run: <cmd>` / `- script: <cmd>`（冒号后含委托形）。displayName/name 行的引号内文本既不以委托形起头、也无命令键前缀 ⇒ 被
     /// 排除（结构绑定，非裸 `contains`）。
     fn line_bears_form(raw: &str, forms: &[&str]) -> bool {
         let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
-        let is_script = line.starts_with("script:");
-        let cmd = line.strip_prefix("script:").map(str::trim).unwrap_or(line);
+        let is_command = line.starts_with("script:") || line.starts_with("run:");
+        let cmd = line
+            .strip_prefix("script:")
+            .or_else(|| line.strip_prefix("run:"))
+            .map(str::trim)
+            .unwrap_or(line);
         forms
             .iter()
-            .any(|f| cmd.starts_with(f) || (is_script && cmd.contains(f)))
+            .any(|f| cmd.starts_with(f) || (is_command && cmd.contains(f)))
     }
 
-    /// 某委托命令形是否出现在**真实 script 命令**里（而非注释 / displayName 等字符串字段）。
+    /// 某委托命令形是否出现在**真实 run/script 命令**里（而非注释 / displayName 等字符串字段）。
     fn form_in_script(yaml: &str, forms: &[&str]) -> bool {
         yaml_code_lines(yaml)
             .iter()
@@ -1716,15 +1720,18 @@ mod tests {
         }
     }
 
-    /// 真实 committed 文件：azure-pipelines.yml 委托 `cargo xtask ci`、不重列门（INVARIANT CI-PIPELINE-DELEGATE-01）。
+    /// 真实 committed 文件：GitHub CI workflow 委托 `cargo xtask ci`、不重列门（INVARIANT CI-PIPELINE-DELEGATE-01）。
     #[test]
-    fn azure_pipeline_delegates_to_xtask_ci() -> anyhow::Result<()> {
-        let path = workspace_root()?.join("azure-pipelines.yml");
+    fn github_ci_workflow_delegates_to_xtask_ci() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             pipeline_delegates_to_xtask_ci(&yaml),
-            "azure-pipelines.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
+            ".github/workflows/ci.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
         );
         Ok(())
     }
@@ -1735,24 +1742,15 @@ mod tests {
     const XTASK_AUDIT_FORMS: &[&str] =
         &["cargo xtask audit", "cargo run --locked -p xtask -- audit"];
 
-    /// 调度 lane 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。YAML 须同时
-    /// 满足——① 顶层 `schedules:` 键（去注释后整行 == `schedules:`，非字符串值）；② `always: true` 映射项
-    /// （无代码变更也跑，否则捕不到「未变依赖」新披露 CVE，是定时刷新核心用途）；③ audit 委托形在**真实 script
-    /// 命令**（[`form_in_script`]，非 displayName / 注释；门逻辑单源在 xtask，CI-PIPELINE-DELEGATE-01 同族）；
-    /// ④ Build.Reason **互斥分流**两 `condition:` 都在（`eq(...,'Schedule')` 给 audit lane、`ne(...,'Schedule')` 给
-    /// ci lane）——缺任一则两步可能都跑或都不跑；⑤ 每个 `cargo <sub>` ∈ 委托白名单。
+    /// GitHub audit workflow 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。
+    /// YAML 须同时满足——① 顶层 `schedule:` 键（GitHub Actions 定时触发）；② `workflow_dispatch:` 手动 backstop；
+    /// ③ audit 委托形在**真实 script 命令**；④ 每个 `cargo <sub>` ∈ 委托白名单。
     fn pipeline_has_scheduled_audit_lane(yaml: &str) -> bool {
         let code = yaml_code_lines(yaml);
         let line_is = |s: &str| code.contains(&s);
-        let condition_has = |needle: &str| {
-            code.iter()
-                .any(|l| l.starts_with("condition:") && l.contains(needle))
-        };
-        line_is("schedules:")
-            && line_is("always: true")
+        line_is("schedule:")
+            && line_is("workflow_dispatch:")
             && form_in_script(yaml, XTASK_AUDIT_FORMS)
-            && condition_has("eq(variables['Build.Reason'], 'Schedule')")
-            && condition_has("ne(variables['Build.Reason'], 'Schedule')")
             && cargo_subcommands(yaml)
                 .iter()
                 .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
@@ -1761,25 +1759,21 @@ mod tests {
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
     #[test]
     fn scheduled_audit_lane_predicate_green_and_red() {
-        let green = "schedules:\n  - cron: \"0 6 * * *\"\n    always: true\nsteps:\n  - script: cargo install cargo-binstall\n  - script: cargo run --locked -p xtask -- ci\n    condition: ne(variables['Build.Reason'], 'Schedule')\n  - script: cargo run --locked -p xtask -- audit\n    condition: eq(variables['Build.Reason'], 'Schedule')\n";
+        let green = "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\njobs:\n  audit:\n    steps:\n      - run: cargo install cargo-binstall\n      - run: cargo run --locked -p xtask -- audit\n";
         assert!(
             pipeline_has_scheduled_audit_lane(green),
             "完整定时 lane 应为真"
         );
         // 红：逐一抽掉一个必需子句。
         assert!(
-            !pipeline_has_scheduled_audit_lane(&green.replace("schedules:", "trigger:")),
-            "缺 schedules 块"
-        );
-        assert!(
-            !pipeline_has_scheduled_audit_lane(&green.replace("    always: true\n", "")),
-            "缺 always:true（无代码变更不跑、捕不到未变依赖新 CVE）"
+            !pipeline_has_scheduled_audit_lane(&green.replace("schedule:", "x_schedule:")),
+            "缺 schedule 块"
         );
         assert!(
             !pipeline_has_scheduled_audit_lane(
-                &green.replace("ne(variables['Build.Reason'], 'Schedule')", "always()")
+                &green.replace("workflow_dispatch:", "x_workflow_dispatch:")
             ),
-            "缺 ne 分流条件（ci/audit 可能都跑或都不跑）"
+            "缺 workflow_dispatch backstop"
         );
         assert!(
             !pipeline_has_scheduled_audit_lane(
@@ -1796,29 +1790,32 @@ mod tests {
         //（旧裸 `yaml.contains` 谓词会误判为真）。安装步使 cargo_subcommands 通过，隔离出结构断言失败。
         assert!(
             !pipeline_has_scheduled_audit_lane(
-                "# schedules:\n# always: true\n# condition: eq(variables['Build.Reason'], 'Schedule')\n# condition: ne(variables['Build.Reason'], 'Schedule')\n# cargo run --locked -p xtask -- audit\nsteps:\n  - script: cargo install cargo-binstall\n"
+                "# schedule:\n# workflow_dispatch:\n# cargo run --locked -p xtask -- audit\nsteps:\n  - run: cargo install cargo-binstall\n"
             ),
             "关键字仅在注释里不应满足守卫（fail-closed）"
         );
         // 红（codex F1 核心）：audit 委托形仅在 **displayName**（字符串字段值）、无真实 audit script → 不满足。
         assert!(
             !pipeline_has_scheduled_audit_lane(
-                "schedules:\n  - cron: \"0 6 * * *\"\n    always: true\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: ne(variables['Build.Reason'], 'Schedule')\n  - script: cargo install cargo-binstall\n    displayName: 'cargo run --locked -p xtask -- audit'\n    condition: eq(variables['Build.Reason'], 'Schedule')\n"
+                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: cargo install cargo-binstall\n    name: 'cargo run --locked -p xtask -- audit'\n"
             ),
             "audit 形仅在 displayName 不应满足守卫（fail-closed）"
         );
     }
 
-    /// 真实 committed 文件：azure-pipelines.yml 含每日定时刷新 lane，经 `cargo xtask audit` 委托
+    /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 `cargo xtask audit` 委托
     /// （issue #1133：捕获「未变依赖」新披露 CVE；门逻辑单源在 xtask，不内联）。
     #[test]
-    fn azure_pipeline_has_scheduled_audit_lane() -> anyhow::Result<()> {
-        let path = workspace_root()?.join("azure-pipelines.yml");
+    fn github_audit_workflow_has_scheduled_audit_lane() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("audit.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             pipeline_has_scheduled_audit_lane(&yaml),
-            "azure-pipelines.yml 须含 `schedules:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
+            ".github/workflows/audit.yml 须含 `schedule:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
         );
         Ok(())
     }
@@ -1831,30 +1828,14 @@ mod tests {
         "cargo run --locked -p xtask -- integration",
     ];
 
-    /// 集成 lane 谓词（**结构绑定 + step 级绑定**，fail-closed；同 audit lane 范式 + codex F1 加固）。YAML 须同时
-    /// 满足——① **同一 step 块**内既承载 integration 委托形（真实 script，非 displayName / 注释）**又**带
-    /// `condition: and(succeeded(), ...ne(...,'Schedule'))`（[`yaml_step_blocks`] 把字段绑定到承载命令形的那个
-    /// step；门逻辑单源在 xtask，CI-PIPELINE-DELEGATE-01 同族）——集成容器重，须 ① PR-gate 跑在 PR/push、不在每日
-    /// audit Schedule 跑（`ne(...)`），**且** ② ci 失败后不跑（`succeeded()`）；② 每个 `cargo <sub>` ∈ 委托白名单（不内联门）。
-    ///
-    /// **review #281 F1（轮1）**：旧实现的 `condition_has` 扫全文任意 `condition:` 行，ci 步的 `ne(...)` 会令
-    /// 「integration 步本身缺 condition」假阳性通过；改为 step 级绑定——只有承载 integration 形的那个 step 自带 PR-gate 才算数。
-    /// **review #281 F1（轮2）**：守卫须同锁 `succeeded()`——Azure 显式 `condition` 顶替默认隐式 `succeeded()`，缺它
-    /// 则 `cargo xtask ci` 失败后集成步仍拉容器跑（azure-pipelines.yml 已写 `and(succeeded(), ne(...))`，守卫须把这个
-    /// 不变式锁住，否则回归到裸 `ne(...)` 不被捕获）。
+    /// GitHub integration workflow 谓词（**结构绑定**，fail-closed）。YAML 须同时满足——① `pull_request:` +
+    /// `push:` 触发；② integration 委托形在真实 run/script 命令；③ 每个 `cargo <sub>` ∈ 委托白名单（不内联门）。
     fn pipeline_has_integration_lane(yaml: &str) -> bool {
-        let pr_gated_integration_step = yaml_step_blocks(yaml).iter().any(|block| {
-            let bears_form = block
-                .iter()
-                .any(|&raw| line_bears_form(raw, XTASK_INTEGRATION_FORMS));
-            let pr_gated = block.iter().any(|l| {
-                l.starts_with("condition:")
-                    && l.contains("succeeded()")
-                    && l.contains("ne(variables['Build.Reason'], 'Schedule')")
-            });
-            bears_form && pr_gated
-        });
-        pr_gated_integration_step
+        let code = yaml_code_lines(yaml);
+        let triggers = code.iter().any(|l| l.starts_with("pull_request:"))
+            && code.iter().any(|l| l.starts_with("push:"));
+        triggers
+            && form_in_script(yaml, XTASK_INTEGRATION_FORMS)
             && cargo_subcommands(yaml)
                 .iter()
                 .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
@@ -1863,49 +1844,31 @@ mod tests {
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
     #[test]
     fn integration_lane_predicate_green_and_red() {
-        let green = "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n  - script: cargo run --locked -p xtask -- integration\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n";
+        let green = "on:\n  pull_request:\n  push:\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- integration\n";
         assert!(pipeline_has_integration_lane(green), "完整集成 lane 应为真");
         // 红：缺 integration 委托形（只剩 ci 步）。
         assert!(
             !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n"
+                "on:\n  pull_request:\n  push:\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- ci\n"
             ),
             "缺 integration 委托形"
         );
-        // 红：缺 PR-gated ne 条件（集成步会在每日 Schedule 也跑）。
+        // 红：缺 pull_request 触发。
         assert!(
-            !pipeline_has_integration_lane(
-                &green.replace("ne(variables['Build.Reason'], 'Schedule')", "always()")
-            ),
-            "缺 ne 分流条件"
-        );
-        // 红（codex review #281 第2轮 F1）：integration 步 condition 有 ne 但缺 `succeeded()`——显式 condition 顶替
-        // Azure 隐式 succeeded()，缺它则 ci 失败后集成步仍跑；守卫须锁 succeeded()（与 azure-pipelines.yml 一致）。
-        assert!(
-            !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo run --locked -p xtask -- integration\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
-            ),
-            "integration 步 condition 缺 succeeded()（ci 失败后仍会跑）"
-        );
-        // 红（review #281 F1 轮1）：integration 步有委托形但**本步**无 condition（ci 步仍有 condition）→ step 级绑定不满足
-        //（旧 condition_has 扫全文会被 ci 步的 ne 假阳性顶替）。
-        assert!(
-            !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n  - script: cargo run --locked -p xtask -- integration\n"
-            ),
-            "integration 步缺自身 condition（ci 步的 condition 不应顶替）"
+            !pipeline_has_integration_lane(&green.replace("pull_request:", "x_pull_request:")),
+            "缺 pull_request 触发"
         );
         // 红（codex F1）：integration 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足。
         assert!(
             !pipeline_has_integration_lane(
-                "# cargo run --locked -p xtask -- integration\nsteps:\n  - script: cargo install cargo-binstall\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+                "# cargo run --locked -p xtask -- integration\non:\n  pull_request:\n  push:\nsteps:\n  - run: cargo install cargo-binstall\n"
             ),
             "integration 形仅在注释不应满足守卫（fail-closed）"
         );
         // 红（codex F1）：integration 形仅在 **displayName**（字符串字段值）、无真实 script → 不满足。
         assert!(
             !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo run --locked -p xtask -- integration'\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+                "on:\n  pull_request:\n  push:\nsteps:\n  - run: cargo install cargo-binstall\n    name: 'cargo run --locked -p xtask -- integration'\n"
             ),
             "integration 形仅在 displayName 不应满足守卫（fail-closed）"
         );
@@ -1918,24 +1881,27 @@ mod tests {
         );
     }
 
-    /// 真实 committed 文件：azure-pipelines.yml 含集成测试 lane，经 `cargo xtask integration` 委托
+    /// 真实 committed 文件：GitHub integration workflow 含集成测试 lane，经 `cargo xtask integration` 委托
     /// （issue #1145 第②项：真集成测试入 PR lane；门逻辑单源在 xtask，不内联）。
     #[test]
-    fn azure_pipeline_has_integration_lane() -> anyhow::Result<()> {
-        let path = workspace_root()?.join("azure-pipelines.yml");
+    fn github_integration_workflow_has_integration_lane() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("integration.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             pipeline_has_integration_lane(&yaml),
-            "azure-pipelines.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
+            ".github/workflows/integration.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
         );
         Ok(())
     }
 
     // ---- SAST / CodeQL workflow 守卫（issue #1145 第⑤项；INVARIANT SAST-CODEQL-PRESENT-01）----
 
-    /// CodeQL workflow 必备要素（**结构绑定**，content-scan，Medium）。RSS 主 forge 为 Azure，仓库每日镜像同步到
-    /// GitHub，SAST 跑在 GitHub 侧——守卫须锁住「SAST 真的会随 push/定时跑 + 真的扫 Rust + 真的产 alert」整条不变式，
+    /// CodeQL workflow 必备要素（**结构绑定**，content-scan，Medium）。GitHub Actions 承载 CI/SAST，
+    /// 守卫须锁住「SAST 真的会随 push/定时跑 + 真的扫 Rust + 真的产 alert」整条不变式，
     /// 而非仅找关键字子串（review #281 F2，对标 sibling azure 守卫的结构绑定）。经 [`yaml_code_lines`] 先剥 `#` 注释：
     ///
     /// - **① 触发器**：`push:` + `schedule:` 两结构键都在（行起头）——否则退化成仅 `workflow_dispatch`，SAST 不随

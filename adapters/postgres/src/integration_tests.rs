@@ -137,7 +137,9 @@ async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
     ))
     .execute(&store.pool)
     .await;
-    let err = result.expect_err("0028 must reject non-empty dead_letter");
+    let Err(err) = result else {
+        return Err("0028 must reject non-empty dead_letter".into());
+    };
     let rendered = err.to_string();
     assert!(
         rendered.contains("dead_letter must be empty before enabling encrypted original_entry"),
@@ -602,7 +604,7 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
 
 fn make_pg_outbox_with_publisher(
     store: &PgStore,
-    publisher: impl Publisher + Send + Sync + 'static,
+    publisher: impl Publisher + Sync + 'static,
 ) -> PgOutbox {
     PgOutbox::new(
         store,

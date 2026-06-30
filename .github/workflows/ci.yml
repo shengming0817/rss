@@ -1,0 +1,59 @@
+# .github/workflows/ci.yml — RSS GitHub Actions CI lane.
+#
+# Thin shell: CI gate logic lives in `cargo xtask ci`; this workflow installs the
+# pinned toolchain/tools and delegates to that single command.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RSS_NIGHTLY_PINNED: nightly-2026-04-16
+
+jobs:
+  ci:
+    name: cargo xtask ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup component add rustfmt clippy llvm-tools-preview
+          rustup toolchain install "$RSS_NIGHTLY_PINNED" --profile minimal --component rustc-dev llvm-tools-preview rust-src
+          rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-ci-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ci-${{ runner.os }}-
+
+      - name: Install CI tools
+        run: |
+          set -euo pipefail
+          cargo install cargo-binstall@1.20.1 --locked
+          cargo binstall -y --locked \
+            cargo-nextest@0.9.137 cargo-deny@0.19.9 cargo-dylint@6.0.1 dylint-link@6.0.1 \
+            cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0 cargo-audit@0.22.2
+
+      - name: cargo xtask ci
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xtask -- ci

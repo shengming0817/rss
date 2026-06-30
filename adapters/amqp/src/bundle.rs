@@ -176,8 +176,10 @@ impl AckableSubscriber for SharedAmqpSubscriber {
     }
 
     async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // port-local shutdown 关本 subscriber 各 channel；connection 由 AmqpSubscriberGuard 单源关。
-        AckableSubscriber::shutdown(self.0.as_ref()).await
+        // Bundle-dispatched subscriber handles do not own the connection lifecycle. Individual
+        // subscription channels are closed by their cancellation tokens; the shared connection is
+        // closed once by AmqpSubscriberGuard from runtime_resources().
+        Ok(())
     }
 }
 

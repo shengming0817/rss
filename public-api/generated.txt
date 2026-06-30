@@ -667,6 +667,7 @@ impl<T> core::convert::From<T> for generated::event::SubscriptionSpec
 pub fn generated::event::SubscriptionSpec::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::event::SubscriptionSpec
 pub type generated::event::SubscriptionSpec::Output = T
+pub const generated::event::SUBSCRIPTIONS: &[generated::event::SubscriptionSpec]
 pub mod generated::http
 pub mod generated::http::_seed_v1
 pub mod generated::http::_seed_v1::error
@@ -2075,7 +2076,6 @@ impl<T> serde_core::de::DeserializeOwned for generated::http::identity_v1::roles
 impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_assign::IdentityRolesAssignData
 pub type generated::http::identity_v1::roles_assign::IdentityRolesAssignData::Output = T
 pub struct generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest
-pub generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest::role_id: alloc::string::String
 pub generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest::subject: alloc::string::String
 impl core::clone::Clone for generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest
 pub fn generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest::clone(&self) -> generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest
@@ -2434,9 +2434,10 @@ impl<T> serde_core::de::DeserializeOwned for generated::http::identity_v1::roles
 impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData
 pub type generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData::Output = T
 pub struct generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
-pub generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::subject: alloc::string::String
 impl core::clone::Clone for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
 pub fn generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::clone(&self) -> generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
+impl core::default::Default for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
+pub fn generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::default() -> Self
 impl core::fmt::Debug for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
 pub fn generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl secure::redaction::Redact for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
@@ -3066,6 +3067,8 @@ pub generated::http::HttpSpec::contract_id: &'static str
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]
 pub generated::http::HttpSpec::method: &'static str
 pub generated::http::HttpSpec::path: &'static str
+pub generated::http::HttpSpec::resource: core::option::Option<&'static str>
+pub generated::http::HttpSpec::self_scoped: bool
 impl core::clone::Clone for generated::http::HttpSpec
 pub fn generated::http::HttpSpec::clone(&self) -> generated::http::HttpSpec
 impl core::cmp::Eq for generated::http::HttpSpec

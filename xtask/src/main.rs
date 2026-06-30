@@ -26,20 +26,20 @@
 //!                                      --layer 时检查 basis + engine + curated extras）；
 //!                                      --check 缺 baseline 默认 fail-fast，--allow-missing 显式宽限（PR-0 自检）
 //!   `cargo xtask ci [--allow-missing-tools]`
-//!                                      CI lane **超集**聚合（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
+//!                                      CI lane **超集**聚合（issue #1132，GitHub Actions 薄壳唯一调用入口）：
 //!                                      verify 全门（build/clippy 升 `--all-features --all-targets`）+ 覆盖率门
 //!                                      （`cargo llvm-cov nextest` 替 nextest，单跑两子门：basis/engine ≥90% 绝对
 //!                                      地板 + 本 PR diff 增量 ≥80%，见 `coverage.rs`/`diffcov.rs`）+ public-api
 //!                                      --check（轴 A）+ cargo-audit（供应链漏洞，#1133）。verify 仍是本地 stable-only 快门，ci 是 CI 全工具超集。详见 `verify.rs`。
 //!   `cargo xtask audit [--allow-missing-tools]`
-//!                                      供应链漏洞**定时刷新** lane（issue #1133，azure-pipelines.yml 每日 `schedules:`
+//!                                      供应链漏洞**定时刷新** lane（issue #1133，GitHub Actions `schedule:`
 //!                                      cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit`
 //!                                      两门（皆 no-compile、快），捕获「未变依赖」新披露 CVE。详见 `verify.rs`。
 //!   `cargo xtask integration [--allow-missing-tools]`
 //!                                      真集成 lane（issue #1137，**opt-in**，不入 verify/ci）：testcontainers
 //!                                      self-provision postgres/redis/rabbitmq 跑 `--features integration` 测试。
 //!                                      **docker-gated**（fail-closed；env URL 全在则对接长存服务免 docker）。
-//!                                      **已接入 azure-pipelines PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
+//!                                      **已接入 GitHub Actions PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
 mod archrules;
 mod assembly;
 mod cmd;

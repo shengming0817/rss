@@ -10,7 +10,7 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 构建与本地验证
 
-单一聚合入口（**激活 forge=azure 无 CI ⇒ 这是治理门的唯一实际 gate**）：
+单一聚合入口（GitHub Actions 与本地共用同一 `cargo xtask` 门）：
 
 ```bash
 make verify              # == cargo xtask verify（薄 alias）

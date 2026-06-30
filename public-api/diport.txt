@@ -1053,12 +1053,13 @@ impl<T> typenum::type_operators::Same for diport::dead_letter_store::WritableDea
 pub type diport::dead_letter_store::WritableDeadLetterSource::Output = T
 pub struct diport::dead_letter_store::DeadLetterRecord
 impl diport::dead_letter_store::DeadLetterRecord
+pub fn diport::dead_letter_store::DeadLetterRecord::consumer_group(&self) -> core::option::Option<&str>
 pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
@@ -1338,9 +1339,10 @@ pub const diport::envelope::KEY_CORRELATION: &str
 pub const diport::envelope::KEY_OCCURRED_AT: &str
 pub const diport::envelope::KEY_PRINCIPAL: &str
 pub const diport::envelope::KEY_SUBJECT_ID: &str
+pub const diport::envelope::KEY_TENANT_AUTHORITY: &str
 pub const diport::envelope::KEY_TENANT_ID: &str
 pub const diport::envelope::KEY_TRACE: &str
-pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 5]
+pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 6]
 pub mod diport::fenced_writer
 #[non_exhaustive] pub enum diport::fenced_writer::WriteOutcome
 pub diport::fenced_writer::WriteOutcome::Committed
@@ -1663,17 +1665,17 @@ pub const fn diport::DynKeyProvider<'dynosaur_struct>::from_ref(&impl diport::ke
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_arc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_box(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_rc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynKeyProvider<'dynosaur_struct>>
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -1686,7 +1688,7 @@ pub fn diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::f
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynKeyProvider<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynKeyProvider<'dynosaur_struct>
@@ -1903,22 +1905,22 @@ impl<T> core::convert::From<T> for diport::key_provider::KeyVersion
 pub fn diport::key_provider::KeyVersion::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::key_provider::KeyVersion
 pub type diport::key_provider::KeyVersion::Output = T
-pub trait diport::key_provider::KeyProvider: core::marker::Send
+pub trait diport::key_provider::KeyProvider: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::key_provider::KeyProvider::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::key_provider::KeyProvider::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::key_provider::KeyProvider::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::key_provider::KeyProvider::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -1928,7 +1930,7 @@ pub fn diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::Redacted
 pub fn diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-pub trait diport::key_provider::KeyProviderLocal
+pub trait diport::key_provider::KeyProviderLocal: core::marker::Send + core::marker::Sync
 pub async fn diport::key_provider::KeyProviderLocal::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>
 pub async fn diport::key_provider::KeyProviderLocal::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>
 pub async fn diport::key_provider::KeyProviderLocal::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>
@@ -6079,12 +6081,13 @@ impl<T> typenum::type_operators::Same for diport::checkpoint_store::CheckpointVe
 pub type diport::checkpoint_store::CheckpointVersion::Output = T
 pub struct diport::DeadLetterRecord
 impl diport::dead_letter_store::DeadLetterRecord
+pub fn diport::dead_letter_store::DeadLetterRecord::consumer_group(&self) -> core::option::Option<&str>
 pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
@@ -6444,17 +6447,17 @@ pub const fn diport::DynKeyProvider<'dynosaur_struct>::from_ref(&impl diport::ke
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_arc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_box(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_rc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynKeyProvider<'dynosaur_struct>>
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -6467,7 +6470,7 @@ pub fn diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::f
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynKeyProvider<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynKeyProvider<'dynosaur_struct>
@@ -8790,9 +8793,10 @@ pub const diport::KEY_CORRELATION: &str
 pub const diport::KEY_OCCURRED_AT: &str
 pub const diport::KEY_PRINCIPAL: &str
 pub const diport::KEY_SUBJECT_ID: &str
+pub const diport::KEY_TENANT_AUTHORITY: &str
 pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
-pub const diport::RESERVED_METADATA_KEYS: [&str; 5]
+pub const diport::RESERVED_METADATA_KEYS: [&str; 6]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
 pub const diport::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::AckableSubscriber: core::marker::Send
@@ -8882,22 +8886,22 @@ pub fn alloc::boxed::Box<diport::DynFencedWriter<'dynosaur_struct>>::write(&self
 impl<'dynosaur_struct> diport::fenced_writer::FencedWriter for diport::DynFencedWriter<'dynosaur_struct>
 pub fn diport::DynFencedWriter<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::fenced_writer::FencedWriterError>> + core::marker::Send
 pub fn diport::DynFencedWriter<'dynosaur_struct>::write(&self, diport::fenced_writer::FencedWriteRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::fenced_writer::WriteOutcome, diport::fenced_writer::FencedWriterError>> + core::marker::Send
-pub trait diport::KeyProvider: core::marker::Send
+pub trait diport::KeyProvider: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::KeyProvider::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::KeyProvider::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::KeyProvider::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::KeyProvider::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send

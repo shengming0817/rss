@@ -21,8 +21,7 @@
 #   - pr-diff / pr-diffstat: ADO REST exposes no line-level +/- -> computed from
 #     local git against the active remote's branches.
 #   - author trust: no author_association -> AZURE_TRUSTED_AUTHORS allowlist.
-#   - ci-*: gated off in forge.sh (AZURE_HAS_CI=false); pipeline-* verbs below
-#     manage Azure Pipelines explicitly for the local-CI mirror.
+#   - ci-*: gated off in forge.sh; RSS CI is carried by GitHub Actions.
 #   - issue-edit-labels (System.Tags): read-modify-write via REST op=replace
 #     (`az boards --fields` only ADDS tags, never removes; `az devops invoke`
 #     PATCH errors); NOT atomic (backlog).
@@ -286,83 +285,6 @@ _azure_pr_mergeable() { # <pr> -> MERGEABLE|CONFLICTING|UNKNOWN
 }
 
 _azure_pr_web_url() { printf '%s/pullrequest/%s\n' "$(_az_pr_url_base)" "$1"; }
-
-# --- Azure Pipelines (local-CI mirror) ---------------------------------------
-_azure_pipeline_create() { # <name> <repo> <branch> <yaml> [queue-id]
-    local name="$1" repo="$2" branch="$3" yaml_path="$4" queue_id="${5:-}"
-    local -a cmd=(az pipelines create
-        --name "${name}"
-        --repository "${repo}"
-        --repository-type tfsgit
-        --branch "${branch}"
-        --yml-path "${yaml_path}")
-    [ -n "${queue_id}" ] && cmd+=(--queue-id "${queue_id}")
-    cmd+=(
-        --skip-first-run true
-        --org "${ADO_ORG}"
-        --project "${ADO_PROJECT}")
-    _dry "${cmd[@]}" && return 0
-    "${cmd[@]}"
-}
-
-_azure_pipeline_run() { # <name> <branch> <phase> <lint-mode> <base-ref> <with-nightly> <docker-wrapper> <agent-pool> [open]
-    local name="$1" branch="$2" phase="$3" lint_mode="$4" base_ref="$5" with_nightly="$6" docker_wrapper="$7" agent_pool="$8" open="${9:-false}"
-    local -a cmd=(az pipelines run
-        --name "${name}"
-        --branch "${branch}"
-        --org "${ADO_ORG}"
-        --project "${ADO_PROJECT}"
-        --parameters
-        phase="${phase}"
-        lintMode="${lint_mode}"
-        baseRef="${base_ref}"
-        withNightly="${with_nightly}"
-        dockerWrapper="${docker_wrapper}"
-        agentPool="${agent_pool}")
-    [ "${open}" = "true" ] && cmd+=(--open)
-    _dry "${cmd[@]}" && return 0
-    "${cmd[@]}"
-}
-
-_azure_pipeline_list() { # <name>
-    local name="$1"
-    if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az pipelines show --name %s ; az pipelines runs list --pipeline-ids <id>\n' "${name}"
-        return 0
-    fi
-    local pipeline_id
-    pipeline_id="$(az pipelines show --name "${name}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --query id -o tsv)"
-    az pipelines runs list \
-        --pipeline-ids "${pipeline_id}" \
-        --org "${ADO_ORG}" \
-        --project "${ADO_PROJECT}" \
-        --top 10 \
-        -o table
-}
-
-_azure_pipeline_policy() { # <name> <repo> <branch> <display-name>
-    local name="$1" repo="$2" branch="$3" display_name="$4"
-    if [ "${DRY_RUN}" = "1" ]; then
-        printf 'az pipelines show --name %s ; az repos show --repository %s ; az repos policy build create --branch %s --display-name %s\n' "${name}" "${repo}" "${branch}" "${display_name}"
-        return 0
-    fi
-    local pipeline_id repository_id
-    pipeline_id="$(az pipelines show --name "${name}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --query id -o tsv)"
-    repository_id="$(az repos show --repository "${repo}" --org "${ADO_ORG}" --project "${ADO_PROJECT}" --query id -o tsv)"
-    az repos policy build create \
-        --blocking true \
-        --enabled true \
-        --manual-queue-only false \
-        --queue-on-source-update-only true \
-        --valid-duration 0 \
-        --display-name "${display_name}" \
-        --build-definition-id "${pipeline_id}" \
-        --repository-id "${repository_id}" \
-        --branch "${branch}" \
-        --branch-match-type exact \
-        --org "${ADO_ORG}" \
-        --project "${ADO_PROJECT}"
-}
 
 # --- Work Items (issue-* verbs map to Azure Boards) --------------------------
 _azure_issue_create() { # <title> <body-file> <label-csv> [type]

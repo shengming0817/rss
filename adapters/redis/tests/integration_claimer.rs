@@ -65,6 +65,64 @@ fn make_store(
     Ok(make_deps(url)?.infra().idempotency(group, ttl)?)
 }
 
+fn require_lock_acquired(
+    outcome: LockAcquireOutcome,
+    context: &str,
+) -> Result<vocab::Epoch, FixtureError> {
+    match outcome {
+        LockAcquireOutcome::Acquired { token } => Ok(token),
+        other => Err(FixtureError::msg(format!(
+            "{context} must acquire lock, got {other:?}"
+        ))),
+    }
+}
+
+fn require_cas_applied(
+    outcome: CasStoreOutcome,
+    context: &str,
+) -> Result<vocab::Epoch, FixtureError> {
+    match outcome {
+        CasStoreOutcome::Applied { token } => Ok(token),
+        other => Err(FixtureError::msg(format!(
+            "{context} must apply CAS, got {other:?}"
+        ))),
+    }
+}
+
+fn count_lock_acquire_outcome(
+    outcome: LockAcquireOutcome,
+    acquired: &mut usize,
+    held: &mut usize,
+) -> Result<(), FixtureError> {
+    match outcome {
+        LockAcquireOutcome::Acquired { .. } => *acquired += 1,
+        LockAcquireOutcome::Held => *held += 1,
+        other => {
+            return Err(FixtureError::msg(format!(
+                "unexpected lock outcome: {other:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn count_cas_create_outcome(
+    outcome: CasStoreOutcome,
+    applied: &mut usize,
+    conflicts: &mut usize,
+) -> Result<(), FixtureError> {
+    match outcome {
+        CasStoreOutcome::Applied { .. } => *applied += 1,
+        CasStoreOutcome::Conflict { current: Some(_) } => *conflicts += 1,
+        other => {
+            return Err(FixtureError::msg(format!(
+                "unexpected CAS outcome: {other:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ─── 既有基础行为（更新至新签名：try_claim/commit/release 均携带 lease token）────────────────
 
 #[tokio::test]
@@ -389,11 +447,7 @@ async fn integration_distlock_mutex_ttl_and_fencing() -> Result<(), FixtureError
     let key = unique_lock_key("integration_distlock");
     let ttl = Duration::from_millis(500);
 
-    let first = lock.acquire(key.clone(), ttl).await?;
-    let token_a = match first {
-        LockAcquireOutcome::Acquired { token } => token,
-        other => panic!("first acquire must win, got {other:?}"),
-    };
+    let token_a = require_lock_acquired(lock.acquire(key.clone(), ttl).await?, "first acquire")?;
     assert_eq!(
         lock.acquire(key.clone(), ttl).await?,
         LockAcquireOutcome::Held,
@@ -406,11 +460,7 @@ async fn integration_distlock_mutex_ttl_and_fencing() -> Result<(), FixtureError
     );
 
     tokio::time::sleep(Duration::from_millis(700)).await;
-    let second = lock.acquire(key.clone(), ttl).await?;
-    let token_b = match second {
-        LockAcquireOutcome::Acquired { token } => token,
-        other => panic!("acquire after TTL must win, got {other:?}"),
-    };
+    let token_b = require_lock_acquired(lock.acquire(key.clone(), ttl).await?, "post-TTL acquire")?;
     assert!(
         token_b > token_a,
         "fencing token must be monotonic across TTL expiry"
@@ -466,11 +516,7 @@ async fn integration_distlock_concurrent_same_key_single_winner() -> Result<(), 
     let mut acquired = 0;
     let mut held = 0;
     for task in tasks {
-        match task.await?? {
-            LockAcquireOutcome::Acquired { .. } => acquired += 1,
-            LockAcquireOutcome::Held => held += 1,
-            other => panic!("unexpected lock outcome: {other:?}"),
-        }
+        count_lock_acquire_outcome(task.await??, &mut acquired, &mut held)?;
     }
     assert_eq!(
         acquired, 1,
@@ -495,10 +541,7 @@ async fn integration_redis_cas_three_states_and_fencing() -> Result<(), FixtureE
             expected_token: None,
         })
         .await?;
-    let token1 = match created {
-        CasStoreOutcome::Applied { token } => token,
-        other => panic!("create must apply, got {other:?}"),
-    };
+    let token1 = require_cas_applied(created, "create")?;
 
     let updated = cas
         .compare_and_swap(CasStoreRequest {
@@ -508,10 +551,7 @@ async fn integration_redis_cas_three_states_and_fencing() -> Result<(), FixtureE
             expected_token: Some(token1),
         })
         .await?;
-    let token2 = match updated {
-        CasStoreOutcome::Applied { token } => token,
-        other => panic!("matching update must apply, got {other:?}"),
-    };
+    let token2 = require_cas_applied(updated, "matching update")?;
     assert!(token2 > token1);
 
     let conflict = cas
@@ -570,11 +610,7 @@ async fn integration_redis_cas_concurrent_create_has_single_winner() -> Result<(
     let mut applied = 0;
     let mut conflicts = 0;
     for task in tasks {
-        match task.await?? {
-            CasStoreOutcome::Applied { .. } => applied += 1,
-            CasStoreOutcome::Conflict { current: Some(_) } => conflicts += 1,
-            other => panic!("unexpected outcome: {other:?}"),
-        }
+        count_cas_create_outcome(task.await??, &mut applied, &mut conflicts)?;
     }
     assert_eq!(
         applied, 1,
@@ -604,17 +640,18 @@ async fn integration_redis_cas_token_overflow_fails_fast() -> Result<(), Fixture
         .query_async(&mut *conn)
         .await?;
 
-    let err = deps
-        .infra()
-        .cas_store()
-        .compare_and_swap(CasStoreRequest {
-            key,
-            expected: Some(b"v1".to_vec().into()),
-            new_value: b"v2".to_vec().into(),
-            expected_token: Some(vocab::Epoch::new(9_007_199_254_740_991_u64)),
-        })
-        .await
-        .expect_err("max Lua-safe token must fail before increment");
-    drop(err);
+    assert!(
+        deps.infra()
+            .cas_store()
+            .compare_and_swap(CasStoreRequest {
+                key,
+                expected: Some(b"v1".to_vec().into()),
+                new_value: b"v2".to_vec().into(),
+                expected_token: Some(vocab::Epoch::new(9_007_199_254_740_991_u64)),
+            })
+            .await
+            .is_err(),
+        "max Lua-safe token must fail before increment"
+    );
     Ok(())
 }

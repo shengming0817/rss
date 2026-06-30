@@ -1,4 +1,7 @@
 //! Postgres transaction retry classification and boundary metrics.
+//!
+//! INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" } -
+//! Postgres owns the SQLSTATE/repo-error mapping before delegating full UoW retries to consistency.
 
 use std::error::Error;
 use std::future::Future;

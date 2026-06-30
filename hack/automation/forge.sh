@@ -52,7 +52,7 @@ if [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; shift; fi
 FORGE="${RSS_FORGE:-${DEFAULT_FORGE:-github}}"
 case "${FORGE}" in
     github) FORGE_REMOTE="${GITHUB_REMOTE:-origin}"; FORGE_HAS_CI="${GITHUB_HAS_CI:-true}" ;;
-    azure)  FORGE_REMOTE="${AZURE_REMOTE:-azure}";   FORGE_HAS_CI="${AZURE_HAS_CI:-false}" ;;
+    azure)  FORGE_REMOTE="${AZURE_REMOTE:-azure}";   FORGE_HAS_CI="false" ;;
     gitlab) FORGE_REMOTE="${GITLAB_REMOTE:-gitlab}"; FORGE_HAS_CI="${GITLAB_HAS_CI:-true}" ;;
     *) echo "forge: unknown forge '${FORGE}' (want github|azure|gitlab)" >&2; exit 64 ;;
 esac
@@ -105,10 +105,6 @@ usage: forge.sh [--dry-run] <verb> [args...]
          pr-state <pr> | pr-refs <pr> | pr-mergeable <pr> | pr-web-url <pr>
          pr-diff <pr> | pr-diffstat <pr> | pr-comments-json <pr>
   ci   : ci-watch <pr> | ci-failed <pr> | ci-logs <args>   (no-op when has-ci=false)
-         pipeline-create <name> <repo> <branch> <yaml> [queue-id]
-         pipeline-run <name> <branch> <phase> <lint-mode> <base-ref> <with-nightly> <docker-wrapper> <agent-pool> [open]
-         pipeline-list <name>
-         pipeline-policy <name> <repo> <branch> <display-name>
   issue: issue-create <title> <body-file> <label-csv> [type]
          issue-view <n> | issue-edit-labels <n> --add a,b --remove c,d
          issue-close <n> <reason> <comment> | issue-list <search> <state>

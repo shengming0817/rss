@@ -34,10 +34,12 @@ use primitives::ListenerKind;
 use runtime::{
     SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity_with, wire_settings,
 };
+use secure::ProtectionContext;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
-use wiremock::matchers::{body_partial_json, method as match_method};
+use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
+use wiremock::matchers::{body_partial_json, method as match_method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -52,6 +54,10 @@ const ADMIN_ROLE: &str = "tenant-admin";
 const OPERATOR_ROLE: &str = "operator";
 const TARGET_SUBJECT: &str = "bob@example.test";
 const JWT_EXP_FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01T00:00:00Z.
+const SETTINGS_KEY_NAME: &str = "settings-config";
+const SETTINGS_E2E_KEY: &str = "app.timeout";
+const KEYPROVIDER_READINESS_TENANT: &str = "00000000-0000-4000-8000-000000000147";
+const KEYPROVIDER_READINESS_MISMATCH_TENANT: &str = "00000000-0000-4000-8000-000000000148";
 
 // ── vault Transit mock helpers（mirror refresh_mint_e2e.rs） ────────────────────────────────────
 
@@ -120,6 +126,108 @@ impl Respond for TransitSignResponder {
         ResponseTemplate::new(200)
             .set_body_json(serde_json::json!({ "data": { "signature": tagged } }))
     }
+}
+
+fn config_value_context_b64(
+    tenant: &str,
+    key: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let tenant = vocab::TenantId::parse(tenant)?;
+    let aad =
+        ProtectionContext::authenticated_request(tenant, key, "settings.config.value", 1)?.derive();
+    Ok(B64_STD.encode(aad.as_canonical_bytes()))
+}
+
+async fn mount_settings_transit_mocks(server: &MockServer) -> TestResult {
+    let readiness_context =
+        config_value_context_b64(KEYPROVIDER_READINESS_TENANT, "readiness.probe")?;
+    let mismatch_context =
+        config_value_context_b64(KEYPROVIDER_READINESS_MISMATCH_TENANT, "readiness.probe")?;
+    let settings_context = config_value_context_b64(CANON_TENANT, SETTINGS_E2E_KEY)?;
+
+    Mock::given(match_method("POST"))
+        .and(path(format!("/v1/transit/encrypt/{SETTINGS_KEY_NAME}")))
+        .and(body_partial_json(serde_json::json!({
+            "context": readiness_context
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "ciphertext": "vault:v1:cnNzLWtleXByb3ZpZGVyLXJlYWR5",
+                "key_version": 1
+            }
+        })))
+        .mount(server)
+        .await;
+    Mock::given(match_method("POST"))
+        .and(path(format!("/v1/transit/decrypt/{SETTINGS_KEY_NAME}")))
+        .and(body_partial_json(serde_json::json!({
+            "context": mismatch_context
+        })))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "errors": ["ciphertext verification failed"]
+        })))
+        .mount(server)
+        .await;
+    Mock::given(match_method("POST"))
+        .and(path(format!("/v1/transit/decrypt/{SETTINGS_KEY_NAME}")))
+        .and(body_partial_json(serde_json::json!({
+            "context": readiness_context
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "plaintext": B64_STD.encode(b"rss-keyprovider-ready")
+            }
+        })))
+        .mount(server)
+        .await;
+    Mock::given(match_method("POST"))
+        .and(path(format!("/v1/transit/encrypt/{SETTINGS_KEY_NAME}")))
+        .and(body_partial_json(serde_json::json!({
+            "context": settings_context
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "ciphertext": "vault:v1:MzBz",
+                "key_version": 1
+            }
+        })))
+        .mount(server)
+        .await;
+    Mock::given(match_method("POST"))
+        .and(path(format!("/v1/transit/decrypt/{SETTINGS_KEY_NAME}")))
+        .and(body_partial_json(serde_json::json!({
+            "context": settings_context
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "plaintext": B64_STD.encode(b"30s")
+            }
+        })))
+        .mount(server)
+        .await;
+    Ok(())
+}
+
+fn mock_vault_runtime(
+    vault_uri: &str,
+) -> Result<VaultRuntimeDeps, Box<dyn std::error::Error + Send + Sync>> {
+    let stores = TenantStoreAllowlist::new(std::iter::empty())?;
+    Ok(VaultRuntimeDeps::new(
+        VaultSecretResolver::new_allow_http(
+            reqwest::Client::new(),
+            vault_uri.to_string(),
+            "test-token",
+            Duration::from_secs(5),
+            stores,
+        )?,
+        VaultKeyProvider::new_allow_http(
+            reqwest::Client::new(),
+            vault_uri.to_string(),
+            "test-token",
+            "transit",
+            Duration::from_secs(5),
+        )?,
+    ))
 }
 
 // ── postgres fixture helpers ────────────────────────────────────────────────────────────────────
@@ -301,6 +409,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         .respond_with(TransitSignResponder { sk: sk_jwt() })
         .mount(&vault_server)
         .await;
+    mount_settings_transit_mocks(&vault_server).await?;
     let vault_uri = vault_server.uri();
 
     // 2. postgres fixture + credential seed（login 凭据）。
@@ -320,12 +429,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
 
     // 3. vault bundle（#1498）：pre-GA 空 allowlist，secret resolver 不触 vault；仅构造器结构满足
     //    SharedRuntimeDeps.vault 字段。mock http URL 可用（resolver 仅构造期校验 URL，无连接）。
-    let vault = runtime::build_vault_runtime_deps(|name| match name {
-        "RSS_VAULT_ADDR" => Some("https://vault.test".to_string()),
-        "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
-        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
-        _ => None,
-    })?;
+    let vault = mock_vault_runtime(&vault_uri)?;
     // SharedRuntimeDeps 现含 redis bundle（#1255/#332）——构造 redis fixture 满足结构（identity wiring 不消费）。
     let redis_fixture = testkit::env_or_redis().await?;
     let redis = runtime::build_redis_runtime_deps(|name| {
@@ -336,7 +440,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         pg,
         redis,
         vault,
-        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        settings_config_value_key_name: diport::KeyName::try_new(SETTINGS_KEY_NAME)?,
     };
 
     // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
@@ -478,6 +582,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         .respond_with(TransitSignResponder { sk: sk_jwt() })
         .mount(&vault_server)
         .await;
+    mount_settings_transit_mocks(&vault_server).await?;
     let vault_uri = vault_server.uri();
 
     // 2. postgres fixture + RBAC seed：admin 角色、operator 角色、admin 自身 role binding。
@@ -521,18 +626,13 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         outbox_topic_count(&assertion_pool, "identity", "identity.role-assigned").await?;
     let revoked_before =
         outbox_topic_count(&assertion_pool, "identity", "identity.role-revoked").await?;
-    let settings_key = "app.timeout";
+    let settings_key = SETTINGS_E2E_KEY;
     let settings_before = config_entry_count(&assertion_pool, settings_key).await?;
     let settings_outbox_before =
         outbox_topic_count(&assertion_pool, "settings", SETTINGS_VERSION_CHANGED_TOPIC).await?;
 
     // 3. production runtime deps + Primary router/auth middleware.
-    let vault = runtime::build_vault_runtime_deps(|name| match name {
-        "RSS_VAULT_ADDR" => Some("https://vault.test".to_string()),
-        "RSS_VAULT_TOKEN" => Some("test-token".to_string()),
-        "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
-        _ => None,
-    })?;
+    let vault = mock_vault_runtime(&vault_uri)?;
     let redis_fixture = testkit::env_or_redis().await?;
     let redis = runtime::build_redis_runtime_deps(|name| {
         (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
@@ -542,7 +642,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         pg,
         redis,
         vault,
-        settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        settings_config_value_key_name: diport::KeyName::try_new(SETTINGS_KEY_NAME)?,
     };
     let identity_domain = wire_identity_with(
         &deps,
