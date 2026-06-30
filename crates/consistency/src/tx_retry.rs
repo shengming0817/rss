@@ -3,6 +3,10 @@
 //! This module owns the closed retry classification and the bounded retry loop. It deliberately
 //! does not know about SQLSTATE, repository errors, metrics, or clocks; adapters classify their own
 //! errors and emit boundary-specific observability.
+//!
+//! INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" } —
+//! [`TxRetryClass`], [`TxRetryPolicy`], and [`run_tx_retry`] keep retry decisions at the UoW
+//! boundary as closed, bounded, adapter-classified policy rather than scattered bool/string checks.
 
 use std::future::Future;
 use std::time::Duration;

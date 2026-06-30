@@ -73,6 +73,10 @@ pub enum PgError {
     /// NOBYPASSRLS 角色（fail-closed，拒绝启动；tenancy.md「生产 owner 须为非 superuser」）。
     #[error("postgres rls capability: connection role bypasses RLS (superuser or BYPASSRLS)")]
     RlsBypassRole,
+    /// RLS 能力门：durable serving pool 必须以固定 app-serving role `rss_app` 连接；其它 non-bypass role
+    /// 也不得作为生产 serving pool，避免测试替身 / owner-like 角色漂进 bootstrap。
+    #[error("postgres rls capability: serving role must be rss_app")]
+    RlsUnexpectedServingRole,
     /// config_entries 中仍存在 legacy plaintext `ConfigValue` 行。默认启动 fail-closed；临时兼容只能经显式
     /// `LegacyConfigPlaintextPolicy::AllowTemporary` 放行。
     #[error("postgres legacy plaintext config values are present")]
@@ -338,6 +342,8 @@ impl PgStore {
 
 /// RLS 能力自检的固定探测租户（canonical 非-nil UUID，仅用于 GUC roundtrip；不写任何业务行）。
 const RLS_PROBE_TENANT: &str = "00000000-0000-0000-0000-000000000001";
+/// durable serving pool 唯一允许的 PostgreSQL role。
+const EXPECTED_SERVING_ROLE: &str = "rss_app";
 
 /// 不达标 tenant 表查询：动态派生（含 `tenant_id` 列的 public 表）后逐表判不达标——
 /// (a) 缺 `relrowsecurity AND relforcerowsecurity`（ENABLE+FORCE）；或
@@ -366,9 +372,16 @@ WHERE n.nspname = 'public' AND c.relkind = 'r' \
                     AND p.permissive = 'PERMISSIVE' \
                     AND btrim(lower(coalesce(p.qual, 'true'))) IN ('true', '(true)')))";
 
-/// 当前连接角色是否会绕过 RLS（superuser 或 `BYPASSRLS`）——绕过则 FORCE RLS / policy 全失效，能力门必须 fail-fast。
-const CONNECTION_BYPASSES_RLS_SQL: &str = "\
-SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user";
+/// 当前连接角色及其 RLS 绕过属性。serving pool 必须直连固定 `rss_app`，且不得 superuser/BYPASSRLS。
+const CONNECTION_ROLE_SQL: &str = "\
+SELECT session_user, current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user";
+
+struct ServingRole {
+    session_user: String,
+    current_user: String,
+    superuser: bool,
+    bypass_rls: bool,
+}
 
 /// 含 `tenant_id` 列的 public 表总数（anti-vacuity：durable 库应至少有迁移建出的 tenant 表）。
 /// 用 `pg_catalog`（非 `information_schema`——后者按当前角色权限过滤，非 superuser serving 角色会漏看
@@ -384,8 +397,9 @@ impl PgStore {
     /// durable 启动 RLS 能力门（schema 门控，**fail-fast**：缺能力即拒绝启动）。
     ///
     /// 四段校验（任一不过 → `Err`，组合根冒泡使进程不进入服务态）：
-    /// 0. **连接角色不绕过 RLS**——`current_user` 非 superuser 且非 `BYPASSRLS`（否则 FORCE RLS / policy 全
-    ///    失效，后续校验形同虚设；tenancy.md「生产 owner 须为非 superuser」的运行期强制，最先 fail-fast）。
+    /// 0. **登录会话直连 `rss_app` 且不绕过 RLS**——`session_user = current_user = rss_app`，并且非
+    ///    superuser / 非 `BYPASSRLS`（否则 FORCE RLS / policy 全失效，后续校验形同虚设；tenancy.md
+    ///    「生产 owner 须为非 superuser」的运行期强制，最先 fail-fast）。
     /// 1. `rss.tenant_id` GUC roundtrip——经统一 funnel [`set_local_tenant`] 注入探测租户后
     ///    `current_setting` 回显比对（验证 GUC 基础设施可用，dogfood funnel）。
     /// 2. anti-vacuity——至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移）。
@@ -397,7 +411,7 @@ impl PgStore {
     pub(crate) async fn verify_rls_capability(&self) -> Result<(), PgError> {
         // 直线编排：四段校验各为低复杂度 helper（任一 Err 经 `?` 冒泡，tx drop 即 rollback 自检事务）。
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
-        ensure_not_bypass_role(&mut tx).await?; // 0. 连接角色不绕过 RLS（最先 fail-fast）
+        ensure_serving_role(&mut tx).await?; // 0. 连接角色必须为 rss_app 且不绕过 RLS（最先 fail-fast）
         verify_tenant_guc_roundtrip(&mut tx).await?; // 1. GUC roundtrip
         ensure_tenant_tables_present(&mut tx).await?; // 2. anti-vacuity
         let offenders = offending_tenant_tables(&mut tx).await?; // 3. 逐表 FORCE RLS + 规范 policy + 无 widening
@@ -407,24 +421,70 @@ impl PgStore {
     }
 }
 
-/// 0. 连接角色绕过 RLS（superuser/BYPASSRLS）→ fail-fast：绕过下 FORCE RLS 与 policy 全失效，后续 schema
-///    校验无意义（PostgreSQL ddl-rowsecurity：superuser/BYPASSRLS 永远绕过含 FORCE 的 RLS）。
-async fn ensure_not_bypass_role(
+/// 0. serving 连接必须直连固定 `rss_app`，且不得绕过 RLS（superuser/BYPASSRLS）→ fail-fast。
+///    绕过下 FORCE RLS 与 policy 全失效，后续 schema 校验无意义（PostgreSQL ddl-rowsecurity：
+///    superuser/BYPASSRLS 永远绕过含 FORCE 的 RLS）。
+async fn ensure_serving_role(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), PgError> {
-    let (bypass,): (bool,) = sqlx::query_as(CONNECTION_BYPASSES_RLS_SQL)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(PgError::RlsCapability)?;
-    if !bypass {
+    let (session_user, current_user, superuser, bypass_rls): (String, String, bool, bool) =
+        sqlx::query_as(CONNECTION_ROLE_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::RlsCapability)?;
+    let role = ServingRole {
+        session_user,
+        current_user,
+        superuser,
+        bypass_rls,
+    };
+    ensure_expected_serving_role(&role)?;
+    ensure_serving_role_cannot_bypass_rls(&role)?;
+    log_serving_role_accepted(&role);
+    Ok(())
+}
+
+fn ensure_expected_serving_role(role: &ServingRole) -> Result<(), PgError> {
+    if role.session_user == EXPECTED_SERVING_ROLE && role.current_user == EXPECTED_SERVING_ROLE {
         return Ok(());
     }
     tracing::error!(
         target: "postgres",
-        "rls capability gate: connection role is superuser or BYPASSRLS — RLS not enforceable; \
-         serving connection must use a non-superuser NOBYPASSRLS role (tenancy.md §RLS 与 PG scope)"
+        session_user = %role.session_user,
+        current_user = %role.current_user,
+        expected_user = EXPECTED_SERVING_ROLE,
+        "rls capability gate: durable serving connection must log in directly as rss_app"
     );
+    Err(PgError::RlsUnexpectedServingRole)
+}
+
+fn ensure_serving_role_cannot_bypass_rls(role: &ServingRole) -> Result<(), PgError> {
+    if !role.superuser && !role.bypass_rls {
+        return Ok(());
+    }
+    log_serving_role_bypass(role);
     Err(PgError::RlsBypassRole)
+}
+
+fn log_serving_role_accepted(role: &ServingRole) {
+    tracing::info!(
+        target: "postgres",
+        session_user = %role.session_user,
+        current_user = %role.current_user,
+        "rls capability gate: serving role accepted"
+    );
+}
+
+fn log_serving_role_bypass(role: &ServingRole) {
+    tracing::error!(
+        target: "postgres",
+        session_user = %role.session_user,
+        current_user = %role.current_user,
+        superuser = role.superuser,
+        bypass_rls = role.bypass_rls,
+        "rls capability gate: connection role is superuser or BYPASSRLS — RLS not enforceable; \
+         serving connection must use rss_app as a non-superuser NOBYPASSRLS role (tenancy.md §RLS 与 PG scope)"
+    );
 }
 
 /// 2. anti-vacuity：至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移 / 库不符预期）。

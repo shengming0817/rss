@@ -83,7 +83,7 @@ synthetic red（嵌套路径 / 空白变体 / 裸 SET LOCAL / 散文不误报）
 0. **连接角色不绕过 RLS**（#310 review F2，最先）：`SELECT rolsuper OR rolbypassrls FROM pg_roles
    WHERE rolname = current_user`——superuser / `BYPASSRLS` 角色永远绕过含 FORCE 的 RLS，使后续 schema
    校验形同虚设；命中即 `Err(RlsBypassRole)`。这是 tenancy.md「生产 owner 须为非 superuser」的运行期强制
-   （serving 连接须用非 superuser NOBYPASSRLS 角色；dual-pool rss_app 接线仍为独立 follow-up）。
+   （serving 连接须直连 `rss_app` 且该角色为非 superuser、NOBYPASSRLS）。
 1. **动态派生 tenant 表集合**：用 `pg_catalog`（`pg_class` + `pg_attribute`，**非** `information_schema`——
    后者按当前角色权限过滤，非 superuser serving 角色会漏看未授权 tenant 表致门控盲区）得含 `tenant_id` 列的表。
 2. **RLS + policy 断言**：每表 `relrowsecurity AND relforcerowsecurity`（ENABLE+FORCE）；且 `pg_policies`

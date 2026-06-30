@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use diport::ManagedResource;
-use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
 use runtime::{
     CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME, SharedRuntimeDeps,
     build_redis_runtime_deps, wire_settings,
@@ -31,8 +31,8 @@ use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-const TEST_APP_ROLE: &str = "rss_wire_contract_e2e_app";
-const TEST_APP_PASSWORD: &str = "wire_contract_e2e_pw";
+const TEST_APP_ROLE: &str = "rss_app";
+const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
 
@@ -42,13 +42,7 @@ async fn connect_pg()
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    match PgRuntimeDeps::setup(&owner_config, &owner_config).await {
-        Ok(deps) => return Ok((fixture, deps)),
-        Err(PgError::RlsBypassRole) => {
-            provision_nobypass_app_role(p).await?;
-        }
-        Err(e) => return Err(Box::new(e)),
-    }
+    provision_rss_app_login(p).await?;
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
@@ -69,7 +63,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_nobypass_app_role(
+async fn provision_rss_app_login(
     p: &testkit::PgConnParams,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let options = PgConnectOptions::new()
@@ -97,21 +91,6 @@ async fn provision_nobypass_app_role(
         END
         $$;
         "#
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT USAGE, CREATE ON SCHEMA public TO {TEST_APP_ROLE}"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {TEST_APP_ROLE}"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {TEST_APP_ROLE}"
     ))
     .execute(&pool)
     .await?;

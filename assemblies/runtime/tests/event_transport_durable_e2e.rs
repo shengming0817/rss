@@ -27,7 +27,7 @@ use generated::event::identity_v1::session_created::IdentitySessionCreatedPayloa
 use generated::http::identity_v1::login::IdentityLoginRequest;
 use identity::ports::{DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, TenantId};
 use identity::{IdentityDomain, LoginService};
-use postgres::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
@@ -49,8 +49,8 @@ const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 const AUDIT_KEY: [u8; 32] = [0x5a; 32];
 const NOW_SECS: u64 = 1_000;
 const TTL_SECS: u64 = 3_600;
-const TEST_APP_ROLE: &str = "rss_event_transport_e2e_app";
-const TEST_APP_PASSWORD: &str = "event_transport_e2e_pw";
+const TEST_APP_ROLE: &str = "rss_app";
+const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -169,13 +169,7 @@ async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
     let fixture = testkit::env_or_postgres().await?;
     let p = fixture.params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    match PgRuntimeDeps::setup(&owner_config, &owner_config).await {
-        Ok(deps) => return Ok((fixture, deps)),
-        Err(PgError::RlsBypassRole) => {
-            provision_nobypass_app_role(p).await?;
-        }
-        Err(e) => return Err(e.into()),
-    }
+    provision_rss_app_login(p).await?;
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
@@ -196,7 +190,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn provision_nobypass_app_role(p: &testkit::PgConnParams) -> Result<()> {
+async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
     let options = PgConnectOptions::new()
         .host(&p.host)
         .port(p.port)
@@ -222,31 +216,6 @@ async fn provision_nobypass_app_role(p: &testkit::PgConnParams) -> Result<()> {
         END
         $$;
         "#
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT USAGE, CREATE ON SCHEMA public TO {TEST_APP_ROLE}"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {TEST_APP_ROLE}"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "REVOKE DELETE ON distributed_cas FROM {TEST_APP_ROLE}"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT, INSERT, UPDATE ON distributed_cas TO {TEST_APP_ROLE}"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::query(&format!(
-        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {TEST_APP_ROLE}"
     ))
     .execute(&pool)
     .await?;

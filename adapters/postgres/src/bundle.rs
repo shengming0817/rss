@@ -116,7 +116,7 @@ impl PgRuntimeDeps {
     /// 唯一公开构造路径：migrator 连接跑迁移，serving 连接建长期 pool 并跑 RLS 能力门。
     ///
     /// `migrator_config` 必须是短生命周期 DDL 角色；`serving_config` 必须是长期最小权限
-    /// NOBYPASSRLS 角色。缺配 / 连不上 / 迁移失败 / **RLS 能力缺失**均 fail-fast 返 [`PgError`]
+    /// `rss_app` NOBYPASSRLS 角色。缺配 / 连不上 / 迁移失败 / **RLS 能力缺失**均 fail-fast 返 [`PgError`]
     /// （区分 `Connect` / `Migrate` / `Rls*` 阶段）；组合根在边界 `.context(..)` 成 anyhow。
     /// 对标 omicron `DataStore::new_with_timeout`（构造器集中 + schema/能力门控，对象返回前校验）。
     pub async fn setup(

@@ -39,6 +39,11 @@
 >（`0026_create_role_bindings.sql` / `0026_grant_distributed_cas.sql`）。后者仅一条 grant，本 PR 将该 grant
 > 并入唯一的 `0026_create_role_bindings.sql` 并删除重复文件，不改授权语义；依据同上，重号本身已让 fresh DB
 > migration 不可应用。
+>
+> **例外扩展（#1579，pre-GA residual duplicate carve-out）**：`develop` 残留两个 `0028`
+>（`0028_encrypt_dead_letter_original_entry.sql` / `0028_grant_runtime_serving.sql`）。后者仅为 serving
+> role 补 runtime DML grant，本 PR 将其重编号为 `0030_grant_runtime_serving.sql`，不改 SQL 语义；依据同上，
+> 重号本身已让 fresh DB migration 不可应用。
 
 ## 索引形态（阶段约定）
 
@@ -66,10 +71,10 @@ Medium）扫描 schema 快照，缺三件套即门红。
 
 - `0012`：原四张 tenant 表（`sessions` / `config_entries` / `roles` / `secret_refs`）DML（SELECT/INSERT/UPDATE/DELETE）。
 - `0015` `credentials`、`0017` `refresh_tokens`：补全 DML（tenant 表）。
-- append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。
+- append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。`dead_letter` 保留期清理由 `0030` 的窄 `rss_sweep_dead_letter(bigint)` SECURITY DEFINER 函数授权给 `rss_app`，不授直接 DELETE；该函数 owner 是 NOLOGIN `rss_dead_letter_maintenance`，仅用于 FORCE RLS 下的全域 30 天 retention sweep。
 
-生产 LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。后续新增 tenant / append-only 表须在其建表迁移内
-为 `rss_app` 补最小授权（tenant 表 DML、append-only 表 SELECT+INSERT），与上表同范式。
+生产 `rss_app` LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。后续新增 tenant / append-only 表须在其
+建表迁移内为 `rss_app` 补最小授权（tenant 表 DML、append-only 表 SELECT+INSERT），与上表同范式。
 
 ## Append-only 表（REVOKE 强制）
 

@@ -77,7 +77,9 @@ NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前�
 app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
 （sessions / config_entries / roles / secret_refs / credentials / refresh_tokens；audit_entries 仅
 SELECT+INSERT；dead_letter 仅 SELECT+INSERT）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受
-policy 约束。业务池以 rss_app 连接的 dual-pool 接线是 follow-up（bootstrap 接线未落地）。
+policy 约束。durable bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving
+pool 必须以 `rss_app` 连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非
+`rss_app` serving role。
 注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
 生产 owner 须为非 superuser。
 
@@ -120,10 +122,13 @@ tenant 表集合，扫描生产 Rust SQL site，禁止 tenant 表 SQL 通过 raw
 allowlist 测试。raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
 global infra adapter 和命名维护例外中出现。
 
-**命名维护例外**：`dead_letter` retention sweep 是唯一 tenant 表 raw-pool 维护例外：它按保留期
-批量删除历史 dead-letter 记录，不代表某个 tenant repository 的业务路径；该例外必须在
-`pg-tenant-tx-guard` 中有显式规则和 stale-allowlist 测试。outbox relay 将 publish 失败写入
-`dead_letter` 必须经 tenant-scoped write funnel 执行，不再保留 raw-pool settlement 例外。
+**命名维护例外**：tenant 表 raw-pool 维护例外只允许在 `pg-tenant-tx-guard` 中按窄形状显式登记，并带
+stale-allowlist 测试。当前 Rust raw-pool 例外仅为 `config_entries` startup legacy plaintext probe（serving
+pool 接受前由 migrator/owner 连接只统计 encryption migration debt）。`dead_letter` retention sweep 不保留
+owner/maintenance 长期连接，也不授 `rss_app` 直接 `DELETE`；它由迁移安装的窄 `SECURITY DEFINER`
+函数承载，函数 owner 是 NOLOGIN `rss_dead_letter_maintenance`，仅用于 FORCE RLS 下的全域 30 天 retention
+sweep。runtime 仍经 `rss_app` 调用固定保留期删除能力。outbox relay 将 publish 失败写入 `dead_letter`
+必须经 tenant-scoped write funnel 执行，不再保留 raw-pool settlement 例外。
 
 **启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用
 `PgStore::verify_rls_capability()`，动态派生含 `tenant_id` 列的表集合，断言每张表满足
@@ -141,7 +146,7 @@ backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过�
 - **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
 
 dual-pool（`rss_app` serving 非 superuser 角色）接线见上文 §RLS 与 PG scope；`rss_app
-NOBYPASSRLS` 已 provision，dual-pool bootstrap 接线是独立 follow-up。
+NOBYPASSRLS` 已 provision，bootstrap serving pool 已由启动期 RLS 能力门强制。
 
 ## ABAC authz 接线（permission-based）
 

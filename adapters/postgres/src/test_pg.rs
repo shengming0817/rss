@@ -8,6 +8,9 @@ use std::time::Duration;
 use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
 use testkit::PgFixture;
 
+const RSS_APP_ROLE: &str = "rss_app";
+const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
+
 /// fixture（env 或 self-provision 容器）→ 连接 store。
 ///
 /// 回传 `(PgFixture, PgStore)`；**调用方须绑定 fixture 到测试结束**（其 `Drop` 停容器）。
@@ -33,8 +36,8 @@ pub(crate) async fn connect_pg()
 
 /// 在已连接的（owner/superuser）`store` 上创建一个 NOBYPASSRLS LOGIN 角色，并以该角色连一个新 `PgStore`。
 ///
-/// 供 RLS 能力门「非绕过角色」路径测试用——serving 连接须为非 superuser（tenancy.md §RLS 与 PG scope），
-/// 故能力门的 ok / table-offender 路径只有在非绕过角色下才可达（superuser 会先触发 `RlsBypassRole`）。
+/// 供 RLS 能力门「非 rss_app 角色仍被拒」负例测试用。serving 连接必须是固定 `rss_app`，其它 non-bypass
+/// role 也不得通过 bootstrap gate。
 /// 角色名 / 口令为测试固定字面量（非注入面）；幂等：先 `DROP ROLE IF EXISTS` 清同库重跑残留。
 /// 该角色不授任何表 DML——能力门只读 `pg_catalog` / `pg_policies` + set GUC，无需表权限（pg_catalog 不受权限过滤）。
 pub(crate) async fn connect_pg_nobypass_role(
@@ -59,6 +62,32 @@ pub(crate) async fn connect_pg_nobypass_role(
         p.database.clone(),
         ROLE.to_string(),
         PgPassword::new(PW.to_string()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(Duration::from_secs(5));
+    Ok(PgStore::connect(&config).await?)
+}
+
+/// 将迁移 provision 的 `rss_app` 临时打开 LOGIN，并以真实 serving role 建连接。
+///
+/// 生产 LOGIN/password 仍由部署 out-of-band 管理；集成测试只在测试 DB 内设置固定密码，直证 bootstrap
+/// serving pool 使用 `current_user = rss_app`。
+pub(crate) async fn connect_pg_rss_app_role(
+    fixture: &PgFixture,
+    store: &PgStore,
+) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
+    sqlx::query(&format!(
+        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}' NOBYPASSRLS"
+    ))
+    .execute(&store.pool)
+    .await?;
+    let p = fixture.params();
+    let config = PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        RSS_APP_ROLE.to_string(),
+        PgPassword::new(RSS_APP_PASSWORD.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));

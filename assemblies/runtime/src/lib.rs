@@ -2454,7 +2454,7 @@ mod tests {
             "RSS_PG_HOST" => Some("pg.internal".to_string()),
             "RSS_PG_PORT" => Some("5432".to_string()),
             "RSS_PG_DATABASE" => Some("rss_db".to_string()),
-            "RSS_PG_USERNAME" => Some("rss_user".to_string()),
+            "RSS_PG_USERNAME" => Some("rss_app".to_string()),
             "RSS_PG_PASSWORD" => Some("s3cr3t".to_string()),
             _ => None,
         }
@@ -2468,6 +2468,7 @@ mod tests {
         // 验证 host 被记录（不泄露 password，只断言端口和 host 可 debug 比较）。
         let debug = format!("{cfg:?}");
         assert!(debug.contains("pg.internal"), "host 在 debug 输出中");
+        assert!(debug.contains("rss_app"), "serving user 示例为 rss_app");
         assert!(!debug.contains("s3cr3t"), "password 不在 debug 输出中");
     }
 

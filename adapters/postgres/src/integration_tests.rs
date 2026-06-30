@@ -14,13 +14,13 @@ use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseToken, SeenStat
 use diport::ManagedResource;
 use futures::future::BoxFuture;
 
-use crate::PgStore;
+use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
 
 // 统一 Send+Sync 错误（= testkit::FixtureError）：sqlx::Error / PgError / FixtureError 均 Send+Sync，
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-use crate::test_pg::{connect_pg, connect_pg_nobypass_role};
+use crate::test_pg::{connect_pg, connect_pg_nobypass_role, connect_pg_rss_app_role};
 
 #[allow(clippy::unwrap_used)]
 fn test_tenant() -> vocab::TenantId {
@@ -171,31 +171,173 @@ async fn legacy_config_plaintext_policy_allows_temporary_override() -> TestResul
     Ok(())
 }
 
-/// RLS 能力门反例（**连接角色绕过**，最先 fail-fast）：superuser 连接（容器默认 `postgres`）→
-/// `Err(RlsBypassRole)`。superuser / BYPASSRLS 绕过 FORCE RLS，能力门须先拒（tenancy.md「生产 owner 须为
-/// 非 superuser」的运行期强制）。本测试**用默认 superuser 连接**直证绕过检测。
+/// RLS 能力门反例：superuser/owner 连接不能作为 durable serving pool。该路径同时不是固定 `rss_app`
+/// serving role 且会绕过 RLS，能力门须 fail-fast；当前以 role mismatch 先命中。
 #[tokio::test(flavor = "multi_thread")]
-async fn verify_rls_capability_rejects_bypass_role() -> TestResult {
+async fn verify_rls_capability_rejects_owner_serving_role() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let verdict = store.verify_rls_capability().await; // superuser → 角色绕过门最先命中
+    let verdict = store.verify_rls_capability().await; // owner/superuser 不能作为 serving pool
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsBypassRole)),
-        "superuser/BYPASSRLS 连接应使能力门 fail-fast，实得: {verdict:?}"
+        matches!(verdict, Err(crate::PgError::RlsUnexpectedServingRole)),
+        "owner/superuser 连接应使 serving role gate fail-fast，实得: {verdict:?}"
     );
     store.shutdown().await?;
     Ok(())
 }
 
-/// RLS 能力门正例：迁移后所有 tenant 表均 FORCE RLS + 规范 policy + GUC roundtrip，且**非绕过角色**连接 →
-/// `verify_rls_capability` 放行。serving 连接须为非 superuser（superuser 会先触发 `RlsBypassRole`），故正例
-/// 经 [`connect_pg_nobypass_role`] 建的 NOBYPASSRLS 角色驱动。
+/// RLS 能力门反例：即使某个测试角色是 NOBYPASSRLS，也不能替代生产固定 serving role `rss_app`。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_non_rss_app_nobypass_role() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let app = connect_pg_nobypass_role(&pg, &store).await?;
+    let verdict = app.verify_rls_capability().await;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsUnexpectedServingRole)),
+        "non-rss_app NOBYPASSRLS 角色不得作为 serving pool，实得: {verdict:?}"
+    );
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RLS 能力门反例：owner/superuser session 即使 `SET ROLE rss_app` 也不是长期 serving 直连。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_owner_session_set_role_rss_app() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let p = pg.params();
+    let switched_config = PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        p.username.clone(),
+        PgPassword::new(p.password.clone()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_max_connections(1)
+    .with_acquire_timeout(std::time::Duration::from_secs(5));
+    let switched = PgStore::connect(&switched_config).await?;
+
+    sqlx::query("SET ROLE rss_app")
+        .execute(&switched.pool)
+        .await?;
+    let (session_user, current_user): (String, String) =
+        sqlx::query_as("SELECT session_user, current_user")
+            .fetch_one(&switched.pool)
+            .await?;
+    assert_ne!(
+        session_user, current_user,
+        "test must prove SET ROLE made current_user differ from login session"
+    );
+    assert_eq!(current_user, "rss_app");
+
+    let verdict = switched.verify_rls_capability().await;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsUnexpectedServingRole)),
+        "SET ROLE rss_app must not satisfy direct serving login gate, got: {verdict:?}"
+    );
+    switched.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// RLS 能力门正例：迁移后所有 tenant 表均 FORCE RLS + 规范 policy + GUC roundtrip，且以真实 `rss_app`
+/// serving role 连接 → `verify_rls_capability` 放行。
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_rls_capability_ok_after_migrations() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
+    let (pg, store) = connect_pg().await?;
     store.run_migrations().await?; // 迁移经 owner/superuser
-    let app = connect_pg_nobypass_role(&_pg, &store).await?;
-    app.verify_rls_capability().await?; // 非绕过角色 + FORCE RLS + 规范 policy + GUC roundtrip 全通过
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let (session_user, current_user): (String, String) =
+        sqlx::query_as("SELECT session_user, current_user")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(session_user, "rss_app", "serving pool 必须直连 rss_app");
+    assert_eq!(current_user, "rss_app", "serving pool 必须直连 rss_app");
+    app.verify_rls_capability().await?; // rss_app + FORCE RLS + 规范 policy + GUC roundtrip 全通过
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 真实 serving pool 覆盖：不用 `SET LOCAL ROLE` 模拟，直接以 `rss_app` 登录连接验证 tenant A/B 隔离。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid v4 与固定 SQL happy-path；集成测试构造值均合法。
+async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+
+    let (session_user, current_user): (String, String) =
+        sqlx::query_as("SELECT session_user, current_user")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(session_user, "rss_app", "serving pool 必须直连 rss_app");
+    assert_eq!(current_user, "rss_app", "serving pool 必须直连 rss_app");
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let session_a = uuid::Uuid::new_v4().to_string();
+
+    {
+        let mut tx = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at) \
+             VALUES ($1, $2, $3::uuid, now() + interval '1 hour', now())",
+        )
+        .bind(&session_a)
+        .bind("rss-app-serving-test")
+        .bind(&tenant_a)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    {
+        let mut tx = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&session_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(cnt.0, 1, "tenant A scope 应能看到 tenant A session");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&session_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(cnt.0, 0, "tenant B scope 不得看到 tenant A session");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = app.pool.begin().await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&session_a)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(cnt.0, 0, "未设 rss.tenant_id 时必须 fail-closed");
+        tx.rollback().await?;
+    }
+
     app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
@@ -210,7 +352,7 @@ async fn verify_rls_capability_rejects_tenant_table_without_rls() -> TestResult 
     sqlx::query("CREATE TABLE IF NOT EXISTS _rls_probe_bad (tenant_id uuid NOT NULL, x int)")
         .execute(&store.pool)
         .await?;
-    let app = connect_pg_nobypass_role(&_pg, &store).await?;
+    let app = connect_pg_rss_app_role(&_pg, &store).await?;
     let verdict = app.verify_rls_capability().await;
     sqlx::query("DROP TABLE IF EXISTS _rls_probe_bad")
         .execute(&store.pool)
@@ -240,7 +382,7 @@ async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
     ] {
         sqlx::query(stmt).execute(&store.pool).await?;
     }
-    let app = connect_pg_nobypass_role(&_pg, &store).await?;
+    let app = connect_pg_rss_app_role(&_pg, &store).await?;
     let verdict = app.verify_rls_capability().await;
     sqlx::query("DROP TABLE IF EXISTS _rls_probe_permissive")
         .execute(&store.pool)
@@ -2146,17 +2288,45 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
-async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
+async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     use diport::{
         DeadLetterRecord, DeadLetterStore, DeadLetterSummary, EnvelopeMetadata,
         WritableDeadLetterSource,
     };
-    let (_pg, store) = connect_pg().await?;
+    let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let dl = store.dead_letter(test_dlx_payload_protector());
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let dl = app.dead_letter(test_dlx_payload_protector());
     let domain = unique_domain("dl-sweep");
+    let (owner, owner_can_login, owner_bypass, rss_app_can_execute): (String, bool, bool, bool) =
+        sqlx::query_as(
+            r#"
+            SELECT pg_get_userbyid(p.proowner),
+                   r.rolcanlogin,
+                   r.rolbypassrls,
+                   has_function_privilege('rss_app', 'rss_sweep_dead_letter(bigint)', 'EXECUTE')
+            FROM pg_proc p
+            JOIN pg_roles r ON r.oid = p.proowner
+            WHERE p.proname = 'rss_sweep_dead_letter'
+            "#,
+        )
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(owner, "rss_dead_letter_maintenance");
+    assert!(
+        !owner_can_login,
+        "dead-letter maintenance definer must be NOLOGIN"
+    );
+    assert!(
+        owner_bypass,
+        "FORCE RLS global sweep must be owned by explicit BYPASSRLS maintenance role"
+    );
+    assert!(
+        rss_app_can_execute,
+        "rss_app must only receive EXECUTE on the fixed sweep function"
+    );
 
-    // old 死信：写入 → 回拨 last_attempt_at 过期（2h 前）。
+    // old 死信：写入 → 回拨 last_attempt_at 过默认保留期。
     dl.write_dead_letter(DeadLetterRecord::new(
         vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
         "msg-dl-old",
@@ -2175,7 +2345,7 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
         "UPDATE dead_letter SET last_attempt_at = now() - make_interval(secs => $1) \
          WHERE domain = $2 AND topic = $3",
     )
-    .bind(7200i64)
+    .bind((crate::DEAD_LETTER_RETENTION_SECONDS + 3600) as i64)
     .bind(&domain)
     .bind("dl.old")
     .execute(&store.pool)
@@ -2197,8 +2367,8 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
     ))
     .await?;
 
-    // sweep 保留期 1h：仅 old（2h 前）被删。
-    let deleted = dl.sweep(3600).await?;
+    // sweep 默认保留期：仅 old（超过 30 天）被删。
+    let deleted = dl.sweep(crate::DEAD_LETTER_RETENTION_SECONDS).await?;
     assert!(deleted >= 1, "至少删除老死信: deleted={deleted}");
 
     let cnt_old: (i64,) =
@@ -2217,6 +2387,7 @@ async fn t_dead_letter_sweep_removes_old_keeps_recent() -> TestResult {
             .await?;
     assert_eq!(cnt_recent.0, 1, "保留期内死信不应被 sweep 删");
 
+    app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }

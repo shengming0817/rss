@@ -28,8 +28,8 @@
 
 - [x] T004 [US1] Implement service-token MAC binding for `X-Tenant-ID` in crates/authn and crates/httpserve
 - [x] T005 [US1] Add contract/header governance tests for authenticated tenant header sources in xtask
-- [ ] T006 [US1] Wire durable bootstrap to use non-superuser NOBYPASSRLS `rss_app` serving pool in adapters/postgres and runtime composition
-- [ ] T007 [US1] Add readyz/current-role probe coverage for non-bypass serving role in crates/syshealth or adapters/postgres
+- [x] T006 [US1] Wire durable bootstrap to use non-superuser NOBYPASSRLS `rss_app` serving pool in adapters/postgres and runtime composition
+- [x] T007 [US1] Add readyz/current-role probe coverage for non-bypass serving role in crates/syshealth or adapters/postgres
 - [x] T008 [US1] Add raw-pool/TxManager bypass guard for tenant-scoped Postgres code in adapters/postgres and xtask
 
 ---
@@ -40,11 +40,11 @@
 
 **Independent Test**: Durable startup rejects bypass roles; tenant A/B read-write isolation passes with `rss_app`.
 
-- [ ] T009 [P] [US1] Add red integration tests for `rss_app` tenant A/B read/write isolation in adapters/postgres/src/integration_tests.rs
-- [ ] T010 [US1] Finish serving pool bootstrap wiring for tenant-scoped repositories in adapters/postgres/src/pool.rs
-- [ ] T011 [US1] Enforce startup failure on skipped RLS setup path through PgRuntimeDeps setup in adapters/postgres and runtime composition
+- [x] T009 [P] [US1] Add red integration tests for `rss_app` tenant A/B read/write isolation in adapters/postgres/src/integration_tests.rs
+- [x] T010 [US1] Finish serving pool bootstrap wiring for tenant-scoped repositories in adapters/postgres/src/pool.rs
+- [x] T011 [US1] Enforce startup failure on skipped RLS setup path through PgRuntimeDeps setup in adapters/postgres and runtime composition
 - [ ] T012 [P] [US1] Add anti-vacuity tests for TENANCY-SETLOCAL-FUNNEL-01 in xtask/src/setlocal_funnel.rs
-- [ ] T013 [US1] Update docs/rules/tenancy.md to remove stale dual-pool follow-up text after PR2 lands
+- [x] T013 [US1] Update docs/rules/tenancy.md to remove stale dual-pool follow-up text after PR2 lands
 
 ---
 

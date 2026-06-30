@@ -193,7 +193,7 @@ pub(crate) fn scan_guard(
         }
     }
 
-    for expected in ["dead-letter-retention-sweep"] {
+    for expected in ["config-legacy-plaintext-startup-probe"] {
         if !allowed_exceptions.contains(expected) {
             findings.push(finding(
                 Rule::StaleException,
@@ -481,13 +481,12 @@ fn allowed_site_exception(
     tables: &[String],
     window: &str,
 ) -> Option<&'static str> {
-    if rel == "dead_letter.rs"
-        && tables == ["dead_letter"]
-        && window.contains("delete from dead_letter")
-        && window.contains("make_interval")
-        && window.contains("maintenance_pool")
+    if rel == "migrator.rs"
+        && tables == ["config_entries"]
+        && window.contains("select count(*)::bigint from config_entries")
+        && window.contains("protection_scheme = 0")
     {
-        return Some("dead-letter-retention-sweep");
+        return Some("config-legacy-plaintext-startup-probe");
     }
     None
 }
@@ -669,6 +668,7 @@ mod tests {
             "0001.sql".to_string(),
             "CREATE TABLE roles (tenant_id uuid NOT NULL, id text);\n\
              CREATE TABLE credentials (tenant_id uuid NOT NULL, id text);\n\
+             CREATE TABLE config_entries (tenant_id uuid NOT NULL, key text, protection_scheme int);\n\
              CREATE TABLE audit_entries (tenant_id uuid NOT NULL, seq bigint);\n\
              CREATE TABLE outbox (event_id text);\n\
              CREATE TABLE dead_letter (tenant_id uuid NOT NULL, id uuid);"
@@ -937,6 +937,28 @@ mod tests {
     }
 
     #[test]
+    fn red_dead_letter_raw_retention_sweep_is_not_allowlisted() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "migrator.rs",
+                    "fn legacy_config_plaintext_count(){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.pool).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::RawTenantTableAccess
+                && f.subject.starts_with("dead_letter.rs:")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn red_local_pgpool_variable_touching_tenant_table() {
         let (_, findings) = scan_guard(
             &migrations(),
@@ -1008,8 +1030,8 @@ mod tests {
                     "struct E { pool: PgPool } async fn f(){ self.pool.begin().await; sqlx::query(\"INSERT INTO outbox VALUES (1)\"); }",
                 ),
                 (
-                    "dead_letter.rs",
-                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                    "migrator.rs",
+                    "fn legacy_config_plaintext_count(){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.pool).await; }",
                 ),
             ]),
         );

@@ -86,7 +86,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
   pending）。replay/redrive 均必须携带 `OperatorDlqCapability`；replay 的 dead_letter id 先经 typed
   `DeadLetterId` UUID parse，非法输入不进入 SQL cast。replay/redrive 必须先用同一 `KeyProvider` 解密，
   plaintext row/shape 必须失败；consumer replay 不删除原死信、不重置 `inbox_dedup done`。
-- 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——约定 append-only（非 REVOKE 强制，DB 层允许保留期 DELETE）；清理前冷存储导出（合规归档）见 #1536。
+- 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认/最小 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——`rss_app` 无直接 DELETE，仅可调用 NOLOGIN maintenance owner 承载的 `rss_sweep_dead_letter(bigint)` 固定函数；清理前冷存储导出（合规归档）见 #1536。
 
 ### saga_journal（P9）
 | 列 | 类型 | 说明 |
