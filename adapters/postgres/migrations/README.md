@@ -70,6 +70,11 @@ Medium）扫描 schema 快照，缺三件套即门红。
 **forward-only 增量授权**（不回改历史迁移，新增表在其建表迁移内补 grant）：
 
 - `0012`：原四张 tenant 表（`sessions` / `config_entries` / `roles` / `secret_refs`）DML（SELECT/INSERT/UPDATE/DELETE）。
+  `sessions` 过期清理由 `0032` 的窄 `rss_sweep_expired_sessions()` SECURITY DEFINER 函数授权给
+  `rss_app`，函数按 `expires_at, session_id` 固定删除单批最多 1000 条 `expires_at <= now()` 的 session；
+  函数 owner 是 NOLOGIN `rss_session_maintenance`（BYPASSRLS），用于 FORCE RLS 下的全域 expired-only sweep。
+  `0032` 同时 `REVOKE DELETE ON sessions FROM rss_app`，不保留 `rss_app` 表级删除权限或 tenant/raw SQL/retain
+  参数入口。
 - `0015` `credentials`、`0017` `refresh_tokens`：补全 DML（tenant 表）。
 - append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。`dead_letter` 保留期清理由 `0030` 的窄 `rss_sweep_dead_letter(bigint)` SECURITY DEFINER 函数授权给 `rss_app`，不授直接 DELETE；该函数 owner 是 NOLOGIN `rss_dead_letter_maintenance`，仅用于 FORCE RLS 下的全域 30 天 retention sweep。
 

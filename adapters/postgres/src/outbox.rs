@@ -559,6 +559,8 @@ impl OutboxRelay for PgOutbox {
 }
 
 impl PgOutbox {
+    // reason: tenant authority signature绑定的字段需显式传入以保持调用点可审计；本轮只补 workspace clippy 门。
+    #[allow(clippy::too_many_arguments)]
     fn sign_metadata(
         &self,
         mut metadata: EnvelopeMetadata,
@@ -802,6 +804,8 @@ async fn sample_outbox_backlog(
 /// `metadata::text` 返回 jsonb 列的 JSON 字符串表示（NOT NULL DEFAULT '{}'，恒有值），
 /// relay 经 [`hydrate_envelope_metadata`] 重建为 [`EnvelopeMetadata`] 透传到 broker（#1160 A4）。
 /// `pub(crate)`：integration 测试做 lease fencing 断言。
+// reason: 返回 tuple 与 SQL 函数列顺序一一对应，避免本轮 clippy 门引入无关结构重映射。
+#[allow(clippy::type_complexity)]
 pub(crate) async fn acquire_lease(
     pool: &sqlx::PgPool,
     event_id: &str,

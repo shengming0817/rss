@@ -2427,6 +2427,225 @@ async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     Ok(())
 }
 
+// ── #1233 sessions 过期清理：SECURITY DEFINER 全域删除 expired-only。──
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试构造固定 UUID / 时间值；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_session_sweeper_rss_app_deletes_only_expired_sessions() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let sweeper = app.session_sweeper();
+
+    let tenant_a = COTX_TENANT_A;
+    let tenant_b = "00000000-0000-4000-8000-0000000000bb";
+    let expired_a = unique_event_id("session-sweep-expired-a");
+    let expired_b = unique_event_id("session-sweep-expired-b");
+    let future = unique_event_id("session-sweep-future");
+    let revoked_future = unique_event_id("session-sweep-revoked-future");
+
+    for (session_id, tenant, expires_offset_secs, revoked) in [
+        (expired_a.as_str(), tenant_a, -3600_i64, false),
+        (expired_b.as_str(), tenant_b, -60_i64, false),
+        (future.as_str(), tenant_a, 3600_i64, false),
+        (revoked_future.as_str(), tenant_a, 7200_i64, true),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at, revoked)
+            VALUES ($1, $2, $3::uuid, now() + make_interval(secs => $4), now(), $5)
+            "#,
+        )
+        .bind(session_id)
+        .bind("subject-for-session-sweep")
+        .bind(tenant)
+        .bind(expires_offset_secs)
+        .bind(revoked)
+        .execute(&owner.pool)
+        .await?;
+    }
+
+    let deleted = sweeper.sweep_expired().await?;
+    assert!(
+        deleted >= 2,
+        "至少删除两个本测试插入的过期 session，实际={deleted}"
+    );
+
+    for (session_id, expected_count) in [
+        (expired_a.as_str(), 0_i64),
+        (expired_b.as_str(), 0_i64),
+        (future.as_str(), 1_i64),
+        (revoked_future.as_str(), 1_i64),
+    ] {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+                .bind(session_id)
+                .fetch_one(&owner.pool)
+                .await?;
+        assert_eq!(
+            count, expected_count,
+            "session_sweeper expired-only mismatch for {session_id}"
+        );
+    }
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试批量构造固定行数；item-level carve-out。
+async fn t_session_sweeper_deletes_one_bounded_batch_per_call() -> TestResult {
+    const SESSION_SWEEP_BATCH_LIMIT: usize = 1_000;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let sweeper = app.session_sweeper();
+    let prefix = unique_event_id("session-sweep-batch");
+    let inserted = SESSION_SWEEP_BATCH_LIMIT + 1;
+
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at, revoked)
+        SELECT $1 || '-' || gs::text,
+               'subject-for-session-sweep-batch',
+               $2::uuid,
+               TIMESTAMPTZ '1970-01-01 00:00:00+00' + make_interval(secs => gs),
+               TIMESTAMPTZ '1970-01-01 00:00:00+00',
+               false
+        FROM generate_series(0, $3::int - 1) AS gs
+        "#,
+    )
+    .bind(&prefix)
+    .bind(COTX_TENANT_A)
+    .bind(i32::try_from(inserted).unwrap())
+    .execute(&owner.pool)
+    .await?;
+
+    let deleted = sweeper.sweep_expired().await?;
+    assert!(
+        deleted <= u64::try_from(SESSION_SWEEP_BATCH_LIMIT).unwrap(),
+        "session sweeper must delete at most one bounded batch per call, deleted={deleted}"
+    );
+
+    let (remaining,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id LIKE $1 || '-%'")
+            .bind(&prefix)
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(
+        remaining, 1,
+        "one over-limit expired session must remain for the next tick"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_session_sweeper_function_is_narrow_rss_app_capability() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+
+    let (
+        function_owner,
+        owner_can_login,
+        owner_bypass,
+        rss_app_can_execute,
+        rss_app_can_delete_sessions,
+        function_sql,
+    ): (String, bool, bool, bool, bool, String) = sqlx::query_as(
+        r#"
+        SELECT pg_get_userbyid(p.proowner),
+               r.rolcanlogin,
+               r.rolbypassrls,
+               has_function_privilege('rss_app', 'rss_sweep_expired_sessions()', 'EXECUTE'),
+               has_table_privilege('rss_app', 'sessions', 'DELETE'),
+               pg_get_functiondef(p.oid)
+        FROM pg_proc p
+        JOIN pg_roles r ON r.oid = p.proowner
+        WHERE p.proname = 'rss_sweep_expired_sessions'
+        "#,
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+
+    assert_eq!(function_owner, "rss_session_maintenance");
+    assert!(
+        !owner_can_login,
+        "session maintenance definer must be NOLOGIN"
+    );
+    assert!(
+        owner_bypass,
+        "FORCE RLS global session sweep requires explicit BYPASSRLS maintenance role"
+    );
+    assert!(
+        rss_app_can_execute,
+        "rss_app must receive EXECUTE on the fixed session sweep function"
+    );
+    assert!(
+        !rss_app_can_delete_sessions,
+        "rss_app must not retain direct sessions DELETE after the fixed sweep function exists"
+    );
+    assert!(
+        function_sql.contains("DELETE FROM sessions")
+            && function_sql.contains("expires_at <= now()")
+            && !function_sql.contains("p_retain_seconds"),
+        "session sweep function must be fixed-shape expired-only SQL: {function_sql}"
+    );
+
+    let protected_future = unique_event_id("session-sweep-direct-delete-proof");
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at, revoked)
+        VALUES ($1, $2, $3::uuid, now() + make_interval(secs => 3600), now(), false)
+        "#,
+    )
+    .bind(&protected_future)
+    .bind("subject-for-session-sweep-direct-delete-proof")
+    .bind(COTX_TENANT_A)
+    .execute(&owner.pool)
+    .await?;
+
+    let direct_delete = sqlx::query("DELETE FROM sessions").execute(&app.pool).await;
+    assert!(
+        direct_delete.is_err(),
+        "rss_app must not have any direct sessions DELETE path"
+    );
+    let (remaining,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&protected_future)
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(
+        remaining, 1,
+        "direct rss_app DELETE must leave the proof row"
+    );
+
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(COTX_TENANT_A)
+        .execute(&mut *tx)
+        .await?;
+    let tenant_scoped_direct_delete = sqlx::query("DELETE FROM sessions WHERE session_id = $1")
+        .bind(&protected_future)
+        .execute(&mut *tx)
+        .await;
+    assert!(
+        tenant_scoped_direct_delete.is_err(),
+        "rss_app must not have a tenant-scoped direct sessions DELETE path"
+    );
+    tx.rollback().await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 /// dead_letter store enrollment：统一 tenant conformance 覆盖 round-trip / cross-tenant invisible / non-interference。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -4026,7 +4245,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
 /// t27b：跨租户同 `(domain, partition_key)` 不互阻。
 ///
 /// tenant A 队头进 dlx 后，只能阻塞 tenant A 同 partition 后继；tenant B 使用相同业务 key 的行仍可投递。
-/// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Hard", exec = "db", source = "migration" }
+/// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。

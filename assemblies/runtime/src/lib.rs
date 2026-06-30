@@ -679,6 +679,44 @@ pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTr
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
 }
 
+// ── Session expiry sweeper helper ─────────────────────────────────────────────────────────────
+
+const SESSION_SWEEP_INTERVAL_ENV: &str = "RSS_SESSION_SWEEP_INTERVAL_MS";
+const DEFAULT_SESSION_SWEEP_INTERVAL_MS: u64 = 300_000;
+const MIN_SESSION_SWEEP_INTERVAL_MS: u64 = 1_000;
+const DEFAULT_SESSION_SWEEP_INTERVAL: Duration =
+    Duration::from_millis(DEFAULT_SESSION_SWEEP_INTERVAL_MS);
+pub const SESSION_SWEEPER_PROBE_NAME: &str = "session_sweeper";
+const SESSION_SWEEPER_WORKER_NAME: &str = "session-sweeper";
+
+/// sessions 过期清理周期（env `RSS_SESSION_SWEEP_INTERVAL_MS`）。
+///
+/// 未配置取默认 5 分钟；显式配置解析失败或小于 1 秒时 warn + 默认，避免误配导致热 DELETE 循环。
+pub(crate) fn build_session_sweeper_interval_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    match get(SESSION_SWEEP_INTERVAL_ENV) {
+        None => DEFAULT_SESSION_SWEEP_INTERVAL,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) if ms >= MIN_SESSION_SWEEP_INTERVAL_MS => Duration::from_millis(ms),
+            _ => {
+                tracing::warn!(
+                    env = SESSION_SWEEP_INTERVAL_ENV,
+                    raw = %raw,
+                    default_ms = DEFAULT_SESSION_SWEEP_INTERVAL_MS,
+                    min_ms = MIN_SESSION_SWEEP_INTERVAL_MS,
+                    "invalid session sweep interval (expected u64 ms >= 1000); using default"
+                );
+                DEFAULT_SESSION_SWEEP_INTERVAL
+            }
+        },
+    }
+}
+
+fn build_session_sweeper_interval() -> Duration {
+    build_session_sweeper_interval_from(|name| std::env::var(name).ok())
+}
+
 // ── DB readiness 采样周期 helper ───────────────────────────────────────────────────────────────
 
 /// 默认 DB readiness 采样周期（5 秒）。
@@ -1606,6 +1644,171 @@ fn spawn_keyprovider_readiness_sampler(
     }
 }
 
+// ── SessionSweeperProbe / worker ──────────────────────────────────────────────────────────────
+
+const SESSION_SWEEPER_HEALTHY: u8 = 0;
+const SESSION_SWEEPER_DEGRADED: u8 = 1;
+const SESSION_SWEEPER_STOPPED: u8 = 2;
+
+struct SessionSweeperHealth(std::sync::atomic::AtomicU8);
+
+impl SessionSweeperHealth {
+    fn healthy() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(SESSION_SWEEPER_HEALTHY))
+    }
+
+    fn mark_healthy(&self) {
+        self.0.store(
+            SESSION_SWEEPER_HEALTHY,
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    fn mark_degraded(&self) {
+        self.0.store(
+            SESSION_SWEEPER_DEGRADED,
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    fn mark_stopped(&self) {
+        self.0.store(
+            SESSION_SWEEPER_STOPPED,
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    fn status_detail(&self) -> (HealthStatus, &'static str) {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            SESSION_SWEEPER_HEALTHY => (HealthStatus::Healthy, "worker"),
+            SESSION_SWEEPER_DEGRADED => (HealthStatus::Degraded, "degraded"),
+            _ => (HealthStatus::Unhealthy, "stopped"),
+        }
+    }
+}
+
+struct SessionSweeperStoppedGuard(Arc<SessionSweeperHealth>);
+
+impl Drop for SessionSweeperStoppedGuard {
+    fn drop(&mut self) {
+        self.0.mark_stopped();
+    }
+}
+
+struct SessionSweeperProbe {
+    name: ProbeName,
+    health: Arc<SessionSweeperHealth>,
+}
+
+impl bootstrap::HealthProbe for SessionSweeperProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = self.health.status_detail();
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+struct SessionSweeperWorker {
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    token: CancellationToken,
+}
+
+impl ManagedResource for SessionSweeperWorker {
+    fn name(&self) -> &str {
+        SESSION_SWEEPER_WORKER_NAME
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.token.cancel();
+        let mut handle = self.handle.lock().await;
+        if let Some(handle) = handle.take()
+            && let Err(err) = handle.await
+        {
+            tracing::warn!(error = %err, "session sweeper worker join failed");
+        }
+        Ok(())
+    }
+}
+
+fn spawn_session_sweeper(
+    sweeper: postgres::PgSessionSweeper,
+    period: Duration,
+    token: CancellationToken,
+    health: Arc<SessionSweeperHealth>,
+) -> SessionSweeperWorker {
+    let child = token.child_token();
+    let worker_token = child.clone();
+    let handle = tokio::spawn(async move {
+        let _stopped = SessionSweeperStoppedGuard(Arc::clone(&health));
+        let mut ticker = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                biased;
+                () = worker_token.cancelled() => break,
+                _ = ticker.tick() => {
+                    tokio::select! {
+                        biased;
+                        () = worker_token.cancelled() => break,
+                        deleted = sweeper.sweep_expired() => {
+                            match deleted {
+                                Ok(deleted) => {
+                                    tracing::debug!(target_table = "sessions", deleted, "session sweeper: tick completed");
+                                    health.mark_healthy();
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        target_table = "sessions",
+                                        error = %err,
+                                        "session sweeper: sweep failed, marking worker degraded; backing off to next tick"
+                                    );
+                                    health.mark_degraded();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    SessionSweeperWorker {
+        handle: tokio::sync::Mutex::new(Some(handle)),
+        token: child,
+    }
+}
+
+fn session_sweeper_module_result(
+    worker: bootstrap::WorkerSpec,
+    health: Arc<SessionSweeperHealth>,
+) -> anyhow::Result<DomainModuleResult> {
+    let probe_name = ProbeName::parse(SESSION_SWEEPER_PROBE_NAME)
+        .context("session_sweeper probe name is invalid")?;
+    Ok(DomainModuleResult {
+        probes: vec![(
+            probe_name.clone(),
+            Box::new(SessionSweeperProbe {
+                name: probe_name,
+                health,
+            }),
+        )],
+        workers: vec![worker],
+        ..Default::default()
+    })
+}
+
+fn wire_session_sweeper(pg: &PgRuntimeDeps) -> anyhow::Result<DomainModuleResult> {
+    let period = build_session_sweeper_interval();
+    let sweeper = pg.infra().session_sweeper();
+    let health = Arc::new(SessionSweeperHealth::healthy());
+    let worker_health = Arc::clone(&health);
+    let worker: bootstrap::WorkerSpec = Box::new(move |token| {
+        DynManagedResource::new_box(spawn_session_sweeper(sweeper, period, token, worker_health))
+    });
+    tracing::info!(
+        interval_ms = period.as_millis(),
+        "session sweeper interval configured"
+    );
+    session_sweeper_module_result(worker, health)
+}
+
 // ── settings + secret wiring ─────────────────────────────────────────────────────────────────
 
 /// 接线 settings 域（#1430 PERSIST-009 settings 首条 durable module 闭环）：构造 config 应用服务 + secret
@@ -2403,6 +2606,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     // 聚合各域 module result（settings configs_ready 探针；后续域只需多一行 module.merge(wire_X(&deps).await?)）。
     let mut module = DomainModuleResult::default();
     module.merge(settings_module);
+    module.merge(wire_session_sweeper(&pg).context("wire session sweeper")?);
     // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
     // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
     module.resources.extend(deps.redis.runtime_resources());
@@ -2770,6 +2974,69 @@ mod tests {
         assert!(
             result.workers.is_empty(),
             "纯 module result helper 不创建后台 worker"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_sweeper_interval_defaults_and_parses_env() {
+        let default = build_session_sweeper_interval_from(|_| None);
+        assert_eq!(default, DEFAULT_SESSION_SWEEP_INTERVAL);
+
+        let parsed = build_session_sweeper_interval_from(|name| {
+            (name == SESSION_SWEEP_INTERVAL_ENV).then(|| "120000".to_string())
+        });
+        assert_eq!(parsed, Duration::from_millis(120_000));
+
+        let invalid = build_session_sweeper_interval_from(|name| {
+            (name == SESSION_SWEEP_INTERVAL_ENV).then(|| "not-a-number".to_string())
+        });
+        assert_eq!(invalid, DEFAULT_SESSION_SWEEP_INTERVAL);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_maintenance_module_emits_session_sweeper_probe_and_worker() {
+        struct NoopResource;
+        impl diport::ManagedResource for NoopResource {
+            fn name(&self) -> &str {
+                "noop-session-sweeper"
+            }
+
+            async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+                Ok(())
+            }
+        }
+
+        let health = Arc::new(SessionSweeperHealth::healthy());
+        let worker: bootstrap::WorkerSpec =
+            Box::new(|_| diport::DynManagedResource::new_box(NoopResource));
+        let result =
+            session_sweeper_module_result(worker, health).expect("session sweeper module result");
+        assert_eq!(result.probes.len(), 1);
+        assert_eq!(result.probes[0].0.as_str(), SESSION_SWEEPER_PROBE_NAME);
+        assert!(result.resources.is_empty());
+        assert_eq!(
+            result.workers.len(),
+            1,
+            "session sweeper must be registered as a managed worker"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: 静态回归守卫切分当前源码；缺目标函数时测试应硬失败。
+    fn session_sweeper_worker_cancellation_races_inflight_sweep() {
+        let source = include_str!("lib.rs");
+        let function = source
+            .split("fn spawn_session_sweeper(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn session_sweeper_module_result(").next())
+            .expect("spawn_session_sweeper source slice");
+        assert!(
+            function.contains("deleted = sweeper.sweep_expired()")
+                && function.contains("() = worker_token.cancelled() => break"),
+            "session sweeper worker must race cancellation against an in-flight sweep"
         );
     }
 

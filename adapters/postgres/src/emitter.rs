@@ -79,6 +79,9 @@ impl OutboxEmitter for PgEmitter {
 }
 
 /// outbox 写入事务体（与 emit 分离以控制认知复杂度）。
+// reason: 既有事务体把 tenant scope、append、commit 三段及各自结构化日志保持在同一错误边界；
+// 本轮只补 workspace clippy 门，不改 outbox 行为。
+#[allow(clippy::cognitive_complexity)]
 async fn emit_in_tx(
     mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
     entry: &Entry,

@@ -40,6 +40,7 @@ mod role_repo;
 mod saga_journal;
 mod secret_repo;
 mod session_lifecycle;
+mod session_sweeper;
 mod tx;
 mod tx_retry;
 
@@ -72,6 +73,7 @@ pub use role_repo::PgRoleRepo;
 pub use saga_journal::PgSagaJournal;
 pub use secret_repo::PgSecretRepo;
 pub use session_lifecycle::PgSessionLifecycle;
+pub use session_sweeper::PgSessionSweeper;
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests;
@@ -160,7 +162,8 @@ mod smoke {
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
     //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
     //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
-    //! AuditRepo on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）；
+    //! AuditRepo on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
+    //! PgSessionSweeper concrete maintenance type（#1233，不新增 identity 域端口）；
     //! 去掉任一即编译失败（anti-vacuity）。
     //! INVARIANT: PG-BUNDLE-DOMAIN-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
     //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
@@ -182,6 +185,7 @@ mod smoke {
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
     fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
     fn assert_audit_repo<T: audit::ports::AuditRepo>(_: PhantomData<T>) {}
+    fn assert_send_sync<T: Send + Sync>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
@@ -214,6 +218,9 @@ mod smoke {
         assert_audit_repo(
             PhantomData::<super::PgAuditRepo<super::audit_repo::test_support::TestVerifier>>,
         );
+        // `PgSessionSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke
+        // 锁住可进入 runtime worker 的形状。
+        assert_send_sync(PhantomData::<super::PgSessionSweeper>);
         // PG-BUNDLE-DOMAIN-02：三个 per-domain marker 均满足 sealed `PgDomain`（去掉任一 impl 即编译失败）。
         assert_pg_domain(PhantomData::<super::caps::Settings>);
         assert_pg_domain(PhantomData::<super::caps::Identity>);

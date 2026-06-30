@@ -65,8 +65,8 @@ use crate::{
     PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance, PgCredentialRepo,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
     PgOutbox, PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
-    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore,
-    PgStoreGuard,
+    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle,
+    PgSessionSweeper, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -532,7 +532,8 @@ impl PgDomainDeps<caps::Audit> {
 /// framework/global postgres 基建能力句柄（`Clone`，provider-agnostic、非单域）。
 ///
 /// 私有持 `Arc<PgStore>`，经 [`PgRuntimeDeps::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
-/// saga_journal / projection_events / cas_store——这些是跨域基建（非绑某个 `caps::*` 域），故独立于 [`PgDomainDeps`]。
+/// saga_journal / projection_events / cas_store / session_sweeper——这些是跨域基建（非绑某个 `caps::*` 域），
+/// 故独立于 [`PgDomainDeps`]。
 /// 与 `PgDomainDeps` 一样不返回 `&PgStore` / `PgPool`（PG-BUNDLE-POOL-03）。
 ///
 /// infra/domain 能力面**互斥**（typed function choice）：`PgInfraDeps` 上没有域 repo（编译期被拒）：
@@ -605,6 +606,15 @@ impl PgInfraDeps {
     #[must_use]
     pub fn inbox_sweeper(&self) -> PgInboxSweeper {
         self.store.inbox_sweeper()
+    }
+
+    /// sessions 过期行维护清理器（全域，固定 `expires_at <= now()` 谓词，#1233）。
+    ///
+    /// 不返回 tenant/raw pool/SQL/retain 参数；runtime 只拿到具体 [`PgSessionSweeper`] 并调用
+    /// `sweep_expired()`。
+    #[must_use]
+    pub fn session_sweeper(&self) -> PgSessionSweeper {
+        self.store.session_sweeper()
     }
 
     /// owner checkpoint store（reconcile/saga 进度）。
@@ -865,6 +875,7 @@ mod tests {
         let _ = infra.dead_letter(payload_protector());
         let _ = infra.dlq(payload_protector());
         let _ = infra.inbox_sweeper();
+        let _ = infra.session_sweeper();
         let _ = infra.checkpoint();
         let _ = infra.saga_journal();
         let _ = infra.projection_events();

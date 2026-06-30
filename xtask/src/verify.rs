@@ -1868,6 +1868,8 @@ mod tests {
     /// 谓词绿/红例（anti-vacuity）：委托=真；不委托或重列**任一**门（含黑名单曾漏的 build/llvm-cov/
     /// public-api）=假。
     #[test]
+    // reason: 表驱动 anti-vacuity 用例集中覆盖正反例；本轮只补 workspace clippy 门，不拆验证语义。
+    #[allow(clippy::cognitive_complexity)]
     fn pipeline_delegate_predicate_green_and_red() {
         let triggers =
             "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n";
