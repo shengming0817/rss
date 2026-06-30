@@ -10,7 +10,7 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 构建与本地验证
 
-单一聚合入口（**激活 forge=azure 无 CI ⇒ 这是治理门的唯一实际 gate**）：
+单一聚合入口（GitHub Actions 与本地共用同一 `cargo xtask` 门）：
 
 ```bash
 make verify              # == cargo xtask verify（薄 alias）
@@ -36,8 +36,9 @@ cargo dylint --all                                     # AST 级自写 lint（do
 工具链由 `rust-toolchain.toml` 钉定（首次进入目录自动安装）。治理工具：
 
 ```bash
-cargo install cargo-deny cargo-nextest --locked   # deny / nextest 步
-cargo install cargo-dylint dylint-link            # dylint 步（AST lint）
+cargo install cargo-nextest@0.9.137 cargo-deny@0.19.9 --locked
+cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked
+cargo install cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0 cargo-audit@0.22.2 --locked
 ```
 
 > dylint 须 nightly：`cargo-dylint` / `dylint-link` 版本与 `lints/rust-toolchain.toml` 的 channel +

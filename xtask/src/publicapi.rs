@@ -21,7 +21,7 @@
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 { level = "Medium", exec = "ci-only", source = "public-api" }—— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "ci-only", source = "public-api" }—— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
 //! INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }—— rustdoc-json 用钉版 nightly（[`PINNED_NIGHTLY`]，非 rolling）；该 pin 四处
-//!   一致：`PINNED_NIGHTLY` ⇔ `lints/rust-toolchain.toml` channel ⇔ azure `RSS_NIGHTLY_PINNED`（三方功能值，
+//!   一致：`PINNED_NIGHTLY` ⇔ `lints/rust-toolchain.toml` channel ⇔ GitHub CI `RSS_NIGHTLY_PINNED`（三方功能值，
 //!   `pinned_nightly_single_source_of_truth` 守）+ `verify.rs` public-api install_hint（`verify::tests::
 //!   public_api_install_hint_pins_nightly` 守，绑真实字段值非源码全文）。漂移即 fail。
 
@@ -43,7 +43,7 @@ const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated"];
 /// [`public_api_cmd`] 设 `RUSTUP_TOOLCHAIN`（等价 `cargo +<此值> public-api`）把 nightly 钉死，使快照可复现（#1145）。
 ///
 /// **单一事实源（NIGHTLY-PIN-01）**：本 const ⇔ `lints/rust-toolchain.toml` 的 `[toolchain].channel`
-/// （dylint 实际 nightly）⇔ `azure-pipelines.yml` 的 `RSS_NIGHTLY_PINNED`（CI 安装的 nightly）三方功能值由
+/// （dylint 实际 nightly）⇔ `.github/workflows/ci.yml` 的 `RSS_NIGHTLY_PINNED`（CI 安装的 nightly）三方功能值由
 /// `pinned_nightly_single_source_of_truth` 守；第四处 `verify.rs` public-api install_hint 由
 /// `verify::tests::public_api_install_hint_pins_nightly` 守（绑真实 install_hint 字段值、非源码全文，避免注释
 /// 含 pin 的误绿）——漂移即 fail。**与 dylint nightly 成对、CI 只装一份**：dylint 因 `clippy_utils` rev 升 nightly 时——
@@ -501,9 +501,9 @@ mod tests {
             .map(str::to_owned)
     }
 
-    /// 从 azure-pipelines.yml 文本取 `RSS_NIGHTLY_PINNED` 变量值：行扫描，先 `split('#')` 剥注释、
+    /// 从 GitHub CI workflow 文本取 `RSS_NIGHTLY_PINNED` 变量值：行扫描，先 `split('#')` 剥注释、
     /// 再结构绑定 `RSS_NIGHTLY_PINNED:` 前缀——防注释内同名误满足（无 serde_yaml 依赖）。
-    fn azure_nightly_pinned(yaml_src: &str) -> Option<String> {
+    fn github_ci_nightly_pinned(yaml_src: &str) -> Option<String> {
         yaml_src.lines().find_map(|line| {
             let code = line.split('#').next().unwrap_or("").trim();
             let rest = code.strip_prefix("RSS_NIGHTLY_PINNED:")?;
@@ -512,8 +512,8 @@ mod tests {
     }
 
     /// 三方 pinned-nightly 是否一致。
-    fn nightly_pins_agree(const_val: &str, channel: &str, azure: &str) -> bool {
-        const_val == channel && channel == azure
+    fn nightly_pins_agree(const_val: &str, channel: &str, github_ci: &str) -> bool {
+        const_val == channel && channel == github_ci
     }
 
     #[test]
@@ -530,20 +530,20 @@ mod tests {
     }
 
     #[test]
-    fn azure_nightly_pinned_extracts_value() {
+    fn github_ci_nightly_pinned_extracts_value() {
         assert_eq!(
-            azure_nightly_pinned("variables:\n  RSS_NIGHTLY_PINNED: nightly-2026-04-16\n")
-                .as_deref(),
+            github_ci_nightly_pinned("env:\n  RSS_NIGHTLY_PINNED: nightly-2026-04-16\n").as_deref(),
             Some("nightly-2026-04-16")
         );
         // 值后带行尾注释：split('#') 剥注释后取值（YAML unquoted scalar 行尾注释语义，刻意支持）。
         assert_eq!(
-            azure_nightly_pinned("  RSS_NIGHTLY_PINNED: nightly-2026-04-16 # 钉版\n").as_deref(),
+            github_ci_nightly_pinned("  RSS_NIGHTLY_PINNED: nightly-2026-04-16 # 钉版\n")
+                .as_deref(),
             Some("nightly-2026-04-16")
         );
         // synthetic red（fail-closed）：仅注释行不可误满足（对标 verify.rs codex F1）。
         assert_eq!(
-            azure_nightly_pinned("  # RSS_NIGHTLY_PINNED: nightly-2026-04-16\n"),
+            github_ci_nightly_pinned("  # RSS_NIGHTLY_PINNED: nightly-2026-04-16\n"),
             None
         );
     }
@@ -560,8 +560,8 @@ mod tests {
         assert!(!nightly_pins_agree(other, p, p));
     }
 
-    /// anti-vacuity 真实绿例：从真实 `lints/rust-toolchain.toml` + `azure-pipelines.yml` 解析，断言
-    /// 三方功能 pinned-nightly 一致（`PINNED_NIGHTLY` == lints channel == azure `RSS_NIGHTLY_PINNED`）。
+    /// anti-vacuity 真实绿例：从真实 `lints/rust-toolchain.toml` + `.github/workflows/ci.yml` 解析，断言
+    /// 三方功能 pinned-nightly 一致（`PINNED_NIGHTLY` == lints channel == GitHub CI `RSS_NIGHTLY_PINNED`）。
     /// 第四处镜像（verify.rs public-api install_hint）由 `verify::tests::public_api_install_hint_pins_nightly`
     /// 守——绑真实 install_hint 字段值（非源码全文，避免注释含 pin 的误绿）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
     #[test]
@@ -569,14 +569,16 @@ mod tests {
         let root = crate::workspace_root()?;
         let toolchain_toml =
             std::fs::read_to_string(root.join("lints").join("rust-toolchain.toml"))?;
-        let azure_yaml = std::fs::read_to_string(root.join("azure-pipelines.yml"))?;
+        let github_ci_yaml =
+            std::fs::read_to_string(root.join(".github").join("workflows").join("ci.yml"))?;
         let channel = parse_toolchain_channel(&toolchain_toml)
             .ok_or_else(|| anyhow::anyhow!("lints/rust-toolchain.toml 应有 [toolchain].channel"))?;
-        let azure = azure_nightly_pinned(&azure_yaml)
-            .ok_or_else(|| anyhow::anyhow!("azure-pipelines.yml 应有 RSS_NIGHTLY_PINNED 变量"))?;
+        let github_ci = github_ci_nightly_pinned(&github_ci_yaml).ok_or_else(|| {
+            anyhow::anyhow!(".github/workflows/ci.yml 应有 RSS_NIGHTLY_PINNED 变量")
+        })?;
         assert!(
-            nightly_pins_agree(PINNED_NIGHTLY, &channel, &azure),
-            "pinned nightly 三方漂移：PINNED_NIGHTLY={PINNED_NIGHTLY}, lints channel={channel}, azure={azure}"
+            nightly_pins_agree(PINNED_NIGHTLY, &channel, &github_ci),
+            "pinned nightly 三方漂移：PINNED_NIGHTLY={PINNED_NIGHTLY}, lints channel={channel}, github_ci={github_ci}"
         );
         Ok(())
     }

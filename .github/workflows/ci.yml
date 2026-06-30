@@ -1,0 +1,44 @@
+# .github/workflows/ci.yml — RSS GitHub Actions CI lane.
+#
+# Thin shell: CI gate logic lives in `cargo xtask ci`; this workflow installs the
+# pinned toolchain/tools and delegates to that single command.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop, "codex/**", "feature/**", "fix/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RSS_NIGHTLY_PINNED: nightly-2026-04-16
+
+jobs:
+  ci:
+    name: cargo xtask ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup RSS Rust CI
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          nightly: ${{ env.RSS_NIGHTLY_PINNED }}
+          cache-prefix: cargo-ci
+          tools: >-
+            cargo-nextest@0.9.137 cargo-deny@0.19.9 cargo-dylint@6.0.1 dylint-link@6.0.1
+            cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0 cargo-audit@0.22.2
+
+      - name: cargo xtask ci
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xtask -- ci

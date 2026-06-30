@@ -1,0 +1,38 @@
+# .github/workflows/audit.yml — scheduled RustSec refresh lane.
+#
+# The pull-request CI lane already runs the full deny/audit checks. This
+# scheduled lane catches newly disclosed advisories when no code changed.
+name: Audit
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo xtask audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup RSS Rust CI
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          cache-prefix: cargo-audit
+          tools: cargo-deny@0.19.9 cargo-audit@0.22.2
+
+      - name: cargo xtask audit
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xtask -- audit

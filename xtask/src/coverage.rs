@@ -9,7 +9,7 @@
 //!    adapters/域 crate 的大改动可零新测试照样过地板门。
 //!
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
-//! 全 workspace 跑），只在 `cargo xtask ci`（CI 超集）内、由 azure-pipelines.yml 调用。issue #1132 验收
+//! 全 workspace 跑），只在 `cargo xtask ci`（CI 超集）内、由 GitHub Actions 调用。issue #1132 验收
 //! 「cargo nextest run --workspace + cargo llvm-cov 阈值门（引擎/基础 ≥90%）」由本**一步**同时兑现——
 //! 单跑一次测试既是 nextest 门又出覆盖率（不重复跑）。集成测试 `#[cfg(feature="integration")]` 默认不
 //! 编入 ⇒ 无需 DB/broker。

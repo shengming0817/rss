@@ -1,0 +1,56 @@
+name: Setup RSS Rust CI
+description: Install the RSS Rust toolchain, cache Cargo artifacts, and install lane tools.
+
+inputs:
+  nightly:
+    description: Optional pinned nightly toolchain required by public-api.
+    required: false
+    default: ""
+  tools:
+    description: Space-separated cargo-binstall package specs.
+    required: false
+    default: ""
+  cache-prefix:
+    description: Cache key prefix for the caller lane.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup component add rustfmt clippy llvm-tools-preview
+        if [ -n "${RSS_SETUP_NIGHTLY}" ]; then
+          rustup toolchain install "${RSS_SETUP_NIGHTLY}" --profile minimal --component rustc-dev --component llvm-tools-preview --component rust-src
+        fi
+        rustup show
+      env:
+        RSS_SETUP_NIGHTLY: ${{ inputs.nightly }}
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ inputs.cache-prefix }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-prefix }}-${{ runner.os }}-
+
+    - name: Install cargo-binstall
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo install cargo-binstall@1.20.1 --locked
+
+    - name: Install lane tools
+      if: ${{ inputs.tools != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo binstall -y --locked ${RSS_SETUP_TOOLS}
+      env:
+        RSS_SETUP_TOOLS: ${{ inputs.tools }}

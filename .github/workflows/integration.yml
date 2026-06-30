@@ -1,0 +1,40 @@
+# .github/workflows/integration.yml — RSS real integration lane.
+#
+# Testcontainers self-provisions Postgres/Redis/RabbitMQ/Mosquitto through
+# `cargo xtask integration`; workflow YAML does not inline service setup.
+name: Integration
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop, "codex/**", "feature/**", "fix/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integration:
+    name: cargo xtask integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup RSS Rust CI
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          cache-prefix: cargo-integration
+          tools: cargo-nextest@0.9.137
+
+      - name: cargo xtask integration
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xtask -- integration

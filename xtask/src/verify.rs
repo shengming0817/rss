@@ -1,7 +1,7 @@
 //! `cargo xtask verify` —— 本地全量治理门聚合入口。
 //!
-//! RSS 激活 forge=azure **无 CI**（见 issue #1023），CI 收敛降级为本地 `make verify` ⇒ 本命令是
-//! 治理门的**唯一**实际 gate。聚合（fail-fast，无编译的步最先）：
+//! RSS 本地全量治理门。GitHub Actions 调 `cargo xtask ci` 作为合入阻断门；本命令保留为
+//! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
 //!   2. in-process meta：contract validate + assembly validate + archrules + layer-deps + codegen --check
@@ -19,14 +19,14 @@
 //! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
 //! 外部工具时显式宽限（默认 fail-closed）。
 //!
-//! **`cargo xtask ci`（[`run_ci`]）= CI lane 超集**（issue #1132，azure-pipelines.yml 薄壳唯一调用入口）：
+//! **`cargo xtask ci`（[`run_ci`]）= CI lane 超集**（issue #1132，GitHub Actions 薄壳唯一调用入口）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 是 **CI 全工具超集**——二者经
 //! [`full_plan`] / [`ci_plan`] 共享 fmt/meta/deny/dylint 同一构造，杜绝两份计划漂移。
 //!
-//! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，azure-pipelines.yml
-//! 每日 `schedules:` cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
+//! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
+//! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
 //! （皆 no-compile、快）。PR 门（ci）已含全量 `deny check`（advisories+licenses+bans+sources）+ cargo-audit；
 //! audit lane 专攻**时间维度**——对「未变依赖」新披露的 CVE，PR 门要等下个 PR 才捕获，故每日重跑漏洞维度。
 //! audit lane = **告警**（无 PR 可阻断）；PR 门 ci = **合入阻断**。
@@ -37,8 +37,8 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— azure-pipelines.yml 只调 `cargo xtask ci`、不逐条重列门 run
-//!   命令（门逻辑单源在 xtask）；由 `azure_pipeline_delegates_to_xtask_ci` 治理测试守。
+//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow 只调 `cargo xtask ci`、不逐条重列门 run
+//!   命令（门逻辑单源在 xtask）；由 `github_ci_workflow_delegates_to_xtask_ci` 治理测试守。
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
@@ -46,6 +46,26 @@ use crate::{archrules, assembly, codegen, contract, doc_contracts, layerdeps, ws
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::Stdio;
+
+#[cfg(test)]
+const CI_TOOL_SPECS: &[&str] = &[
+    "cargo-binstall@1.20.1",
+    "cargo-nextest@0.9.137",
+    "cargo-deny@0.19.9",
+    "cargo-dylint@6.0.1",
+    "dylint-link@6.0.1",
+    "cargo-llvm-cov@0.8.7",
+    "cargo-public-api@0.52.0",
+    "cargo-audit@0.22.2",
+];
+const INSTALL_HINT_DENY: &str = "cargo install cargo-deny@0.19.9 --locked";
+const INSTALL_HINT_AUDIT: &str = "cargo install cargo-audit@0.22.2 --locked";
+const INSTALL_HINT_DYLINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
+const INSTALL_HINT_NEXTEST: &str = "cargo install cargo-nextest@0.9.137 --locked";
+const INSTALL_HINT_INTEGRATION: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker 或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 等 env URL）";
+const INSTALL_HINT_LLVM_COV: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
+const INSTALL_HINT_PUBLIC_API: &str =
+    "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
 
 /// verify 选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +365,7 @@ fn step_deny() -> Step {
         args: &["deny", "check"],
         kind: StepKind::Tool {
             probe: "deny",
-            install_hint: "cargo install cargo-deny --locked",
+            install_hint: INSTALL_HINT_DENY,
         },
         env: &[],
         needs_compile: false,
@@ -359,7 +379,7 @@ fn step_deny_advisories() -> Step {
         args: &["deny", "check", "advisories"],
         kind: StepKind::Tool {
             probe: "deny",
-            install_hint: "cargo install cargo-deny --locked",
+            install_hint: INSTALL_HINT_DENY,
         },
         env: &[],
         needs_compile: false,
@@ -386,7 +406,7 @@ fn step_cargo_audit() -> Step {
         args: &["audit", "--ignore", "RUSTSEC-2023-0071"],
         kind: StepKind::Tool {
             probe: "audit",
-            install_hint: "cargo install cargo-audit --locked",
+            install_hint: INSTALL_HINT_AUDIT,
         },
         env: &[],
         needs_compile: false,
@@ -414,7 +434,7 @@ fn step_dylint() -> Step {
         args: &["dylint", "--all"],
         kind: StepKind::Tool {
             probe: "dylint",
-            install_hint: "cargo install cargo-dylint dylint-link",
+            install_hint: INSTALL_HINT_DYLINT,
         },
         // `rss_domain_no_serialize` 默认 `Warn`（warning 不退非零）；`-D warnings` 把它（及其它
         // 注册 lint）升为 deny ⇒ 违例即非零退出，使 dylint 成 fail-closed 门（#1023 的核心诉求）。
@@ -496,7 +516,7 @@ fn step_integration_run() -> Step {
         ],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked（实跑还需 docker 或设 PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 等 env URL）",
+            install_hint: INSTALL_HINT_INTEGRATION,
         },
         env: &[],
         needs_compile: true,
@@ -524,7 +544,7 @@ fn step_nextest() -> Step {
         args: &["nextest", "run", "--workspace", "--no-tests=pass"],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -547,7 +567,7 @@ fn step_s3_backend_tests() -> Step {
         args: &["nextest", "run", "-p", "s3", "--features", "backend"],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -566,7 +586,7 @@ fn step_redis_backend_tests() -> Step {
         ],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -578,7 +598,7 @@ fn step_oidc_backend_tests() -> Step {
         args: &["nextest", "run", "-p", "oidc", "--features", "backend"],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -597,7 +617,7 @@ fn step_prometheus_backend_tests() -> Step {
         ],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -612,7 +632,7 @@ fn step_otel_backend_tests() -> Step {
         args: &["nextest", "run", "-p", "otel", "--features", "backend"],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -624,7 +644,7 @@ fn step_grpc_backend_tests() -> Step {
         args: &["nextest", "run", "-p", "grpc", "--features", "backend"],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -639,7 +659,7 @@ fn step_vault_backend_tests() -> Step {
         args: &["nextest", "run", "-p", "vault", "--features", "backend"],
         kind: StepKind::Tool {
             probe: "nextest",
-            install_hint: "cargo install cargo-nextest --locked",
+            install_hint: INSTALL_HINT_NEXTEST,
         },
         env: &[],
         needs_compile: true,
@@ -707,7 +727,7 @@ fn step_coverage() -> Step {
         args: &[],
         kind: StepKind::ToolGatedInternal {
             probe: "llvm-cov",
-            install_hint: "cargo install cargo-llvm-cov --locked",
+            install_hint: INSTALL_HINT_LLVM_COV,
             check: InternalCheck::Coverage,
         },
         env: &[],
@@ -722,7 +742,7 @@ fn step_public_api() -> Step {
             probe: "public-api",
             // 钉版 nightly + 钉版工具：须含 publicapi::PINNED_NIGHTLY（`&'static str` 字段无法引 const，
             // 故字面量）；NIGHTLY-PIN-01 治理测试断言 verify.rs 含该值，bump 漏改即 fail。
-            install_hint: "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked",
+            install_hint: INSTALL_HINT_PUBLIC_API,
             check: InternalCheck::PublicApiCheck,
         },
         env: &[],
@@ -796,13 +816,13 @@ pub(crate) fn ci_plan() -> Vec<Step> {
     plan
 }
 
-/// audit 精简供应链门步计划（issue #1133；azure-pipelines.yml 每日 cron 调 `cargo xtask audit`）。
+/// audit 精简供应链门步计划（issue #1133；GitHub Actions schedule 调 `cargo xtask audit`）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
 /// [`ci_plan`] 已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一 [`step_cargo_audit`] 构造。
 ///
 /// INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
-/// 由 `azure_pipeline_has_scheduled_audit_lane` 守。
+/// 由 `github_audit_workflow_has_scheduled_audit_lane` 守。
 fn audit_plan() -> Vec<Step> {
     vec![step_deny_advisories(), step_cargo_audit()]
 }
@@ -850,8 +870,8 @@ fn docker_available() -> bool {
 /// integration 入口（#1137 真集成 lane，opt-in）：docker 门把守后按 [`integration_plan`] 跑。
 /// **docker-gated（fail-closed，对齐 VERIFY-TOOL-GATE-01）**：三 env URL 全在 → 跳过 docker 探测（env 路径
 /// 不 self-provision）；否则探测 docker，缺 + 未宽限 → fail-closed（清晰指引），缺 + `--allow-missing-tools`
-/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；**已接入 azure-pipelines PR/push lane**（#1145，
-/// CI-INTEGRATION-LANE-01；ubuntu-latest agent 预装 docker ⇒ testkit self-provision，由 `azure_pipeline_has_integration_lane` 守）。
+/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；**已接入 GitHub Actions PR/push lane**（#1145，
+/// CI-INTEGRATION-LANE-01；ubuntu-latest runner 预装 docker ⇒ testkit self-provision，由 `github_integration_workflow_has_integration_lane` 守）。
 pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
@@ -887,7 +907,7 @@ pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
     );
     for (i, step) in plan.iter().enumerate() {
         eprintln!("integration: [{}/{}] {}", i + 1, plan.len(), step.label);
-        run_one(step, &opts, &root)?;
+        run_one("integration", step, &opts, &root)?;
     }
     eprintln!("integration：全部通过");
     Ok(())
@@ -914,12 +934,18 @@ fn resolve_tool(available: bool, allow_missing: bool) -> ToolAction {
 
 /// spawn 一个 cargo 门步，继承 stdio（用户实时看输出），校验退出码。
 /// INVARIANT VERIFY-AGGREGATE-01：非零退出 ⇒ `Err`（不吞错）。
-fn run_step(label: &str, args: &[&str], env: &[(&str, &str)], cwd: &Path) -> Result<()> {
+fn run_step(
+    lane: &str,
+    label: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: &Path,
+) -> Result<()> {
     let status = crate::cmd::clean_cmd("cargo", args, env, Some(cwd))
         .status()
         .map_err(|e| {
             anyhow::anyhow!(
-                "verify: 启动门步 `{label}`（cargo {}）失败: {e}",
+                "{lane}: 启动门步 `{label}`（cargo {}）失败: {e}",
                 args.join(" ")
             )
         })?;
@@ -930,32 +956,34 @@ fn run_step(label: &str, args: &[&str], env: &[(&str, &str)], cwd: &Path) -> Res
         .code()
         .map_or_else(|| "signal".to_owned(), |c| c.to_string());
     bail!(
-        "verify: 门步 `{label}` 失败（cargo {} 退出码 {code}）",
+        "{lane}: 门步 `{label}` 失败（cargo {} 退出码 {code}）",
         args.join(" ")
     )
 }
 
 /// 跑单步：Internal 进程内执行；CargoBuiltin 直接 spawn；Tool 先探测再按决策分派。
-fn run_one(step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
+fn run_one(lane: &str, step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
     match &step.kind {
         StepKind::Internal(check) => run_internal(*check),
-        StepKind::CargoBuiltin => run_step(step.label, step.args, step.env, root),
+        StepKind::CargoBuiltin => run_step(lane, step.label, step.args, step.env, root),
         StepKind::Tool {
             probe,
             install_hint,
         } => run_tool_gated(
+            lane,
             crate::cmd::tool_available(probe),
             opts.allow_missing_tools,
             probe,
             install_hint,
             step.label,
-            || run_step(step.label, step.args, step.env, root),
+            || run_step(lane, step.label, step.args, step.env, root),
         ),
         StepKind::ToolGatedInternal {
             probe,
             install_hint,
             check,
         } => run_tool_gated(
+            lane,
             crate::cmd::tool_available(probe),
             opts.allow_missing_tools,
             probe,
@@ -970,6 +998,7 @@ fn run_one(step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
 /// [`resolve_tool`] 决策——在则跑 `on_run`，缺+宽限则警告跳过，缺+不宽限则 fail-closed
 /// （INVARIANT VERIFY-TOOL-GATE-01）。
 fn run_tool_gated(
+    lane: &str,
     available: bool,
     allow_missing: bool,
     probe: &str,
@@ -981,12 +1010,12 @@ fn run_tool_gated(
         ToolAction::Run => on_run(),
         ToolAction::SkipWarn => {
             eprintln!(
-                "verify: [跳过] `{label}`（缺 `cargo {probe}`，--allow-missing-tools 宽限）。装：{install_hint}"
+                "{lane}: [跳过] `{label}`（缺 `cargo {probe}`，--allow-missing-tools 宽限）。装：{install_hint}"
             );
             Ok(())
         }
         ToolAction::Fail => bail!(
-            "verify: 缺 `cargo {probe}`（门步 `{label}`）。装：{install_hint}\n（门不建议绕过；确需可显式 --allow-missing-tools）"
+            "{lane}: 缺 `cargo {probe}`（门步 `{label}`）。装：{install_hint}\n（门不建议绕过；确需可显式 --allow-missing-tools）"
         ),
     }
 }
@@ -1021,6 +1050,14 @@ fn run_internal(check: InternalCheck) -> Result<()> {
     }
 }
 
+fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -> Result<()> {
+    for (i, step) in plan.iter().enumerate() {
+        eprintln!("{lane}: [{}/{}] {}", i + 1, plan.len(), step.label);
+        run_one(lane, step, opts, root)?;
+    }
+    Ok(())
+}
+
 /// verify 入口：按 plan 顺序跑每步，fail-fast。
 pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -1031,16 +1068,13 @@ pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
     let plan = verify_plan(&opts);
     let mode = if fast { "fast" } else { "full" };
     eprintln!("verify（{mode}）：{} 步", plan.len());
-    for (i, step) in plan.iter().enumerate() {
-        // 每步开始打 label——build/clippy/nextest 各数分钟，让操作者实时知道卡在哪步。
-        eprintln!("verify: [{}/{}] {}", i + 1, plan.len(), step.label);
-        run_one(step, &opts, &root)?;
-    }
+    // 每步开始打 label——build/clippy/nextest 各数分钟，让操作者实时知道卡在哪步。
+    run_labeled_plan("verify", &plan, &opts, &root)?;
     eprintln!("verify（{mode}）：全部通过");
     Ok(())
 }
 
-/// ci 入口（issue #1132 CI lane 超集）：按 [`ci_plan`] 顺序跑每步，fail-fast。CI 由 azure-pipelines.yml
+/// ci 入口（issue #1132 CI lane 超集）：按 [`ci_plan`] 顺序跑每步，fail-fast。CI 由 GitHub Actions
 /// 调 `cargo xtask ci`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01）；本地全工具机器亦可 `make ci`。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
 pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
@@ -1051,16 +1085,13 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
     let root = workspace_root()?;
     let plan = ci_plan();
     eprintln!("ci：{} 步（CI lane 超集）", plan.len());
-    for (i, step) in plan.iter().enumerate() {
-        eprintln!("ci: [{}/{}] {}", i + 1, plan.len(), step.label);
-        run_one(step, &opts, &root)?;
-    }
+    run_labeled_plan("ci", &plan, &opts, &root)?;
     eprintln!("ci：全部通过");
     Ok(())
 }
 
 /// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
-/// azure-pipelines.yml 每日 cron 调 `cargo xtask audit`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01 同族）。
+/// GitHub Actions schedule 调 `cargo xtask audit`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01 同族）。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
 pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -1070,10 +1101,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let root = workspace_root()?;
     let plan = audit_plan();
     eprintln!("audit：{} 步（供应链漏洞刷新 lane）", plan.len());
-    for (i, step) in plan.iter().enumerate() {
-        eprintln!("audit: [{}/{}] {}", i + 1, plan.len(), step.label);
-        run_one(step, &opts, &root)?;
-    }
+    run_labeled_plan("audit", &plan, &opts, &root)?;
     eprintln!("audit：全部通过");
     Ok(())
 }
@@ -1232,7 +1260,16 @@ mod tests {
     #[test]
     fn run_step_nonzero_is_err() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        assert!(run_step("redcase", &["zzz-not-a-cargo-subcommand"], &[], &root).is_err());
+        assert!(
+            run_step(
+                "verify",
+                "redcase",
+                &["zzz-not-a-cargo-subcommand"],
+                &[],
+                &root
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -1240,8 +1277,21 @@ mod tests {
     #[test]
     fn run_step_success_is_ok() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        assert!(run_step("greencase", &["--version"], &[], &root).is_ok());
+        assert!(run_step("verify", "greencase", &["--version"], &[], &root).is_ok());
         Ok(())
+    }
+
+    #[test]
+    fn run_labeled_plan_executes_small_plan_with_lane_prefix() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let plan = [Step {
+            label: "cargo-version",
+            args: &["--version"],
+            kind: StepKind::CargoBuiltin,
+            env: &[],
+            needs_compile: false,
+        }];
+        run_labeled_plan("ci", &plan, &opts(false, false), &root)
     }
 
     /// dylint 步必须带 `DYLINT_RUSTFLAGS=-D warnings`——否则默认 `Warn` 的 `rss_domain_no_serialize`
@@ -1271,7 +1321,7 @@ mod tests {
     fn run_one_missing_tool_fail_closed_is_err() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let step = missing_tool_step();
-        assert!(run_one(&step, &opts(false, false), &root).is_err());
+        assert!(run_one("verify", &step, &opts(false, false), &root).is_err());
         Ok(())
     }
 
@@ -1280,7 +1330,7 @@ mod tests {
     fn run_one_missing_tool_skipwarn_is_ok() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let step = missing_tool_step();
-        assert!(run_one(&step, &opts(false, true), &root).is_ok());
+        assert!(run_one("verify", &step, &opts(false, true), &root).is_ok());
         Ok(())
     }
 
@@ -1543,7 +1593,15 @@ mod tests {
     #[test]
     fn run_one_toolgated_missing_fail_closed_is_err() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        assert!(run_one(&missing_toolgated_step(), &opts(false, false), &root).is_err());
+        assert!(
+            run_one(
+                "verify",
+                &missing_toolgated_step(),
+                &opts(false, false),
+                &root
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -1551,7 +1609,15 @@ mod tests {
     #[test]
     fn run_one_toolgated_missing_skipwarn_is_ok() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        assert!(run_one(&missing_toolgated_step(), &opts(false, true), &root).is_ok());
+        assert!(
+            run_one(
+                "verify",
+                &missing_toolgated_step(),
+                &opts(false, true),
+                &root
+            )
+            .is_ok()
+        );
         Ok(())
     }
 
@@ -1571,31 +1637,17 @@ mod tests {
         }
     }
 
-    // ---- CI-PIPELINE-DELEGATE-01：azure-pipelines.yml 委托 `cargo xtask ci`、不逐条重列门 ----
+    // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托 `cargo xtask ci`、不逐条重列门 ----
 
-    /// 委托豁免的 cargo 子命令**正向白名单**：`xtask`（alias 形）+ `run`（CI 锁定入口 `cargo run --locked
-    /// -p xtask -- ci`——run 跑 xtask 而非门）+ 工具安装（install/binstall）。除此之外任何裸 `cargo <sub>`
+    /// 委托豁免的 cargo 子命令**正向白名单**：`xtask`（alias 形）+ 工具安装（install/binstall）。`cargo run`
+    /// 不在这里泛放行，只能经完整 `cargo run --locked -p xtask -- <lane>` 结构化匹配通过。除此之外任何裸 `cargo <sub>`
     /// 都视作门 run（build/clippy/nextest/deny/dylint/llvm-cov/public-api/fmt 及**任何未来新门**）——正向
-    /// 白名单无枚举盲区（review #206 A1/A3 黑名单漏 build/llvm-cov/public-api；codex F2 入口改 --locked run
-    /// 形需放行 run）。
-    const DELEGATION_CARGO_SUBCOMMANDS: &[&str] = &["xtask", "run", "install", "binstall"];
+    /// 白名单无枚举盲区（review #206 A1/A3 黑名单漏 build/llvm-cov/public-api）。
+    const DELEGATION_CARGO_SUBCOMMANDS: &[&str] = &["xtask", "install", "binstall"];
 
     /// xtask ci 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形（本地/文档）与 CI 锁定入口
     /// 形（`--locked` 锁 xtask 子树依赖解析，与内部 `--workspace --locked` 门共同锁全链，codex F2）。
     const XTASK_CI_FORMS: &[&str] = &["cargo xtask ci", "cargo run --locked -p xtask -- ci"];
-
-    /// 扫 YAML **命令文本**里每个 `cargo <token>`（run 形带空格；连字符的 `cargo-nextest` 等 arg 不匹配），
-    /// 返回紧跟的子命令 token。先按行剥 YAML 注释（`#` 起）——散文注释里的 `cargo …`（如「cargo 默认
-    /// target …」）不计入门 run 判定。
-    fn cargo_subcommands(yaml: &str) -> Vec<&str> {
-        yaml.lines()
-            .flat_map(|line| {
-                let code = line.split('#').next().unwrap_or("");
-                code.match_indices("cargo ")
-                    .filter_map(|(i, _)| code[i + "cargo ".len()..].split_whitespace().next())
-            })
-            .collect()
-    }
 
     /// 剥 `#` 注释 + 去缩进后的 YAML「代码行」（注释行 → 空串）。委托守卫据此**绑定结构**而非裸全文匹配——
     /// 散文注释（已剥）与 displayName/name 等字符串字段值都不能满足守卫（fail-closed，对标 codex F1：
@@ -1606,24 +1658,170 @@ mod tests {
             .collect()
     }
 
-    /// 单条已剥注释 / 去缩进的 code 行是否承载某委托命令形（**真实 script 命令**，非 displayName / name 等
-    /// 字符串字段）。命令形态：`script: |` block 的命令体行（trimmed 以委托形起头），或 inline `- script: <cmd>`
-    /// （`script:` 冒号后含委托形）。displayName/name 行的引号内文本既不以委托形起头、也无 `script:` 前缀 ⇒ 被
+    /// 保留缩进的 YAML code 行，用于把 `pull_request:` / `push:` 与其 `branches:` 子块结构绑定。
+    fn yaml_indented_code_lines(yaml: &str) -> Vec<(usize, &str)> {
+        yaml.lines()
+            .filter_map(|line| {
+                let code = line.split('#').next().unwrap_or("").trim_end();
+                let text = code.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                let indent = code.len() - code.trim_start().len();
+                Some((indent, text))
+            })
+            .collect()
+    }
+
+    fn yaml_scalar_eq(raw: &str, expected: &str) -> bool {
+        let scalar = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+        scalar == expected
+    }
+
+    fn yaml_value_contains_scalar(raw: &str, expected: &str) -> bool {
+        let value = raw.trim();
+        if value.is_empty() {
+            return false;
+        }
+        if let Some(list) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            return list.split(',').any(|item| yaml_scalar_eq(item, expected));
+        }
+        yaml_scalar_eq(value, expected)
+    }
+
+    /// 只承认顶层 `on:` 下的直接 event 键，避免 jobs/env/name 中的同名字段凑出假阳性。
+    fn workflow_has_top_level_on_event(yaml: &str, event: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let event_key = format!("{event}:");
+        for (idx, (on_indent, text)) in lines.iter().enumerate() {
+            if *on_indent != 0 || *text != "on:" {
+                continue;
+            }
+            for (indent, child) in lines.iter().skip(idx + 1) {
+                if *indent <= *on_indent {
+                    break;
+                }
+                if *indent == *on_indent + 2 && *child == event_key {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// GitHub Actions event 必须绑定 develop 分支，而不是只有裸 `pull_request:` / `push:`。
+    fn workflow_event_has_develop_branch(yaml: &str, event: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let event_key = format!("{event}:");
+        for (on_idx, (on_indent, text)) in lines.iter().enumerate() {
+            if *on_indent != 0 || *text != "on:" {
+                continue;
+            }
+            let mut event_idx = None;
+            let mut i = on_idx + 1;
+            while i < lines.len() {
+                let (indent, child) = lines[i];
+                if indent <= *on_indent {
+                    break;
+                }
+                if indent == *on_indent + 2 && child == event_key {
+                    event_idx = Some((i, indent));
+                    break;
+                }
+                i += 1;
+            }
+
+            let Some((idx, event_indent)) = event_idx else {
+                continue;
+            };
+            let mut i = idx + 1;
+            while i < lines.len() {
+                let (indent, child) = lines[i];
+                if indent <= event_indent {
+                    break;
+                }
+                if let Some(rest) = child.strip_prefix("branches:") {
+                    if yaml_value_contains_scalar(rest, "develop") {
+                        return true;
+                    }
+                    let branch_indent = indent;
+                    let mut j = i + 1;
+                    while j < lines.len() {
+                        let (nested_indent, nested) = lines[j];
+                        if nested_indent <= branch_indent {
+                            break;
+                        }
+                        if nested_indent == branch_indent + 2
+                            && nested
+                                .strip_prefix("- ")
+                                .map(|item| yaml_scalar_eq(item, "develop"))
+                                == Some(true)
+                        {
+                            return true;
+                        }
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+        false
+    }
+
+    fn workflow_pr_push_triggers_develop(yaml: &str) -> bool {
+        workflow_event_has_develop_branch(yaml, "pull_request")
+            && workflow_event_has_develop_branch(yaml, "push")
+    }
+
+    /// 单条已剥注释 / 去缩进的 code 行是否承载某委托命令形（**真实 run/script 命令**，非 displayName / name 等
+    /// 字符串字段）。命令形态：`run: |` / `script: |` block 的命令体行（trimmed 以委托形起头），或 inline
+    /// `- run: <cmd>` / `- script: <cmd>`（冒号后含委托形）。displayName/name 行的引号内文本既不以委托形起头、也无命令键前缀 ⇒ 被
     /// 排除（结构绑定，非裸 `contains`）。
     fn line_bears_form(raw: &str, forms: &[&str]) -> bool {
         let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
-        let is_script = line.starts_with("script:");
-        let cmd = line.strip_prefix("script:").map(str::trim).unwrap_or(line);
+        let is_command = line.starts_with("script:") || line.starts_with("run:");
+        let cmd = line
+            .strip_prefix("script:")
+            .or_else(|| line.strip_prefix("run:"))
+            .map(str::trim)
+            .unwrap_or(line);
         forms
             .iter()
-            .any(|f| cmd.starts_with(f) || (is_script && cmd.contains(f)))
+            .any(|f| cmd.starts_with(f) || (is_command && cmd.contains(f)))
     }
 
-    /// 某委托命令形是否出现在**真实 script 命令**里（而非注释 / displayName 等字符串字段）。
+    /// 某委托命令形是否出现在**真实 run/script 命令**里（而非注释 / displayName 等字符串字段）。
     fn form_in_script(yaml: &str, forms: &[&str]) -> bool {
         yaml_code_lines(yaml)
             .iter()
             .any(|&raw| line_bears_form(raw, forms))
+    }
+
+    fn cargo_commands_are_delegation_safe(yaml: &str, xtask_forms: &[&str]) -> bool {
+        yaml_code_lines(yaml).iter().all(|raw| {
+            let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
+            let is_command_key = line.starts_with("script:") || line.starts_with("run:");
+            let is_command_body = line.starts_with("cargo ");
+            if !is_command_key && !is_command_body {
+                return true;
+            }
+            let code = line
+                .strip_prefix("script:")
+                .or_else(|| line.strip_prefix("run:"))
+                .map(str::trim)
+                .unwrap_or(line);
+            code.match_indices("cargo ").all(|(i, _)| {
+                let command = code[i..].trim_start();
+                let sub = command["cargo ".len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if sub == "run" {
+                    return xtask_forms.iter().any(|form| command.starts_with(form));
+                }
+                DELEGATION_CARGO_SUBCOMMANDS.contains(&sub)
+            })
+        })
     }
 
     /// 把去注释 / 去缩进的 code 行按 step 边界（`- ` 起头）切块——每块 = 一个 step 的全部字段行（首个 `- ` 前的
@@ -1652,51 +1850,76 @@ mod tests {
         })
     }
 
-    /// 委托谓词（正向白名单）：YAML 的**真实 script 命令**含 xtask ci 规范形之一（经 [`form_in_script`] 结构
-    /// 绑定，不被注释 / displayName 误满足；codex F1 同类加固），且每个 `cargo <sub>` 的 sub ∈
-    /// [`DELEGATION_CARGO_SUBCOMMANDS`]——即除安装/跑 xtask 外不逐条重列任何门。
+    /// 委托谓词（正向白名单）：YAML 的 PR/push 触发器绑定 develop，**真实 script 命令**含 xtask ci 规范
+    /// 形之一（经 [`form_in_script`] 结构绑定，不被注释 / displayName 误满足），且每个 `cargo <sub>` 都是
+    /// 安装/xtask alias 或完整 xtask run 委托形。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
-        form_in_script(yaml, XTASK_CI_FORMS)
-            && cargo_subcommands(yaml)
-                .iter()
-                .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
+        workflow_pr_push_triggers_develop(yaml)
+            && form_in_script(yaml, XTASK_CI_FORMS)
+            && cargo_commands_are_delegation_safe(yaml, XTASK_CI_FORMS)
+    }
+
+    /// 被 workflow 引用的本地 composite action 也是 CI 执行面。setup action 只能安装工具，不得把 build /
+    /// clippy / nextest / coverage / public-api 等门命令搬进去绕过 workflow 委托守卫。
+    fn setup_action_contains_only_setup_cargo_commands(yaml: &str) -> bool {
+        cargo_commands_are_delegation_safe(yaml, &[])
     }
 
     /// 谓词绿/红例（anti-vacuity）：委托=真；不委托或重列**任一**门（含黑名单曾漏的 build/llvm-cov/
     /// public-api）=假。
     #[test]
     fn pipeline_delegate_predicate_green_and_red() {
-        assert!(pipeline_delegates_to_xtask_ci(
-            "steps:\n  - script: cargo xtask ci\n"
-        ));
+        let triggers =
+            "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n";
+        assert!(pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo xtask ci\n"
+        )));
         // 绿：安装形（install/binstall）豁免，连字符 arg 不误判。
-        assert!(pipeline_delegates_to_xtask_ci(
-            "steps:\n  - script: cargo install cargo-binstall\n  - script: cargo binstall -y cargo-nextest cargo-deny\n  - script: cargo xtask ci\n"
-        ));
+        assert!(pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo install cargo-binstall\n  - script: cargo binstall -y cargo-nextest cargo-deny\n  - script: cargo xtask ci\n"
+        )));
         // 绿：散文注释里的 `cargo <词>`（如「cargo 默认 target …」/「cargo build 历史」）不计入门 run 判定。
-        assert!(pipeline_delegates_to_xtask_ci(
-            "  # cargo 默认 target 在 repo 根；曾用 cargo build 直跑\nsteps:\n  - script: cargo xtask ci\n"
-        ));
+        assert!(pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}  # cargo 默认 target 在 repo 根；曾用 cargo build 直跑\nsteps:\n  - script: cargo xtask ci\n"
+        )));
         // 绿：CI 锁定入口形 `cargo run --locked -p xtask -- ci`（run 跑 xtask 非门）+ 安装形（codex F2）。
-        assert!(pipeline_delegates_to_xtask_ci(
-            "steps:\n  - script: cargo install cargo-binstall@1.20.1 --locked\n  - script: cargo run --locked -p xtask -- ci\n"
+        assert!(pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo install cargo-binstall@1.20.1 --locked\n  - script: cargo run --locked -p xtask -- ci\n"
+        )));
+        // 红：PR/push 触发未绑定 develop。
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "on:\n  pull_request:\n  push:\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
+        ));
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "on:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
+        ));
+        // 红：分支名必须精确等于 develop，不能用 substring 命中 development / not-develop。
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "on:\n  pull_request:\n    branches: [development]\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
+        ));
+        assert!(!pipeline_delegates_to_xtask_ci(
+            "on:\n  pull_request:\n    branches:\n      - not-develop\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
         ));
         // 红：run 形入口但仍重列门（build）——run 放行不削弱门捕获。
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo build --workspace\n"
-        ));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo build --workspace\n"
+        )));
+        // 红：`cargo run` 不是 xtask 委托形。
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo run -p server\n"
+        )));
         // 红：未委托。
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "steps:\n  - script: cargo clippy --workspace\n"
-        ));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo clippy --workspace\n"
+        )));
         // 红（codex F1）：xtask ci 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足（安装步通过白名单但 form_in_script 假）。
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "# cargo xtask ci\nsteps:\n  - script: cargo install cargo-binstall\n"
-        ));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}# cargo xtask ci\nsteps:\n  - script: cargo install cargo-binstall\n"
+        )));
         // 红（codex F1）：xtask ci 形仅在 **displayName**（字符串字段值）、无真实 script 委托 → 不满足。
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo xtask ci'\n"
-        ));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo xtask ci'\n"
+        )));
         // 红：调了 xtask ci 但仍重列门——逐一覆盖（含黑名单曾漏的 build / llvm-cov / public-api / fmt）。
         for gate in [
             "cargo clippy -- -D warnings",
@@ -1708,7 +1931,8 @@ mod tests {
             "cargo llvm-cov nextest",
             "cargo public-api --check",
         ] {
-            let yaml = format!("steps:\n  - script: cargo xtask ci\n  - script: {gate}\n");
+            let yaml =
+                format!("{triggers}steps:\n  - script: cargo xtask ci\n  - script: {gate}\n");
             assert!(
                 !pipeline_delegates_to_xtask_ci(&yaml),
                 "重列门 `{gate}` 应被谓词捕获"
@@ -1716,15 +1940,122 @@ mod tests {
         }
     }
 
-    /// 真实 committed 文件：azure-pipelines.yml 委托 `cargo xtask ci`、不重列门（INVARIANT CI-PIPELINE-DELEGATE-01）。
     #[test]
-    fn azure_pipeline_delegates_to_xtask_ci() -> anyhow::Result<()> {
-        let path = workspace_root()?.join("azure-pipelines.yml");
+    fn setup_action_delegate_predicate_green_and_red() {
+        let green = "runs:\n  using: composite\n  steps:\n    - run: cargo install cargo-binstall@1.20.1 --locked\n    - run: cargo binstall -y --locked cargo-nextest@0.9.137\n";
+        assert!(setup_action_contains_only_setup_cargo_commands(green));
+        assert!(!setup_action_contains_only_setup_cargo_commands(
+            "runs:\n  using: composite\n  steps:\n    - run: cargo nextest run --workspace\n"
+        ));
+        assert!(!setup_action_contains_only_setup_cargo_commands(
+            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p server\n"
+        ));
+    }
+
+    /// 真实 committed 文件：GitHub CI workflow 委托 `cargo xtask ci`、不重列门；被引用的本地 setup action
+    /// 也只能安装工具，不能承载门命令（INVARIANT CI-PIPELINE-DELEGATE-01）。
+    #[test]
+    fn github_ci_workflow_delegates_to_xtask_ci() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             pipeline_delegates_to_xtask_ci(&yaml),
-            "azure-pipelines.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
+            ".github/workflows/ci.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
+        );
+        let action_path = workspace_root()?
+            .join(".github")
+            .join("actions")
+            .join("setup-rss-ci")
+            .join("action.yml");
+        let action_yaml = std::fs::read_to_string(&action_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", action_path.display()))?;
+        assert!(
+            setup_action_contains_only_setup_cargo_commands(&action_yaml),
+            ".github/actions/setup-rss-ci/action.yml 只能包含 cargo install/binstall 类 setup 命令，不得内联门命令"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn github_setup_action_cache_excludes_cargo_home_root() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("actions")
+            .join("setup-rss-ci")
+            .join("action.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            yaml.contains("~/.cargo/registry") && yaml.contains("~/.cargo/git"),
+            "setup action cache 应只缓存 cargo registry/git 与 target"
+        );
+        assert!(
+            !yaml.lines().any(|line| line.trim() == "~/.cargo"),
+            "setup action 不得缓存整个 ~/.cargo，避免缓存 ~/.cargo/bin、.crates*.toml 或未来凭据"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ci_tool_versions_are_pinned_in_docs_and_workflows() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let read = |rel: &str| -> anyhow::Result<String> {
+            let path = root.join(rel);
+            std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))
+        };
+        let ci_surface = [
+            ".github/actions/setup-rss-ci/action.yml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/integration.yml",
+            ".github/workflows/audit.yml",
+        ]
+        .iter()
+        .map(|rel| read(rel))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .join("\n");
+        for spec in CI_TOOL_SPECS {
+            assert!(
+                ci_surface.contains(spec),
+                "GitHub CI surface 须包含钉版工具 `{spec}`"
+            );
+        }
+
+        let readme = read("README.md")?;
+        for spec in CI_TOOL_SPECS
+            .iter()
+            .copied()
+            .filter(|spec| !spec.starts_with("cargo-binstall"))
+        {
+            assert!(readme.contains(spec), "README 治理工具须钉版 `{spec}`");
+        }
+        Ok(())
+    }
+
+    /// GitHub CI 安装 pinned nightly 时，每个 component 必须显式带 `--component`，否则 rustup 会把后续
+    /// component 名误解析成 toolchain 名（GitHub runner 上 fail-fast）。
+    #[test]
+    fn github_ci_nightly_components_are_explicit() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("actions")
+            .join("setup-rss-ci")
+            .join("action.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            yaml.contains(
+                "rustup toolchain install \"${RSS_SETUP_NIGHTLY}\" --profile minimal --component rustc-dev --component llvm-tools-preview --component rust-src"
+            ),
+            "pinned nightly install 须为每个 component 显式写 `--component`"
+        );
+        assert!(
+            !yaml.contains("--component rustc-dev llvm-tools-preview rust-src"),
+            "不得把多个 component 裸接在单个 `--component` 后"
         );
         Ok(())
     }
@@ -1735,90 +2066,83 @@ mod tests {
     const XTASK_AUDIT_FORMS: &[&str] =
         &["cargo xtask audit", "cargo run --locked -p xtask -- audit"];
 
-    /// 调度 lane 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。YAML 须同时
-    /// 满足——① 顶层 `schedules:` 键（去注释后整行 == `schedules:`，非字符串值）；② `always: true` 映射项
-    /// （无代码变更也跑，否则捕不到「未变依赖」新披露 CVE，是定时刷新核心用途）；③ audit 委托形在**真实 script
-    /// 命令**（[`form_in_script`]，非 displayName / 注释；门逻辑单源在 xtask，CI-PIPELINE-DELEGATE-01 同族）；
-    /// ④ Build.Reason **互斥分流**两 `condition:` 都在（`eq(...,'Schedule')` 给 audit lane、`ne(...,'Schedule')` 给
-    /// ci lane）——缺任一则两步可能都跑或都不跑；⑤ 每个 `cargo <sub>` ∈ 委托白名单。
-    fn pipeline_has_scheduled_audit_lane(yaml: &str) -> bool {
-        let code = yaml_code_lines(yaml);
-        let line_is = |s: &str| code.contains(&s);
-        let condition_has = |needle: &str| {
-            code.iter()
-                .any(|l| l.starts_with("condition:") && l.contains(needle))
-        };
-        line_is("schedules:")
-            && line_is("always: true")
+    /// GitHub audit workflow 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。
+    /// YAML 须同时满足——① 顶层 `schedule:` 键（GitHub Actions 定时触发）；② `workflow_dispatch:` 手动 backstop；
+    /// ③ audit 委托形在**真实 script 命令**；④ 每个 `cargo run` 都是完整 xtask audit 委托形，其他 cargo 子命令仅限安装。
+    fn github_audit_workflow_has_scheduled_lane(yaml: &str) -> bool {
+        workflow_has_top_level_on_event(yaml, "schedule")
+            && workflow_has_top_level_on_event(yaml, "workflow_dispatch")
             && form_in_script(yaml, XTASK_AUDIT_FORMS)
-            && condition_has("eq(variables['Build.Reason'], 'Schedule')")
-            && condition_has("ne(variables['Build.Reason'], 'Schedule')")
-            && cargo_subcommands(yaml)
-                .iter()
-                .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
+            && cargo_commands_are_delegation_safe(yaml, XTASK_AUDIT_FORMS)
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
     #[test]
     fn scheduled_audit_lane_predicate_green_and_red() {
-        let green = "schedules:\n  - cron: \"0 6 * * *\"\n    always: true\nsteps:\n  - script: cargo install cargo-binstall\n  - script: cargo run --locked -p xtask -- ci\n    condition: ne(variables['Build.Reason'], 'Schedule')\n  - script: cargo run --locked -p xtask -- audit\n    condition: eq(variables['Build.Reason'], 'Schedule')\n";
+        let green = "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\njobs:\n  audit:\n    steps:\n      - run: cargo install cargo-binstall\n      - run: cargo run --locked -p xtask -- audit\n";
         assert!(
-            pipeline_has_scheduled_audit_lane(green),
+            github_audit_workflow_has_scheduled_lane(green),
             "完整定时 lane 应为真"
         );
         // 红：逐一抽掉一个必需子句。
         assert!(
-            !pipeline_has_scheduled_audit_lane(&green.replace("schedules:", "trigger:")),
-            "缺 schedules 块"
+            !github_audit_workflow_has_scheduled_lane(&green.replace("schedule:", "x_schedule:")),
+            "缺 schedule 块"
         );
         assert!(
-            !pipeline_has_scheduled_audit_lane(&green.replace("    always: true\n", "")),
-            "缺 always:true（无代码变更不跑、捕不到未变依赖新 CVE）"
-        );
-        assert!(
-            !pipeline_has_scheduled_audit_lane(
-                &green.replace("ne(variables['Build.Reason'], 'Schedule')", "always()")
+            !github_audit_workflow_has_scheduled_lane(
+                &green.replace("workflow_dispatch:", "x_workflow_dispatch:")
             ),
-            "缺 ne 分流条件（ci/audit 可能都跑或都不跑）"
+            "缺 workflow_dispatch backstop"
         );
         assert!(
-            !pipeline_has_scheduled_audit_lane(
+            !github_audit_workflow_has_scheduled_lane(
                 &green.replace("cargo run --locked -p xtask -- audit", "cargo xtask ci")
             ),
             "缺 audit 委托形"
         );
         // 红：内联 `cargo audit` 门命令（不委托 xtask）——门逻辑须单源在 xtask。
         assert!(
-            !pipeline_has_scheduled_audit_lane(&format!("{green}  - script: cargo audit\n")),
+            !github_audit_workflow_has_scheduled_lane(&format!("{green}  - script: cargo audit\n")),
             "内联 cargo audit 门命令"
         );
         // 红（codex F1 核心）：全部关键字仅在**注释**里、无真实结构 → 结构绑定守卫不满足
-        //（旧裸 `yaml.contains` 谓词会误判为真）。安装步使 cargo_subcommands 通过，隔离出结构断言失败。
+        //（旧裸 `yaml.contains` 谓词会误判为真）。安装步使 cargo 命令白名单通过，隔离出结构断言失败。
         assert!(
-            !pipeline_has_scheduled_audit_lane(
-                "# schedules:\n# always: true\n# condition: eq(variables['Build.Reason'], 'Schedule')\n# condition: ne(variables['Build.Reason'], 'Schedule')\n# cargo run --locked -p xtask -- audit\nsteps:\n  - script: cargo install cargo-binstall\n"
+            !github_audit_workflow_has_scheduled_lane(
+                "# schedule:\n# workflow_dispatch:\n# cargo run --locked -p xtask -- audit\nsteps:\n  - run: cargo install cargo-binstall\n"
             ),
             "关键字仅在注释里不应满足守卫（fail-closed）"
         );
+        // 红：`schedule:` / `workflow_dispatch:` 不在顶层 `on:` 下，不能凑出触发器。
+        assert!(
+            !github_audit_workflow_has_scheduled_lane(
+                "env:\n  schedule: true\njobs:\n  audit:\n    workflow_dispatch: true\n    steps:\n      - run: cargo run --locked -p xtask -- audit\n"
+            ),
+            "触发器键不在顶层 on 块下不应满足守卫（fail-closed）"
+        );
         // 红（codex F1 核心）：audit 委托形仅在 **displayName**（字符串字段值）、无真实 audit script → 不满足。
         assert!(
-            !pipeline_has_scheduled_audit_lane(
-                "schedules:\n  - cron: \"0 6 * * *\"\n    always: true\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: ne(variables['Build.Reason'], 'Schedule')\n  - script: cargo install cargo-binstall\n    displayName: 'cargo run --locked -p xtask -- audit'\n    condition: eq(variables['Build.Reason'], 'Schedule')\n"
+            !github_audit_workflow_has_scheduled_lane(
+                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: cargo install cargo-binstall\n    name: 'cargo run --locked -p xtask -- audit'\n"
             ),
             "audit 形仅在 displayName 不应满足守卫（fail-closed）"
         );
     }
 
-    /// 真实 committed 文件：azure-pipelines.yml 含每日定时刷新 lane，经 `cargo xtask audit` 委托
+    /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 `cargo xtask audit` 委托
     /// （issue #1133：捕获「未变依赖」新披露 CVE；门逻辑单源在 xtask，不内联）。
     #[test]
-    fn azure_pipeline_has_scheduled_audit_lane() -> anyhow::Result<()> {
-        let path = workspace_root()?.join("azure-pipelines.yml");
+    fn github_audit_workflow_has_scheduled_audit_lane() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("audit.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
-            pipeline_has_scheduled_audit_lane(&yaml),
-            "azure-pipelines.yml 须含 `schedules:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
+            github_audit_workflow_has_scheduled_lane(&yaml),
+            ".github/workflows/audit.yml 须含 `schedule:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
         );
         Ok(())
     }
@@ -1831,111 +2155,87 @@ mod tests {
         "cargo run --locked -p xtask -- integration",
     ];
 
-    /// 集成 lane 谓词（**结构绑定 + step 级绑定**，fail-closed；同 audit lane 范式 + codex F1 加固）。YAML 须同时
-    /// 满足——① **同一 step 块**内既承载 integration 委托形（真实 script，非 displayName / 注释）**又**带
-    /// `condition: and(succeeded(), ...ne(...,'Schedule'))`（[`yaml_step_blocks`] 把字段绑定到承载命令形的那个
-    /// step；门逻辑单源在 xtask，CI-PIPELINE-DELEGATE-01 同族）——集成容器重，须 ① PR-gate 跑在 PR/push、不在每日
-    /// audit Schedule 跑（`ne(...)`），**且** ② ci 失败后不跑（`succeeded()`）；② 每个 `cargo <sub>` ∈ 委托白名单（不内联门）。
-    ///
-    /// **review #281 F1（轮1）**：旧实现的 `condition_has` 扫全文任意 `condition:` 行，ci 步的 `ne(...)` 会令
-    /// 「integration 步本身缺 condition」假阳性通过；改为 step 级绑定——只有承载 integration 形的那个 step 自带 PR-gate 才算数。
-    /// **review #281 F1（轮2）**：守卫须同锁 `succeeded()`——Azure 显式 `condition` 顶替默认隐式 `succeeded()`，缺它
-    /// 则 `cargo xtask ci` 失败后集成步仍拉容器跑（azure-pipelines.yml 已写 `and(succeeded(), ne(...))`，守卫须把这个
-    /// 不变式锁住，否则回归到裸 `ne(...)` 不被捕获）。
-    fn pipeline_has_integration_lane(yaml: &str) -> bool {
-        let pr_gated_integration_step = yaml_step_blocks(yaml).iter().any(|block| {
-            let bears_form = block
-                .iter()
-                .any(|&raw| line_bears_form(raw, XTASK_INTEGRATION_FORMS));
-            let pr_gated = block.iter().any(|l| {
-                l.starts_with("condition:")
-                    && l.contains("succeeded()")
-                    && l.contains("ne(variables['Build.Reason'], 'Schedule')")
-            });
-            bears_form && pr_gated
-        });
-        pr_gated_integration_step
-            && cargo_subcommands(yaml)
-                .iter()
-                .all(|sub| DELEGATION_CARGO_SUBCOMMANDS.contains(sub))
+    /// GitHub integration workflow 谓词（**结构绑定**，fail-closed）。YAML 须同时满足——① `pull_request:` +
+    /// `push:` 触发且都绑定 develop；② integration 委托形在真实 run/script 命令；③ 每个 `cargo run`
+    /// 都是完整 xtask integration 委托形，其他 cargo 子命令仅限安装（不内联门）。
+    fn github_integration_workflow_has_lane(yaml: &str) -> bool {
+        workflow_pr_push_triggers_develop(yaml)
+            && form_in_script(yaml, XTASK_INTEGRATION_FORMS)
+            && cargo_commands_are_delegation_safe(yaml, XTASK_INTEGRATION_FORMS)
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
     #[test]
     fn integration_lane_predicate_green_and_red() {
-        let green = "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n  - script: cargo run --locked -p xtask -- integration\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n";
-        assert!(pipeline_has_integration_lane(green), "完整集成 lane 应为真");
+        let green = "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- integration\n";
+        assert!(
+            github_integration_workflow_has_lane(green),
+            "完整集成 lane 应为真"
+        );
         // 红：缺 integration 委托形（只剩 ci 步）。
         assert!(
-            !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n"
+            !github_integration_workflow_has_lane(
+                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- ci\n"
             ),
             "缺 integration 委托形"
         );
-        // 红：缺 PR-gated ne 条件（集成步会在每日 Schedule 也跑）。
+        // 红：缺 pull_request 触发。
         assert!(
-            !pipeline_has_integration_lane(
-                &green.replace("ne(variables['Build.Reason'], 'Schedule')", "always()")
+            !github_integration_workflow_has_lane(
+                &green.replace("pull_request:", "x_pull_request:")
             ),
-            "缺 ne 分流条件"
+            "缺 pull_request 触发"
         );
-        // 红（codex review #281 第2轮 F1）：integration 步 condition 有 ne 但缺 `succeeded()`——显式 condition 顶替
-        // Azure 隐式 succeeded()，缺它则 ci 失败后集成步仍跑；守卫须锁 succeeded()（与 azure-pipelines.yml 一致）。
         assert!(
-            !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo run --locked -p xtask -- integration\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+            !github_integration_workflow_has_lane(
+                &green.replace("branches: [develop]", "branches: [main]")
             ),
-            "integration 步 condition 缺 succeeded()（ci 失败后仍会跑）"
-        );
-        // 红（review #281 F1 轮1）：integration 步有委托形但**本步**无 condition（ci 步仍有 condition）→ step 级绑定不满足
-        //（旧 condition_has 扫全文会被 ci 步的 ne 假阳性顶替）。
-        assert!(
-            !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo run --locked -p xtask -- ci\n    condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))\n  - script: cargo run --locked -p xtask -- integration\n"
-            ),
-            "integration 步缺自身 condition（ci 步的 condition 不应顶替）"
+            "触发器未绑定 develop"
         );
         // 红（codex F1）：integration 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足。
         assert!(
-            !pipeline_has_integration_lane(
-                "# cargo run --locked -p xtask -- integration\nsteps:\n  - script: cargo install cargo-binstall\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+            !github_integration_workflow_has_lane(
+                "# cargo run --locked -p xtask -- integration\non:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\nsteps:\n  - run: cargo install cargo-binstall\n"
             ),
             "integration 形仅在注释不应满足守卫（fail-closed）"
         );
         // 红（codex F1）：integration 形仅在 **displayName**（字符串字段值）、无真实 script → 不满足。
         assert!(
-            !pipeline_has_integration_lane(
-                "steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo run --locked -p xtask -- integration'\n    condition: ne(variables['Build.Reason'], 'Schedule')\n"
+            !github_integration_workflow_has_lane(
+                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\nsteps:\n  - run: cargo install cargo-binstall\n    name: 'cargo run --locked -p xtask -- integration'\n"
             ),
             "integration 形仅在 displayName 不应满足守卫（fail-closed）"
         );
         // 红：内联集成门命令（`cargo nextest`，不委托 xtask）——门逻辑须单源在 xtask。
         assert!(
-            !pipeline_has_integration_lane(&format!(
+            !github_integration_workflow_has_lane(&format!(
                 "{green}  - script: cargo nextest run --features integration\n"
             )),
             "内联 nextest 集成门命令"
         );
     }
 
-    /// 真实 committed 文件：azure-pipelines.yml 含集成测试 lane，经 `cargo xtask integration` 委托
+    /// 真实 committed 文件：GitHub integration workflow 含集成测试 lane，经 `cargo xtask integration` 委托
     /// （issue #1145 第②项：真集成测试入 PR lane；门逻辑单源在 xtask，不内联）。
     #[test]
-    fn azure_pipeline_has_integration_lane() -> anyhow::Result<()> {
-        let path = workspace_root()?.join("azure-pipelines.yml");
+    fn github_integration_workflow_has_integration_lane() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("integration.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
-            pipeline_has_integration_lane(&yaml),
-            "azure-pipelines.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
+            github_integration_workflow_has_lane(&yaml),
+            ".github/workflows/integration.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
         );
         Ok(())
     }
 
     // ---- SAST / CodeQL workflow 守卫（issue #1145 第⑤项；INVARIANT SAST-CODEQL-PRESENT-01）----
 
-    /// CodeQL workflow 必备要素（**结构绑定**，content-scan，Medium）。RSS 主 forge 为 Azure，仓库每日镜像同步到
-    /// GitHub，SAST 跑在 GitHub 侧——守卫须锁住「SAST 真的会随 push/定时跑 + 真的扫 Rust + 真的产 alert」整条不变式，
+    /// CodeQL workflow 必备要素（**结构绑定**，content-scan，Medium）。GitHub Actions 承载 CI/SAST，
+    /// 守卫须锁住「SAST 真的会随 push/定时跑 + 真的扫 Rust + 真的产 alert」整条不变式，
     /// 而非仅找关键字子串（review #281 F2，对标 sibling azure 守卫的结构绑定）。经 [`yaml_code_lines`] 先剥 `#` 注释：
     ///
     /// - **① 触发器**：`push:` + `schedule:` 两结构键都在（行起头）——否则退化成仅 `workflow_dispatch`，SAST 不随
@@ -1948,9 +2248,9 @@ mod tests {
     /// 任一不满足即 SAST 被静默削弱 / 禁用（关键字落注释 / name / 错 step、或退化触发器均 fail-closed）。
     fn codeql_workflow_well_formed(yaml: &str) -> bool {
         let code = yaml_code_lines(yaml);
-        let line_starts = |key: &str| code.iter().any(|l| l.starts_with(key));
         let blocks = yaml_step_blocks(yaml);
-        let triggers = line_starts("push:") && line_starts("schedule:");
+        let triggers = workflow_event_has_develop_branch(yaml, "push")
+            && workflow_has_top_level_on_event(yaml, "schedule");
         let init_bound = blocks.iter().any(|b| {
             block_uses_action(b, "github/codeql-action/init")
                 && b.iter().any(|l| l.contains("languages: rust"))

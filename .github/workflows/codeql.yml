@@ -1,28 +1,28 @@
 # .github/workflows/codeql.yml — CodeQL SAST（issue #1145 第⑤项）。
 #
-# RSS 主 forge 是 Azure DevOps（PR / 合并策略都在此）；本仓库**每日镜像同步到 GitHub**，故 SAST 跑在 GitHub 侧
-# （code-scanning，结果入 Security tab）。Rust 已 GA（CodeQL 2.23.3，2025-10）+ `build-mode: none` 免编译——提取器
+# GitHub Actions 是 RSS 的 CI/SAST 承载面；CodeQL 结果进入 GitHub Security tab。Rust 已 GA
+# （CodeQL 2.23.3，2025-10）+ `build-mode: none` 免编译——提取器
 # 直读源码，无需 cargo build / toolchain，故 workflow 最小（checkout → init → analyze）。
 #
-# 激活前置（org 一次性，仓库无法代办，同 azure AZURE_HAS_CI 范式）：GitHub 镜像启用 code scanning（private 仓需
-# GitHub Advanced Security）。未启用前 workflow committed 但不产 alert。
+# 激活前置（org 一次性，仓库无法代办）：GitHub 启用 code scanning（private 仓需 GitHub Advanced
+# Security）。未启用前 workflow committed 但不产 alert。
 #
 # 守卫：xtask 治理测试 `github_codeql_workflow_present` / `codeql_workflow_well_formed`
 # （INVARIANT SAST-CODEQL-PRESENT-01，Medium）防 workflow 被静默删除 / 禁用。
 #
 # action 钉版：用 major-tag `@v4`（非 commit-SHA）——first-party GitHub org（actions/ + github/）+ TLS 信任，token
 # 权限收窄（见下 permissions）；`@v4` 自动收 v4.x 补丁让 SAST query 保持新鲜（本仓无 renovate/dependabot ⇒ 冻结 SHA
-# 反致 query 陈旧、削弱扫描）。与 azure binstall「工具哈希钉定」同属 #1145 供应链硬化子项（详见 docs/ops ci-lane §交付边界，review #281 F-B2）。
+# 反致 query 陈旧、削弱扫描）。与 CI 工具钉版同属 #1145 供应链硬化子项（详见 docs/ops ci-lane §交付边界，review #281 F-B2）。
 #
 # ref: github/codeql-action README.md@main（v4 latest major + languages:rust / build-mode:none）
 # ref: actions/starter-workflows code-scanning/codeql.yml@main（advanced setup 样板：init → analyze + security-events:write）
 name: CodeQL
 
 on:
-  # 镜像每日 push develop ⇒ 每次同步触发扫描。
+  # develop push 触发扫描。
   push:
     branches: [develop]
-  # backstop：镜像 push 漏触 / 未变代码新披露规则时，每周一兜底重扫。
+  # backstop：push 漏触 / 未变代码新披露规则时，每周一兜底重扫。
   schedule:
     - cron: "0 7 * * 1"
   workflow_dispatch:
@@ -39,6 +39,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
