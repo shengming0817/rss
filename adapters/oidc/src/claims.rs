@@ -4,7 +4,7 @@
 //! 闭值标签（不记 token / claim 值）。`exp`/`iss`/`aud`/`sub` 为必填字段（缺失 → 反序列化失败 → 不可用 token →
 //! `InvalidSignature`）；`exp` 必填即拒永久 token。时间一律取注入 `Clock`（**禁系统时钟**，rust-standards 护栏）。
 
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use diport::{Clock, PdpError, VerifiedClaims};
 use serde::Deserialize;
@@ -18,6 +18,8 @@ use crate::verify::LOG_TARGET;
 struct Claims {
     sub: String,
     exp: i64,
+    #[serde(default)]
+    jti: Option<String>,
     #[serde(default)]
     nbf: Option<i64>,
     iss: String,
@@ -50,6 +52,28 @@ pub(crate) fn validate_and_map(
     clock: &dyn Clock,
     payload: &[u8],
 ) -> Result<VerifiedClaims, PdpError> {
+    validate_claims(config, clock, payload).map(|(claims, _jti, _expires_at)| claims)
+}
+
+/// Service-token claim validation additionally requires a non-empty `jti` nonce.
+pub(crate) fn validate_service_token_and_map(
+    config: &VerifierConfig,
+    clock: &dyn Clock,
+    payload: &[u8],
+) -> Result<(VerifiedClaims, String, SystemTime), PdpError> {
+    let (claims, jti, expires_at) = validate_claims(config, clock, payload)?;
+    let Some(jti) = jti.filter(|s| !s.is_empty()) else {
+        log_fail("missing_jti");
+        return Err(PdpError::InvalidSignature);
+    };
+    Ok((claims, jti, expires_at))
+}
+
+fn validate_claims(
+    config: &VerifierConfig,
+    clock: &dyn Clock,
+    payload: &[u8],
+) -> Result<(VerifiedClaims, Option<String>, SystemTime), PdpError> {
     let claims: Claims = serde_json::from_slice(payload).map_err(|_| {
         // 缺必填 claim / JSON 畸形 → 不可用 token。不记 payload 字节。
         log_fail("malformed_or_missing_claim");
@@ -77,9 +101,17 @@ pub(crate) fn validate_and_map(
         return Err(PdpError::InvalidSignature);
     }
 
+    let expires_at = expiry_system_time(claims.exp, config.leeway_secs()).ok_or_else(|| {
+        log_fail("invalid_expiry_boundary");
+        PdpError::InvalidSignature
+    })?;
     let tenant = string_claim(&claims.extra, config.tenant_claim());
     let kind = trusted_kind(config, &claims.extra);
-    Ok(VerifiedClaims::new(claims.sub, tenant, kind))
+    Ok((
+        VerifiedClaims::new(claims.sub, tenant, kind),
+        claims.jti,
+        expires_at,
+    ))
 }
 
 /// exp/nbf 越界判定（注入时钟 + leeway）。过期 / 未生效均 → [`PdpError::Expired`]。
@@ -107,6 +139,12 @@ fn now_unix_secs(clock: &dyn Clock) -> Option<i64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| i64::try_from(d.as_secs()).ok())
+}
+
+fn expiry_system_time(exp: i64, leeway: u64) -> Option<SystemTime> {
+    let expires_at = exp.saturating_add_unsigned(leeway);
+    let secs = u64::try_from(expires_at).ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(secs))
 }
 
 /// 取 kind claim 并经 operator allowlist 过滤：值 ∈ 信任集 → 透传；存在但不信任 → 剥离 None + debug 记一笔
@@ -264,6 +302,7 @@ mod tests {
         Claims {
             sub: "alice".to_string(),
             exp,
+            jti: None,
             nbf,
             iss: "https://iss".to_string(),
             aud: Audience::One("aud".to_string()),

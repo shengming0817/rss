@@ -19,12 +19,20 @@ workspace = true
 #   thiserror  = 构造期 / shutdown 错误枚举（error-handling.md：&'static str message，无 PII）
 [dependencies]
 diport = { path = "../../crates/diport" }
+authn = { path = "../../crates/authn" }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net", "sync"] }
+tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+spiffe = { workspace = true }
+spiffe-rustls = { workspace = true }
+spiffe-rustls-tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tower = { workspace = true }
 
 [dev-dependencies]
 # bind 127.0.0.1:0 → 真 socket serve + raw TcpStream HTTP/1.1 GET 断言 200 + shutdown 收敛（hermetic，无外部 dep）。
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net"] }
+rustls = { workspace = true }
+rcgen = "0.14.8"

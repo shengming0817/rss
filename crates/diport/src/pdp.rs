@@ -41,6 +41,29 @@ pub enum PdpError {
     Untrusted,
 }
 
+/// service-token replay guard failure.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServiceTokenReplayError {
+    /// Token nonce/jti was already observed.
+    #[error("service-token nonce replayed")]
+    Replayed,
+    /// Guard storage/check failed; callers must fail closed.
+    #[error("service-token replay guard failed")]
+    Guard,
+}
+
+/// Required seam for service-token `jti`/nonce replay protection.
+pub trait ServiceTokenReplayGuard: Send + Sync + 'static {
+    /// Atomically record a nonce if it has not been observed, retaining it at least until the
+    /// already-validated service token expiry boundary.
+    fn check_and_record(
+        &self,
+        nonce: &str,
+        expires_at: std::time::SystemTime,
+    ) -> Result<(), ServiceTokenReplayError>;
+}
+
 /// 凭据 scheme 标签——adapter 据此选验签路径（JWT 签名 vs service-token MAC）。闭值集，`#[non_exhaustive]`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

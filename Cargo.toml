@@ -139,6 +139,12 @@ trait-variant = "=0.1.2"
 axum = "0.8"
 http-body-util = "0.1"  # stream-level body cap（Limited wrap，#1106 FIX-1）；axum 0.8 生态同版本
 tower = "0.5"
+spiffe = { version = "0.16.0", default-features = false, features = ["x509-source"] }
+spiffe-rustls = { version = "0.7.0", default-features = false, features = ["ring"] }
+spiffe-rustls-tokio = "0.4.0"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"
 tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
 # 限流 provider（adapters/ratelimit，#1011）：keyed GCRA 限流器，x/time/rate（token bucket）的 Rust 工业等价。
 # 自带 monotonic clock（DefaultClock/QuantaClock；FakeRelativeClock 供确定性测试）——不经 diport::Clock

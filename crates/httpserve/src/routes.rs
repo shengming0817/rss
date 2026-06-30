@@ -364,6 +364,24 @@ pub fn finalize_auth_with_audit(
     finalize_auth_inner(routes, plan, Some(AuthAudit::new(audit_sink, clock)), None)
 }
 
+pub fn finalize_auth_with_audit_and_authorizer(
+    routes: UnfinalizedRoutes,
+    plan: AuthPlan,
+    audit_sink: AuditSinkHandle,
+    clock: Arc<dyn diport::Clock>,
+    authorizer: Arc<dyn RouteAuthorizer>,
+) -> Result<AuthenticatedRoutes, RouteGroupError> {
+    if plan.listener() == primitives::ListenerKind::Primary {
+        return Err(RouteGroupError::ListenerMismatch);
+    }
+    finalize_auth_inner(
+        routes,
+        plan,
+        Some(AuthAudit::new(audit_sink, clock)),
+        Some(authorizer),
+    )
+}
+
 pub fn finalize_primary_auth(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,

@@ -1,0 +1,10 @@
+error[E0624]: associated function `seal` is private
+ --> tests/ui/external_cannot_seal_mtls_peer_fail.rs:5:38
+  |
+5 |     let _ = authn::VerifiedMtlsPeer::seal(id); // E0624: associated function `seal` is private
+  |                                      ^^^^ private associated function
+  |
+ ::: src/mtls.rs
+  |
+  |     pub(crate) fn seal(spiffe_id: SpiffeId) -> Self {
+  |     ----------------------------------------------- private associated function defined here

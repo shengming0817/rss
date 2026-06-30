@@ -2,7 +2,7 @@
 //! `httpserve::finalize_auth` + enforce，经 `tower::oneshot` 驱动已组装 router（不真实绑端口；serve = #1017）。
 //!
 //! 覆盖：有效 JWT→200+证据放行；无 token/坏签名/过期/错 aud/错 iss/alg:none/跨 scheme→401（拒绝路径全覆盖）；
-//! **无 bridge 回归**（T001/T002 单独 merge 态：即便有效 JWT，Require 仍 401）；unsupported scheme(Mtls) fail-closed；
+//! **无 bridge 回归**（T001/T002 单独 merge 态：即便有效 JWT，Require 仍 401）；mTLS 只接受 transport peer evidence；
 //! Public 路由不被 bridge 误伤；小写 bearer 前缀放行；service-token/HS256 happy；tracing 埋点 `authz.decision`+
 //! `principal.kind`、无 subject/token 泄漏。
 //!
@@ -40,6 +40,7 @@ const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
 const NOW: i64 = 1_700_000_000;
+const HS_KID: &str = "cell-a.svc-a";
 
 // ── 注入时钟替身（确定性 exp 边界，非系统时钟） ───────────────────────────────────
 struct FixedClock(i64);
@@ -121,7 +122,7 @@ fn mint_es256(sk: &SigningKey, payload: &str) -> String {
 fn mint_hs256(secret: &[u8], payload: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let header = B64.encode(br#"{"alg":"HS256"}"#);
+    let header = B64.encode(format!(r#"{{"alg":"HS256","kid":"{HS_KID}"}}"#));
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
@@ -135,7 +136,7 @@ fn mint_hs256(secret: &[u8], payload: &str) -> String {
 fn mint_hs256_bound(secret: &[u8], payload: &str, tenant: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let header = B64.encode(br#"{"alg":"HS256"}"#);
+    let header = B64.encode(format!(r#"{{"alg":"HS256","kid":"{HS_KID}"}}"#));
     let body = B64.encode(payload.as_bytes());
     let signing_input = format!("{header}.{body}");
     let binding = diport::ServiceTokenTenantBinding::new(
@@ -164,6 +165,13 @@ fn super_admin_payload(exp: i64, iss: &str, aud: &str) -> String {
 fn super_admin_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
     mint_es256(sk, &super_admin_payload(exp, iss, aud))
 }
+
+fn service_token_payload(exp: i64, sub: &str) -> String {
+    format!(
+        r#"{{"sub":"{sub}","exp":{exp},"iss":"{ISS}","aud":"{AUD}","jti":"mtls-exact-match-{sub}-{exp}"}}"#
+    )
+}
+
 /// `user` kind JWT（需 tenant claim；默认 claim 名 `tenant_id`）。
 fn user_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
     scoped_jwt(sk, exp, iss, aud, "user")
@@ -192,6 +200,7 @@ fn es256_provider() -> OidcProvider {
         "superAdmin,user,device,admin",
         Some(&es256_b64),
         None,
+        None,
         Box::new(FixedClock(NOW)),
     )
     .expect("es256 production provider")
@@ -207,6 +216,7 @@ fn hs256_provider() -> (OidcProvider, Vec<u8>) {
         "user",
         None,
         Some(&hs_b64),
+        Some(HS_KID),
         Box::new(FixedClock(NOW)),
     )
     .expect("hs256 production provider");
@@ -248,6 +258,76 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
         Some(scheme) => apply_verify_bridge(authed, Arc::new(es256_provider()), scheme),
         None => authed,
     }
+}
+
+#[allow(clippy::expect_used)]
+fn mtls_authed_routes() -> httpserve::AuthenticatedRoutes {
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
+        rb.mount_primary(
+            httpserve::PrimaryRoute::permission(
+                Method::GET,
+                "/protected",
+                "test.protected",
+                RoutePermission {
+                    permission: "test:read",
+                    scope: RouteResourceScope::None,
+                },
+            ),
+            get(|| async { "ok" }),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Mtls).expect("plan");
+    httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth")
+}
+
+fn mtls_router() -> httpserve::AuthenticatedRoutes {
+    let authed = mtls_authed_routes();
+    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+}
+
+#[allow(clippy::expect_used)]
+fn internal_mtls_routes() -> httpserve::UnfinalizedRoutes {
+    httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+        rb.mount(
+            httpserve::Route {
+                method: Method::GET,
+                path: "/svc",
+                contract_id: "test.internal.mtls",
+            },
+            get(|| async { "ok" }),
+        )
+    })
+}
+
+#[allow(clippy::expect_used)]
+fn internal_mtls_router_without_authorizer() -> httpserve::AuthenticatedRoutes {
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::Mtls).expect("plan");
+    let authed = httpserve::finalize_auth(internal_mtls_routes(), plan).expect("finalize_auth");
+    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+}
+
+#[allow(clippy::expect_used)]
+fn internal_mtls_router_with_authorizer(
+    authorizer: Arc<dyn RouteAuthorizer>,
+) -> httpserve::AuthenticatedRoutes {
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::Mtls).expect("plan");
+    let authed = httpserve::finalize_auth_with_audit_and_authorizer(
+        internal_mtls_routes(),
+        plan,
+        httpserve::AuditSinkHandle::new(RecordingAuditSink::default()),
+        Arc::new(FixedClock(NOW)),
+        authorizer,
+    )
+    .expect("finalize_auth_with_authorizer");
+    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+}
+
+#[allow(clippy::expect_used)]
+fn verified_mtls_peer() -> authn::VerifiedMtlsPeer {
+    let allow =
+        authn::MtlsAllowSet::new(["spiffe://example.org/ns/rss/sa/internal"]).expect("allow-set");
+    let id = authn::SpiffeId::parse("spiffe://example.org/ns/rss/sa/internal").expect("spiffe id");
+    authn::verify_mtls_peer(id, &allow).expect("verified peer")
 }
 
 #[allow(clippy::expect_used)]
@@ -797,18 +877,107 @@ async fn hs256_token_on_jwt_listener_is_401() {
     );
 }
 #[tokio::test]
-async fn unsupported_scheme_require_is_401() {
-    // bridge 配 RequiredScheme::Mtls（本桥不支持）→ verify_principal `_ => None` → 无证据 → enforce 401（fail-closed）。
+async fn jwt_evidence_cannot_satisfy_require_mtls() {
+    // RequiredScheme::Mtls 不读取 bearer token；JWT 不能跨 scheme 放行。
     let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
     assert_eq!(
         status(
-            jwt_router(Some(RequiredScheme::Mtls)),
+            mtls_router(),
             "/protected",
             Some(&format!("Bearer {token}"))
         )
         .await,
         StatusCode::UNAUTHORIZED,
-        "unsupported scheme(Mtls) → 无证据 → fail-closed 401"
+        "JWT evidence 不得通过 Require(Mtls)"
+    );
+}
+
+#[tokio::test]
+async fn service_token_evidence_cannot_satisfy_require_mtls() {
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256_bound(&secret, &service_token_payload(NOW + 3600, "svc-a"), TENANT);
+    let app = apply_verify_bridge(
+        mtls_authed_routes(),
+        Arc::new(provider),
+        RequiredScheme::ServiceToken,
+    );
+
+    assert_eq!(
+        status_with_tenant(
+            app,
+            "/protected",
+            Some(&format!("Bearer {token}")),
+            Some(TENANT)
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "ServiceToken evidence 不得通过 Require(Mtls)"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn verified_mtls_peer_satisfies_require_mtls() {
+    let mut req = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri("/protected")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(verified_mtls_peer());
+
+    let resp = mtls_router()
+        .into_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "transport-injected VerifiedMtlsPeer passes Require(Mtls)"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn internal_mtls_requires_route_authorizer() {
+    let mut req = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri("/svc")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(verified_mtls_peer());
+
+    let resp = internal_mtls_router_without_authorizer()
+        .into_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "mTLS evidence alone must not bypass route-level caller authorization"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn internal_mtls_route_authorizer_allows_verified_peer() {
+    let mut req = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri("/svc")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(verified_mtls_peer());
+
+    let resp = internal_mtls_router_with_authorizer(allow_authorizer())
+        .into_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "mTLS Internal route must pass only after caller authorization"
     );
 }
 
@@ -846,7 +1015,7 @@ async fn service_token_hs256_is_200() {
     let token = mint_hs256_bound(
         &secret,
         &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-ok"}}"#,
             NOW + 3600
         ),
         TENANT,
@@ -878,7 +1047,7 @@ async fn service_token_missing_or_wrong_tenant_header_is_401() {
     let token = mint_hs256_bound(
         &secret,
         &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-tenant"}}"#,
             NOW + 3600
         ),
         TENANT,
@@ -933,7 +1102,7 @@ async fn service_token_duplicate_tenant_header_is_401() {
     let token = mint_hs256_bound(
         &secret,
         &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-duplicate-header"}}"#,
             NOW + 3600
         ),
         TENANT,
@@ -972,7 +1141,7 @@ async fn service_token_establishes_scope_from_mac_bound_tenant() {
     let token = mint_hs256_bound(
         &secret,
         &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-scope"}}"#,
             NOW + 3600
         ),
         TENANT,
@@ -1194,7 +1363,7 @@ fn tracing_service_token_binding_error_has_distinct_reason_no_pii() {
     let token = mint_hs256_bound(
         &secret,
         &format!(
-            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}"}}"#,
+            r#"{{"sub":"svc-1","exp":{},"iss":"{ISS}","aud":"{AUD}","jti":"nonce-svc-tracing"}}"#,
             NOW + 3600
         ),
         TENANT,

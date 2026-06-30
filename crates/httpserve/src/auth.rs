@@ -404,6 +404,8 @@ impl<S> Layer<S> for EnforceLayer {
 /// 拒绝响应类型别名（降低类型复杂度）。
 type DenyFuture<E> = Pin<Box<dyn Future<Output = Result<Response, E>> + Send>>;
 
+const MTLS_ROUTE_PERMISSION: &str = "mtls:invoke";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthDecision {
     Allow,
@@ -623,6 +625,26 @@ async fn authorize_route_permission(
     }
 }
 
+async fn authorize_mtls_route(
+    meta: &RouteMeta,
+    evidence: &Authenticated,
+    authorizer: Option<Arc<dyn RouteAuthorizer>>,
+) -> bool {
+    let Some(authorizer) = authorizer else {
+        return false;
+    };
+    let principal_id = evidence.self_scoped_principal_id().to_string();
+    let request = RouteAuthorizationRequest {
+        contract_id: meta.contract_id,
+        permission: MTLS_ROUTE_PERMISSION,
+        tenant_id: evidence.tenant_id(),
+        principal_kind: evidence.principal_kind(),
+        principal_id,
+        resource: None,
+    };
+    authorizer.authorize(request).await == RouteAuthorizationDecision::Allow
+}
+
 impl<S> Service<Request> for EnforceService<S>
 where
     S: Service<Request, Response = Response> + Clone + Send + 'static,
@@ -684,6 +706,8 @@ where
         // 仅**认证路由**（`Require`）放行后建 ambient scope；Public opt-out（`requirement=Allow`）不建——
         // 杜绝 Public 路由因携有效 Bearer 被误绑 ambient tenant（#1105 F2，scope 与 route auth 决策对齐）。
         let is_require = matches!(requirement, AuthRequirement::Require(_));
+        let requires_mtls_route_authz =
+            matches!(requirement, AuthRequirement::Require(RequiredScheme::Mtls));
 
         let decision = decide_auth(requirement, evidence_scheme);
         log_auth_decision(decision, meta.contract_id, evidence.as_ref());
@@ -741,6 +765,30 @@ where
                 };
                 if let Some(authorized) = authorized {
                     req.extensions_mut().insert(authorized);
+                }
+            } else if requires_mtls_route_authz {
+                let Some(evidence_ref) = evidence.as_ref() else {
+                    return reject_response(AuthDecision::Deny, &rid).await;
+                };
+                if !authorize_mtls_route(&meta, evidence_ref, route_authorizer).await {
+                    if let Err(error) = record_auth_audit(
+                        audit,
+                        AuthDecision::Deny,
+                        meta.contract_id,
+                        rid.clone(),
+                        evidence.clone(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            contract_id = meta.contract_id,
+                            authz.decision = AuthDecision::Deny.as_label(),
+                            error = %error,
+                            "auth audit record failed before mtls route authz reject"
+                        );
+                        return Ok(crate::error::internal_error(&rid));
+                    }
+                    return reject_response(AuthDecision::Deny, &rid).await;
                 }
             }
             // PendingScopeCtx 总是取走（不残留 extension）；仅 `Require`-Allow 用它建 scope，Public opt-out 丢弃（F2）。

@@ -3,8 +3,9 @@
 //! 验签静默失败（Option 范式：累加可忽略空输入，最终 `build` 必校验）。
 //!
 //! **key 格式（SEC1 点/bytes）跨 JWKS PR（#1109/T003）稳定**：T003 增 live JWKS 时复用同形 key 注入——
-//! ES256 = SEC1 未压缩点（JWKS `x`·`y` 拼接同形 `0x04||x||y`）；HS256 = 共享密钥字节。T003 若引入 kid
-//! 索引将以**新增可选 kid 参数**方式向下兼容，不破坏现有无-kid 调用。
+//! ES256 = SEC1 未压缩点（JWKS `x`·`y` 拼接同形 `0x04||x||y`）；HS256 = 共享密钥字节。service-token
+//! HS256 key selection requires `kid`; [`StaticKeySourceBuilder::add_hs256_secret`] uses the explicit default
+//! kid `"default"` and signers must include that JOSE header.
 //!
 //! 路径隔离（防 alg-confusion，INVARIANT: OIDC-ALG-KEYPATH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）：ES256 公钥集只服务 JWT 路径，HS256 密钥集
 //! 只服务 service-token 路径——[`crate::verify`] 按 scheme 选 key 集 + 校 token alg 匹配。
@@ -50,15 +51,21 @@ pub enum ConfigError {
     /// HS256 共享密钥过弱（短于 256-bit / 32 bytes，含空密钥）。弱 MAC key 削弱 service-token 验签强度。
     #[error("oidc HS256 secret too weak (require >= 32 bytes / 256-bit)")]
     WeakHs256Secret,
+    /// service-token HS256 key id 为空。
+    #[error("oidc HS256 kid must not be empty")]
+    EmptyHs256Kid,
     /// leeway 超过上限（> 300s）。极大 leeway 近似关闭 exp/nbf 时间校验，安全边界前移 fail-fast 拒。
     #[error("oidc leeway exceeds maximum (300s)")]
     LeewayTooLarge,
     /// 重复设置 key 源（`keys` 与 `keys_jwks` 互斥，二次调用即冲突）。互斥配置不静默覆盖，构造期 fail-fast。
     #[error("oidc key source set more than once (keys/keys_jwks are mutually exclusive)")]
     ConflictingKeySources,
+    /// service-token key present without replay guard.
+    #[error("oidc service-token replay guard is required")]
+    MissingReplayGuard,
 }
 
-/// 单把验签 key + 其可选 `kid`（key id）。`kid = None` = untagged（静态 key / 无 id 的 JWK）。
+/// 单把验签 key + 其可选 `kid`（key id）。`kid = None` = untagged ES256 static key.
 pub(crate) struct KeyEntry<K> {
     pub(crate) kid: Option<String>,
     pub(crate) key: K,
@@ -73,7 +80,7 @@ pub(crate) struct KeySet {
     hs256: Vec<KeyEntry<Vec<u8>>>,
 }
 
-/// kid 候选规则（**单源**）：untagged key（`kid=None`）永远候选；tagged key 仅当 token kid 精确匹配才候选。
+/// kid 候选规则（**单源**）：ES256 untagged key（`kid=None`）永远候选；tagged key 仅当 token kid 精确匹配才候选。
 /// `kid` 只缩小候选集，最终仍须签名校验——非信任根。
 ///
 /// **untagged=通配的安全边界（#254 F1）**：`kid=None` 的 entry **只可能**来自 operator 注入的静态源
@@ -82,6 +89,10 @@ pub(crate) struct KeySet {
 /// → fail-closed（spec FR-005；绝不让无-kid JWK 变成任意 token 的通配 key）。
 fn entry_matches(entry_kid: Option<&str>, token_kid: Option<&str>) -> bool {
     entry_kid.is_none() || entry_kid == token_kid
+}
+
+fn entry_matches_exact_kid(entry_kid: Option<&str>, token_kid: Option<&str>) -> bool {
+    matches!((entry_kid, token_kid), (Some(entry), Some(token)) if entry == token)
 }
 
 impl KeySet {
@@ -108,7 +119,7 @@ impl KeySet {
     ) -> impl Iterator<Item = &'a [u8]> + 'a {
         self.hs256
             .iter()
-            .filter(move |e| entry_matches(e.kid.as_deref(), token_kid))
+            .filter(move |e| entry_matches_exact_kid(e.kid.as_deref(), token_kid))
             .map(|e| e.key.as_slice())
     }
 
@@ -119,6 +130,9 @@ impl KeySet {
     /// HS256 集大小（脱敏失败日志计数用）。
     pub(crate) fn hs256_len(&self) -> usize {
         self.hs256.len()
+    }
+    pub(crate) fn has_hs256(&self) -> bool {
+        !self.hs256.is_empty()
     }
 
     /// 两集是否都空（`VerifierConfigBuilder::build` fail-fast / JWKS 刷新「绝不 swap 空集」guard 用）。
@@ -163,9 +177,17 @@ impl KeySource {
             KeySource::Jwks(_) => false,
         }
     }
+
+    pub(crate) fn has_hs256(&self) -> bool {
+        match self {
+            KeySource::Static(set) => set.has_hs256(),
+            // JWKS may rotate in HS256 service-token keys; require ReplayGuard at config boundary.
+            KeySource::Jwks(_) => true,
+        }
+    }
 }
 
-/// 静态验签 key 源：构造期注入的不变 [`KeySet`] 快照（ES256 公钥集 + HS256 密钥集，untagged）。字段私有 +
+/// 静态验签 key 源：构造期注入的不变 [`KeySet`] 快照（ES256 公钥集 + HS256 密钥集）。字段私有 +
 /// 唯一构造入口 = [`StaticKeySourceBuilder`]（外部不可伪造）。
 pub struct StaticKeySource {
     set: Arc<KeySet>,
@@ -188,7 +210,7 @@ impl StaticKeySource {
 #[derive(Default)]
 pub struct StaticKeySourceBuilder {
     es256: Vec<VerifyingKey>,
-    hs256: Vec<Vec<u8>>,
+    hs256: Vec<KeyEntry<Vec<u8>>>,
 }
 
 impl StaticKeySourceBuilder {
@@ -212,28 +234,43 @@ impl StaticKeySourceBuilder {
         Ok(self)
     }
 
-    /// 注入一把 HS256 共享密钥（service-token 路径）。短于 256-bit / 32 bytes（含空密钥）fail-fast 拒。
+    /// 注入一把 HS256 共享密钥（service-token 路径），使用默认 `kid="default"`。签发方必须在 JOSE
+    /// header 中设置同名 `kid`；缺失 `kid` 的 service-token 会 fail-closed。
     pub fn add_hs256_secret(mut self, secret: &[u8]) -> Result<Self, ConfigError> {
-        if secret.len() < MIN_HS256_SECRET_BYTES {
-            return Err(ConfigError::WeakHs256Secret);
-        }
-        self.hs256.push(secret.to_vec());
+        self = self.add_hs256_secret_with_kid("default", secret)?;
         Ok(self)
     }
 
-    /// 装箱成不变 [`KeySet`] 快照（静态 key 全 untagged → `kid=None`，验签时盲扫，保既有行为）。key 集可任一为
-    /// 空——某 scheme 无 key 时该路径验签必失败；两集都空由 `VerifierConfigBuilder::build` 拒。
+    /// 注入一把带 `kid` 的 HS256 共享密钥（service-token 路径）。运行期按 token header `kid` 精确选 key。
+    pub fn add_hs256_secret_with_kid(
+        mut self,
+        kid: impl Into<String>,
+        secret: &[u8],
+    ) -> Result<Self, ConfigError> {
+        let kid = kid.into();
+        if kid.trim().is_empty() {
+            return Err(ConfigError::EmptyHs256Kid);
+        }
+        if secret.len() < MIN_HS256_SECRET_BYTES {
+            return Err(ConfigError::WeakHs256Secret);
+        }
+        self.hs256.push(KeyEntry {
+            kid: Some(kid),
+            key: secret.to_vec(),
+        });
+        Ok(self)
+    }
+
+    /// 装箱成不变 [`KeySet`] 快照。ES256 static keys are untagged and blind-scanned; HS256 service-token
+    /// keys always carry a `kid` and are selected by exact JOSE header match. key 集可任一为空——某 scheme
+    /// 无 key 时该路径验签必失败；两集都空由 `VerifierConfigBuilder::build` 拒。
     pub fn build(self) -> StaticKeySource {
         let es256 = self
             .es256
             .into_iter()
             .map(|key| KeyEntry { kid: None, key })
             .collect();
-        let hs256 = self
-            .hs256
-            .into_iter()
-            .map(|key| KeyEntry { kid: None, key })
-            .collect();
+        let hs256 = self.hs256.into_iter().collect();
         StaticKeySource {
             set: Arc::new(KeySet::new(es256, hs256)),
         }
@@ -254,6 +291,7 @@ pub struct VerifierConfig {
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: KeySource,
+    service_token_replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
 }
 
 impl VerifierConfig {
@@ -279,6 +317,11 @@ impl VerifierConfig {
     pub(crate) fn keys(&self) -> &KeySource {
         &self.keys
     }
+    pub(crate) fn service_token_replay_guard(
+        &self,
+    ) -> Option<&dyn diport::ServiceTokenReplayGuard> {
+        self.service_token_replay_guard.as_deref()
+    }
 }
 
 /// [`VerifierConfig`] 累加式 builder：注入 issuer / audience / [`StaticKeySource`] / 可配置 tenant·kind claim 名 /
@@ -291,6 +334,7 @@ pub struct VerifierConfigBuilder {
     kind_allowlist: HashSet<String>,
     leeway_secs: u64,
     keys: Option<KeySource>,
+    service_token_replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
     /// 是否重复设置 key 源（`keys`/`keys_jwks` 二次调用即 true）→ `build` fail-fast 拒（互斥不静默覆盖，#254 F3）。
     key_source_conflict: bool,
 }
@@ -306,6 +350,7 @@ impl VerifierConfigBuilder {
             kind_allowlist: HashSet::new(),
             leeway_secs: DEFAULT_LEEWAY_SECS,
             keys: None,
+            service_token_replay_guard: None,
             key_source_conflict: false,
         }
     }
@@ -366,6 +411,16 @@ impl VerifierConfigBuilder {
         self
     }
 
+    /// Inject required replay guard for service-token `jti`/nonce checks.
+    #[must_use]
+    pub fn service_token_replay_guard(
+        mut self,
+        guard: Arc<dyn diport::ServiceTokenReplayGuard>,
+    ) -> Self {
+        self.service_token_replay_guard = Some(guard);
+        self
+    }
+
     /// 最终 fail-fast 校验 + 装箱。
     pub fn build(self) -> Result<VerifierConfig, ConfigError> {
         // 互斥 key 源二次设置 → fail-fast（#254 F3，不静默覆盖）。
@@ -390,6 +445,9 @@ impl VerifierConfigBuilder {
             .keys
             .filter(|k| !k.is_empty())
             .ok_or(ConfigError::NoKeys)?;
+        if keys.has_hs256() && self.service_token_replay_guard.is_none() {
+            return Err(ConfigError::MissingReplayGuard);
+        }
         Ok(VerifierConfig {
             issuer: self.issuer,
             audience: self.audience,
@@ -398,6 +456,7 @@ impl VerifierConfigBuilder {
             kind_allowlist: self.kind_allowlist,
             leeway_secs: self.leeway_secs,
             keys,
+            service_token_replay_guard: self.service_token_replay_guard,
         })
     }
 }
@@ -407,7 +466,21 @@ mod tests {
     //! builder fail-fast 单测：覆盖每个 ConfigError 变体 + happy path。
     //! item-level `#[allow(clippy::expect_used)]` 按 error-handling.md §Carve-out 标注在用到 expect 的 fn 上。
 
+    use std::sync::Arc;
+
     use super::*;
+
+    struct NoopReplayGuard;
+
+    impl diport::ServiceTokenReplayGuard for NoopReplayGuard {
+        fn check_and_record(
+            &self,
+            _nonce: &str,
+            _expires_at: std::time::SystemTime,
+        ) -> Result<(), diport::ServiceTokenReplayError> {
+            Ok(())
+        }
+    }
 
     /// 合法 ES256 SEC1 点（来自固定标量 0x42；**仅测试 fixture，永非生产 key**）。
     #[allow(clippy::expect_used)]
@@ -514,6 +587,36 @@ mod tests {
             .expect("32-byte secret accepted")
             .build();
         assert!(!ks.snapshot().is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn hs256_service_token_key_requires_replay_guard() {
+        let keys = StaticKeySource::builder()
+            .add_hs256_secret_with_kid("svc-a", &[0x33u8; MIN_HS256_SECRET_BYTES])
+            .expect("hs256 key")
+            .build();
+        let result = VerifierConfigBuilder::new("https://iss", "aud")
+            .keys(keys)
+            .trust_kind("service")
+            .build();
+        assert!(matches!(result, Err(ConfigError::MissingReplayGuard)));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn hs256_service_token_key_with_replay_guard_builds() {
+        let keys = StaticKeySource::builder()
+            .add_hs256_secret_with_kid("svc-a", &[0x44u8; MIN_HS256_SECRET_BYTES])
+            .expect("hs256 key")
+            .build();
+        let config = VerifierConfigBuilder::new("https://iss", "aud")
+            .keys(keys)
+            .trust_kind("service")
+            .service_token_replay_guard(Arc::new(NoopReplayGuard))
+            .build()
+            .expect("replay guard satisfies service-token config gate");
+        assert_eq!(config.issuer(), "https://iss");
     }
 
     #[test]

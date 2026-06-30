@@ -42,6 +42,8 @@ const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requ
 // 本 crate 顶部 verify→mint bridge；mint 子模块复用下方 `KIND_*` claim 串单源（杜绝 round-trip 漂移）。
 mod mint;
 pub use mint::{JwtAlg, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
+mod mtls;
+pub use mtls::{MtlsAllowSet, MtlsIdentityError, SpiffeId, VerifiedMtlsPeer, verify_mtls_peer};
 
 // kind claim 字符串常量（单源：验签侧 `derive_from_claims` 读、mint 侧 `kind_claim` 写，同一组常量防漂移）。
 const KIND_USER: &str = "user";

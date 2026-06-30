@@ -50,7 +50,7 @@ use futures::FutureExt;
 use httpserve::{Authenticated, AuthenticatedRoutes};
 use oidc::OidcProvider;
 use primitives::RequiredScheme;
-use vocab::TenantId;
+use vocab::{PrincipalKind, TenantId};
 
 /// 验签桥中间件 state：共享验签 provider（多次调用 ⇒ 泛型静态分发的 `Arc<S>` 范式，ADR-003 §注入形态收口；
 /// `OidcProvider` 是 `Send + Sync`）+ 本 listener 绑定的已验证方案。
@@ -133,8 +133,8 @@ fn verify_principal(
                     .map_err(VerifyFailure::Authn)
                 })
         }
-        // 本桥仅承载 jwt / service-token 验签；其余方案（Mtls / JwtFromAssembly）不产证据 ⇒ enforce fail-closed。
-        // reason: Mtls 走传输层、JwtFromAssembly 留后续；二者非本桥职责，无证据 = Require 路由 401（fail-closed）。
+        // mTLS 不读取 bearer token；由 `verify` 直接消费 transport 层注入的 VerifiedMtlsPeer。
+        // JwtFromAssembly 留后续；无证据 = Require 路由 401（fail-closed）。
         _ => None,
     }
 }
@@ -206,6 +206,23 @@ fn allow_evidence(
     (evidence, ctx)
 }
 
+/// mTLS allow 分支：只消费 httpd mTLS listener 在 TLS handshake 后注入的 [`authn::VerifiedMtlsPeer`]。
+fn mtls_evidence(req: &Request) -> Option<Authenticated> {
+    let peer = req.extensions().get::<authn::VerifiedMtlsPeer>()?;
+    tracing::debug!(
+        authz.decision = "allow",
+        principal.kind = ?PrincipalKind::Service,
+        scoped_principal = false,
+        "verify-bridge-mtls"
+    );
+    Some(Authenticated::new(
+        RequiredScheme::Mtls,
+        PrincipalKind::Service,
+        peer.spiffe_id().as_str(),
+        None,
+    ))
+}
+
 /// 验签失败 deny 埋点（`AuthnError` 变体 + 闭值 `authz.deny_reason`，脱敏）。
 fn log_deny_verify(err: &authn::AuthnError) {
     tracing::warn!(
@@ -268,7 +285,23 @@ fn log_deny_not_synchronous() {
 /// span」）。request_id 关联已落地（#1320）：`request_id` 中间件经唯一 bindable 出口封在本桥**外层**
 /// （ROUTE-REQUESTID-OUTERMOST-01），本桥运行时 RequestId 已就位 ⇒ 经 `httpserve::request_id_str` 读入
 /// span（不带凭据请求 request_id 为空——span 仅在有 bearer token 时建，无埋点需求）。
+// reason: this is the single request middleware junction for mTLS evidence, bearer extraction,
+// verifier result mapping, and audit logging; splitting would obscure request-order semantics.
+#[allow(clippy::cognitive_complexity)]
 async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) -> Response {
+    if state.scheme == RequiredScheme::Mtls {
+        if let Some(evidence) = mtls_evidence(&req) {
+            req.extensions_mut().insert(evidence);
+        } else {
+            tracing::warn!(
+                authz.decision = "deny",
+                authz.deny_reason = "mtls_peer_missing",
+                "verify-bridge-mtls"
+            );
+        }
+        return next.run(req).await;
+    }
+
     if let Some(token) = bearer_token(req.headers()) {
         let request_id = httpserve::request_id_str(req.extensions())
             .unwrap_or_default()
@@ -293,11 +326,16 @@ async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) 
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{
         DENY_REASON_EXPIRED, DENY_REASON_INVALID, DENY_REASON_PRINCIPAL_INVALID,
-        DENY_REASON_SIGNATURE_INVALID, DENY_REASON_UNTRUSTED, deny_reason,
+        DENY_REASON_SIGNATURE_INVALID, DENY_REASON_UNTRUSTED, deny_reason, mtls_evidence,
     };
+    use axum::body::Body;
+    use axum::http::Request;
+    use primitives::RequiredScheme;
+    use vocab::PrincipalKind;
 
     /// `deny_reason` 闭值映射全臂覆盖（含 `_` 兜底）：四路一一保真（含 `PrincipalInvalid`→`principal_invalid`，
     /// #1275 review F1：验签后良性失败不记 `signature_invalid`）+ 本桥不可达的 `SessionNotFound` / `Forbidden`
@@ -331,5 +369,25 @@ mod tests {
             deny_reason(&authn::AuthnError::Forbidden),
             DENY_REASON_INVALID
         );
+    }
+
+    #[test]
+    fn mtls_evidence_maps_verified_peer_to_service_principal() {
+        let allow = authn::MtlsAllowSet::new(["spiffe://example.org/ns/rss/sa/internal"])
+            .expect("allow set");
+        let peer_id =
+            authn::SpiffeId::parse("spiffe://example.org/ns/rss/sa/internal").expect("spiffe id");
+        let peer = authn::verify_mtls_peer(peer_id, &allow).expect("verified peer");
+        let mut req = Request::new(Body::empty());
+        req.extensions_mut().insert(peer);
+
+        let evidence = mtls_evidence(&req).expect("mTLS evidence");
+        assert_eq!(evidence.scheme(), RequiredScheme::Mtls);
+        assert_eq!(evidence.principal_kind(), PrincipalKind::Service);
+        assert_eq!(
+            evidence.self_scoped_principal_id(),
+            "spiffe://example.org/ns/rss/sa/internal"
+        );
+        assert_eq!(evidence.tenant_id(), None);
     }
 }

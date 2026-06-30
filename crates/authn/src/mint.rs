@@ -166,6 +166,8 @@ struct JoseHeader<'a> {
 struct MintClaims<'a> {
     sub: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tenant_id: Option<&'a str>,
     kind: &'a str,
     iat: i64,
@@ -341,6 +343,9 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
         };
         let claims = MintClaims {
             sub: subject,
+            jti: service_token_binding
+                .as_ref()
+                .map(|_| uuid::Uuid::new_v4().to_string()),
             tenant_id: tenant_claim.as_deref(),
             kind: kind_str,
             iat,

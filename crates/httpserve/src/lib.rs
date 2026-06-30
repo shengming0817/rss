@@ -23,7 +23,8 @@ pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
     Admin, AuthenticatedRoutes, Health, Internal, Listener, ListenerRouter, NonPrimaryListener,
-    Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit, finalize_primary_auth,
+    Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
+    finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
     finalize_primary_auth_with_audit,
 };
 

@@ -7,6 +7,9 @@
 - **归属**：framework（服务间认证 / 工作负载身份接缝，provider-agnostic 基础设施治理）
 - **AI-robust 评级**：见 §6
 
+> **Superseded by #1500（2026-06-30）**：HTTP/Internal 当前执行策略已切为 SPIFFE/SPIRE + listener 级
+> mTLS 默认，service-token 仅作为显式迁移 listener 路径保留。本文保留为 2026-06-23 的历史裁决记录。
+
 ---
 
 ## 1. 背景

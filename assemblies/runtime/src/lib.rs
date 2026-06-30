@@ -8,7 +8,7 @@
 //! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。各域业务 handler ↔ service 接线 = #1309
 //!   及后续域 PR（本 PR 仅打通 async runtime、wire_X call-site 与 readiness probe）。live JWKS 远程拉取
 //! + 轮转 = **T003/#1197**（本 PR 用 `StaticKeySource` 构造期注入 key，构造器签名已为其留稳）。
-//!   listener / pg / vault 传输层 TLS（rustls+ring）= 后续 TLS 切片。
+//!   Internal listener 默认走 SPIFFE/mTLS；service-token 仅在显式迁移配置下绑定。
 //!
 //! 安全同批门（ADR-006 §5）：依赖图引真 verifier（`oidc` backend）、不引 stub Pdp（`memory` 经 deny.toml 禁
 //! server/rss/runtime；bins 生产 `src/` 无内联 `impl diport::Pdp`，`rss_pdp_impl_adapter_only` dylint 守 +
@@ -29,9 +29,12 @@ pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
 
+use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
@@ -72,6 +75,15 @@ use vault::{
     caps as vault_caps,
 };
 
+/// Internal listener auth mode. Default is mTLS; `service-token` is a transitional opt-in.
+const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
+const INTERNAL_AUTH_SCHEME_MTLS: &str = "mtls";
+const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
+/// Comma-separated exact SPIFFE IDs accepted on the Internal mTLS listener.
+const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
+/// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
+const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
+
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
 /// 组合根是 sanctioned 直读系统时钟点（`diport::Clock` rustdoc：「prod `SystemClock` 内部调 `SystemTime::now`，
@@ -83,6 +95,34 @@ impl diport::Clock for SystemClock {
         // reason: 组合根生产时钟——唯一 sanctioned 直读系统时钟点（rust-standards「Clock 构造器位置参」的 prod 实现）。
         #[allow(clippy::disallowed_methods)]
         SystemTime::now()
+    }
+}
+
+#[derive(Default)]
+struct RuntimeServiceTokenReplayGuard {
+    seen: Mutex<HashMap<String, SystemTime>>,
+}
+
+impl diport::ServiceTokenReplayGuard for RuntimeServiceTokenReplayGuard {
+    fn check_and_record(
+        &self,
+        nonce: &str,
+        expires_at: SystemTime,
+    ) -> Result<(), diport::ServiceTokenReplayError> {
+        // reason: runtime assembly owns this in-process fallback guard; production clock read is local to
+        // replay-state expiry pruning and does not leak into domain logic.
+        #[allow(clippy::disallowed_methods)]
+        let now = SystemTime::now();
+        let mut seen = self
+            .seen
+            .lock()
+            .map_err(|_| diport::ServiceTokenReplayError::Guard)?;
+        seen.retain(|_, expires_at| *expires_at > now);
+        if seen.contains_key(nonce) {
+            return Err(diport::ServiceTokenReplayError::Replayed);
+        }
+        seen.insert(nonce.to_string(), expires_at);
+        Ok(())
     }
 }
 
@@ -123,6 +163,7 @@ impl diport::AuditSink for TracingAuthAuditSink {
 ///   → JWT **全 401**（评审 F1 修复的生产失效根因），故构造期 fail-fast 拒空。
 /// - `RSS_OIDC_ES256_SEC1_B64URL`：JWT 路径 ES256 公钥，base64url(SEC1 未压缩点)，逗号分隔可多把（可选）。
 /// - `RSS_OIDC_HS256_SECRET_B64URL`：service-token 路径 HS256 密钥，base64url（可选）。
+/// - `RSS_OIDC_HS256_KID`：service-token 路径 key id；配置 HS256 secret 时必填。
 ///
 /// 薄壳：注入 `std::env::var` 读取器，委托可测核心 [`build_provider_from`]。
 pub fn build_provider() -> anyhow::Result<OidcProvider> {
@@ -144,6 +185,7 @@ fn build_provider_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<O
         &trusted_kinds,
         get("RSS_OIDC_ES256_SEC1_B64URL").as_deref(),
         get("RSS_OIDC_HS256_SECRET_B64URL").as_deref(),
+        get("RSS_OIDC_HS256_KID").as_deref(),
         Box::new(SystemClock),
     )
 }
@@ -163,6 +205,7 @@ pub fn provider_from_b64(
     trusted_kinds_csv: &str,
     es256_csv: Option<&str>,
     hs256_b64: Option<&str>,
+    hs256_kid: Option<&str>,
     clock: Box<dyn diport::Clock>,
 ) -> anyhow::Result<OidcProvider> {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -178,15 +221,22 @@ pub fn provider_from_b64(
         }
     }
     if let Some(hs) = hs256_b64 {
+        let kid = hs256_kid
+            .filter(|kid| !kid.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_HS256_KID"))?;
         let secret = b64
             .decode(hs)
             .context("RSS_OIDC_HS256_SECRET_B64URL not valid base64url")?;
         keys = keys
-            .add_hs256_secret(&secret)
+            .add_hs256_secret_with_kid(kid, &secret)
             .map_err(|e| anyhow::anyhow!("weak HS256 secret: {e}"))?;
     }
 
     let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience).keys(keys.build());
+    if hs256_b64.is_some() {
+        builder =
+            builder.service_token_replay_guard(Arc::new(RuntimeServiceTokenReplayGuard::default()));
+    }
     let mut trusted = 0usize;
     for kind in trusted_kinds_csv
         .split(',')
@@ -209,34 +259,174 @@ pub fn provider_from_b64(
 }
 
 /// listener → 认证方案策略（runtime-api.md §Listener：单 listener 单 scheme）。
-fn auth_scheme(listener: ListenerKind) -> AuthScheme {
-    match listener {
+fn auth_scheme(listener: ListenerKind) -> anyhow::Result<AuthScheme> {
+    auth_scheme_from(listener, |name| std::env::var(name).ok())
+}
+
+fn auth_scheme_from(
+    listener: ListenerKind,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<AuthScheme> {
+    Ok(match listener {
         ListenerKind::Primary | ListenerKind::Admin => AuthScheme::Jwt,
-        ListenerKind::Internal => AuthScheme::ServiceToken,
+        ListenerKind::Internal => internal_auth_scheme_from(get)?,
         ListenerKind::Health => AuthScheme::NoAuth,
         // ListenerKind non_exhaustive——未知 listener fail-closed 要求 JWT 认证（绝不默认 NoAuth）+ 配置期 warn 埋点。
         _ => {
             tracing::warn!(listener = ?listener, "unknown ListenerKind; fail-closed to JWT auth scheme");
             AuthScheme::Jwt
         }
+    })
+}
+
+fn internal_auth_scheme_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<AuthScheme> {
+    let Some(raw) = get(INTERNAL_AUTH_SCHEME_ENV) else {
+        return Ok(AuthScheme::Mtls);
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        INTERNAL_AUTH_SCHEME_MTLS => Ok(AuthScheme::Mtls),
+        INTERNAL_AUTH_SCHEME_SERVICE_TOKEN => {
+            tracing::warn!(
+                env = INTERNAL_AUTH_SCHEME_ENV,
+                "internal listener using transitional service-token auth; mTLS is the default"
+            );
+            Ok(AuthScheme::ServiceToken)
+        }
+        "" => anyhow::bail!(
+            "{INTERNAL_AUTH_SCHEME_ENV} must be either '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}'"
+        ),
+        _ => anyhow::bail!(
+            "{INTERNAL_AUTH_SCHEME_ENV} has unsupported value '{raw}' (expected '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}')"
+        ),
     }
 }
 
-/// listener → 验签桥应验证的方案（`NoAuth` listener 不挂桥 ⇒ `None`）。
-///
-/// `Mtls`（传输层鉴权，非本桥职责）与 `non_exhaustive` 未知方案均 → `None`（不挂桥 ⇒ 该 listener 的 Require
-/// 路由由 enforce fail-closed 401）+ 配置期 warn 埋点（消除「required_scheme 说要 Mtls 桥、但 bridge 不支持 Mtls」
-/// 的死代码 + 不一致，评审 F2）。
-fn required_scheme(listener: ListenerKind) -> Option<RequiredScheme> {
-    match auth_scheme(listener) {
+fn required_scheme_for_auth_scheme(scheme: AuthScheme) -> Option<RequiredScheme> {
+    match scheme {
         AuthScheme::Jwt | AuthScheme::JwtFromAssembly => Some(RequiredScheme::Jwt),
         AuthScheme::ServiceToken => Some(RequiredScheme::ServiceToken),
+        AuthScheme::Mtls => Some(RequiredScheme::Mtls),
         AuthScheme::NoAuth => None,
         other => {
             tracing::warn!(scheme = ?other, "listener auth scheme has no verify-bridge; Require routes fail-closed 401");
             None
         }
     }
+}
+
+pub struct AssembledListener {
+    listener: ListenerKind,
+    routes: httpserve::AuthenticatedRoutes,
+    mtls_health: Option<Arc<MtlsHealthSlot>>,
+}
+
+impl AssembledListener {
+    pub fn listener(&self) -> ListenerKind {
+        self.listener
+    }
+
+    pub fn into_parts(self) -> (ListenerKind, httpserve::AuthenticatedRoutes) {
+        (self.listener, self.routes)
+    }
+
+    fn plain(listener: ListenerKind, routes: httpserve::AuthenticatedRoutes) -> Self {
+        Self {
+            listener,
+            routes,
+            mtls_health: None,
+        }
+    }
+}
+
+struct MtlsHealthSlot {
+    config: Mutex<Option<httpd::MtlsServerConfig>>,
+}
+
+impl MtlsHealthSlot {
+    fn new() -> Self {
+        Self {
+            config: Mutex::new(None),
+        }
+    }
+
+    fn set(&self, config: httpd::MtlsServerConfig) -> anyhow::Result<()> {
+        let mut guard = self
+            .config
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mtls health slot lock poisoned"))?;
+        *guard = Some(config);
+        Ok(())
+    }
+
+    fn check(&self) -> (HealthStatus, &'static str) {
+        let Ok(guard) = self.config.lock() else {
+            return (HealthStatus::Unhealthy, "slot-poisoned");
+        };
+        match guard.as_ref() {
+            Some(config) if config.is_healthy() => (HealthStatus::Healthy, "ready"),
+            Some(_) => (HealthStatus::Unhealthy, "down"),
+            None => (HealthStatus::Unhealthy, "not-bound"),
+        }
+    }
+}
+
+struct MtlsSourceHealthProbe {
+    name: ProbeName,
+    slot: Arc<MtlsHealthSlot>,
+}
+
+impl MtlsSourceHealthProbe {
+    fn new(name: ProbeName, slot: Arc<MtlsHealthSlot>) -> Self {
+        Self { name, slot }
+    }
+}
+
+impl bootstrap::HealthProbe for MtlsSourceHealthProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = self.slot.check();
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+const MTLS_SOURCE_READY_PROBE_NAME: &str = "mtls_source_ready";
+
+fn mtls_probe_name(listener: ListenerKind) -> anyhow::Result<ProbeName> {
+    anyhow::ensure!(
+        listener == ListenerKind::Internal,
+        "mTLS health probe is only wired for Internal"
+    );
+    ProbeName::parse(MTLS_SOURCE_READY_PROBE_NAME).context("valid mtls probe name")
+}
+
+struct MtlsRouteAuthorizer {
+    allow_set: authn::MtlsAllowSet,
+}
+
+impl httpserve::RouteAuthorizer for MtlsRouteAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        request: httpserve::RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
+        Box::pin(async move {
+            let allowed = request.principal_kind == vocab::PrincipalKind::Service
+                && authn::SpiffeId::parse(&request.principal_id)
+                    .map(|id| self.allow_set.allows(&id))
+                    .unwrap_or(false);
+            if allowed {
+                httpserve::RouteAuthorizationDecision::Allow
+            } else {
+                httpserve::RouteAuthorizationDecision::Deny
+            }
+        })
+    }
+}
+
+fn mtls_route_authorizer_from_env(
+    listener: ListenerKind,
+) -> anyhow::Result<Arc<dyn httpserve::RouteAuthorizer>> {
+    let allow_set = mtls_allow_set_from_env(listener, |name| std::env::var(name).ok())?;
+    Ok(Arc::new(MtlsRouteAuthorizer { allow_set }))
 }
 
 /// 默认限流配额：10 req/s，burst 20（per-peer-IP keyed，组合根 owner；可配置化 follow-up #1106）。
@@ -281,7 +471,7 @@ pub fn assemble_authed_routers(
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
     primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-) -> anyhow::Result<Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>> {
+) -> anyhow::Result<Vec<AssembledListener>> {
     // 默认限流配额（owner=组合根，可调）：10 req/s，burst 20。peer-IP keyed（见 #1106 / RealIP follow-up）。
     // 共享跨所有 listener——统一 per-IP 预算，避免分散 listener 各自独立 bucket 使 burst 预算 N 倍膨胀。
     //
@@ -291,8 +481,21 @@ pub fn assemble_authed_routers(
     let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
     let mut out = Vec::new();
     for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
-        let scheme = auth_scheme(listener);
+        let scheme = auth_scheme(listener).context("resolve listener auth scheme")?;
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
+        let mtls_health = if scheme == AuthScheme::Mtls {
+            let slot = Arc::new(MtlsHealthSlot::new());
+            let probe_name = mtls_probe_name(listener)?;
+            registry
+                .probe(
+                    probe_name.clone(),
+                    Box::new(MtlsSourceHealthProbe::new(probe_name, slot.clone())),
+                )
+                .context("register mtls source health probe")?;
+            Some(slot)
+        } else {
+            None
+        };
         let authed = if listener == ListenerKind::Primary {
             httpserve::finalize_primary_auth_with_audit(
                 routes,
@@ -300,6 +503,14 @@ pub fn assemble_authed_routers(
                 audit_sink.clone(),
                 audit_clock.clone(),
                 primary_authorizer.clone(),
+            )
+        } else if scheme == AuthScheme::Mtls {
+            httpserve::finalize_auth_with_audit_and_authorizer(
+                routes,
+                plan,
+                audit_sink.clone(),
+                audit_clock.clone(),
+                mtls_route_authorizer_from_env(listener)?,
             )
         } else {
             httpserve::finalize_auth_with_audit(
@@ -310,7 +521,7 @@ pub fn assemble_authed_routers(
             )
         }
         .context("finalize_auth")?;
-        let required = required_scheme(listener);
+        let required = required_scheme_for_auth_scheme(scheme);
         let wired = match required {
             Some(req) => auth_bridge::apply_verify_bridge(authed, provider.clone(), req),
             None => authed,
@@ -329,7 +540,11 @@ pub fn assemble_authed_routers(
             verify_bridge = required.is_some(),
             "listener auth wiring assembled"
         );
-        out.push((listener, wired));
+        out.push(AssembledListener {
+            listener,
+            routes: wired,
+            mtls_health,
+        });
     }
     Ok(out)
 }
@@ -1500,7 +1715,7 @@ fn listener_addr(listener: ListenerKind) -> anyhow::Result<SocketAddr> {
 /// （SHUTDOWN-TOKEN-FUNNEL-01）。信号到达 → `stack.shutdown()` 阶段 1 广播 cancel 触发各 serve graceful
 /// drain、阶段 2 LIFO await 收敛。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
 async fn serve_until_signal(
-    listeners: Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>,
+    listeners: Vec<AssembledListener>,
     register_background: impl FnOnce(&mut ShutdownStack),
 ) -> anyhow::Result<()> {
     // 生产装配：真实 env 地址解析 + 真实信号 future（薄壳，委托可测核心 [`serve_until`]）。
@@ -1526,7 +1741,7 @@ async fn serve_until_signal(
 // 实际控制流是「bind 各 listener → 等关停 → shutdown」三段——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 async fn serve_until<B, R, S>(
-    listeners: Vec<(ListenerKind, httpserve::AuthenticatedRoutes)>,
+    listeners: Vec<AssembledListener>,
     register_background: B,
     addr_resolver: R,
     shutdown: S,
@@ -1544,8 +1759,8 @@ where
     let mut stack = ShutdownStack::new(CancellationToken::new());
     // 先注册后台 worker（LIFO：listener 后注册先 drain，sampler 先注册后停——确保 listener drain 后采样停）。
     register_background(&mut stack);
-    for (listener, routes) in listeners {
-        bind_and_register(&mut stack, listener, routes, &addr_resolver).await?;
+    for listener in listeners {
+        bind_and_register(&mut stack, listener, &addr_resolver).await?;
     }
     // 启动就绪汇总（operator 一眼确认全部 listener 已绑定 + 服务就绪）。
     tracing::info!(listener_count, "all listeners bound; server ready");
@@ -1561,24 +1776,91 @@ where
 /// async bind 在注册前完成 ⇒ 端口冲突 fail-fast；同步 `bound.serve(svc, token)` 在 `register_with_token`
 /// 闭包内消费注入的 child token（SHUTDOWN-TOKEN-FUNNEL-01）。`addr_resolver` 由 [`serve_until`] 注入
 /// （生产 = env 解析，测试 = `127.0.0.1:0` ephemeral）。
+// reason: this is the per-listener assembly junction; keeping bind, auth-scheme selection, and
+// plaintext/mTLS ShutdownStack registration together makes fail-fast startup order explicit.
+#[allow(clippy::cognitive_complexity)]
 async fn bind_and_register<R>(
     stack: &mut ShutdownStack,
-    listener: ListenerKind,
-    routes: httpserve::AuthenticatedRoutes,
+    listener: AssembledListener,
     addr_resolver: &R,
 ) -> anyhow::Result<()>
 where
     R: Fn(ListenerKind) -> anyhow::Result<SocketAddr>,
 {
+    let AssembledListener {
+        listener,
+        routes,
+        mtls_health,
+    } = listener;
     let name = listener_name(listener);
     let addr = addr_resolver(listener)?;
     let bound = HttpServer::bind(name, addr)
         .await
         .with_context(|| format!("bind {name} listener at {addr}"))?;
     tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
+    let scheme = auth_scheme(listener).context("resolve listener auth scheme for serve")?;
     let svc = routes.into_make_service();
-    stack.register_with_token(move |token| DynManagedResource::new_box(bound.serve(svc, token)));
+    match scheme {
+        AuthScheme::Mtls => {
+            let mtls = mtls_config_from_env(listener)
+                .await
+                .with_context(|| format!("build {name} mTLS config"))?;
+            if let Some(slot) = &mtls_health {
+                slot.set(mtls.clone())?;
+            }
+            stack.register_with_token(move |token| {
+                DynManagedResource::new_box(bound.serve_mtls(svc, mtls, token))
+            });
+        }
+        _ => {
+            if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
+                tracing::warn!(
+                    listener = ?listener,
+                    "binding transitional Internal service-token listener; mTLS is the default"
+                );
+            }
+            stack.register_with_token(move |token| {
+                DynManagedResource::new_box(bound.serve(svc, token))
+            });
+        }
+    }
     Ok(())
+}
+
+fn mtls_allow_set_from_csv(raw: &str) -> anyhow::Result<authn::MtlsAllowSet> {
+    let mut ids = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "{INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV} must not contain empty entries"
+        );
+        ids.push(trimmed.to_owned());
+    }
+    authn::MtlsAllowSet::new(ids)
+        .map_err(|e| anyhow::anyhow!("{INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV} invalid: {e}"))
+}
+
+fn mtls_allow_set_from_env(
+    listener: ListenerKind,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<authn::MtlsAllowSet> {
+    anyhow::ensure!(
+        listener == ListenerKind::Internal,
+        "mTLS listener config is only wired for Internal"
+    );
+    let raw = get(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV}")
+    })?;
+    mtls_allow_set_from_csv(&raw)
+}
+
+async fn mtls_config_from_env(listener: ListenerKind) -> anyhow::Result<httpd::MtlsServerConfig> {
+    let allow_set = mtls_allow_set_from_env(listener, |name| std::env::var(name).ok())?;
+    let endpoint = std::env::var(SPIFFE_ENDPOINT_SOCKET_ENV).ok();
+    httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// 聚合 `ShutdownStack::shutdown` 的 per-listener 失败：空 = 干净退出 `Ok`；非空 = 记录每条 + 非零退出 `Err`
@@ -1843,7 +2125,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
     // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
     let reporter = Arc::new(registry.take_health_reporter());
-    listeners.push(health_listener(reporter, metrics_exporter).context("build health listener")?);
+    let (listener, routes) =
+        health_listener(reporter, metrics_exporter).context("build health listener")?;
+    listeners.push(AssembledListener::plain(listener, routes));
 
     // LIFO 注册顺序：otel exporter 先注册（最后关，关停期 span flush）→ pg pool guard → sampler →
     // event infra guards（AMQP+Redis）→ module resources/workers（event + 域）→
@@ -1881,6 +2165,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diport::ServiceTokenReplayGuard;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -1970,6 +2255,40 @@ mod tests {
         let down = probe.check();
         assert_eq!(down.status(), HealthStatus::Unhealthy);
         assert_eq!(down.detail(), "down");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn runtime_replay_guard_expires_seen_nonce() {
+        let guard = RuntimeServiceTokenReplayGuard::default();
+        let expired = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let future = SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800);
+        guard
+            .check_and_record("nonce-a", expired)
+            .expect("first record");
+        guard
+            .check_and_record("nonce-a", future)
+            .expect("expired nonce pruned before second record");
+        assert!(matches!(
+            guard.check_and_record("nonce-a", future),
+            Err(diport::ServiceTokenReplayError::Replayed)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn mtls_source_health_probe_is_unhealthy_before_bind() {
+        use bootstrap::HealthProbe;
+
+        let slot = Arc::new(MtlsHealthSlot::new());
+        let probe = MtlsSourceHealthProbe::new(
+            mtls_probe_name(ListenerKind::Internal).expect("probe name"),
+            slot,
+        );
+        let check = probe.check();
+        assert_eq!(check.status(), HealthStatus::Unhealthy);
+        assert_eq!(check.detail(), "not-bound");
+        assert_eq!(check.name().as_str(), MTLS_SOURCE_READY_PROBE_NAME);
     }
 
     /// KeyProviderReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("down")`（fail-closed）。
@@ -2143,33 +2462,108 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn auth_scheme_per_listener() {
-        assert_eq!(auth_scheme(ListenerKind::Primary), AuthScheme::Jwt);
-        assert_eq!(auth_scheme(ListenerKind::Admin), AuthScheme::Jwt);
         assert_eq!(
-            auth_scheme(ListenerKind::Internal),
-            AuthScheme::ServiceToken
+            auth_scheme_from(ListenerKind::Primary, |_| None).unwrap(),
+            AuthScheme::Jwt
         );
-        assert_eq!(auth_scheme(ListenerKind::Health), AuthScheme::NoAuth);
+        assert_eq!(
+            auth_scheme_from(ListenerKind::Admin, |_| None).unwrap(),
+            AuthScheme::Jwt
+        );
+        assert_eq!(
+            auth_scheme_from(ListenerKind::Internal, |_| None).unwrap(),
+            AuthScheme::Mtls
+        );
+        assert_eq!(
+            auth_scheme_from(ListenerKind::Health, |_| None).unwrap(),
+            AuthScheme::NoAuth
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_service_token_requires_explicit_transition_flag() {
+        let scheme = auth_scheme_from(ListenerKind::Internal, |name| {
+            (name == INTERNAL_AUTH_SCHEME_ENV)
+                .then(|| INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string())
+        })
+        .expect("explicit service-token transition is accepted");
+        assert_eq!(scheme, AuthScheme::ServiceToken);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_auth_scheme_rejects_unknown_value() {
+        let err = auth_scheme_from(ListenerKind::Internal, |name| {
+            (name == INTERNAL_AUTH_SCHEME_ENV).then(|| "mtls-or-token".to_string())
+        })
+        .expect_err("unknown internal auth scheme must fail-fast");
+        assert!(
+            err.to_string().contains(INTERNAL_AUTH_SCHEME_ENV),
+            "error should name env var: {err}"
+        );
     }
 
     #[test]
     fn required_scheme_maps_and_health_is_none() {
         assert_eq!(
-            required_scheme(ListenerKind::Primary),
+            required_scheme_for_auth_scheme(AuthScheme::Jwt),
             Some(RequiredScheme::Jwt)
         );
         assert_eq!(
-            required_scheme(ListenerKind::Internal),
+            required_scheme_for_auth_scheme(AuthScheme::Mtls),
+            Some(RequiredScheme::Mtls)
+        );
+        assert_eq!(
+            required_scheme_for_auth_scheme(AuthScheme::ServiceToken),
             Some(RequiredScheme::ServiceToken)
         );
-        assert_eq!(required_scheme(ListenerKind::Health), None);
+        assert_eq!(required_scheme_for_auth_scheme(AuthScheme::NoAuth), None);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn mtls_allow_set_from_csv_rejects_empty_and_wildcard() {
+        let err = mtls_allow_set_from_csv("spiffe://example.org/ns/rss/sa/internal,")
+            .expect_err("trailing comma must not be ignored");
+        assert!(
+            err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
+            "error should name env var: {err}"
+        );
+
+        let err = mtls_allow_set_from_csv("spiffe://example.org/ns/rss/sa/*")
+            .expect_err("wildcard spiffe ids must fail");
+        assert!(
+            err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
+            "error should name env var: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn mtls_allow_set_from_env_requires_config_for_internal_mtls() {
+        let err = mtls_allow_set_from_env(ListenerKind::Internal, |_| None)
+            .expect_err("mTLS allow-set must be configured");
+        assert!(
+            err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
+            "error should name env var: {err}"
+        );
     }
 
     #[test]
     fn provider_from_b64_empty_keys_fails_fast() {
         // 无任何 key → VerifierConfigBuilder::build fail-fast（无 key 的 provider 是配置错误）。
         assert!(
-            provider_from_b64("https://issuer.test", "rss", "user", None, None, clk()).is_err()
+            provider_from_b64(
+                "https://issuer.test",
+                "rss",
+                "user",
+                None,
+                None,
+                None,
+                clk()
+            )
+            .is_err()
         );
     }
 
@@ -2183,6 +2577,7 @@ mod tests {
             "  ,  ",
             None,
             Some(&secret),
+            Some("cell-a.svc-a"),
             clk(),
         );
         assert!(matches!(&r, Err(e) if e.to_string().contains("RSS_OIDC_TRUSTED_KINDS")));
@@ -2226,6 +2621,7 @@ mod tests {
             "RSS_OIDC_AUDIENCE" => Some("rss".to_string()),
             "RSS_OIDC_TRUSTED_KINDS" => Some("user,admin".to_string()),
             "RSS_OIDC_HS256_SECRET_B64URL" => Some(secret.clone()),
+            "RSS_OIDC_HS256_KID" => Some("cell-a.svc-a".to_string()),
             _ => None,
         };
         build_provider_from(get).expect("issuer + aud + trusted kinds + hs256 key ⇒ 构造成功");
@@ -2247,6 +2643,7 @@ mod tests {
             "user",
             Some("!!not-b64!!"),
             None,
+            None,
             clk(),
         );
         assert!(bad.is_err());
@@ -2262,6 +2659,7 @@ mod tests {
             "user",
             None,
             Some(&secret),
+            Some("cell-a.svc-a"),
             clk(),
         );
         assert!(
@@ -2431,6 +2829,7 @@ mod tests {
                 "user",
                 None,
                 Some(&secret),
+                Some("cell-a.svc-a"),
                 clk(),
             )
             .expect("provider"),
@@ -2967,6 +3366,13 @@ mod tests {
         Arc::new(FixedMetrics("# noop\n"))
     }
 
+    #[allow(clippy::expect_used)]
+    fn test_health_assembled() -> AssembledListener {
+        let (listener, routes) =
+            health_listener(test_reporter(), noop_metrics()).expect("health listener");
+        AssembledListener::plain(listener, routes)
+    }
+
     // ── build_trace_export：otel 导出按需开启 + endpoint typed 安全边界（fail-fast）─────────────
     // get 注入式（不读真实 env），覆盖 None / TLS / loopback-http / 非 loopback 明文 / 非法 scheme 五态。
 
@@ -3039,10 +3445,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn serve_until_binds_all_listeners_and_drains_clean() {
-        let listeners = vec![
-            health_listener(test_reporter(), noop_metrics()).expect("h1"),
-            health_listener(test_reporter(), noop_metrics()).expect("h2"),
-        ];
+        let listeners = vec![test_health_assembled(), test_health_assembled()];
         serve_until(
             listeners,
             |_stack| {}, // 无后台 worker（测 serve 循环本身）
@@ -3075,7 +3478,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn serve_until_addr_resolver_failure_propagates() {
-        let listeners = vec![health_listener(test_reporter(), noop_metrics()).expect("health")];
+        let listeners = vec![test_health_assembled()];
         let err = serve_until(
             listeners,
             |_stack| {}, // 无后台 worker（测 serve 循环本身）

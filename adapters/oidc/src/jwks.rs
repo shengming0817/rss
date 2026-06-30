@@ -499,6 +499,7 @@ fn decode_b64(s: &str) -> Option<Vec<u8>> {
 mod tests {
     //! JWKS 解析矩阵 + 文件源加载 / 轮转 / fail-closed / degraded / shutdown。
     //! 测试 expect/unwrap carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow]` 逐 fn 标注。
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -515,6 +516,22 @@ mod tests {
     const NOW: i64 = 1_700_000_000;
     const SK1_BYTES: [u8; 32] = [0x42; 32];
     const SK2_BYTES: [u8; 32] = [0x11; 32];
+
+    struct NoopReplayGuard;
+
+    impl diport::ServiceTokenReplayGuard for NoopReplayGuard {
+        fn check_and_record(
+            &self,
+            _nonce: &str,
+            _expires_at: std::time::SystemTime,
+        ) -> Result<(), diport::ServiceTokenReplayError> {
+            Ok(())
+        }
+    }
+
+    fn replay_guard() -> Arc<dyn diport::ServiceTokenReplayGuard> {
+        Arc::new(NoopReplayGuard)
+    }
 
     /// 确定性 tracing 捕获（JWKS poison recovery 回归测试用）。仅包住本测试触发的新 callsite，避免与
     /// `verify.rs` 的全局 subscriber fixture 争抢全局状态。
@@ -916,6 +933,7 @@ mod tests {
         .expect("initial load");
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
+            .service_token_replay_guard(replay_guard())
             .build()
             .expect("config");
 
@@ -951,6 +969,7 @@ mod tests {
         assert!(src.reload(), "reload 成功");
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
+            .service_token_replay_guard(replay_guard())
             .build()
             .expect("config");
 
@@ -1091,6 +1110,7 @@ mod tests {
         .expect("initial load");
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
+            .service_token_replay_guard(replay_guard())
             .build()
             .expect("config");
         // 无 kid 的 token（用 k1 私钥签发，但 header 不带 kid）→ JWKS 快照无 untagged → 无候选 → Untrusted。
@@ -1155,6 +1175,7 @@ mod tests {
         assert!(handle.is_ready());
         let _config = VerifierConfigBuilder::new(ISS, AUD)
             .keys_jwks(src)
+            .service_token_replay_guard(replay_guard())
             .build()
             .expect("config");
         // src 已 move 进 config，句柄仍读共享 ready（组合根据此注册 oidc_jwks_ready probe）。

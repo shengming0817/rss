@@ -146,6 +146,7 @@ fn oidc_provider() -> OidcProvider {
         "user",
         Some(&es256_b64),
         None,
+        None,
         Box::new(FixedClock(NOW)),
     )
     .expect("es256 production provider")

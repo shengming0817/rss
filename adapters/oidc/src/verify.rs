@@ -88,6 +88,10 @@ fn verify_path(
     }
     // kid 缩小候选集（JWKS 轮转按 id 选 key；无 kid → untagged 盲扫）。kid 是 hint、非信任根——下方仍须签名校验。
     let kid = jws.kid.as_deref();
+    if expected == SupportedAlg::Hs256 && kid.is_none() {
+        log_fail("missing_kid", &snapshot);
+        return Err(PdpError::Untrusted);
+    }
     match match expected {
         SupportedAlg::Es256 => verify_es256(&snapshot, kid, &jws),
         SupportedAlg::Hs256 => match service_token_binding {
@@ -108,7 +112,27 @@ fn verify_path(
         }
     }
     // 签名通过 → 校 claim 语义（exp/nbf 经注入 Clock + iss/aud/sub）。
-    claims::validate_and_map(config, clock, &jws.payload)
+    match expected {
+        SupportedAlg::Es256 => claims::validate_and_map(config, clock, &jws.payload),
+        SupportedAlg::Hs256 => {
+            let (claims, nonce, expires_at) =
+                claims::validate_service_token_and_map(config, clock, &jws.payload)?;
+            let Some(guard) = config.service_token_replay_guard() else {
+                log_fail("missing_replay_guard", &snapshot);
+                return Err(PdpError::Untrusted);
+            };
+            guard.check_and_record(&nonce, expires_at).map_err(|e| {
+                let reason = match e {
+                    diport::ServiceTokenReplayError::Replayed => "nonce_replayed",
+                    diport::ServiceTokenReplayError::Guard => "replay_guard_error",
+                    _ => "replay_guard_error",
+                };
+                log_fail(reason, &snapshot);
+                PdpError::InvalidSignature
+            })?;
+            Ok(claims)
+        }
+    }
 }
 
 /// 单路径验签三态（区分 fail-closed 语义）：候选为空 = kid 不在受信集（未知 / 轮转出）→ `Untrusted`；候选存在
@@ -211,6 +235,8 @@ fn log_fail(reason: &'static str, keys: &KeySet) {
 mod tests {
     //! 表驱动验签矩阵 + RFC7515 known-answer + PII 边界回归。
     //! 测试 expect/unwrap carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow]` 逐 fn 标注。
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use base64::Engine as _;
@@ -232,8 +258,32 @@ mod tests {
     const TEST_SK2_BYTES: [u8; 32] = [0x11; 32];
     /// HS256 测试共享密钥（service-token 路径 fixture）。
     const HS_SECRET: &[u8] = b"unit-test-hs256-shared-secret-0001";
+    const HS_KID: &str = "cell-a.svc-a";
+    const HS_KID2: &str = "cell-a.svc-b";
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const OTHER_TENANT: &str = "11111111-2222-4333-8444-555555555555";
+
+    #[derive(Default)]
+    struct TestReplayGuard {
+        seen: Mutex<HashSet<String>>,
+    }
+
+    impl diport::ServiceTokenReplayGuard for TestReplayGuard {
+        fn check_and_record(
+            &self,
+            nonce: &str,
+            _expires_at: SystemTime,
+        ) -> Result<(), diport::ServiceTokenReplayError> {
+            let mut seen = self
+                .seen
+                .lock()
+                .map_err(|_| diport::ServiceTokenReplayError::Guard)?;
+            if !seen.insert(nonce.to_string()) {
+                return Err(diport::ServiceTokenReplayError::Replayed);
+            }
+            Ok(())
+        }
+    }
 
     /// 确定性 tracing 捕获（PII 回归测试用）。`cargo test`（非进程隔离的 nextest）多测试共进程：先跑的、
     /// 无 subscriber 的测试会把 warn/debug callsite 的 interest 缓存成 `never`，事件宏短路、不再咨询后装的
@@ -339,12 +389,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn hs256_config() -> VerifierConfig {
         let keys = StaticKeySource::builder()
-            .add_hs256_secret(HS_SECRET)
+            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
             .expect("hs256 secret")
             .build();
         VerifierConfigBuilder::new(ISS, AUD)
             .keys(keys)
             .trust_kind("service")
+            .service_token_replay_guard(Arc::new(TestReplayGuard::default()))
             .build()
             .expect("valid hs256 config")
     }
@@ -365,9 +416,14 @@ mod tests {
     /// 用 HS256 共享密钥签发 token（header alg=HS256）。
     #[allow(clippy::expect_used)]
     fn mint_hs256(secret: &[u8], payload_json: &str) -> String {
+        mint_hs256_with_kid(secret, HS_KID, payload_json)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn mint_hs256_with_kid(secret: &[u8], kid: &str, payload_json: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#);
+        let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"HS256","kid":"{kid}"}}"#));
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
@@ -383,6 +439,31 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn mint_hs256_bound(secret: &[u8], payload_json: &str, tenant: &str) -> String {
+        mint_hs256_bound_with_kid(secret, HS_KID, payload_json, tenant)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn mint_hs256_bound_with_kid(
+        secret: &[u8],
+        kid: &str,
+        payload_json: &str,
+        tenant: &str,
+    ) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let header = URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"HS256","kid":"{kid}"}}"#));
+        let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let binding = tenant_binding(tenant);
+        let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+        mac.update(&mac_input);
+        let tag = mac.finalize().into_bytes();
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(tag))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn mint_hs256_bound_without_kid(secret: &[u8], payload_json: &str, tenant: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#);
@@ -596,7 +677,12 @@ mod tests {
     fn valid_hs256_service_token_maps_claims() {
         let token = mint_hs256_bound(
             HS_SECRET,
-            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-valid""#,
+            ),
             CANON_TENANT,
         );
         let claims = ok_claims(verify_credential(
@@ -612,7 +698,12 @@ mod tests {
     fn hs256_service_token_wrong_tenant_binding_rejected() {
         let token = mint_hs256_bound(
             HS_SECRET,
-            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-tenant""#,
+            ),
             CANON_TENANT,
         );
         let r = verify_credential(
@@ -627,7 +718,12 @@ mod tests {
     fn legacy_unbound_hs256_service_token_rejected() {
         let token = mint_hs256(
             HS_SECRET,
-            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-unbound""#,
+            ),
         );
         let r = verify_credential(
             &hs256_config(),
@@ -638,9 +734,99 @@ mod tests {
     }
 
     #[test]
+    fn hs256_service_token_missing_kid_rejected() {
+        let token = mint_hs256_bound_without_kid(
+            HS_SECRET,
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-no-kid""#,
+            ),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
+    }
+
+    #[test]
+    fn hs256_service_token_unknown_kid_rejected() {
+        let token = mint_hs256_bound_with_kid(
+            HS_SECRET,
+            "unknown-kid",
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-unknown-kid""#,
+            ),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::Untrusted)), "got {r:?}");
+    }
+
+    #[test]
+    fn hs256_service_token_missing_jti_rejected() {
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            CANON_TENANT,
+        );
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
+    #[test]
+    fn hs256_service_token_duplicate_jti_rejected() {
+        let config = hs256_config();
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-dup""#,
+            ),
+            CANON_TENANT,
+        );
+        let first = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::service_token(token.clone(), tenant_binding(CANON_TENANT)),
+        );
+        assert!(first.is_ok(), "first nonce use should pass: {first:?}");
+        let second = verify_credential(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(
+            matches!(second, Err(PdpError::InvalidSignature)),
+            "duplicate nonce must fail closed: {second:?}"
+        );
+    }
+
+    #[test]
     #[allow(clippy::unwrap_used)]
     fn hs256_tampered_rejected() {
-        let token = mint_hs256_bound(HS_SECRET, &payload(NOW + 3600, ISS, AUD, ""), CANON_TENANT);
+        let token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(NOW + 3600, ISS, AUD, r#","jti":"nonce-tampered""#),
+            CANON_TENANT,
+        );
         // 篡改签名段最后一字符。
         let mut t = token;
         let last = t.pop().unwrap_or('A');
@@ -966,20 +1152,27 @@ mod tests {
     fn hs256_multi_key_rotation_second_key_succeeds() {
         const HS_SECRET2: &[u8] = b"second-hs256-secret-for-rotation-test";
         let keys = StaticKeySource::builder()
-            .add_hs256_secret(HS_SECRET)
+            .add_hs256_secret_with_kid(HS_KID, HS_SECRET)
             .expect("first secret")
-            .add_hs256_secret(HS_SECRET2)
+            .add_hs256_secret_with_kid(HS_KID2, HS_SECRET2)
             .expect("second secret")
             .build();
         let config = VerifierConfigBuilder::new(ISS, AUD)
             .keys(keys)
             .trust_kind("service")
+            .service_token_replay_guard(Arc::new(TestReplayGuard::default()))
             .build()
             .expect("config");
         // 用第二把 secret 签发 → 验签器遍历两把密钥，第二把命中 → Ok。
-        let token = mint_hs256_bound(
+        let token = mint_hs256_bound_with_kid(
             HS_SECRET2,
-            &payload(NOW + 3600, ISS, AUD, r#","kind":"service""#),
+            HS_KID2,
+            &payload(
+                NOW + 3600,
+                ISS,
+                AUD,
+                r#","kind":"service","jti":"nonce-k2""#,
+            ),
             CANON_TENANT,
         );
         let r = verify_credential(

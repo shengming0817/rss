@@ -15,4 +15,6 @@ fn ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/external_cannot_seal_fail.rs");
     t.compile_fail("tests/ui/external_cannot_construct_fail.rs");
+    t.compile_fail("tests/ui/external_cannot_construct_mtls_peer_fail.rs");
+    t.compile_fail("tests/ui/external_cannot_seal_mtls_peer_fail.rs");
 }

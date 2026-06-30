@@ -266,6 +266,7 @@ fn test_provider() -> oidc::OidcProvider {
         "user,admin",
         Some(&B64_URL.encode(sec1(&sk_jwt()))),
         Some(&B64_URL.encode([7u8; 32])),
+        Some("cell-a.svc-a"),
         Box::new(SystemClock),
     )
     .expect("test provider")
@@ -403,13 +404,14 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     let mut primary = None;
-    for (listener, routes) in runtime::assemble_authed_routers(
+    for assembled in runtime::assemble_authed_routers(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
         identity_domain.primary_authorizer(),
     )? {
+        let (listener, routes) = assembled.into_parts();
         if listener == ListenerKind::Primary {
             primary = Some(routes.into_router_for_test());
         }
@@ -619,13 +621,14 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &settings_domain];
     let mut registry = bootstrap::compose(&domains)?;
     let mut primary = None;
-    for (listener, routes) in runtime::assemble_authed_routers(
+    for assembled in runtime::assemble_authed_routers(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
         identity_domain.primary_authorizer(),
     )? {
+        let (listener, routes) = assembled.into_parts();
         if listener == ListenerKind::Primary {
             primary = Some(routes.into_router_for_test());
         }
