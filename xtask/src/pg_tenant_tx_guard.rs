@@ -195,6 +195,7 @@ pub(crate) fn scan_guard(
 
     for expected in [
         "config-legacy-plaintext-startup-probe",
+        "config-value-maintenance",
         "outbox-dlx-dead-letter-settlement",
     ] {
         if !allowed_exceptions.contains(expected) {
@@ -497,6 +498,39 @@ fn allowed_site_exception(
         && window.contains("fetch_one(&self.pool")
     {
         return Some("config-legacy-plaintext-startup-probe");
+    }
+    if rel == "config_repo.rs"
+        && tables == ["config_entries"]
+        && window.contains("select tenant_id::text, config_key, version, value, value_enc, key_id")
+        && window.contains("from config_entries")
+        && window.contains("protection_scheme = $1")
+        && window.contains("fetch_all(&self.store.pool")
+    {
+        return Some("config-value-maintenance");
+    }
+    if rel == "config_repo.rs"
+        && tables == ["config_entries"]
+        && window.contains("update config_entries")
+        && window.contains("protection_scheme = 0")
+        && window.contains("execute(&self.store.pool")
+    {
+        return Some("config-value-maintenance");
+    }
+    if rel == "config_repo.rs"
+        && tables == ["config_entries"]
+        && window.contains("update config_entries")
+        && window.contains("protection_scheme = 1")
+        && window.contains("execute(&self.store.pool")
+    {
+        return Some("config-value-maintenance");
+    }
+    if rel == "config_repo.rs"
+        && tables == ["config_entries"]
+        && window.contains("select count(*)::bigint from config_entries")
+        && window.contains("protection_scheme = 0")
+        && window.contains("fetch_one(&self.store.pool")
+    {
+        return Some("config-value-maintenance");
     }
     if rel == "outbox.rs"
         && tables == ["dead_letter"]
@@ -1054,6 +1088,22 @@ mod tests {
                 (
                     "migrator.rs",
                     "async fn legacy_config_plaintext_count(&self){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.pool).await; }",
+                ),
+                (
+                    "config_repo.rs",
+                    "async fn select_maintenance_rows(&self){ sqlx::query(\"SELECT tenant_id::text, config_key, version, value, value_enc, key_id FROM config_entries WHERE protection_scheme = $1 ORDER BY tenant_id::text, config_key, version LIMIT $2\").fetch_all(&self.store.pool).await; }",
+                ),
+                (
+                    "config_repo.rs",
+                    "async fn backfill_row(&self){ sqlx::query(\"UPDATE config_entries SET value = NULL, protection_scheme = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 0\").execute(&self.store.pool).await; }",
+                ),
+                (
+                    "config_repo.rs",
+                    "async fn rewrap_row(&self){ sqlx::query(\"UPDATE config_entries SET value_enc = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 1\").execute(&self.store.pool).await; }",
+                ),
+                (
+                    "config_repo.rs",
+                    "async fn remaining_plaintext(&self){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.store.pool).await; }",
                 ),
             ]),
         );

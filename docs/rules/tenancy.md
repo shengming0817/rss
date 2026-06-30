@@ -128,9 +128,16 @@ allowlist 测试。raw `PgPool` 只允许在 `PgStore` setup、migration、readi
 global infra adapter 和命名维护例外中出现。
 
 **命名维护例外**：tenant 表 raw-pool 维护例外只允许在 `pg-tenant-tx-guard` 中按窄形状显式登记，并带
-stale-allowlist 测试。当前 Rust raw-pool 例外仅为 `config_entries` startup legacy plaintext probe（serving
-pool 接受前由 migrator/owner 连接只统计 encryption migration debt）。`dead_letter` retention sweep 和
-outbox relay/retention/backlog 不保留 owner/maintenance 长期连接，也不授 `rss_app` 直接 DELETE/UPDATE；
+stale-allowlist 测试。当前 Rust raw-pool 例外只有两类：`config_entries` startup legacy plaintext probe
+（serving pool 接受前由 migrator/owner 连接只统计 encryption migration debt），以及 `rss
+settings-config-values maintenance` 的 `config_entries` backfill/rewrap。后者只能经
+`PgRuntimeDeps::setup_maintenance` 的 migrator/owner 连接执行，SQL 形状限定为按
+`(tenant_id, config_key, version)` 稳定扫描 `protection_scheme = 0|1`、原地 CAS `UPDATE` 同一版本行、统计
+remaining plaintext；runtime 必须验签 operator service-token，用已验证 service principal subject 写入
+`auth_audit_events` job start/finish durable audit。维护 AAD 只能经 `ConfigValueMaintenanceCapability` 派生，
+普通 serving 读写路径不能读取
+scheme=0 plaintext。`dead_letter` retention sweep 和 outbox relay/retention/backlog 不保留 owner/maintenance
+长期连接，也不授 `rss_app` 直接 DELETE/UPDATE；
 它们由迁移安装的窄 `SECURITY DEFINER` 函数承载，函数 owner 是 NOLOGIN BYPASSRLS 维护角色，只开放固定
 参数的全域维护能力。runtime 仍经 `rss_app` 调用这些函数；outbox relay 将 publish 失败写入 `dead_letter`
 前必须从 outbox metadata 取 tenant，并在同一事务内经 `set_local_tenant` 注入 tenant scope 后写入。

@@ -109,6 +109,209 @@ impl ConfigValueProtections {
     }
 }
 
+/// settings `ConfigValue` 存量维护操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigValueMaintenanceOperation {
+    /// 仅把 legacy plaintext `protection_scheme=0` 行转换为 encrypted scheme。
+    Backfill,
+    /// 仅把 encrypted 行重包裹到 provider current-primary。
+    Rewrap,
+    /// 先 backfill，再 rewrap。
+    Both,
+}
+
+impl ConfigValueMaintenanceOperation {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Backfill => "backfill",
+            Self::Rewrap => "rewrap",
+            Self::Both => "both",
+        }
+    }
+
+    fn includes_backfill(self) -> bool {
+        matches!(self, Self::Backfill | Self::Both)
+    }
+
+    fn includes_rewrap(self) -> bool {
+        matches!(self, Self::Rewrap | Self::Both)
+    }
+}
+
+/// settings `ConfigValue` 存量维护参数。
+#[derive(Debug, Clone)]
+pub struct ConfigValueMaintenanceOptions {
+    operation: ConfigValueMaintenanceOperation,
+    tenant: Option<TenantId>,
+    batch_size: usize,
+    max_rows: Option<usize>,
+    dry_run: bool,
+}
+
+impl ConfigValueMaintenanceOptions {
+    /// 默认执行 backfill + rewrap，batch size = 500。
+    #[must_use]
+    pub fn new(operation: ConfigValueMaintenanceOperation) -> Self {
+        Self {
+            operation,
+            tenant: None,
+            batch_size: 500,
+            max_rows: None,
+            dry_run: false,
+        }
+    }
+
+    /// 限定单租户。
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: TenantId) -> Self {
+        self.tenant = Some(tenant);
+        self
+    }
+
+    /// 设置可选租户过滤。
+    #[must_use]
+    pub fn with_tenant_opt(mut self, tenant: Option<TenantId>) -> Self {
+        self.tenant = tenant;
+        self
+    }
+
+    /// 设置每批扫描行数。`0` 由执行入口 fail-closed 拒绝。
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// 设置本次最多处理的匹配行数。`Some(0)` 表示处理 0 行，供测试/脚本显式 dry boundary。
+    #[must_use]
+    pub fn with_max_rows(mut self, max_rows: Option<usize>) -> Self {
+        self.max_rows = max_rows;
+        self
+    }
+
+    /// 只统计，不写库、不调用 KeyProvider。
+    #[must_use]
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    /// 当前租户过滤。
+    #[must_use]
+    pub fn tenant_opt(&self) -> Option<TenantId> {
+        self.tenant
+    }
+
+    /// 当前 batch size。
+    #[must_use]
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    /// 当前 max rows。
+    #[must_use]
+    pub fn max_rows(&self) -> Option<usize> {
+        self.max_rows
+    }
+
+    /// 是否 dry-run。
+    #[must_use]
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// 当前维护操作。
+    #[must_use]
+    pub fn operation(&self) -> ConfigValueMaintenanceOperation {
+        self.operation
+    }
+}
+
+impl Default for ConfigValueMaintenanceOptions {
+    fn default() -> Self {
+        Self::new(ConfigValueMaintenanceOperation::Both)
+    }
+}
+
+/// 已授权的 settings `ConfigValue` 维护能力。
+///
+/// 该类型由 runtime 验证 operator service-token 并写入 job-start durable audit 后 mint。维护 AAD 派生 helper
+/// 必须持有该 capability，避免普通读写路径复用 legacy plaintext backfill/rewrap 入口。
+#[derive(Debug, Clone)]
+pub struct ConfigValueMaintenanceCapability {
+    operator_subject: Box<str>,
+}
+
+impl ConfigValueMaintenanceCapability {
+    pub fn from_verified_service_subject(
+        operator_subject: impl Into<String>,
+    ) -> Result<Self, ConfigRepoError> {
+        Self::new(operator_subject)
+    }
+
+    pub(crate) fn new(operator_subject: impl Into<String>) -> Result<Self, ConfigRepoError> {
+        let operator_subject = operator_subject.into();
+        let operator_subject = operator_subject.trim();
+        if operator_subject.is_empty() {
+            return Err(protection_auth_message(
+                "config value maintenance operator subject must be non-empty",
+            ));
+        }
+        Ok(Self {
+            operator_subject: operator_subject.into(),
+        })
+    }
+
+    #[must_use]
+    pub fn operator_subject(&self) -> &str {
+        &self.operator_subject
+    }
+}
+
+/// settings `ConfigValue` 存量维护结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfigValueMaintenanceReport {
+    pub selected: u64,
+    pub backfilled: u64,
+    pub rewrapped: u64,
+    pub unchanged: u64,
+    pub failed: u64,
+    pub remaining_plaintext: u64,
+}
+
+impl ConfigValueMaintenanceReport {
+    fn add(&mut self, other: Self) {
+        self.selected += other.selected;
+        self.backfilled += other.backfilled;
+        self.rewrapped += other.rewrapped;
+        self.unchanged += other.unchanged;
+        self.failed += other.failed;
+        self.remaining_plaintext = other.remaining_plaintext;
+    }
+}
+
+/// settings `ConfigValue` 存量维护执行器。
+pub struct PgConfigValueMaintenance {
+    store: Arc<PgStore>,
+    protection: ConfigValueProtection,
+    capability: ConfigValueMaintenanceCapability,
+}
+
+impl PgConfigValueMaintenance {
+    pub(crate) fn new(
+        store: Arc<PgStore>,
+        protection: ConfigValueProtection,
+        capability: ConfigValueMaintenanceCapability,
+    ) -> Self {
+        Self {
+            store,
+            protection,
+            capability,
+        }
+    }
+}
+
 impl PgConfigRepo {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
@@ -297,12 +500,12 @@ impl PgConfigRepo {
 
         match scheme {
             0 => {
-                if value_enc.is_some() || key_id.is_some() {
-                    return Err(protection_auth_message(
-                        "legacy config value has encrypted columns",
-                    ));
-                }
-                value.ok_or_else(|| protection_auth_message("legacy config value is null"))
+                let _ = value;
+                let _ = value_enc;
+                let _ = key_id;
+                Err(protection_auth_message(
+                    "legacy config value requires maintenance backfill",
+                ))
             }
             CONFIG_VALUE_PROTECTION_SCHEME => {
                 if value.is_some() {
@@ -444,6 +647,456 @@ async fn latest_deleted(
         .await
         .map_err(storage)?;
     Ok(deleted.unwrap_or(false))
+}
+
+#[derive(Clone)]
+struct ConfigValueMaintenanceCursor {
+    tenant_id: String,
+    config_key: String,
+    version: i64,
+}
+
+struct ConfigValueMaintenanceRow {
+    tenant: TenantId,
+    tenant_id: String,
+    key: SettingKey,
+    config_key: String,
+    version: i64,
+    value: Option<String>,
+    value_enc: Option<Vec<u8>>,
+    key_id: Option<String>,
+}
+
+impl ConfigValueMaintenanceRow {
+    fn from_pg(row: sqlx::postgres::PgRow) -> Result<Self, ConfigRepoError> {
+        let tenant_id: String = row.try_get("tenant_id").map_err(storage)?;
+        let config_key: String = row.try_get("config_key").map_err(storage)?;
+        let version: i64 = row.try_get("version").map_err(storage)?;
+        let value: Option<String> = row.try_get("value").map_err(storage)?;
+        let value_enc: Option<Vec<u8>> = row.try_get("value_enc").map_err(storage)?;
+        let key_id: Option<String> = row.try_get("key_id").map_err(storage)?;
+        let tenant = TenantId::parse(&tenant_id).map_err(protection_auth_failure)?;
+        let key = SettingKey::parse(&config_key).map_err(protection_auth_failure)?;
+        Ok(Self {
+            tenant,
+            tenant_id,
+            key,
+            config_key,
+            version,
+            value,
+            value_enc,
+            key_id,
+        })
+    }
+
+    fn cursor(&self) -> ConfigValueMaintenanceCursor {
+        ConfigValueMaintenanceCursor {
+            tenant_id: self.tenant_id.clone(),
+            config_key: self.config_key.clone(),
+            version: self.version,
+        }
+    }
+}
+
+fn config_value_maintenance_aad(
+    _capability: &ConfigValueMaintenanceCapability,
+    tenant: TenantId,
+    key: &SettingKey,
+) -> Result<DerivedAad, ConfigRepoError> {
+    ProtectionContext::authorized_maintenance(
+        tenant,
+        key.as_str(),
+        CONFIG_VALUE_FIELD,
+        CONFIG_VALUE_PROTECTION_SCHEME as u32,
+    )
+    .map(|ctx| ctx.derive())
+    .map_err(protection_auth_failure)
+}
+
+fn maintenance_capacity(options: &ConfigValueMaintenanceOptions, selected: u64) -> usize {
+    let remaining = options
+        .max_rows
+        .map(|max| max.saturating_sub(selected as usize))
+        .unwrap_or(usize::MAX);
+    options.batch_size.min(remaining)
+}
+
+impl PgConfigValueMaintenance {
+    /// 执行 settings `ConfigValue` 存量 backfill/rewrap。
+    pub async fn run(
+        &self,
+        options: &ConfigValueMaintenanceOptions,
+    ) -> Result<ConfigValueMaintenanceReport, ConfigRepoError> {
+        if options.batch_size == 0 {
+            return Err(protection_auth_message(
+                "config value maintenance batch size must be greater than zero",
+            ));
+        }
+        let mut report = ConfigValueMaintenanceReport::default();
+        if options.operation.includes_backfill() {
+            report.add(self.run_backfill(options).await?);
+        }
+        if options.operation.includes_rewrap() {
+            let rewrap_options = options.clone().with_max_rows(
+                options
+                    .max_rows
+                    .map(|max_rows| max_rows.saturating_sub(report.selected as usize)),
+            );
+            if maintenance_capacity(&rewrap_options, 0) > 0 {
+                report.add(self.run_rewrap(&rewrap_options).await?);
+            }
+        }
+        report.remaining_plaintext = self.remaining_plaintext(options.tenant).await?;
+        Ok(report)
+    }
+
+    // reason: batch scan loop + per-row disposition accounting is linear operational code; splitting would obscure
+    // the maintenance report invariants more than it helps.
+    #[allow(clippy::cognitive_complexity)]
+    async fn run_backfill(
+        &self,
+        options: &ConfigValueMaintenanceOptions,
+    ) -> Result<ConfigValueMaintenanceReport, ConfigRepoError> {
+        let mut report = ConfigValueMaintenanceReport::default();
+        let mut cursor = None;
+        loop {
+            let limit = maintenance_capacity(options, report.selected);
+            if limit == 0 {
+                break;
+            }
+            let rows = self
+                .select_maintenance_rows(0, options.tenant, cursor.as_ref(), limit)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                cursor = Some(row.cursor());
+                report.selected += 1;
+                if options.dry_run {
+                    continue;
+                }
+                match self.backfill_row(&row).await {
+                    Ok(true) => report.backfilled += 1,
+                    Ok(false) => report.unchanged += 1,
+                    Err(err) => {
+                        report.failed += 1;
+                        tracing::warn!(
+                            error = %secure::redact_error(&err),
+                            operator_subject = self.capability.operator_subject(),
+                            tenant_id = row.tenant_id,
+                            config_key = row.config_key,
+                            version = row.version,
+                            "config value backfill row failed"
+                        );
+                    }
+                }
+                if maintenance_capacity(options, report.selected) == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    // reason: batch scan loop + key filtering + per-row disposition accounting is linear operational code; keeping it
+    // together makes selected/backfilled/rewrapped/failed counters auditable.
+    #[allow(clippy::cognitive_complexity)]
+    async fn run_rewrap(
+        &self,
+        options: &ConfigValueMaintenanceOptions,
+    ) -> Result<ConfigValueMaintenanceReport, ConfigRepoError> {
+        let mut report = ConfigValueMaintenanceReport::default();
+        let mut cursor = None;
+        loop {
+            let limit = maintenance_capacity(options, report.selected);
+            if limit == 0 {
+                break;
+            }
+            let rows = self
+                .select_maintenance_rows(
+                    CONFIG_VALUE_PROTECTION_SCHEME,
+                    options.tenant,
+                    cursor.as_ref(),
+                    limit,
+                )
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                cursor = Some(row.cursor());
+                let Some(raw_key_ref) = row.key_id.as_deref() else {
+                    report.selected += 1;
+                    report.failed += 1;
+                    tracing::warn!(
+                        operator_subject = self.capability.operator_subject(),
+                        tenant_id = row.tenant_id,
+                        config_key = row.config_key,
+                        version = row.version,
+                        "config value rewrap row missing key_id"
+                    );
+                    if maintenance_capacity(options, report.selected) == 0 {
+                        break;
+                    }
+                    continue;
+                };
+                let Ok(key_ref) = KeyRef::parse(raw_key_ref) else {
+                    report.selected += 1;
+                    report.failed += 1;
+                    tracing::warn!(
+                        operator_subject = self.capability.operator_subject(),
+                        tenant_id = row.tenant_id,
+                        config_key = row.config_key,
+                        version = row.version,
+                        key_id = raw_key_ref,
+                        "config value rewrap row invalid key_id"
+                    );
+                    if maintenance_capacity(options, report.selected) == 0 {
+                        break;
+                    }
+                    continue;
+                };
+                if !key_ref.name().ct_eq(&self.protection.key_name) {
+                    continue;
+                }
+                report.selected += 1;
+                if options.dry_run {
+                    continue;
+                }
+                match self.rewrap_row(&row, raw_key_ref, key_ref).await {
+                    Ok(RewrapDisposition::Rewrapped) => report.rewrapped += 1,
+                    Ok(RewrapDisposition::Unchanged) => report.unchanged += 1,
+                    Err(err) => {
+                        report.failed += 1;
+                        tracing::warn!(
+                            error = %secure::redact_error(&err),
+                            operator_subject = self.capability.operator_subject(),
+                            tenant_id = row.tenant_id,
+                            config_key = row.config_key,
+                            version = row.version,
+                            "config value rewrap row failed"
+                        );
+                    }
+                }
+                if maintenance_capacity(options, report.selected) == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    async fn select_maintenance_rows(
+        &self,
+        scheme: i32,
+        tenant: Option<TenantId>,
+        cursor: Option<&ConfigValueMaintenanceCursor>,
+        limit: usize,
+    ) -> Result<Vec<ConfigValueMaintenanceRow>, ConfigRepoError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = match (tenant, cursor) {
+            (Some(tenant), Some(cursor)) => sqlx::query(
+                r#"
+                SELECT tenant_id::text, config_key, version, value, value_enc, key_id
+                FROM config_entries
+                WHERE protection_scheme = $1
+                  AND tenant_id = $2::uuid
+                  AND (tenant_id::text, config_key, version) > ($3, $4, $5)
+                ORDER BY tenant_id::text, config_key, version
+                LIMIT $6
+                "#,
+            )
+            .bind(scheme)
+            .bind(tenant_param(tenant))
+            .bind(&cursor.tenant_id)
+            .bind(&cursor.config_key)
+            .bind(cursor.version)
+            .bind(limit)
+            .fetch_all(&self.store.pool)
+            .await
+            .map_err(storage)?,
+            (Some(tenant), None) => sqlx::query(
+                r#"
+                SELECT tenant_id::text, config_key, version, value, value_enc, key_id
+                FROM config_entries
+                WHERE protection_scheme = $1
+                  AND tenant_id = $2::uuid
+                ORDER BY tenant_id::text, config_key, version
+                LIMIT $3
+                "#,
+            )
+            .bind(scheme)
+            .bind(tenant_param(tenant))
+            .bind(limit)
+            .fetch_all(&self.store.pool)
+            .await
+            .map_err(storage)?,
+            (None, Some(cursor)) => sqlx::query(
+                r#"
+                SELECT tenant_id::text, config_key, version, value, value_enc, key_id
+                FROM config_entries
+                WHERE protection_scheme = $1
+                  AND (tenant_id::text, config_key, version) > ($2, $3, $4)
+                ORDER BY tenant_id::text, config_key, version
+                LIMIT $5
+                "#,
+            )
+            .bind(scheme)
+            .bind(&cursor.tenant_id)
+            .bind(&cursor.config_key)
+            .bind(cursor.version)
+            .bind(limit)
+            .fetch_all(&self.store.pool)
+            .await
+            .map_err(storage)?,
+            (None, None) => sqlx::query(
+                r#"
+                SELECT tenant_id::text, config_key, version, value, value_enc, key_id
+                FROM config_entries
+                WHERE protection_scheme = $1
+                ORDER BY tenant_id::text, config_key, version
+                LIMIT $2
+                "#,
+            )
+            .bind(scheme)
+            .bind(limit)
+            .fetch_all(&self.store.pool)
+            .await
+            .map_err(storage)?,
+        };
+        rows.into_iter()
+            .map(ConfigValueMaintenanceRow::from_pg)
+            .collect()
+    }
+
+    async fn backfill_row(&self, row: &ConfigValueMaintenanceRow) -> Result<bool, ConfigRepoError> {
+        let value = row
+            .value
+            .as_ref()
+            .ok_or_else(|| protection_auth_message("legacy config value is null"))?;
+        if row.value_enc.is_some() || row.key_id.is_some() {
+            return Err(protection_auth_message(
+                "legacy config value has encrypted columns",
+            ));
+        }
+        let aad = config_value_maintenance_aad(&self.capability, row.tenant, &row.key)?;
+        let encrypted = self
+            .protection
+            .key_provider
+            .encrypt(
+                self.protection.key_name.clone(),
+                Plaintext::new(value.as_bytes().to_vec()),
+                aad,
+            )
+            .await
+            .map_err(key_provider_error)?;
+        let done = sqlx::query(
+            r#"
+            UPDATE config_entries
+            SET value = NULL, protection_scheme = $4, value_enc = $5, key_id = $6
+            WHERE tenant_id = $1::uuid
+              AND config_key = $2
+              AND version = $3
+              AND protection_scheme = 0
+              AND value IS NOT DISTINCT FROM $7
+              AND value_enc IS NULL
+              AND key_id IS NULL
+            "#,
+        )
+        .bind(&row.tenant_id)
+        .bind(&row.config_key)
+        .bind(row.version)
+        .bind(CONFIG_VALUE_PROTECTION_SCHEME)
+        .bind(encrypted.ciphertext())
+        .bind(encrypted.key().to_token())
+        .bind(value)
+        .execute(&self.store.pool)
+        .await
+        .map_err(storage)?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn rewrap_row(
+        &self,
+        row: &ConfigValueMaintenanceRow,
+        raw_key_ref: &str,
+        key_ref: KeyRef,
+    ) -> Result<RewrapDisposition, ConfigRepoError> {
+        let ciphertext = row
+            .value_enc
+            .as_ref()
+            .ok_or_else(|| protection_auth_message("encrypted config value missing ciphertext"))?;
+        if row.value.is_some() {
+            return Err(protection_auth_message(
+                "encrypted config value has plaintext",
+            ));
+        }
+        let aad = config_value_maintenance_aad(&self.capability, row.tenant, &row.key)?;
+        let encrypted = self
+            .protection
+            .key_provider
+            .rewrap(RedactedBytes::new(ciphertext.clone()), key_ref, aad)
+            .await
+            .map_err(key_provider_error)?;
+        let new_key_ref = encrypted.key().to_token();
+        if encrypted.ciphertext() == ciphertext.as_slice() && new_key_ref == raw_key_ref {
+            return Ok(RewrapDisposition::Unchanged);
+        }
+        let done = sqlx::query(
+            r#"
+            UPDATE config_entries
+            SET value_enc = $4, key_id = $5
+            WHERE tenant_id = $1::uuid
+              AND config_key = $2
+              AND version = $3
+              AND protection_scheme = 1
+              AND value_enc = $6
+              AND key_id = $7
+            "#,
+        )
+        .bind(&row.tenant_id)
+        .bind(&row.config_key)
+        .bind(row.version)
+        .bind(encrypted.ciphertext())
+        .bind(new_key_ref)
+        .bind(ciphertext)
+        .bind(raw_key_ref)
+        .execute(&self.store.pool)
+        .await
+        .map_err(storage)?;
+        if done.rows_affected() == 1 {
+            Ok(RewrapDisposition::Rewrapped)
+        } else {
+            Ok(RewrapDisposition::Unchanged)
+        }
+    }
+
+    async fn remaining_plaintext(&self, tenant: Option<TenantId>) -> Result<u64, ConfigRepoError> {
+        let count: i64 = if let Some(tenant) = tenant {
+            sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM config_entries \
+                 WHERE protection_scheme = 0 AND tenant_id = $1::uuid",
+            )
+            .bind(tenant_param(tenant))
+            .fetch_one(&self.store.pool)
+            .await
+            .map_err(storage)?
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0",
+            )
+            .fetch_one(&self.store.pool)
+            .await
+            .map_err(storage)?
+        };
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+}
+
+enum RewrapDisposition {
+    Rewrapped,
+    Unchanged,
 }
 
 impl ConfigRepo for PgConfigRepo {

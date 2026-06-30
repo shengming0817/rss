@@ -18,11 +18,12 @@
 //!
 //! ## INVARIANT
 //!
-//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：`PgRuntimeDeps::setup` 是唯一公开 store 构造路径——
+//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许两个受控 funnel：
+//!   [`PgRuntimeDeps::setup`]（serving runtime）与 [`PgRuntimeDeps::setup_maintenance`]（离线维护）。二者之外
 //!   `PgStore::connect` / `run_migrations` 已降 `pub(crate)`，外部无法 mint `PgStore`、也拿不到 `&PgStore`；
 //!   且**所有** `&PgStore`-taking repo 构造器（含 credential/role/refresh_token/emitter + dead_letter/
-//!   checkpoint/saga/projection）均 `pub(crate)`——repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，无
-//!   public-but-unreachable 残留（#1423 review F1）。
+//!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
+//!   maintenance 只能拿到限定维护能力，不暴露 pool/store。
 //! - **PG-BUNDLE-DOMAIN-02**（Hard，sealed marker + typed function choice）：per-domain 能力隔离。
 //!   anti-vacuity = 下方 `PgDomainDeps` 的 `compile_fail` doctest（Settings 句柄调 `session_lifecycle` 必败）。
 //! - **PG-BUNDLE-POOL-03**（Hard）：本模块无任何返回 `&PgStore` / `Arc<PgStore>` / `PgPool` 的公开 accessor；
@@ -51,7 +52,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use diport::{Clock, DynCasStore, DynPublisher, ManagedResource};
 use eventexec::TenantAuthority;
@@ -59,10 +60,11 @@ use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ConfigValueProtections, DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditRepo,
-    PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgCredentialRepo, PgDbReadiness,
-    PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper, PgOutbox,
-    PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
+    ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections,
+    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditRepo, PgAuthAuditSink,
+    PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance, PgCredentialRepo,
+    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
+    PgOutbox, PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
     PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgStore,
     PgStoreGuard,
 };
@@ -112,6 +114,25 @@ pub struct PgRuntimeDeps {
     rls_ready: Arc<AtomicBool>,
 }
 
+/// 离线维护用 postgres 能力包。
+///
+/// 只用 migrator/owner 连接执行 schema migration 与全库维护扫描；不构造 serving pool、不跑 RLS 能力门、不跑
+/// legacy plaintext deny 门，否则 backfill 命令会在最需要运行时被 scheme=0 启动门挡住。
+pub struct PgMaintenanceDeps {
+    store: Arc<PgStore>,
+    clock: Arc<dyn Clock>,
+}
+
+struct PgMaintenanceSystemClock;
+
+impl Clock for PgMaintenanceSystemClock {
+    fn now(&self) -> SystemTime {
+        // reason: postgres maintenance production clock; adapter-owned Clock impl is a sanctioned system-time boundary.
+        #[allow(clippy::disallowed_methods)]
+        SystemTime::now()
+    }
+}
+
 impl PgRuntimeDeps {
     /// 唯一公开构造路径：migrator 连接跑迁移，serving 连接建长期 pool 并跑 RLS 能力门。
     ///
@@ -152,6 +173,18 @@ impl PgRuntimeDeps {
             store,
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
+        })
+    }
+
+    /// 构造离线维护能力包：migrator 连接 + migration，不跑 serving/RLS/legacy deny。
+    pub async fn setup_maintenance(
+        migrator_config: &PgConfig,
+    ) -> Result<PgMaintenanceDeps, PgError> {
+        let store = Arc::new(PgStore::connect(migrator_config).await?);
+        store.run_migrations().await?;
+        Ok(PgMaintenanceDeps {
+            store,
+            clock: Arc::new(PgMaintenanceSystemClock),
         })
     }
 
@@ -223,6 +256,69 @@ impl PgRuntimeDeps {
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
     }
+}
+
+impl PgMaintenanceDeps {
+    /// settings `ConfigValue` 存量 backfill/rewrap 执行器。
+    #[must_use]
+    pub fn config_value_maintenance(
+        &self,
+        protection: ConfigValueProtection,
+        capability: ConfigValueMaintenanceCapability,
+    ) -> PgConfigValueMaintenance {
+        PgConfigValueMaintenance::new(Arc::clone(&self.store), protection, capability)
+    }
+
+    /// Durable audit record for settings ConfigValue maintenance jobs.
+    pub async fn record_config_value_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        let now = self
+            .clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+        let nanos = i32::try_from(now.subsec_nanos()).unwrap_or(0);
+        let (outcome, failure_reason) = match outcome {
+            MaintenanceAuditOutcome::Success => ("success", None),
+            MaintenanceAuditOutcome::Failure { reason } => ("failure", Some(reason)),
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO auth_audit_events (
+                occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, principal_tenant,
+                resource_kind, resource_id, action, outcome, failure_reason, request_id, correlation_id
+            )
+            VALUES ($1, $2, $3, 'service', NULL, 'settings.config-values.maintenance', $4, $5, $6, $7, NULL, NULL)
+            "#,
+        )
+        .bind(secs)
+        .bind(nanos)
+        .bind(operator_subject)
+        .bind(resource_id)
+        .bind(action)
+        .bind(outcome)
+        .bind(failure_reason)
+        .execute(&self.store.pool)
+        .await
+        .map_err(PgError::MaintenanceAudit)?;
+        Ok(())
+    }
+
+    /// 关闭维护连接池。
+    pub async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        self.store.shutdown().await
+    }
+}
+
+pub enum MaintenanceAuditOutcome<'a> {
+    Success,
+    Failure { reason: &'a str },
 }
 
 /// per-domain 受控 durable 能力句柄（`Clone`，内部 `Arc` 廉价 clone）。

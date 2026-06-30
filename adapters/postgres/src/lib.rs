@@ -46,10 +46,17 @@ mod tx_retry;
 pub use audit_repo::PgAuditRepo;
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
-pub use bundle::{PgDomain, PgDomainDeps, PgInfraDeps, PgRuntimeDeps, PgSettingsBundle, caps};
+pub use bundle::{
+    MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps, PgRuntimeDeps,
+    PgSettingsBundle, caps,
+};
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
-pub use config_repo::{ConfigValueProtection, ConfigValueProtections, PgConfigRepo};
+pub use config_repo::{
+    ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
+    ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
+    ConfigValueProtections, PgConfigRepo, PgConfigValueMaintenance,
+};
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use dead_letter_payload::DlxPayloadProtector;

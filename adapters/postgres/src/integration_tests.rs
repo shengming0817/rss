@@ -4847,7 +4847,11 @@ use settings::ports::{ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork
 use crate::config_repo::{arm_config_retry_failpoint, config_retry_failpoint_hits};
 use crate::cotx::co_tx_with_outbox;
 use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
-use crate::{ConfigValueProtection, ConfigValueProtections, PgConfigRepo};
+use crate::{
+    ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
+    ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
+    PgConfigValueMaintenance,
+};
 
 /// config 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值，避免两 const 漂移）。
 const CONFIG_TENANT: &str = COTX_TENANT_A;
@@ -4860,6 +4864,11 @@ const CONFIG_VERSION_CHANGED_TOPIC: &str = "settings.config-version-changed";
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
 fn config_tenant() -> TenantId {
     TenantId::parse(CONFIG_TENANT).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn config_maintenance_capability() -> ConfigValueMaintenanceCapability {
+    ConfigValueMaintenanceCapability::new("test-operator").unwrap()
 }
 
 /// 构造 ConfigEntry（经 `ConfigEntry::hydrate` 跨 crate pub funnel）。
@@ -5000,6 +5009,92 @@ impl diport::KeyProvider for UnavailableKeyProvider {
     }
 }
 
+struct RewrappingKeyProvider;
+
+impl diport::KeyProvider for RewrappingKeyProvider {
+    async fn encrypt(
+        &self,
+        _key: diport::KeyName,
+        _plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn decrypt(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn rewrap(
+        &self,
+        ciphertext: diport::RedactedBytes,
+        key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Ok(diport::EncryptOutput::new(
+            ciphertext.into_bytes(),
+            diport::KeyRef::new(key.name().clone(), diport::KeyVersion::new(2)),
+        ))
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        Ok(())
+    }
+}
+
+struct MutatingBackfillKeyProvider {
+    pool: sqlx::PgPool,
+}
+
+impl diport::KeyProvider for MutatingBackfillKeyProvider {
+    async fn encrypt(
+        &self,
+        _key: diport::KeyName,
+        _plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        sqlx::query("UPDATE config_entries SET value = $1 WHERE config_key = $2")
+            .bind("plain-v2")
+            .bind("legacy.cas")
+            .execute(&self.pool)
+            .await
+            .map_err(|_| config_key_unavailable())?;
+        let key_name =
+            diport::KeyName::try_new("settings-config").map_err(|_| config_key_rejected())?;
+        Ok(diport::EncryptOutput::new(
+            b"stale-ciphertext".to_vec(),
+            diport::KeyRef::new(key_name, diport::KeyVersion::new(1)),
+        ))
+    }
+
+    async fn decrypt(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn rewrap(
+        &self,
+        _ciphertext: diport::RedactedBytes,
+        _key: diport::KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        Err(config_key_rejected())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        Ok(())
+    }
+}
+
 fn config_key_rejected() -> diport::KeyProviderError {
     diport::KeyProviderError::new(
         diport::key_provider::KeyProviderErrorKind::Rejected,
@@ -5043,6 +5138,22 @@ fn rejecting_config_protection() -> ConfigValueProtection {
 fn unavailable_config_protection() -> ConfigValueProtection {
     ConfigValueProtection::new(
         diport::DynKeyProvider::new_box(UnavailableKeyProvider),
+        diport::KeyName::try_new("settings-config").unwrap(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn rewrapping_config_protection() -> ConfigValueProtection {
+    ConfigValueProtection::new(
+        diport::DynKeyProvider::new_box(RewrappingKeyProvider),
+        diport::KeyName::try_new("settings-config").unwrap(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn mutating_backfill_config_protection(pool: sqlx::PgPool) -> ConfigValueProtection {
+    ConfigValueProtection::new(
+        diport::DynKeyProvider::new_box(MutatingBackfillKeyProvider { pool }),
         diport::KeyName::try_new("settings-config").unwrap(),
     )
 }
@@ -5119,10 +5230,10 @@ async fn tc1_config_save_find_roundtrip() -> TestResult {
     Ok(())
 }
 
-/// tc1a：legacy plaintext 行只读兼容；读取路径不得调用 KeyProvider。
+/// tc1a：legacy plaintext 行在 serving 读路径 fail-closed；只有 maintenance backfill 可读取。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-async fn tc1a_config_legacy_plaintext_read_does_not_call_key_provider() -> TestResult {
+async fn tc1a_config_legacy_plaintext_read_fails_closed() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
     sqlx::query(
@@ -5139,8 +5250,11 @@ async fn tc1a_config_legacy_plaintext_read_does_not_call_key_provider() -> TestR
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), rejecting_config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("legacy.value").unwrap();
-    let found = repo.find(tenant, &key).await?.unwrap();
-    assert_eq!(found.value(), "plain-v1", "legacy scheme 0 直接返回明文");
+    let result = repo.find(tenant, &key).await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
+        "serving read path must reject legacy plaintext rows"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -5262,6 +5376,479 @@ async fn tc1f_config_corrupt_encrypted_metadata_fails_closed() -> TestResult {
         matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
         "corrupt encrypted metadata must fail closed as auth failure"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1g：maintenance dry-run 只统计 legacy plaintext，不写库、不调用 KeyProvider。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1g_config_maintenance_dry_run_counts_legacy_without_provider() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.dry-run")
+    .bind("plain-v1")
+    .execute(&store.pool)
+    .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        rejecting_config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(
+            &ConfigValueMaintenanceOptions::new(ConfigValueMaintenanceOperation::Backfill)
+                .with_dry_run(true),
+        )
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.backfilled, 0);
+    assert_eq!(report.failed, 0);
+    assert_eq!(report.remaining_plaintext, 1);
+    let row: (Option<String>, i32, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+        "SELECT value, protection_scheme, value_enc, key_id \
+         FROM config_entries WHERE config_key = $1",
+    )
+    .bind("legacy.dry-run")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("plain-v1"));
+    assert_eq!(row.1, 0);
+    assert!(row.2.is_none());
+    assert!(row.3.is_none());
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1h：maintenance backfill 把 legacy plaintext 转为 encrypted scheme，随后普通读路径可读回原值。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1h_config_maintenance_backfills_legacy_plaintext() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.backfill")
+    .bind("plain-v1")
+    .execute(&store.pool)
+    .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(&ConfigValueMaintenanceOptions::new(
+            ConfigValueMaintenanceOperation::Backfill,
+        ))
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.backfilled, 1);
+    assert_eq!(report.remaining_plaintext, 0);
+    let raw: (Option<String>, i32, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+        "SELECT value, protection_scheme, value_enc, key_id \
+         FROM config_entries WHERE config_key = $1",
+    )
+    .bind("legacy.backfill")
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        raw.0.is_none(),
+        "backfill must remove plaintext column value"
+    );
+    assert_eq!(raw.1, 1);
+    assert!(raw.2.is_some());
+    assert_eq!(raw.3.as_deref(), Some("settings-config:1"));
+
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let found = repo
+        .find(
+            config_tenant(),
+            &SettingKey::parse("legacy.backfill").unwrap(),
+        )
+        .await?
+        .unwrap();
+    assert_eq!(found.value(), "plain-v1");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1i：maintenance rewrap 更新 encrypted 行 key_id 到 provider current-primary，不调用 decrypt。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1i_config_maintenance_rewrap_updates_key_ref() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    writer
+        .save(config_tenant(), config_entry("encrypted.rewrap", "v1", 1))
+        .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        rewrapping_config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(&ConfigValueMaintenanceOptions::new(
+            ConfigValueMaintenanceOperation::Rewrap,
+        ))
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.rewrapped, 1);
+    assert_eq!(report.failed, 0);
+    let key_id: (String,) =
+        sqlx::query_as("SELECT key_id FROM config_entries WHERE config_key = $1")
+            .bind("encrypted.rewrap")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(key_id.0, "settings-config:2");
+
+    let second = maintenance
+        .run(&ConfigValueMaintenanceOptions::new(
+            ConfigValueMaintenanceOperation::Rewrap,
+        ))
+        .await?;
+    assert_eq!(second.selected, 1);
+    assert_eq!(second.unchanged, 1, "repeated rewrap is idempotent");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1j：maintenance backfill provider failure leaves legacy row intact and reports failure.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1j_config_maintenance_backfill_failure_preserves_row() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.failure")
+    .bind("plain-v1")
+    .execute(&store.pool)
+    .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        unavailable_config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(&ConfigValueMaintenanceOptions::new(
+            ConfigValueMaintenanceOperation::Backfill,
+        ))
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.backfilled, 0);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.remaining_plaintext, 1);
+    let row: (Option<String>, i32, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+        "SELECT value, protection_scheme, value_enc, key_id \
+         FROM config_entries WHERE config_key = $1",
+    )
+    .bind("legacy.failure")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("plain-v1"));
+    assert_eq!(row.1, 0);
+    assert!(row.2.is_none());
+    assert!(row.3.is_none());
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1l：backfill update 带原 plaintext CAS；选中后被改动的行不会被 stale ciphertext 覆盖。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1l_config_maintenance_backfill_stale_row_is_unchanged() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.cas")
+    .bind("plain-v1")
+    .execute(&store.pool)
+    .await?;
+
+    let pool = store.pool.clone();
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        mutating_backfill_config_protection(pool),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(&ConfigValueMaintenanceOptions::new(
+            ConfigValueMaintenanceOperation::Backfill,
+        ))
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.backfilled, 0);
+    assert_eq!(report.unchanged, 1);
+    assert_eq!(report.failed, 0);
+    let row: (Option<String>, i32, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+        "SELECT value, protection_scheme, value_enc, key_id \
+         FROM config_entries WHERE config_key = $1",
+    )
+    .bind("legacy.cas")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("plain-v2"));
+    assert_eq!(row.1, 0);
+    assert!(row.2.is_none());
+    assert!(row.3.is_none());
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1m：maintenance rewrap provider failure leaves encrypted row intact and reports failure.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1m_config_maintenance_rewrap_failure_preserves_row() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    writer
+        .save(
+            config_tenant(),
+            config_entry("encrypted.rewrap_failure", "v1", 1),
+        )
+        .await?;
+    let before: (Option<Vec<u8>>, Option<String>) =
+        sqlx::query_as("SELECT value_enc, key_id FROM config_entries WHERE config_key = $1")
+            .bind("encrypted.rewrap_failure")
+            .fetch_one(&store.pool)
+            .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        unavailable_config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(&ConfigValueMaintenanceOptions::new(
+            ConfigValueMaintenanceOperation::Rewrap,
+        ))
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.rewrapped, 0);
+    assert_eq!(report.failed, 1);
+    let after: (Option<Vec<u8>>, Option<String>) =
+        sqlx::query_as("SELECT value_enc, key_id FROM config_entries WHERE config_key = $1")
+            .bind("encrypted.rewrap_failure")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(after, before);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1o：rewrap 遇到 malformed key_id 时计入 selected/failed，且消耗 max_rows 预算。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1o_config_maintenance_rewrap_invalid_key_ref_counts_as_failed_selected_row() -> TestResult
+{
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme, value_enc, key_id) \
+         VALUES ($1::uuid, $2, 1, NULL, 1, $3, $4)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("encrypted.invalid_key_ref")
+    .bind(b"ciphertext".as_slice())
+    .bind("not-a-key-ref")
+    .execute(&store.pool)
+    .await?;
+    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    writer
+        .save(
+            config_tenant(),
+            config_entry("encrypted.valid_after_invalid", "v1", 1),
+        )
+        .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        rewrapping_config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(
+            &ConfigValueMaintenanceOptions::new(ConfigValueMaintenanceOperation::Rewrap)
+                .with_max_rows(Some(1)),
+        )
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.rewrapped, 0);
+    let key_id: (String,) =
+        sqlx::query_as("SELECT key_id FROM config_entries WHERE config_key = $1")
+            .bind("encrypted.valid_after_invalid")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        key_id.0, "settings-config:1",
+        "malformed selected row must consume the max_rows budget"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1k：tenant/max_rows 限制只处理指定租户内的限定行数。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1k_config_maintenance_tenant_and_max_rows_limit_scope() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    for key in ["legacy.scope_a", "legacy.scope_b"] {
+        sqlx::query(
+            "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+             VALUES ($1::uuid, $2, 1, $3, 0)",
+        )
+        .bind(CONFIG_TENANT)
+        .bind(key)
+        .bind("plain")
+        .execute(&store.pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(CONFIG_TENANT_B)
+    .bind("legacy.scope.other")
+    .bind("plain")
+    .execute(&store.pool)
+    .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(
+            &ConfigValueMaintenanceOptions::new(ConfigValueMaintenanceOperation::Backfill)
+                .with_tenant(config_tenant())
+                .with_max_rows(Some(1)),
+        )
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.backfilled, 1);
+    assert_eq!(report.remaining_plaintext, 1);
+    let all_remaining: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM config_entries WHERE protection_scheme = 0")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        all_remaining.0, 2,
+        "one same-tenant row and one other-tenant row remain"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1n：默认 both 操作共享 `max_rows` 预算，不会 backfill N 行后再额外 rewrap N 行。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1n_config_maintenance_both_max_rows_is_shared() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (tenant_id, config_key, version, value, protection_scheme) \
+         VALUES ($1::uuid, $2, 1, $3, 0)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("legacy.both_budget")
+    .bind("plain")
+    .execute(&store.pool)
+    .await?;
+    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    writer
+        .save(
+            config_tenant(),
+            config_entry("encrypted.both_budget", "v1", 1),
+        )
+        .await?;
+
+    let store = Arc::new(store);
+    let maintenance = PgConfigValueMaintenance::new(
+        Arc::clone(&store),
+        config_protection(),
+        config_maintenance_capability(),
+    );
+    let report = maintenance
+        .run(&ConfigValueMaintenanceOptions::default().with_max_rows(Some(1)))
+        .await?;
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.backfilled, 1);
+    assert_eq!(report.rewrapped, 0);
+    let key_id: (String,) =
+        sqlx::query_as("SELECT key_id FROM config_entries WHERE config_key = $1")
+            .bind("encrypted.both_budget")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(key_id.0, "settings-config:1");
 
     store.shutdown().await?;
     Ok(())

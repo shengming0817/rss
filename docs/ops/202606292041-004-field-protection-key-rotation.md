@@ -28,17 +28,7 @@ For Vault Transit, `vault:vN:` identifies the key version used for a ciphertext;
 
 ## Current Production Boundary
 
-This runbook currently covers the provider and Vault Transit rotation contract delivered by #1474. It does not yet deliver an RSS production rewrap tool for persisted application records. Until that tool exists, operators may rotate the Vault Transit key and verify new writes, but must keep the previous-read window open. Do not raise `min_decryption_version` to the current primary for an RSS field-protection key unless a production rewrap job has already proven zero old-version records remain.
-
-The missing production job must provide these RSS-side controls before old versions can be disabled:
-
-- A concrete inventory of protected tables and columns that store ciphertext and `KeyRef`.
-- A dry-run mode that counts records where `KeyRef.version() < current_primary`.
-- A resumable batch mode that derives AAD from persisted tenant/config-key/field/schema-version coordinates with `ProtectionContext::authorized_maintenance`.
-- One storage transaction per record or batch that replaces ciphertext and `KeyRef` with the `KeyProvider::rewrap` output.
-- Coverage SQL or an equivalent machine-readable report proving zero old-version `KeyRef` values remain.
-- Canary encrypt/decrypt and sampled post-rewrite decrypt checks.
-- Audit output for operator identity, key name, old/new versions, batch counts, failures, and resume cursor.
+This runbook covers the provider, Vault Transit rotation contract, and RSS production maintenance command for persisted settings `ConfigValue` records. `rss settings-config-values maintenance` proves legacy plaintext backfill status and performs rewrap, but it does not query Vault for the current-primary version. Operators must not raise `min_decryption_version` from `failed=0` and `remaining_plaintext=0` alone.
 
 ## Rotation
 
@@ -65,17 +55,37 @@ The missing production job must provide these RSS-side controls before old versi
    - Confirm the returned `KeyRef.version()` equals the new Vault version.
    - Confirm the ciphertext starts with `vault:v<new-version>:` for Vault Transit.
 
-4. Keep the previous-read window open:
+4. Keep the previous-read window open while RSS records are migrated.
 
-   Because #1474 does not ship the RSS production rewrap job, stop the production procedure here after canary verification. Existing records continue to decrypt because Vault still allows their older versions. Do not run Future Production Rewrap step 3, or otherwise raise `min_decryption_version` to disable old versions, for RSS field-protection keys in this state.
+5. Inspect pending RSS work:
 
-## Future Production Rewrap
+   ```bash
+   rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> --operation both --dry-run --batch-size 500
+   ```
 
-After a production rewrap job exists, use this sequence before disabling old versions:
+6. Backfill legacy plaintext rows:
 
-1. Rewrap existing records:
+   ```bash
+   rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> --operation backfill --batch-size 500
+   ```
 
-   - Scan records whose stored `KeyRef.version()` is older than the current primary.
+   For throttled rollout, add `--tenant <uuid>` and/or `--max-rows <n>`. `--max-rows` limits the whole command; in `both` mode backfill and rewrap share that budget. `--operator-service-token` must verify as an operator service principal; `--operator-tenant` supplies the service-token MAC binding, and the verified subject is written to durable audit with job start/finish. Repeat until an unscoped run reports `failed=0` and `remaining_plaintext=0`. After that, remove `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES`; serving reads no longer accept `protection_scheme=0`.
+
+7. Rewrap encrypted rows:
+
+   ```bash
+   rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> --operation rewrap --batch-size 500
+   ```
+
+   The command uses `KeyProvider::rewrap` and does not decrypt plaintext in RSS. Run full, unthrottled rewrap passes until there are no failures; do not use a `--max-rows` batch result as evidence for disabling old versions.
+
+## Production Rewrap
+
+Use this sequence before disabling old versions:
+
+1. Rewrap existing records with the RSS command:
+
+   - Scan encrypted settings records for the configured settings key.
    - Re-derive AAD with `ProtectionContext::authorized_maintenance` from the persisted tenant/config-key/field/schema-version coordinates.
    - Call `KeyProvider::rewrap(ciphertext, old_key_ref, aad)`.
    - In one storage transaction, replace ciphertext and `KeyRef` with the returned values.
@@ -83,9 +93,10 @@ After a production rewrap job exists, use this sequence before disabling old ver
 
 2. Validate coverage before disabling old versions:
 
-   - Count remaining records where `KeyRef.version() < current_primary`.
-   - The count must be zero before closing the previous-read window.
-   - Sample decrypt rewritten records with `KeyProvider::decrypt` and the new `KeyRef`.
+   - Confirm an unscoped backfill/both command returned `failed=0` and `remaining_plaintext=0`; otherwise keep the previous-read window open and finish backfill.
+   - Confirm full, unthrottled rewrap passes for the settings key return no failures. Because RSS deliberately does not query Vault current-primary version, this report is necessary but not sufficient for disabling old versions.
+   - Verify coverage against the Vault version recorded in the rotation step by sampling persisted `key_id` values for the settings key and decrypting representative rewritten records with `KeyProvider::decrypt` and the expected new `KeyRef`.
+   - If any sampled or audited record still references an old `KeyRef.version()`, keep old versions enabled and rerun rewrap before proceeding.
 
 3. Disable old versions:
 

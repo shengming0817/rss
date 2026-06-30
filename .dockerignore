@@ -1,4 +1,4 @@
-# 构建上下文裁剪：只送 cargo 解析整个 workspace + 编译 `--bin server` 子图所需的输入。
+# 构建上下文裁剪：只送 cargo 解析整个 workspace + 编译 `--bin server --bin rss` 子图所需的输入。
 # 关键不变量：所有 workspace member 目录（crates/ adapters/ assemblies/ bins/ xtask/ generated/
 # journeys/）的 Cargo.toml 必须在上下文内——cargo 须解析整个 workspace 才能编译任一 bin。
 # 成员清单单源 = 根 Cargo.toml [workspace.members]（docs/rules/architecture.md §扁平 workspace 结构）。

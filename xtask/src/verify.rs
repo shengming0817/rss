@@ -1886,6 +1886,12 @@ mod tests {
         assert!(pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}steps:\n  - script: cargo install cargo-binstall@1.20.1 --locked\n  - script: cargo run --locked -p xtask -- ci\n"
         )));
+    }
+
+    #[test]
+    fn pipeline_delegate_predicate_red_cases() {
+        let triggers =
+            "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n";
         // 红：PR/push 触发未绑定 develop。
         assert!(!pipeline_delegates_to_xtask_ci(
             "on:\n  pull_request:\n  push:\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"

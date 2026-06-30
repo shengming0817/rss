@@ -27,21 +27,22 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# ── builder：先 cook 依赖层（缓存命中点）→ 再编 server bin → strip 符号 ────────────────────────────
+# ── builder：先 cook 依赖层（缓存命中点）→ 再编 server/rss bins → strip 符号 ─────────────────────────
 FROM chef AS builder
-# 仅 server 子图的依赖被 cook（--bin server 透传给底层 cargo），无关 workspace 成员不参与。
+# 仅 server/rss 子图的依赖被 cook（--bin 透传给底层 cargo），无关 workspace 成员不参与。
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json --bin server
+RUN cargo chef cook --release --locked --recipe-path recipe.json --bin server --bin rss
 COPY . .
-RUN cargo build --release --locked --bin server \
+RUN cargo build --release --locked --bin server --bin rss \
     # reason: strip 符号缩体积（不改全局 [profile.release]，避免影响整个 workspace 的开发构建）。
-    && strip target/release/server
+    && strip target/release/server target/release/rss
 
-# ── runtime：distroless/cc 非 root，仅含 server 二进制 ──────────────────────────────────────────────
+# ── runtime：distroless/cc 非 root，server 为入口，rss 供离线维护命令使用 ─────────────────────────────
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 # 4 个 listener（Primary/Internal/Admin/Health）默认演示端口；实际 bind 地址由 RSS_*_LISTEN_ADDR 决定。
 EXPOSE 8080 8081 8082 8083
 COPY --from=builder /app/target/release/server /usr/local/bin/server
+COPY --from=builder /app/target/release/rss /usr/local/bin/rss
 # distroless:nonroot 已内置 USER 65532:65532（只读 rootfs 友好；无 shell ⇒ 无 Docker HEALTHCHECK，
 # 探针交编排器 httpGet /health/v1/readyz，见部署文档）。
 ENTRYPOINT ["/usr/local/bin/server"]

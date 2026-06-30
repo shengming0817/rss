@@ -15,9 +15,10 @@
 //! `cargo xtask verify` 的 pdp-allow 计数门守逃生门用量）。`OidcProvider` 必填 `VerifierConfig` + `Box<dyn Clock>`
 //! ⇒ 无 key/clock 不可构造（编译期守）。
 //!
-//! INVARIANT: BINS-AUTH-SYNC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard, #1309) — `bins/rss` + `bins/server` 均仅 `main.rs` 调
-//! `runtime::run()`，组合根逻辑单一副本；auth wiring 一致性由「单一 `run()` 源」编译期保证，
-//! 原 xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
+//! INVARIANT: BINS-AUTH-SYNC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard, #1309) — `bins/server` 是 serving-only thin entry；`bins/rss` 先
+//! dispatch 显式 operator CLI（当前含 settings ConfigValue maintenance），未知参数 fail-closed，未命中 CLI
+//! 时再调用同一份 `runtime::run()` serving 组合根。auth wiring 一致性由「单一 `run()` 源」编译期保证，原
+//! xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
 pub mod distributed_runtime;
@@ -58,8 +59,10 @@ use identity::{
 };
 use oidc::OidcProvider;
 use postgres::{
-    ConfigValueProtections, LegacyConfigPlaintextPolicy, PgConfig, PgDbReadiness, PgPassword,
-    PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
+    ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
+    ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
+    LegacyConfigPlaintextPolicy, MaintenanceAuditOutcome, PgConfig, PgDbReadiness,
+    PgMaintenanceDeps, PgPassword, PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
 };
 use primitives::{
     AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
@@ -876,6 +879,374 @@ pub fn build_vault_runtime_deps(
         build_vault_resolver_from(&get)?,
         build_vault_key_provider_from(get)?,
     ))
+}
+
+/// `rss` binary 是否请求 settings ConfigValue 维护命令。
+#[must_use]
+pub fn is_settings_config_value_maintenance_command(args: &[String]) -> bool {
+    matches!(
+        args,
+        [cmd, sub, ..] if cmd == "settings-config-values" && sub == "maintenance"
+    )
+}
+
+fn parse_config_value_maintenance_operation(
+    raw: &str,
+) -> anyhow::Result<ConfigValueMaintenanceOperation> {
+    match raw {
+        "backfill" => Ok(ConfigValueMaintenanceOperation::Backfill),
+        "rewrap" => Ok(ConfigValueMaintenanceOperation::Rewrap),
+        "both" => Ok(ConfigValueMaintenanceOperation::Both),
+        other => anyhow::bail!(
+            "unknown settings config value maintenance operation: {other}; expected backfill|rewrap|both"
+        ),
+    }
+}
+
+fn parse_positive_usize(raw: &str, flag: &str) -> anyhow::Result<usize> {
+    let value = raw
+        .parse::<usize>()
+        .with_context(|| format!("{flag} must be a positive integer"))?;
+    anyhow::ensure!(value > 0, "{flag} must be greater than zero");
+    Ok(value)
+}
+
+#[derive(Debug, Clone)]
+struct SettingsConfigValueMaintenanceArgs {
+    options: ConfigValueMaintenanceOptions,
+    operator_service_token: String,
+    operator_tenant: vocab::TenantId,
+}
+
+fn parse_settings_config_value_maintenance_args(
+    args: &[String],
+) -> anyhow::Result<SettingsConfigValueMaintenanceArgs> {
+    anyhow::ensure!(
+        is_settings_config_value_maintenance_command(args),
+        "usage: rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> [--operation backfill|rewrap|both] [--tenant <uuid>] [--batch-size <n>] [--max-rows <n>] [--dry-run]"
+    );
+    let mut options = ConfigValueMaintenanceOptions::default();
+    let mut operator_service_token = None;
+    let mut operator_tenant = None;
+    let mut it = args[2..].iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--operator-service-token" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--operator-service-token requires a value"))?;
+                let trimmed = raw.trim();
+                anyhow::ensure!(
+                    !trimmed.is_empty(),
+                    "--operator-service-token must be non-empty"
+                );
+                operator_service_token = Some(trimmed.to_owned());
+            }
+            "--operator-tenant" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--operator-tenant requires a value"))?;
+                let tenant = vocab::TenantId::parse(raw)
+                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
+                operator_tenant = Some(tenant);
+            }
+            "--operation" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--operation requires a value"))?;
+                options = ConfigValueMaintenanceOptions::new(
+                    parse_config_value_maintenance_operation(raw)?,
+                )
+                .with_tenant_opt(options.tenant_opt())
+                .with_batch_size(options.batch_size())
+                .with_max_rows(options.max_rows())
+                .with_dry_run(options.dry_run());
+            }
+            "--tenant" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--tenant requires a value"))?;
+                let tenant = vocab::TenantId::parse(raw)
+                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
+                options = options.with_tenant(tenant);
+            }
+            "--batch-size" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--batch-size requires a value"))?;
+                options = options.with_batch_size(parse_positive_usize(raw, "--batch-size")?);
+            }
+            "--max-rows" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--max-rows requires a value"))?;
+                options = options.with_max_rows(Some(parse_positive_usize(raw, "--max-rows")?));
+            }
+            "--dry-run" => {
+                options = options.with_dry_run(true);
+            }
+            other => {
+                anyhow::bail!("unknown settings config value maintenance argument: {other}");
+            }
+        }
+    }
+    let operator_service_token = operator_service_token
+        .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?;
+    let operator_tenant =
+        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
+    Ok(SettingsConfigValueMaintenanceArgs {
+        options,
+        operator_service_token,
+        operator_tenant,
+    })
+}
+
+fn settings_config_value_maintenance_resource_id(
+    options: &ConfigValueMaintenanceOptions,
+) -> String {
+    let scope = options
+        .tenant_opt()
+        .map(|tenant| format!("tenant:{tenant}"))
+        .unwrap_or_else(|| "all".to_owned());
+    let max_rows = options
+        .max_rows()
+        .map(|max_rows| max_rows.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    format!(
+        "operation={} scope={} dry_run={} batch_size={} max_rows={}",
+        options.operation().as_str(),
+        scope,
+        options.dry_run(),
+        options.batch_size(),
+        max_rows
+    )
+}
+
+const UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR: &str = "unverified-service-token";
+
+async fn verified_config_value_maintenance_operator_subject(
+    service_token: &str,
+    operator_tenant: vocab::TenantId,
+    pdp: &diport::DynPdp<'_>,
+) -> anyhow::Result<String> {
+    let (_token, principal) = authn::verify_service_token(
+        service_token,
+        diport::ServiceTokenTenantBinding::new(operator_tenant),
+        pdp,
+    )
+    .await
+    .context("verify settings config value maintenance operator service token")?;
+    anyhow::ensure!(
+        principal.kind() == vocab::PrincipalKind::Service,
+        "settings config value maintenance operator must be a service principal"
+    );
+    Ok(principal.audit_subject().to_owned())
+}
+
+async fn record_config_value_maintenance_finish_audit(
+    pg: &PgMaintenanceDeps,
+    operator_subject: &str,
+    resource_id: &str,
+    outcome: MaintenanceAuditOutcome<'_>,
+) -> anyhow::Result<()> {
+    pg.record_config_value_maintenance_audit(
+        operator_subject,
+        "settings.config-values.maintenance.finish",
+        outcome,
+        resource_id,
+    )
+    .await
+    .context("record settings config value maintenance finish audit")
+}
+
+async fn settings_config_value_maintenance_operator_subject(
+    pg: &PgMaintenanceDeps,
+    parsed: &SettingsConfigValueMaintenanceArgs,
+    resource_id: &str,
+) -> anyhow::Result<String> {
+    let operator_provider = match build_provider() {
+        Ok(provider) => provider,
+        Err(err) => {
+            record_config_value_maintenance_finish_audit(
+                pg,
+                UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_provider_config",
+                },
+            )
+            .await?;
+            return Err(err).context("settings config value maintenance operator verifier");
+        }
+    };
+    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
+    match verified_config_value_maintenance_operator_subject(
+        &parsed.operator_service_token,
+        parsed.operator_tenant,
+        operator_pdp,
+    )
+    .await
+    {
+        Ok(subject) => Ok(subject),
+        Err(err) => {
+            record_config_value_maintenance_finish_audit(
+                pg,
+                UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_auth",
+                },
+            )
+            .await?;
+            Err(err)
+        }
+    }
+}
+
+async fn settings_config_value_maintenance_protection(
+    pg: &PgMaintenanceDeps,
+    operator_subject: &str,
+    resource_id: &str,
+) -> anyhow::Result<ConfigValueProtection> {
+    let key_provider = match build_vault_key_provider_from(|name| std::env::var(name).ok()) {
+        Ok(provider) => provider,
+        Err(err) => {
+            record_config_value_maintenance_finish_audit(
+                pg,
+                operator_subject,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "key_provider_config",
+                },
+            )
+            .await?;
+            return Err(err).context("settings config value maintenance key provider");
+        }
+    };
+    let key_name = match build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
+    {
+        Ok(key_name) => key_name,
+        Err(err) => {
+            record_config_value_maintenance_finish_audit(
+                pg,
+                operator_subject,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "key_name_config",
+                },
+            )
+            .await?;
+            return Err(err).context("settings config value key name");
+        }
+    };
+    Ok(ConfigValueProtection::new(
+        DynKeyProvider::new_box(key_provider),
+        key_name,
+    ))
+}
+
+/// 执行 `rss settings-config-values maintenance`。
+pub async fn run_settings_config_value_maintenance(args: &[String]) -> anyhow::Result<()> {
+    let parsed = parse_settings_config_value_maintenance_args(args)?;
+    let options = parsed.options.clone();
+    let resource_id = settings_config_value_maintenance_resource_id(&options);
+    let pg = PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+        .await
+        .context("setup postgres maintenance deps")?;
+    pg.record_config_value_maintenance_audit(
+        UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR,
+        "settings.config-values.maintenance.start",
+        MaintenanceAuditOutcome::Success,
+        &resource_id,
+    )
+    .await
+    .context("record settings config value maintenance start audit")?;
+    let operator_subject = match settings_config_value_maintenance_operator_subject(
+        &pg,
+        &parsed,
+        &resource_id,
+    )
+    .await
+    {
+        Ok(subject) => subject,
+        Err(err) => {
+            pg.shutdown().await.ok();
+            return Err(err);
+        }
+    };
+    let capability =
+        ConfigValueMaintenanceCapability::from_verified_service_subject(operator_subject.clone())
+            .context("settings config value maintenance operator subject")?;
+    let protection =
+        match settings_config_value_maintenance_protection(&pg, &operator_subject, &resource_id)
+            .await
+        {
+            Ok(protection) => protection,
+            Err(err) => {
+                pg.shutdown().await.ok();
+                return Err(err);
+            }
+        };
+    let maintenance = pg.config_value_maintenance(protection, capability);
+    let report = match maintenance.run(&options).await {
+        Ok(report) => report,
+        Err(err) => {
+            record_config_value_maintenance_finish_audit(
+                &pg,
+                &operator_subject,
+                &resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "run_error",
+                },
+            )
+            .await
+            .context("record settings config value maintenance failure audit")?;
+            pg.shutdown().await.ok();
+            return Err(err).context("settings config value maintenance");
+        }
+    };
+    let audit_outcome = if report.failed == 0 {
+        MaintenanceAuditOutcome::Success
+    } else {
+        MaintenanceAuditOutcome::Failure {
+            reason: "failed_rows",
+        }
+    };
+    record_config_value_maintenance_finish_audit(
+        &pg,
+        &operator_subject,
+        &resource_id,
+        audit_outcome,
+    )
+    .await?;
+    let scope = options
+        .tenant_opt()
+        .map(|tenant| format!("tenant:{tenant}"))
+        .unwrap_or_else(|| "all".to_owned());
+    let max_rows = options
+        .max_rows()
+        .map(|max_rows| max_rows.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    println!(
+        "operation={} dry_run={} scope={} batch_size={} max_rows={} selected={} backfilled={} rewrapped={} unchanged={} failed={} remaining_plaintext={}",
+        options.operation().as_str(),
+        options.dry_run(),
+        scope,
+        options.batch_size(),
+        max_rows,
+        report.selected,
+        report.backfilled,
+        report.rewrapped,
+        report.unchanged,
+        report.failed,
+        report.remaining_plaintext
+    );
+    pg.shutdown().await.ok();
+    anyhow::ensure!(
+        report.failed == 0,
+        "settings config value maintenance completed with failed rows"
+    );
+    Ok(())
 }
 
 /// 组合根级 redis capability bundle 构造：`RSS_REDIS_URL` → deadpool redis pool + PING → [`redis::RedisRuntimeDeps`].
@@ -2192,6 +2563,189 @@ mod tests {
 
     fn allow_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
         Arc::new(AllowAuthorizer)
+    }
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
+    fn settings_config_value_maintenance_args_default_to_both() -> anyhow::Result<()> {
+        let parsed = parse_settings_config_value_maintenance_args(&args(&[
+            "settings-config-values",
+            "maintenance",
+            "--operator-service-token",
+            "opaque-token",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+        ]))?;
+        assert_eq!(parsed.operator_service_token, "opaque-token");
+        assert_eq!(
+            parsed.operator_tenant,
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?
+        );
+        assert_eq!(parsed.options.batch_size(), 500);
+        assert_eq!(parsed.options.max_rows(), None);
+        assert!(!parsed.options.dry_run());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_config_value_maintenance_args_parse_flags() -> anyhow::Result<()> {
+        let parsed = parse_settings_config_value_maintenance_args(&args(&[
+            "settings-config-values",
+            "maintenance",
+            "--operator-service-token",
+            "opaque-token",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--operation",
+            "backfill",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--batch-size",
+            "7",
+            "--max-rows",
+            "9",
+            "--dry-run",
+        ]))?;
+        assert_eq!(parsed.operator_service_token, "opaque-token");
+        assert_eq!(parsed.options.batch_size(), 7);
+        assert_eq!(parsed.options.max_rows(), Some(9));
+        assert!(parsed.options.tenant_opt().is_some());
+        assert!(parsed.options.dry_run());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_config_value_maintenance_args_fail_closed() {
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token",
+                "opaque-token",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--bogus",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token",
+                "opaque-token",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--operation",
+                "decrypt",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token",
+                "opaque-token",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--batch-size",
+                "0",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token",
+                "",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token",
+                "opaque-token",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_settings_config_value_maintenance_args(&args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-subject",
+                "ops@example.com",
+            ]))
+            .is_err()
+        );
+    }
+
+    struct StubPdp {
+        result: Result<diport::VerifiedClaims, diport::PdpError>,
+    }
+
+    impl diport::Pdp for StubPdp {
+        async fn verify(
+            &self,
+            _raw: &diport::RawCredential,
+        ) -> Result<diport::VerifiedClaims, diport::PdpError> {
+            self.result.clone()
+        }
+    }
+
+    fn stub_pdp(
+        result: Result<diport::VerifiedClaims, diport::PdpError>,
+    ) -> Box<diport::DynPdp<'static>> {
+        diport::DynPdp::new_box(StubPdp { result })
+    }
+
+    #[tokio::test]
+    async fn settings_config_value_maintenance_operator_subject_comes_from_verified_service_token()
+    -> anyhow::Result<()> {
+        let pdp = stub_pdp(Ok(diport::VerifiedClaims::new(
+            "verified-operator",
+            None,
+            Some("ignored".to_owned()),
+        )));
+        let subject = verified_config_value_maintenance_operator_subject(
+            "opaque-token",
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
+            &pdp,
+        )
+        .await?;
+
+        assert_eq!(subject, "verified-operator");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settings_config_value_maintenance_operator_token_failure_is_fail_closed()
+    -> anyhow::Result<()> {
+        let pdp = stub_pdp(Err(diport::PdpError::InvalidSignature));
+        let result = verified_config_value_maintenance_operator_subject(
+            "opaque-token",
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
+            &pdp,
+        )
+        .await;
+
+        assert!(result.is_err());
+        Ok(())
     }
 
     /// settings 域产物：`configs_ready` + `keyprovider_ready` 两条探针、resources / workers 空。
