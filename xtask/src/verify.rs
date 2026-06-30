@@ -1736,6 +1736,29 @@ mod tests {
         Ok(())
     }
 
+    /// GitHub CI 安装 pinned nightly 时，每个 component 必须显式带 `--component`，否则 rustup 会把后续
+    /// component 名误解析成 toolchain 名（GitHub runner 上 fail-fast）。
+    #[test]
+    fn github_ci_nightly_components_are_explicit() -> anyhow::Result<()> {
+        let path = workspace_root()?
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml");
+        let yaml = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+        assert!(
+            yaml.contains(
+                "rustup toolchain install \"$RSS_NIGHTLY_PINNED\" --profile minimal --component rustc-dev --component llvm-tools-preview --component rust-src"
+            ),
+            "pinned nightly install 须为每个 component 显式写 `--component`"
+        );
+        assert!(
+            !yaml.contains("--component rustc-dev llvm-tools-preview rust-src"),
+            "不得把多个 component 裸接在单个 `--component` 后"
+        );
+        Ok(())
+    }
+
     // ---- 供应链定时刷新 lane 守卫（issue #1133）----
 
     /// xtask audit 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形与 CI 锁定入口形。

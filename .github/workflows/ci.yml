@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup component add rustfmt clippy llvm-tools-preview
-          rustup toolchain install "$RSS_NIGHTLY_PINNED" --profile minimal --component rustc-dev llvm-tools-preview rust-src
+          rustup toolchain install "$RSS_NIGHTLY_PINNED" --profile minimal --component rustc-dev --component llvm-tools-preview --component rust-src
           rustup show
 
       - name: Cache cargo
