@@ -104,11 +104,20 @@ impl Default for EventRuntime {
 
 // ── 内部类型 ──────────────────────────────────────────────────────────────────
 
-/// L2 OutboxFact **发布域集**（producer-side）：identity（`identity.session-created`）+ settings
-/// （`settings.config-version-changed`）。每个发布域各起一个 relay（per-domain vhost publisher + caps marker）——
-/// 未列入的发布域 outbox 会在 durable runtime 静默积压（#1251 F2）。新增 L2 发布域时在此追加 + 在 `wire_durable`
-/// 显式接一个 relay（caps::* 是编译期 marker，无法对 domain 字符串泛型循环）。
-const RELAY_DOMAINS: &[&str] = &["identity", "settings"];
+/// 生产 AMQP relay 发布域集。
+///
+/// 只列已经具备 broker routing 拓扑的 active 事件域。`settings.config-version-changed`
+/// 当前仍是 draft 且没有 consumer queue；AMQP publisher 使用 `mandatory=true`，若在生产
+/// durable runtime 接入 settings relay，会把该事件正确判为 unroutable 并反复 retry/DLX。
+/// 因此 settings 的 durable journey 只验证 PgOutbox + 测试 Publisher 模板，待事件升 active
+/// 并补 consumer/topology 后再加入此列表和 `wire_durable` relay block。
+const RELAY_DOMAINS: &[&str] = &["identity"];
+
+#[cfg(test)]
+fn relay_domains_for_test() -> &'static [&'static str] {
+    RELAY_DOMAINS
+}
+
 const INBOX_SWEEPER_WORKER_NAME: &str = "inbox-sweeper";
 const INBOX_SWEEPER_PROBE: &str = "inbox_sweeper";
 const DEAD_LETTER_SWEEPER_WORKER_NAME: &str = "dead-letter-sweeper";
@@ -588,9 +597,8 @@ async fn wire_durable(
         amqp_map.insert(domain, amqp_deps);
     }
 
-    // Relay workers：每个 L2 发布域（[`RELAY_DOMAINS`]）一个 relay——往该域 vhost 发布其 outbox（否则该域
-    // outbox 在 durable runtime 静默积压，#1251 F2）。caps::* 是编译期 marker、无法对 domain 字符串泛型循环
-    // → 显式 identity + settings（新增 L2 发布域时在此加一块 + 在 RELAY_DOMAINS 追加）。
+    // Relay workers：每个生产 AMQP 发布域（[`RELAY_DOMAINS`]）一个 relay。caps::* 是编译期 marker、
+    // 无法对 domain 字符串泛型循环 → 显式 block（新增 active 发布域时在此加一块 + 在 RELAY_DOMAINS 追加）。
     {
         let publisher = relay_publisher(&amqp_map, "identity")?;
         let outbox = pg.for_domain::<caps::Identity>().outbox(
@@ -599,15 +607,6 @@ async fn wire_durable(
             security.dlx_payload_protector.clone(),
         );
         wire_domain_relay("identity", outbox, &timing, &mut module)?;
-    }
-    {
-        let publisher = relay_publisher(&amqp_map, "settings")?;
-        let outbox = pg.for_domain::<caps::Settings>().outbox(
-            publisher,
-            Arc::clone(&security.tenant_authority),
-            security.dlx_payload_protector.clone(),
-        );
-        wire_domain_relay("settings", outbox, &timing, &mut module)?;
     }
     wire_outbox_maintenance(pg, distributed, &security, &timing, &mut module)?;
 
@@ -1188,11 +1187,8 @@ mod tests {
 
     #[test]
     fn required_domains_includes_publishing_domains_without_subscribers() {
-        // 无 subscriber → 仍含 RELAY_DOMAINS 发布域（relay 需 per-domain vhost；否则该域 outbox 静默积压）。
-        assert_eq!(
-            required_domains(&[]),
-            vec!["identity".to_string(), "settings".to_string()]
-        );
+        // 无 subscriber → 仍含 production RELAY_DOMAINS 发布域（relay 需 per-domain vhost）。
+        assert_eq!(required_domains(&[]), vec!["identity".to_string()]);
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1257,9 +1253,9 @@ mod tests {
             SPECS,
         )
         .unwrap();
-        // subscriber owner {identity, audit} ∪ RELAY_DOMAINS {identity, settings} → 去重排序。
+        // subscriber owner {identity, audit} ∪ RELAY_DOMAINS {identity} → 去重排序。
         let domains = required_domains(&bindings);
-        assert_eq!(domains, vec!["audit", "identity", "settings"]);
+        assert_eq!(domains, vec!["audit", "identity"]);
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1780,6 +1776,22 @@ mod tests {
         assert!(runtime.module.probes.is_empty());
         assert!(runtime.module.resources.is_empty());
         assert!(runtime.module.workers.is_empty());
+    }
+
+    #[test]
+    fn draft_settings_event_is_not_in_production_relay_domains() {
+        assert!(
+            !relay_domains_for_test().contains(&"settings"),
+            "settings.config-version-changed is draft and has no consumer queue; production AMQP relay would be unroutable"
+        );
+        assert!(
+            primitives::ProbeName::parse(OUTBOX_SAMPLER_PROBE).is_ok(),
+            "outbox sampler probe name must remain readyz-compatible"
+        );
+        assert!(
+            primitives::ProbeName::parse(OUTBOX_SWEEPER_PROBE).is_ok(),
+            "outbox sweeper probe name must remain readyz-compatible"
+        );
     }
 
     // ── resolve_event_decision（纯函数；无 PG/infra 依赖）────────────────────

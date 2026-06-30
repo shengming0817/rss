@@ -82,6 +82,13 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   `with_local_recorder` 渲染断言 + postgres `OutboxBacklog` 集成测试 T15–T18，testcontainers gated）。**E2E
   metrics 经 /metrics 实采集**需 runtime 装配 relay/sampler worker（#1429）并挂 HealthListener；验收项为
   `/metrics` 返回 `outbox_publish_total` / `outbox_pending_depth` 等。
+- **settings durable journey 模板（#1433）**：`assemblies/runtime/tests/settings_config_publish_durable_e2e.rs`
+  用真实 Postgres + `PgConfigUnitOfWork` + `PgOutbox` + 测试 publisher 验证 `settings` 写入、co-tx outbox、
+  relay settle、`outbox_publish_total{domain="settings",status="ack"}`、`outbox_pending_depth{domain="settings"}`
+  与测试 `outbox_relay_settings` readyz 闭环。该模板刻意不走生产 AMQP publisher：`settings.config-version-changed`
+  仍是 draft 且无 consumer queue，生产 `mandatory=true` AMQP relay 会把它判为 unroutable；事件升 active 并补
+  subscriber/topology 前不接入 production relay domain。运行：
+  `cargo test -p runtime --features integration --test settings_config_publish_durable_e2e`。
 
 ## 配置护栏（误配防护）
 
@@ -119,8 +126,8 @@ funnel，未校验 config 类型层不可表达）：
 runtime durable event transport 现在把 outbox relay / sampler / sweeper 与 consumer bundle 作为
 `DomainModuleResult` 产物输出：
 
-- per-domain relay：`outbox_relay_identity` / `outbox_relay_settings` readyz probe，按发布域 AMQP publisher
-  中继 outbox。
+- per-domain relay：`outbox_relay_identity` readyz probe，按 active/provisioned 发布域 AMQP publisher 中继
+  outbox；draft 且无 consumer queue 的 settings 暂不接 production relay。
 - sampler：`outbox_sampler` readyz probe，按 `RSS_RELAY_SAMPLE_INTERVAL_MS` 采样 backlog gauges。
 - sweeper：`outbox_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
   `RSS_OUTBOX_RETAIN_SECONDS` 的 `published` outbox 行。

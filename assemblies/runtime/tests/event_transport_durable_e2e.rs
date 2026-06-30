@@ -379,8 +379,24 @@ async fn event_transport_durable_e2e() -> Result<()> {
     );
     assert_eq!(
         event_runtime.module.workers.len(),
-        7,
-        "identity relay + settings relay + consumer + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
+        6,
+        "identity relay + consumer + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
+    );
+    let probe_names: Vec<&str> = event_runtime
+        .module
+        .probes
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for expected in ["outbox_sampler", "outbox_sweeper"] {
+        assert!(
+            probe_names.contains(&expected),
+            "durable module probes must include {expected}; got {probe_names:?}"
+        );
+    }
+    assert!(
+        !probe_names.contains(&"outbox_relay_settings"),
+        "draft settings event has no consumer queue; production AMQP relay must not be wired"
     );
 
     // ── 步骤 7：注册 ShutdownStack（infra_guards 先注册 → LIFO 最后关；workers 后注册 → LIFO 最先 drain）
