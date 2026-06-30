@@ -294,11 +294,11 @@ scope、subject、actor 都不从裸 string / payload 重新派生；`OutboxEnve
 
 可选 `partition_key`（#1211）是 envelope 的有序投递路由列（不透明聚合根键，非 metadata、非 reserved
 funnel）：经 `OutboxEnvelopeParts::with_partition_key(key)`（未设即 `None`，无序并行）落 outbox 列，决定投递顺序分区（语义见
-`eventbus.md` §投递顺序保证）。`partition_key` **必须自带 tenant scope**（含 tenantId 或全局唯一如 sessionId）；
-outbox 表无 `tenant_id` 列、无 RLS，无 tenant scope 的 partition_key 同 `(domain, partition_key)` 跨租户碰撞
-致 liveness DoS——详见 `tenancy.md` §RLS 与全局表 + issue **#1405**。
+`eventbus.md` §投递顺序保证）。outbox 行同时持久化 typed tenant 为 `tenant_id` 并启用 RLS；
+head-of-partition gate 按 `(tenant_id, domain, partition_key)` 判队头。因此 `partition_key` 是同租户内的不透明
+aggregate 路由键，不需要把 tenant id 再拼进 key；跨租同 business key 不共享 gate。
 
-> **PII / 凭据边界**：推荐的 tenant-scoped key 可能含**凭据级** bearer 标识（sessionId 即 bearer token），故
+> **PII / 凭据边界**：业务选择的 partition key 可能含**凭据级** bearer 标识（sessionId 即 bearer token），故
 > `PartitionKey` / `OutboxEnvelopeParts` 的 `Debug` **脱敏**（值渲染 `<redacted>`，仅 presence 可见）——
 > **不以明文进结构化日志**（F3，#1211 review，同 `identity::SessionId` 范式）。定位 stalled partition 经受控
 > DB 查询（`SELECT partition_key FROM outbox WHERE event_id=…`），非日志明文；partition 级诊断信号见 issue #1406。

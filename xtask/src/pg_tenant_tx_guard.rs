@@ -193,7 +193,10 @@ pub(crate) fn scan_guard(
         }
     }
 
-    for expected in ["config-legacy-plaintext-startup-probe"] {
+    for expected in [
+        "config-legacy-plaintext-startup-probe",
+        "outbox-dlx-dead-letter-settlement",
+    ] {
         if !allowed_exceptions.contains(expected) {
             findings.push(finding(
                 Rule::StaleException,
@@ -494,6 +497,14 @@ fn allowed_site_exception(
         && window.contains("fetch_one(&self.pool")
     {
         return Some("config-legacy-plaintext-startup-probe");
+    }
+    if rel == "outbox.rs"
+        && tables == ["dead_letter"]
+        && window.contains("rss_outbox_mark_dlx")
+        && window.contains("set_local_tenant")
+        && window.contains("insert into dead_letter")
+    {
+        return Some("outbox-dlx-dead-letter-settlement");
     }
     None
 }
@@ -1033,8 +1044,8 @@ mod tests {
                     "async fn f(){ self.pool.write(tenant, |conn| Box::pin(async move { sqlx::query(\"UPDATE credentials SET id=id\").execute(&mut *conn).await.map_err(storage) }), storage); }",
                 ),
                 (
-                    "emitter.rs",
-                    "struct E { pool: PgPool } async fn f(){ self.pool.begin().await; sqlx::query(\"INSERT INTO outbox VALUES (1)\"); }",
+                    "outbox.rs",
+                    "async fn settle_dlx(pool: &PgPool){ let mut tx = pool.begin().await; sqlx::query(\"SELECT * FROM rss_outbox_mark_dlx($1, $2, $3)\").fetch_optional(&mut *tx).await; set_local_tenant(&mut tx, tenant).await; sqlx::query(\"INSERT INTO dead_letter VALUES (1)\").execute(&mut *tx).await; }",
                 ),
                 (
                     "migrator.rs",

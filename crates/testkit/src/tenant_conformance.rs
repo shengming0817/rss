@@ -146,4 +146,29 @@ mod tests {
             "{err:?}"
         );
     }
+
+    /// anti-vacuity：跨租写会抹掉 A 的可见性 → CrossTenantInterference（守卫 no-interference 非恒真）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn interfering_fake_repo_is_caught() {
+        let current: RefCell<Option<u32>> = RefCell::new(None);
+        let save = |t: u32| {
+            let current = &current;
+            async move {
+                *current.borrow_mut() = Some(t);
+                Ok::<(), std::convert::Infallible>(())
+            }
+        };
+        let exists = |t: u32| {
+            let current = &current;
+            async move { Ok::<bool, std::convert::Infallible>(*current.borrow() == Some(t)) }
+        };
+        let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists)
+            .await
+            .expect_err("interfering repo must fail");
+        assert!(
+            matches!(err, TenantConformanceError::CrossTenantInterference),
+            "{err:?}"
+        );
+    }
 }

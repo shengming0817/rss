@@ -76,21 +76,26 @@ NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前�
 
 app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
 （sessions / config_entries / roles / secret_refs / credentials / refresh_tokens；audit_entries 仅
-SELECT+INSERT；dead_letter 仅 SELECT+INSERT）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受
-policy 约束。durable bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving
-pool 必须以 `rss_app` 连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非
-`rss_app` serving role。
+SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
+不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
+bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving pool 必须以 `rss_app`
+连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非 `rss_app` serving role。
 注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
 生产 owner 须为非 superuser。
 
-outbox / saga_journal / projection_events 是**无 `tenant_id` 列的全局表**，不在 `schema-rls` 检查
-范围。这些表以其它机制保证数据隔离：saga_journal / projection_events 依赖 seq 全局顺序 + consumer
-group 隔离；outbox 依赖 partition_key routing。因此，outbox `partition_key` 若用于有序投递**必须自带
-tenant scope**（含 tenantId 或全局唯一如 sessionId），否则同 `(domain, partition_key)` 跨租户碰撞
-致 liveness DoS（队头阻塞传播到另一租户的投递队列）。架构强制（outbox 加 `tenant_id` 列 + RLS，或
-typed `PartitionKey::for_tenant(TenantId, ..)` 让 tenant scope 进类型层）见 issue **#1405**。
+outbox 是 tenant-scoped 表：`tenant_id uuid NOT NULL` 与 metadata `tenantId` 同源落库，并受
+`ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。emit-only 路径和 co-tx 路径必须
+先在事务内 `SET LOCAL rss.tenant_id`，且 co-tx 会拒绝 envelope tenant 与事务 tenant 不一致。ordered delivery
+的 head-of-partition gating 按 `(tenant_id, domain, partition_key)` 判队头；同一 business key 下，tenant A
+进入 dlx 的队头不得阻塞 tenant B 的同 key 投递。跨租 relay / retention / backlog 维护不得给 `rss_app`
+开放 outbox 全表 UPDATE/DELETE，只能调用迁移安装的固定 `SECURITY DEFINER` 函数；函数 owner 为 NOLOGIN
+BYPASSRLS 维护角色，函数签名是运行期唯一全域 outbox DML 通道。
 
-> tenant-scoped key（如 `<tenantId>:<sessionId>`）可能含**凭据级** bearer 标识，故 `PartitionKey` 的 `Debug`
+saga_journal / projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围；它们依赖
+seq 全局顺序、owner checkpoint / consumer group 隔离与上层 envelope tenant authority，不承载 outbox
+partition liveness 语义。
+
+> partition key（如 sessionId）可能含**凭据级** bearer 标识，故 `PartitionKey` 的 `Debug`
 > 脱敏（`<redacted>`），不以明文进日志（F3，#1211 review；同 `SessionId`）——见 `observability.md` §Outbox Envelope。
 
 ## 持久化模式 tenant 作用域合约（PERSIST-016 / #1437 RLS 解锁器）
@@ -124,11 +129,11 @@ global infra adapter 和命名维护例外中出现。
 
 **命名维护例外**：tenant 表 raw-pool 维护例外只允许在 `pg-tenant-tx-guard` 中按窄形状显式登记，并带
 stale-allowlist 测试。当前 Rust raw-pool 例外仅为 `config_entries` startup legacy plaintext probe（serving
-pool 接受前由 migrator/owner 连接只统计 encryption migration debt）。`dead_letter` retention sweep 不保留
-owner/maintenance 长期连接，也不授 `rss_app` 直接 `DELETE`；它由迁移安装的窄 `SECURITY DEFINER`
-函数承载，函数 owner 是 NOLOGIN `rss_dead_letter_maintenance`，仅用于 FORCE RLS 下的全域 30 天 retention
-sweep。runtime 仍经 `rss_app` 调用固定保留期删除能力。outbox relay 将 publish 失败写入 `dead_letter`
-必须经 tenant-scoped write funnel 执行，不再保留 raw-pool settlement 例外。
+pool 接受前由 migrator/owner 连接只统计 encryption migration debt）。`dead_letter` retention sweep 和
+outbox relay/retention/backlog 不保留 owner/maintenance 长期连接，也不授 `rss_app` 直接 DELETE/UPDATE；
+它们由迁移安装的窄 `SECURITY DEFINER` 函数承载，函数 owner 是 NOLOGIN BYPASSRLS 维护角色，只开放固定
+参数的全域维护能力。runtime 仍经 `rss_app` 调用这些函数；outbox relay 将 publish 失败写入 `dead_letter`
+前必须从 outbox metadata 取 tenant，并在同一事务内经 `set_local_tenant` 注入 tenant scope 后写入。
 
 **启动期 RLS 能力门控**：`PgRuntimeDeps::setup` 在迁移完成后调用
 `PgStore::verify_rls_capability()`，动态派生含 `tenant_id` 列的表集合，断言每张表满足
@@ -141,8 +146,8 @@ backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过�
 （Hard）与 xtask setlocal-funnel / pg-tenant-tx-guard 守卫（Medium）及启动能力门控（Medium），
 为以下同批 issue 提供稳定底座：
 
-- **#1405**：outbox / inbox tenant 注入（outbox 当前为无 `tenant_id` 的全局表，见上文全局表注，其 tenant 硬化超出本 issue 范围）。
-- **#1426**：完整 repo 一致性 conformance testkit（CAS / rollback / co-tx 跨场景验收）。
+- **#1581**：outbox tenant 注入已落地（`tenant_id` + RLS + 固定 SECURITY DEFINER 维护函数）；inbox tenant 维度仍单列跟踪。
+- **#1582**：tenant repo conformance 已纳入真实 postgres repos（config seed + role / audit / dead_letter 等），完整 CAS / rollback / co-tx 扩展仍按后续 conformance 范围推进。
 - **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
 
 dual-pool（`rss_app` serving 非 superuser 角色）接线见上文 §RLS 与 PG scope；`rss_app

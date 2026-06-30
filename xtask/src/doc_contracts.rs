@@ -1,7 +1,8 @@
 //! `doc-contracts` —— 文档契约片段漂移门（AI-robust Medium 内容扫描门）。
 //!
 //! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code" }—— tenant + actor aware command /
-//! outbox envelope 签名已经进入 codegen 与 runtime；规则 / spec 文档不得残留 tenantless / actorless 旧片段。
+//! outbox envelope 签名已经进入 codegen 与 runtime；规则 / spec 文档与相关 public rustdoc 不得残留 tenantless /
+//! actorless 旧片段。
 //! 该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文。
 
 use std::path::{Path, PathBuf};
@@ -13,6 +14,11 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 const DOC_ROOTS: &[&str] = &["docs/rules", "docs/spec"];
+const SOURCE_DOC_FILES: &[&str] = &[
+    "crates/consistency/src/outbox.rs",
+    "crates/diport/src/outbox_emitter.rs",
+    "adapters/postgres/src/outbox.rs",
+];
 
 const FORBIDDEN: &[ForbiddenPattern] = &[
     ForbiddenPattern {
@@ -50,6 +56,56 @@ const FORBIDDEN: &[ForbiddenPattern] = &[
         needle: "request: <Cmd>Request, subject_id: String, idempotency_key: Option<String>",
         detail: "producer wrapper spec 必须使用 typed subject/actor，不得暴露 String subject_id 旧签名",
     },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "outbox / saga_journal / projection_events 是**无 `tenant_id` 列的全局表**",
+        detail: "outbox 已是 tenant-scoped 表；文档不得回退为 tenantless global outbox",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "outbox 当前为无 `tenant_id` 的全局表",
+        detail: "outbox 已是 tenant-scoped 表；文档不得保留旧 future-work 描述",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "outbox/inbox 不引入 tenant_id 维度属本 feature 显式范围决策",
+        detail: "outbox 已引入 tenant_id；仅 inbox 仍维持现有去重维度",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "outbox 表无 `tenant_id` 列、无 RLS",
+        detail: "outbox 已是 tenant-scoped RLS 表；文档不得保留旧无 tenant_id 描述",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "`partition_key` **必须自带 tenant scope**",
+        detail: "outbox gate 已按 (tenant_id, domain, partition_key) 判队头；partition_key 不得再被描述为自带 tenant scope 的授权边界",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "partition_key 必须自带 tenant scope",
+        detail: "outbox gate 已按 (tenant_id, domain, partition_key) 判队头；partition_key 不得再被描述为自带 tenant scope 的授权边界",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "设置时同 `(domain, partition_key)`",
+        detail: "outbox gate 已按 (tenant_id, domain, partition_key) 判队头；public rustdoc 不得保留 tenantless gate 描述",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "gating：同 `(domain, partition_key)`",
+        detail: "outbox gate 已按 (tenant_id, domain, partition_key) 判队头；public rustdoc 不得保留 tenantless gate 描述",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "tenant-scoped key",
+        detail: "partition_key 不再需要自带 tenant；tenant scope 由 typed tenant_id 列承载",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxTenantScope,
+        needle: "issue **#1405**",
+        detail: "outbox tenant_id/RLS 已落地；规则文档不得继续指向 #1405 future-work",
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,6 +114,7 @@ pub(crate) enum Rule {
     RuntimeCommandEmit,
     OutboxEnvelope,
     ProducerSignature,
+    OutboxTenantScope,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,7 +142,7 @@ impl GovernanceCheck for DocContracts {
             );
         }
         Ok((
-            format!("{scanned} docs 文件扫描，command/outbox tenant-aware 片段无漂移"),
+            format!("{scanned} docs/source 文件扫描，command/outbox tenant-aware 片段无漂移"),
             findings,
         ))
     }
@@ -99,6 +156,13 @@ fn scan_docs(root: &Path) -> Result<(usize, Vec<Finding>)> {
             bail!("doc-contracts: {dir} 下无 .md 文件，fail-closed");
         }
         files.append(&mut found);
+    }
+    for rel in SOURCE_DOC_FILES {
+        let path = root.join(rel);
+        if !path.is_file() {
+            bail!("doc-contracts: source rustdoc 文件 {rel} 缺失，fail-closed");
+        }
+        files.push(path);
     }
     files.sort();
 
@@ -190,5 +254,27 @@ eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, pa
 OutboxEnvelopeParts::new(CONTRACT, tenant, subject, actor)
 ";
         assert!(scan_content(Path::new("docs/rules/eventbus.md"), src).is_empty());
+    }
+
+    #[test]
+    fn scan_content_reports_tenantless_outbox_doc_fragments() {
+        let src = "\
+outbox / saga_journal / projection_events 是**无 `tenant_id` 列的全局表**
+outbox/inbox 不引入 tenant_id 维度属本 feature 显式范围决策
+outbox 表无 `tenant_id` 列、无 RLS
+`partition_key` **必须自带 tenant scope**
+partition_key 必须自带 tenant scope
+设置时同 `(domain, partition_key)`
+gating：同 `(domain, partition_key)`
+tenant-scoped key
+issue **#1405**
+";
+        let findings = scan_content(Path::new("docs/rules/tenancy.md"), src);
+        assert_eq!(findings.len(), 9);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::OutboxTenantScope)
+        );
     }
 }

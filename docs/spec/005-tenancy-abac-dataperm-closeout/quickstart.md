@@ -23,8 +23,8 @@ cargo test -p authn
 - Missing tenant context denies instead of defaulting.
 - `rss_app` with tenant A cannot see tenant B rows.
 - Superuser/BYPASSRLS durable setup fails.
-- Unscoped outbox partition keys cannot be used for tenant-scoped ordered delivery.
-- Tenant-aware `PartitionKey` and `OutboxEnvelopeParts` Debug/log output redacts credential-like identifiers.
+- Outbox ordered delivery gates by `(tenant_id, domain, partition_key)`; tenant A DLX cannot block tenant B with the same business key.
+- `rss_app` cannot directly UPDATE/DELETE outbox and must use fixed outbox maintenance functions for relay settlement/retention.
 - `RowScope::All` cannot be issued without durable audit success.
 - Active routes without AuthZ mode are rejected.
 - Sensitive read fields remain masked by default.

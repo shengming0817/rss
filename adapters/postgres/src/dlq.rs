@@ -51,7 +51,6 @@ const LIST_DEAD_LETTER_SQL: &str = r#"
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
     tenant_pool: PgTenantPool,
-    global_pool: sqlx::PgPool,
     payload_protector: DlxPayloadProtector,
 }
 
@@ -60,7 +59,6 @@ impl PgStore {
     pub(crate) fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
         PgDlqStore {
             tenant_pool: PgTenantPool::new(self),
-            global_pool: self.pool.clone(),
             payload_protector,
         }
     }
@@ -144,12 +142,13 @@ impl DlqStore for PgDlqStore {
 
                         let result = sqlx::query(
                             r#"
-                            INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status)
-                            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                            INSERT INTO outbox (event_id, tenant_id, domain, topic, contract_id, payload, metadata, status)
+                            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8)
                             ON CONFLICT (event_id) DO NOTHING
                             "#,
                         )
                         .bind(request.replay_id().as_str())
+                        .bind(request.tenant().to_string())
                         .bind(domain)
                         .bind(topic)
                         .bind(contract_id)
@@ -176,29 +175,33 @@ impl DlqStore for PgDlqStore {
         &self,
         request: DlqRedriveRequest,
     ) -> Result<DlqRedriveOutcome, DlqError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE outbox
-            SET status = $3,
-                retry_count = 0,
-                retry_after = NULL,
-                lease_token = NULL,
-                updated_at = now()
-            WHERE event_id = $1
-              AND status = $4
-              AND metadata ->> $5 = $2
-            "#,
-        )
-        .bind(request.event_id().as_str())
-        .bind(request.tenant().to_string())
-        .bind(STATUS_PENDING)
-        .bind(STATUS_DLX)
-        .bind(KEY_TENANT_ID)
-        .execute(&self.global_pool)
-        .await
-        .map_err(db_error("redrive.update_outbox"))?;
+        let event_id = request.event_id().as_str().to_string();
+        let tenant = request.tenant();
+        let result = self
+            .tenant_pool
+            .write(
+                tenant,
+                move |conn| {
+                    let event_id = event_id.clone();
+                    Box::pin(async move {
+                        let row: (i64,) = sqlx::query_as(
+                            r#"
+                            SELECT rss_outbox_redrive($1, $2::uuid)
+                            "#,
+                        )
+                        .bind(&event_id)
+                        .bind(tenant.to_string())
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(db_error("redrive.update_outbox"))?;
+                        Ok(row.0)
+                    })
+                },
+                db_error("redrive.tx"),
+            )
+            .await?;
 
-        if result.rows_affected() == 1 {
+        if result == 1 {
             Ok(DlqRedriveOutcome::Redriven)
         } else {
             Ok(DlqRedriveOutcome::NotFound)
@@ -263,52 +266,69 @@ impl PgDlqStore {
             return Ok(Vec::new());
         }
 
-        let rows: Vec<OutboxRow> = sqlx::query_as(
-            r#"
-            SELECT o.event_id,
-                   o.domain,
-                   o.contract_id,
-                   o.topic,
-                   octet_length(o.payload)::bigint,
-                   o.retry_count,
-                   EXTRACT(EPOCH FROM o.updated_at)::bigint
-            FROM outbox o
-            WHERE o.status = $1
-            AND o.metadata ->> $2 = $3
-              AND ($4::text IS NULL OR o.domain = $4)
-              AND (
-                    $5::bigint IS NULL
-                 OR EXTRACT(EPOCH FROM o.updated_at)::bigint < $5
-                 OR (
-                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
-                    AND $6::text > $7
-                    )
-                 OR (
-                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
-                    AND $6::text = $7
-                    AND o.event_id > $8
-                    )
-              )
-            ORDER BY o.updated_at DESC, o.event_id ASC
-            LIMIT $9
-            "#,
-        )
-        .bind(STATUS_DLX)
-        .bind(KEY_TENANT_ID)
-        .bind(query.tenant().to_string())
-        .bind(query.domain())
-        .bind(query.cursor().map(|cursor| cursor.last_epoch_secs()))
-        .bind(DlqEntryKind::OutboxDlx.cursor_part())
-        .bind(
-            query
-                .cursor()
-                .map(|cursor| cursor.last_kind().cursor_part().to_string()),
-        )
-        .bind(query.cursor().map(|cursor| cursor.last_id().to_string()))
-        .bind(i64::from(query.fetch_limit()))
-        .fetch_all(&self.global_pool)
-        .await
-        .map_err(db_error("list.fetch_outbox_dlx"))?;
+        let tenant = query.tenant();
+        let domain = query.domain().map(ToString::to_string);
+        let cursor_epoch = query.cursor().map(|cursor| cursor.last_epoch_secs());
+        let cursor_kind = query
+            .cursor()
+            .map(|cursor| cursor.last_kind().cursor_part().to_string());
+        let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
+        let limit = i64::from(query.fetch_limit());
+        let rows: Vec<OutboxRow> = self
+            .tenant_pool
+            .read_map(
+                tenant,
+                move |conn| {
+                    let domain = domain.clone();
+                    let cursor_kind = cursor_kind.clone();
+                    let cursor_id = cursor_id.clone();
+                    Box::pin(async move {
+                        sqlx::query_as(
+                            r#"
+                            SELECT o.event_id,
+                                   o.domain,
+                                   o.contract_id,
+                                   o.topic,
+                                   octet_length(o.payload)::bigint,
+                                   o.retry_count,
+                                   EXTRACT(EPOCH FROM o.updated_at)::bigint
+                            FROM outbox o
+                            WHERE o.status = $1
+                              AND o.tenant_id = $2::uuid
+                              AND ($3::text IS NULL OR o.domain = $3)
+                              AND (
+                                    $4::bigint IS NULL
+                                 OR EXTRACT(EPOCH FROM o.updated_at)::bigint < $4
+                                 OR (
+                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $4
+                                    AND $5::text > $6
+                                    )
+                                 OR (
+                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $4
+                                    AND $5::text = $6
+                                    AND o.event_id > $7
+                                    )
+                              )
+                            ORDER BY o.updated_at DESC, o.event_id ASC
+                            LIMIT $8
+                            "#,
+                        )
+                        .bind(STATUS_DLX)
+                        .bind(tenant.to_string())
+                        .bind(domain)
+                        .bind(cursor_epoch)
+                        .bind(DlqEntryKind::OutboxDlx.cursor_part())
+                        .bind(cursor_kind)
+                        .bind(cursor_id)
+                        .bind(limit)
+                        .fetch_all(&mut *conn)
+                        .await
+                        .map_err(db_error("list.fetch_outbox_dlx"))
+                    })
+                },
+                db_error("list.outbox_tx"),
+            )
+            .await?;
 
         rows.into_iter()
             .map(|row| row.into_summary(query.tenant()))

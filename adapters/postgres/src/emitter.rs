@@ -19,6 +19,7 @@ use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use sqlx::PgPool;
 
 use crate::PgStore;
+use crate::cotx::set_local_tenant;
 use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
 
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
@@ -83,6 +84,19 @@ async fn emit_in_tx(
     entry: &Entry,
     env: &OutboxEnvelope,
 ) -> Result<(), OutboxEmitError> {
+    if let Err(e) = set_local_tenant(&mut tx, env.tenant()).await {
+        tracing::warn!(
+            target: "postgres",
+            event_id = entry.idem_key().as_str(),
+            domain = env.domain(),
+            topic = entry.topic().as_str(),
+            error = %secure::redact_error(&e),
+            "outbox emit: set tenant failed"
+        );
+        rollback_warn(tx).await;
+        return Err(OutboxEmitError::new(e));
+    }
+
     if let Err(e) = append_outbox(&mut tx, entry, env).await {
         tracing::warn!(
             target: "postgres",

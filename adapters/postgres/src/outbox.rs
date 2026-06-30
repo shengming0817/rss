@@ -30,7 +30,7 @@ use diport::{
     OutboxActor, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
 };
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, Row};
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
@@ -44,13 +44,21 @@ use crate::dead_letter_payload::{
 pub(crate) const MAX_PUBLISH_ATTEMPTS: i32 = 10;
 
 /// `publishing` 状态 lease 过期阈值（秒）；超过后 poll_pending 重新捞回（崩溃重投）。
+// reason(dead_code): 0031 SECURITY DEFINER SQL owns the runtime predicate; Rust constant remains the
+// migration/spec drift anchor exercised by outbox unit tests.
+#[allow(dead_code)]
 pub(crate) const LEASE_TTL_SECONDS: i64 = 60;
 
 /// outbox status 值集——**生产单源**（F8）。所有 SQL 谓词 / SET 一律 `.bind(STATUS_*)`，不再内联裸
 /// 字符串；与 migration `0002` 的 `CHECK (status IN (...))` 由 `status_consts_match_migration_check`
 /// 解析对齐守（两处漂移即单测红，Medium anti-vacuity），单测亦复用同一单源。
 pub(crate) const STATUS_PENDING: &str = "pending";
+// reason(dead_code): 0031 SECURITY DEFINER SQL owns relay state transitions; constants remain test
+// anchors for migration CHECK/status drift.
+#[allow(dead_code)]
 pub(crate) const STATUS_PUBLISHING: &str = "publishing";
+// reason(dead_code): see STATUS_PUBLISHING.
+#[allow(dead_code)]
 pub(crate) const STATUS_PUBLISHED: &str = "published";
 pub(crate) const STATUS_DLX: &str = "dlx";
 const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
@@ -73,7 +81,10 @@ const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
 /// envelope metadata 只能经此 funnel 构造（Hard：无 raw `Value` 入口，reserved/PII 不可表达）；
 /// reserved key 拒绝由 `metadata_try_insert_rejects_reserved_key` 负向单测守 anti-vacuity。
 #[derive(Clone)]
-pub(crate) struct OutboxMetadata(serde_json::Map<String, serde_json::Value>);
+pub(crate) struct OutboxMetadata {
+    tenant: vocab::TenantId,
+    map: serde_json::Map<String, serde_json::Value>,
+}
 
 impl OutboxMetadata {
     /// 由 reserved `occurred_at`（unix 秒 i64，producer 端事件发生时刻）+ typed `tenantId` 构造。
@@ -96,14 +107,19 @@ impl OutboxMetadata {
             KEY_TENANT_ID.to_string(),
             serde_json::Value::String(tenant.to_string()),
         );
-        Self(map)
+        Self { tenant, map }
+    }
+
+    /// 借出 envelope 所属 tenant；与 JSON metadata 中 `tenantId` 同源，避免生产路径运行期反解析。
+    pub(crate) fn tenant(&self) -> vocab::TenantId {
+        self.tenant
     }
 
     /// 设置 opaque 主体 id（唯一允许的 principal 形态——不容完整 Principal / PII）。
     /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts.subject_id` 组装（T008/#1100）。
     /// KEY_SUBJECT_ID = diport 单源（#1160 A4）。
     pub(crate) fn with_subject_id(mut self, subject_id: EnvelopeSubjectId) -> Self {
-        self.0.insert(
+        self.map.insert(
             KEY_SUBJECT_ID.to_string(),
             serde_json::Value::String(subject_id.as_str().to_string()),
         );
@@ -131,7 +147,7 @@ impl OutboxMetadata {
             "scope".to_string(),
             serde_json::Value::String(actor.scope().as_label().to_string()),
         );
-        self.0
+        self.map
             .insert(KEY_ACTOR.to_string(), serde_json::Value::Object(obj));
         self
     }
@@ -142,7 +158,7 @@ impl OutboxMetadata {
     /// 生产 caller：[`metadata_with_ambient`]（从当前 tracing span 经 `tracewire::capture` 取 W3C traceparent，
     /// fail-open；#1224 接线，关闭 #1076 预留槽）。
     pub(crate) fn with_trace(mut self, trace: impl Into<String>) -> Self {
-        self.0.insert(
+        self.map.insert(
             KEY_TRACE.to_string(),
             serde_json::Value::String(trace.into()),
         );
@@ -154,7 +170,7 @@ impl OutboxMetadata {
     /// 生产 caller：[`metadata_with_ambient`]（从 `diagctx` ambient 读回 correlation，fail-open）。
     /// KEY_CORRELATION = diport 单源（#1160 A4）。
     pub(crate) fn with_correlation(mut self, correlation: impl Into<String>) -> Self {
-        self.0.insert(
+        self.map.insert(
             KEY_CORRELATION.to_string(),
             serde_json::Value::String(correlation.into()),
         );
@@ -174,13 +190,13 @@ impl OutboxMetadata {
         if RESERVED_METADATA_KEYS.contains(&key.as_str()) {
             return Err(MetadataError::ReservedKey);
         }
-        self.0.insert(key, value);
+        self.map.insert(key, value);
         Ok(())
     }
 
     /// 序列化为 JSON object 字符串（绑 `$N::jsonb` 用）。
     fn to_json_string(&self) -> String {
-        serde_json::to_string(&self.0).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&self.map).unwrap_or_else(|_| "{}".to_string())
         // reason: Map<String, Value> 序列化理论上不失败（已验证 JSON 树）；
         // 即便极端情况失败，退化到空对象比 panic 更安全（不阻写路径）。
     }
@@ -251,6 +267,7 @@ pub(crate) fn epoch_secs_to_time(secs: i64) -> SystemTime {
 pub(crate) struct OutboxEnvelope {
     domain: String,
     contract_id: String,
+    tenant: vocab::TenantId,
     metadata: OutboxMetadata,
     partition_key: Option<String>,
 }
@@ -259,9 +276,11 @@ impl OutboxEnvelope {
     /// 构造 envelope（funnel；字段私有，仅经此入口）。
     /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts` 组装（T008/#1100）。
     pub(crate) fn new(domain: String, contract_id: String, metadata: OutboxMetadata) -> Self {
+        let tenant = metadata.tenant();
         Self {
             domain,
             contract_id,
+            tenant,
             metadata,
             partition_key: None,
         }
@@ -281,6 +300,11 @@ impl OutboxEnvelope {
     /// 借出 contract_id。
     pub(crate) fn contract_id(&self) -> &str {
         &self.contract_id
+    }
+
+    /// 借出 tenant_id；outbox 表列、RLS 与 metadata `tenantId` 共享此类型层来源。
+    pub(crate) fn tenant(&self) -> vocab::TenantId {
+        self.tenant
     }
 
     /// 借出可选分区键（`None` → DB NULL，无序并行；`Some(&str)` → 串行有序）。
@@ -318,12 +342,13 @@ pub(crate) async fn append_outbox(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status, partition_key)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+        INSERT INTO outbox (event_id, tenant_id, domain, topic, contract_id, payload, metadata, status, partition_key)
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8, $9)
         ON CONFLICT (event_id) DO NOTHING
         "#,
     )
     .bind(entry.idem_key().as_str())
+    .bind(env.tenant().to_string())
     .bind(env.domain())
     .bind(entry.topic().as_str())
     .bind(env.contract_id())
@@ -400,13 +425,14 @@ impl PgOutboxMaintenance {
 impl OutboxSource for PgOutbox {
     /// 扫描 `domain` 下至多 `limit` 条待发 entry（pending 且到期，或 lease 过期 stale publishing）。
     ///
-    /// **Head-of-partition gating（#1211）**：对 `partition_key IS NOT NULL` 的行，仅当同 (domain, partition_key)
-    /// 内所有 `seq < o.seq` 的行均已 `published` 时才放行，保证同 partition 内按 seq 顺序串行投递。
+    /// **Head-of-partition gating（#1211/#1581）**：对 `partition_key IS NOT NULL` 的行，仅当同
+    /// `(tenant_id, domain, partition_key)` 内所有 `seq < o.seq` 的行均已 `published` 时才放行，
+    /// 保证同 tenant partition 内按 seq 顺序串行投递。
     /// `partition_key IS NULL` 的行保持原语义——无序并行，不受 gate 约束。
     ///
     /// - **dlx fail-closed 语义**：队头进 dlx（`b.status <> 'published'`，dlx 计「未结清」）会**阻塞**该
-    ///   partition 直到运维 re-drive（`UPDATE outbox SET status='pending', retry_count=0, retry_after=NULL
-    ///   WHERE event_id=…`）——这是与「serial in order」一致的唯一选择。
+    ///   partition 直到运维经 `DlqStore::redrive_outbox` / `rss_outbox_redrive(text, uuid)` re-drive
+    ///   ——这是与「serial in order」一致的唯一选择。
     /// - **已知前提**：`b.seq < o.seq` 队头判据假设同 partition 行按 seq 序提交，成立条件是同 partition 写入由
     ///   聚合根并发控制（行锁/version CAS）串行化（partition = aggregate 标准契约）。
     /// - **backlog 注意**：head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog
@@ -419,32 +445,12 @@ impl OutboxSource for PgOutbox {
     async fn poll_pending(&self, domain: &str, limit: usize) -> Result<Vec<Entry>, EngineError> {
         let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
             r#"
-            SELECT o.topic, o.event_id, o.payload
-            FROM outbox o
-            WHERE o.domain = $1
-              AND (
-                    (o.status = $4 AND (o.retry_after IS NULL OR o.retry_after <= now()))
-                 OR (o.status = $5 AND o.updated_at <= now() - make_interval(secs => $2))
-              )
-              AND (o.partition_key IS NULL
-                OR NOT EXISTS (
-                    SELECT 1 FROM outbox b
-                    WHERE b.domain = o.domain
-                      AND b.partition_key = o.partition_key
-                      AND b.seq < o.seq
-                      AND b.status <> $6
-                ))
-            ORDER BY o.seq
-            LIMIT $3
-            FOR UPDATE OF o SKIP LOCKED
+            SELECT topic, event_id, payload
+            FROM rss_outbox_poll_pending($1, $2)
             "#,
         )
         .bind(domain)
-        .bind(LEASE_TTL_SECONDS)
         .bind(limit as i64)
-        .bind(STATUS_PENDING)
-        .bind(STATUS_PUBLISHING)
-        .bind(STATUS_PUBLISHED)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| {
@@ -482,14 +488,26 @@ impl OutboxRelay for PgOutbox {
         // 1. CAS acquire：把 pending（或 stale publishing）行翻转到 publishing，返 (retry_count, lease_token)。
         let maybe_lease = acquire_lease(&self.pool, event_id).await?;
 
-        let (retry_count, lease_token, metadata_json, domain, contract_id, topic, now_epoch) =
-            match maybe_lease {
-                // 0 行：已被他人发或已 published → 幂等 Ack，禁二次 publish。
-                None => return Ok(consistency::Disposition::Ack),
-                Some(lease) => lease,
-            };
+        let (
+            retry_count,
+            lease_token,
+            tenant_id,
+            metadata_json,
+            domain,
+            contract_id,
+            topic,
+            now_epoch,
+        ) = match maybe_lease {
+            // 0 行：已被他人发或已 published → 幂等 Ack，禁二次 publish。
+            None => return Ok(consistency::Disposition::Ack),
+            Some(lease) => lease,
+        };
+        let tenant = parse_tenant_id(&tenant_id)?;
+        let mut metadata = hydrate_envelope_metadata(&metadata_json);
+        metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
         let metadata = self.sign_metadata(
-            hydrate_envelope_metadata(&metadata_json),
+            metadata,
+            tenant,
             &domain,
             &contract_id,
             &topic,
@@ -544,15 +562,13 @@ impl PgOutbox {
     fn sign_metadata(
         &self,
         mut metadata: EnvelopeMetadata,
+        tenant: vocab::TenantId,
         domain: &str,
         contract_id: &str,
         topic: &str,
         event_id: &str,
         now_epoch: i64,
     ) -> Result<EnvelopeMetadata, EngineError> {
-        let tenant = metadata
-            .tenant_id()
-            .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
         let token = self
             .tenant_authority
             .sign_at(
@@ -652,8 +668,8 @@ fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &Publi
 ///
 /// **排障路径**：relay 侧 Entry 不携 partition_key；dlx 冻结某 partition 时，运维可经
 /// `SELECT partition_key, domain FROM outbox WHERE event_id = $event_id` 定位被冻结的 partition，
-/// 再经 re-drive（`UPDATE outbox SET status='pending', retry_count=0, retry_after=NULL WHERE event_id=…`）
-/// 解冻队头并放行后继。主动 partition 级监控信号（batch dlx gauge）见 issue **#1406**（不在本 PR）。
+/// 再经 `DlqStore::redrive_outbox`（底层固定函数 `rss_outbox_redrive(text, uuid)`）解冻队头并放行后继。
+/// 主动 partition 级监控信号（batch dlx gauge）见 issue **#1406**（不在本 PR）。
 fn log_dlx(event_id: &str, attempts: i32, permanent: bool) {
     tracing::error!(target: "postgres", event_id, attempts, permanent, "outbox: publish failed, moved to dlx");
 }
@@ -727,21 +743,22 @@ async fn sweep_published_outbox(
         i64::try_from(retain_seconds).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
     let result = sqlx::query(
         r#"
-        DELETE FROM outbox
-        WHERE status = $2
-          AND created_at <= now() - make_interval(secs => $1)
+        SELECT rss_sweep_outbox_published($1) AS deleted_rows
         "#,
     )
     .bind(secs)
-    .bind(STATUS_PUBLISHED)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| {
         tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "outbox: sweep db error");
         EngineError::new(EngineErrorKind::Transient)
     })?;
 
-    Ok(result.rows_affected())
+    let deleted_rows: i64 = result.try_get("deleted_rows").map_err(|e| {
+        tracing::warn!(target: "postgres", error = %secure::redact_error(&e), "outbox: sweep result decode error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+    u64::try_from(deleted_rows).map_err(|_| EngineError::new(EngineErrorKind::Invariant))
 }
 
 async fn sample_outbox_backlog(
@@ -750,20 +767,11 @@ async fn sample_outbox_backlog(
 ) -> Result<BacklogSample, EngineError> {
     let row: (i64, i64) = sqlx::query_as(
         r#"
-        SELECT count(*)                                                         AS depth,
-               COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at)))::bigint, 0) AS oldest_age_seconds
-        FROM outbox
-        WHERE domain = $1
-          AND (
-                (status = $2 AND (retry_after IS NULL OR retry_after <= now()))
-             OR (status = $3 AND updated_at <= now() - make_interval(secs => $4))
-          )
+        SELECT depth, oldest_age_seconds
+        FROM rss_outbox_sample_backlog($1)
         "#,
     )
     .bind(domain)
-    .bind(STATUS_PENDING)
-    .bind(STATUS_PUBLISHING)
-    .bind(LEASE_TTL_SECONDS)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -797,27 +805,14 @@ async fn sample_outbox_backlog(
 pub(crate) async fn acquire_lease(
     pool: &sqlx::PgPool,
     event_id: &str,
-) -> Result<Option<(i32, String, String, String, String, String, i64)>, EngineError> {
-    let row: Option<(i32, String, String, String, String, String, i64)> = sqlx::query_as(
+) -> Result<Option<(i32, String, String, String, String, String, String, i64)>, EngineError> {
+    let row: Option<(i32, String, String, String, String, String, String, i64)> = sqlx::query_as(
         r#"
-        UPDATE outbox
-        SET status = $3,
-            lease_token = gen_random_uuid(),
-            updated_at = now()
-        WHERE event_id = $1
-          AND (
-                status = $4
-             OR (status = $5 AND updated_at <= now() - make_interval(secs => $2))
-          )
-        RETURNING retry_count, lease_token::text, metadata::text, domain, contract_id, topic,
-                  EXTRACT(EPOCH FROM now())::bigint
+        SELECT retry_count, lease_token, tenant_id, metadata, domain, contract_id, topic, now_epoch
+        FROM rss_outbox_acquire_lease($1)
         "#,
     )
     .bind(event_id)
-    .bind(LEASE_TTL_SECONDS)
-    .bind(STATUS_PUBLISHING)
-    .bind(STATUS_PENDING)
-    .bind(STATUS_PUBLISHING)
     .fetch_optional(pool)
     .await
     .map_err(|e| {
@@ -855,27 +850,21 @@ pub(crate) async fn settle_published(
     event_id: &str,
     lease_token: &str,
 ) -> Result<SettleOutcome, EngineError> {
-    let result = sqlx::query(
+    let row: (i64,) = sqlx::query_as(
         r#"
-        UPDATE outbox
-        SET status = $3,
-            updated_at = now()
-        WHERE event_id = $1
-          AND status = $4
-          AND lease_token = $2::uuid
+        SELECT rss_outbox_settle_published($1, $2::uuid)
         "#,
     )
     .bind(event_id)
     .bind(lease_token)
-    .bind(STATUS_PUBLISHED)
-    .bind(STATUS_PUBLISHING)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| {
         tracing::warn!(target: "postgres", event_id, operation = "settle_published", error = %secure::redact_error(&e), "outbox: settle_published db error");
         EngineError::new(EngineErrorKind::Transient)
     })?;
-    Ok(settle_outcome(result.rows_affected()))
+    let rows = u64::try_from(row.0).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    Ok(settle_outcome(rows))
 }
 
 /// 预算耗尽后把行置 dlx（以 `lease_token` 比对，防 stale 持租者把已被新租约结算的行误标 dlx）。
@@ -891,23 +880,15 @@ async fn settle_dlx(
         EngineError::new(EngineErrorKind::Transient)
     })?;
 
-    let row: Option<(String, String, String, Vec<u8>, String)> = sqlx::query_as(
+    let row: Option<(String, String, String, String, Vec<u8>, String)> = sqlx::query_as(
         r#"
-        UPDATE outbox
-        SET status = $4,
-            retry_count = $2,
-            updated_at = now()
-        WHERE event_id = $1
-          AND status = $5
-          AND lease_token = $3::uuid
-        RETURNING domain, contract_id, topic, payload, metadata::text
+        SELECT tenant_id, domain, contract_id, topic, payload, metadata
+        FROM rss_outbox_mark_dlx($1, $2, $3::uuid)
         "#,
     )
     .bind(event_id)
     .bind(new_retry_count)
     .bind(lease_token)
-    .bind(STATUS_DLX)
-    .bind(STATUS_PUBLISHING)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| {
@@ -915,7 +896,7 @@ async fn settle_dlx(
         EngineError::new(EngineErrorKind::Transient)
     })?;
 
-    let Some((domain, contract_id, topic, payload, metadata_json)) = row else {
+    let Some((tenant_id, domain, contract_id, topic, payload, metadata_json)) = row else {
         tx.rollback().await.map_err(|e| {
             tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx rollback db error");
             EngineError::new(EngineErrorKind::Transient)
@@ -923,10 +904,8 @@ async fn settle_dlx(
         return Ok(SettleOutcome::LostLease);
     };
 
-    let metadata = parse_metadata_json(&metadata_json)?;
-    let tenant = hydrate_envelope_metadata(&metadata_json)
-        .tenant_id()
-        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
+    let tenant = parse_tenant_id(&tenant_id)?;
+    let metadata = metadata_json_with_column_tenant(&metadata_json, tenant)?;
     set_local_tenant(&mut tx, tenant).await.map_err(|e| {
         tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx set tenant db error");
         EngineError::new(EngineErrorKind::Transient)
@@ -995,6 +974,25 @@ fn parse_metadata_json(json: &str) -> Result<serde_json::Value, EngineError> {
     }
 }
 
+fn parse_tenant_id(raw: &str) -> Result<vocab::TenantId, EngineError> {
+    vocab::TenantId::parse(raw).map_err(|_| EngineError::new(EngineErrorKind::Invariant))
+}
+
+fn metadata_json_with_column_tenant(
+    json: &str,
+    tenant: vocab::TenantId,
+) -> Result<serde_json::Value, EngineError> {
+    let mut metadata = parse_metadata_json(json)?;
+    let serde_json::Value::Object(ref mut map) = metadata else {
+        return Err(EngineError::new(EngineErrorKind::Invariant));
+    };
+    map.insert(
+        KEY_TENANT_ID.to_string(),
+        serde_json::Value::String(tenant.to_string()),
+    );
+    Ok(metadata)
+}
+
 /// 还有预算时把行退回 pending + 退避（以 `lease_token` 比对，防 stale 持租者结算；WHERE 先于 SET 求值）。
 async fn settle_retry(
     pool: &sqlx::PgPool,
@@ -1003,32 +1001,23 @@ async fn settle_retry(
     backoff_secs: i64,
     lease_token: &str,
 ) -> Result<SettleOutcome, EngineError> {
-    let result = sqlx::query(
+    let row: (i64,) = sqlx::query_as(
         r#"
-        UPDATE outbox
-        SET status = $5,
-            retry_count = $2,
-            retry_after = now() + make_interval(secs => $3),
-            lease_token = NULL,
-            updated_at = now()
-        WHERE event_id = $1
-          AND status = $6
-          AND lease_token = $4::uuid
+        SELECT rss_outbox_settle_retry($1, $2, $3, $4::uuid)
         "#,
     )
     .bind(event_id)
     .bind(new_retry_count)
     .bind(backoff_secs)
     .bind(lease_token)
-    .bind(STATUS_PENDING)
-    .bind(STATUS_PUBLISHING)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| {
         tracing::warn!(target: "postgres", event_id, operation = "settle_retry", error = %secure::redact_error(&e), "outbox: settle_retry db error");
         EngineError::new(EngineErrorKind::Transient)
     })?;
-    Ok(settle_outcome(result.rows_affected()))
+    let rows = u64::try_from(row.0).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    Ok(settle_outcome(rows))
 }
 
 // ── 纯函数（单测覆盖）────────────────────────────────────────────────────────
@@ -1365,14 +1354,66 @@ mod tests {
     }
 
     #[test]
-    fn runtime_serving_migration_grants_current_outbox_runtime_dml_to_rss_app() {
-        const MIGRATION: &str = include_str!("../migrations/0030_grant_runtime_serving.sql");
+    fn outbox_definer_migration_matches_status_and_lease_consts() {
+        const MIGRATION: &str = include_str!("../migrations/0031_harden_outbox_tenant_scope.sql");
+        let ttl = format!("make_interval(secs => {LEASE_TTL_SECONDS})");
+        assert_eq!(
+            MIGRATION.matches(&ttl).count(),
+            3,
+            "0031 definer SQL must use the Rust lease TTL constant everywhere"
+        );
+        for status in [
+            STATUS_PENDING,
+            STATUS_PUBLISHING,
+            STATUS_PUBLISHED,
+            STATUS_DLX,
+        ] {
+            assert!(
+                MIGRATION.contains(&format!("'{status}'")),
+                "0031 definer SQL must reference status literal {status}"
+            );
+        }
+        for needle in [
+            "RETURNS TABLE(\n    retry_count int,\n    lease_token text,\n    tenant_id text",
+            "RETURNS TABLE(tenant_id text, domain text",
+            "CREATE OR REPLACE FUNCTION rss_outbox_redrive(p_event_id text, p_tenant_id uuid)",
+            "rss_outbox_poll_pending poll limit must be in range [1, 10000]",
+            "RAISE EXCEPTION 'rss_sweep_outbox_published retain seconds must be non-negative'",
+            "outbox_metadata_tenant_matches",
+        ] {
+            assert!(MIGRATION.contains(needle), "0031 drift: missing {needle}");
+        }
+    }
+
+    #[test]
+    fn runtime_serving_migration_hardens_current_outbox_runtime_dml_to_functions() {
+        const LEGACY_GRANTS: &str = include_str!("../migrations/0030_grant_runtime_serving.sql");
+        const HARDENING: &str = include_str!("../migrations/0031_harden_outbox_tenant_scope.sql");
         assert!(
-            MIGRATION.contains("GRANT SELECT, INSERT, UPDATE, DELETE ON outbox TO rss_app"),
-            "current runtime uses rss_app PgStore for outbox write, relay, sampler, and sweeper until dedicated outbox roles land"
+            LEGACY_GRANTS.contains("GRANT SELECT, INSERT, UPDATE, DELETE ON outbox TO rss_app"),
+            "anti-vacuity: 0030 used to grant broad outbox DML"
         );
         assert!(
-            MIGRATION.contains("ON inbox_dedup TO rss_app"),
+            HARDENING.contains("REVOKE UPDATE, DELETE ON outbox FROM rss_app")
+                && HARDENING.contains("GRANT SELECT, INSERT ON outbox TO rss_app"),
+            "0031 must narrow rss_app outbox table privileges"
+        );
+        for signature in [
+            "rss_outbox_acquire_lease(text)",
+            "rss_outbox_settle_published(text, uuid)",
+            "rss_outbox_settle_retry(text, int, bigint, uuid)",
+            "rss_outbox_mark_dlx(text, int, uuid)",
+            "rss_outbox_redrive(text, uuid)",
+            "rss_sweep_outbox_published(bigint)",
+            "rss_outbox_sample_backlog(text)",
+        ] {
+            assert!(
+                HARDENING.contains(&format!("GRANT EXECUTE ON FUNCTION {signature} TO rss_app")),
+                "0031 must expose fixed function {signature} to rss_app"
+            );
+        }
+        assert!(
+            LEGACY_GRANTS.contains("ON inbox_dedup TO rss_app"),
             "anti-vacuity: runtime serving migration should still contain serving grants"
         );
     }

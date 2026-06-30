@@ -187,21 +187,21 @@ fn is_canonical_dotted(s: &str) -> bool {
 
 /// 有序投递分区键 newtype（私有字段，构造经 fallible funnel）。
 ///
-/// outbox 投递顺序保证的分区维度：设置时同 `(domain, partition_key)` 串行有序投递（head-of-partition
-/// gating，SQL 侧 `poll_pending` 收口——每 partition 仅放行 min(seq) 未投队头）；不设置（write 路径 `None`
-/// ⇒ DB NULL）= 无序要求，并行投递（行为同分区前）。等价 Debezium outbox 的 `aggregateid` / projection_events
-/// 的 `aggregate_id`——是**不透明聚合根路由键**，非 dotted topic，故只拒空（fail-closed），不施 dotted 文法。
+/// outbox 投递顺序保证的分区维度：设置时同 `(tenant_id, domain, partition_key)` 串行有序投递
+///（head-of-partition gating，SQL 侧 `poll_pending` 收口——每 tenant partition 仅放行 min(seq)
+/// 未投队头）；不设置（write 路径 `None` ⇒ DB NULL）= 无序要求，并行投递（行为同分区前）。等价
+/// Debezium outbox 的 `aggregateid` / projection_events 的 `aggregate_id`——是**不透明聚合根路由键**，
+/// 非 dotted topic，故只拒空（fail-closed），不施 dotted 文法。
 ///
-/// **⚠ 安全约束：partition_key 必须自带 tenant scope**（含 tenantId 前缀，或全局唯一的标识如
-/// sessionId）。若裸用无 tenant scope 的 key，相同 `(domain, partition_key)` 可被不同租户写入 —— 导致
-/// 租户 A 的 dlx 队头阻塞租户 B 的后继行 = **跨租户 liveness DoS**。架构强制（outbox 加 tenant_id 列
-/// + RLS 隔离）见 issue **#1405**；在 #1405 落地前，producer 侧须手动保证 tenant 可区分。
+/// tenant scope 由 outbox write 路径的 typed tenant 输入落入 `tenant_id` 列承载；相同 business key
+/// 在不同 tenant 下不共享 head-of-partition gate，因此 producer 不需要把 tenant id 再拼入
+/// `partition_key`。
 ///
 /// 携带在 **write 路径**（`diport::OutboxEnvelopeParts` → adapter `OutboxEnvelope` → INSERT），**不**进
 /// [`Entry`]（与 `domain` 同——分区键是投递路由属性，relay 读侧无需透传：顺序由 SQL gating 承载）。
 ///
-/// **PII / 凭据边界**：推荐的 tenant-scoped key（如 `<tenantId>:<sessionId>`）可能含**凭据级** bearer
-/// 标识（sessionId 即 bearer token），故 `PartitionKey` 的 `Debug` **脱敏为 `<redacted>`**（同
+/// **PII / 凭据边界**：业务选择的 partition key（如 sessionId）可能含**凭据级** bearer 标识
+///（sessionId 即 bearer token），故 `PartitionKey` 的 `Debug` **脱敏为 `<redacted>`**（同
 /// `identity::SessionId` 范式），不以明文经 `{:?}` 泄漏至日志 / 断言（F3，#1211 review）。定位 stalled
 /// partition 经受控 DB 查询（`SELECT partition_key FROM outbox WHERE event_id=…`），非日志明文。
 ///
@@ -350,8 +350,9 @@ pub trait OutboxSource {
     /// 扫描某 `domain` 至多 `limit` 条待发 entry（pending 且 `retry_after` 到期，或 lease 过期的 in-flight
     /// 可回收行）。返回已重建的引擎 [`Entry`]；空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
     ///
-    /// 若 adapter 走分区串行投递，须在此实现 head-of-partition gating：同 `(domain, partition_key)` 仅放行
-    /// min(seq) 的队头行，确保同 partition 内严格按 seq 顺序投递。参见
+    /// 若 adapter 走分区串行投递，须在此实现 head-of-partition gating：同
+    /// `(tenant_id, domain, partition_key)` 仅放行 min(seq) 的队头行，确保同 tenant partition 内严格按
+    /// seq 顺序投递。参见
     /// `INVARIANT: OUTBOX-PARTITION-ORDER-01` { level = "Medium", exec = "manual/opt-in", source = "code" }（定义在 adapter impl，`adapters/postgres/src/outbox.rs`
     /// `OutboxSource for PgOutbox`）。
     async fn poll_pending(

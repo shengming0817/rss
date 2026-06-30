@@ -30,14 +30,14 @@ Platform runtime can run tenant-scoped HTTP/service/repo paths on a non-bypass P
 
 Outbox and event routing cannot create cross-tenant liveness coupling or unscoped payload access.
 
-**Why this priority**: Current global tables do not have `tenant_id`; partition ordering can couple tenants if keys are not tenant-scoped.
+**Why this priority**: Outbox ordering must not depend on caller discipline around key uniqueness; tenant scope belongs in the persisted boundary that enforces partition gating.
 
 **Independent Test**: Two tenants using the same aggregate key cannot block each other in outbox partition ordering; all tenant-scoped emit paths either persist tenant scope or use a typed tenant-aware partition key.
 
 **Acceptance Scenarios**:
 
 1. **Given** tenant A and tenant B events with the same business key, **When** tenant A's event is dead-lettered, **Then** tenant B's later events are not blocked by the same `(domain, partition_key)`.
-2. **Given** an emitter call site, **When** it requests ordered delivery, **Then** it must construct a tenant-aware key or explicitly prove the key is globally unique.
+2. **Given** an emitter call site, **When** it requests ordered delivery, **Then** the outbox row persists the typed tenant scope and gates ordering by tenant as well as domain and partition key.
 
 ---
 
@@ -118,7 +118,7 @@ The feature is complete only when documentation, ADR links, xtask/governance che
 - **FR-003**: Durable startup MUST fail when tenant tables lack FORCE RLS, tenant isolation policy, GUC round-trip, or non-bypass serving role.
 - **FR-004**: Production Postgres serving paths MUST use non-superuser/NOBYPASSRLS role wiring.
 - **FR-005**: Direct raw pool/connection bypass of tenant-scoped transaction helpers MUST be caught by governance or startup fail-fast.
-- **FR-006**: Outbox ordered delivery MUST carry tenant scope or a proof of global uniqueness.
+- **FR-006**: Outbox ordered delivery MUST persist tenant scope and gate ordered partitions by `(tenant_id, domain, partition_key)`.
 - **FR-007**: `RowVisibility` MUST be sealed and prevent ordinary construction of cross-tenant all-scope.
 - **FR-008**: Cross-tenant super-admin visibility MUST be issued only after durable audit append succeeds.
 - **FR-009**: Route authorization MUST be contract-derived and must reject missing AuthZ mode for active generated routes.
@@ -132,7 +132,7 @@ The feature is complete only when documentation, ADR links, xtask/governance che
 - **RequestCtx**: Sealed runtime authorization context carrying tenant and principal facets.
 - **RowVisibility**: Sealed row-level data visibility obligation.
 - **CrossTenantVisibility**: Audited capability for super-admin cross-tenant reads.
-- **PartitionKey**: Outbox ordering key that must be tenant-scoped or globally unique.
+- **PartitionKey**: Outbox ordering key scoped by persisted outbox `tenant_id`; the key may remain a business aggregate key without cross-tenant liveness coupling.
 - **Permission / Policy / Decision**: ABAC route authorization inputs and outcomes.
 - **ResourceProjection / FieldMask**: Column-level projection and masking boundary.
 

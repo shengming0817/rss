@@ -241,18 +241,15 @@ impl OutboxEnvelopeParts {
 
     /// 设置有序投递分区键（builder，#1211）。
     ///
-    /// 设置后同 `(domain, partition_key)` 的 outbox 行严格按 `seq` 顺序投递（head-of-partition gating）；
+    /// 设置后同 `(tenant_id, domain, partition_key)` 的 outbox 行严格按 `seq` 顺序投递（head-of-partition gating）；
     /// 未设（`None`）时与现有行为完全兼容——无序并行投递。
     ///
-    /// **⚠ 必须 tenant-scoped**：`partition_key` **必须自带 tenant scope**（含 tenantId 或全局唯一如
-    /// sessionId）——outbox 表无 `tenant_id` 列、gating 仅按 `(domain, partition_key)`，无 tenant scope 的
-    /// 裸 aggregate id 跨租户碰撞会让租户 A 的队头阻塞租户 B（liveness DoS）。推荐 `<tenantId>:<aggregateId>`
-    /// 或显式全局唯一 key。类型层强制（`for_tenant`）/ outbox `tenant_id` 列见 issue #1405；语义见
-    /// `docs/rules/tenancy.md` + `eventbus.md §投递顺序保证`。
+    /// `partition_key` 是不透明聚合根路由键；tenant scope 由必填的 [`vocab::TenantId`] 落入 outbox
+    /// `tenant_id` 列承载，跨租同 business key 不共享 gate。推荐直接使用稳定 aggregate id；
+    /// 语义见 `docs/rules/tenancy.md` + `eventbus.md §投递顺序保证`。
     ///
     /// **⚠ DLX 警示**：队头行一旦进入 DLX（永久错误或重试预算耗尽），会**阻塞该
-    /// `(domain, partition_key)` 的所有后继行**，直到运维 re-drive（`UPDATE outbox SET
-    /// status='pending', retry_count=0, retry_after=NULL WHERE event_id=…`）解冻队头。
+    /// `(tenant_id, domain, partition_key)` 的所有后继行**，直到运维经 DLQ redrive 解冻队头。
     #[must_use]
     pub fn with_partition_key(mut self, key: consistency::PartitionKey) -> Self {
         self.partition_key = Some(key);

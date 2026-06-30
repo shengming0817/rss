@@ -54,11 +54,11 @@
 
 **Independent Test**: Tenant A dead-lettered ordered event does not block tenant B ordered event with same business key.
 
-- [ ] T014 [P] [US2] Add failing cross-tenant partition blocking test in adapters/postgres/src/integration_tests.rs
-- [ ] T015 [US2] Add tenant-aware PartitionKey constructor or tenant_id outbox storage in crates/consistency and adapters/postgres, including Debug/log redaction tests for tenant-aware PartitionKey and OutboxEnvelopeParts
-- [ ] T016 [US2] Update diport::OutboxEnvelopeParts to require tenant-aware ordered delivery inputs in crates/diport/src/outbox_emitter.rs
-- [ ] T017 [US2] Add codegen/doc-contract drift checks for tenant-aware outbox signatures in xtask
-- [ ] T018 [US2] Update docs/rules/eventbus.md and docs/rules/tenancy.md with final outbox tenant-scope invariant
+- [x] T014 [P] [US2] Add failing cross-tenant partition blocking test in adapters/postgres/src/integration_tests.rs
+- [x] T015 [US2] Add tenant_id outbox storage + RLS in adapters/postgres, including fail-closed migration and rss_app direct-DML denial tests
+- [x] T016 [US2] Keep diport::OutboxEnvelopeParts tenant as the ordered-delivery input and persist it to outbox.tenant_id; tenant-aware PartitionKey constructor not needed for the chosen storage boundary
+- [x] T017 [US2] Add doc-contract drift checks for tenant-aware outbox documentation in xtask
+- [x] T018 [US2] Update docs/rules/eventbus.md and docs/rules/tenancy.md with final outbox tenant-scope invariant
 
 ---
 

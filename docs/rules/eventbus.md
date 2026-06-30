@@ -140,14 +140,18 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
 
 - **`partition_key IS NULL`（默认）= 无序并行**：不同 entry 投递顺序无保证，跨 worker 并行。消费方须幂等、
   不依赖跨 entry 顺序（靠 inbox 去重 + 实体状态收敛）。emit 默认 `None`，行为同分区前。
-- **`partition_key` 设置 = 同 `(domain, partition_key)` 串行有序**：relay 经 `poll_pending` 的
+- **`partition_key` 设置 = 同 `(tenant_id, domain, partition_key)` 串行有序**：outbox 行持久化
+  `tenant_id` 并启用 RLS；relay 经 `poll_pending` 的
   **head-of-partition gating**——同 partition 仅放行 `min(seq)` 且尚未 `published` 的队头行（`NOT EXISTS`
   更早未结清 sibling），即使多 worker + `SKIP LOCKED` 也**永不乱序、至多一条 in-flight**。`partition_key` 是
   不透明聚合根路由键（= Debezium `aggregateid`），经 write 路径 `diport::OutboxEnvelopeParts::with_partition_key`
   → adapter 落库，不进 `consistency::Entry`（relay 读侧无需透传，顺序由 SQL gating 承载）。
+  tenant 是 outbox envelope 的必填 typed 输入，adapter 将其落为列；同一 business key 在不同 tenant 下不共享
+  head-of-partition gate。
 
 **dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽）会**阻塞**该 partition 直到运维 re-drive
-（`eventexec::DlqRedriveRequest` → `outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL`）
+（`eventexec::DlqRedriveRequest` → 当前 tenant scope 内
+`outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL`）
 ——这是与「串行有序」一致的唯一选择（放行后继破坏 in-order 不变式）。`outbox.status='dlx'` 仍是 relay
 状态与 partition ordering gate；统一 DLQ 审计行写入 `dead_letter(source_kind='outbox_relay')`，不搬迁/删除
 原 outbox 行。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+ backlog `oldest_age` 增长。

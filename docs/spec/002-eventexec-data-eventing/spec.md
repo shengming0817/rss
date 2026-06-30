@@ -255,7 +255,10 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 ## Assumptions
 
 - G0/#997 已冻结全部 trait/type 签名；本 feature 不改公共接缝，只填 body（破坏式 wire 变更走 pre-GA 窗口原地改 active 版本 + 扇出闭环，至 2026-12-31）。
-- **租户隔离立场**：当前 per-domain 队列/凭据隔离粒度为 domain，不分 tenant；outbox/inbox_dedup 去重以 `(event_id, consumer_group)` 为键，跨租户正确性依赖 EventId 全局唯一（UUID）+ 上层 RLS + envelope principal；**outbox/inbox 不引入 tenant_id 维度属本 feature 显式范围决策**，post-GA 如需 per-tenant 队列/索引隔离再单列 Epic 跟踪。
+- **租户隔离立场**：当前 per-domain 队列/凭据隔离粒度为 domain，不分 tenant；outbox 持久化 `tenant_id`
+  并按 `(tenant_id, domain, partition_key)` 执行有序投递 gate，避免跨租户 liveness coupling。inbox_dedup
+  去重仍以 `(event_id, consumer_group)` 为键，跨租户正确性依赖 EventId 全局唯一（UUID）+ tenantAuthority
+  envelope 验签 + 上层 RLS；如需 per-tenant broker 队列或 inbox 索引隔离再单列 Epic 跟踪。
 - `consistency` 引擎策略 trait 为 native AFIT + 泛型静态分发（不引 dynosaur/async-trait）；`diport` DI port 为 dynosaur dyn（ADR-003）。二者分工不变。
 - demo 拓扑（in-mem，adapters/memory）已实现并保留为单进程/测试/样例路径；durable 拓扑按机制组合 postgres/amqp/redis，其中 runtime event consumer 使用 postgres inbox + amqp，不再经 Redis claimer。
 - G1 追踪弹（identity→in-mem→audit）已绿，作为 #1100 durable 替换的起点与回归基线。

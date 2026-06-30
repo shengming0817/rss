@@ -656,6 +656,19 @@ fn make_test_env(domain: &str, contract_id: &str) -> OutboxEnvelope {
     )
 }
 
+/// 构造指定租户的测试 envelope，用于跨租 outbox partition/RLS 用例。
+fn make_test_env_for_tenant(
+    domain: &str,
+    contract_id: &str,
+    tenant: vocab::TenantId,
+) -> OutboxEnvelope {
+    OutboxEnvelope::new(
+        domain.to_string(),
+        contract_id.to_string(),
+        OutboxMetadata::new(0, tenant),
+    )
+}
+
 #[derive(Debug)]
 struct TestMac;
 
@@ -2414,6 +2427,73 @@ async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     Ok(())
 }
 
+/// dead_letter store enrollment：统一 tenant conformance 覆盖 round-trip / cross-tenant invisible / non-interference。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 fixture 构造已知合法 tenant；item-level carve-out。
+async fn dead_letter_tenant_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let dl = store.dead_letter(test_dlx_payload_protector());
+    let domain = unique_domain("dead-letter-conf");
+    let message_id = unique_event_id("dead-letter-conf-msg");
+    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+
+    testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let dl = &dl;
+            let domain = domain.clone();
+            let message_id = message_id.clone();
+            async move {
+                dl.write_dead_letter(DeadLetterRecord::new(
+                    tenant,
+                    &message_id,
+                    domain.as_str(),
+                    "contract-conf",
+                    "test.event",
+                    Some("tenant-conf-consumer".to_string()),
+                    b"payload".to_vec(),
+                    diport::DeadLetterSummary::new("tenant conformance"),
+                    1,
+                    diport::WritableDeadLetterSource::Consumer,
+                    EnvelopeMetadata::empty(),
+                ))
+                .await?;
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            }
+        },
+        |tenant| {
+            let pool = store.pool.clone();
+            let message_id = message_id.clone();
+            async move {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET LOCAL ROLE rss_app")
+                    .execute(&mut *tx)
+                    .await?;
+                crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+                let cnt: (i64,) =
+                    sqlx::query_as("SELECT count(*) FROM dead_letter WHERE message_id = $1")
+                        .bind(&message_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                tx.rollback().await?;
+                Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(cnt.0 > 0)
+            }
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: integration test fixtures use known-valid ids; assertions should fail loud.
@@ -2731,8 +2811,9 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
     };
 
-    let (_pg, store) = connect_pg().await?;
+    let (pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
     let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
     let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
     let domain = unique_domain("dlq-outbox");
@@ -2776,7 +2857,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(row.3, 1);
     assert_eq!(row.4["tenantId"], COTX_TENANT_A);
 
-    let dlq = store.dlq(test_dlx_payload_protector());
+    let dlq = app.dlq(test_dlx_payload_protector());
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let replay_id = IdemKey::parse(&unique_event_id("bad-replay")).unwrap();
     let replay = dlq
@@ -2842,6 +2923,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         "redriven outbox rows must disappear from current DLQ list"
     );
 
+    app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -2871,7 +2953,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 
     // A 取租约 → tokenA（行置 publishing）。
     let lease = crate::outbox::acquire_lease(&store.pool, &event_id).await?;
-    let (_rc, token_a, _metadata_json, _domain, _contract_id, _topic, _now_epoch) =
+    let (_rc, token_a, _tenant_id, _metadata_json, _domain, _contract_id, _topic, _now_epoch) =
         lease.ok_or("acquire_lease should return a lease for pending row")?;
 
     // 模拟 B 重新 acquire：覆盖 lease_token = tokenB，A 的 tokenA 变 stale。
@@ -3622,19 +3704,25 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
     // GENERATED ALWAYS 拒绝应用显式写入 seq。
     let fake_seq: i64 = 999_999_999;
     let forge_id = unique_event_id("t24-forge");
+    let forge_env = make_test_env(&domain, "c");
     let forge_result = sqlx::query(
-        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status, seq) \
-         VALUES ($1, $2, 'test.event', 'c', $3, '{}'::jsonb, 'pending', $4)",
+        "INSERT INTO outbox (event_id, tenant_id, domain, topic, contract_id, payload, metadata, status, seq) \
+         VALUES ($1, $2::uuid, $3, 'test.event', 'c', $4, $5::jsonb, 'pending', $6)",
     )
     .bind(&forge_id)
+    .bind(forge_env.tenant().to_string())
     .bind(&domain)
     .bind(b"p".as_slice())
+    .bind(forge_env.metadata_json())
     .bind(fake_seq)
     .execute(&store.pool)
     .await;
+    let forge_err = forge_result
+        .expect_err("t24: GENERATED ALWAYS 应拒绝应用写入 seq（反真空：伪造尝试必须失败）");
+    let rendered = forge_err.to_string();
     assert!(
-        forge_result.is_err(),
-        "t24: GENERATED ALWAYS 应拒绝应用写入 seq（反真空：伪造尝试必须失败）"
+        rendered.contains("non-DEFAULT value") || rendered.contains("GENERATED ALWAYS"),
+        "t24: 伪造 seq 必须由 GENERATED ALWAYS 拒绝，而不是被其它约束挡住: {rendered}"
     );
 
     store.shutdown().await?;
@@ -3929,6 +4017,261 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     assert!(
         unblocked.iter().any(|e| e.idem_key().as_str() == s2_id),
         "t27: H published 后 S2 应解除阻塞"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t27b：跨租户同 `(domain, partition_key)` 不互阻。
+///
+/// tenant A 队头进 dlx 后，只能阻塞 tenant A 同 partition 后继；tenant B 使用相同业务 key 的行仍可投递。
+/// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Hard", exec = "db", source = "migration" }
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
+async fn t27b_outbox_cross_tenant_partition_dlx_does_not_block() -> TestResult {
+    use consistency::PartitionKey;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t27b");
+    let key = PartitionKey::parse("shared-business-key").unwrap();
+    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+    let a_head = unique_event_id("t27b-a-head");
+    let a_tail = unique_event_id("t27b-a-tail");
+    let b_head = unique_event_id("t27b-b-head");
+
+    for (tenant, eid) in [
+        (tenant_a, &a_head),
+        (tenant_a, &a_tail),
+        (tenant_b, &b_head),
+    ] {
+        let entry = make_entry(eid);
+        let env = make_test_env_for_tenant(&domain, "c", tenant)
+            .with_partition_key_opt(Some(key.clone()));
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|c| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(c, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    sqlx::query("UPDATE outbox SET status = $1 WHERE event_id = $2")
+        .bind(STATUS_DLX)
+        .bind(&a_head)
+        .execute(&store.pool)
+        .await?;
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let polled = outbox.poll_pending(&domain, 10).await?;
+    let ids: Vec<&str> = polled
+        .iter()
+        .map(|entry| entry.idem_key().as_str())
+        .collect();
+    assert!(
+        ids.contains(&b_head.as_str()),
+        "tenant B same partition key must remain pollable; got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&a_tail.as_str()),
+        "tenant A tail must stay blocked by tenant A dlx head; got {ids:?}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0031：tenant_id backfill 必须 fail-closed 拒绝缺失 metadata.tenantId 的历史 outbox 行。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0031_rejects_outbox_rows_missing_tenant_metadata() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!("../migrations/0003_create_outbox.sql"))
+        .execute(&store.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0016_add_seq_and_partition_to_outbox.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status) \
+         VALUES ($1, 'identity', 'test.event', 'contract-1', $2, '{}'::jsonb, 'pending')",
+    )
+    .bind(unique_event_id("bad-outbox-tenant"))
+    .bind(b"payload".as_slice())
+    .execute(&store.pool)
+    .await?;
+
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0031_harden_outbox_tenant_scope.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let err = result.expect_err("0031 must reject outbox rows without metadata tenantId");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("outbox tenant_id backfill requires metadata.tenantId"),
+        "unexpected migration error: {rendered}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0031：tenant_id backfill 接受 typed TenantId 契约允许的 canonical UUIDv7。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0031_accepts_canonical_uuid_v7_tenant_metadata() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!("../migrations/0003_create_outbox.sql"))
+        .execute(&store.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0016_add_seq_and_partition_to_outbox.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
+                CREATE ROLE rss_app NOLOGIN NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        GRANT USAGE ON SCHEMA public TO rss_app;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let tenant_v7 = "01890f9d-7bb3-7cc0-98c4-dc0c0c07398f";
+    assert!(
+        vocab::TenantId::parse(tenant_v7).is_ok(),
+        "anti-vacuity: fixture must be a valid typed TenantId"
+    );
+    sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status) \
+         VALUES ($1, 'identity', 'test.event', 'contract-1', $2, $3::jsonb, 'pending')",
+    )
+    .bind(unique_event_id("uuid-v7-outbox-tenant"))
+    .bind(b"payload".as_slice())
+    .bind(serde_json::json!({ "tenantId": tenant_v7 }).to_string())
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0031_harden_outbox_tenant_scope.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    let row: (String,) =
+        sqlx::query_as("SELECT tenant_id::text FROM outbox WHERE metadata->>'tenantId' = $1")
+            .bind(tenant_v7)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(row.0, tenant_v7);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0031 权限面：rss_app 不能直接全域 UPDATE/DELETE outbox，只能 EXECUTE 固定 relay/maintenance 函数。
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let event_id = unique_event_id("outbox-rss-app-perm");
+    let entry = make_entry(&event_id);
+    let env = make_test_env("outbox-perm", "c");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|c| {
+            let entry = entry.clone();
+            Box::pin(async move {
+                append_outbox(c, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *tx)
+        .await?;
+    crate::cotx::set_local_tenant(&mut tx, test_tenant()).await?;
+    let direct_update = sqlx::query("UPDATE outbox SET status = 'published' WHERE event_id = $1")
+        .bind(&event_id)
+        .execute(&mut *tx)
+        .await;
+    assert!(
+        direct_update.is_err(),
+        "rss_app must not directly mutate outbox relay state"
+    );
+    tx.rollback().await?;
+
+    for (limit_sql, expected) in [
+        ("NULL::bigint", "poll limit must be non-null"),
+        ("0", "poll limit must be in range"),
+        ("10001", "poll limit must be in range"),
+    ] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        crate::cotx::set_local_tenant(&mut tx, test_tenant()).await?;
+        let result = sqlx::query(&format!(
+            "SELECT * FROM rss_outbox_poll_pending('outbox-perm', {limit_sql})"
+        ))
+        .execute(&mut *tx)
+        .await;
+        let err = result.expect_err("rss_app poll_pending must reject invalid limits");
+        assert!(
+            err.to_string().contains(expected),
+            "unexpected poll_pending limit error for {limit_sql}: {err}"
+        );
+        tx.rollback().await?;
+    }
+
+    let negative_sweep = sqlx::query("SELECT rss_sweep_outbox_published(-1)")
+        .execute(&store.pool)
+        .await;
+    let negative_sweep_err =
+        negative_sweep.expect_err("rss_sweep_outbox_published must reject negative retain seconds");
+    assert!(
+        negative_sweep_err
+            .to_string()
+            .contains("retain seconds must be non-negative"),
+        "unexpected negative sweep error: {negative_sweep_err}"
+    );
+
+    let can_execute: (bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_function_privilege('rss_app', 'rss_outbox_poll_pending(text, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_acquire_lease(text)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_redrive(text, uuid)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_sweep_outbox_published(bigint)', 'EXECUTE')
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        can_execute,
+        (true, true, true, true, true),
+        "rss_app should only receive the fixed outbox function surface"
     );
 
     store.shutdown().await?;
@@ -6569,6 +6912,41 @@ async fn role_repo_tenant_row_isolation() -> TestResult {
             .name(),
         "OnlyInA"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// role repo enrollment：统一 tenant conformance 覆盖 round-trip / cross-tenant invisible / non-interference。
+#[tokio::test(flavor = "multi_thread")]
+async fn role_repo_tenant_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgRoleRepo::new(&store);
+    let tenant_a = role_tenant(ROLE_TENANT_A)?;
+    let tenant_b = role_tenant(ROLE_TENANT_B)?;
+    let role_id = Role::hydrate("tenant-conf-role", "seed", &[])?.id().clone();
+
+    testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let repo = &repo;
+            async move {
+                repo.save(
+                    tenant,
+                    Role::hydrate("tenant-conf-role", "TenantConf", &["conf:read".to_string()])?,
+                )
+                .await
+            }
+        },
+        |tenant| {
+            let repo = &repo;
+            let role_id = role_id.clone();
+            async move { repo.find(tenant, role_id).await.map(|role| role.is_some()) }
+        },
+    )
+    .await?;
 
     store.shutdown().await?;
     Ok(())
@@ -9708,6 +10086,39 @@ async fn ta4_audit_tenant_isolation_independent_genesis() -> TestResult {
     assert_eq!(b.entries.len(), 1, "TA4: tenant_b 应有 1 条");
     assert_eq!(a.entries[0].seq(), 0, "TA4: tenant_a genesis seq=0");
     assert_eq!(b.entries[0].seq(), 0, "TA4: tenant_b 独立 genesis seq=0");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA4b：`PgAuditRepo` 接入统一 tenant conformance。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta4b_audit_tenant_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let repo = &repo;
+            async move { repo.append(make_audit_record(tenant, 0)).await }
+        },
+        |tenant| {
+            let repo = &repo;
+            async move {
+                repo.list(tenant, audit_page(500, None))
+                    .await
+                    .map(|page| !page.entries.is_empty())
+            }
+        },
+    )
+    .await?;
 
     store.shutdown().await?;
     Ok(())

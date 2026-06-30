@@ -48,6 +48,10 @@ pub(crate) fn commit_unknown(source: sqlx::Error) -> sqlx::Error {
     sqlx::Error::AnyDriverError(Box::new(PgTxCommitError::new(source)))
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("outbox envelope tenant does not match tenant-scoped transaction")]
+struct OutboxTenantMismatch;
+
 /// tenant-scoped Postgres pool wrapper.
 ///
 /// This is the typed production entry for RLS tenant-table access. It is cloneable for repo
@@ -445,6 +449,11 @@ where
     set_local_tenant(tx, tenant)
         .await
         .map_err(CoTxWriteError::TenantScope)?;
+    if env.tenant() != tenant {
+        return Err(CoTxWriteError::TenantMismatch(sqlx::Error::AnyDriverError(
+            Box::new(OutboxTenantMismatch),
+        )));
+    }
     if bound_lock_wait {
         set_local_retry_lock_timeout(tx)
             .await
@@ -463,6 +472,7 @@ where
 
 enum CoTxWriteError<E> {
     TenantScope(sqlx::Error),
+    TenantMismatch(sqlx::Error),
     RetryLockTimeout(sqlx::Error),
     BusinessWrite(E),
     AppendOutbox(sqlx::Error),
@@ -472,6 +482,7 @@ impl<E> CoTxWriteError<E> {
     fn stage(&self) -> &'static str {
         match self {
             Self::TenantScope(_) => "set-local-tenant",
+            Self::TenantMismatch(_) => "outbox-tenant-match",
             Self::RetryLockTimeout(_) => "set-local-retry-lock-timeout",
             Self::BusinessWrite(_) => "business-write",
             Self::AppendOutbox(_) => "append-outbox",
@@ -480,16 +491,20 @@ impl<E> CoTxWriteError<E> {
 
     fn sqlx_source(&self) -> Option<&sqlx::Error> {
         match self {
-            Self::TenantScope(e) | Self::RetryLockTimeout(e) | Self::AppendOutbox(e) => Some(e),
+            Self::TenantScope(e)
+            | Self::TenantMismatch(e)
+            | Self::RetryLockTimeout(e)
+            | Self::AppendOutbox(e) => Some(e),
             Self::BusinessWrite(_) => None,
         }
     }
 
     fn into_domain(self, map_storage: &(impl Fn(sqlx::Error) -> E + Send)) -> E {
         match self {
-            Self::TenantScope(e) | Self::RetryLockTimeout(e) | Self::AppendOutbox(e) => {
-                map_storage(e)
-            }
+            Self::TenantScope(e)
+            | Self::TenantMismatch(e)
+            | Self::RetryLockTimeout(e)
+            | Self::AppendOutbox(e) => map_storage(e),
             Self::BusinessWrite(e) => e,
         }
     }
