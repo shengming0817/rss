@@ -488,6 +488,13 @@ fn allowed_site_exception(
     {
         return Some("config-legacy-plaintext-startup-probe");
     }
+    if rel == "migrator.rs"
+        && tables == ["config_entries"]
+        && window.contains("protection_scheme = 0")
+        && window.contains("fetch_one(&self.pool")
+    {
+        return Some("config-legacy-plaintext-startup-probe");
+    }
     None
 }
 
@@ -1032,6 +1039,10 @@ mod tests {
                 (
                     "migrator.rs",
                     "fn legacy_config_plaintext_count(){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.pool).await; }",
+                ),
+                (
+                    "migrator.rs",
+                    "async fn legacy_config_plaintext_count(&self){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.pool).await; }",
                 ),
             ]),
         );

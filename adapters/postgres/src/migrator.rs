@@ -35,7 +35,7 @@ impl PgStore {
     /// 该扫描必须走 migrator/owner 连接，在 serving pool 与 RLS tenant GUC 建立前检查全库行；否则长期
     /// NOBYPASSRLS app 连接可能只看到当前 tenant 或看不到任何 row，导致 legacy plaintext 静默残留。
     ///
-    /// INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" } exception —
+    /// INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" } exception -
     /// this is the named `config_entries` startup plaintext probe. It runs before the durable
     /// serving pool is accepted and only counts legacy encrypted-at-rest migration debt;
     /// `pg-tenant-tx-guard` allowlists only this count-probe shape and has a stale-allowlist test.

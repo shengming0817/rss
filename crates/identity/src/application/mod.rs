@@ -25,8 +25,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use base64::Engine as _;
 use bootstrap::{Domain, KernelError, Registry};
-use consistency::{Entry, IdemKey, Topic};
-use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
+use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+use diport::{
+    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
+};
 use generated::event::identity_v1::session_created::{
     CONTRACT, IdentitySessionCreatedPayload, TOPIC,
 };
@@ -301,10 +303,20 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         let entry = Entry::new(
             Topic::parse(TOPIC).map_err(|_| LoginError::EntryBuild)?,
             IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
-            bytes,
+            OutboxPayload::from_reviewed_event_bytes(bytes),
         );
         // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；business 只给 opaque subject。
-        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject.clone());
+        let subject_id =
+            EnvelopeSubjectId::from_opaque(subject.clone()).map_err(|_| LoginError::EntryBuild)?;
+        let actor_id =
+            OpaqueActorId::from_opaque(subject.clone()).map_err(|_| LoginError::EntryBuild)?;
+        let actor = OutboxActor::scoped(
+            vocab::PrincipalKind::User,
+            actor_id,
+            tenant,
+            vocab::ScopedTenant::SelfOnly,
+        );
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor);
 
         // 5. 首发 token bundle（#1252，F4 reorder：mint 先于 co-tx）。
         //    铸 access JWT（注入的 vault `Signer`）+ 签发首个 refresh token——令组合根注入的 `Signer`
@@ -964,6 +976,7 @@ struct AuthSubjectContext {
 struct AuthUserContext {
     tenant: TenantId,
     user_id: ids::UserId,
+    kind: vocab::PrincipalKind,
 }
 
 #[derive(Clone)]
@@ -1202,6 +1215,7 @@ fn authorized_user_context(ctx: AuthSubjectContext) -> Result<AuthUserContext, A
     Ok(AuthUserContext {
         tenant: ctx.tenant,
         user_id,
+        kind: ctx.kind,
     })
 }
 
@@ -1264,7 +1278,13 @@ async fn roles_assign_handler(
     }
     match state
         .service
-        .assign_role(auth.tenant, auth.user_id, request.subject, role_id)
+        .assign_role(
+            auth.tenant,
+            auth.user_id,
+            auth.kind,
+            request.subject,
+            role_id,
+        )
         .await
     {
         Ok(()) => (
@@ -1301,7 +1321,7 @@ async fn roles_revoke_handler(
     }
     match state
         .service
-        .revoke_role(auth.tenant, auth.user_id, role_id, subject_raw)
+        .revoke_role(auth.tenant, auth.user_id, auth.kind, role_id, subject_raw)
         .await
     {
         Ok(revoked) => (
@@ -2028,7 +2048,8 @@ mod tests {
         // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id 同源，#1193）；
         // subject_id = canonical user id（登录标识不进 broker metadata）。
         assert_eq!(*envelope.contract(), CONTRACT);
-        assert_eq!(envelope.subject_id(), CANON_USER);
+        assert_eq!(envelope.subject_id().as_str(), CANON_USER);
+        assert_eq!(envelope.actor().kind(), vocab::PrincipalKind::User);
     }
 
     #[tokio::test]

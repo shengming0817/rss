@@ -10,7 +10,7 @@
 //! 库名校验由 `testkit::env_or_postgres` 单源执行，此处无需重复。
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
-use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseToken, SeenState};
+use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseToken, OutboxPayload, SeenState};
 use diport::ManagedResource;
 use futures::future::BoxFuture;
 
@@ -25,6 +25,26 @@ use crate::test_pg::{connect_pg, connect_pg_nobypass_role, connect_pg_rss_app_ro
 #[allow(clippy::unwrap_used)]
 fn test_tenant() -> vocab::TenantId {
     vocab::TenantId::parse(COTX_TENANT_A).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn reviewed_payload(bytes: &[u8]) -> OutboxPayload {
+    OutboxPayload::from_reviewed_event_bytes(bytes.to_vec())
+}
+
+#[allow(clippy::unwrap_used)]
+fn subject_id(raw: &str) -> diport::EnvelopeSubjectId {
+    diport::EnvelopeSubjectId::from_opaque(raw).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn actor_for(tenant: vocab::TenantId) -> diport::OutboxActor {
+    diport::OutboxActor::scoped(
+        vocab::PrincipalKind::Admin,
+        diport::OpaqueActorId::from_opaque("pg-integration-actor").unwrap(),
+        tenant,
+        vocab::ScopedTenant::Tenant,
+    )
 }
 
 /// 测试用固定事件发生时刻（unix 秒）——t10/t11 断言 envelope `occurred_at`（#1129）。
@@ -612,7 +632,7 @@ fn make_entry(event_id: &str) -> Entry {
     Entry::new(
         Topic::parse("test.event").unwrap(),
         IdemKey::parse(event_id).unwrap(),
-        b"payload".to_vec(),
+        reviewed_payload(b"payload"),
     )
 }
 
@@ -623,7 +643,7 @@ fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
         "contract-1".to_string(),
-        OutboxMetadata::new(0, test_tenant()).with_subject_id(event_id),
+        OutboxMetadata::new(0, test_tenant()).with_subject_id(subject_id(event_id)),
     )
 }
 
@@ -1615,7 +1635,8 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0, test_tenant()).with_subject_id(event_id.as_str()),
+                OutboxMetadata::new(0, test_tenant())
+                    .with_subject_id(subject_id(event_id.as_str())),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -1658,7 +1679,8 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0, test_tenant()).with_subject_id(event_id.as_str()),
+                OutboxMetadata::new(0, test_tenant())
+                    .with_subject_id(subject_id(event_id.as_str())),
             );
             Box::pin(async move {
                 append_outbox(c, &entry, &env).await?;
@@ -2923,21 +2945,23 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     let entry = Entry::new(
         Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
-        br#"{"sessionId":"s"}"#.to_vec(),
+        reviewed_payload(br#"{"sessionId":"s"}"#),
     );
+    let tenant = test_tenant();
     crate::PgEmitter::new(&store, fixed_clock())
         .emit(
             entry,
             OutboxEnvelopeParts::new(
                 vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
-                test_tenant(),
-                "subj-opaque-77",
+                tenant,
+                subject_id("subj-opaque-77"),
+                actor_for(tenant),
             ),
         )
         .await?;
 
-    let row: (String, String, String, String, String, String) = sqlx::query_as(
-        "SELECT event_id, domain, topic, contract_id, status, metadata::text FROM outbox WHERE event_id = $1",
+    let row: (String, String, String, String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT event_id, domain, topic, contract_id, status, metadata FROM outbox WHERE event_id = $1",
     )
     .bind(&event_id)
     .fetch_one(&store.pool)
@@ -2948,23 +2972,49 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     // contract_id 列 = ContractBinding.contract_id()（#1193 typed 绑定经 adapter 落库的 drift-lock）。
     assert_eq!(row.3, "identity.session-created", "contract_id");
     assert_eq!(row.4, "pending", "新 entry pending 待 relay");
-    // metadata 含 opaque subjectId + sealed 注入的 reserved occurred_at（#1129）；无完整 PII（FR-020 funnel）。
-    assert!(
-        row.5.contains("subjectId") && row.5.contains("subj-opaque-77"),
+    // metadata 含 opaque subjectId + actor + sealed 注入的 reserved occurred_at（#1129）；无完整 PII（FR-020 funnel）。
+    assert_eq!(
+        row.5.get("subjectId").and_then(serde_json::Value::as_str),
+        Some("subj-opaque-77"),
         "metadata 应含 opaque subjectId: {}",
         row.5
     );
-    assert!(
-        row.5
-            .replace(' ', "")
-            .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
+    assert_eq!(
+        row.5.get("occurredAt").and_then(serde_json::Value::as_i64),
+        Some(expected_occurred_at()),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
+        row.5
+    );
+    let actor = row.5.get("actor").expect("metadata should include actor");
+    assert_eq!(
+        actor.get("kind").and_then(serde_json::Value::as_str),
+        Some("admin"),
+        "metadata.actor.kind 应落库: {}",
+        row.5
+    );
+    assert_eq!(
+        actor.get("id").and_then(serde_json::Value::as_str),
+        Some("pg-integration-actor"),
+        "metadata.actor.id 应落库: {}",
+        row.5
+    );
+    let tenant_text = tenant.to_string();
+    assert_eq!(
+        actor.get("tenantId").and_then(serde_json::Value::as_str),
+        Some(tenant_text.as_str()),
+        "metadata.actor.tenantId 应落库: {}",
+        row.5
+    );
+    assert_eq!(
+        actor.get("scope").and_then(serde_json::Value::as_str),
+        Some("tenant"),
+        "metadata.actor.scope 应落库: {}",
         row.5
     );
     // trace / correlation / principal 为后续 follow-up 空接缝，本 PR 不写。
     for reserved in ["trace", "correlation", "principal"] {
         assert!(
-            !row.5.contains(reserved),
+            row.5.get(reserved).is_none(),
             "空接缝 reserved key {reserved} 本 PR 不应写入: {}",
             row.5
         );
@@ -3000,7 +3050,7 @@ fn session_entry(event_id: &str) -> Entry {
     Entry::new(
         Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(event_id).unwrap(),
-        br#"{"sessionId":"s"}"#.to_vec(),
+        reviewed_payload(br#"{"sessionId":"s"}"#),
     )
 }
 
@@ -3009,7 +3059,8 @@ fn session_envelope() -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
         vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
         test_tenant(),
-        "subj-opaque-cotx",
+        subject_id("subj-opaque-cotx"),
+        actor_for(test_tenant()),
     )
 }
 
@@ -3094,7 +3145,8 @@ async fn t11b_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let envelope = OutboxEnvelopeParts::new(
         vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
         envelope_tenant,
-        "subj-opaque-cotx",
+        subject_id("subj-opaque-cotx"),
+        actor_for(envelope_tenant),
     );
 
     let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
@@ -3134,7 +3186,7 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let env = OutboxEnvelope::new(
         "identity".to_string(),
         SESSION_CREATED_TOPIC.to_string(),
-        OutboxMetadata::new(0, test_tenant()).with_subject_id("subj-12"),
+        OutboxMetadata::new(0, test_tenant()).with_subject_id(subject_id("subj-12")),
     );
     let tenant = COTX_TENANT_A.to_string();
     let sid = session_id.clone();
@@ -4044,7 +4096,7 @@ async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
     let entry = Entry::new(
         Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
-        br#"{"sessionId":"s"}"#.to_vec(),
+        reviewed_payload(br#"{"sessionId":"s"}"#),
     );
     // tenant-scoped key（推荐形态 <tenantId>:<aggregateId>）经 public builder 传入。
     let pk = "tenant-7:session-42";
@@ -4054,7 +4106,8 @@ async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
             OutboxEnvelopeParts::new(
                 vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
                 test_tenant(),
-                "subj-opaque-30",
+                subject_id("subj-opaque-30"),
+                actor_for(test_tenant()),
             )
             .with_partition_key(PartitionKey::parse(pk).unwrap()),
         )
@@ -4657,7 +4710,7 @@ fn config_outbox_entry(event_id: &str) -> Entry {
     Entry::new(
         Topic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
         IdemKey::parse(event_id).unwrap(),
-        br#"{"key":"app.k","version":1}"#.to_vec(),
+        reviewed_payload(br#"{"key":"app.k","version":1}"#),
     )
 }
 
@@ -4666,7 +4719,8 @@ fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
         vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
         config_tenant(),
-        subject,
+        subject_id(subject),
+        actor_for(config_tenant()),
     )
 }
 
@@ -5306,7 +5360,8 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let envelope = OutboxEnvelopeParts::new(
         vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
         TenantId::parse(CONFIG_TENANT_B).unwrap(),
-        "app.mismatch",
+        subject_id("app.mismatch"),
+        actor_for(TenantId::parse(CONFIG_TENANT_B).unwrap()),
     );
 
     let result = repo
@@ -5350,7 +5405,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     let env = OutboxEnvelope::new(
         "settings".to_string(),
         CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-        OutboxMetadata::new(0, test_tenant()).with_subject_id("app.rollback".to_string()),
+        OutboxMetadata::new(0, test_tenant()).with_subject_id(subject_id("app.rollback")),
     );
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
@@ -5502,7 +5557,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                     "settings".to_string(),
                     CONFIG_VERSION_CHANGED_TOPIC.to_string(),
                     OutboxMetadata::new(0, test_tenant())
-                        .with_subject_id("app.cotx-rollback".to_string()),
+                        .with_subject_id(subject_id("app.cotx-rollback")),
                 );
                 co_tx_with_outbox(
                     &store.pool,
@@ -5675,7 +5730,8 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                             CONFIG_VERSION_CHANGED_TOPIC,
                         ),
                         TenantId::parse(CONFIG_TENANT_B).unwrap(),
-                        "app.retry-permanent",
+                        subject_id("app.retry-permanent"),
+                        actor_for(TenantId::parse(CONFIG_TENANT_B).unwrap()),
                     ),
                 )
                 .await
@@ -6689,8 +6745,14 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     );
     let actor = ids::UserId::parse("11111111-2222-4333-8444-555555555555")?;
 
-    svc.assign_role(tenant, actor, "target-user".to_string(), role_id.clone())
-        .await?;
+    svc.assign_role(
+        tenant,
+        actor,
+        vocab::PrincipalKind::Admin,
+        "target-user".to_string(),
+        role_id.clone(),
+    )
+    .await?;
     let binding_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM role_bindings WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
     )
@@ -6708,7 +6770,13 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     assert_eq!(assigned_events.0, 1, "assign 写入 role-assigned outbox");
 
     let cross_tenant_revoked = svc
-        .revoke_role(tenant_b, actor, role_id.clone(), "target-user".to_string())
+        .revoke_role(
+            tenant_b,
+            actor,
+            vocab::PrincipalKind::Admin,
+            role_id.clone(),
+            "target-user".to_string(),
+        )
         .await?;
     assert!(
         !cross_tenant_revoked,
@@ -6737,7 +6805,13 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     );
 
     let revoked = svc
-        .revoke_role(tenant, actor, role_id.clone(), "target-user".to_string())
+        .revoke_role(
+            tenant,
+            actor,
+            vocab::PrincipalKind::Admin,
+            role_id.clone(),
+            "target-user".to_string(),
+        )
         .await?;
     assert!(revoked);
     let binding_after_revoke: (i64,) = sqlx::query_as(
@@ -6751,7 +6825,13 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     assert_eq!(binding_after_revoke.0, 0, "revoke 删除 binding");
 
     let revoked_again = svc
-        .revoke_role(tenant, actor, role_id, "target-user".to_string())
+        .revoke_role(
+            tenant,
+            actor,
+            vocab::PrincipalKind::Admin,
+            role_id,
+            "target-user".to_string(),
+        )
         .await?;
     assert!(!revoked_again, "重复 revoke 幂等 false");
     let revoked_events: (i64,) =

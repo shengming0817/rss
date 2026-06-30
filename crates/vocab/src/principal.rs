@@ -28,6 +28,20 @@ pub enum PrincipalKind {
     Anonymous,
 }
 
+impl PrincipalKind {
+    /// outbox actor metadata label（persisted-only，复用 DB/audit snake_case 方言，避免第三套主体格式）。
+    pub fn as_actor_metadata_label(self) -> &'static str {
+        match self {
+            PrincipalKind::User => "user",
+            PrincipalKind::Device => "device",
+            PrincipalKind::Admin => "admin",
+            PrincipalKind::SuperAdmin => "super_admin",
+            PrincipalKind::Service => "service",
+            PrincipalKind::Anonymous => "anonymous",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PrincipalKind;
@@ -53,6 +67,21 @@ mod tests {
                 | PrincipalKind::Service
                 | PrincipalKind::Anonymous => {}
             }
+        }
+    }
+
+    #[test]
+    fn principal_kind_actor_metadata_labels_are_stable() {
+        let cases = [
+            (PrincipalKind::User, "user"),
+            (PrincipalKind::Device, "device"),
+            (PrincipalKind::Admin, "admin"),
+            (PrincipalKind::SuperAdmin, "super_admin"),
+            (PrincipalKind::Service, "service"),
+            (PrincipalKind::Anonymous, "anonymous"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_actor_metadata_label(), expected);
         }
     }
 }

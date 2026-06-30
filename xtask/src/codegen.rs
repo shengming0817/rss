@@ -443,18 +443,19 @@ pub const TOPIC: &str = "{topic}";
 
 /// Producer wrapper（triple funnel 顶层）：把 typed [`{request_ty}`] 经注入的 [`super::CommandEmit`] 落
 /// durable outbox。baked `CONTRACT` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
-/// `tenant` 是 typed RLS scope（必填）；`subject_id` 是不透明主体标识（落 outbox envelope.subject，必填）；`idempotency_key` 是可选业务幂等键
+/// `tenant` 是 typed RLS scope（必填）；`subject_id` 与 `actor` 是 bridge 绑定的 typed envelope identity；`idempotency_key` 是可选业务幂等键
 /// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
 /// 由 `cargo xtask codegen` 派生；勿手改。
 pub async fn emit_async<E: {sup}CommandEmit>(
     emitter: &E,
     request: {request_ty},
     tenant: ::vocab::TenantId,
-    subject_id: ::std::string::String,
+    subject_id: E::SubjectId,
+    actor: E::Actor,
     idempotency_key: ::core::option::Option<::std::string::String>,
 ) -> ::core::result::Result<(), E::Error> {{
     emitter
-        .emit(CONTRACT, TOPIC, &request, tenant, &subject_id, idempotency_key.as_deref())
+        .emit(CONTRACT, TOPIC, &request, tenant, subject_id, actor, idempotency_key.as_deref())
         .await
 }}
 
@@ -935,10 +936,14 @@ const COMMAND_SEAM_DEF: &str = r#"
 pub trait CommandEmit {
     /// emit 失败类型（实现绑定，如 `eventexec::command::CommandEmitError`）。
     type Error;
+    /// bridge 绑定的事件主体类型（生产 impl 应绑定为 `diport::EnvelopeSubjectId`）。
+    type SubjectId: ::core::marker::Send;
+    /// bridge 绑定的 actor 类型（生产 impl 应绑定为 `diport::OutboxActor`）。
+    type Actor: ::core::marker::Send;
     /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract` / `topic` 是 generated
     /// wrapper 注入的 baked 常量；`request` 是 typed payload（实现侧 `serde_json` 编码）；`tenant` 是
-    /// **runtime 必填**的 typed RLS scope；`subject_id` 是
-    /// **runtime 必填**的不透明主体标识（落 outbox envelope.subject，如设备 / 会话 ID）；`idempotency_key`
+    /// **runtime 必填**的 typed RLS scope；`subject_id` / `actor` 是
+    /// **runtime 必填**的 typed envelope identity；`idempotency_key`
     /// 是**可选**业务幂等键——`Some` ⇒ 经它 mint 稳定 `DispatchId`（同键二次 emit 被 claimer 拒），`None`
     /// ⇒ bridge mint 随机 `DispatchId`（无业务去重）。
     ///
@@ -950,17 +955,19 @@ pub trait CommandEmit {
     /// 2. **生成 DispatchId**：`idempotency_key` 为 `Some(k)` ⇒
     ///    `eventexec::command::DispatchId::from_idempotency_key(k)?`（稳定业务幂等键）；为 `None` ⇒
     ///    `eventexec::command::DispatchId::from_idempotency_key(&Uuid::new_v4().to_string())?`（随机）。
-    /// 3. **透传 tenant / subject_id**：直接转发本参数（runtime 写入 outbox envelope，不再由 bridge 编造）。
-    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, bytes, subject_id.to_owned()).await`
+    /// 3. **透传 tenant / subject_id / actor**：直接转发本参数（runtime 写入 outbox envelope，不再由 bridge 编造）。
+    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, bytes, subject_id, actor).await`
     ///
     /// 组合根 bridge 是唯一 sanctioned 实现者；域 crate 不得直接 impl 本 trait（机器守 `COMMAND-IMPL-ALLOWLIST-01`）。
+    #[allow(clippy::too_many_arguments)]
     fn emit<R: ::serde::Serialize + ::core::marker::Send + ::core::marker::Sync>(
         &self,
         contract: ::vocab::ContractBinding,
         topic: &'static str,
         request: &R,
         tenant: ::vocab::TenantId,
-        subject_id: &str,
+        subject_id: Self::SubjectId,
+        actor: Self::Actor,
         idempotency_key: ::core::option::Option<&str>,
     ) -> impl ::core::future::Future<Output = ::core::result::Result<(), Self::Error>>
     + ::core::marker::Send;
@@ -2172,20 +2179,24 @@ mod tests {
             rendered.contains("request: SeedDoThingRequest"),
             "emit_async 须锁 typed Request:\n{rendered}"
         );
-        // F1（#1124 review）：wrapper + seam 把 tenant / subject_id（必填）+ idempotency_key（可选）纳入类型面，
-        // 否则 bridge 拿不到 runtime 必需的 per-call tenant / subject / 业务幂等键。
+        // F1（#1124 review）：wrapper + seam 把 tenant / subject_id / actor（必填）+ idempotency_key（可选）
+        // 纳入类型面，否则 bridge 拿不到 runtime 必需的 per-call tenant / subject / actor / 业务幂等键。
         assert!(
             rendered.contains("tenant: ::vocab::TenantId")
-                && rendered.contains("subject_id: ::std::string::String")
+                && rendered.contains("subject_id: E::SubjectId")
+                && rendered.contains("actor: E::Actor")
                 && rendered
                     .contains("idempotency_key: ::core::option::Option<::std::string::String>"),
-            "emit_async wrapper 须含 tenant + subject_id + idempotency_key 参数:\n{rendered}"
+            "emit_async wrapper 须含 tenant + subject_id + actor + idempotency_key 参数:\n{rendered}"
         );
         assert!(
             mod_rs.contains("tenant: ::vocab::TenantId")
-                && mod_rs.contains("subject_id: &str")
+                && mod_rs.contains("type SubjectId: ::core::marker::Send")
+                && mod_rs.contains("type Actor: ::core::marker::Send")
+                && mod_rs.contains("subject_id: Self::SubjectId")
+                && mod_rs.contains("actor: Self::Actor")
                 && mod_rs.contains("idempotency_key: ::core::option::Option<&str>"),
-            "CommandEmit::emit seam 须含 tenant + subject_id + idempotency_key 参数:\n{mod_rs}"
+            "CommandEmit::emit seam 须含 tenant + subject_id + actor + idempotency_key 参数:\n{mod_rs}"
         );
         // seam 定义在 mod.rs，子模块经 super:: 引用
         assert!(

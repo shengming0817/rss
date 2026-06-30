@@ -265,20 +265,21 @@ producer 与 consumer **双侧**都收口到 codegen typed API。五层 funnel�
 
 ```
 业务/组合根
-  → generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, idempotency_key)
+  → generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)
       // per-command wrapper（codegen 生成）；bake CONTRACT_ID/TOPIC + 锁 typed Request
-      // tenant 必填（typed RLS scope，落 reserved tenantId envelope）；subject_id 必填（落 envelope.subject）
+      // tenant 必填（typed RLS scope，落 reserved tenantId envelope）
+      // subject_id + actor 必填（typed envelope identity，persisted-only，不进 broker header）
       // idempotency_key 可选（Some→稳定 DispatchId / None→随机）
       // generic over generated::command::CommandEmit seam
   → 组合根 bridge impl CommandEmit
       // 组合根唯一 sanctioned impl；serde_json 编码 payload；idempotency_key→DispatchId（Some 经
-      // from_idempotency_key、None mint 随机）；透传 tenant / subject_id；不在 generated 内实现
-  → eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, payload, subject_id)
-      // RUNTIME 层；调 outbox::Entry::new
+      // from_idempotency_key、None mint 随机）；透传 tenant / subject_id / actor；不在 generated 内实现
+  → eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, payload, subject_id, actor)
+      // RUNTIME 层；调 OutboxPayload::from_reviewed_event_bytes + outbox::Entry::new
   → consistency::outbox::Entry::new(..)
-      // command-topic Entry 构造收口于此（设计 funnel 点）；当前 `Entry::new` 仍 public，类型层**未**
-      // sealed——裸构造由 COMMAND-SYMMETRY-01（AST 扫 BareEmitExit）+ COMMAND-IMPL-ALLOWLIST-01
-      // （Medium）守；Hard 化（sealed CommandTopic）见 follow-up（#1124 review F2 defer）
+      // command-topic Entry 构造收口于此；payload 必须是 OutboxPayload，裸 Vec<u8> 不可编译。
+      // 当前 `Entry::new` 仍 public；裸构造由 COMMAND-SYMMETRY-01（AST 扫 BareEmitExit）+
+      // COMMAND-IMPL-ALLOWLIST-01（Medium）守；Hard 化（sealed CommandTopic）见 follow-up。
   → diport::OutboxEmitter（注入的 Box<DynOutboxEmitter>）
 ```
 
@@ -289,9 +290,10 @@ funneling 而无需依赖 runtime——组合根 bridge impl 是唯一衔接点�
 **DispatchId** 是封装 `consistency::idempotency::IdemKey` 的 sealed newtype，由 RUNTIME 层
 （`eventexec::command`）mint + seal，**不**在 generated wrapper 内构造——因为 `IdemKey` 是引擎层
 类型，`generated` 依赖图禁止命名它。wrapper 锁 topic + contract + typed Request + tenant +
-subject_id + idempotency_key（后者经组合根 bridge mint DispatchId：`Some`→`from_idempotency_key`、
+subject_id + actor + idempotency_key（后者经组合根 bridge mint DispatchId：`Some`→`from_idempotency_key`、
 `None`→随机）。`tenant` 是 `vocab::TenantId` typed scope，由 runtime 写入 reserved `tenantId`
-envelope；组合根 bridge 只透传，不从 subject / payload 重新派生。
+envelope；`subject_id` 是 `diport::EnvelopeSubjectId`，`actor` 是 `diport::OutboxActor`。两者由 runtime
+写入 persisted metadata，broker header / MQTT user property 不可见；组合根 bridge 只透传，不从 payload 重新派生。
 command-topic `Entry::new` 是设计上的构造收口点，但 `Entry::new` 仍 public（类型层未 sealed，见 funnel
 图注；裸构造由 AST 治理门 + follow-up Hard 化守）。
 

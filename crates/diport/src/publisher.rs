@@ -150,7 +150,8 @@ impl PublishRequest {
         self.payload.as_bytes()
     }
 
-    /// 统一 delivery envelope metadata（occurred_at / subjectId / correlation … → broker header）。
+    /// 统一 delivery envelope metadata；publisher 只能外发 transport-safe view（trace / correlation /
+    /// occurredAt / tenantId / tenantAuthority）。
     pub fn metadata(&self) -> &EnvelopeMetadata {
         &self.metadata
     }

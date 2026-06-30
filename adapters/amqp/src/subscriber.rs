@@ -108,7 +108,7 @@ impl ManagedResource for AmqpSubscriber {
 
 /// AMQP [`lapin::BasicProperties`] → [`diport::EnvelopeMetadata`] rehydrate（adapter 透传路径）。
 /// - `timestamp` → `occurred_at`（unix 秒，十进制 string）。
-/// - `headers` LongString pair → metadata pair（LongString 以 utf8_lossy Display 转 string）。
+/// - transport-safe `headers` LongString pair → metadata pair（LongString 以 utf8_lossy Display 转 string）。
 /// - 非 LongString header 值跳过（不是本 adapter `build_properties` 产出的；透传外部生产者时静默忽略）。
 ///
 /// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
@@ -123,8 +123,11 @@ fn extract_metadata(props: &lapin::BasicProperties) -> EnvelopeMetadata {
             if let AMQPValue::LongString(ls) = v {
                 // reason: LongString Display 用 String::from_utf8_lossy——非 utf8 字节以 U+FFFD 替换，
                 // 不 panic。仅本 adapter build_properties 产出 LongString，外部生产者的非 LongString
-                // header 在此跳过（非本 adapter 控制路径，不可信 roundtrip）。
-                md.insert_wire_pair(k.as_str(), ls.to_string());
+                // header 在此跳过（非本 adapter 控制路径，不可信 roundtrip）。persisted-only
+                // subjectId/principal/actor 即使由外部 producer 伪造到 header，也不得进入消费侧 metadata。
+                if EnvelopeMetadata::is_transport_header_key(k.as_str()) {
+                    md.insert_wire_pair(k.as_str(), ls.to_string());
+                }
             }
         }
     }
@@ -294,7 +297,7 @@ mod tests {
 /// `extract_metadata` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
 #[cfg(test)]
 mod extract_metadata_tests {
-    use diport::KEY_CORRELATION;
+    use diport::{KEY_ACTOR, KEY_CORRELATION, KEY_PRINCIPAL, KEY_SUBJECT_ID};
     use lapin::BasicProperties;
     use lapin::types::{AMQPValue, FieldTable};
 
@@ -315,7 +318,7 @@ mod extract_metadata_tests {
     }
 
     #[test]
-    fn long_string_headers_transferred() {
+    fn transport_long_string_headers_transferred() {
         let mut table = FieldTable::default();
         table.insert(
             KEY_CORRELATION.into(),
@@ -324,6 +327,34 @@ mod extract_metadata_tests {
         let props = BasicProperties::default().with_headers(table);
         let md = extract_metadata(&props);
         assert_eq!(md.get(KEY_CORRELATION), Some("corr-9"));
+    }
+
+    #[test]
+    fn persisted_only_headers_are_dropped_on_rehydrate() {
+        let mut table = FieldTable::default();
+        table.insert(
+            KEY_SUBJECT_ID.into(),
+            AMQPValue::LongString(b"spoofed-subject".to_vec().into()),
+        );
+        table.insert(
+            KEY_PRINCIPAL.into(),
+            AMQPValue::LongString(b"spoofed-principal".to_vec().into()),
+        );
+        table.insert(
+            KEY_ACTOR.into(),
+            AMQPValue::LongString(b"spoofed-actor".to_vec().into()),
+        );
+        table.insert(
+            KEY_CORRELATION.into(),
+            AMQPValue::LongString(b"corr-safe".to_vec().into()),
+        );
+        let props = BasicProperties::default().with_headers(table);
+        let md = extract_metadata(&props);
+
+        assert_eq!(md.get(KEY_CORRELATION), Some("corr-safe"));
+        assert_eq!(md.get(KEY_SUBJECT_ID), None);
+        assert_eq!(md.get(KEY_PRINCIPAL), None);
+        assert_eq!(md.get(KEY_ACTOR), None);
     }
 
     #[test]

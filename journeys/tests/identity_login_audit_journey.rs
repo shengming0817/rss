@@ -46,15 +46,16 @@ use bootstrap::{
 };
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
-    audit_domain, identity_domain, signed_metadata, single_subscription, tenant_authority,
+    audit_domain, identity_domain, memory_tenant_signer, signed_metadata, single_subscription,
+    tenant_authority,
 };
 use consistency::{
     EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
-    PermanentError, PermanentErrorKind, SeenState,
+    OutboxPayload, PermanentError, PermanentErrorKind, SeenState,
 };
 use diport::{
-    DynDeadLetterStore, DynManagedResource, Message, MessageId, OutboxEmitter, OutboxEnvelopeParts,
-    PublishRequest, Publisher, Subscriber, Topic,
+    DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
+    OutboxActor, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher, Subscriber, Topic,
 };
 use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, spawn_consumer};
 use futures::future::BoxFuture;
@@ -209,9 +210,9 @@ fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
         Duration::from_secs(TTL_SECS),
     );
     let login = Arc::new(LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(MemSessionLifecycle::new(
-            bus.clone(),
-        ))),
+        Arc::from(DynSessionLifecycle::new_box(
+            MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
+        )),
         Arc::clone(&refresh),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
@@ -399,13 +400,20 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_USER}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
     )
     .into_bytes();
-    let emitter = MemEmitter::new(bus.clone());
+    let emitter = MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer());
+    let subject = EnvelopeSubjectId::from_opaque(CANON_USER)?;
+    let actor = OutboxActor::scoped(
+        vocab::PrincipalKind::User,
+        OpaqueActorId::from_opaque(CANON_USER)?,
+        TenantId::parse(CANON_TENANT)?,
+        vocab::ScopedTenant::SelfOnly,
+    );
     for _ in 0..2 {
         let entry = Entry::new(
             consistency::Topic::parse(SESSION_CREATED_TOPIC)
                 .map_err(|_| anyhow::anyhow!("topic parse"))?,
             IdemKey::parse(EVENT_ID).map_err(|_| anyhow::anyhow!("idem parse"))?,
-            payload.clone(),
+            OutboxPayload::from_reviewed_event_bytes(payload.clone()),
         );
         emitter
             .emit(
@@ -413,7 +421,8 @@ async fn relay_redelivery_audits_once() -> Result<()> {
                 OutboxEnvelopeParts::new(
                     generated::event::identity_v1::session_created::CONTRACT,
                     TenantId::parse(CANON_TENANT)?,
-                    CANON_USER,
+                    subject.clone(),
+                    actor.clone(),
                 ),
             )
             .await

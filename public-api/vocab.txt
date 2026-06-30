@@ -502,6 +502,8 @@ pub vocab::principal::PrincipalKind::Device
 pub vocab::principal::PrincipalKind::Service
 pub vocab::principal::PrincipalKind::SuperAdmin
 pub vocab::principal::PrincipalKind::User
+impl vocab::principal::PrincipalKind
+pub fn vocab::principal::PrincipalKind::as_actor_metadata_label(self) -> &'static str
 impl core::clone::Clone for vocab::principal::PrincipalKind
 pub fn vocab::principal::PrincipalKind::clone(&self) -> vocab::principal::PrincipalKind
 impl core::cmp::Eq for vocab::principal::PrincipalKind
@@ -694,6 +696,8 @@ pub vocab::tenant::RowScope::All
 pub vocab::tenant::RowScope::Device
 pub vocab::tenant::RowScope::SelfOnly
 pub vocab::tenant::RowScope::Tenant
+impl vocab::tenant::RowScope
+pub fn vocab::tenant::RowScope::as_label(self) -> &'static str
 impl core::clone::Clone for vocab::tenant::RowScope
 pub fn vocab::tenant::RowScope::clone(&self) -> vocab::tenant::RowScope
 impl core::cmp::Eq for vocab::tenant::RowScope
@@ -1215,6 +1219,8 @@ pub vocab::PrincipalKind::Device
 pub vocab::PrincipalKind::Service
 pub vocab::PrincipalKind::SuperAdmin
 pub vocab::PrincipalKind::User
+impl vocab::principal::PrincipalKind
+pub fn vocab::principal::PrincipalKind::as_actor_metadata_label(self) -> &'static str
 impl core::clone::Clone for vocab::principal::PrincipalKind
 pub fn vocab::principal::PrincipalKind::clone(&self) -> vocab::principal::PrincipalKind
 impl core::cmp::Eq for vocab::principal::PrincipalKind
@@ -1300,6 +1306,8 @@ pub vocab::RowScope::All
 pub vocab::RowScope::Device
 pub vocab::RowScope::SelfOnly
 pub vocab::RowScope::Tenant
+impl vocab::tenant::RowScope
+pub fn vocab::tenant::RowScope::as_label(self) -> &'static str
 impl core::clone::Clone for vocab::tenant::RowScope
 pub fn vocab::tenant::RowScope::clone(&self) -> vocab::tenant::RowScope
 impl core::cmp::Eq for vocab::tenant::RowScope

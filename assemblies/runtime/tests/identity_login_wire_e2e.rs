@@ -561,7 +561,13 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let setup_rbac =
         identity::RbacAdminService::new(setup_roles, setup_bindings, Box::new(SystemClock));
     setup_rbac
-        .assign_role(tenant, actor, CANON_USER.to_string(), admin_role_id)
+        .assign_role(
+            tenant,
+            actor,
+            vocab::PrincipalKind::Admin,
+            CANON_USER.to_string(),
+            admin_role_id,
+        )
         .await?;
 
     let assigned_before =

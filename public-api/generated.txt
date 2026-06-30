@@ -87,11 +87,13 @@ pub type generated::command::_seed_v1::SeedDoThingRequest::Output = T
 pub const generated::command::_seed_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::command::_seed_v1::CONTRACT_ID: &str
 pub const generated::command::_seed_v1::TOPIC: &str
-pub async fn generated::command::_seed_v1::emit_async<E: generated::command::CommandEmit>(&E, generated::command::_seed_v1::SeedDoThingRequest, vocab::tenant::TenantId, alloc::string::String, core::option::Option<alloc::string::String>) -> core::result::Result<(), <E as generated::command::CommandEmit>::Error>
+pub async fn generated::command::_seed_v1::emit_async<E: generated::command::CommandEmit>(&E, generated::command::_seed_v1::SeedDoThingRequest, vocab::tenant::TenantId, <E as generated::command::CommandEmit>::SubjectId, <E as generated::command::CommandEmit>::Actor, core::option::Option<alloc::string::String>) -> core::result::Result<(), <E as generated::command::CommandEmit>::Error>
 pub fn generated::command::_seed_v1::register_handler<Reg, H, Fut>(&mut Reg, H) -> <Reg as generated::command::CommandRegister>::Output where Reg: generated::command::CommandRegister, H: core::ops::function::Fn(generated::command::_seed_v1::SeedDoThingRequest) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = <Reg as generated::command::CommandRegister>::Outcome> + core::marker::Send + 'static
 pub trait generated::command::CommandEmit
+pub type generated::command::CommandEmit::Actor: core::marker::Send
 pub type generated::command::CommandEmit::Error
-pub fn generated::command::CommandEmit::emit<R: serde_core::ser::Serialize + core::marker::Send + core::marker::Sync>(&self, vocab::contract::binding::ContractBinding, &'static str, &R, vocab::tenant::TenantId, &str, core::option::Option<&str>) -> impl core::future::future::Future<Output = core::result::Result<(), Self::Error>> + core::marker::Send
+pub type generated::command::CommandEmit::SubjectId: core::marker::Send
+pub fn generated::command::CommandEmit::emit<R: serde_core::ser::Serialize + core::marker::Send + core::marker::Sync>(&self, vocab::contract::binding::ContractBinding, &'static str, &R, vocab::tenant::TenantId, Self::SubjectId, Self::Actor, core::option::Option<&str>) -> impl core::future::future::Future<Output = core::result::Result<(), Self::Error>> + core::marker::Send
 pub trait generated::command::CommandRegister
 pub type generated::command::CommandRegister::Outcome
 pub type generated::command::CommandRegister::Output
@@ -667,6 +669,7 @@ impl<T> core::convert::From<T> for generated::event::SubscriptionSpec
 pub fn generated::event::SubscriptionSpec::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::event::SubscriptionSpec
 pub type generated::event::SubscriptionSpec::Output = T
+pub const generated::event::SUBSCRIPTIONS: &[generated::event::SubscriptionSpec]
 pub mod generated::http
 pub mod generated::http::_seed_v1
 pub mod generated::http::_seed_v1::error
@@ -2075,7 +2078,6 @@ impl<T> serde_core::de::DeserializeOwned for generated::http::identity_v1::roles
 impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_assign::IdentityRolesAssignData
 pub type generated::http::identity_v1::roles_assign::IdentityRolesAssignData::Output = T
 pub struct generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest
-pub generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest::role_id: alloc::string::String
 pub generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest::subject: alloc::string::String
 impl core::clone::Clone for generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest
 pub fn generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest::clone(&self) -> generated::http::identity_v1::roles_assign::IdentityRolesAssignRequest
@@ -2434,9 +2436,10 @@ impl<T> serde_core::de::DeserializeOwned for generated::http::identity_v1::roles
 impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData
 pub type generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData::Output = T
 pub struct generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
-pub generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::subject: alloc::string::String
 impl core::clone::Clone for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
 pub fn generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::clone(&self) -> generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
+impl core::default::Default for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
+pub fn generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::default() -> Self
 impl core::fmt::Debug for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
 pub fn generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl secure::redaction::Redact for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeRequest
@@ -3066,6 +3069,8 @@ pub generated::http::HttpSpec::contract_id: &'static str
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]
 pub generated::http::HttpSpec::method: &'static str
 pub generated::http::HttpSpec::path: &'static str
+pub generated::http::HttpSpec::resource: core::option::Option<&'static str>
+pub generated::http::HttpSpec::self_scoped: bool
 impl core::clone::Clone for generated::http::HttpSpec
 pub fn generated::http::HttpSpec::clone(&self) -> generated::http::HttpSpec
 impl core::cmp::Eq for generated::http::HttpSpec

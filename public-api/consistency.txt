@@ -562,7 +562,7 @@ pub fn consistency::outbox::BacklogSample::from(T) -> T
 pub struct consistency::outbox::Entry
 impl consistency::outbox::Entry
 pub fn consistency::outbox::Entry::idem_key(&self) -> &consistency::idempotency::IdemKey
-pub fn consistency::outbox::Entry::new(consistency::outbox::Topic, consistency::idempotency::IdemKey, alloc::vec::Vec<u8>) -> Self
+pub fn consistency::outbox::Entry::new(consistency::outbox::Topic, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> Self
 pub fn consistency::outbox::Entry::payload(&self) -> &[u8]
 pub fn consistency::outbox::Entry::topic(&self) -> &consistency::outbox::Topic
 impl core::clone::Clone for consistency::outbox::Entry
@@ -630,6 +630,48 @@ impl<T> core::borrow::BorrowMut<T> for consistency::outbox::HandleResult where T
 pub fn consistency::outbox::HandleResult::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::outbox::HandleResult
 pub fn consistency::outbox::HandleResult::from(T) -> T
+pub struct consistency::outbox::OutboxPayload(_)
+impl consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::as_bytes(&self) -> &[u8]
+pub fn consistency::outbox::OutboxPayload::from_reviewed_event_bytes(alloc::vec::Vec<u8>) -> Self
+pub fn consistency::outbox::OutboxPayload::into_bytes(self) -> alloc::vec::Vec<u8>
+impl core::clone::Clone for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::clone(&self) -> consistency::outbox::OutboxPayload
+impl core::cmp::Eq for consistency::outbox::OutboxPayload
+impl core::cmp::PartialEq for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::eq(&self, &consistency::outbox::OutboxPayload) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxPayload
+impl core::marker::Freeze for consistency::outbox::OutboxPayload
+impl core::marker::Send for consistency::outbox::OutboxPayload
+impl core::marker::Sync for consistency::outbox::OutboxPayload
+impl core::marker::Unpin for consistency::outbox::OutboxPayload
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxPayload
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxPayload
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxPayload
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxPayload where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxPayload::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxPayload where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxPayload::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxPayload::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxPayload where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxPayload::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxPayload::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::OutboxPayload where T: core::clone::Clone
+pub type consistency::outbox::OutboxPayload::Owned = T
+pub fn consistency::outbox::OutboxPayload::clone_into(&self, &mut T)
+pub fn consistency::outbox::OutboxPayload::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::OutboxPayload where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxPayload::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxPayload where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxPayload::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxPayload where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxPayload::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::OutboxPayload where T: core::clone::Clone
+pub unsafe fn consistency::outbox::OutboxPayload::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::from(T) -> T
 pub struct consistency::outbox::PartitionKey(_)
 impl consistency::outbox::PartitionKey
 pub fn consistency::outbox::PartitionKey::as_str(&self) -> &str
@@ -1254,6 +1296,232 @@ pub trait consistency::saga::SagaStep
 pub async fn consistency::saga::SagaStep::compensate(&self) -> core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>
 pub async fn consistency::saga::SagaStep::execute(&self) -> core::result::Result<consistency::saga::SagaOutcome, consistency::error::EngineError>
 pub fn consistency::saga::SagaStep::name(&self) -> &consistency::saga::StepName
+pub mod consistency::tx_retry
+#[non_exhaustive] pub enum consistency::tx_retry::TxRetryClass
+pub consistency::tx_retry::TxRetryClass::Conflict
+pub consistency::tx_retry::TxRetryClass::OwnershipLost
+pub consistency::tx_retry::TxRetryClass::Permanent
+pub consistency::tx_retry::TxRetryClass::Transient
+impl consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::clone(&self) -> consistency::tx_retry::TxRetryClass
+impl core::cmp::Eq for consistency::tx_retry::TxRetryClass
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::eq(&self, &consistency::tx_retry::TxRetryClass) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryClass
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryClass
+impl core::marker::Freeze for consistency::tx_retry::TxRetryClass
+impl core::marker::Send for consistency::tx_retry::TxRetryClass
+impl core::marker::Sync for consistency::tx_retry::TxRetryClass
+impl core::marker::Unpin for consistency::tx_retry::TxRetryClass
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryClass
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryClass
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryClass
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryClass where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryClass::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryClass where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryClass::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryClass::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryClass where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryClass::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryClass::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryClass where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryClass::Owned = T
+pub fn consistency::tx_retry::TxRetryClass::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryClass::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryClass where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryClass::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryClass where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryClass::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryClass where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryClass::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryClass where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryClass::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::from(T) -> T
+#[non_exhaustive] pub enum consistency::tx_retry::TxRetryFinalStatus
+pub consistency::tx_retry::TxRetryFinalStatus::Exhausted
+pub consistency::tx_retry::TxRetryFinalStatus::NotRetryable(consistency::tx_retry::TxRetryClass)
+pub consistency::tx_retry::TxRetryFinalStatus::Success
+impl consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::clone(&self) -> consistency::tx_retry::TxRetryFinalStatus
+impl core::cmp::Eq for consistency::tx_retry::TxRetryFinalStatus
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::eq(&self, &consistency::tx_retry::TxRetryFinalStatus) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Freeze for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Send for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Sync for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Unpin for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryFinalStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryFinalStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryFinalStatus
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryFinalStatus where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryFinalStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryFinalStatus where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryFinalStatus::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryFinalStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryFinalStatus where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryFinalStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryFinalStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryFinalStatus where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryFinalStatus::Owned = T
+pub fn consistency::tx_retry::TxRetryFinalStatus::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryFinalStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryFinalStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryFinalStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryFinalStatus where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryFinalStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryFinalStatus where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryFinalStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryFinalStatus where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryFinalStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::tx_retry::TxRetryPolicyError
+pub consistency::tx_retry::TxRetryPolicyError::DelayRange
+pub consistency::tx_retry::TxRetryPolicyError::ZeroAttempts
+impl core::clone::Clone for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::clone(&self) -> consistency::tx_retry::TxRetryPolicyError
+impl core::cmp::Eq for consistency::tx_retry::TxRetryPolicyError
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::eq(&self, &consistency::tx_retry::TxRetryPolicyError) -> bool
+impl core::error::Error for consistency::tx_retry::TxRetryPolicyError
+impl core::fmt::Debug for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Freeze for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Send for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Sync for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Unpin for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryPolicyError
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryPolicyError
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryPolicyError where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryPolicyError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryPolicyError where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryPolicyError::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryPolicyError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryPolicyError where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryPolicyError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryPolicyError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryPolicyError where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryPolicyError::Owned = T
+pub fn consistency::tx_retry::TxRetryPolicyError::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryPolicyError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::tx_retry::TxRetryPolicyError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::tx_retry::TxRetryPolicyError where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryPolicyError where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryPolicyError where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryPolicyError where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryPolicyError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::from(T) -> T
+pub struct consistency::tx_retry::TxRetryPolicy
+impl consistency::tx_retry::TxRetryPolicy
+pub const consistency::tx_retry::TxRetryPolicy::DEFAULT: Self
+pub fn consistency::tx_retry::TxRetryPolicy::delay_after(self, u32) -> core::time::Duration
+pub fn consistency::tx_retry::TxRetryPolicy::max_attempts(self) -> u32
+pub fn consistency::tx_retry::TxRetryPolicy::new(u32, core::time::Duration, core::time::Duration) -> core::result::Result<Self, consistency::tx_retry::TxRetryPolicyError>
+pub fn consistency::tx_retry::TxRetryPolicy::should_retry(self, consistency::tx_retry::TxRetryClass, u32) -> bool
+impl core::clone::Clone for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::clone(&self) -> consistency::tx_retry::TxRetryPolicy
+impl core::cmp::Eq for consistency::tx_retry::TxRetryPolicy
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::eq(&self, &consistency::tx_retry::TxRetryPolicy) -> bool
+impl core::default::Default for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::default() -> Self
+impl core::fmt::Debug for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryPolicy
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Freeze for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Send for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Sync for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Unpin for consistency::tx_retry::TxRetryPolicy
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryPolicy
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryPolicy
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryPolicy where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryPolicy where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryPolicy::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryPolicy where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryPolicy where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryPolicy::Owned = T
+pub fn consistency::tx_retry::TxRetryPolicy::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryPolicy::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryPolicy where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryPolicy where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryPolicy where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryPolicy where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::from(T) -> T
+pub struct consistency::tx_retry::TxRetryReport
+impl consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::attempts(self) -> u32
+pub fn consistency::tx_retry::TxRetryReport::final_status(self) -> consistency::tx_retry::TxRetryFinalStatus
+impl core::clone::Clone for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::clone(&self) -> consistency::tx_retry::TxRetryReport
+impl core::cmp::Eq for consistency::tx_retry::TxRetryReport
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::eq(&self, &consistency::tx_retry::TxRetryReport) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryReport
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryReport
+impl core::marker::Freeze for consistency::tx_retry::TxRetryReport
+impl core::marker::Send for consistency::tx_retry::TxRetryReport
+impl core::marker::Sync for consistency::tx_retry::TxRetryReport
+impl core::marker::Unpin for consistency::tx_retry::TxRetryReport
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryReport
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryReport
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryReport
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryReport where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryReport where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryReport::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryReport where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryReport where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryReport::Owned = T
+pub fn consistency::tx_retry::TxRetryReport::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryReport::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryReport where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryReport where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryReport where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryReport where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::from(T) -> T
+pub async fn consistency::tx_retry::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = ()>
 #[non_exhaustive] pub enum consistency::CompensationOutcome
 pub consistency::CompensationOutcome::Compensated
 pub consistency::CompensationOutcome::Failed
@@ -1745,6 +2013,141 @@ impl<T> core::borrow::BorrowMut<T> for consistency::outbox::TopicError where T: 
 pub fn consistency::outbox::TopicError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::outbox::TopicError
 pub fn consistency::outbox::TopicError::from(T) -> T
+#[non_exhaustive] pub enum consistency::TxRetryClass
+pub consistency::TxRetryClass::Conflict
+pub consistency::TxRetryClass::OwnershipLost
+pub consistency::TxRetryClass::Permanent
+pub consistency::TxRetryClass::Transient
+impl consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::clone(&self) -> consistency::tx_retry::TxRetryClass
+impl core::cmp::Eq for consistency::tx_retry::TxRetryClass
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::eq(&self, &consistency::tx_retry::TxRetryClass) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryClass
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryClass
+impl core::marker::Freeze for consistency::tx_retry::TxRetryClass
+impl core::marker::Send for consistency::tx_retry::TxRetryClass
+impl core::marker::Sync for consistency::tx_retry::TxRetryClass
+impl core::marker::Unpin for consistency::tx_retry::TxRetryClass
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryClass
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryClass
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryClass
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryClass where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryClass::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryClass where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryClass::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryClass::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryClass where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryClass::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryClass::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryClass where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryClass::Owned = T
+pub fn consistency::tx_retry::TxRetryClass::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryClass::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryClass where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryClass::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryClass where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryClass::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryClass where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryClass::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryClass where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryClass::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryClass
+pub fn consistency::tx_retry::TxRetryClass::from(T) -> T
+#[non_exhaustive] pub enum consistency::TxRetryFinalStatus
+pub consistency::TxRetryFinalStatus::Exhausted
+pub consistency::TxRetryFinalStatus::NotRetryable(consistency::tx_retry::TxRetryClass)
+pub consistency::TxRetryFinalStatus::Success
+impl consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::clone(&self) -> consistency::tx_retry::TxRetryFinalStatus
+impl core::cmp::Eq for consistency::tx_retry::TxRetryFinalStatus
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::eq(&self, &consistency::tx_retry::TxRetryFinalStatus) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Freeze for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Send for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Sync for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::Unpin for consistency::tx_retry::TxRetryFinalStatus
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryFinalStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryFinalStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryFinalStatus
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryFinalStatus where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryFinalStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryFinalStatus where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryFinalStatus::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryFinalStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryFinalStatus where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryFinalStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryFinalStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryFinalStatus where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryFinalStatus::Owned = T
+pub fn consistency::tx_retry::TxRetryFinalStatus::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryFinalStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryFinalStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryFinalStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryFinalStatus where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryFinalStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryFinalStatus where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryFinalStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryFinalStatus where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryFinalStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryFinalStatus
+pub fn consistency::tx_retry::TxRetryFinalStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::TxRetryPolicyError
+pub consistency::TxRetryPolicyError::DelayRange
+pub consistency::TxRetryPolicyError::ZeroAttempts
+impl core::clone::Clone for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::clone(&self) -> consistency::tx_retry::TxRetryPolicyError
+impl core::cmp::Eq for consistency::tx_retry::TxRetryPolicyError
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::eq(&self, &consistency::tx_retry::TxRetryPolicyError) -> bool
+impl core::error::Error for consistency::tx_retry::TxRetryPolicyError
+impl core::fmt::Debug for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Freeze for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Send for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Sync for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::Unpin for consistency::tx_retry::TxRetryPolicyError
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryPolicyError
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryPolicyError
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryPolicyError where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryPolicyError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryPolicyError where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryPolicyError::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryPolicyError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryPolicyError where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryPolicyError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryPolicyError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryPolicyError where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryPolicyError::Owned = T
+pub fn consistency::tx_retry::TxRetryPolicyError::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryPolicyError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::tx_retry::TxRetryPolicyError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::tx_retry::TxRetryPolicyError where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryPolicyError where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryPolicyError where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicyError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryPolicyError where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryPolicyError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryPolicyError
+pub fn consistency::tx_retry::TxRetryPolicyError::from(T) -> T
 pub struct consistency::BacklogSample
 impl consistency::outbox::BacklogSample
 pub fn consistency::outbox::BacklogSample::depth(&self) -> u64
@@ -1951,7 +2354,7 @@ pub fn consistency::reconcile::EntityId::from(T) -> T
 pub struct consistency::Entry
 impl consistency::outbox::Entry
 pub fn consistency::outbox::Entry::idem_key(&self) -> &consistency::idempotency::IdemKey
-pub fn consistency::outbox::Entry::new(consistency::outbox::Topic, consistency::idempotency::IdemKey, alloc::vec::Vec<u8>) -> Self
+pub fn consistency::outbox::Entry::new(consistency::outbox::Topic, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> Self
 pub fn consistency::outbox::Entry::payload(&self) -> &[u8]
 pub fn consistency::outbox::Entry::topic(&self) -> &consistency::outbox::Topic
 impl core::clone::Clone for consistency::outbox::Entry
@@ -2153,6 +2556,48 @@ impl<T> core::clone::CloneToUninit for consistency::projection::Lsn where T: cor
 pub unsafe fn consistency::projection::Lsn::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::projection::Lsn
 pub fn consistency::projection::Lsn::from(T) -> T
+pub struct consistency::OutboxPayload(_)
+impl consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::as_bytes(&self) -> &[u8]
+pub fn consistency::outbox::OutboxPayload::from_reviewed_event_bytes(alloc::vec::Vec<u8>) -> Self
+pub fn consistency::outbox::OutboxPayload::into_bytes(self) -> alloc::vec::Vec<u8>
+impl core::clone::Clone for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::clone(&self) -> consistency::outbox::OutboxPayload
+impl core::cmp::Eq for consistency::outbox::OutboxPayload
+impl core::cmp::PartialEq for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::eq(&self, &consistency::outbox::OutboxPayload) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxPayload
+impl core::marker::Freeze for consistency::outbox::OutboxPayload
+impl core::marker::Send for consistency::outbox::OutboxPayload
+impl core::marker::Sync for consistency::outbox::OutboxPayload
+impl core::marker::Unpin for consistency::outbox::OutboxPayload
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxPayload
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxPayload
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxPayload
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxPayload where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxPayload::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxPayload where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxPayload::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxPayload::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxPayload where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxPayload::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxPayload::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::OutboxPayload where T: core::clone::Clone
+pub type consistency::outbox::OutboxPayload::Owned = T
+pub fn consistency::outbox::OutboxPayload::clone_into(&self, &mut T)
+pub fn consistency::outbox::OutboxPayload::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::OutboxPayload where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxPayload::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxPayload where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxPayload::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxPayload where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxPayload::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::OutboxPayload where T: core::clone::Clone
+pub unsafe fn consistency::outbox::OutboxPayload::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::OutboxPayload
+pub fn consistency::outbox::OutboxPayload::from(T) -> T
 pub struct consistency::Outcome
 impl consistency::reconcile::Outcome
 pub fn consistency::reconcile::Outcome::requeue_after(core::time::Duration) -> Self
@@ -2475,6 +2920,95 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::Topic where T: core:
 pub unsafe fn consistency::outbox::Topic::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::Topic
 pub fn consistency::outbox::Topic::from(T) -> T
+pub struct consistency::TxRetryPolicy
+impl consistency::tx_retry::TxRetryPolicy
+pub const consistency::tx_retry::TxRetryPolicy::DEFAULT: Self
+pub fn consistency::tx_retry::TxRetryPolicy::delay_after(self, u32) -> core::time::Duration
+pub fn consistency::tx_retry::TxRetryPolicy::max_attempts(self) -> u32
+pub fn consistency::tx_retry::TxRetryPolicy::new(u32, core::time::Duration, core::time::Duration) -> core::result::Result<Self, consistency::tx_retry::TxRetryPolicyError>
+pub fn consistency::tx_retry::TxRetryPolicy::should_retry(self, consistency::tx_retry::TxRetryClass, u32) -> bool
+impl core::clone::Clone for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::clone(&self) -> consistency::tx_retry::TxRetryPolicy
+impl core::cmp::Eq for consistency::tx_retry::TxRetryPolicy
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::eq(&self, &consistency::tx_retry::TxRetryPolicy) -> bool
+impl core::default::Default for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::default() -> Self
+impl core::fmt::Debug for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryPolicy
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Freeze for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Send for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Sync for consistency::tx_retry::TxRetryPolicy
+impl core::marker::Unpin for consistency::tx_retry::TxRetryPolicy
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryPolicy
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryPolicy
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryPolicy where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryPolicy where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryPolicy::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryPolicy where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryPolicy where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryPolicy::Owned = T
+pub fn consistency::tx_retry::TxRetryPolicy::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryPolicy::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryPolicy where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryPolicy where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryPolicy where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryPolicy where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryPolicy
+pub fn consistency::tx_retry::TxRetryPolicy::from(T) -> T
+pub struct consistency::TxRetryReport
+impl consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::attempts(self) -> u32
+pub fn consistency::tx_retry::TxRetryReport::final_status(self) -> consistency::tx_retry::TxRetryFinalStatus
+impl core::clone::Clone for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::clone(&self) -> consistency::tx_retry::TxRetryReport
+impl core::cmp::Eq for consistency::tx_retry::TxRetryReport
+impl core::cmp::PartialEq for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::eq(&self, &consistency::tx_retry::TxRetryReport) -> bool
+impl core::fmt::Debug for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::tx_retry::TxRetryReport
+impl core::marker::StructuralPartialEq for consistency::tx_retry::TxRetryReport
+impl core::marker::Freeze for consistency::tx_retry::TxRetryReport
+impl core::marker::Send for consistency::tx_retry::TxRetryReport
+impl core::marker::Sync for consistency::tx_retry::TxRetryReport
+impl core::marker::Unpin for consistency::tx_retry::TxRetryReport
+impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryReport
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryReport
+impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryReport
+impl<T, U> core::convert::Into<U> for consistency::tx_retry::TxRetryReport where U: core::convert::From<T>
+pub fn consistency::tx_retry::TxRetryReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::tx_retry::TxRetryReport where U: core::convert::Into<T>
+pub type consistency::tx_retry::TxRetryReport::Error = core::convert::Infallible
+pub fn consistency::tx_retry::TxRetryReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::tx_retry::TxRetryReport where U: core::convert::TryFrom<T>
+pub type consistency::tx_retry::TxRetryReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::tx_retry::TxRetryReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::tx_retry::TxRetryReport where T: core::clone::Clone
+pub type consistency::tx_retry::TxRetryReport::Owned = T
+pub fn consistency::tx_retry::TxRetryReport::clone_into(&self, &mut T)
+pub fn consistency::tx_retry::TxRetryReport::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::tx_retry::TxRetryReport where T: 'static + ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::tx_retry::TxRetryReport where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::tx_retry::TxRetryReport where T: ?core::marker::Sized
+pub fn consistency::tx_retry::TxRetryReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryReport where T: core::clone::Clone
+pub unsafe fn consistency::tx_retry::TxRetryReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryReport
+pub fn consistency::tx_retry::TxRetryReport::from(T) -> T
 pub trait consistency::IdempotencyStore
 pub async fn consistency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
@@ -2503,3 +3037,4 @@ pub async fn consistency::SagaStep::execute(&self) -> core::result::Result<consi
 pub fn consistency::SagaStep::name(&self) -> &consistency::saga::StepName
 pub trait consistency::SerialInOrderGuarantor: consistency::projection::sealed::Sealed + core::marker::Copy
 impl consistency::projection::SerialInOrderGuarantor for consistency::projection::SerialInOrder
+pub async fn consistency::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = ()>

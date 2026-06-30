@@ -258,14 +258,21 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
   从当前 tracing span 导出 traceparent、`OutboxMetadata::with_trace`（#1193 sealed setter）写入 metadata 保留键；
   relay→broker header 透传（同 correlation #1160）；consumer 侧 `tracewire::restore_parent()` 还原 remote parent，
   使 handler span 与 producer 同 `trace_id`。**fail-open**：无 otel 层 / 未采样 / 畸形 traceparent ⇒ 省略 / no-op，绝不阻投递。
-- `principal`：typed-but-empty 接缝，待安全 / PII 决策（完整 principal 上 wire 安全决策，**#1397**）——本轮仅留 opaque `subjectId`。
+- `subjectId` / `principal` / `actor`：**persisted-only**。producer 必须传 `diport::EnvelopeSubjectId`
+  与 `diport::OutboxActor`；adapter 只把最小 opaque subject / actor 写入 outbox metadata，用于审计、dead-letter
+  和运维追溯。完整 `Principal`、email、姓名、token 等 PII 不得进入 metadata；这些字段也永不进入 AMQP header /
+  MQTT user property，不能作为 broker-visible auth source。
 
-**统一 delivery envelope（#1160）**：envelope metadata 经统一 wire-faithful 类型 `diport::EnvelopeMetadata`
-（`string→string`，broker header 通用形态）从 **producer→broker→consumer 全程保真**。relay 经
+**统一 delivery envelope（#1160）**：envelope metadata 经统一类型 `diport::EnvelopeMetadata`
+（`string→string`，broker header 通用形态）；只有 transport-safe view 从 **producer→broker→consumer 全程保真**。relay 经
 `acquire_lease` 的 `UPDATE…RETURNING metadata::text` 读 `outbox.metadata` 列（**不**扩 `consistency::Entry`、
 **不**动 `poll_pending`），`hydrate_envelope_metadata` 重建后携入 `PublishRequest`；adapter publisher 映射进
-broker header（AMQP `with_timestamp`(occurred_at) + `FieldTable` headers / MQTT v5 `user_properties` /
-memory 直传），subscriber 反向读回填 `Message.metadata`，handler 经 `msg.metadata.get(..)` 消费。
+broker header（AMQP `with_timestamp`(occurred_at) + transport-safe `FieldTable` headers / MQTT v5
+transport-safe `user_properties` / memory 直传）。broker-visible metadata 只能来自
+`EnvelopeMetadata::iter_transport_headers()` allowlist：`trace`、`correlation`、`occurredAt`、`tenantId`、
+`tenantAuthority`。`subjectId` / `principal` / `actor` 与业务 free-form metadata 只可经
+`iter_persisted_metadata()` 留在持久化 / dead-letter 边界，不回填 broker header。subscriber 反向只读 broker
+传来的 transport-safe 元数据，handler 经 `msg.metadata.get(..)` 消费。
 ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、CloudEvents binary content-mode。
 
 **Tenant authority token（#1535）**：relay 发布 broker 消息前在 reserved metadata `tenantAuthority`
@@ -279,10 +286,11 @@ issuer/audience、TTL、topic、contract、message id 与 tenant 绑定；缺失
 
 envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed `vocab::ContractBinding`** 承载（#1193）：
 两字段同源一份 `contract.toml`，经 `cargo xtask codegen` 派生为 `generated::event::{domain}_v1::CONTRACT`
-（golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, tenant, subject)` 传入。domain +
+（golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 传入。domain +
 contract_id 收进**单一绑定值**，tenant 是 `vocab::TenantId` typed scope（adapter 盖章进 reserved `tenantId`
-envelope），故 contract 归属与 tenant scope 都不从裸 string / payload 重新派生；`OutboxEnvelopeParts`
-字段私有（input-struct-field-exclusion，Hard）。
+envelope），subject 是 `diport::EnvelopeSubjectId`，actor 是 `diport::OutboxActor`。contract 归属、tenant
+scope、subject、actor 都不从裸 string / payload 重新派生；`OutboxEnvelopeParts` 字段私有
+（input-struct-field-exclusion，Hard）。
 
 可选 `partition_key`（#1211）是 envelope 的有序投递路由列（不透明聚合根键，非 metadata、非 reserved
 funnel）：经 `OutboxEnvelopeParts::with_partition_key(key)`（未设即 `None`，无序并行）落 outbox 列，决定投递顺序分区（语义见
@@ -297,12 +305,12 @@ outbox 表无 `tenant_id` 列、无 RLS，无 tenant scope 的 partition_key 同
 
 两类 Hard 保证：
 
-- **producer 不可漏接** `occurred_at`：由 metadata funnel 的构造器 `OutboxMetadata::new(occurred_at)`
-  **必填位置参**承载——「无 occurred_at 的 outbox metadata」类型层不可表达，新增 outbox producer 必须从注入
-  `Clock` 提供（缺失即编译错误）。三条生产构造点（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）同源。
+- **producer 不可漏接** `occurred_at` / subject / actor：`occurred_at` 由 metadata funnel 的构造器
+  `OutboxMetadata::new(occurred_at)` **必填位置参**承载；subject / actor 由
+  `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 必填。新增 outbox producer 缺任一项即编译错误。
 - **业务不可伪造** reserved key（producer + wire 两侧）：
   - producer 侧（落库）：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
-    fail-closed 拒；reserved key（含 trace / correlation）只经 funnel 内 sealed setter 写入（INVARIANT
+    fail-closed 拒；reserved key（含 trace / correlation / subjectId / actor）只经 funnel 内 sealed setter 写入（INVARIANT
     OUTBOX-METADATA-FUNNEL-01）。
   - wire 侧（`diport::EnvelopeMetadata`，#1160）：业务 `try_insert` 同样 fail-closed 拒 reserved（Hard，
     类型层）；reserved-capable 透传写面 `insert_wire_pair` 仅 relay / subscriber 从**已 sealed 来源**

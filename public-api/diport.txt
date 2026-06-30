@@ -1053,12 +1053,13 @@ impl<T> typenum::type_operators::Same for diport::dead_letter_store::WritableDea
 pub type diport::dead_letter_store::WritableDeadLetterSource::Output = T
 pub struct diport::dead_letter_store::DeadLetterRecord
 impl diport::dead_letter_store::DeadLetterRecord
+pub fn diport::dead_letter_store::DeadLetterRecord::consumer_group(&self) -> core::option::Option<&str>
 pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
@@ -1288,7 +1289,9 @@ pub fn diport::envelope::EnvelopeMetadata::empty() -> Self
 pub fn diport::envelope::EnvelopeMetadata::get(&self, &str) -> core::option::Option<&str>
 pub fn diport::envelope::EnvelopeMetadata::insert_wire_pair(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)
 pub fn diport::envelope::EnvelopeMetadata::is_empty(&self) -> bool
-pub fn diport::envelope::EnvelopeMetadata::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
+pub fn diport::envelope::EnvelopeMetadata::is_transport_header_key(&str) -> bool
+pub fn diport::envelope::EnvelopeMetadata::iter_persisted_metadata(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
+pub fn diport::envelope::EnvelopeMetadata::iter_transport_headers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
 pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
 pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<vocab::tenant::TenantId>
@@ -1334,13 +1337,15 @@ impl<T> core::convert::From<T> for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeMetadata
 pub type diport::envelope::EnvelopeMetadata::Output = T
+pub const diport::envelope::KEY_ACTOR: &str
 pub const diport::envelope::KEY_CORRELATION: &str
 pub const diport::envelope::KEY_OCCURRED_AT: &str
 pub const diport::envelope::KEY_PRINCIPAL: &str
 pub const diport::envelope::KEY_SUBJECT_ID: &str
+pub const diport::envelope::KEY_TENANT_AUTHORITY: &str
 pub const diport::envelope::KEY_TENANT_ID: &str
 pub const diport::envelope::KEY_TRACE: &str
-pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 5]
+pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 8]
 pub mod diport::fenced_writer
 #[non_exhaustive] pub enum diport::fenced_writer::WriteOutcome
 pub diport::fenced_writer::WriteOutcome::Committed
@@ -1663,17 +1668,17 @@ pub const fn diport::DynKeyProvider<'dynosaur_struct>::from_ref(&impl diport::ke
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_arc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_box(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_rc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynKeyProvider<'dynosaur_struct>>
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -1686,7 +1691,7 @@ pub fn diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::f
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynKeyProvider<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynKeyProvider<'dynosaur_struct>
@@ -1903,22 +1908,22 @@ impl<T> core::convert::From<T> for diport::key_provider::KeyVersion
 pub fn diport::key_provider::KeyVersion::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::key_provider::KeyVersion
 pub type diport::key_provider::KeyVersion::Output = T
-pub trait diport::key_provider::KeyProvider: core::marker::Send
+pub trait diport::key_provider::KeyProvider: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::key_provider::KeyProvider::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::key_provider::KeyProvider::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::key_provider::KeyProvider::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::key_provider::KeyProvider::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -1928,7 +1933,7 @@ pub fn diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::Redacted
 pub fn diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-pub trait diport::key_provider::KeyProviderLocal
+pub trait diport::key_provider::KeyProviderLocal: core::marker::Send + core::marker::Sync
 pub async fn diport::key_provider::KeyProviderLocal::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>
 pub async fn diport::key_provider::KeyProviderLocal::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>
 pub async fn diport::key_provider::KeyProviderLocal::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>
@@ -2710,6 +2715,53 @@ pub async fn TraitVariantBlanketType::put_object(&self, diport::object_store::Ob
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::object_store::ObjectStoreError>
 pub type diport::object_store::ObjectByteStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = core::result::Result<alloc::vec::Vec<u8>, diport::object_store::ObjectStoreError>> + core::marker::Send)>>
 pub mod diport::outbox_emitter
+pub enum diport::outbox_emitter::EnvelopeIdentityError
+pub diport::outbox_emitter::EnvelopeIdentityError::Empty
+pub diport::outbox_emitter::EnvelopeIdentityError::TooLong
+impl core::clone::Clone for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::clone(&self) -> diport::outbox_emitter::EnvelopeIdentityError
+impl core::cmp::Eq for diport::outbox_emitter::EnvelopeIdentityError
+impl core::cmp::PartialEq for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::eq(&self, &diport::outbox_emitter::EnvelopeIdentityError) -> bool
+impl core::error::Error for diport::outbox_emitter::EnvelopeIdentityError
+impl core::fmt::Debug for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Freeze for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Send for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Sync for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Unpin for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeIdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::EnvelopeIdentityError where U: core::convert::From<T>
+pub fn diport::outbox_emitter::EnvelopeIdentityError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::EnvelopeIdentityError where U: core::convert::Into<T>
+pub type diport::outbox_emitter::EnvelopeIdentityError::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::EnvelopeIdentityError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::EnvelopeIdentityError where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::EnvelopeIdentityError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::EnvelopeIdentityError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::EnvelopeIdentityError where T: core::clone::Clone
+pub type diport::outbox_emitter::EnvelopeIdentityError::Owned = T
+pub fn diport::outbox_emitter::EnvelopeIdentityError::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::EnvelopeIdentityError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::outbox_emitter::EnvelopeIdentityError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::outbox_emitter::EnvelopeIdentityError where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::EnvelopeIdentityError where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::EnvelopeIdentityError where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::EnvelopeIdentityError where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::EnvelopeIdentityError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeIdentityError
+pub type diport::outbox_emitter::EnvelopeIdentityError::Output = T
 #[repr(transparent)] pub struct diport::outbox_emitter::DynOutboxEmitter<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynOutboxEmitter<'dynosaur_struct>
 pub const fn diport::DynOutboxEmitter<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynOutboxEmitter<'dynosaur_struct>>
@@ -2740,6 +2792,143 @@ impl<T> core::borrow::Borrow<T> for diport::DynOutboxEmitter<'dynosaur_struct> w
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for diport::DynOutboxEmitter<'dynosaur_struct> where T: ?core::marker::Sized
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::borrow_mut(&mut self) -> &mut T
+pub struct diport::outbox_emitter::EnvelopeSubjectId(_)
+impl diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::as_str(&self) -> &str
+pub fn diport::outbox_emitter::EnvelopeSubjectId::from_opaque(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::outbox_emitter::EnvelopeIdentityError>
+impl core::clone::Clone for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::clone(&self) -> diport::outbox_emitter::EnvelopeSubjectId
+impl core::cmp::Eq for diport::outbox_emitter::EnvelopeSubjectId
+impl core::cmp::PartialEq for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::eq(&self, &diport::outbox_emitter::EnvelopeSubjectId) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Freeze for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Send for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Sync for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Unpin for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeSubjectId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeSubjectId
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeSubjectId
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::EnvelopeSubjectId where U: core::convert::From<T>
+pub fn diport::outbox_emitter::EnvelopeSubjectId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::EnvelopeSubjectId where U: core::convert::Into<T>
+pub type diport::outbox_emitter::EnvelopeSubjectId::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::EnvelopeSubjectId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::EnvelopeSubjectId where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::EnvelopeSubjectId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::EnvelopeSubjectId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::EnvelopeSubjectId where T: core::clone::Clone
+pub type diport::outbox_emitter::EnvelopeSubjectId::Owned = T
+pub fn diport::outbox_emitter::EnvelopeSubjectId::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::EnvelopeSubjectId::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::EnvelopeSubjectId where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeSubjectId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::EnvelopeSubjectId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeSubjectId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::EnvelopeSubjectId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeSubjectId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::EnvelopeSubjectId where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::EnvelopeSubjectId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeSubjectId
+pub type diport::outbox_emitter::EnvelopeSubjectId::Output = T
+pub struct diport::outbox_emitter::OpaqueActorId(_)
+impl diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::as_str(&self) -> &str
+pub fn diport::outbox_emitter::OpaqueActorId::from_opaque(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::outbox_emitter::EnvelopeIdentityError>
+impl core::clone::Clone for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::clone(&self) -> diport::outbox_emitter::OpaqueActorId
+impl core::cmp::Eq for diport::outbox_emitter::OpaqueActorId
+impl core::cmp::PartialEq for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::eq(&self, &diport::outbox_emitter::OpaqueActorId) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Freeze for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Send for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Sync for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Unpin for diport::outbox_emitter::OpaqueActorId
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::OpaqueActorId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OpaqueActorId
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OpaqueActorId
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::OpaqueActorId where U: core::convert::From<T>
+pub fn diport::outbox_emitter::OpaqueActorId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::OpaqueActorId where U: core::convert::Into<T>
+pub type diport::outbox_emitter::OpaqueActorId::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::OpaqueActorId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::OpaqueActorId where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::OpaqueActorId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::OpaqueActorId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::OpaqueActorId where T: core::clone::Clone
+pub type diport::outbox_emitter::OpaqueActorId::Owned = T
+pub fn diport::outbox_emitter::OpaqueActorId::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::OpaqueActorId::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::OpaqueActorId where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::OpaqueActorId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::OpaqueActorId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OpaqueActorId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::OpaqueActorId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OpaqueActorId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::OpaqueActorId where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::OpaqueActorId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::OpaqueActorId
+pub type diport::outbox_emitter::OpaqueActorId::Output = T
+pub struct diport::outbox_emitter::OutboxActor
+impl diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::actor_id(&self) -> &diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OutboxActor::kind(&self) -> vocab::principal::PrincipalKind
+pub fn diport::outbox_emitter::OutboxActor::scope(&self) -> vocab::tenant::RowScope
+pub fn diport::outbox_emitter::OutboxActor::scoped(vocab::principal::PrincipalKind, diport::outbox_emitter::OpaqueActorId, vocab::tenant::TenantId, vocab::tenant::ScopedTenant) -> Self
+pub fn diport::outbox_emitter::OutboxActor::service(diport::outbox_emitter::OpaqueActorId) -> Self
+pub fn diport::outbox_emitter::OutboxActor::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+impl core::clone::Clone for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::clone(&self) -> diport::outbox_emitter::OutboxActor
+impl core::cmp::Eq for diport::outbox_emitter::OutboxActor
+impl core::cmp::PartialEq for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::eq(&self, &diport::outbox_emitter::OutboxActor) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::OutboxActor
+impl core::marker::Freeze for diport::outbox_emitter::OutboxActor
+impl core::marker::Send for diport::outbox_emitter::OutboxActor
+impl core::marker::Sync for diport::outbox_emitter::OutboxActor
+impl core::marker::Unpin for diport::outbox_emitter::OutboxActor
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::OutboxActor
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OutboxActor
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxActor
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::OutboxActor where U: core::convert::From<T>
+pub fn diport::outbox_emitter::OutboxActor::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::OutboxActor where U: core::convert::Into<T>
+pub type diport::outbox_emitter::OutboxActor::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::OutboxActor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::OutboxActor where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::OutboxActor::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::OutboxActor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::OutboxActor where T: core::clone::Clone
+pub type diport::outbox_emitter::OutboxActor::Owned = T
+pub fn diport::outbox_emitter::OutboxActor::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::OutboxActor::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::OutboxActor where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::OutboxActor::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::OutboxActor where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OutboxActor::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::OutboxActor where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OutboxActor::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::OutboxActor where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::OutboxActor::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::OutboxActor
+pub type diport::outbox_emitter::OutboxActor::Output = T
 pub struct diport::outbox_emitter::OutboxEmitError
 impl diport::outbox_emitter::OutboxEmitError
 pub fn diport::outbox_emitter::OutboxEmitError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -2778,10 +2967,11 @@ impl<T> typenum::type_operators::Same for diport::outbox_emitter::OutboxEmitErro
 pub type diport::outbox_emitter::OutboxEmitError::Output = T
 pub struct diport::outbox_emitter::OutboxEnvelopeParts
 impl diport::outbox_emitter::OutboxEnvelopeParts
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::actor(&self) -> &diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::contract(&self) -> &vocab::contract::binding::ContractBinding
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, alloc::string::String, core::option::Option<consistency::outbox::PartitionKey>)
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &str
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>)
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &diport::outbox_emitter::EnvelopeSubjectId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> vocab::tenant::TenantId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_partition_key(self, consistency::outbox::PartitionKey) -> Self
 impl core::clone::Clone for diport::outbox_emitter::OutboxEnvelopeParts
@@ -2921,6 +3111,49 @@ impl<T> core::convert::From<T> for diport::pdp::PdpError
 pub fn diport::pdp::PdpError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::pdp::PdpError
 pub type diport::pdp::PdpError::Output = T
+#[non_exhaustive] pub enum diport::pdp::ServiceTokenReplayError
+pub diport::pdp::ServiceTokenReplayError::Guard
+pub diport::pdp::ServiceTokenReplayError::Replayed
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::clone(&self) -> diport::pdp::ServiceTokenReplayError
+impl core::error::Error for diport::pdp::ServiceTokenReplayError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayError
+impl<T, U> core::convert::Into<U> for diport::pdp::ServiceTokenReplayError where U: core::convert::From<T>
+pub fn diport::pdp::ServiceTokenReplayError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::pdp::ServiceTokenReplayError where U: core::convert::Into<T>
+pub type diport::pdp::ServiceTokenReplayError::Error = core::convert::Infallible
+pub fn diport::pdp::ServiceTokenReplayError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::pdp::ServiceTokenReplayError where U: core::convert::TryFrom<T>
+pub type diport::pdp::ServiceTokenReplayError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::pdp::ServiceTokenReplayError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::pdp::ServiceTokenReplayError where T: core::clone::Clone
+pub type diport::pdp::ServiceTokenReplayError::Owned = T
+pub fn diport::pdp::ServiceTokenReplayError::clone_into(&self, &mut T)
+pub fn diport::pdp::ServiceTokenReplayError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::pdp::ServiceTokenReplayError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::pdp::ServiceTokenReplayError where T: 'static + ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::pdp::ServiceTokenReplayError where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::pdp::ServiceTokenReplayError where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::pdp::ServiceTokenReplayError where T: core::clone::Clone
+pub unsafe fn diport::pdp::ServiceTokenReplayError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::pdp::ServiceTokenReplayError
+pub type diport::pdp::ServiceTokenReplayError::Output = T
 #[repr(transparent)] pub struct diport::pdp::DynPdp<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynPdp<'dynosaur_struct>
 pub const fn diport::DynPdp<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::pdp::Pdp + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynPdp<'dynosaur_struct>>
@@ -3095,6 +3328,8 @@ pub trait diport::pdp::PdpLocal
 pub async fn diport::pdp::PdpLocal::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
 impl<TraitVariantBlanketType: diport::pdp::Pdp> diport::pdp::PdpLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::verify(&self, &diport::pdp::RawCredential) -> core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>
+pub trait diport::pdp::ServiceTokenReplayGuard: core::marker::Send + core::marker::Sync + 'static
+pub fn diport::pdp::ServiceTokenReplayGuard::check_and_record(&self, &str, std::time::SystemTime) -> core::result::Result<(), diport::pdp::ServiceTokenReplayError>
 pub fn diport::pdp::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
@@ -4912,6 +5147,53 @@ impl<T> core::convert::From<T> for diport::dead_letter_store::DeadLetterSource
 pub fn diport::dead_letter_store::DeadLetterSource::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::dead_letter_store::DeadLetterSource
 pub type diport::dead_letter_store::DeadLetterSource::Output = T
+pub enum diport::EnvelopeIdentityError
+pub diport::EnvelopeIdentityError::Empty
+pub diport::EnvelopeIdentityError::TooLong
+impl core::clone::Clone for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::clone(&self) -> diport::outbox_emitter::EnvelopeIdentityError
+impl core::cmp::Eq for diport::outbox_emitter::EnvelopeIdentityError
+impl core::cmp::PartialEq for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::eq(&self, &diport::outbox_emitter::EnvelopeIdentityError) -> bool
+impl core::error::Error for diport::outbox_emitter::EnvelopeIdentityError
+impl core::fmt::Debug for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Freeze for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Send for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Sync for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::Unpin for diport::outbox_emitter::EnvelopeIdentityError
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeIdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::EnvelopeIdentityError where U: core::convert::From<T>
+pub fn diport::outbox_emitter::EnvelopeIdentityError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::EnvelopeIdentityError where U: core::convert::Into<T>
+pub type diport::outbox_emitter::EnvelopeIdentityError::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::EnvelopeIdentityError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::EnvelopeIdentityError where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::EnvelopeIdentityError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::EnvelopeIdentityError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::EnvelopeIdentityError where T: core::clone::Clone
+pub type diport::outbox_emitter::EnvelopeIdentityError::Owned = T
+pub fn diport::outbox_emitter::EnvelopeIdentityError::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::EnvelopeIdentityError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::outbox_emitter::EnvelopeIdentityError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::outbox_emitter::EnvelopeIdentityError where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::EnvelopeIdentityError where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::EnvelopeIdentityError where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeIdentityError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::EnvelopeIdentityError where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::EnvelopeIdentityError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeIdentityError
+pub fn diport::outbox_emitter::EnvelopeIdentityError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeIdentityError
+pub type diport::outbox_emitter::EnvelopeIdentityError::Output = T
 #[non_exhaustive] pub enum diport::JournalStatus
 pub diport::JournalStatus::Compensated
 pub diport::JournalStatus::Compensating
@@ -5432,6 +5714,49 @@ impl<T> core::convert::From<T> for diport::secret_resolver::SecretResolverError
 pub fn diport::secret_resolver::SecretResolverError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::secret_resolver::SecretResolverError
 pub type diport::secret_resolver::SecretResolverError::Output = T
+#[non_exhaustive] pub enum diport::ServiceTokenReplayError
+pub diport::ServiceTokenReplayError::Guard
+pub diport::ServiceTokenReplayError::Replayed
+impl core::clone::Clone for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::clone(&self) -> diport::pdp::ServiceTokenReplayError
+impl core::error::Error for diport::pdp::ServiceTokenReplayError
+impl core::fmt::Debug for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pdp::ServiceTokenReplayError
+impl core::marker::Send for diport::pdp::ServiceTokenReplayError
+impl core::marker::Sync for diport::pdp::ServiceTokenReplayError
+impl core::marker::Unpin for diport::pdp::ServiceTokenReplayError
+impl core::marker::UnsafeUnpin for diport::pdp::ServiceTokenReplayError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenReplayError
+impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayError
+impl<T, U> core::convert::Into<U> for diport::pdp::ServiceTokenReplayError where U: core::convert::From<T>
+pub fn diport::pdp::ServiceTokenReplayError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::pdp::ServiceTokenReplayError where U: core::convert::Into<T>
+pub type diport::pdp::ServiceTokenReplayError::Error = core::convert::Infallible
+pub fn diport::pdp::ServiceTokenReplayError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::pdp::ServiceTokenReplayError where U: core::convert::TryFrom<T>
+pub type diport::pdp::ServiceTokenReplayError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::pdp::ServiceTokenReplayError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::pdp::ServiceTokenReplayError where T: core::clone::Clone
+pub type diport::pdp::ServiceTokenReplayError::Owned = T
+pub fn diport::pdp::ServiceTokenReplayError::clone_into(&self, &mut T)
+pub fn diport::pdp::ServiceTokenReplayError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::pdp::ServiceTokenReplayError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::pdp::ServiceTokenReplayError where T: 'static + ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::pdp::ServiceTokenReplayError where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::pdp::ServiceTokenReplayError where T: ?core::marker::Sized
+pub fn diport::pdp::ServiceTokenReplayError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::pdp::ServiceTokenReplayError where T: core::clone::Clone
+pub unsafe fn diport::pdp::ServiceTokenReplayError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::pdp::ServiceTokenReplayError
+pub fn diport::pdp::ServiceTokenReplayError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::pdp::ServiceTokenReplayError
+pub type diport::pdp::ServiceTokenReplayError::Output = T
 pub enum diport::WritableDeadLetterSource
 pub diport::WritableDeadLetterSource::Consumer
 pub diport::WritableDeadLetterSource::OutboxRelay
@@ -6079,12 +6404,13 @@ impl<T> typenum::type_operators::Same for diport::checkpoint_store::CheckpointVe
 pub type diport::checkpoint_store::CheckpointVersion::Output = T
 pub struct diport::DeadLetterRecord
 impl diport::dead_letter_store::DeadLetterRecord
+pub fn diport::dead_letter_store::DeadLetterRecord::consumer_group(&self) -> core::option::Option<&str>
 pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::dead_letter_store::WritableDeadLetterSource, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
@@ -6444,17 +6770,17 @@ pub const fn diport::DynKeyProvider<'dynosaur_struct>::from_ref(&impl diport::ke
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_arc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_box(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>
 pub fn diport::DynKeyProvider<'dynosaur_struct>::new_rc(impl diport::key_provider::KeyProvider + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynKeyProvider<'dynosaur_struct>>
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -6467,7 +6793,7 @@ pub fn diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::f
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynKeyProvider<'dynosaur_struct>
-impl<'dynosaur_struct> !core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Unpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynKeyProvider<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynKeyProvider<'dynosaur_struct>
@@ -7024,7 +7350,9 @@ pub fn diport::envelope::EnvelopeMetadata::empty() -> Self
 pub fn diport::envelope::EnvelopeMetadata::get(&self, &str) -> core::option::Option<&str>
 pub fn diport::envelope::EnvelopeMetadata::insert_wire_pair(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>)
 pub fn diport::envelope::EnvelopeMetadata::is_empty(&self) -> bool
-pub fn diport::envelope::EnvelopeMetadata::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
+pub fn diport::envelope::EnvelopeMetadata::is_transport_header_key(&str) -> bool
+pub fn diport::envelope::EnvelopeMetadata::iter_persisted_metadata(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
+pub fn diport::envelope::EnvelopeMetadata::iter_transport_headers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
 pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
 pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<vocab::tenant::TenantId>
@@ -7070,6 +7398,51 @@ impl<T> core::convert::From<T> for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeMetadata
 pub type diport::envelope::EnvelopeMetadata::Output = T
+pub struct diport::EnvelopeSubjectId(_)
+impl diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::as_str(&self) -> &str
+pub fn diport::outbox_emitter::EnvelopeSubjectId::from_opaque(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::outbox_emitter::EnvelopeIdentityError>
+impl core::clone::Clone for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::clone(&self) -> diport::outbox_emitter::EnvelopeSubjectId
+impl core::cmp::Eq for diport::outbox_emitter::EnvelopeSubjectId
+impl core::cmp::PartialEq for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::eq(&self, &diport::outbox_emitter::EnvelopeSubjectId) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Freeze for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Send for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Sync for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::Unpin for diport::outbox_emitter::EnvelopeSubjectId
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeSubjectId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeSubjectId
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeSubjectId
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::EnvelopeSubjectId where U: core::convert::From<T>
+pub fn diport::outbox_emitter::EnvelopeSubjectId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::EnvelopeSubjectId where U: core::convert::Into<T>
+pub type diport::outbox_emitter::EnvelopeSubjectId::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::EnvelopeSubjectId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::EnvelopeSubjectId where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::EnvelopeSubjectId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::EnvelopeSubjectId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::EnvelopeSubjectId where T: core::clone::Clone
+pub type diport::outbox_emitter::EnvelopeSubjectId::Owned = T
+pub fn diport::outbox_emitter::EnvelopeSubjectId::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::EnvelopeSubjectId::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::EnvelopeSubjectId where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeSubjectId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::EnvelopeSubjectId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeSubjectId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::EnvelopeSubjectId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeSubjectId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::EnvelopeSubjectId where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::EnvelopeSubjectId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeSubjectId
+pub fn diport::outbox_emitter::EnvelopeSubjectId::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeSubjectId
+pub type diport::outbox_emitter::EnvelopeSubjectId::Output = T
 pub struct diport::FencedWriteKey(_)
 impl diport::fenced_writer::FencedWriteKey
 pub fn diport::fenced_writer::FencedWriteKey::as_str(&self) -> &str
@@ -7810,6 +8183,98 @@ impl<T> core::convert::From<T> for diport::object_store::ObjectPayload
 pub fn diport::object_store::ObjectPayload::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::object_store::ObjectPayload
 pub type diport::object_store::ObjectPayload::Output = T
+pub struct diport::OpaqueActorId(_)
+impl diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::as_str(&self) -> &str
+pub fn diport::outbox_emitter::OpaqueActorId::from_opaque(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::outbox_emitter::EnvelopeIdentityError>
+impl core::clone::Clone for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::clone(&self) -> diport::outbox_emitter::OpaqueActorId
+impl core::cmp::Eq for diport::outbox_emitter::OpaqueActorId
+impl core::cmp::PartialEq for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::eq(&self, &diport::outbox_emitter::OpaqueActorId) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Freeze for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Send for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Sync for diport::outbox_emitter::OpaqueActorId
+impl core::marker::Unpin for diport::outbox_emitter::OpaqueActorId
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::OpaqueActorId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OpaqueActorId
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OpaqueActorId
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::OpaqueActorId where U: core::convert::From<T>
+pub fn diport::outbox_emitter::OpaqueActorId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::OpaqueActorId where U: core::convert::Into<T>
+pub type diport::outbox_emitter::OpaqueActorId::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::OpaqueActorId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::OpaqueActorId where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::OpaqueActorId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::OpaqueActorId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::OpaqueActorId where T: core::clone::Clone
+pub type diport::outbox_emitter::OpaqueActorId::Owned = T
+pub fn diport::outbox_emitter::OpaqueActorId::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::OpaqueActorId::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::OpaqueActorId where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::OpaqueActorId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::OpaqueActorId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OpaqueActorId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::OpaqueActorId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OpaqueActorId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::OpaqueActorId where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::OpaqueActorId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OpaqueActorId::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::OpaqueActorId
+pub type diport::outbox_emitter::OpaqueActorId::Output = T
+pub struct diport::OutboxActor
+impl diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::actor_id(&self) -> &diport::outbox_emitter::OpaqueActorId
+pub fn diport::outbox_emitter::OutboxActor::kind(&self) -> vocab::principal::PrincipalKind
+pub fn diport::outbox_emitter::OutboxActor::scope(&self) -> vocab::tenant::RowScope
+pub fn diport::outbox_emitter::OutboxActor::scoped(vocab::principal::PrincipalKind, diport::outbox_emitter::OpaqueActorId, vocab::tenant::TenantId, vocab::tenant::ScopedTenant) -> Self
+pub fn diport::outbox_emitter::OutboxActor::service(diport::outbox_emitter::OpaqueActorId) -> Self
+pub fn diport::outbox_emitter::OutboxActor::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+impl core::clone::Clone for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::clone(&self) -> diport::outbox_emitter::OutboxActor
+impl core::cmp::Eq for diport::outbox_emitter::OutboxActor
+impl core::cmp::PartialEq for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::eq(&self, &diport::outbox_emitter::OutboxActor) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::OutboxActor
+impl core::marker::Freeze for diport::outbox_emitter::OutboxActor
+impl core::marker::Send for diport::outbox_emitter::OutboxActor
+impl core::marker::Sync for diport::outbox_emitter::OutboxActor
+impl core::marker::Unpin for diport::outbox_emitter::OutboxActor
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::OutboxActor
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OutboxActor
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxActor
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::OutboxActor where U: core::convert::From<T>
+pub fn diport::outbox_emitter::OutboxActor::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::OutboxActor where U: core::convert::Into<T>
+pub type diport::outbox_emitter::OutboxActor::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::OutboxActor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::OutboxActor where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::OutboxActor::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::OutboxActor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::OutboxActor where T: core::clone::Clone
+pub type diport::outbox_emitter::OutboxActor::Owned = T
+pub fn diport::outbox_emitter::OutboxActor::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::OutboxActor::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::OutboxActor where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::OutboxActor::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::OutboxActor where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OutboxActor::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::OutboxActor where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::OutboxActor::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::OutboxActor where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::OutboxActor::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxActor::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::OutboxActor
+pub type diport::outbox_emitter::OutboxActor::Output = T
 pub struct diport::OutboxEmitError
 impl diport::outbox_emitter::OutboxEmitError
 pub fn diport::outbox_emitter::OutboxEmitError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -7848,10 +8313,11 @@ impl<T> typenum::type_operators::Same for diport::outbox_emitter::OutboxEmitErro
 pub type diport::outbox_emitter::OutboxEmitError::Output = T
 pub struct diport::OutboxEnvelopeParts
 impl diport::outbox_emitter::OutboxEnvelopeParts
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::actor(&self) -> &diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::contract(&self) -> &vocab::contract::binding::ContractBinding
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, alloc::string::String, core::option::Option<consistency::outbox::PartitionKey>)
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &str
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>)
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &diport::outbox_emitter::EnvelopeSubjectId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> vocab::tenant::TenantId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_partition_key(self, consistency::outbox::PartitionKey) -> Self
 impl core::clone::Clone for diport::outbox_emitter::OutboxEnvelopeParts
@@ -8786,13 +9252,15 @@ pub fn diport::pdp::VerifiedClaims::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::pdp::VerifiedClaims
 pub type diport::pdp::VerifiedClaims::Output = T
 pub const diport::DEFAULT_SHUTDOWN_TIMEOUT: core::time::Duration
+pub const diport::KEY_ACTOR: &str
 pub const diport::KEY_CORRELATION: &str
 pub const diport::KEY_OCCURRED_AT: &str
 pub const diport::KEY_PRINCIPAL: &str
 pub const diport::KEY_SUBJECT_ID: &str
+pub const diport::KEY_TENANT_AUTHORITY: &str
 pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
-pub const diport::RESERVED_METADATA_KEYS: [&str; 5]
+pub const diport::RESERVED_METADATA_KEYS: [&str; 8]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
 pub const diport::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::AckableSubscriber: core::marker::Send
@@ -8882,22 +9350,22 @@ pub fn alloc::boxed::Box<diport::DynFencedWriter<'dynosaur_struct>>::write(&self
 impl<'dynosaur_struct> diport::fenced_writer::FencedWriter for diport::DynFencedWriter<'dynosaur_struct>
 pub fn diport::DynFencedWriter<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::fenced_writer::FencedWriterError>> + core::marker::Send
 pub fn diport::DynFencedWriter<'dynosaur_struct>::write(&self, diport::fenced_writer::FencedWriteRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::fenced_writer::WriteOutcome, diport::fenced_writer::FencedWriterError>> + core::marker::Send
-pub trait diport::KeyProvider: core::marker::Send
+pub trait diport::KeyProvider: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::KeyProvider::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::KeyProvider::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::KeyProvider::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn diport::KeyProvider::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for &mut diport::DynKeyProvider<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn &mut diport::DynKeyProvider<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::key_provider::KeyProviderError>> + core::marker::Send
-impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send
+impl<'dynosaur_struct> diport::key_provider::KeyProvider for alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::decrypt(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<secure::aead::Plaintext, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::encrypt(&self, diport::key_provider::KeyName, secure::aead::Plaintext, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynKeyProvider<'dynosaur_struct>>::rewrap(&self, diport::RedactedBytes, diport::key_provider::KeyRef, secure::protection::DerivedAad) -> impl core::future::future::Future<Output = core::result::Result<diport::key_provider::EncryptOutput, diport::key_provider::KeyProviderError>> + core::marker::Send
@@ -9119,6 +9587,8 @@ impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed:
 pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
 pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
+pub trait diport::ServiceTokenReplayGuard: core::marker::Send + core::marker::Sync + 'static
+pub fn diport::ServiceTokenReplayGuard::check_and_record(&self, &str, std::time::SystemTime) -> core::result::Result<(), diport::pdp::ServiceTokenReplayError>
 pub trait diport::Signer: core::marker::Send
 pub fn diport::Signer::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::signer::SignerError>> + core::marker::Send
 pub fn diport::Signer::sign(&self, diport::signer::SignRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::signer::Signature, diport::signer::SignerError>> + core::marker::Send

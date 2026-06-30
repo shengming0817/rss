@@ -7,10 +7,14 @@
 pub trait CommandEmit {
     /// emit 失败类型（实现绑定，如 `eventexec::command::CommandEmitError`）。
     type Error;
+    /// bridge 绑定的事件主体类型（生产 impl 应绑定为 `diport::EnvelopeSubjectId`）。
+    type SubjectId: ::core::marker::Send;
+    /// bridge 绑定的 actor 类型（生产 impl 应绑定为 `diport::OutboxActor`）。
+    type Actor: ::core::marker::Send;
     /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract` / `topic` 是 generated
     /// wrapper 注入的 baked 常量；`request` 是 typed payload（实现侧 `serde_json` 编码）；`tenant` 是
-    /// **runtime 必填**的 typed RLS scope；`subject_id` 是
-    /// **runtime 必填**的不透明主体标识（落 outbox envelope.subject，如设备 / 会话 ID）；`idempotency_key`
+    /// **runtime 必填**的 typed RLS scope；`subject_id` / `actor` 是
+    /// **runtime 必填**的 typed envelope identity；`idempotency_key`
     /// 是**可选**业务幂等键——`Some` ⇒ 经它 mint 稳定 `DispatchId`（同键二次 emit 被 claimer 拒），`None`
     /// ⇒ bridge mint 随机 `DispatchId`（无业务去重）。
     ///
@@ -22,17 +26,19 @@ pub trait CommandEmit {
     /// 2. **生成 DispatchId**：`idempotency_key` 为 `Some(k)` ⇒
     ///    `eventexec::command::DispatchId::from_idempotency_key(k)?`（稳定业务幂等键）；为 `None` ⇒
     ///    `eventexec::command::DispatchId::from_idempotency_key(&Uuid::new_v4().to_string())?`（随机）。
-    /// 3. **透传 tenant / subject_id**：直接转发本参数（runtime 写入 outbox envelope，不再由 bridge 编造）。
-    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, bytes, subject_id.to_owned()).await`
+    /// 3. **透传 tenant / subject_id / actor**：直接转发本参数（runtime 写入 outbox envelope，不再由 bridge 编造）。
+    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, bytes, subject_id, actor).await`
     ///
     /// 组合根 bridge 是唯一 sanctioned 实现者；域 crate 不得直接 impl 本 trait（机器守 `COMMAND-IMPL-ALLOWLIST-01`）。
+    #[allow(clippy::too_many_arguments)]
     fn emit<R: ::serde::Serialize + ::core::marker::Send + ::core::marker::Sync>(
         &self,
         contract: ::vocab::ContractBinding,
         topic: &'static str,
         request: &R,
         tenant: ::vocab::TenantId,
-        subject_id: &str,
+        subject_id: Self::SubjectId,
+        actor: Self::Actor,
         idempotency_key: ::core::option::Option<&str>,
     ) -> impl ::core::future::Future<Output = ::core::result::Result<(), Self::Error>>
     + ::core::marker::Send;

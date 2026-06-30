@@ -32,7 +32,7 @@ fn build_properties(event_id: &str, md: &EnvelopeMetadata) -> BasicProperties {
         None => props,
     };
     let mut table = FieldTable::default();
-    for (k, v) in md.iter() {
+    for (k, v) in md.iter_transport_headers() {
         if k == KEY_OCCURRED_AT {
             // occurred_at 已进 timestamp 字段，不重复入 headers。
             continue;
@@ -336,7 +336,10 @@ mod classify_tests {
 /// 验证 occurred_at → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
 #[cfg(test)]
 mod build_properties_tests {
-    use diport::{EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID};
+    use diport::{
+        EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
+        KEY_SUBJECT_ID,
+    };
     use lapin::types::AMQPValue;
 
     use super::build_properties;
@@ -391,10 +394,13 @@ mod build_properties_tests {
     #[test]
     // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
     #[allow(clippy::expect_used)]
-    fn other_metadata_goes_to_headers_as_long_string() {
+    fn transport_metadata_goes_to_headers_and_sensitive_metadata_is_excluded() {
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_CORRELATION, "corr-9");
-        let _ = md.try_insert(KEY_SUBJECT_ID, "user-42");
+        md.insert_wire_pair(KEY_SUBJECT_ID, "user-42");
+        md.insert_wire_pair(KEY_PRINCIPAL, "principal-42");
+        md.insert_wire_pair(KEY_ACTOR, "actor-42");
+        let _ = md.try_insert("requestPath", "/login");
         let props = build_properties("evt-3", &md);
         assert!(props.timestamp().is_none(), "no occurred_at → no timestamp");
         let table = props.headers().as_ref().expect("headers should be set");
@@ -412,7 +418,10 @@ mod build_properties_tests {
             })
         };
         assert_eq!(get(KEY_CORRELATION).as_deref(), Some("corr-9"));
-        assert_eq!(get(KEY_SUBJECT_ID).as_deref(), Some("user-42"));
+        assert_eq!(get(KEY_SUBJECT_ID), None);
+        assert_eq!(get(KEY_PRINCIPAL), None);
+        assert_eq!(get(KEY_ACTOR), None);
+        assert_eq!(get("requestPath"), None);
     }
 
     #[test]

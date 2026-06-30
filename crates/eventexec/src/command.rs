@@ -20,10 +20,11 @@ use std::sync::Arc;
 
 use consistency::HandleResult;
 use consistency::idempotency::{IdemKey, IdempotencyStore};
-use consistency::outbox::{Entry, PermanentError, PermanentErrorKind, Topic};
+use consistency::outbox::{Entry, OutboxPayload, PermanentError, PermanentErrorKind, Topic};
 use diport::dead_letter_store::DynDeadLetterStore;
 use diport::{
-    DynOutboxEmitter, Message, MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
+    DynOutboxEmitter, EnvelopeSubjectId, Message, MessageStream, OutboxActor, OutboxEmitError,
+    OutboxEmitter, OutboxEnvelopeParts,
 };
 
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
@@ -74,6 +75,7 @@ pub enum CommandEmitError {
 /// mirror 事件 emit 路径：`Topic::parse`（命令 topic 构造收口于此）→ [`Entry::new`]（seal `DispatchId`）→
 /// 注入的 [`DynOutboxEmitter`] port。`payload` 已编码（serde 在 generated wrapper / 组合根 bridge 侧；本
 /// runtime serde-free 收 `Vec<u8>`）。`subject_id` 是 opaque 主体标识（无 PII，FR-020）。
+#[allow(clippy::too_many_arguments)]
 pub async fn emit_async(
     emitter: &DynOutboxEmitter<'_>,
     dispatch_id: DispatchId,
@@ -81,11 +83,16 @@ pub async fn emit_async(
     contract: vocab::ContractBinding,
     tenant: vocab::TenantId,
     payload: Vec<u8>,
-    subject_id: String,
+    subject_id: EnvelopeSubjectId,
+    actor: OutboxActor,
 ) -> Result<(), CommandEmitError> {
     let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
-    let entry = Entry::new(parsed_topic, dispatch_id.into_idem_key(), payload);
-    let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id);
+    let entry = Entry::new(
+        parsed_topic,
+        dispatch_id.into_idem_key(),
+        OutboxPayload::from_reviewed_event_bytes(payload),
+    );
+    let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id, actor);
     emitter
         .emit(entry, envelope)
         .await
@@ -198,8 +205,8 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{
-        DynOutboxEmitter, EnvelopeMetadata, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message,
-        OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
+        DynOutboxEmitter, EnvelopeMetadata, EnvelopeSubjectId, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
+        Message, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
     };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
@@ -216,6 +223,16 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn subject(raw: &str) -> EnvelopeSubjectId {
+        EnvelopeSubjectId::from_opaque(raw).expect("opaque subject")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn actor() -> OutboxActor {
+        OutboxActor::service(OpaqueActorId::from_opaque("command-test-service").expect("actor"))
     }
 
     #[derive(Debug)]
@@ -255,6 +272,7 @@ mod tests {
         payload: Vec<u8>,
         contract_id: String,
         tenant_id: String,
+        actor_kind: String,
     }
 
     struct CapturingEmitter {
@@ -283,6 +301,11 @@ mod tests {
                 payload: entry.payload().to_vec(),
                 contract_id: envelope.contract().contract_id().to_string(),
                 tenant_id: envelope.tenant().to_string(),
+                actor_kind: envelope
+                    .actor()
+                    .kind()
+                    .as_actor_metadata_label()
+                    .to_string(),
             });
             Ok(())
         }
@@ -315,7 +338,8 @@ mod tests {
             vocab::ContractBinding::from_static("seed", "seed.do-thing"),
             tenant(),
             b"{\"amount\":7}".to_vec(),
-            "subject-opaque".to_string(),
+            subject("subject-opaque"),
+            actor(),
         )
         .await
         .expect("emit ok");
@@ -336,6 +360,7 @@ mod tests {
             c.tenant_id, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
             "envelope tenant 回显"
         );
+        assert_eq!(c.actor_kind, "service", "actor kind 回显");
     }
 
     /// 非 canonical dotted topic → CommandEmitError::Topic（fail-closed，不构造 Entry）。
@@ -352,7 +377,8 @@ mod tests {
             vocab::ContractBinding::from_static("seed", "seed.do-thing"),
             tenant(),
             b"{}".to_vec(),
-            "s".to_string(),
+            subject("s"),
+            actor(),
         )
         .await;
         assert!(
@@ -630,7 +656,8 @@ mod tests {
             vocab::ContractBinding::from_static("seed", "seed.fail"),
             tenant(),
             b"{}".to_vec(),
-            "subject-opaque".to_string(),
+            subject("subject-opaque"),
+            actor(),
         )
         .await;
         assert!(

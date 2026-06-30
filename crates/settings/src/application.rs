@@ -27,8 +27,8 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use bootstrap::{Domain, KernelError, Registry};
-use consistency::{Entry, IdemKey, Topic};
-use diport::{Clock, OutboxEnvelopeParts};
+use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
     CONTRACT, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
     TOPIC as VERSION_CHANGED_TOPIC,
@@ -239,6 +239,7 @@ impl SettingsService {
         &self,
         key: &SettingKey,
         tenant: TenantId,
+        actor: OutboxActor,
         version: u64,
         change_kind: SettingsConfigChangeKind,
         source_version: Option<u64>,
@@ -259,10 +260,12 @@ impl SettingsService {
         let entry = Entry::new(
             Topic::parse(VERSION_CHANGED_TOPIC).map_err(|_| SettingsServiceError::EntryBuild)?,
             IdemKey::parse(&event_id).map_err(|_| SettingsServiceError::EntryBuild)?,
-            bytes,
+            OutboxPayload::from_reviewed_event_bytes(bytes),
         );
         // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；subject = opaque 配置 key。
-        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, key.as_str().to_string());
+        let subject_id = EnvelopeSubjectId::from_opaque(key.as_str())
+            .map_err(|_| SettingsServiceError::EntryBuild)?;
+        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor);
         Ok((entry, envelope))
     }
 
@@ -273,6 +276,7 @@ impl SettingsService {
     pub async fn publish_config(
         &self,
         tenant: TenantId,
+        actor: OutboxActor,
         request: SettingsConfigPublishRequest,
     ) -> Result<SettingsConfigPublishResponse, SettingsServiceError> {
         let key = SettingKey::parse(&request.key)?;
@@ -286,6 +290,7 @@ impl SettingsService {
         let (outbox_entry, envelope) = self.build_version_changed_entry(
             &key,
             tenant,
+            actor,
             version,
             SettingsConfigChangeKind::Published,
             None,
@@ -310,6 +315,7 @@ impl SettingsService {
     pub async fn rollback(
         &self,
         tenant: TenantId,
+        actor: OutboxActor,
         key: &str,
         to_version: u64,
     ) -> Result<SettingsConfigPublishResponse, SettingsServiceError> {
@@ -325,6 +331,7 @@ impl SettingsService {
         let (outbox_entry, envelope) = self.build_version_changed_entry(
             &key,
             tenant,
+            actor,
             version,
             SettingsConfigChangeKind::RolledBack,
             Some(to_version),
@@ -410,12 +417,15 @@ pub(crate) fn request_id_from(req: &Request<Body>) -> String {
 pub(crate) enum AuthReject {
     /// 无 [`AuthorizedSubject`] 证据（fail-closed；正常经 primary route gate 后必有，缺失即框架接线异常）→ 401。
     Unauthenticated,
+    /// 授权证据无法派生 outbox actor（认证主体与 envelope actor 约束不一致；接线/issuer invariant）。
+    InvalidActor,
 }
 
 impl AuthReject {
     pub(crate) fn into_response(self, request_id: &str) -> Response {
         match self {
             AuthReject::Unauthenticated => httpserve::error::unauthenticated(request_id),
+            AuthReject::InvalidActor => httpserve::error::internal_error(request_id),
         }
     }
 }
@@ -427,6 +437,33 @@ pub(crate) fn authenticated_tenant(req: &Request<Body>) -> Result<TenantId, Auth
         None => Err(AuthReject::Unauthenticated),
         Some(auth) => Ok(auth.tenant_id()),
     }
+}
+
+fn authenticated_actor(req: &Request<Body>) -> Result<(TenantId, OutboxActor), AuthReject> {
+    let auth = req
+        .extensions()
+        .get::<AuthorizedSubject>()
+        .ok_or(AuthReject::Unauthenticated)?;
+    let tenant = auth.tenant_id();
+    let actor_id = OpaqueActorId::from_opaque(auth.principal_id()).map_err(|err| {
+        tracing::error!(
+            error = %err,
+            tenant_id = %tenant,
+            principal_kind = ?auth.principal_kind(),
+            contract_id = CONFIG_HTTP_SPEC.contract_id,
+            "settings authorized subject cannot be represented as outbox actor id"
+        );
+        AuthReject::InvalidActor
+    })?;
+    Ok((
+        tenant,
+        OutboxActor::scoped(
+            auth.principal_kind(),
+            actor_id,
+            tenant,
+            vocab::ScopedTenant::Tenant,
+        ),
+    ))
 }
 
 /// 从 generated SPEC 派生 [`PrimaryRoute`]（method / 相对 path / contract_id / opt_out 单源，杜绝手写漂移）。
@@ -473,8 +510,8 @@ async fn config_publish_handler(
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
-    let tenant = match authenticated_tenant(&req) {
-        Ok(tenant) => tenant,
+    let (tenant, actor) = match authenticated_actor(&req) {
+        Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
     let (_, body) = req.into_parts();
@@ -482,13 +519,14 @@ async fn config_publish_handler(
         Ok(body) => body,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
-    config_publish_handler_bytes(service, tenant, body, &request_id).await
+    config_publish_handler_bytes(service, tenant, actor, body, &request_id).await
 }
 
 /// config-publish 核心（tenant 已解析）：parse → service → typed 响应 / 错误映射。供单测直接驱动。
 pub(crate) async fn config_publish_handler_bytes(
     service: Arc<SettingsService>,
     tenant: TenantId,
+    actor: OutboxActor,
     body: Bytes,
     request_id: &str,
 ) -> Response {
@@ -496,7 +534,7 @@ pub(crate) async fn config_publish_handler_bytes(
         Ok(request) => request,
         Err(_) => return httpserve::error::validation_bad_request(request_id),
     };
-    match service.publish_config(tenant, request).await {
+    match service.publish_config(tenant, actor, request).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(err) => config_error_response(&err, tenant, request_id),
     }
@@ -599,6 +637,16 @@ mod tests {
         TenantId::parse(TENANT).expect("canonical uuid")
     }
 
+    #[allow(clippy::expect_used)]
+    fn actor() -> OutboxActor {
+        OutboxActor::scoped(
+            vocab::PrincipalKind::Admin,
+            OpaqueActorId::from_opaque("settings-test-actor").expect("opaque actor"),
+            tenant(),
+            vocab::ScopedTenant::Tenant,
+        )
+    }
+
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：OutboxEmitter / Clock 替身在此手写。
     #[derive(Clone, Default)]
     struct CapturingEmitter {
@@ -661,7 +709,7 @@ mod tests {
                 idem: entry.idem_key().as_str().to_string(),
                 domain: env.contract().domain().to_string(),
                 contract_id: env.contract().contract_id().to_string(),
-                subject_id: env.subject_id().to_string(),
+                subject_id: env.subject_id().as_str().to_string(),
                 payload: serde_json::from_slice(entry.payload()).expect("decode payload"),
             })
             .collect()
@@ -681,7 +729,7 @@ mod tests {
         let svc = service_with(&capture, InMemFlagStore::new());
 
         let resp = svc
-            .publish_config(tenant(), publish_req("app.timeout", "30s"))
+            .publish_config(tenant(), actor(), publish_req("app.timeout", "30s"))
             .await
             .expect("publish ok");
 
@@ -714,11 +762,11 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
 
-        svc.publish_config(tenant(), publish_req("app.k", "v1"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("v1");
         let resp = svc
-            .publish_config(tenant(), publish_req("app.k", "v2"))
+            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
             .await
             .expect("v2");
         assert_eq!(resp.data.version, 2);
@@ -734,7 +782,7 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
-            .publish_config(tenant(), publish_req("nodot", "v"))
+            .publish_config(tenant(), actor(), publish_req("nodot", "v"))
             .await
             .expect_err("invalid key");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
@@ -767,14 +815,17 @@ mod tests {
     async fn rollback_restores_value_and_emits_rolled_back() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), publish_req("app.k", "v1"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("v1");
-        svc.publish_config(tenant(), publish_req("app.k", "v2"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v2"))
             .await
             .expect("v2");
 
-        let resp = svc.rollback(tenant(), "app.k", 1).await.expect("rollback");
+        let resp = svc
+            .rollback(tenant(), actor(), "app.k", 1)
+            .await
+            .expect("rollback");
         assert_eq!(resp.data.version, 3, "回滚生成新版本 v3");
         assert_eq!(
             svc.get_value(tenant(), "app.k").await.expect("get"),
@@ -798,11 +849,11 @@ mod tests {
     async fn rollback_missing_version_is_not_found() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), publish_req("app.k", "v1"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("v1");
         let err = svc
-            .rollback(tenant(), "app.k", 9)
+            .rollback(tenant(), actor(), "app.k", 9)
             .await
             .expect_err("missing version");
         assert!(matches!(err, SettingsServiceError::NotFound));
@@ -813,7 +864,7 @@ mod tests {
     async fn delete_removes_config() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), publish_req("app.k", "v1"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("v1");
         svc.delete(tenant(), "app.k").await.expect("delete");
@@ -885,6 +936,10 @@ mod tests {
     /// post-authz 授权证据（Primary route gate 注入）。
     fn user_evidence(t: TenantId) -> AuthorizedSubject {
         AuthorizedSubject::for_test(t, PrincipalKind::User, "test-subject", None)
+    }
+
+    fn user_evidence_with_subject(t: TenantId, subject: impl Into<String>) -> AuthorizedSubject {
+        AuthorizedSubject::for_test(t, PrincipalKind::User, subject, None)
     }
 
     fn config_router(
@@ -1003,12 +1058,33 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn config_publish_handler_actor_id_overflow_returns_500_not_forbidden() {
+        let capture = CapturingEmitter::default();
+        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let router = config_router(
+            svc,
+            Some(user_evidence_with_subject(tenant(), "x".repeat(257))),
+        );
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/configs").json(&publish_req("app.k", "v")),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .expect("actor id invariant mismatch → 500");
+        assert_eq!(emitted_facts(&capture).len(), 0, "actor 派生失败 → 零写");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn config_publish_bytes_invalid_json_returns_400() {
         let capture = CapturingEmitter::default();
         let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
         let resp = config_publish_handler_bytes(
             svc,
             tenant(),
+            actor(),
             axum::body::Bytes::from_static(b"not json"),
             "rid",
         )
@@ -1022,7 +1098,7 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
         let body = serde_json::to_vec(&publish_req("bad key", "v")).expect("serialize");
-        let resp = config_publish_handler_bytes(svc, tenant(), body.into(), "rid").await;
+        let resp = config_publish_handler_bytes(svc, tenant(), actor(), body.into(), "rid").await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -1067,7 +1143,7 @@ mod tests {
     async fn cross_tenant_isolation() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), publish_req("app.k", "secret"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "secret"))
             .await
             .expect("tenant_a publish");
         let val = svc
@@ -1087,10 +1163,10 @@ mod tests {
         let cap2 = CapturingEmitter::default();
         let svc2 = service_with(&cap2, InMemFlagStore::new());
 
-        svc1.publish_config(tenant(), publish_req("app.timeout", "30s"))
+        svc1.publish_config(tenant(), actor(), publish_req("app.timeout", "30s"))
             .await
             .expect("svc1 publish");
-        svc2.publish_config(tenant(), publish_req("app.timeout", "30s"))
+        svc2.publish_config(tenant(), actor(), publish_req("app.timeout", "30s"))
             .await
             .expect("svc2 publish");
 
@@ -1125,7 +1201,7 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
-            .rollback(tenant(), "nodot", 1)
+            .rollback(tenant(), actor(), "nodot", 1)
             .await
             .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
@@ -1157,7 +1233,7 @@ mod tests {
     async fn delete_hides_value_and_is_idempotent() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        svc.publish_config(tenant(), publish_req("app.k", "v1"))
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("publish");
 
@@ -1180,7 +1256,7 @@ mod tests {
         let svc = service_with(&capture, InMemFlagStore::new());
 
         let v1 = svc
-            .publish_config(tenant(), publish_req("app.k", "v1"))
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("publish v1");
         assert_eq!(v1.data.version, 1);
@@ -1189,7 +1265,7 @@ mod tests {
 
         // republish：版本继续递增（v1 + tombstone v2 → v3），**非**重置回 1。
         let v3 = svc
-            .publish_config(tenant(), publish_req("app.k", "v1-again"))
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1-again"))
             .await
             .expect("republish");
         assert_eq!(
@@ -1228,11 +1304,11 @@ mod tests {
         let svc = service_with(&capture, InMemFlagStore::new());
 
         let resp_a = svc
-            .publish_config(tenant(), publish_req("app.a", "val-a"))
+            .publish_config(tenant(), actor(), publish_req("app.a", "val-a"))
             .await
             .expect("publish a");
         let resp_b = svc
-            .publish_config(tenant(), publish_req("app.b", "val-b"))
+            .publish_config(tenant(), actor(), publish_req("app.b", "val-b"))
             .await
             .expect("publish b");
 
@@ -1315,8 +1391,8 @@ mod tests {
 
         // 单任务 join! 并发：两 future 都在 barrier 处 yield，同步后各自 save（CAS 竞争）。
         let (r1, r2) = tokio::join!(
-            svc.publish_config(tenant(), publish_req("app.k", "a")),
-            svc.publish_config(tenant(), publish_req("app.k", "b")),
+            svc.publish_config(tenant(), actor(), publish_req("app.k", "a")),
+            svc.publish_config(tenant(), actor(), publish_req("app.k", "b")),
         );
 
         let results = [r1, r2];
@@ -1362,7 +1438,7 @@ mod tests {
             )),
         );
         let resp = svc
-            .publish_config(tenant(), publish_req("app.smoke", "v1-value"))
+            .publish_config(tenant(), actor(), publish_req("app.smoke", "v1-value"))
             .await
             .expect("publish ok");
         assert_eq!(resp.data.version, 1);

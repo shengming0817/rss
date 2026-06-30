@@ -112,6 +112,31 @@ pub fn tenant_authority() -> Arc<TenantAuthority> {
     )
 }
 
+struct MemoryTenantSigner {
+    authority: Arc<TenantAuthority>,
+}
+
+impl memory::TenantMetadataSigner for MemoryTenantSigner {
+    fn sign_tenant_metadata(
+        &self,
+        binding: memory::TenantMetadataBinding<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.authority.sign(TenantAuthorityBinding::new(
+            binding.tenant(),
+            binding.domain(),
+            binding.contract_id(),
+            binding.topic(),
+            binding.message_id(),
+        ))?)
+    }
+}
+
+pub fn memory_tenant_signer() -> Arc<dyn memory::TenantMetadataSigner> {
+    Arc::new(MemoryTenantSigner {
+        authority: tenant_authority(),
+    })
+}
+
 pub fn signed_metadata(
     domain: &str,
     contract_id: &str,

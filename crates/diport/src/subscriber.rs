@@ -36,9 +36,10 @@ impl MessageId {
 /// 消息值类型（对齐 watermill Message UUID/Metadata/Payload）。
 ///
 /// 不暴露 Ack/Nack——由框架据 `eventexec::Disposition` 驱动。`metadata` 是统一 delivery envelope
-/// （[`EnvelopeMetadata`]）：reserved key（trace / correlation / principal / occurred_at）由 adapter
-/// subscriber 从 broker header 经 [`EnvelopeMetadata::insert_wire_pair`] 透传（来源已 sealed），业务不得伪造
-/// （writer 两层强度见 [`EnvelopeMetadata`] rustdoc + dylint DIPORT-ENVELOPE-WIRE-WRITER-01）。
+/// （[`EnvelopeMetadata`]）：transport-safe reserved key（trace / correlation / occurredAt / tenantId /
+/// tenantAuthority）由 adapter subscriber 从 broker header 经 [`EnvelopeMetadata::insert_wire_pair`] 透传
+/// （来源已 sealed），业务不得伪造（writer 两层强度见 [`EnvelopeMetadata`] rustdoc + dylint
+/// DIPORT-ENVELOPE-WIRE-WRITER-01）。
 /// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：`payload`（消息体，可能含 PII）经 [`RedactedBytes`] 持有
 /// （`Debug` 恒 `<redacted>`、经 `as_bytes` 受控读取），故 struct `derive(Debug)` 即安全；`id`（路由）可观测；
 /// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
@@ -48,7 +49,7 @@ impl MessageId {
 pub struct Message {
     /// 消息唯一标识。
     pub id: MessageId,
-    /// 统一 delivery envelope metadata（occurred_at / subjectId / correlation … 从 broker header 透传）。
+    /// 统一 delivery envelope metadata（仅 transport-safe broker header 透传）。
     pub metadata: EnvelopeMetadata,
     /// provider-agnostic 消息字节（[`RedactedBytes`] 持有：`Debug` 恒 `<redacted>`，经 `payload.as_bytes()` 读取）。
     pub payload: RedactedBytes,

@@ -1,9 +1,13 @@
+-- 0030_grant_runtime_serving.sql
 -- Split migrator and serving roles: the long-lived app login inherits rss_app
 -- runtime DML only, while migrations/DDL stay on the short-lived migrator role.
 -- No schema CREATE, ownership, CREATEROLE, or BYPASSRLS grant is allowed to
 -- rss_app here. The dead-letter retention worker uses a separate NOLOGIN
 -- SECURITY DEFINER owner below so the serving pool still cannot DELETE rows
 -- directly.
+-- outbox DML stays with rss_app until runtime has a dedicated writer/relay/
+-- maintenance pool. Current serving runtime writes outbox rows in business
+-- transactions and runs relay/sampler/sweeper from the same PgStore pool.
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON outbox TO rss_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON inbox_dedup TO rss_app;

@@ -1,7 +1,8 @@
 //! `doc-contracts` —— 文档契约片段漂移门（AI-robust Medium 内容扫描门）。
 //!
-//! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code" }—— tenant-aware command / outbox envelope 签名已经进入 codegen 与 runtime；
-//! 规则 / spec 文档不得残留 tenantless 旧片段。该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文。
+//! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code" }—— tenant + actor aware command /
+//! outbox envelope 签名已经进入 codegen 与 runtime；规则 / spec 文档不得残留 tenantless / actorless 旧片段。
+//! 该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文。
 
 use std::path::{Path, PathBuf};
 
@@ -17,22 +18,37 @@ const FORBIDDEN: &[ForbiddenPattern] = &[
     ForbiddenPattern {
         rule: Rule::CommandWrapper,
         needle: "emit_async(emitter, request, subject_id, idempotency_key)",
-        detail: "command wrapper 必须显式接收 tenant: emit_async(emitter, request, tenant, subject_id, idempotency_key)",
+        detail: "command wrapper 必须显式接收 tenant + actor: emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)",
+    },
+    ForbiddenPattern {
+        rule: Rule::CommandWrapper,
+        needle: "emit_async(emitter, request, tenant, subject_id, idempotency_key)",
+        detail: "command wrapper 必须显式接收 actor: emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)",
     },
     ForbiddenPattern {
         rule: Rule::RuntimeCommandEmit,
         needle: "eventexec::command::emit_async(emitter, dispatch_id, topic, contract_id, payload, subject)",
-        detail: "runtime command emit 必须透传 typed contract + tenant: emit_async(..., contract, tenant, payload, subject_id)",
+        detail: "runtime command emit 必须透传 typed contract + tenant + actor: emit_async(..., contract, tenant, payload, subject_id, actor)",
+    },
+    ForbiddenPattern {
+        rule: Rule::RuntimeCommandEmit,
+        needle: "eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, payload, subject_id)",
+        detail: "runtime command emit 必须透传 actor: emit_async(..., contract, tenant, payload, subject_id, actor)",
     },
     ForbiddenPattern {
         rule: Rule::OutboxEnvelope,
         needle: "OutboxEnvelopeParts::new(CONTRACT, subject)",
-        detail: "outbox envelope parts 必须显式接收 tenant: OutboxEnvelopeParts::new(CONTRACT, tenant, subject)",
+        detail: "outbox envelope parts 必须显式接收 tenant + actor: OutboxEnvelopeParts::new(CONTRACT, tenant, subject, actor)",
+    },
+    ForbiddenPattern {
+        rule: Rule::OutboxEnvelope,
+        needle: "OutboxEnvelopeParts::new(CONTRACT, tenant, subject)",
+        detail: "outbox envelope parts 必须显式接收 actor: OutboxEnvelopeParts::new(CONTRACT, tenant, subject, actor)",
     },
     ForbiddenPattern {
         rule: Rule::ProducerSignature,
         needle: "request: <Cmd>Request, subject_id: String, idempotency_key: Option<String>",
-        detail: "producer wrapper spec 必须在 subject_id 前声明 tenant: vocab::TenantId",
+        detail: "producer wrapper spec 必须使用 typed subject/actor，不得暴露 String subject_id 旧签名",
     },
 ];
 
@@ -153,11 +169,25 @@ OutboxEnvelopeParts::new(CONTRACT, subject)
     }
 
     #[test]
-    fn scan_content_accepts_tenant_aware_fragments() {
+    fn scan_content_reports_actorless_command_and_envelope_fragments() {
         let src = "\
 generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, idempotency_key)
 eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, payload, subject_id)
 OutboxEnvelopeParts::new(CONTRACT, tenant, subject)
+";
+        let findings = scan_content(Path::new("docs/rules/eventbus.md"), src);
+        assert_eq!(findings.len(), 3);
+        assert_eq!(findings[0].rule, Rule::CommandWrapper);
+        assert_eq!(findings[1].rule, Rule::RuntimeCommandEmit);
+        assert_eq!(findings[2].rule, Rule::OutboxEnvelope);
+    }
+
+    #[test]
+    fn scan_content_accepts_actor_aware_fragments() {
+        let src = "\
+generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)
+eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, payload, subject_id, actor)
+OutboxEnvelopeParts::new(CONTRACT, tenant, subject, actor)
 ";
         assert!(scan_content(Path::new("docs/rules/eventbus.md"), src).is_empty());
     }

@@ -38,9 +38,9 @@ pub use idempotency::{
     LeaseToken, SeenState,
 };
 pub use outbox::{
-    BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxRelay, OutboxSource,
-    PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind, RetentionSweeper, Topic,
-    TopicError,
+    BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxPayload, OutboxRelay,
+    OutboxSource, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,
+    RetentionSweeper, Topic, TopicError,
 };
 pub use projection::{
     Lsn, PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrder, SerialInOrderGuarantor,

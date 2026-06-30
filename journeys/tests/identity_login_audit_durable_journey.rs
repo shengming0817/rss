@@ -342,7 +342,7 @@ async fn login_audit_durable_topology() -> Result<()> {
     );
 
     // #1160 端到端 envelope metadata 保真：取首条携 metadata 的消费消息（重投是 metadata 空的 PublishRequest），
-    // 断言 occurred_at / correlation / subjectId 经 emit→outbox.metadata 列→relay hydrate→MemBus→consumer 全链保真。
+    // 断言 broker-visible occurred_at / correlation 经 emit→outbox.metadata 列→relay hydrate→MemBus→consumer 全链保真。
     let seen = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let md = seen
         .iter()
@@ -360,8 +360,8 @@ async fn login_audit_durable_topology() -> Result<()> {
     );
     assert_eq!(
         md.get(KEY_SUBJECT_ID),
-        Some(CANON_USER),
-        "subjectId 应贯通到消费侧（CANON_USER 经 login→envelope.subject_id→outbox.metadata→relay→broker→consumer 全链保真）"
+        None,
+        "subjectId 是 persisted-only metadata，不应经 relay→broker→consumer 外发"
     );
     Ok(())
 }

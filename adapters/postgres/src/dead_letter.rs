@@ -140,7 +140,7 @@ impl DeadLetterStore for PgDeadLetterStore {
 /// Envelope metadata → jsonb object。值保持 wire string 形态，避免 DLQ 重放时发生隐式类型漂移。
 pub(crate) fn metadata_json(metadata: &EnvelopeMetadata) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for (key, value) in metadata.iter() {
+    for (key, value) in metadata.iter_persisted_metadata() {
         if key == KEY_TENANT_AUTHORITY {
             continue;
         }

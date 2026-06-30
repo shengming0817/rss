@@ -21,13 +21,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxRelay,
-    OutboxSource, RetentionSweeper, Topic,
+    BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxPayload,
+    OutboxRelay, OutboxSource, RetentionSweeper, Topic,
 };
 use diport::{
-    DeadLetterSource, DynPublisher, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
-    KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, PublishRequest, Publisher,
-    PublisherError, RESERVED_METADATA_KEYS,
+    DeadLetterSource, DynPublisher, EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR,
+    KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError,
+    OutboxActor, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
 };
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use sqlx::PgConnection;
@@ -102,11 +102,37 @@ impl OutboxMetadata {
     /// 设置 opaque 主体 id（唯一允许的 principal 形态——不容完整 Principal / PII）。
     /// 生产 caller：`PgEmitter::emit` 从 `diport::OutboxEnvelopeParts.subject_id` 组装（T008/#1100）。
     /// KEY_SUBJECT_ID = diport 单源（#1160 A4）。
-    pub(crate) fn with_subject_id(mut self, subject_id: impl Into<String>) -> Self {
+    pub(crate) fn with_subject_id(mut self, subject_id: EnvelopeSubjectId) -> Self {
         self.0.insert(
             KEY_SUBJECT_ID.to_string(),
-            serde_json::Value::String(subject_id.into()),
+            serde_json::Value::String(subject_id.as_str().to_string()),
         );
+        self
+    }
+
+    /// 设置最小化 actor envelope（persisted-only，不进 broker header）。
+    pub(crate) fn with_actor(mut self, actor: OutboxActor) -> Self {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "kind".to_string(),
+            serde_json::Value::String(actor.kind().as_actor_metadata_label().to_string()),
+        );
+        obj.insert(
+            "id".to_string(),
+            serde_json::Value::String(actor.actor_id().as_str().to_string()),
+        );
+        if let Some(tenant) = actor.tenant() {
+            obj.insert(
+                "tenantId".to_string(),
+                serde_json::Value::String(tenant.to_string()),
+            );
+        }
+        obj.insert(
+            "scope".to_string(),
+            serde_json::Value::String(actor.scope().as_label().to_string()),
+        );
+        self.0
+            .insert(KEY_ACTOR.to_string(), serde_json::Value::Object(obj));
         self
     }
 
@@ -432,7 +458,11 @@ impl OutboxSource for PgOutbox {
                     .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                 let idem_key = IdemKey::parse(&event_id)
                     .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                Ok(Entry::new(topic, idem_key, payload))
+                Ok(Entry::new(
+                    topic,
+                    idem_key,
+                    OutboxPayload::from_reviewed_event_bytes(payload),
+                ))
             })
             .collect()
     }
@@ -1057,7 +1087,8 @@ mod tests {
         hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient, unix_secs,
     };
     use diport::{
-        KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
+        EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, MetadataError,
+        OpaqueActorId, OutboxActor, RESERVED_METADATA_KEYS,
     };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -1069,6 +1100,21 @@ mod tests {
 
     fn metadata(occurred_at_secs: i64) -> OutboxMetadata {
         OutboxMetadata::new(occurred_at_secs, tenant())
+    }
+
+    #[allow(clippy::expect_used)]
+    fn subject(raw: &str) -> EnvelopeSubjectId {
+        EnvelopeSubjectId::from_opaque(raw).expect("valid envelope subject")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn actor(raw: &str) -> OutboxActor {
+        OutboxActor::scoped(
+            vocab::PrincipalKind::Admin,
+            OpaqueActorId::from_opaque(raw).expect("valid actor id"),
+            tenant(),
+            vocab::ScopedTenant::Tenant,
+        )
     }
 
     // #1212 dlx 分流谓词表驱动：permanent 首投（new_count=1）即 dlx；transient 仅预算耗尽
@@ -1099,7 +1145,7 @@ mod tests {
         let env = OutboxEnvelope::new(
             "identity".to_string(),
             "contract-1".to_string(),
-            metadata(1_700_000_000).with_subject_id("tenant-42"),
+            metadata(1_700_000_000).with_subject_id(subject("tenant-42")),
         );
         assert_eq!(env.domain(), "identity");
         assert_eq!(env.contract_id(), "contract-1");
@@ -1130,13 +1176,7 @@ mod tests {
     // fail-closed 拒；非 reserved key 接受并经 funnel 序列化（occurredAt 由 new 构造期注入）。
     #[test]
     fn metadata_try_insert_rejects_reserved_key() {
-        for reserved in [
-            "trace",
-            "correlation",
-            "principal",
-            "occurredAt",
-            "tenantId",
-        ] {
+        for reserved in RESERVED_METADATA_KEYS {
             let mut m = metadata(0);
             assert_eq!(
                 m.try_insert(reserved, serde_json::Value::Bool(true)),
@@ -1166,7 +1206,7 @@ mod tests {
         let env = super::OutboxEnvelope::new(
             "identity".to_string(),
             "c".to_string(),
-            metadata(1_700_000_000).with_subject_id("subj-1"),
+            metadata(1_700_000_000).with_subject_id(subject("subj-1")),
         );
         let json = env.metadata_json();
         assert!(
@@ -1215,12 +1255,13 @@ mod tests {
     // 与 occurred_at / subjectId 共存。键序 order-independent 断言——`serde_json::Map` 序列化次序随
     // `preserve_order` feature 变（workspace 统一 on=插入序 / 隔离 off=字母序），故逐 key-value 子串校验。
     #[test]
-    fn sealed_setters_write_reserved_keys() {
+    fn sealed_setters_write_reserved_keys() -> Result<(), serde_json::Error> {
         let env = super::OutboxEnvelope::new(
             "identity".to_string(),
             "identity.session-created".to_string(),
             metadata(1_700_000_000)
-                .with_subject_id("subj-1")
+                .with_subject_id(subject("subj-1"))
+                .with_actor(actor("actor-1"))
                 .with_trace("trace-abc")
                 .with_correlation("corr-xyz"),
         );
@@ -1236,6 +1277,12 @@ mod tests {
                 "sealed setter metadata 应含 {kv}: {json}"
             );
         }
+        let parsed: serde_json::Value = serde_json::from_str(&json)?;
+        assert_eq!(parsed["actor"]["kind"], "admin");
+        assert_eq!(parsed["actor"]["id"], "actor-1");
+        assert_eq!(parsed["actor"]["scope"], "tenant");
+        assert_eq!(parsed["actor"]["tenantId"], TENANT);
+        Ok(())
     }
 
     // #1193 anti-vacuity：sealed setter 注入成功，而业务 free-form try_insert 对同名 reserved key 仍
@@ -1255,7 +1302,7 @@ mod tests {
     // #1193 drift-lock：sealed setter 注入的 trace / correlation key 必属 reserved 集（注入集 ⊆ 拒绝集）。
     #[test]
     fn reserved_setter_keys_are_reserved() {
-        for key in [KEY_TRACE, KEY_CORRELATION] {
+        for key in [KEY_TRACE, KEY_CORRELATION, KEY_ACTOR] {
             assert!(
                 RESERVED_METADATA_KEYS.contains(&key),
                 "sealed setter 写的 {key} 必须在 RESERVED_METADATA_KEYS 内"
@@ -1314,6 +1361,19 @@ mod tests {
         assert_eq!(
             migration_values, const_values,
             "outbox status const 集与 migration 0002 CHECK 漂移"
+        );
+    }
+
+    #[test]
+    fn runtime_serving_migration_grants_current_outbox_runtime_dml_to_rss_app() {
+        const MIGRATION: &str = include_str!("../migrations/0030_grant_runtime_serving.sql");
+        assert!(
+            MIGRATION.contains("GRANT SELECT, INSERT, UPDATE, DELETE ON outbox TO rss_app"),
+            "current runtime uses rss_app PgStore for outbox write, relay, sampler, and sweeper until dedicated outbox roles land"
+        );
+        assert!(
+            MIGRATION.contains("ON inbox_dedup TO rss_app"),
+            "anti-vacuity: runtime serving migration should still contain serving grants"
         );
     }
 

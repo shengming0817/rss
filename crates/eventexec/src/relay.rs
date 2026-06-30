@@ -656,7 +656,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use consistency::outbox::{BacklogSample, Disposition, Entry, Topic};
+    use consistency::outbox::{BacklogSample, Disposition, Entry, OutboxPayload, Topic};
     use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use diport::ManagedResource;
     use primitives::healthz::{HealthStatus, ProbeName};
@@ -808,7 +808,7 @@ mod tests {
         Entry::new(
             Topic::parse("session.created").unwrap(),
             consistency::idempotency::IdemKey::parse("evt-001").unwrap(),
-            vec![1u8, 2, 3],
+            OutboxPayload::from_reviewed_event_bytes(vec![1u8, 2, 3]),
         )
     }
 

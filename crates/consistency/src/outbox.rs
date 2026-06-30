@@ -251,6 +251,40 @@ impl PartitionKey {
     }
 }
 
+/// 已审查可持久化的 outbox payload 字节。
+///
+/// 私有字段 + 命名构造器把「裸 `Vec<u8>`」从 [`Entry::new`] 公共边界移走；调用方必须在 generated DTO /
+/// 领域事件编码完成后显式标记这些字节已过事件 payload 边界审查。`Debug` 恒脱敏，避免 outbox entry
+/// 断言 / 日志把 payload 原文带出。
+#[derive(Clone, PartialEq, Eq)]
+pub struct OutboxPayload(Vec<u8>);
+
+impl OutboxPayload {
+    /// 从已审查的事件 payload 字节构造。
+    pub fn from_reviewed_event_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// 借出底层字节，仅供存储 / 发布边界使用。
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// 消费式取回底层字节。
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for OutboxPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboxPayload")
+            .field("len", &self.0.len())
+            .field("bytes", &"<redacted>")
+            .finish()
+    }
+}
+
 /// 持久化 outbox 条目（私有字段；payload 是已编码字节，由 emit 期写入 —— eventbus.md §命名与 payload）。
 ///
 /// engine 类型——**不** derive serde（ADR-004 C6）；wire 编解码在 generated/eventexec 边界完成。
@@ -258,12 +292,16 @@ impl PartitionKey {
 pub struct Entry {
     topic: Topic,
     idem_key: crate::idempotency::IdemKey,
-    payload: Vec<u8>,
+    payload: OutboxPayload,
 }
 
 impl Entry {
     /// 由 topic + 幂等 key + 已编码 payload 构造（受控 funnel；命令 topic 构造收口于此 —— eventbus.md）。
-    pub fn new(topic: Topic, idem_key: crate::idempotency::IdemKey, payload: Vec<u8>) -> Self {
+    pub fn new(
+        topic: Topic,
+        idem_key: crate::idempotency::IdemKey,
+        payload: OutboxPayload,
+    ) -> Self {
         Self {
             topic,
             idem_key,
@@ -283,7 +321,7 @@ impl Entry {
 
     /// 已编码 payload。
     pub fn payload(&self) -> &[u8] {
-        &self.payload
+        self.payload.as_bytes()
     }
 }
 
@@ -408,8 +446,8 @@ pub trait OutboxBacklog {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogSample, Disposition, Entry, HandleResult, PartitionKey, PartitionKeyError,
-        PermanentError, PermanentErrorKind, Topic, TopicError,
+        BacklogSample, Disposition, Entry, HandleResult, OutboxPayload, PartitionKey,
+        PartitionKeyError, PermanentError, PermanentErrorKind, Topic, TopicError,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -589,10 +627,36 @@ mod tests {
         let topic = Topic::parse("session.created").unwrap();
         let key = IdemKey::parse("evt-1").unwrap();
         let payload = vec![1u8, 2, 3];
-        let entry = Entry::new(topic.clone(), key.clone(), payload.clone());
+        let entry = Entry::new(
+            topic.clone(),
+            key.clone(),
+            OutboxPayload::from_reviewed_event_bytes(payload.clone()),
+        );
         assert_eq!(entry.topic(), &topic);
         assert_eq!(entry.idem_key(), &key);
         assert_eq!(entry.payload(), payload.as_slice());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    fn entry_debug_redacts_payload_marker() {
+        let topic = Topic::parse("session.created").unwrap();
+        let key = IdemKey::parse("evt-redact").unwrap();
+        let entry = Entry::new(
+            topic,
+            key,
+            OutboxPayload::from_reviewed_event_bytes(b"SECRET_PAYLOAD_MARKER".to_vec()),
+        );
+        let dbg = format!("{entry:?}");
+        assert!(
+            !dbg.contains("SECRET_PAYLOAD_MARKER"),
+            "Entry Debug must not leak payload bytes: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "redaction marker missing: {dbg}"
+        );
     }
 
     // BacklogSample::new funnel + 两访问器借出（非零值往返）。

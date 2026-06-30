@@ -24,10 +24,12 @@ use std::collections::BTreeMap;
 
 /// envelope reserved key 单源（producer funnel + wire funnel + adapter 映射共用，消除漂移）。
 /// 业务 [`EnvelopeMetadata::try_insert`] 对这些 key fail-closed 拒；只 adapter 受控注入点可写。
-pub const RESERVED_METADATA_KEYS: [&str; 6] = [
+pub const RESERVED_METADATA_KEYS: [&str; 8] = [
     KEY_TRACE,
     KEY_CORRELATION,
     KEY_PRINCIPAL,
+    KEY_ACTOR,
+    KEY_SUBJECT_ID,
     KEY_OCCURRED_AT,
     KEY_TENANT_ID,
     KEY_TENANT_AUTHORITY,
@@ -41,11 +43,13 @@ pub const KEY_TRACE: &str = "trace";
 pub const KEY_CORRELATION: &str = "correlation";
 /// reserved：opaque principal（源待安全决策，本轮仅留 slot）。
 pub const KEY_PRINCIPAL: &str = "principal";
+/// reserved：最小化 actor envelope（persisted-only；不进 broker header）。
+pub const KEY_ACTOR: &str = "actor";
 /// reserved：canonical tenant id（认证 / co-tx 边界盖章，消费 DLX / RLS scope 使用）。
 pub const KEY_TENANT_ID: &str = "tenantId";
 /// reserved：tenant authority token（relay 签发，consumer 写 DLX 前验签）。
 pub const KEY_TENANT_AUTHORITY: &str = "tenantAuthority";
-/// 非-reserved 但 PII：opaque 主体标识（业务可经 envelope 携带；`Debug` 脱敏）。
+/// reserved：opaque 事件主体标识（persisted-only；业务不能经 free-form metadata 写入）。
 pub const KEY_SUBJECT_ID: &str = "subjectId";
 
 /// [`EnvelopeMetadata::try_insert`] 失败原因。
@@ -82,8 +86,30 @@ impl EnvelopeMetadata {
         self.0.get(key).map(String::as_str)
     }
 
-    /// 遍历全部键值对（确定性序）。adapter publisher 映射进 broker header 经此。
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+    /// broker transport-safe 视图（确定性序）。
+    ///
+    /// 只允许诊断 / 租户权威元数据进入 broker headers/user-properties。`subjectId` / `principal` / `actor`
+    /// 以及所有业务 free-form metadata 均为 persisted-only，避免新 publisher 误把完整 metadata 外发。
+    pub fn iter_transport_headers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .filter(|(k, _)| is_transport_header_key(k.as_str()))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// 判断单个 metadata key 是否允许进入 broker transport headers/user-properties。
+    ///
+    /// 入站 subscriber 在 rehydrate 前也必须使用同一 allowlist，避免外部 producer 伪造 persisted-only
+    /// `subjectId` / `principal` / `actor` 字段进入消费侧 [`Message`](crate::Message) metadata。
+    pub fn is_transport_header_key(key: &str) -> bool {
+        is_transport_header_key(key)
+    }
+
+    /// persisted-only 全量视图（确定性序）。
+    ///
+    /// 仅供持久化边界（如 dead-letter metadata JSON）使用；broker publisher 必须使用
+    /// [`EnvelopeMetadata::iter_transport_headers`]。
+    pub fn iter_persisted_metadata(&self) -> impl Iterator<Item = (&str, &str)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
@@ -121,6 +147,13 @@ impl EnvelopeMetadata {
     }
 }
 
+fn is_transport_header_key(key: &str) -> bool {
+    matches!(
+        key,
+        KEY_TRACE | KEY_CORRELATION | KEY_OCCURRED_AT | KEY_TENANT_ID | KEY_TENANT_AUTHORITY
+    )
+}
+
 /// PII / authority 边界（类型层，对标 [`crate::OutboxEnvelopeParts`]）：手写 `Debug` 对 `subjectId` /
 /// `principal` / `tenantAuthority`（opaque 主体或授权材料）值输出 `<redacted>`；`occurred_at` / `trace` /
 /// `correlation` 是路由 / 观测元数据，可观测。INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level =
@@ -129,7 +162,11 @@ impl std::fmt::Debug for EnvelopeMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut m = f.debug_map();
         for (k, v) in self.0.iter() {
-            if k == KEY_SUBJECT_ID || k == KEY_PRINCIPAL || k == KEY_TENANT_AUTHORITY {
+            if k == KEY_SUBJECT_ID
+                || k == KEY_PRINCIPAL
+                || k == KEY_ACTOR
+                || k == KEY_TENANT_AUTHORITY
+            {
                 m.entry(&k, &"<redacted>");
             } else {
                 m.entry(&k, &v);
@@ -142,8 +179,9 @@ impl std::fmt::Debug for EnvelopeMetadata {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
-        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
+        EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
+        KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, MetadataError,
+        RESERVED_METADATA_KEYS,
     };
 
     #[test]
@@ -151,9 +189,8 @@ mod tests {
         let mut md = EnvelopeMetadata::empty();
         assert_eq!(md.try_insert("requestPath", "/login"), Ok(()));
         assert_eq!(md.get("requestPath"), Some("/login"));
-        // subjectId 非 reserved（业务可携 opaque 主体）。
-        assert_eq!(md.try_insert(KEY_SUBJECT_ID, "user-7"), Ok(()));
-        assert_eq!(md.get(KEY_SUBJECT_ID), Some("user-7"));
+        assert_eq!(md.try_insert("requestPath", "/profile"), Ok(()));
+        assert_eq!(md.get("requestPath"), Some("/profile"));
     }
 
     #[test]
@@ -191,19 +228,66 @@ mod tests {
     }
 
     #[test]
-    fn iter_and_len_reflect_contents() {
+    fn iter_persisted_and_len_reflect_contents() {
         let mut md = EnvelopeMetadata::empty();
         assert!(md.is_empty());
         md.insert_wire_pair(KEY_OCCURRED_AT, "1");
         md.insert_wire_pair(KEY_CORRELATION, "c");
-        assert_eq!(md.len(), 2);
+        md.insert_wire_pair(KEY_SUBJECT_ID, "subj");
+        md.insert_wire_pair(KEY_ACTOR, "actor-json");
+        let _ = md.try_insert("requestPath", "/login");
+        assert_eq!(md.len(), 5);
         // BTreeMap 确定性序：correlation < occurredAt（字典序）。
-        let pairs: Vec<(&str, &str)> = md.iter().collect();
-        assert_eq!(pairs, vec![(KEY_CORRELATION, "c"), (KEY_OCCURRED_AT, "1")]);
+        let pairs: Vec<(&str, &str)> = md.iter_persisted_metadata().collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (KEY_ACTOR, "actor-json"),
+                (KEY_CORRELATION, "c"),
+                (KEY_OCCURRED_AT, "1"),
+                ("requestPath", "/login"),
+                (KEY_SUBJECT_ID, "subj")
+            ]
+        );
     }
 
     #[test]
-    fn reserved_keys_single_source_is_exactly_six() {
+    fn iter_transport_headers_is_allowlist_and_excludes_sensitive_metadata() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TRACE, "trace-1");
+        md.insert_wire_pair(KEY_CORRELATION, "corr-1");
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        md.insert_wire_pair(KEY_TENANT_ID, "f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        md.insert_wire_pair(KEY_TENANT_AUTHORITY, "signed-authority");
+        md.insert_wire_pair(KEY_SUBJECT_ID, "SECRET_SUBJECT");
+        md.insert_wire_pair(KEY_PRINCIPAL, "SECRET_PRINCIPAL");
+        md.insert_wire_pair(KEY_ACTOR, "SECRET_ACTOR");
+        let _ = md.try_insert("requestPath", "/login");
+
+        let pairs: Vec<(&str, &str)> = md.iter_transport_headers().collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (KEY_CORRELATION, "corr-1"),
+                (KEY_OCCURRED_AT, "1700000000"),
+                (KEY_TENANT_AUTHORITY, "signed-authority"),
+                (KEY_TENANT_ID, "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+                (KEY_TRACE, "trace-1"),
+            ]
+        );
+        assert!(
+            pairs.iter().all(|(k, v)| *k != KEY_SUBJECT_ID
+                && *k != KEY_PRINCIPAL
+                && *k != KEY_ACTOR
+                && *v != "SECRET_SUBJECT"
+                && *v != "SECRET_PRINCIPAL"
+                && *v != "SECRET_ACTOR"),
+            "transport view leaked sensitive metadata: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keys_single_source_is_exactly_eight() {
         // drift-lock：reserved 集恰为 trace/correlation/principal/occurredAt/tenantId（与 postgres OutboxMetadata
         // funnel + migration CHECK 同源；下游 import 本 const，不另立第二真源）。
         assert_eq!(
@@ -212,6 +296,8 @@ mod tests {
                 KEY_TRACE,
                 KEY_CORRELATION,
                 KEY_PRINCIPAL,
+                KEY_ACTOR,
+                KEY_SUBJECT_ID,
                 KEY_OCCURRED_AT,
                 KEY_TENANT_ID,
                 KEY_TENANT_AUTHORITY,
@@ -240,16 +326,17 @@ mod pii_debug {
     //! `EnvelopeMetadata` 的 `subjectId` / `principal` / `tenantAuthority` 值 Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::{
-        EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
-        KEY_TENANT_AUTHORITY,
+        EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
+        KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY,
     };
 
     #[test]
     fn debug_redacts_subject_principal_and_tenant_authority_shows_observable() {
         let mut md = EnvelopeMetadata::empty();
         // anti-vacuity：subjectId 值若不脱敏会出现在普通 map Debug 中。
-        let _ = md.try_insert(KEY_SUBJECT_ID, "SECRET_SUBJECT");
+        md.insert_wire_pair(KEY_SUBJECT_ID, "SECRET_SUBJECT");
         md.insert_wire_pair(KEY_PRINCIPAL, "SECRET_PRINCIPAL");
+        md.insert_wire_pair(KEY_ACTOR, "SECRET_ACTOR");
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, "SECRET_TENANT_AUTHORITY");
         md.insert_wire_pair(KEY_CORRELATION, "corr-observable");
         md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
@@ -260,6 +347,7 @@ mod pii_debug {
             !dbg.contains("SECRET_TENANT_AUTHORITY"),
             "tenantAuthority 值泄漏: {dbg}"
         );
+        assert!(!dbg.contains("SECRET_ACTOR"), "actor 值泄漏: {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         // 路由 / 观测元数据可见。
         assert!(dbg.contains("corr-observable"), "correlation 应可见: {dbg}");

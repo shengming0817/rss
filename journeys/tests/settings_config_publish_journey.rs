@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use diport::{Subscriber, Topic};
+use common::memory_tenant_signer;
+use diport::{KEY_TENANT_AUTHORITY, OpaqueActorId, OutboxActor, Subscriber, Topic};
 use futures::StreamExt;
 use generated::event::settings_v1::{
     SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
@@ -28,12 +29,23 @@ use settings::{SettingsDomain, SettingsService, empty_secret_repo};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
+mod common;
+
 /// canonical UUID 种子租户（TenantId::parse 接受形态）。
 const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 /// config-version-changed event 契约 topic（settings 发布）。
 const VERSION_CHANGED_TOPIC: &str = "settings.config-version-changed";
 /// 固定发布时刻（确定性断言）。
 const NOW_SECS: u64 = 1_000;
+
+fn actor(tenant: TenantId) -> Result<OutboxActor> {
+    Ok(OutboxActor::scoped(
+        vocab::PrincipalKind::Admin,
+        OpaqueActorId::from_opaque("settings-journey-actor")?,
+        tenant,
+        vocab::ScopedTenant::Tenant,
+    ))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
@@ -44,7 +56,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     //    secret-publish 业务路由组（config 服务 + secret 仓储端口构造器注入）。
     let domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
-            MemEmitter::new(bus.clone()),
+            MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         )),
         empty_secret_repo(),
@@ -85,13 +97,15 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
 
     // 4. 发布配置：注入 MemEmitter + 固定时钟，CAS 写 v1 + 发 version-changed fact。
     let service = SettingsService::with_seed(
-        MemEmitter::new(bus.clone()),
+        MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let tenant = TenantId::parse(CANON_TENANT)?;
+    let actor = actor(tenant)?;
     let response = service
         .publish_config(
             tenant,
+            actor,
             SettingsConfigPublishRequest {
                 key: "app.timeout".to_string(),
                 value: "30s".to_string(),
@@ -105,6 +119,10 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("expected config-version-changed event"))?;
+    assert!(
+        message.metadata.get(KEY_TENANT_AUTHORITY).is_some(),
+        "demo memory provider must carry signed tenantAuthority metadata"
+    );
     let payload: SettingsConfigVersionChangedPayload =
         serde_json::from_slice(message.payload.as_bytes())?;
     assert_eq!(payload.key, "app.timeout");
@@ -133,15 +151,17 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
 
     // 3. service（with_seed 注入 MemEmitter + 固定时钟）。
     let service = SettingsService::with_seed(
-        MemEmitter::new(bus.clone()),
+        MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let tenant = TenantId::parse(CANON_TENANT)?;
+    let actor = actor(tenant)?;
 
     // 4. publish v1 + v2。
     service
         .publish_config(
             tenant,
+            actor.clone(),
             SettingsConfigPublishRequest {
                 key: "app.k".to_string(),
                 value: "v1".to_string(),
@@ -151,6 +171,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
     service
         .publish_config(
             tenant,
+            actor.clone(),
             SettingsConfigPublishRequest {
                 key: "app.k".to_string(),
                 value: "v2".to_string(),
@@ -159,7 +180,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
         .await?;
 
     // 5. rollback to v1（生成 v3）。
-    let resp = service.rollback(tenant, "app.k", 1).await?;
+    let resp = service.rollback(tenant, actor, "app.k", 1).await?;
     assert_eq!(resp.data.version, 3, "rollback 应生成 v3");
 
     // 6. 从订阅流读 3 条事件。

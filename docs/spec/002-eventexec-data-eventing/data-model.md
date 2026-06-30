@@ -33,7 +33,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | topic | text | dotted topic |
 | contract_id | text | 契约 id |
 | payload | bytea | 已编码 payload |
-| metadata | jsonb | envelope: trace/correlation/principal/occurred_at；`principal` 仅 opaque subject id（UUID），不序列化完整 Principal 或含 PII（refs: FR-020） |
+| metadata | jsonb | envelope: broker-visible `trace`/`correlation`/`tenantId`/`tenantAuthority`/`occurredAt`；persisted-only `subjectId`/`actor`；不序列化完整 Principal 或含 PII（refs: FR-020） |
 | status | text | pending/publishing/published/dlx（值集冻结） |
 | retry_count | int default 0 | |
 | retry_after | timestamptz NULL | 瞬态失败延后 |

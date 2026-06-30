@@ -223,11 +223,11 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-017**: 命令分发 MUST 经 codegen triple funnel（业务→`<cmd>::emit_async` wrapper→runtime `command::emit_async`→`outbox::Entry::new`），MUST 禁裸调 runtime emit；DispatchId + claimer 两阶段幂等；producer/consumer/wiring 同源 key。
 - **FR-018**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0/#997 冻结签名内兑现 body，不改公共接缝；破坏式 wire 变更走 pre-GA 窗口原地改 + 扇出闭环。
 - **FR-019**: 各一致性等级 MUST 配对应治理/测试：L0 表驱动、L1 事务完整性、L2 outbox 原子性+consumer 幂等、L3 replay+投影重建、L4 状态机+超时+fencing；新增治理机制 MUST ≥ Medium（严禁 Soft）。
-- **FR-020**: outbox/event envelope 的 reserved key（trace/correlation/principal/occurred_at）MUST 由受控构造注入，业务 MUST 不可经 metadata 伪造；broker 凭据 / PII MUST 不进 wire 与默认日志。envelope `principal` 字段 MUST 仅携带不透明 subject id（opaque UUID），不得序列化完整 Principal 或含 email/姓名/phone 等 PII（理由：outbox metadata 是可 replay 且跨进程 AMQP 传播的持久通道，PII 风险高于 audit log）。
+- **FR-020**: outbox/event envelope 的 reserved key（trace/correlation/subjectId/principal/actor/occurredAt/tenantId/tenantAuthority）MUST 由受控构造注入，业务 MUST 不可经 metadata 伪造；broker 凭据 / PII MUST 不进 wire 与默认日志。`subjectId` 与 `actor` MUST 使用 typed opaque/newtype 入口写入 persisted metadata，MUST NOT 进入 AMQP header / MQTT user property；完整 `Principal` 或含 email/姓名/phone/token 等 PII 不得序列化进 envelope。
 
 ### Key Entities *(include if feature involves data)*
 
-- **Outbox Entry**：已持久化的待发事件——topic + idem_key（EventId）+ 已编码 payload + envelope（trace/correlation/principal/occurred_at）+ 投递状态（pending/publishing/published/dlx）+ retry 计数 + retry_after + lease/fencing token。
+- **Outbox Entry**：已持久化的待发事件——topic + idem_key（EventId）+ 已编码 payload（`OutboxPayload`）+ envelope（transport-safe trace/correlation/tenant authority + persisted-only subject/actor）+ 投递状态（pending/publishing/published/dlx）+ retry 计数 + retry_after + lease/fencing token。
 - **Idempotency / Inbox Record**：消费侧去重记录——idem key + consumer group + lease/done 状态 + 命名空间（per-domain）。
 - **Dead Letter Record**：永久失败或预算耗尽的 entry——原始 entry 引用 + 错误摘要 + 尝试次数 + 首末尝试时间。
 - **Saga Journal Entry**：saga 执行轨迹——saga id + step name + 状态（executing/completed/compensating/compensated/failed）+ output + 错误 + 时间。

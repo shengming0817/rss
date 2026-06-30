@@ -342,7 +342,7 @@ impl CapturedEvent {
             payload: entry.payload().to_vec(),
             contract_id: envelope.contract().contract_id().to_string(),
             env_tenant: envelope.tenant().to_string(),
-            subject_id: envelope.subject_id().to_string(),
+            subject_id: envelope.subject_id().as_str().to_string(),
         }
     }
 }
@@ -557,8 +557,8 @@ mod tests {
     use super::{Credential, InMemCredentialRepo, InMemSessionLifecycle, TenantId};
     use crate::domain::{AuthOutcome, IdentityError, LoginIdentifier, Session, SessionId};
     use crate::ports::{CredentialRepo, SessionLifecycle};
-    use consistency::{Entry, IdemKey, Topic};
-    use diport::OutboxEnvelopeParts;
+    use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+    use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
     use std::time::{Duration, SystemTime};
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -611,7 +611,7 @@ mod tests {
         Entry::new(
             Topic::parse("identity.session-created").expect("topic parses"),
             IdemKey::parse("evt-1").expect("idem key parses"),
-            b"{}".to_vec(),
+            OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
         )
     }
 
@@ -619,7 +619,13 @@ mod tests {
         OutboxEnvelopeParts::new(
             generated::event::identity_v1::session_created::CONTRACT,
             tid(TENANT_A),
-            "subject-1",
+            EnvelopeSubjectId::from_opaque("subject-1").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                OpaqueActorId::from_opaque("actor-1").expect("actor"),
+                tid(TENANT_A),
+                vocab::ScopedTenant::SelfOnly,
+            ),
         )
     }
 

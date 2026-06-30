@@ -14,6 +14,7 @@
 //! （receiver 即 `Stream`），不绑 tokio runtime。
 
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -92,8 +93,9 @@ impl Publisher for MemPublisher {
             request.event_id().as_str().to_string()
         };
         let topic = request.topic().as_str().to_string();
-        // metadata clone：先借用完毕再 into_payload（消费 request 所有权）。
-        let metadata = request.metadata().clone();
+        // Memory bus is a broker substitute: expose only transport-safe metadata
+        // to consumers, matching AMQP/MQTT header semantics.
+        let metadata = transport_metadata(request.metadata());
         let payload = request.into_payload();
         let senders = inner.topics.entry(topic).or_default();
         // 投递 clone 给每个订阅者；receiver 已 drop（unbounded_send Err）则剔除（对标 gochannel 退订清理）。
@@ -154,22 +156,131 @@ impl Subscriber for MemSubscriber {
 /// 闭合 demo 侧 EventId 传播（消费侧 `run_consumer` 据此幂等去重）。
 pub struct MemEmitter {
     bus: MemBus,
+    tenant_signer: Option<Arc<dyn TenantMetadataSigner>>,
 }
 
 impl MemEmitter {
     /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）。
     pub fn new(bus: MemBus) -> Self {
-        Self { bus }
+        Self {
+            bus,
+            tenant_signer: None,
+        }
+    }
+
+    /// 绑定 tenant metadata signer，供 demo/journey provider 演练 consumer fail-closed tenantAuthority 语义。
+    pub fn with_tenant_metadata_signer(bus: MemBus, signer: Arc<dyn TenantMetadataSigner>) -> Self {
+        Self {
+            bus,
+            tenant_signer: Some(signer),
+        }
     }
 }
 
-/// Envelope metadata emitted by in-mem outbox paths. Keep `MemEmitter` and
-/// `MemSessionLifecycle` aligned so demo providers exercise the same tenant
-/// envelope shape as the durable postgres path.
-fn envelope_metadata(envelope: &OutboxEnvelopeParts) -> diport::EnvelopeMetadata {
+/// tenantAuthority signing adapter for memory providers. The trait is defined in this adapter so
+/// `memory` does not depend on `eventexec`; composition roots bridge it to the real authority.
+pub trait TenantMetadataSigner: Send + Sync {
+    /// Sign the tenant/topic/message binding as broker-visible tenant authority metadata.
+    fn sign_tenant_metadata(
+        &self,
+        binding: TenantMetadataBinding<'_>,
+    ) -> Result<String, Box<dyn Error + Send + Sync>>;
+}
+
+#[derive(Debug)]
+struct TenantMetadataSignFailure {
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl std::fmt::Display for TenantMetadataSignFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("tenant metadata signing failed")
+    }
+}
+
+impl Error for TenantMetadataSignFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// Tenant authority binding passed to [`TenantMetadataSigner`].
+#[derive(Debug, Clone, Copy)]
+pub struct TenantMetadataBinding<'a> {
+    tenant: vocab::TenantId,
+    domain: &'a str,
+    contract_id: &'a str,
+    topic: &'a str,
+    message_id: &'a str,
+}
+
+impl<'a> TenantMetadataBinding<'a> {
+    /// Construct a transport tenant metadata binding.
+    pub fn new(
+        tenant: vocab::TenantId,
+        domain: &'a str,
+        contract_id: &'a str,
+        topic: &'a str,
+        message_id: &'a str,
+    ) -> Self {
+        Self {
+            tenant,
+            domain,
+            contract_id,
+            topic,
+            message_id,
+        }
+    }
+
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    pub fn domain(&self) -> &'a str {
+        self.domain
+    }
+
+    pub fn contract_id(&self) -> &'a str {
+        self.contract_id
+    }
+
+    pub fn topic(&self) -> &'a str {
+        self.topic
+    }
+
+    pub fn message_id(&self) -> &'a str {
+        self.message_id
+    }
+}
+
+/// Broker-visible envelope metadata emitted by in-mem outbox paths. Keep `MemEmitter` and
+/// `MemSessionLifecycle` aligned so demo providers exercise transport-safe tenant metadata.
+fn envelope_metadata(
+    envelope: &OutboxEnvelopeParts,
+    topic: &str,
+    message_id: &str,
+    signer: Option<&dyn TenantMetadataSigner>,
+) -> Result<diport::EnvelopeMetadata, Box<dyn Error + Send + Sync>> {
     let mut metadata = diport::EnvelopeMetadata::empty();
     metadata.insert_wire_pair(diport::KEY_TENANT_ID, envelope.tenant().to_string());
-    metadata.insert_wire_pair(diport::KEY_SUBJECT_ID, envelope.subject_id().to_string());
+    if let Some(signer) = signer {
+        let token = signer.sign_tenant_metadata(TenantMetadataBinding::new(
+            envelope.tenant(),
+            envelope.contract().domain(),
+            envelope.contract().contract_id(),
+            topic,
+            message_id,
+        ))?;
+        metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    }
+    Ok(metadata)
+}
+
+fn transport_metadata(source: &diport::EnvelopeMetadata) -> diport::EnvelopeMetadata {
+    let mut metadata = diport::EnvelopeMetadata::empty();
+    for (key, value) in source.iter_transport_headers() {
+        metadata.insert_wire_pair(key, value);
+    }
     metadata
 }
 
@@ -179,12 +290,17 @@ impl OutboxEmitter for MemEmitter {
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
+        let topic = entry.topic().as_str();
+        let message_id = entry.idem_key().as_str();
         let request = PublishRequest::new(
-            Topic::new(entry.topic().as_str()),
-            MessageId::new(entry.idem_key().as_str()),
+            Topic::new(topic),
+            MessageId::new(message_id),
             entry.payload().to_vec(),
         )
-        .with_metadata(envelope_metadata(&envelope));
+        .with_metadata(
+            envelope_metadata(&envelope, topic, message_id, self.tenant_signer.as_deref())
+                .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
+        );
         self.bus
             .publisher()
             .publish(request)
@@ -211,6 +327,7 @@ impl OutboxEmitter for MemEmitter {
 /// 同一 helper 注入，保证 demo consumer DLX 路径也能读取 tenantId。
 pub struct MemSessionLifecycle {
     bus: MemBus,
+    tenant_signer: Option<Arc<dyn TenantMetadataSigner>>,
     /// `SessionId` → `(Session, revoked_flag)`：进程内会话 store（demo logout/查询可见 login 写入）。
     sessions: Arc<Mutex<HashMap<SessionId, (Session, bool)>>>,
 }
@@ -220,6 +337,16 @@ impl MemSessionLifecycle {
     pub fn new(bus: MemBus) -> Self {
         Self {
             bus,
+            tenant_signer: None,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 绑定 tenant metadata signer，供 demo/journey provider 演练 consumer fail-closed tenantAuthority 语义。
+    pub fn with_tenant_metadata_signer(bus: MemBus, signer: Arc<dyn TenantMetadataSigner>) -> Self {
+        Self {
+            bus,
+            tenant_signer: Some(signer),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -240,12 +367,17 @@ impl SessionLifecycle for MemSessionLifecycle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(session.id().clone(), (session, false));
+        let topic = entry.topic().as_str();
+        let message_id = entry.idem_key().as_str();
         let request = PublishRequest::new(
-            Topic::new(entry.topic().as_str()),
-            MessageId::new(entry.idem_key().as_str()),
+            Topic::new(topic),
+            MessageId::new(message_id),
             entry.payload().to_vec(),
         )
-        .with_metadata(envelope_metadata(&envelope));
+        .with_metadata(
+            envelope_metadata(&envelope, topic, message_id, self.tenant_signer.as_deref())
+                .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
+        );
         self.bus
             .publisher()
             .publish(request)
@@ -1020,6 +1152,38 @@ mod tests {
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TOPIC: &str = "identity.session-created";
 
+    #[derive(Default)]
+    struct RecordingTenantSigner {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingTenantSigner {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl TenantMetadataSigner for RecordingTenantSigner {
+        fn sign_tenant_metadata(
+            &self,
+            binding: TenantMetadataBinding<'_>,
+        ) -> Result<String, Box<dyn Error + Send + Sync>> {
+            let call = format!(
+                "{}|{}|{}|{}|{}",
+                binding.tenant(),
+                binding.domain(),
+                binding.contract_id(),
+                binding.topic(),
+                binding.message_id()
+            );
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(call);
+            Ok("signed-tenant-authority".to_string())
+        }
+    }
+
     // 测试构造 / 断言用 expect：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
     #[allow(clippy::expect_used)]
     fn sample_event() -> AuditEvent {
@@ -1131,12 +1295,20 @@ mod tests {
         let entry = Entry::new(
             consistency::Topic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-77").expect("idem"),
-            b"payload".to_vec(),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
+        let tenant =
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let env = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", TOPIC),
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
-            "subj-opaque",
+            tenant,
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::SelfOnly,
+            ),
         );
         MemEmitter::new(bus.clone())
             .emit(entry, env)
@@ -1152,8 +1324,63 @@ mod tests {
         );
         assert_eq!(
             msg.metadata.get(diport::KEY_SUBJECT_ID),
-            Some("subj-opaque"),
-            "MemEmitter 应透传 subjectId metadata"
+            None,
+            "MemEmitter 不应把 persisted-only subjectId 投递给 consumer"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_ACTOR),
+            None,
+            "MemEmitter 不应把 persisted-only actor 投递给 consumer"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_emitter_signed_path_adds_tenant_authority() {
+        let bus = MemBus::new();
+        let signer = Arc::new(RecordingTenantSigner::default());
+        let token = CancellationToken::new();
+        let mut stream = bus
+            .subscriber()
+            .subscribe(Topic::new(TOPIC), token.clone())
+            .await
+            .expect("subscribe");
+        let entry = Entry::new(
+            consistency::Topic::parse(TOPIC).expect("topic"),
+            IdemKey::parse("evt-signed-tenant").expect("idem"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
+        );
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let env = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", TOPIC),
+            tenant,
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::SelfOnly,
+            ),
+        );
+
+        MemEmitter::with_tenant_metadata_signer(bus.clone(), signer.clone())
+            .emit(entry, env)
+            .await
+            .expect("emit");
+
+        let msg = stream.next().await.expect("message delivered");
+        assert_eq!(msg.metadata.tenant_id(), Some(tenant));
+        assert_eq!(
+            msg.metadata.get(diport::KEY_TENANT_AUTHORITY),
+            Some("signed-tenant-authority"),
+            "signed memory emit path must carry tenantAuthority"
+        );
+        assert_eq!(
+            signer.calls(),
+            vec![format!(
+                "{CANON_TENANT}|identity|{TOPIC}|{TOPIC}|evt-signed-tenant"
+            )],
+            "tenantAuthority binding must match durable relay binding fields"
         );
     }
 
@@ -1178,15 +1405,22 @@ mod tests {
         let entry = Entry::new(
             consistency::Topic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-mem-tenant").expect("idem"),
-            b"payload".to_vec(),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
         let envelope = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", TOPIC),
             tenant,
-            "subj-opaque-session",
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::SelfOnly,
+            ),
         );
 
-        MemSessionLifecycle::new(bus.clone())
+        let signer = Arc::new(RecordingTenantSigner::default());
+        MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), signer)
             .persist_session_and_emit(session, entry, envelope)
             .await
             .expect("persist session and emit");
@@ -1198,9 +1432,19 @@ mod tests {
             "MemSessionLifecycle co-tx path must carry tenantId metadata"
         );
         assert_eq!(
+            msg.metadata.get(diport::KEY_TENANT_AUTHORITY),
+            Some("signed-tenant-authority"),
+            "signed MemSessionLifecycle path must carry tenantAuthority metadata"
+        );
+        assert_eq!(
             msg.metadata.get(diport::KEY_SUBJECT_ID),
-            Some("subj-opaque-session"),
-            "MemSessionLifecycle co-tx path must carry subjectId metadata"
+            None,
+            "MemSessionLifecycle co-tx path must not expose persisted-only subjectId"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_ACTOR),
+            None,
+            "MemSessionLifecycle co-tx path must not expose persisted-only actor"
         );
     }
 
@@ -1232,6 +1476,8 @@ mod tests {
         let mut md = diport::EnvelopeMetadata::empty();
         md.insert_wire_pair(diport::KEY_OCCURRED_AT, "1700000003");
         md.insert_wire_pair(diport::KEY_CORRELATION, "corr-mem-1");
+        md.insert_wire_pair(diport::KEY_SUBJECT_ID, "subj-mem");
+        md.insert_wire_pair(diport::KEY_ACTOR, "actor-mem");
         bus.publisher()
             .publish(
                 PublishRequest::new(
@@ -1254,6 +1500,16 @@ mod tests {
             msg.metadata.get(diport::KEY_CORRELATION),
             Some("corr-mem-1"),
             "correlation 应透传到 Message.metadata"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_SUBJECT_ID),
+            None,
+            "memory broker must filter persisted-only subjectId"
+        );
+        assert_eq!(
+            msg.metadata.get(diport::KEY_ACTOR),
+            None,
+            "memory broker must filter persisted-only actor"
         );
         token.cancel();
     }

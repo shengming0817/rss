@@ -108,6 +108,18 @@ pub enum RowScope {
     All,
 }
 
+impl RowScope {
+    /// 稳定 metadata label（小写 kebab-free 标量）。
+    pub fn as_label(self) -> &'static str {
+        match self {
+            RowScope::SelfOnly => "self-only",
+            RowScope::Device => "device",
+            RowScope::Tenant => "tenant",
+            RowScope::All => "all",
+        }
+    }
+}
+
 /// 行级可见性义务（sealed obligation：私有字段，只能经构造 funnel 构造）。
 ///
 /// 持有者保证 scope + 可选租户约束已经过认证通道派生；外部无法绕过 funnel 自造。
@@ -259,6 +271,19 @@ mod row_visibility_tests {
         ];
         for (scoped, expected) in cases {
             assert_eq!(scoped.as_row_scope(), *expected, "scoped={scoped:?}");
+        }
+    }
+
+    #[test]
+    fn row_scope_labels_are_stable() {
+        let cases: &[(RowScope, &str)] = &[
+            (RowScope::SelfOnly, "self-only"),
+            (RowScope::Device, "device"),
+            (RowScope::Tenant, "tenant"),
+            (RowScope::All, "all"),
+        ];
+        for &(scope, expected) in cases {
+            assert_eq!(scope.as_label(), expected, "scope={scope:?}");
         }
     }
 

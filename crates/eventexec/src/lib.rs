@@ -70,7 +70,8 @@ use futures::future::BoxFuture;
 // 消息原语（Message / MessageId / EnvelopeMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
 // （issue #1075，ADR-003 DI port 收敛）；本 crate 经 `diport::Message` 消费（HandlerFn/ConsumerFn 入参）。
 // 统一 delivery envelope（#1160）：`Message.metadata: diport::EnvelopeMetadata` 从 broker header 透传，
-// handler 经 `msg.metadata.get(..)` / `.occurred_at_secs()` 读 occurred_at / subjectId / correlation。
+// handler 经 `msg.metadata.get(..)` / `.occurred_at_secs()` 读 transport-safe occurred_at / correlation 等元数据；
+// subjectId / actor 是 persisted-only，不从 broker header 回流。
 use diport::{Message, RedactedSource};
 
 // ── 处理结论 ─────────────────────────────────────────────────────────────────

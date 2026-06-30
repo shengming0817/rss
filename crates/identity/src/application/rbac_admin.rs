@@ -12,8 +12,10 @@
 
 use std::sync::Arc;
 
-use consistency::{Entry, IdemKey, Topic};
-use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
+use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+use diport::{
+    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
+};
 use generated::event::identity_v1::role_assigned::{
     CONTRACT as ROLE_ASSIGNED_CONTRACT, IdentityRoleAssignedPayload, TOPIC as ROLE_ASSIGNED_TOPIC,
 };
@@ -82,17 +84,18 @@ impl RbacAdminService {
     /// 角色的**目标主体**。两者分离（data-model.md `assignedBy`）：payload 同时携 `assigned_by`(actor) 与
     /// `subject`(target)，envelope `subject_id` 取 **actor opaque id**（FR-020 非 PII originator），不写 target。
     ///
-    /// `skip_all` 略过 `subject`(PII) / `role_id`；`actor` 以 opaque UUID 入 span 供审计；`err` 使失败时
-    /// `RbacAdminError`（const literal Display，无 PII）入 span。
+    /// `skip_all` 略过 `subject`(PII) / `role_id` / `actor`；审计归因走 audit/event payload 与 persisted-only
+    /// outbox actor，不把 actor opaque id 写入默认 tracing span。
     #[tracing::instrument(
         skip_all,
-        fields(domain = RBAC_DOMAIN, operation = "assign_role", tenant_id = %tenant, actor = %actor.as_uuid()),
+        fields(domain = RBAC_DOMAIN, operation = "assign_role", tenant_id = %tenant),
         err
     )]
     pub async fn assign_role(
         &self,
         tenant: TenantId,
         actor: ids::UserId,
+        actor_kind: vocab::PrincipalKind,
         subject: String,
         role_id: RoleId,
     ) -> Result<(), RbacAdminError> {
@@ -119,11 +122,16 @@ impl RbacAdminService {
         let bytes = serde_json::to_vec(&payload).map_err(RbacAdminError::PayloadEncode)?;
         let entry = build_entry(ROLE_ASSIGNED_TOPIC, bytes)?;
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
-        let envelope = OutboxEnvelopeParts::new(
-            ROLE_ASSIGNED_CONTRACT,
+        let actor_subject = actor.as_uuid().hyphenated().to_string();
+        let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
+            .map_err(|_| RbacAdminError::EntryBuild)?;
+        let actor = OutboxActor::scoped(
+            actor_kind,
+            OpaqueActorId::from_opaque(actor_subject).map_err(|_| RbacAdminError::EntryBuild)?,
             tenant,
-            actor.as_uuid().hyphenated().to_string(),
+            vocab::ScopedTenant::Tenant,
         );
+        let envelope = OutboxEnvelopeParts::new(ROLE_ASSIGNED_CONTRACT, tenant, subject_id, actor);
 
         // 3. L2 co-tx（binding 行 + outbox 行同一事务原子写入）。
         let binding = RoleBinding::new(subject, role_id, tenant);
@@ -140,17 +148,18 @@ impl RbacAdminService {
     /// （data-model.md `revokedBy`）：payload 携 `revoked_by`(actor) + `subject`(target)，envelope `subject_id`
     /// 取 **actor opaque id**（FR-020），不写 target。
     ///
-    /// `skip_all` 略过 `subject`(PII) / `role_id`；`actor` 以 opaque UUID 入 span 供审计；`err` 使失败时
-    /// `RbacAdminError`（const literal Display，无 PII）入 span。
+    /// `skip_all` 略过 `subject`(PII) / `role_id` / `actor`；审计归因走 audit/event payload 与 persisted-only
+    /// outbox actor，不把 actor opaque id 写入默认 tracing span。
     #[tracing::instrument(
         skip_all,
-        fields(domain = RBAC_DOMAIN, operation = "revoke_role", tenant_id = %tenant, actor = %actor.as_uuid()),
+        fields(domain = RBAC_DOMAIN, operation = "revoke_role", tenant_id = %tenant),
         err
     )]
     pub async fn revoke_role(
         &self,
         tenant: TenantId,
         actor: ids::UserId,
+        actor_kind: vocab::PrincipalKind,
         role_id: RoleId,
         subject: String,
     ) -> Result<bool, RbacAdminError> {
@@ -165,11 +174,16 @@ impl RbacAdminService {
         let bytes = serde_json::to_vec(&payload).map_err(RbacAdminError::PayloadEncode)?;
         let entry = build_entry(ROLE_REVOKED_TOPIC, bytes)?;
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
-        let envelope = OutboxEnvelopeParts::new(
-            ROLE_REVOKED_CONTRACT,
+        let actor_subject = actor.as_uuid().hyphenated().to_string();
+        let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
+            .map_err(|_| RbacAdminError::EntryBuild)?;
+        let actor = OutboxActor::scoped(
+            actor_kind,
+            OpaqueActorId::from_opaque(actor_subject).map_err(|_| RbacAdminError::EntryBuild)?,
             tenant,
-            actor.as_uuid().hyphenated().to_string(),
+            vocab::ScopedTenant::Tenant,
         );
+        let envelope = OutboxEnvelopeParts::new(ROLE_REVOKED_CONTRACT, tenant, subject_id, actor);
 
         self.bindings
             .revoke_and_emit(tenant, role_id, subject, entry, envelope)
@@ -185,7 +199,7 @@ fn build_entry(topic: &str, bytes: Vec<u8>) -> Result<Entry, RbacAdminError> {
     Ok(Entry::new(
         Topic::parse(topic).map_err(|_| RbacAdminError::EntryBuild)?,
         IdemKey::parse(&event_id).map_err(|_| RbacAdminError::EntryBuild)?,
-        bytes,
+        OutboxPayload::from_reviewed_event_bytes(bytes),
     ))
 }
 
@@ -257,9 +271,15 @@ mod tests {
             InMemRoleBindingLifecycle::new(),
         );
 
-        svc.assign_role(t, actor(), "alice".to_string(), r.clone())
-            .await
-            .expect("assign ok");
+        svc.assign_role(
+            t,
+            actor(),
+            vocab::PrincipalKind::Admin,
+            "alice".to_string(),
+            r.clone(),
+        )
+        .await
+        .expect("assign ok");
 
         assert!(probe.has_binding(t, &r, "alice"), "binding 应落地");
         let emitted = probe.emitted();
@@ -297,7 +317,13 @@ mod tests {
         let (svc, probe) = service_with(InMemRoleRepo::new(), InMemRoleBindingLifecycle::new());
 
         let err = svc
-            .assign_role(t, actor(), "alice".to_string(), role("ghost"))
+            .assign_role(
+                t,
+                actor(),
+                vocab::PrincipalKind::Admin,
+                "alice".to_string(),
+                role("ghost"),
+            )
             .await
             .expect_err("未知角色应失败");
         assert!(matches!(err, RbacAdminError::RoleNotFound));
@@ -322,7 +348,13 @@ mod tests {
         );
 
         let err = svc
-            .assign_role(t_b, actor(), "alice".to_string(), r.clone())
+            .assign_role(
+                t_b,
+                actor(),
+                vocab::PrincipalKind::Admin,
+                "alice".to_string(),
+                r.clone(),
+            )
             .await
             .expect_err("跨租角色应 RoleNotFound（隐藏存在性）");
         assert!(matches!(err, RbacAdminError::RoleNotFound));
@@ -341,7 +373,13 @@ mod tests {
         );
 
         let err = svc
-            .assign_role(t, actor(), "alice".to_string(), r.clone())
+            .assign_role(
+                t,
+                actor(),
+                vocab::PrincipalKind::Admin,
+                "alice".to_string(),
+                r.clone(),
+            )
             .await
             .expect_err("co-tx 写失败应冒泡");
         assert!(matches!(err, RbacAdminError::BindingWrite(_)));
@@ -363,7 +401,13 @@ mod tests {
         );
 
         let revoked = svc
-            .revoke_role(t, actor(), r.clone(), "alice".to_string())
+            .revoke_role(
+                t,
+                actor(),
+                vocab::PrincipalKind::Admin,
+                r.clone(),
+                "alice".to_string(),
+            )
             .await
             .expect("revoke ok");
 
@@ -402,7 +446,13 @@ mod tests {
         );
 
         let revoked = svc
-            .revoke_role(t_b, actor(), r.clone(), "alice".to_string())
+            .revoke_role(
+                t_b,
+                actor(),
+                vocab::PrincipalKind::Admin,
+                r.clone(),
+                "alice".to_string(),
+            )
             .await
             .expect("revoke ok");
 
@@ -427,7 +477,13 @@ mod tests {
         );
 
         let err = svc
-            .revoke_role(t, actor(), r.clone(), "alice".to_string())
+            .revoke_role(
+                t,
+                actor(),
+                vocab::PrincipalKind::Admin,
+                r.clone(),
+                "alice".to_string(),
+            )
             .await
             .expect_err("co-tx 写失败应冒泡");
         assert!(matches!(err, RbacAdminError::BindingWrite(_)));
@@ -451,12 +507,24 @@ mod tests {
             InMemRoleBindingLifecycle::new(),
         );
 
-        svc.assign_role(t, actor(), "alice".to_string(), r.clone())
-            .await
-            .expect("assign 1");
-        svc.assign_role(t, actor(), "alice".to_string(), r.clone())
-            .await
-            .expect("assign 2");
+        svc.assign_role(
+            t,
+            actor(),
+            vocab::PrincipalKind::Admin,
+            "alice".to_string(),
+            r.clone(),
+        )
+        .await
+        .expect("assign 1");
+        svc.assign_role(
+            t,
+            actor(),
+            vocab::PrincipalKind::Admin,
+            "alice".to_string(),
+            r.clone(),
+        )
+        .await
+        .expect("assign 2");
 
         let emitted = probe.emitted();
         assert_eq!(emitted.len(), 2);
