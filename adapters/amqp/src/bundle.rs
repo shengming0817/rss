@@ -166,10 +166,13 @@ impl SharedAmqpPublisher {
     }
 }
 
-/// `Arc<AmqpSubscriber>` 的 `AckableSubscriber` delegating handle（同 [`SharedAmqpPublisher`] 范式）。
-struct SharedAmqpSubscriber(Arc<AmqpSubscriber>);
+/// `Arc<S>` 的 `AckableSubscriber` delegating handle（同 [`SharedAmqpPublisher`] 范式）。
+struct SharedAmqpSubscriber<S>(Arc<S>);
 
-impl AckableSubscriber for SharedAmqpSubscriber {
+impl<S> AckableSubscriber for SharedAmqpSubscriber<S>
+where
+    S: AckableSubscriber + Sync,
+{
     async fn subscribe_ackable(
         &self,
         topic: Topic,
@@ -179,8 +182,9 @@ impl AckableSubscriber for SharedAmqpSubscriber {
     }
 
     async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // port-local shutdown 关本 subscriber 各 channel；connection 由 AmqpSubscriberGuard 单源关。
-        AckableSubscriber::shutdown(self.0.as_ref()).await
+        // Shared port 不拥有 connection；每个订阅 channel 由调用方 token cancel 收敛，connection 由
+        // AmqpSubscriberGuard（runtime_resources）单源关闭，避免 bundle 派发句柄与 guard double-close。
+        Ok(())
     }
 }
 
@@ -213,5 +217,65 @@ impl ManagedResource for AmqpSubscriberGuard {
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         ManagedResource::shutdown(self.0.as_ref()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use diport::{AckableSubscriber, DeliveryStream, SubscriberError, Topic};
+    use tokio_util::sync::CancellationToken;
+
+    use super::SharedAmqpSubscriber;
+
+    #[derive(Default)]
+    struct RecordingSubscriber {
+        subscribe_called: AtomicBool,
+        shutdown_calls: AtomicUsize,
+    }
+
+    impl AckableSubscriber for RecordingSubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            _token: CancellationToken,
+        ) -> Result<DeliveryStream, SubscriberError> {
+            self.subscribe_called.store(true, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_subscriber_port_delegates_subscribe() -> Result<(), SubscriberError> {
+        let inner = Arc::new(RecordingSubscriber::default());
+        let handle = SharedAmqpSubscriber(Arc::clone(&inner));
+
+        let _stream = AckableSubscriber::subscribe_ackable(
+            &handle,
+            Topic::new("session.created"),
+            CancellationToken::new(),
+        )
+        .await?;
+
+        assert!(inner.subscribe_called.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_subscriber_port_shutdown_is_noop() -> Result<(), SubscriberError> {
+        let inner = Arc::new(RecordingSubscriber::default());
+        let handle = SharedAmqpSubscriber(Arc::clone(&inner));
+
+        AckableSubscriber::shutdown(&handle).await?;
+
+        assert_eq!(inner.shutdown_calls.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 }

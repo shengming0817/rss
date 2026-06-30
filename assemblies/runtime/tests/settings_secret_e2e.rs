@@ -17,6 +17,7 @@
 #![cfg(feature = "integration")]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -36,14 +37,18 @@ const TENANT_STR: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const STORE_ID: &str = "mem-vault";
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ── inline MemResolver（deny.toml 禁 rss→memory，故在本文件内直接实现）──────────
+
+type InlineSecretKey = (String, String, String);
+type InlineSecretStore = Arc<Mutex<HashMap<InlineSecretKey, Vec<u8>>>>;
 
 /// in-test 内存 secret 解析替身（非 memory crate；仅测试使用）。
 ///
 /// 键 = `(tenant_uuid_str, store_id, ref_key)`，命中返 `SecretMaterial`，未命中返 `NotFound`。
 struct InlineMemResolver {
-    store: Arc<Mutex<HashMap<(String, String, String), Vec<u8>>>>,
+    store: InlineSecretStore,
 }
 
 impl InlineMemResolver {
@@ -151,13 +156,10 @@ fn tenant() -> TenantId {
 
 /// 生成每次测试唯一的 secret key（防跨测试污染，无需 DELETE FROM secret_refs）。
 fn unique_key(prefix: &str) -> SecretKey {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    let n = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
     #[allow(clippy::expect_used)]
-    SecretKey::parse(&format!("e2e.{prefix}-{nanos}")).expect("valid unique key")
+    SecretKey::parse(&format!("e2e.{prefix}-pid{pid}-n{n}")).expect("valid unique key")
 }
 
 #[allow(clippy::expect_used)]
@@ -334,10 +336,10 @@ async fn e2e_s4_resolve_not_found_when_no_ref() -> TestResult {
     let svc = make_service(&deps, resolver);
     let key = unique_key("s4-key");
 
-    let err = svc
-        .resolve_secret(tenant(), &key)
-        .await
-        .expect_err("should fail with NotFound");
+    let result = svc.resolve_secret(tenant(), &key).await;
+    let Err(err) = result else {
+        return Err(std::io::Error::other("should fail with NotFound").into());
+    };
     assert!(
         matches!(err, settings::SecretServiceError::NotFound),
         "未注册 ref → NotFound，实际得 {err:?}"

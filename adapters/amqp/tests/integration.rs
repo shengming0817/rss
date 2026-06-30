@@ -532,7 +532,7 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
 }
 
 /// envelope header 双向贯通：publish 携 occurred_at + subjectId + correlation →
-/// subscriber 端 `Message.metadata` 保真（AMQP timestamp + FieldTable LongString 双通道透传验证）。
+/// subscriber 端只 rehydrate broker-visible metadata；subjectId 保持 persisted-only。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
@@ -581,8 +581,8 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     );
     assert_eq!(
         delivery.message.metadata.get(KEY_SUBJECT_ID),
-        Some("user-7"),
-        "subjectId 应经 AMQP FieldTable LongString 透传"
+        None,
+        "subjectId 是 persisted-only metadata，不应经 AMQP FieldTable LongString 透传"
     );
 
     delivery
@@ -644,7 +644,7 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
     assert_eq!(resources[1].name(), "amqp-it-bundle-sub");
 
     token.cancel();
-    // port-local shutdown 关 channel；guard（runtime_resources）单源关 connection。
+    // publisher port-local shutdown 关 channel；subscriber shared port 不拥有 connection；guard 单源关 connection。
     Publisher::shutdown(publisher.as_ref()).await?;
     AckableSubscriber::shutdown(subscriber.as_ref()).await?;
     for resource in resources {

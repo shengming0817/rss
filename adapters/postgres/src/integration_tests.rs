@@ -157,7 +157,9 @@ async fn migration_0028_rejects_non_empty_dead_letter() -> TestResult {
     ))
     .execute(&store.pool)
     .await;
-    let err = result.expect_err("0028 must reject non-empty dead_letter");
+    let Err(err) = result else {
+        return Err(std::io::Error::other("0028 must reject non-empty dead_letter").into());
+    };
     let rendered = err.to_string();
     assert!(
         rendered.contains("dead_letter must be empty before enabling encrypted original_entry"),
@@ -777,7 +779,7 @@ fn make_pg_outbox(store: &PgStore, pub_result_fn: fn() -> Result<(), PublisherEr
 
 fn make_pg_outbox_with_publisher(
     store: &PgStore,
-    publisher: impl Publisher + Send + Sync + 'static,
+    publisher: impl Publisher + Sync + 'static,
 ) -> PgOutbox {
     PgOutbox::new(
         store,
@@ -3286,7 +3288,11 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
         row.5
     );
-    let actor = row.5.get("actor").expect("metadata should include actor");
+    let Some(actor) = row.5.get("actor") else {
+        return Err(
+            std::io::Error::other(format!("metadata should include actor: {}", row.5)).into(),
+        );
+    };
     assert_eq!(
         actor.get("kind").and_then(serde_json::Value::as_str),
         Some("admin"),
@@ -3936,8 +3942,9 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
     .bind(fake_seq)
     .execute(&store.pool)
     .await;
-    let forge_err = forge_result
-        .expect_err("t24: GENERATED ALWAYS 应拒绝应用写入 seq（反真空：伪造尝试必须失败）");
+    let Err(forge_err) = forge_result else {
+        return Err("t24: GENERATED ALWAYS 应拒绝应用写入 seq（反真空：伪造尝试必须失败）".into());
+    };
     let rendered = forge_err.to_string();
     assert!(
         rendered.contains("non-DEFAULT value") || rendered.contains("GENERATED ALWAYS"),
@@ -4245,7 +4252,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
 /// t27b：跨租户同 `(domain, partition_key)` 不互阻。
 ///
 /// tenant A 队头进 dlx 后，只能阻塞 tenant A 同 partition 后继；tenant B 使用相同业务 key 的行仍可投递。
-/// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+/// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Hard", exec = "native-compile", source = "code", native = "migration 0031 tenant-scopes outbox partition ordering keys" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
@@ -4334,7 +4341,9 @@ async fn migration_0031_rejects_outbox_rows_missing_tenant_metadata() -> TestRes
     ))
     .execute(&store.pool)
     .await;
-    let err = result.expect_err("0031 must reject outbox rows without metadata tenantId");
+    let Err(err) = result else {
+        return Err("0031 must reject outbox rows without metadata tenantId".into());
+    };
     let rendered = err.to_string();
     assert!(
         rendered.contains("outbox tenant_id backfill requires metadata.tenantId"),
@@ -4456,7 +4465,9 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         ))
         .execute(&mut *tx)
         .await;
-        let err = result.expect_err("rss_app poll_pending must reject invalid limits");
+        let Err(err) = result else {
+            return Err("rss_app poll_pending must reject invalid limits".into());
+        };
         assert!(
             err.to_string().contains(expected),
             "unexpected poll_pending limit error for {limit_sql}: {err}"
@@ -4467,8 +4478,9 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     let negative_sweep = sqlx::query("SELECT rss_sweep_outbox_published(-1)")
         .execute(&store.pool)
         .await;
-    let negative_sweep_err =
-        negative_sweep.expect_err("rss_sweep_outbox_published must reject negative retain seconds");
+    let Err(negative_sweep_err) = negative_sweep else {
+        return Err("rss_sweep_outbox_published must reject negative retain seconds".into());
+    };
     assert!(
         negative_sweep_err
             .to_string()

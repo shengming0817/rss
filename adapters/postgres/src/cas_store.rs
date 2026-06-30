@@ -275,7 +275,11 @@ mod integration_tests {
             match task.await?? {
                 CasStoreOutcome::Applied { .. } => applied += 1,
                 CasStoreOutcome::Conflict { current: Some(_) } => conflicts += 1,
-                other => panic!("unexpected outcome: {other:?}"),
+                other => {
+                    return Err(
+                        std::io::Error::other(format!("unexpected outcome: {other:?}")).into(),
+                    );
+                }
             }
         }
         assert_eq!(applied, 1, "create-if-absent 应只有一个 winner");
@@ -355,7 +359,11 @@ mod integration_tests {
             match task.await?? {
                 CasStoreOutcome::Applied { .. } => applied += 1,
                 CasStoreOutcome::Conflict { current: Some(_) } => conflicts += 1,
-                other => panic!("unexpected outcome: {other:?}"),
+                other => {
+                    return Err(
+                        std::io::Error::other(format!("unexpected outcome: {other:?}")).into(),
+                    );
+                }
             }
         }
         assert_eq!(applied, 1, "rss_app 并发 create 应只有一个 winner");

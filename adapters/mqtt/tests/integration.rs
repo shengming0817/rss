@@ -162,7 +162,7 @@ async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
 }
 
 /// envelope user_properties 双向贯通：publish 携 occurred_at + subjectId + correlation →
-/// subscriber 端 `Message.metadata` 保真（MQTT v5 user_properties 透传验证）。
+/// subscriber 端只 rehydrate broker-visible metadata；subjectId 保持 persisted-only。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     let broker = testkit::env_or_mosquitto().await?;
@@ -209,8 +209,8 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     );
     assert_eq!(
         msg.metadata.get(KEY_SUBJECT_ID),
-        Some("user-mqtt-1"),
-        "subjectId 应经 MQTT user_properties 透传"
+        None,
+        "subjectId 是 persisted-only metadata，不应经 MQTT user_properties 透传"
     );
 
     token.cancel();

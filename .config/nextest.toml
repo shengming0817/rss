@@ -20,6 +20,9 @@ final-status-level = "slow"
 slow-timeout = { period = "300s", terminate-after = 2 }
 leak-timeout = "200ms"
 fail-fast = false
+# self-provision 容器启动偶发 Docker/testcontainers 端口映射瞬断（如 `does not expose port .../tcp`）。
+# 仅重跑失败测试；确定性断言失败仍会稳定红。
+retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" }
 
 # 集成测试两个正交轴：编译期 feature 门 #[cfg(feature = "integration")] 决定是否编入二进制；
 # 下面 filter 仅在已编入的集成测试上做运行期串行调度（按测试名匹配，非 feature 门）。

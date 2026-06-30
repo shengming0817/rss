@@ -284,6 +284,22 @@ mod integration_tests {
     use crate::dead_letter_payload::tests::test_protector;
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    type DeadLetterRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        serde_json::Value,
+        String,
+        i64,
+        String,
+        String,
+        i32,
+        String,
+        serde_json::Value,
+    );
 
     /// 写入一条死信记录，再 SELECT 回来断言字段往返正确。
     #[tokio::test(flavor = "multi_thread")]
@@ -313,22 +329,7 @@ mod integration_tests {
         dl.write_dead_letter(record).await?;
 
         // SELECT 最新一条（唯一写入）断言各字段。
-        let row: (
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            serde_json::Value,
-            String,
-            i64,
-            String,
-            String,
-            i32,
-            String,
-            serde_json::Value,
-        ) = sqlx::query_as(
+        let row: DeadLetterRow = sqlx::query_as(
             r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, consumer_group,
                       original_entry, original_entry_key_ref, original_entry_payload_len,
                       original_entry_encoding, error_summary, num_attempts, source_kind, metadata

@@ -49,9 +49,11 @@ pub struct GrpcServer {
     #[cfg(feature = "backend")]
     token: tokio_util::sync::CancellationToken,
     #[cfg(feature = "backend")]
-    handle:
-        tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>>>,
+    handle: tokio::sync::Mutex<Option<ServeHandle>>,
 }
+
+#[cfg(feature = "backend")]
+type ServeHandle = tokio::task::JoinHandle<Result<(), tonic::transport::Error>>;
 
 /// gRPC server 启动失败（构造期 fail-fast，不静默 noop）。
 ///
@@ -112,31 +114,17 @@ impl GrpcServer {
         token: tokio_util::sync::CancellationToken,
         allow_non_loopback: bool,
     ) -> Result<Self, GrpcServeError> {
-        if !allow_non_loopback && !addr.ip().is_loopback() {
-            return Err(GrpcServeError::NonLoopbackPlaintext);
-        }
+        Self::reject_non_loopback_plaintext(addr, allow_non_loopback)?;
+        let (listener, local_addr) = Self::bind_listener(addr).await?;
+        Self::warn_if_insecure_plaintext(local_addr);
 
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(GrpcServeError::Bind)?;
-        let local_addr = listener.local_addr().map_err(GrpcServeError::LocalAddr)?;
-
-        if !local_addr.ip().is_loopback() {
-            // 只有经 serve_insecure_* opt-in 才到这；warn 让明文对外在 ops 日志可见。
-            tracing::warn!(
-                addr = %local_addr,
-                "grpc plaintext server bound to non-loopback address via insecure opt-in; TLS deferred (P2-6)"
-            );
-        }
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-
         let (reporter, health_service) = tonic_health::server::health_reporter();
         // overall service ("") = SERVING：gRPC 协议的 server overall **liveness**（进程已起、可服务）。
         // 非 readiness——未注册的业务 service Check 返回 NOT_FOUND（见 crate doc § health 语义）。
         reporter
             .set_service_status("", tonic_health::ServingStatus::Serving)
             .await;
-
         let serve_token = token.clone();
         let handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
@@ -157,6 +145,36 @@ impl GrpcServer {
         })
     }
 
+    fn reject_non_loopback_plaintext(
+        addr: std::net::SocketAddr,
+        allow_non_loopback: bool,
+    ) -> Result<(), GrpcServeError> {
+        if !allow_non_loopback && !addr.ip().is_loopback() {
+            return Err(GrpcServeError::NonLoopbackPlaintext);
+        }
+        Ok(())
+    }
+
+    async fn bind_listener(
+        addr: std::net::SocketAddr,
+    ) -> Result<(tokio::net::TcpListener, std::net::SocketAddr), GrpcServeError> {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(GrpcServeError::Bind)?;
+        let local_addr = listener.local_addr().map_err(GrpcServeError::LocalAddr)?;
+        Ok((listener, local_addr))
+    }
+
+    fn warn_if_insecure_plaintext(local_addr: std::net::SocketAddr) {
+        if !local_addr.ip().is_loopback() {
+            // 只有经 serve_insecure_* opt-in 才到这；warn 让明文对外在 ops 日志可见。
+            tracing::warn!(
+                addr = %local_addr,
+                "grpc plaintext server bound to non-loopback address via insecure opt-in; TLS deferred (P2-6)"
+            );
+        }
+    }
+
     /// 返回 server 实际绑定的地址（含内核分配的 ephemeral 端口）。
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.local_addr
@@ -170,28 +188,40 @@ impl ManagedResource for GrpcServer {
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         #[cfg(feature = "backend")]
-        {
-            // 触发 graceful 退出：cancel token（幂等——若 ShutdownStack 阶段 1 已 cancel 则 no-op）。
-            self.token.cancel();
-            // await serve task 收敛，映射 JoinHandle / tonic transport 错误到 ShutdownError。
-            if let Some(handle) = self.handle.lock().await.take() {
-                match handle.await {
-                    Ok(Ok(())) => {
-                        tracing::info!(name = self.name(), "grpc server shutdown complete");
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(name = self.name(), err = %e, "grpc server transport error on shutdown");
-                        return Err(ShutdownError::new(e));
-                    }
-                    Err(e) => {
-                        tracing::error!(name = self.name(), err = %e, "grpc server task join error on shutdown");
-                        return Err(ShutdownError::new(e));
-                    }
-                }
-            }
-        }
+        self.shutdown_backend().await?;
         // reason（feature-off）: 空壳 GrpcServer 无任何后台资源，shutdown 为 noop，直接 Ok(())。
         Ok(())
+    }
+}
+
+#[cfg(feature = "backend")]
+impl GrpcServer {
+    async fn shutdown_backend(&self) -> Result<(), ShutdownError> {
+        // 触发 graceful 退出：cancel token（幂等——若 ShutdownStack 阶段 1 已 cancel 则 no-op）。
+        self.token.cancel();
+        if let Some(handle) = self.handle.lock().await.take() {
+            Self::await_serve_task(self.name(), handle).await?;
+        }
+        Ok(())
+    }
+
+    async fn await_serve_task(name: &str, handle: ServeHandle) -> Result<(), ShutdownError> {
+        let transport_result = handle
+            .await
+            .map_err(|error| Self::serve_join_error(name, error))?;
+        transport_result.map_err(|error| Self::serve_transport_error(name, error))?;
+        tracing::info!(name, "grpc server shutdown complete");
+        Ok(())
+    }
+
+    fn serve_transport_error(name: &str, error: tonic::transport::Error) -> ShutdownError {
+        tracing::warn!(name, err = %error, "grpc server transport error on shutdown");
+        ShutdownError::new(error)
+    }
+
+    fn serve_join_error(name: &str, error: tokio::task::JoinError) -> ShutdownError {
+        tracing::error!(name, err = %error, "grpc server task join error on shutdown");
+        ShutdownError::new(error)
     }
 }
 

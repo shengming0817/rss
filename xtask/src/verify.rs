@@ -1639,11 +1639,8 @@ mod tests {
 
     // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托 `cargo xtask ci`、不逐条重列门 ----
 
-    /// 委托豁免的 cargo 子命令**正向白名单**：`xtask`（alias 形）+ 工具安装（install/binstall）。`cargo run`
-    /// 不在这里泛放行，只能经完整 `cargo run --locked -p xtask -- <lane>` 结构化匹配通过。除此之外任何裸 `cargo <sub>`
-    /// 都视作门 run（build/clippy/nextest/deny/dylint/llvm-cov/public-api/fmt 及**任何未来新门**）——正向
-    /// 白名单无枚举盲区（review #206 A1/A3 黑名单漏 build/llvm-cov/public-api）。
-    const DELEGATION_CARGO_SUBCOMMANDS: &[&str] = &["xtask", "install", "binstall"];
+    /// setup / workflow 安装步骤只允许 cargo 安装工具；`cargo xtask` 只能作为 lane 委托命令出现。
+    const SETUP_CARGO_SUBCOMMANDS: &[&str] = &["install", "binstall"];
 
     /// xtask ci 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形（本地/文档）与 CI 锁定入口
     /// 形（`--locked` 锁 xtask 子树依赖解析，与内部 `--workspace --locked` 门共同锁全链，codex F2）。
@@ -1773,55 +1770,128 @@ mod tests {
             && workflow_event_has_develop_branch(yaml, "push")
     }
 
-    /// 单条已剥注释 / 去缩进的 code 行是否承载某委托命令形（**真实 run/script 命令**，非 displayName / name 等
-    /// 字符串字段）。命令形态：`run: |` / `script: |` block 的命令体行（trimmed 以委托形起头），或 inline
-    /// `- run: <cmd>` / `- script: <cmd>`（冒号后含委托形）。displayName/name 行的引号内文本既不以委托形起头、也无命令键前缀 ⇒ 被
-    /// 排除（结构绑定，非裸 `contains`）。
-    fn line_bears_form(raw: &str, forms: &[&str]) -> bool {
-        let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
-        let is_command = line.starts_with("script:") || line.starts_with("run:");
-        let cmd = line
-            .strip_prefix("script:")
-            .or_else(|| line.strip_prefix("run:"))
+    fn command_matches_delegation_form(command: &str, form: &str) -> bool {
+        command == form
+    }
+
+    fn command_key_and_rest(line: &str) -> Option<&str> {
+        line.strip_prefix("- ")
             .map(str::trim)
-            .unwrap_or(line);
+            .unwrap_or(line)
+            .strip_prefix("script:")
+            .or_else(|| {
+                line.strip_prefix("- ")
+                    .map(str::trim)
+                    .unwrap_or(line)
+                    .strip_prefix("run:")
+            })
+            .map(str::trim)
+    }
+
+    fn is_yaml_block_scalar_marker(rest: &str) -> bool {
+        matches!(rest, "|" | "|-" | "|+" | ">" | ">-" | ">+")
+    }
+
+    /// 抽出真实 `run:` / `script:` 命令；block scalar 保留命令体行，inline 命令保留冒号后的单行。
+    fn yaml_command_scripts(yaml: &str) -> Vec<Vec<&str>> {
+        let lines = yaml_indented_code_lines(yaml);
+        let mut scripts = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let (indent, text) = lines[i];
+            let Some(rest) = command_key_and_rest(text) else {
+                i += 1;
+                continue;
+            };
+
+            if is_yaml_block_scalar_marker(rest) {
+                let mut body = Vec::new();
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let (body_indent, body_text) = lines[j];
+                    if body_indent <= indent {
+                        break;
+                    }
+                    body.push(body_text);
+                    j += 1;
+                }
+                scripts.push(body);
+                i = j;
+            } else {
+                scripts.push(vec![rest]);
+                i += 1;
+            }
+        }
+        scripts
+    }
+
+    fn cargo_subcommand(command: &str) -> Option<&str> {
+        command
+            .strip_prefix("cargo ")
+            .and_then(|rest| rest.split_whitespace().next())
+    }
+
+    fn line_is_setup_cargo_command(line: &str) -> bool {
+        let Some(sub) = cargo_subcommand(line) else {
+            return !line.contains("cargo ");
+        };
+        SETUP_CARGO_SUBCOMMANDS.contains(&sub)
+    }
+
+    fn line_is_delegate_command(line: &str, forms: &[&str]) -> bool {
         forms
             .iter()
-            .any(|f| cmd.starts_with(f) || (is_command && cmd.contains(f)))
+            .any(|form| command_matches_delegation_form(line, form))
     }
 
-    /// 某委托命令形是否出现在**真实 run/script 命令**里（而非注释 / displayName 等字符串字段）。
-    fn form_in_script(yaml: &str, forms: &[&str]) -> bool {
-        yaml_code_lines(yaml)
-            .iter()
-            .any(|&raw| line_bears_form(raw, forms))
+    fn line_is_delegation_prologue(line: &str) -> bool {
+        matches!(line, "set -euo pipefail")
     }
 
-    fn cargo_commands_are_delegation_safe(yaml: &str, xtask_forms: &[&str]) -> bool {
-        yaml_code_lines(yaml).iter().all(|raw| {
-            let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
-            let is_command_key = line.starts_with("script:") || line.starts_with("run:");
-            let is_command_body = line.starts_with("cargo ");
-            if !is_command_key && !is_command_body {
-                return true;
-            }
-            let code = line
-                .strip_prefix("script:")
-                .or_else(|| line.strip_prefix("run:"))
-                .map(str::trim)
-                .unwrap_or(line);
-            code.match_indices("cargo ").all(|(i, _)| {
-                let command = code[i..].trim_start();
-                let sub = command["cargo ".len()..]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                if sub == "run" {
-                    return xtask_forms.iter().any(|form| command.starts_with(form));
-                }
-                DELEGATION_CARGO_SUBCOMMANDS.contains(&sub)
-            })
+    fn command_script_is_setup_only(script: &[&str]) -> bool {
+        script.iter().all(|line| {
+            let line = line.trim();
+            line.is_empty()
+                || line_is_delegation_prologue(line)
+                || line_is_setup_cargo_command(line)
         })
+    }
+
+    fn command_script_is_exact_delegation(script: &[&str], forms: &[&str]) -> bool {
+        let mut seen_delegate = false;
+        for line in script
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+        {
+            if line_is_delegation_prologue(line) {
+                continue;
+            }
+            if line_is_delegate_command(line, forms) {
+                if seen_delegate {
+                    return false;
+                }
+                seen_delegate = true;
+                continue;
+            }
+            return false;
+        }
+        seen_delegate
+    }
+
+    fn workflow_delegates_to_xtask_lane(yaml: &str, forms: &[&str]) -> bool {
+        let scripts = yaml_command_scripts(yaml);
+        let mut delegate_count = 0;
+        for script in &scripts {
+            if command_script_is_exact_delegation(script, forms) {
+                delegate_count += 1;
+                continue;
+            }
+            if !command_script_is_setup_only(script) {
+                return false;
+            }
+        }
+        delegate_count == 1
     }
 
     /// 把去注释 / 去缩进的 code 行按 step 边界（`- ` 起头）切块——每块 = 一个 step 的全部字段行（首个 `- ` 前的
@@ -1850,19 +1920,23 @@ mod tests {
         })
     }
 
-    /// 委托谓词（正向白名单）：YAML 的 PR/push 触发器绑定 develop，**真实 script 命令**含 xtask ci 规范
-    /// 形之一（经 [`form_in_script`] 结构绑定，不被注释 / displayName 误满足），且每个 `cargo <sub>` 都是
-    /// 安装/xtask alias 或完整 xtask run 委托形。
+    /// 委托谓词（正向白名单）：YAML 的 PR/push 触发器绑定 develop，且 run/script 执行面只有安装步骤
+    /// 和一个受限 prologue + 规范 xtask ci 委托命令。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
         workflow_pr_push_triggers_develop(yaml)
-            && form_in_script(yaml, XTASK_CI_FORMS)
-            && cargo_commands_are_delegation_safe(yaml, XTASK_CI_FORMS)
+            && workflow_delegates_to_xtask_lane(yaml, XTASK_CI_FORMS)
     }
 
     /// 被 workflow 引用的本地 composite action 也是 CI 执行面。setup action 只能安装工具，不得把 build /
     /// clippy / nextest / coverage / public-api 等门命令搬进去绕过 workflow 委托守卫。
     fn setup_action_contains_only_setup_cargo_commands(yaml: &str) -> bool {
-        cargo_commands_are_delegation_safe(yaml, &[])
+        yaml_command_scripts(yaml)
+            .iter()
+            .all(|script| command_script_is_setup_only(script))
+    }
+
+    fn develop_triggers() -> &'static str {
+        "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n"
     }
 
     /// 谓词绿/红例（anti-vacuity）：委托=真；不委托或重列**任一**门（含黑名单曾漏的 build/llvm-cov/
@@ -1871,11 +1945,18 @@ mod tests {
     // reason: 表驱动 anti-vacuity 用例集中覆盖正反例；本轮只补 workspace clippy 门，不拆验证语义。
     #[allow(clippy::cognitive_complexity)]
     fn pipeline_delegate_predicate_green_and_red() {
-        let triggers =
-            "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n";
+        let triggers = develop_triggers();
         assert!(pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}steps:\n  - script: cargo xtask ci\n"
         )));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - script: cargo clippy --workspace\n"
+        )));
+    }
+
+    #[test]
+    fn pipeline_delegate_accepts_allowed_delegation_forms() {
+        let triggers = develop_triggers();
         // 绿：安装形（install/binstall）豁免，连字符 arg 不误判。
         assert!(pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}steps:\n  - script: cargo install cargo-binstall\n  - script: cargo binstall -y cargo-nextest cargo-deny\n  - script: cargo xtask ci\n"
@@ -1891,9 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_delegate_predicate_red_cases() {
-        let triggers =
-            "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n";
+    fn pipeline_delegate_rejects_wrong_develop_triggers() {
         // 红：PR/push 触发未绑定 develop。
         assert!(!pipeline_delegates_to_xtask_ci(
             "on:\n  pull_request:\n  push:\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
@@ -1908,6 +1987,11 @@ mod tests {
         assert!(!pipeline_delegates_to_xtask_ci(
             "on:\n  pull_request:\n    branches:\n      - not-develop\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
         ));
+    }
+
+    #[test]
+    fn pipeline_delegate_rejects_unsafe_or_missing_delegation() {
+        let triggers = develop_triggers();
         // 红：run 形入口但仍重列门（build）——run 放行不削弱门捕获。
         assert!(!pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo build --workspace\n"
@@ -1920,7 +2004,7 @@ mod tests {
         assert!(!pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}steps:\n  - script: cargo clippy --workspace\n"
         )));
-        // 红（codex F1）：xtask ci 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足（安装步通过白名单但 form_in_script 假）。
+        // 红（codex F1）：xtask ci 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足。
         assert!(!pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}# cargo xtask ci\nsteps:\n  - script: cargo install cargo-binstall\n"
         )));
@@ -1928,6 +2012,11 @@ mod tests {
         assert!(!pipeline_delegates_to_xtask_ci(&format!(
             "{triggers}steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo xtask ci'\n"
         )));
+    }
+
+    #[test]
+    fn pipeline_delegate_rejects_relisted_gates() {
+        let triggers = develop_triggers();
         // 红：调了 xtask ci 但仍重列门——逐一覆盖（含黑名单曾漏的 build / llvm-cov / public-api / fmt）。
         for gate in [
             "cargo clippy -- -D warnings",
@@ -1958,6 +2047,61 @@ mod tests {
         assert!(!setup_action_contains_only_setup_cargo_commands(
             "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p server\n"
         ));
+        assert!(!setup_action_contains_only_setup_cargo_commands(
+            "runs:\n  using: composite\n  steps:\n    - run: cargo xtask ci\n"
+        ));
+        assert!(!setup_action_contains_only_setup_cargo_commands(
+            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p xtask -- ci\n"
+        ));
+    }
+
+    #[test]
+    fn pipeline_delegate_rejects_echoed_commands() {
+        let triggers = develop_triggers();
+
+        // 红（#1643）：真实 run/script 行只是 echo/printf 委托命令文本，不等于执行委托命令。
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - run: echo cargo run --locked -p xtask -- ci\n"
+        )));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - run: printf 'cargo xtask ci'\n"
+        )));
+    }
+
+    #[test]
+    fn pipeline_delegate_rejects_delegation_prefix_false_positives() {
+        let triggers = develop_triggers();
+
+        for command in [
+            "cargo xtask ci-fake",
+            "cargo xtask ci || true",
+            "cargo run --locked -p xtask -- ci-fake",
+            "cargo run --locked -p xtask -- ci || true",
+        ] {
+            let yaml = format!("{triggers}steps:\n  - run: {command}\n");
+            assert!(
+                !pipeline_delegates_to_xtask_ci(&yaml),
+                "`{command}` must not satisfy xtask CI delegation"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_delegate_rejects_allow_missing_tools_and_unreachable_blocks() {
+        let triggers = develop_triggers();
+
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - run: cargo run --locked -p xtask -- ci --allow-missing-tools\n"
+        )));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - run: cargo xtask ci --allow-missing-tools\n"
+        )));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - run: |\n      exit 0\n      cargo run --locked -p xtask -- ci\n"
+        )));
+        assert!(!pipeline_delegates_to_xtask_ci(&format!(
+            "{triggers}steps:\n  - run: |\n      set -euo pipefail\n      if true; then\n        cargo run --locked -p xtask -- ci\n      fi\n"
+        )));
     }
 
     /// 真实 committed 文件：GitHub CI workflow 委托 `cargo xtask ci`、不重列门；被引用的本地 setup action
@@ -2080,8 +2224,7 @@ mod tests {
     fn github_audit_workflow_has_scheduled_lane(yaml: &str) -> bool {
         workflow_has_top_level_on_event(yaml, "schedule")
             && workflow_has_top_level_on_event(yaml, "workflow_dispatch")
-            && form_in_script(yaml, XTASK_AUDIT_FORMS)
-            && cargo_commands_are_delegation_safe(yaml, XTASK_AUDIT_FORMS)
+            && workflow_delegates_to_xtask_lane(yaml, XTASK_AUDIT_FORMS)
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
@@ -2136,6 +2279,18 @@ mod tests {
             ),
             "audit 形仅在 displayName 不应满足守卫（fail-closed）"
         );
+        assert!(
+            !github_audit_workflow_has_scheduled_lane(
+                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: cargo run --locked -p xtask -- audit --allow-missing-tools\n"
+            ),
+            "audit lane 不得在 workflow 中宽限缺工具"
+        );
+        assert!(
+            !github_audit_workflow_has_scheduled_lane(
+                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: |\n      exit 0\n      cargo run --locked -p xtask -- audit\n"
+            ),
+            "audit 委托命令不可被前置控制流绕过"
+        );
     }
 
     /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 `cargo xtask audit` 委托
@@ -2168,8 +2323,7 @@ mod tests {
     /// 都是完整 xtask integration 委托形，其他 cargo 子命令仅限安装（不内联门）。
     fn github_integration_workflow_has_lane(yaml: &str) -> bool {
         workflow_pr_push_triggers_develop(yaml)
-            && form_in_script(yaml, XTASK_INTEGRATION_FORMS)
-            && cargo_commands_are_delegation_safe(yaml, XTASK_INTEGRATION_FORMS)
+            && workflow_delegates_to_xtask_lane(yaml, XTASK_INTEGRATION_FORMS)
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
@@ -2220,6 +2374,18 @@ mod tests {
                 "{green}  - script: cargo nextest run --features integration\n"
             )),
             "内联 nextest 集成门命令"
+        );
+        assert!(
+            !github_integration_workflow_has_lane(
+                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- integration --allow-missing-tools\n"
+            ),
+            "integration lane 不得在 workflow 中宽限缺工具"
+        );
+        assert!(
+            !github_integration_workflow_has_lane(
+                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: |\n          exit 0\n          cargo run --locked -p xtask -- integration\n"
+            ),
+            "integration 委托命令不可被前置控制流绕过"
         );
     }
 

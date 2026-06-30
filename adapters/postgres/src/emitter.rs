@@ -81,8 +81,8 @@ impl OutboxEmitter for PgEmitter {
 }
 
 /// outbox 写入事务体（与 emit 分离以控制认知复杂度）。
-// reason: 既有事务体把 tenant scope、append、commit 三段及各自结构化日志保持在同一错误边界；
-// 本轮只补 workspace clippy 门，不改 outbox 行为。
+// reason: DB 事务的 set-tenant / append / commit / rollback 分支必须保持就地线性控制流；
+// 拆成无 DB 单测可覆盖的 helper 会把关键错误路径移出 integration-only 覆盖面。
 #[allow(clippy::cognitive_complexity)]
 async fn emit_in_tx(
     tx: PgTx<'_>,
