@@ -34,10 +34,13 @@ impl std::fmt::Debug for AmqpConnectError {
 /// publish 的 broker ack/nack 可被检测（durable publish-ok 语义，见 publisher）；subscriber 传 false。
 /// 失败经 redaction funnel 记日志，URL 原文绝不进日志。
 pub(crate) async fn connect(
-    url: &str,
+    endpoint: &secure::AmqpEndpoint,
     name: &str,
     confirm: bool,
 ) -> Result<(Arc<Connection>, Channel), AmqpConnectError> {
+    #[allow(clippy::disallowed_methods)]
+    // reason: 唯一 AMQP driver connect callsite；endpoint 已在组合根经 secure::AmqpEndpoint 校验。
+    let url = endpoint.expose();
     let conn = Connection::connect(url, ConnectionProperties::default())
         .await
         .map_err(|source| connect_err(source, url, name))?;

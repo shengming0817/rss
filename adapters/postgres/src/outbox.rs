@@ -62,6 +62,28 @@ pub(crate) const STATUS_PUBLISHING: &str = "publishing";
 pub(crate) const STATUS_PUBLISHED: &str = "published";
 pub(crate) const STATUS_DLX: &str = "dlx";
 const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
+type AcquiredLeaseRow = (i32, String, String, String, String, String, String, i64);
+
+struct TenantAuthoritySignInput<'a> {
+    tenant: vocab::TenantId,
+    domain: &'a str,
+    contract_id: &'a str,
+    topic: &'a str,
+    event_id: &'a str,
+    now_epoch: i64,
+}
+
+impl<'a> TenantAuthoritySignInput<'a> {
+    fn binding(&self) -> TenantAuthorityBinding<'a> {
+        TenantAuthorityBinding::new(
+            self.tenant,
+            self.domain,
+            self.contract_id,
+            self.topic,
+            self.event_id,
+        )
+    }
+}
 
 // ── OutboxMetadata（typed sealed funnel，F1）──────────────────────────────────
 //
@@ -507,12 +529,14 @@ impl OutboxRelay for PgOutbox {
         metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
         let metadata = self.sign_metadata(
             metadata,
-            tenant,
-            &domain,
-            &contract_id,
-            &topic,
-            event_id,
-            now_epoch,
+            TenantAuthoritySignInput {
+                tenant,
+                domain: &domain,
+                contract_id: &contract_id,
+                topic: &topic,
+                event_id,
+                now_epoch,
+            },
         )?;
 
         // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
@@ -564,26 +588,18 @@ impl PgOutbox {
     fn sign_metadata(
         &self,
         mut metadata: EnvelopeMetadata,
-        tenant: vocab::TenantId,
-        domain: &str,
-        contract_id: &str,
-        topic: &str,
-        event_id: &str,
-        now_epoch: i64,
+        input: TenantAuthoritySignInput<'_>,
     ) -> Result<EnvelopeMetadata, EngineError> {
         let token = self
             .tenant_authority
-            .sign_at(
-                TenantAuthorityBinding::new(tenant, domain, contract_id, topic, event_id),
-                now_epoch,
-            )
+            .sign_at(input.binding(), input.now_epoch)
             .map_err(|e| {
                 tracing::error!(
                     target: "postgres",
-                    domain,
-                    contract_id,
-                    topic,
-                    event_id,
+                    domain = input.domain,
+                    contract_id = input.contract_id,
+                    topic = input.topic,
+                    event_id = input.event_id,
                     error = %secure::redact_error(&e),
                     "outbox relay failed to sign tenant authority"
                 );
@@ -809,8 +825,8 @@ async fn sample_outbox_backlog(
 pub(crate) async fn acquire_lease(
     pool: &sqlx::PgPool,
     event_id: &str,
-) -> Result<Option<(i32, String, String, String, String, String, String, i64)>, EngineError> {
-    let row: Option<(i32, String, String, String, String, String, String, i64)> = sqlx::query_as(
+) -> Result<Option<AcquiredLeaseRow>, EngineError> {
+    let row: Option<AcquiredLeaseRow> = sqlx::query_as(
         r#"
         SELECT retry_count, lease_token, tenant_id, metadata, domain, contract_id, topic, now_epoch
         FROM rss_outbox_acquire_lease($1)

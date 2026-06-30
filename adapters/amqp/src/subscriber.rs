@@ -45,14 +45,14 @@ impl AmqpSubscriber {
     /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 `ManagedResource`
     /// 可读名。连接失败日志只经 redaction funnel，URL 原文绝不进日志。
     pub async fn connect(
-        url: &str,
+        endpoint: &secure::AmqpEndpoint,
         name: impl Into<String>,
     ) -> Result<Self, conn::AmqpConnectError> {
         let name = name.into();
         // confirm=false：subscriber 不需 publisher confirms。
         // reason: 订阅 channel 由 subscribe_ackable 按需 per-subscription 新开（F4）；connect 借
         // conn::connect 拿连接 + redaction 日志，其返回的初始 channel 不用于订阅，drop 即可。
-        let (conn, _channel) = conn::connect(url, &name, false).await?;
+        let (conn, _channel) = conn::connect(endpoint, &name, false).await?;
         Ok(Self { conn, name })
     }
 }

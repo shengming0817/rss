@@ -22,6 +22,8 @@ use crate::PgStore;
 use crate::cotx::set_local_tenant;
 use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
 
+type PgTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，与 [`crate::PgOutbox`] 同形）clone 构造；
@@ -83,10 +85,20 @@ impl OutboxEmitter for PgEmitter {
 // 本轮只补 workspace clippy 门，不改 outbox 行为。
 #[allow(clippy::cognitive_complexity)]
 async fn emit_in_tx(
-    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: PgTx<'_>,
     entry: &Entry,
     env: &OutboxEnvelope,
 ) -> Result<(), OutboxEmitError> {
+    let tx = set_tenant_in_tx(tx, entry, env).await?;
+    let tx = append_entry_in_tx(tx, entry, env).await?;
+    commit_emit_tx(tx, entry, env).await
+}
+
+async fn set_tenant_in_tx<'a>(
+    mut tx: PgTx<'a>,
+    entry: &Entry,
+    env: &OutboxEnvelope,
+) -> Result<PgTx<'a>, OutboxEmitError> {
     if let Err(e) = set_local_tenant(&mut tx, env.tenant()).await {
         tracing::warn!(
             target: "postgres",
@@ -99,7 +111,14 @@ async fn emit_in_tx(
         rollback_warn(tx).await;
         return Err(OutboxEmitError::new(e));
     }
+    Ok(tx)
+}
 
+async fn append_entry_in_tx<'a>(
+    mut tx: PgTx<'a>,
+    entry: &Entry,
+    env: &OutboxEnvelope,
+) -> Result<PgTx<'a>, OutboxEmitError> {
     if let Err(e) = append_outbox(&mut tx, entry, env).await {
         tracing::warn!(
             target: "postgres",
@@ -112,6 +131,14 @@ async fn emit_in_tx(
         rollback_warn(tx).await;
         return Err(OutboxEmitError::new(e));
     }
+    Ok(tx)
+}
+
+async fn commit_emit_tx(
+    tx: PgTx<'_>,
+    entry: &Entry,
+    env: &OutboxEnvelope,
+) -> Result<(), OutboxEmitError> {
     tx.commit().await.map_err(|e| {
         tracing::warn!(
             target: "postgres",
@@ -125,7 +152,7 @@ async fn emit_in_tx(
 }
 
 /// rollback 并在失败时记 warn（不覆盖调用方原错误）。
-async fn rollback_warn(tx: sqlx::Transaction<'_, sqlx::Postgres>) {
+async fn rollback_warn(tx: PgTx<'_>) {
     if let Err(rb) = tx.rollback().await {
         tracing::warn!(
             target: "postgres",

@@ -37,35 +37,44 @@
 
 use crate::topology::Topology;
 
-/// Redis URL（含 `user:pass`）——凭据收口 newtype。
+/// Redis URL（含 `user:pass`）——凭据 + scheme policy 收口 newtype。
 ///
-/// `Debug` / `Display` 抹去 URL authority 段 userinfo（凭据 non-leak，Medium）；
+/// `Debug` / `Display` 经 `secure::RedisEndpoint` 脱敏（凭据 non-leak，Medium）；
 /// 原始 URL 仅 [`RedisUrl::expose`] 受控可达（命名示警，仅组合根交 Redis 客户端时调用）。
 #[derive(Clone, PartialEq, Eq)]
-pub struct RedisUrl(String);
+pub struct RedisUrl(secure::RedisEndpoint);
 
 impl RedisUrl {
-    /// 由原始 URL 构造（含凭据）。
-    pub fn new(url: impl Into<String>) -> Self {
-        Self(url.into())
+    /// 由原始 URL 构造（含凭据），并按 transport security policy 校验 scheme。
+    pub fn parse(
+        url: impl Into<String>,
+        policy: secure::PlaintextEndpointPolicy,
+    ) -> Result<Self, secure::TransportEndpointError> {
+        secure::RedisEndpoint::parse(url, policy).map(Self)
     }
 
     /// 暴露原始 URL（含凭据）——**仅组合根**交给 Redis 客户端连接时受控调用；命名示警，禁进日志。
+    #[allow(clippy::disallowed_methods)]
     pub fn expose(&self) -> &str {
+        self.0.expose()
+    }
+}
+
+impl AsRef<secure::RedisEndpoint> for RedisUrl {
+    fn as_ref(&self) -> &secure::RedisEndpoint {
         &self.0
     }
 }
 
 impl std::fmt::Debug for RedisUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // reason: 抹去 userinfo 后再打印，禁 Debug 泄凭据（统一经 secure 脱敏 funnel）。
-        write!(f, "RedisUrl({})", secure::redact_url_credentials(&self.0))
+        write!(f, "RedisUrl({})", self.0)
     }
 }
 
 impl std::fmt::Display for RedisUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", secure::redact_url_credentials(&self.0))
+        write!(f, "{}", self.0)
     }
 }
 
@@ -141,8 +150,16 @@ mod tests {
     };
     use crate::topology::Topology;
 
-    const URL_WITH_CREDS: &str = "redis://user:pass@host:6379/0";
-    const URL_NO_CREDS: &str = "redis://host:6379/0";
+    const URL_WITH_CREDS: &str = "rediss://user:pass@host:6379/0";
+    const URL_NO_CREDS: &str = "rediss://host:6379/0";
+
+    #[allow(clippy::panic)]
+    fn redis_url(url: &str) -> RedisUrl {
+        match RedisUrl::parse(url, secure::PlaintextEndpointPolicy::Deny) {
+            Ok(url) => url,
+            Err(err) => panic!("valid rediss url: {err}"),
+        }
+    }
 
     // expose() 在 clippy.toml disallowed-methods（凭据出口仅组合根受控调用）；本测试是唯一 sanctioned
     // 验证点（确认 expose 返回原文），item-level carve-out。
@@ -170,7 +187,7 @@ mod tests {
     #[test]
     fn demo_with_redis_url_still_resolves_demo() {
         // demo 拓扑忽略 redis url（reason: demo 无外部依赖）。
-        let cfg = IdempotencyConfig::new(Some(RedisUrl::new(URL_WITH_CREDS)));
+        let cfg = IdempotencyConfig::new(Some(redis_url(URL_WITH_CREDS)));
         let got = resolve(Topology::Demo, cfg);
         assert!(matches!(got, Ok(ResolvedIdempotency::Demo)));
     }
@@ -192,29 +209,29 @@ mod tests {
     #[test]
     fn durable_shared_with_redis_url_resolves_durable() {
         // anti-silent-degrade 正例：配置齐备 ⇒ Durable，绝不是 Demo（RedisUrl PartialEq 比对，不经 expose）。
-        let cfg = IdempotencyConfig::new(Some(RedisUrl::new(URL_WITH_CREDS)));
+        let cfg = IdempotencyConfig::new(Some(redis_url(URL_WITH_CREDS)));
         let url = durable_url(resolve(Topology::DurableShared, cfg));
-        assert_eq!(url, RedisUrl::new(URL_WITH_CREDS));
+        assert_eq!(url, redis_url(URL_WITH_CREDS));
     }
 
     #[test]
     fn durable_isolated_with_redis_url_resolves_durable() {
-        let cfg = IdempotencyConfig::new(Some(RedisUrl::new(URL_WITH_CREDS)));
+        let cfg = IdempotencyConfig::new(Some(redis_url(URL_WITH_CREDS)));
         let url = durable_url(resolve(Topology::DurableIsolated, cfg));
-        assert_eq!(url, RedisUrl::new(URL_WITH_CREDS));
+        assert_eq!(url, redis_url(URL_WITH_CREDS));
     }
 
     #[test]
     fn redis_url_expose_returns_original() {
         // expose() 受控验证点：仍可取原文（组合根交 Redis 客户端用）。
-        let url = RedisUrl::new(URL_WITH_CREDS);
+        let url = redis_url(URL_WITH_CREDS);
         assert_expose_eq(&url, URL_WITH_CREDS);
     }
 
     #[test]
     fn credentials_not_in_redis_url_debug_or_display() {
         // Debug / Display 脱敏验证：含凭据 URL 渲染后不含 user/pass，含脱敏标记。
-        let url = RedisUrl::new(URL_WITH_CREDS);
+        let url = redis_url(URL_WITH_CREDS);
         let dbg = format!("{url:?}");
         let disp = format!("{url}");
         for rendered in [&dbg, &disp] {
@@ -230,7 +247,7 @@ mod tests {
     #[test]
     fn redis_url_no_creds_debug_and_display_unchanged() {
         // 无凭据 URL：脱敏后原样（不误删 host 段）。
-        let url = RedisUrl::new(URL_NO_CREDS);
+        let url = redis_url(URL_NO_CREDS);
         let dbg = format!("{url:?}");
         let disp = format!("{url}");
         assert!(dbg.contains("host"), "host missing from debug: {dbg}");

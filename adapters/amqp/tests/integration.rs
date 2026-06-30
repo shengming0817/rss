@@ -20,12 +20,34 @@ use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
+fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
+    Ok(secure::AmqpEndpoint::parse(
+        url,
+        secure::PlaintextEndpointPolicy::AllowLoopback,
+    )?)
+}
+
+async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublisher> {
+    let endpoint = amqp_endpoint(url)?;
+    Ok(AmqpPublisher::connect(&endpoint, name).await?)
+}
+
+async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {
+    let endpoint = amqp_endpoint(url)?;
+    Ok(AmqpSubscriber::connect(&endpoint, name).await?)
+}
+
+async fn connect_runtime_deps(url: &str, name: &str) -> anyhow::Result<AmqpRuntimeDeps> {
+    let endpoint = amqp_endpoint(url)?;
+    Ok(AmqpRuntimeDeps::connect(&endpoint, name).await?)
+}
+
 /// 连接失败：错误面安全（Display 是常量，无 URL/凭据）+ source 保留。**无需 broker**（连不可达端口）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::panic)] // 集成测试断言：item-level carve-out（workspace lints 约定）
 async fn integration_connect_failure_returns_safe_error() {
     // 不可达端口（连接拒绝）；URL 含凭据，断言不泄进错误 Display（AmqpPublisher 不 derive Debug，故 match）。
-    match AmqpPublisher::connect("amqp://user:secretpass@127.0.0.1:1/%2f", "amqp-it").await {
+    match connect_publisher("amqp://user:secretpass@127.0.0.1:1/%2f", "amqp-it").await {
         Ok(_) => panic!("connect to closed port must fail"),
         Err(err) => {
             assert_eq!(err.to_string(), "amqp connect failed");
@@ -40,7 +62,7 @@ async fn integration_connect_failure_returns_safe_error() {
                 assert!(!rendered.contains("user"), "username leaked in {rendered}");
             }
             assert!(
-                std::error::Error::source(&err).is_some(),
+                err.chain().nth(1).is_some(),
                 "lapin error preserved as internal source"
             );
         }
@@ -56,13 +78,13 @@ async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
     let topic = Topic::new("rss.it.roundtrip");
     let token = CancellationToken::new();
 
-    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-sub").await?;
+    let subscriber = connect_subscriber(&url, "amqp-it-sub").await?;
     // 订阅须先于发布（先声明 queue + consumer）。
     let mut stream = subscriber
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-pub").await?;
     publisher
         .publish(PublishRequest::new(
             topic,
@@ -98,7 +120,7 @@ async fn integration_publish_unroutable_is_transient() -> Result<(), FixtureErro
     let rmq = testkit::env_or_rabbitmq().await?;
     let url = rmq.vhost_url("rss_unroutable").await?;
     // 不订阅 ⇒ 无 queue 绑定该 topic；mandatory=true ⇒ broker 退回（durable publish-ok 检测为失败）。
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-unroutable").await?;
+    let publisher = connect_publisher(&url, "amqp-it-unroutable").await?;
     match publisher
         .publish(PublishRequest::new(
             Topic::new("rss.it.no.queue.bound"),
@@ -126,7 +148,7 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
     let url = rmq.vhost_url("rss_topic_iso").await?;
     let token = CancellationToken::new();
-    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-sub").await?;
+    let subscriber = connect_subscriber(&url, "amqp-it-sub").await?;
     let mut stream_a = subscriber
         .subscribe_ackable(Topic::new("rss.it.iso-a"), token.clone())
         .await?;
@@ -134,7 +156,7 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
         .subscribe_ackable(Topic::new("rss.it.iso-b"), token.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-pub").await?;
     publisher
         .publish(PublishRequest::new(
             Topic::new("rss.it.iso-b"),
@@ -169,7 +191,7 @@ async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<()
     let url = rmq.vhost_url("rss_persub_cancel").await?;
     let token_a = CancellationToken::new();
     let token_b = CancellationToken::new();
-    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-persub").await?;
+    let subscriber = connect_subscriber(&url, "amqp-it-persub").await?;
     let mut stream_a = subscriber
         .subscribe_ackable(Topic::new("rss.it.persub-a"), token_a.clone())
         .await?;
@@ -183,7 +205,7 @@ async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<()
     assert!(ended_a.is_none(), "A 流取消后须终止（Ok(None)）");
 
     // A 取消后发到 B → B 仍能收到（B 的 channel/consumer 未被 A 的 cancel 连带关闭——回归守卫）。
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-persub-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-persub-pub").await?;
     publisher
         .publish(PublishRequest::new(
             Topic::new("rss.it.persub-b"),
@@ -221,17 +243,17 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     let token = CancellationToken::new();
 
     // 同 topic 名，分属两 vhost：vhost-a 订阅者 + vhost-b 订阅者。使用 subscribe_ackable（at-least-once）。
-    let sub_a = AmqpSubscriber::connect(&url_a, "xvhost-sub-a").await?;
+    let sub_a = connect_subscriber(&url_a, "xvhost-sub-a").await?;
     let mut stream_a = sub_a
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
-    let sub_b = AmqpSubscriber::connect(&url_b, "xvhost-sub-b").await?;
+    let sub_b = connect_subscriber(&url_b, "xvhost-sub-b").await?;
     let mut stream_b = sub_b
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
 
     // 发到 vhost-a。
-    let pub_a = AmqpPublisher::connect(&url_a, "xvhost-pub-a").await?;
+    let pub_a = connect_publisher(&url_a, "xvhost-pub-a").await?;
     pub_a
         .publish(PublishRequest::new(
             topic.clone(),
@@ -265,7 +287,7 @@ async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;
     let url = rmq.vhost_url("rss_cancel").await?;
     let token = CancellationToken::new();
-    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-sub").await?;
+    let subscriber = connect_subscriber(&url, "amqp-it-sub").await?;
     let mut stream = subscriber
         .subscribe_ackable(Topic::new("rss.it.cancel"), token.clone())
         .await?;
@@ -286,13 +308,13 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
     let topic = Topic::new("rss.it.ack-a");
 
     // 先订阅（声明 queue），再发布，再消费。
-    let sub1 = AmqpSubscriber::connect(&url, "amqp-it-ack-sub1").await?;
+    let sub1 = connect_subscriber(&url, "amqp-it-ack-sub1").await?;
     let token1 = CancellationToken::new();
     let mut stream1 = sub1
         .subscribe_ackable(topic.clone(), token1.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-ack-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-ack-pub").await?;
     publisher
         .publish(PublishRequest::new(
             topic.clone(),
@@ -318,7 +340,7 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
     AckableSubscriber::shutdown(&sub1).await?;
 
     // 重新订阅——broker 已 ack 移除，新 consumer 在超时内无投递。
-    let sub2 = AmqpSubscriber::connect(&url, "amqp-it-ack-sub2").await?;
+    let sub2 = connect_subscriber(&url, "amqp-it-ack-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
         .subscribe_ackable(topic.clone(), token2.clone())
@@ -340,13 +362,13 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
     let url = rmq.vhost_url("rss_ack_b").await?;
     let topic = Topic::new("rss.it.ack-b");
 
-    let sub1 = AmqpSubscriber::connect(&url, "amqp-it-rq-sub1").await?;
+    let sub1 = connect_subscriber(&url, "amqp-it-rq-sub1").await?;
     let token1 = CancellationToken::new();
     let mut stream1 = sub1
         .subscribe_ackable(topic.clone(), token1.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-rq-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-rq-pub").await?;
     publisher
         .publish(PublishRequest::new(
             topic.clone(),
@@ -371,7 +393,7 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
     AckableSubscriber::shutdown(&sub1).await?;
 
     // 第二个 consumer：消息已被 requeue，应再次收到（at-least-once 重投）。
-    let sub2 = AmqpSubscriber::connect(&url, "amqp-it-rq-sub2").await?;
+    let sub2 = connect_subscriber(&url, "amqp-it-rq-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
         .subscribe_ackable(topic.clone(), token2.clone())
@@ -403,13 +425,13 @@ async fn integration_ackable_crash_without_settle_redelivers() -> Result<(), Fix
     let topic = Topic::new("rss.it.ack-c");
 
     // 第一个 consumer：收到消息但不 settle，然后 shutdown channel（模拟崩溃）。
-    let sub1 = AmqpSubscriber::connect(&url, "amqp-it-crash-sub1").await?;
+    let sub1 = connect_subscriber(&url, "amqp-it-crash-sub1").await?;
     let token1 = CancellationToken::new();
     let mut stream1 = sub1
         .subscribe_ackable(topic.clone(), token1.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-crash-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-crash-pub").await?;
     publisher
         .publish(PublishRequest::new(
             topic.clone(),
@@ -430,7 +452,7 @@ async fn integration_ackable_crash_without_settle_redelivers() -> Result<(), Fix
     AckableSubscriber::shutdown(&sub1).await?;
 
     // 第二个 consumer：应能再次收到该消息（broker 重投）。
-    let sub2 = AmqpSubscriber::connect(&url, "amqp-it-crash-sub2").await?;
+    let sub2 = connect_subscriber(&url, "amqp-it-crash-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
         .subscribe_ackable(topic.clone(), token2.clone())
@@ -461,13 +483,13 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
     let url = rmq.vhost_url("rss_ack_d").await?;
     let topic = Topic::new("rss.it.ack-d");
 
-    let sub1 = AmqpSubscriber::connect(&url, "amqp-it-cancel-sub1").await?;
+    let sub1 = connect_subscriber(&url, "amqp-it-cancel-sub1").await?;
     let token1 = CancellationToken::new();
     let mut stream1 = sub1
         .subscribe_ackable(topic.clone(), token1.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-cancel-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-cancel-pub").await?;
     publisher
         .publish(PublishRequest::new(
             topic.clone(),
@@ -487,7 +509,7 @@ async fn integration_ackable_token_cancel_requeues_inflight() -> Result<(), Fixt
     assert!(ended.is_none(), "token cancel 后 ackable 流应终止");
 
     // 新 consumer：未 settle 的 in-flight 已被 channel close requeue，应能再次收到（取消即可重投）。
-    let sub2 = AmqpSubscriber::connect(&url, "amqp-it-cancel-sub2").await?;
+    let sub2 = connect_subscriber(&url, "amqp-it-cancel-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
         .subscribe_ackable(topic.clone(), token2.clone())
@@ -518,12 +540,12 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     let topic = Topic::new("rss.it.envelope-header");
     let token = CancellationToken::new();
 
-    let subscriber = AmqpSubscriber::connect(&url, "amqp-it-env-sub").await?;
+    let subscriber = connect_subscriber(&url, "amqp-it-env-sub").await?;
     let mut stream = subscriber
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
 
-    let publisher = AmqpPublisher::connect(&url, "amqp-it-env-pub").await?;
+    let publisher = connect_publisher(&url, "amqp-it-env-pub").await?;
 
     // 构造携 envelope metadata 的 PublishRequest。
     let mut md = EnvelopeMetadata::empty();
@@ -585,7 +607,7 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
     let topic = Topic::new("rss.it.bundle");
     let token = CancellationToken::new();
 
-    let deps = AmqpRuntimeDeps::connect(&url, "amqp-it-bundle").await?;
+    let deps = connect_runtime_deps(&url, "amqp-it-bundle").await?;
 
     // 经 bundle 派发的 port 句柄跑闭环（证明 dispatch 共享 bundle conn、port 可用）。
     let subscriber = deps.infra().subscriber();

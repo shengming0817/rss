@@ -162,15 +162,15 @@ tonic-health = "0.14"
 prost = "0.14"
 # 持久化（postgres adapter，#1116）
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
-# redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml openssl ban 一致）；
-# re-export redis cmd API + passthrough TLS feature。明文 redis:// / TLS rediss:// 由 URL scheme 决定。
-deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
-# AMQP broker I/O（adapters/amqp，仅 `integration` feature 编译）。default-features=false 关 TLS：
-# lapin 的 rustls/native-tls 后端会拉 aws-lc-sys(OpenSSL 派生 license) / ring(license-file)，二者均不在
-# deny.toml license allow-list（cargo-deny 连 optional 树也校验）⇒ 本 PR 仅明文 `amqp://`（local broker
-# 集成测试 / per-domain vhost 隔离够用）。default-runtime = tokio executor + reactor。生产 AMQPS/TLS
-# provider license 甄别 = follow-up（见 PR body）。ref: lapin examples/pubsub.rs@main
-lapin = { version = "4", default-features = false, features = ["default-runtime"] }
+# redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
+# re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
+# testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
+deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
+# AMQP broker I/O（adapters/amqp）：rustls + ring provider + webpki roots；default-features=false 禁默认漂移。
+# 生产 URL 经 secure::AmqpEndpoint 默认要求 amqps://；testcontainer 明文 amqp:// 仅 loopback + 显式 opt-in。
+# 不启 native-tls / openssl / rustls--aws_lc_rs；deny.toml 兜住 provider 漂移。
+# ref: amqp-rs/lapin Cargo.toml@71d01e2cc3e3221496d11ffcf1f4aaf41532fb9d
+lapin = { version = "4", default-features = false, features = ["default-runtime", "rustls--ring", "rustls-webpki-roots-certs"] }
 # MQTT broker I/O（adapters/mqtt，#1010，仅 `integration` feature 编译）。MQTT v5（`rumqttc::v5`）——
 # publish 经 `PublishProperties.correlation_data` 携带 event_id、订阅侧读回填入 `Message.id`，与 amqp
 # `message_id` 传播对称，保跨进程「至少一次 + 幂等」去重。default-features=false 关 TLS：rumqttc 的

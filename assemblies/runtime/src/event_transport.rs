@@ -130,6 +130,7 @@ const DEFAULT_TENANT_AUTHORITY_CLOCK_SKEW_SECS: u64 = 60;
 const DLX_PAYLOAD_KEY_NAME_ENV: &str = "RSS_DLX_PAYLOAD_KEY_NAME";
 const DEAD_LETTER_RETAIN_SECONDS_ENV: &str = "RSS_DEAD_LETTER_RETAIN_SECONDS";
 const DEFAULT_DEAD_LETTER_RETAIN_SECONDS: u64 = postgres::DEAD_LETTER_RETENTION_SECONDS;
+const AMQP_ALLOW_PLAINTEXT_ENV: &str = "RSS_AMQP_ALLOW_PLAINTEXT";
 const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
 const VAULT_TOKEN_ENV: &str = "RSS_VAULT_TOKEN";
 const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
@@ -480,14 +481,26 @@ pub fn build_event_transport_config_from(
         // env 只把 AMQP 配置完整映射成 typed config——per-domain（`RSS_<DOMAIN>_AMQP_URL`，优先）+ 共享回退
         // （`RSS_AMQP_URL`）；per-domain/shared 完备性与隔离由 `eventtransport::resolve` 单源 fail-closed 强制，
         // env builder 不提前收窄语义（review #342 F1：durable-shared 仅配 RSS_AMQP_URL 也应可启动）。
+        let policy = crate::plaintext_endpoint_policy_from(&get, AMQP_ALLOW_PLAINTEXT_ENV)?;
         let mut per_domain = BTreeMap::new();
         for domain in RELAY_DOMAINS {
             let env = format!("RSS_{}_AMQP_URL", domain.to_ascii_uppercase());
             if let Some(url) = get(&env) {
-                per_domain.insert((*domain).to_string(), bootstrap::AmqpUrl::new(url));
+                let parsed = bootstrap::AmqpUrl::parse(url, policy).with_context(|| {
+                    format!(
+                        "{env} must be amqps:// or loopback amqp:// with explicit plaintext opt-in"
+                    )
+                })?;
+                per_domain.insert((*domain).to_string(), parsed);
             }
         }
-        let shared = get("RSS_AMQP_URL").map(bootstrap::AmqpUrl::new);
+        let shared = get("RSS_AMQP_URL")
+            .map(|url| {
+                bootstrap::AmqpUrl::parse(url, policy).context(
+                    "RSS_AMQP_URL must be amqps:// or loopback amqp:// with explicit plaintext opt-in",
+                )
+            })
+            .transpose()?;
         bootstrap::eventtransport::TransportConfig::new(per_domain, shared)
     };
     let (tenant_authority, dlx_payload_protector) = if topology == bootstrap::Topology::Demo {
@@ -579,17 +592,7 @@ async fn wire_durable(
     let mut amqp_map: BTreeMap<String, amqp::AmqpRuntimeDeps> = BTreeMap::new();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
-        #[allow(clippy::disallowed_methods)]
-        // reason: 凭据原文仅在组合根 AMQP broker-connect callsite 调用 expose()（CREDENTIAL-EXPOSE-COMPOSITIONROOT-01）。
-        let raw_url = url.expose();
-        // FIX 8 — TLS startup warn：cleartext amqp = 凭据 + payload 明文传输，生产必须 amqps://。
-        if !raw_url.starts_with("amqps://") {
-            tracing::warn!(
-                domain,
-                "amqp connection is cleartext (credentials+payload unencrypted); production must use amqps:// TLS"
-            );
-        }
-        let amqp_deps = amqp::AmqpRuntimeDeps::connect(raw_url, &domain)
+        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain)
             .await
             .with_context(|| format!("connect amqp for domain '{domain}'"))?;
         infra_guards.extend(amqp_deps.runtime_resources());
@@ -1585,7 +1588,7 @@ mod tests {
     fn config_builder_durable_shared_url_only_resolves_durable() {
         let cfg = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
             _ => durable_security_env(name),
         })
         .unwrap();
@@ -1594,6 +1597,72 @@ mod tests {
             matches!(decision, Ok(EventDecision::Durable { .. })),
             "durable-shared 仅配共享 URL 应回退成 Durable，实得 {decision:?}"
         );
+    }
+
+    #[test]
+    fn config_builder_rejects_plaintext_amqp_by_default() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_AMQP_URL" => Some("amqp://su:sp@broker/shared".into()),
+            _ => durable_security_env(name),
+        });
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("RSS_AMQP_URL"), "{err}");
+        assert!(err.contains("amqps://"), "{err}");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    // reason: loopback + explicit opt-in 是测试 fixture 路径，必须构造成功。
+    #[test]
+    fn config_builder_allows_loopback_plaintext_amqp_with_explicit_opt_in() {
+        let cfg = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_AMQP_URL" => Some("amqp://su:sp@127.0.0.1:5672/shared".into()),
+            AMQP_ALLOW_PLAINTEXT_ENV => Some("true".into()),
+            _ => durable_security_env(name),
+        })
+        .unwrap();
+        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
+        assert!(matches!(decision, Ok(EventDecision::Durable { .. })));
+    }
+
+    #[test]
+    fn config_builder_rejects_non_loopback_plaintext_amqp_even_with_opt_in() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_AMQP_URL" => Some("amqp://su:sp@broker.internal/shared".into()),
+            AMQP_ALLOW_PLAINTEXT_ENV => Some("true".into()),
+            _ => durable_security_env(name),
+        });
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("loopback"), "{err}");
+    }
+
+    #[allow(clippy::unwrap_used)]
+    // reason: dev-container policy 是 compose 演示栈的显式 opt-in，配置齐备应构造成功。
+    #[test]
+    fn config_builder_allows_dev_container_plaintext_amqp_with_explicit_policy() {
+        let cfg = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_AMQP_URL" => Some("amqp://su:sp@rabbitmq:5672/shared".into()),
+            AMQP_ALLOW_PLAINTEXT_ENV => Some("dev-container".into()),
+            _ => durable_security_env(name),
+        })
+        .unwrap();
+        let decision = resolve_event_decision(cfg.topology, cfg.transport, &["identity"]);
+        assert!(matches!(decision, Ok(EventDecision::Durable { .. })));
+    }
+
+    #[test]
+    fn config_builder_rejects_invalid_amqp_plaintext_opt_in() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@broker/shared".into()),
+            AMQP_ALLOW_PLAINTEXT_ENV => Some("enabled".into()),
+            _ => durable_security_env(name),
+        });
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains(AMQP_ALLOW_PLAINTEXT_ENV), "{err}");
     }
 
     /// durable 缺所有 AMQP URL（per-domain + shared 均无）→ env builder 不报错（只映射），由 resolver
@@ -1622,7 +1691,7 @@ mod tests {
     fn config_builder_durable_isolated_with_shared_fails_closed() {
         let cfg = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-isolated".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
             _ => durable_security_env(name),
         })
         .unwrap();
@@ -1637,7 +1706,7 @@ mod tests {
     fn config_builder_durable_defaults_timing_when_absent() {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
             _ => durable_security_env(name),
         });
         assert!(result.is_ok(), "full durable config should succeed");
@@ -1659,7 +1728,7 @@ mod tests {
     fn config_builder_durable_parses_outbox_maintenance_timing() {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
             "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("120000".into()),
             "RSS_OUTBOX_RETAIN_SECONDS" => Some("86400".into()),
             DEAD_LETTER_RETAIN_SECONDS_ENV => Some("172800".into()),
@@ -1676,7 +1745,7 @@ mod tests {
     fn config_builder_invalid_outbox_maintenance_timing_falls_back() {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_IDENTITY_AMQP_URL" => Some("amqp://user:pass@host/vhost".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
             "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("bad-ms".into()),
             "RSS_OUTBOX_RETAIN_SECONDS" => Some("bad-seconds".into()),
             DEAD_LETTER_RETAIN_SECONDS_ENV => Some("bad-seconds".into()),
@@ -1696,7 +1765,7 @@ mod tests {
     fn config_builder_durable_missing_tenant_authority_key_fails_fast() {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
             TENANT_AUTHORITY_HMAC_KEY_ENV => None,
             _ => durable_security_env(name),
         });
@@ -1716,7 +1785,7 @@ mod tests {
         let short_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42u8; 8]);
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
             TENANT_AUTHORITY_HMAC_KEY_ENV => Some(short_key.clone()),
             _ => durable_security_env(name),
         });
@@ -1732,7 +1801,7 @@ mod tests {
     fn config_builder_durable_oversized_tenant_authority_clock_skew_fails_fast() {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
             TENANT_AUTHORITY_CLOCK_SKEW_ENV => Some("301".into()),
             _ => durable_security_env(name),
         });
@@ -1751,7 +1820,7 @@ mod tests {
     fn config_builder_durable_missing_dlx_payload_key_name_fails_fast() {
         let result = build_event_transport_config_from(|name| match name {
             "RSS_TOPOLOGY" => Some("durable-shared".into()),
-            "RSS_AMQP_URL" => Some("amqp://su:sp@host/shared".into()),
+            "RSS_AMQP_URL" => Some("amqps://su:sp@host/shared".into()),
             DLX_PAYLOAD_KEY_NAME_ENV => None,
             _ => durable_security_env(name),
         });
@@ -1818,10 +1887,13 @@ mod tests {
     // reason: 测试 Ok 臂断言 Durable 变体，unwrap 失败即 test 意图写错；item-level carve-out。
     #[test]
     fn resolve_decision_durable_topology_returns_durable() {
-        let transport = bootstrap::eventtransport::TransportConfig::default().with_domain_url(
-            "identity",
-            bootstrap::AmqpUrl::new("amqp://user:pass@host/vhost".to_string()),
+        let url_result = bootstrap::AmqpUrl::parse(
+            "amqps://user:pass@host/vhost",
+            secure::PlaintextEndpointPolicy::Deny,
         );
+        assert!(url_result.is_ok(), "{url_result:?}");
+        let transport = bootstrap::eventtransport::TransportConfig::default()
+            .with_domain_url("identity", url_result.unwrap());
         let result =
             resolve_event_decision(bootstrap::Topology::DurableShared, transport, &["identity"]);
         assert!(result.is_ok(), "Durable topology must succeed: {result:?}");

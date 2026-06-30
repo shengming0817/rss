@@ -40,35 +40,44 @@ use std::collections::BTreeMap;
 // 禁回退）文档化在 [`resolve`] / [`TransportConfig`] 层，而非枚举本体。
 use crate::topology::Topology;
 
-/// per-domain AMQP broker URL（含 `user:pass` + vhost）——凭据收口 newtype。
+/// per-domain AMQP broker URL（含 `user:pass` + vhost）——凭据 + scheme policy 收口 newtype。
 ///
-/// `Debug` / `Display` 经 `secure::redact_url_credentials` 抹去 userinfo（凭据 non-leak，Medium）；
+/// `Debug` / `Display` 经 `secure::AmqpEndpoint` 脱敏（凭据 non-leak，Medium）；
 /// 原始 URL 仅 [`AmqpUrl::expose`] 受控可达（命名示警，仅组合根交 broker 客户端时调用）。
 #[derive(Clone, PartialEq, Eq)]
-pub struct AmqpUrl(String);
+pub struct AmqpUrl(secure::AmqpEndpoint);
 
 impl AmqpUrl {
-    /// 由原始 URL 构造（含凭据）。
-    pub fn new(url: impl Into<String>) -> Self {
-        Self(url.into())
+    /// 由原始 URL 构造（含凭据），并按 transport security policy 校验 scheme。
+    pub fn parse(
+        url: impl Into<String>,
+        policy: secure::PlaintextEndpointPolicy,
+    ) -> Result<Self, secure::TransportEndpointError> {
+        secure::AmqpEndpoint::parse(url, policy).map(Self)
     }
 
     /// 暴露原始 URL（含凭据）——**仅组合根**交给 broker 客户端连接时受控调用；命名示警，禁进日志。
+    #[allow(clippy::disallowed_methods)]
     pub fn expose(&self) -> &str {
+        self.0.expose()
+    }
+}
+
+impl AsRef<secure::AmqpEndpoint> for AmqpUrl {
+    fn as_ref(&self) -> &secure::AmqpEndpoint {
         &self.0
     }
 }
 
 impl std::fmt::Debug for AmqpUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // reason: 抹去 userinfo 后再打印，禁 Debug 泄凭据（FR-020）。
-        write!(f, "AmqpUrl({})", secure::redact_url_credentials(&self.0))
+        write!(f, "AmqpUrl({})", self.0)
     }
 }
 
 impl std::fmt::Display for AmqpUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", secure::redact_url_credentials(&self.0))
+        write!(f, "{}", self.0)
     }
 }
 
@@ -204,12 +213,20 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    const URL_IDENTITY: &str = "amqp://idu:idp@host/identity";
-    const URL_SHARED: &str = "amqp://su:sp@host/shared";
+    const URL_IDENTITY: &str = "amqps://idu:idp@host/identity";
+    const URL_SHARED: &str = "amqps://su:sp@host/shared";
+
+    #[allow(clippy::panic)]
+    fn amqp_url(url: &str) -> AmqpUrl {
+        match AmqpUrl::parse(url, secure::PlaintextEndpointPolicy::Deny) {
+            Ok(url) => url,
+            Err(err) => panic!("valid amqps url: {err}"),
+        }
+    }
 
     fn cfg_with(domain_key: &str, url: &str) -> TransportConfig {
         let mut m = BTreeMap::new();
-        m.insert(domain_key.to_string(), AmqpUrl::new(url));
+        m.insert(domain_key.to_string(), amqp_url(url));
         TransportConfig::new(m, None)
     }
 
@@ -240,7 +257,7 @@ mod tests {
             &["identity"],
         ));
         assert_eq!(map.len(), 1);
-        assert_eq!(map["IDENTITY"], AmqpUrl::new(URL_IDENTITY));
+        assert_eq!(map["IDENTITY"], amqp_url(URL_IDENTITY));
     }
 
     #[test]
@@ -269,24 +286,24 @@ mod tests {
 
     #[test]
     fn shared_falls_back_to_shared_url() {
-        let cfg = TransportConfig::new(BTreeMap::new(), Some(AmqpUrl::new(URL_SHARED)));
+        let cfg = TransportConfig::new(BTreeMap::new(), Some(amqp_url(URL_SHARED)));
         let map = durable_map(resolve(
             Topology::DurableShared,
             cfg,
             &["identity", "audit"],
         ));
-        assert_eq!(map["IDENTITY"], AmqpUrl::new(URL_SHARED));
-        assert_eq!(map["AUDIT"], AmqpUrl::new(URL_SHARED));
+        assert_eq!(map["IDENTITY"], amqp_url(URL_SHARED));
+        assert_eq!(map["AUDIT"], amqp_url(URL_SHARED));
     }
 
     #[test]
     fn per_domain_url_preferred_over_shared() {
         // shared 回退存在但 per-domain 优先。
         let mut m = BTreeMap::new();
-        m.insert("IDENTITY".to_string(), AmqpUrl::new(URL_IDENTITY));
-        let cfg = TransportConfig::new(m, Some(AmqpUrl::new(URL_SHARED)));
+        m.insert("IDENTITY".to_string(), amqp_url(URL_IDENTITY));
+        let cfg = TransportConfig::new(m, Some(amqp_url(URL_SHARED)));
         let map = durable_map(resolve(Topology::DurableShared, cfg, &["identity"]));
-        assert_eq!(map["IDENTITY"], AmqpUrl::new(URL_IDENTITY));
+        assert_eq!(map["IDENTITY"], amqp_url(URL_IDENTITY));
     }
 
     #[test]
@@ -302,30 +319,28 @@ mod tests {
     #[test]
     fn with_domain_url_normalizes_case() {
         // F6：with_domain_url 传小写 domain 也能被大写 required 命中（key 规范化）。
-        let cfg =
-            TransportConfig::default().with_domain_url("identity", AmqpUrl::new(URL_IDENTITY));
+        let cfg = TransportConfig::default().with_domain_url("identity", amqp_url(URL_IDENTITY));
         let map = durable_map(resolve(Topology::DurableShared, cfg, &["identity"]));
-        assert_eq!(map["IDENTITY"], AmqpUrl::new(URL_IDENTITY));
+        assert_eq!(map["IDENTITY"], amqp_url(URL_IDENTITY));
     }
 
     #[test]
     fn isolated_full_per_domain_resolves() {
         let cfg = TransportConfig::default()
-            .with_domain_url("identity", AmqpUrl::new(URL_IDENTITY))
-            .with_domain_url("audit", AmqpUrl::new("amqp://au:ap@host/audit"));
+            .with_domain_url("identity", amqp_url(URL_IDENTITY))
+            .with_domain_url("audit", amqp_url("amqps://au:ap@host/audit"));
         let map = durable_map(resolve(
             Topology::DurableIsolated,
             cfg,
             &["identity", "audit"],
         ));
-        assert_eq!(map["IDENTITY"], AmqpUrl::new(URL_IDENTITY));
+        assert_eq!(map["IDENTITY"], amqp_url(URL_IDENTITY));
     }
 
     #[test]
     fn isolated_missing_per_domain_fails_closed_no_fallback() {
         // F3：isolated 禁回退——audit 无 per-domain URL（即便后面没 shared）⇒ MissingBrokerUrl{AUDIT}。
-        let cfg =
-            TransportConfig::default().with_domain_url("identity", AmqpUrl::new(URL_IDENTITY));
+        let cfg = TransportConfig::default().with_domain_url("identity", amqp_url(URL_IDENTITY));
         let got = resolve(Topology::DurableIsolated, cfg, &["identity", "audit"]);
         assert!(matches!(
             got,
@@ -336,7 +351,7 @@ mod tests {
     #[test]
     fn isolated_with_shared_url_fails_closed() {
         // F3：isolated 配了共享 URL = 矛盾配置 ⇒ IsolatedFallbackForbidden（绝不用共享凭据）。
-        let cfg = TransportConfig::new(BTreeMap::new(), Some(AmqpUrl::new(URL_SHARED)));
+        let cfg = TransportConfig::new(BTreeMap::new(), Some(amqp_url(URL_SHARED)));
         let got = resolve(Topology::DurableIsolated, cfg, &["identity"]);
         assert!(matches!(
             got,
@@ -349,7 +364,7 @@ mod tests {
     // 验证点（确认 expose 返回原文），item-level carve-out。
     #[allow(clippy::disallowed_methods)]
     fn credentials_not_in_amqp_url_debug_or_display() {
-        let url = AmqpUrl::new(URL_IDENTITY);
+        let url = amqp_url(URL_IDENTITY);
         let dbg = format!("{url:?}");
         let disp = format!("{url}");
         for rendered in [&dbg, &disp] {

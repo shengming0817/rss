@@ -79,9 +79,12 @@ impl AmqpRuntimeDeps {
     /// 稳定标签（对比 redis 固定 `"redis"` / vault 固定 `"vault-secret-resolver"`）。
     ///
     /// 沿用 per-vhost = per-connection 模型：publisher / subscriber 各持独立连接（与现有行为一致，无回归）。
-    pub async fn connect(url: &str, name: &str) -> Result<Self, AmqpConnectError> {
-        let publisher = Arc::new(AmqpPublisher::connect(url, format!("{name}-pub")).await?);
-        let subscriber = Arc::new(AmqpSubscriber::connect(url, format!("{name}-sub")).await?);
+    pub async fn connect(
+        endpoint: &secure::AmqpEndpoint,
+        name: &str,
+    ) -> Result<Self, AmqpConnectError> {
+        let publisher = Arc::new(AmqpPublisher::connect(endpoint, format!("{name}-pub")).await?);
+        let subscriber = Arc::new(AmqpSubscriber::connect(endpoint, format!("{name}-sub")).await?);
         Ok(Self {
             publisher,
             subscriber,

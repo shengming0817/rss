@@ -15,6 +15,7 @@ pub mod pathsafe;
 pub mod protection;
 pub mod redaction;
 pub mod refresh;
+pub mod transport_endpoint;
 
 pub use aead::{Aead, AeadError, Plaintext};
 pub use blind_index::{
@@ -41,3 +42,6 @@ pub use redaction::{
 };
 pub use refresh::{OpaqueToken, digest};
 pub use securederive::Redact;
+pub use transport_endpoint::{
+    AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, TransportEndpointError,
+};

@@ -124,12 +124,12 @@ impl AmqpPublisher {
     /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 `ManagedResource`
     /// 可读名（kebab/snake 稳定标识）。连接失败日志只经 redaction funnel，URL 原文绝不进日志。
     pub async fn connect(
-        url: &str,
+        endpoint: &secure::AmqpEndpoint,
         name: impl Into<String>,
     ) -> Result<Self, conn::AmqpConnectError> {
         let name = name.into();
         // confirm=true：启用 publisher confirms，使 publish 能检测 broker ack/nack（durable publish-ok）。
-        let (conn, channel) = conn::connect(url, &name, true).await?;
+        let (conn, channel) = conn::connect(endpoint, &name, true).await?;
         Ok(Self {
             conn,
             channel,

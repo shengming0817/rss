@@ -175,8 +175,10 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         )?,
     );
     let redis_fixture = testkit::env_or_redis().await?;
-    let redis = build_redis_runtime_deps(|name| {
-        (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
+    let redis = build_redis_runtime_deps(|name| match name {
+        "RSS_REDIS_URL" => Some(redis_fixture.url().to_string()),
+        "RSS_REDIS_ALLOW_PLAINTEXT" => Some("true".to_string()),
+        _ => None,
     })
     .await?;
 

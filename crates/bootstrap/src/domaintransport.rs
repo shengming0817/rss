@@ -346,13 +346,18 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn shares_topology_semantics_with_eventtransport_but_not_config_types() {
         let domain_cfg =
             DomainTransportConfig::new(BTreeMap::new(), Some(DomainTransportUrl::new(URL_SHARED)));
-        let event_cfg = TransportConfig::new(
-            BTreeMap::new(),
-            Some(AmqpUrl::new("amqp://user:pass@broker/shared")),
-        );
+        let event_url = match AmqpUrl::parse(
+            "amqps://user:pass@broker/shared",
+            secure::PlaintextEndpointPolicy::Deny,
+        ) {
+            Ok(url) => url,
+            Err(err) => panic!("valid amqps url: {err}"),
+        };
+        let event_cfg = TransportConfig::new(BTreeMap::new(), Some(event_url));
 
         let domain = resolve(Topology::DurableShared, domain_cfg, &["identity"]);
         let events =

@@ -61,8 +61,14 @@ deny = [
   # ban + 论证 crypto 后端 license/供应链）。图外时为 no-op（同 rsa）。use-instead 走 p256/hmac/sha2（RustCrypto）。
   { crate = "jsonwebtoken" },
   # 外部禁用（provider 收敛）
+  { crate = "native-tls", use-instead = "rustls" },
+  { crate = "tokio-native-tls", use-instead = "tokio-rustls" },
+  { crate = "async-native-tls", use-instead = "rustls" },
   { crate = "openssl", use-instead = "rustls" },
   { crate = "openssl-sys", use-instead = "rustls" },
+  { crate = "async-openssl", use-instead = "rustls" },
+  { crate = "aws-lc-rs", use-instead = "rustls ring provider" },
+  { crate = "aws-lc-sys", use-instead = "rustls ring provider" },
   # DI port 收敛（ADR-003 + ADR-005）：dynosaur（dyn-dispatch 宏）+ trait-variant（Send 变体生成）只能被
   # **DI port 定义点 crate** 依赖——provider-agnostic infra port 定义点 `diport`（DI-infra 层），及**定义
   # 自身 repo/service DI port 的域 crate**（Option 2：域 repo port 必然引用域内实体，不得收敛 diport）。

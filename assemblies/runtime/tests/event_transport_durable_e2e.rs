@@ -55,6 +55,13 @@ const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+fn amqp_endpoint(url: &str) -> Result<secure::AmqpEndpoint> {
+    Ok(secure::AmqpEndpoint::parse(
+        url,
+        secure::PlaintextEndpointPolicy::AllowLoopback,
+    )?)
+}
+
 // ── FixedClock（inline；memory crate 被 deny.toml 限定 journeys/xtask，runtime 不可用）─────────
 
 /// 确定性测试时钟——固定 unix_secs，impl `diport::Clock`（非 `SystemTime::now`，符合 clock 注入纪律）。
@@ -331,6 +338,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let cfg = build_event_transport_config_from(|name| match name {
         "RSS_TOPOLOGY" => Some("durable-shared".to_string()),
         "RSS_AMQP_URL" => Some(vhost_url.clone()),
+        "RSS_AMQP_ALLOW_PLAINTEXT" => Some("true".to_string()),
         "RSS_RELAY_POLL_INTERVAL_MS" => Some("2000".to_string()),
         "RSS_RELAY_BATCH_SIZE" => Some("16".to_string()),
         "RSS_RELAY_SAMPLE_INTERVAL_MS" => Some("30000".to_string()),
@@ -355,8 +363,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 6：wire_event_transport → EventRuntime（relay OS 线程 + consumer worker 启动）──────
 
     let redis_fixture = testkit::env_or_redis().await?;
-    let redis = build_redis_runtime_deps(|name| {
-        (name == "RSS_REDIS_URL").then(|| redis_fixture.url().to_string())
+    let redis = build_redis_runtime_deps(|name| match name {
+        "RSS_REDIS_URL" => Some(redis_fixture.url().to_string()),
+        "RSS_REDIS_ALLOW_PLAINTEXT" => Some("true".to_string()),
+        _ => None,
     })
     .await?;
     let vault = build_vault_runtime_deps(|name| match name {
@@ -520,7 +530,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // （tracer，同 payload → Fresh → append）。单 queue 单 consumer FIFO 顺序消费：tracer 被 audit（len 达 2）
     // 即证明其之前的 duplicate 已被 consumer 真实消费+settle（而非未投递）。去重生效 → 最终稳定 len==2
     // （original + tracer）；去重失效 → duplicate 也 append、升到 3，被下方 fail-fast 捕获。
-    let pubr = amqp::AmqpPublisher::connect(&vhost_url, "e2e-redeliver").await?;
+    let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
+    let pubr = amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver").await?;
     pubr.publish(PublishRequest::new(
         Topic::new(SESSION_CREATED_TOPIC),
         MessageId::new(&captured_event_id),

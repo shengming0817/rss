@@ -4,7 +4,7 @@
 //! **默认起容器**（fail-closed 安全语义）；仅当满足显式 opt-in 条件时走外部路径：
 //! - postgres：`RSS_TEST_ALLOW_EXTERNAL_POSTGRES` 存在（非空）+ 5 元组 `PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD` 全在；
 //! - redis：`REDIS_TEST_URL` 存在；
-//! - rabbitmq：`RSS_AMQP_TEST_URL` 存在（须为 base broker URL，无非空 vhost 段）。
+//! - rabbitmq：`RSS_AMQP_TEST_URL` 存在（须为 base broker URL，无非空 vhost 段；明文仅 loopback）。
 //!
 //! **严格库名（单源在 testkit）**：外部 postgres 路径的 `PGDATABASE` 须 `ends_with("_test")` 或 `== "test"`
 //! 才被接受；不满足直接报错（防 `prod_contest` 这类 substring 误命中）。
@@ -18,6 +18,7 @@
 //! ref: testcontainers/testcontainers-rs-modules-community modules/{postgres,redis,rabbitmq}
 
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -29,6 +30,7 @@ use testcontainers_modules::mosquitto::Mosquitto;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::rabbitmq::RabbitMq;
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
+use url::{Host, Url};
 
 /// fixture 错误（容器起停 / 坐标解析 / env 解析）——dev/test 用，anyhow 以与任意测试返回类型组合。
 pub type FixtureError = anyhow::Error;
@@ -288,38 +290,58 @@ impl RabbitFixture {
 
 /// 校验 AMQP base broker URL（无非空 vhost 段）。
 ///
-/// 合法：`amqp://user:pass@host:port`、`amqp://user:pass@host:port/`。
-/// 拒绝：`amqp://host:5672/existing_vhost`（含非空 path/vhost 段）。
+/// 合法：`amqps://user:pass@host:port`、`amqp://user:pass@127.0.0.1:port`。
+/// 拒绝：`amqp://host:5672`（non-loopback 明文）、`amqp://host:5672/existing_vhost`（含非空 path/vhost 段）。
 ///
 /// `RSS_AMQP_TEST_URL` 须为 base broker URL，vhost 由 testkit 拼接/预建。
 fn validate_amqp_base_url(url: &str) -> Result<()> {
-    // 去协议前缀后找第三个 `/`（host:port 后）；若 path 段非空则拒绝。
-    // 简化解析：协议头 `amqp://` 后取第一个 `/` 即为 vhost 起点。
-    let after_scheme = url
-        .strip_prefix("amqp://")
-        .or_else(|| url.strip_prefix("amqps://"))
-        .ok_or_else(|| {
-            anyhow::anyhow!("RSS_AMQP_TEST_URL 须以 amqp:// 或 amqps:// 开头，实际: {url}")
-        })?;
-    // `after_scheme` = `user:pass@host:port[/vhost]`；取第一个 `/` 后的内容为 vhost 段。
-    if let Some(slash_pos) = after_scheme.find('/') {
-        let vhost_part = &after_scheme[slash_pos + 1..];
-        if !vhost_part.is_empty() {
+    let parsed = Url::parse(url)
+        .map_err(|_| anyhow::anyhow!("RSS_AMQP_TEST_URL 不是合法 URL，实际: {url}"))?;
+    match parsed.scheme() {
+        "amqps" => {}
+        "amqp" if is_loopback_url_host(&parsed) => {}
+        "amqp" => {
             return Err(anyhow::anyhow!(
-                "RSS_AMQP_TEST_URL='{}' 含非空 path/vhost 段 '{}'——须为 base broker URL（无 vhost），\
-                 vhost 由 testkit 在测试用 fixture 中拼接/预建",
-                url,
-                vhost_part
+                "RSS_AMQP_TEST_URL 明文 amqp:// 仅允许 loopback host；外部长存 broker 须使用 amqps://"
+            ));
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "RSS_AMQP_TEST_URL 须为 amqps:// 或 loopback amqp://，实际: {url}"
             ));
         }
     }
+    if parsed.host().is_none() {
+        return Err(anyhow::anyhow!("RSS_AMQP_TEST_URL 须包含 host"));
+    }
+    let path_has_vhost = !parsed.path().trim_matches('/').is_empty();
+    if path_has_vhost {
+        return Err(anyhow::anyhow!(
+            "RSS_AMQP_TEST_URL='{}' 含非空 path/vhost 段 '{}'——须为 base broker URL（无 vhost），\
+             vhost 由 testkit 在测试用 fixture 中拼接/预建",
+            url,
+            parsed.path().trim_start_matches('/')
+        ));
+    }
     Ok(())
+}
+
+fn is_loopback_url_host(parsed: &Url) -> bool {
+    match parsed.host() {
+        Some(Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
+        }
+        Some(Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(Host::Ipv6(addr)) => addr.is_loopback(),
+        None => false,
+    }
 }
 
 /// **默认起容器（fail-closed 安全语义）**。仅当 `RSS_AMQP_TEST_URL` 存在时走外部 broker 路径。
 ///
 /// 外部路径：`RSS_AMQP_TEST_URL` 须为 **base broker URL（无 path/vhost 段）**，如
-/// `amqp://user:pass@host:port` 或 `amqp://user:pass@host:port/`；含非空 vhost 段则报错。
+/// `amqps://user:pass@host:port` 或 loopback `amqp://user:pass@127.0.0.1:port`；含非空 vhost 段则报错。
 /// vhost 由 testkit 在 `vhost_url()` 中拼接；env 路径假定 broker 已预建该 vhost（caller 负责）。
 ///
 /// # Example
@@ -361,7 +383,7 @@ async fn create_vhost(container: &ContainerAsync<RabbitMq>, vhost: &str) -> Resu
     Ok(())
 }
 
-/// 给定 base broker URL（`amqp://user:pass@host:port`）+ vhost 拼出完整 URL（env 路径用）。
+/// 给定 base broker URL（`amqps://user:pass@host:port` 或 loopback `amqp://...`）+ vhost 拼出完整 URL（env 路径用）。
 fn amqp_url_with_vhost(base: &str, vhost: &str) -> String {
     format!("{}/{vhost}", base.trim_end_matches('/'))
 }
@@ -553,18 +575,28 @@ mod tests {
     fn validate_amqp_base_url_table() {
         // 通：无 path 段
         assert!(
-            validate_amqp_base_url("amqp://guest:guest@h:5672").is_ok(),
-            "无 path 须通"
+            validate_amqp_base_url("amqp://guest:guest@127.0.0.1:5672").is_ok(),
+            "loopback 无 path 须通"
         );
         // 通：尾部空 path（/）
         assert!(
-            validate_amqp_base_url("amqp://guest:guest@h:5672/").is_ok(),
-            "尾 / 须通"
+            validate_amqp_base_url("amqp://guest:guest@127.0.0.1:5672/").is_ok(),
+            "loopback 尾 / 须通"
+        );
+        // 拒：外部长存 broker 不允许 non-loopback 明文。
+        assert!(
+            validate_amqp_base_url("amqp://guest:guest@h:5672").is_err(),
+            "non-loopback 明文外部 broker 须拒"
         );
         // 拒：含非空 vhost 段
         assert!(
             validate_amqp_base_url("amqp://guest:guest@h:5672/existing_vhost").is_err(),
             "含 vhost 须拒"
+        );
+        // 通：loopback 明文保留给本地 fixture。
+        assert!(
+            validate_amqp_base_url("amqp://guest:guest@127.0.0.1:5672").is_ok(),
+            "loopback 明文 fixture 须通"
         );
         // 通：amqps 协议
         assert!(

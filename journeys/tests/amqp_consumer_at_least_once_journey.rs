@@ -45,6 +45,23 @@ const TOPIC: &str = "rss.it.consumer-alo";
 /// 去重锚点 EventId（两次发布同此 id 验幂等）。
 const EVENT_ID: &str = "evt-consumer-alo";
 
+fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
+    Ok(secure::AmqpEndpoint::parse(
+        url,
+        secure::PlaintextEndpointPolicy::AllowLoopback,
+    )?)
+}
+
+async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublisher> {
+    let endpoint = amqp_endpoint(url)?;
+    Ok(AmqpPublisher::connect(&endpoint, name).await?)
+}
+
+async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {
+    let endpoint = amqp_endpoint(url)?;
+    Ok(AmqpSubscriber::connect(&endpoint, name).await?)
+}
+
 /// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
 /// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造，**不**直接 raw-new——把 in-mem 构造收束到
 /// 已校验的拓扑决策（review #274 F6/C6：本 AMQP journey 原直接 `InMemClaimer::new` 旁路了 resolve 决策绑定）。
@@ -70,10 +87,10 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let topic = Topic::new(TOPIC);
 
     // 先订阅（声明 durable queue，token 与 stream 同源），再发布——run_consumer_ackable 与连接同 runtime。
-    let sub = AmqpSubscriber::connect(&url, "alo-sub").await?;
+    let sub = connect_subscriber(&url, "alo-sub").await?;
     let token = CancellationToken::new();
     let stream = sub.subscribe_ackable(topic.clone(), token.clone()).await?;
-    let publisher = AmqpPublisher::connect(&url, "alo-pub").await?;
+    let publisher = connect_publisher(&url, "alo-pub").await?;
 
     // 消费侧：InMemClaimer 幂等 + MemDeadLetterStore；handler 记录被消费的 message id。
     let group =
@@ -154,7 +171,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
 
     // at-least-once Ack 兑现：消息被 run_consumer_ackable settle(Ack) → broker 队列空。
     // 新 consumer 超时无投递（证 settle 真落 broker，非仅本地状态机）。
-    let sub2 = AmqpSubscriber::connect(&url, "alo-sub2").await?;
+    let sub2 = connect_subscriber(&url, "alo-sub2").await?;
     let token2 = CancellationToken::new();
     let mut stream2 = sub2
         .subscribe_ackable(topic.clone(), token2.clone())

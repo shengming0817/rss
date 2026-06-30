@@ -23,13 +23,14 @@ testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq", "mosquitto"] }
 tokio = { workspace = true, optional = true, features = ["time"] }
 anyhow = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [features]
 default = []
 # 容器 fixture（#1137）+ tenant-scope conformance 骨架（#1437）：adapter 集成测试 + journeys durable journey
 # 经各自 `integration` feature 传递激活（`testkit/containers`）。契约 harness（#1136，axum oneshot）始终可用。
 # conformance 骨架对 tenant 类型泛型化，**零内部 crate 依赖**（testkit 出边仍全外部 crate，#1437 review F5）。
-containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:tokio", "dep:anyhow"]
+containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:tokio", "dep:anyhow", "dep:url"]
 
 [dev-dependencies]
 tokio = { workspace = true }                         # harness 自测的 async runtime

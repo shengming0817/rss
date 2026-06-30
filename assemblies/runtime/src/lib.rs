@@ -69,7 +69,7 @@ use primitives::{
     RequiredScheme,
 };
 use ratelimit::GovernorLimiter;
-use secure::{Plaintext, ProtectionContext};
+use secure::{Plaintext, PlaintextEndpointPolicy, ProtectionContext};
 use settings::ports::DynSecretRepo;
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
@@ -905,6 +905,21 @@ pub fn build_settings_config_value_key_name_from(
         .map_err(|e| anyhow::anyhow!("{SETTINGS_CONFIG_VALUE_KEY_NAME_ENV} is invalid: {e}"))
 }
 
+pub(crate) fn plaintext_endpoint_policy_from(
+    get: impl Fn(&str) -> Option<String>,
+    env: &str,
+) -> anyhow::Result<PlaintextEndpointPolicy> {
+    let Some(raw) = get(env) else {
+        return Ok(PlaintextEndpointPolicy::Deny);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Ok(PlaintextEndpointPolicy::AllowLoopback),
+        "dev-container" => Ok(PlaintextEndpointPolicy::AllowDevContainer),
+        "0" | "false" | "no" => Ok(PlaintextEndpointPolicy::Deny),
+        _ => anyhow::bail!("{env} must be false, true, or dev-container"),
+    }
+}
+
 /// 组合根级 vault capability bundle 构造（#1498）：env → `VaultSecretResolver`（fail-closed without env，
 /// 见 [`build_vault_resolver_from`]）→ [`VaultRuntimeDeps`]（vault 的 dispatch + lifecycle 单源装配出口）。
 ///
@@ -1287,7 +1302,9 @@ pub async fn run_settings_config_value_maintenance(args: &[String]) -> anyhow::R
     Ok(())
 }
 
-/// 组合根级 redis capability bundle 构造：`RSS_REDIS_URL` → deadpool redis pool + PING → [`redis::RedisRuntimeDeps`].
+const REDIS_ALLOW_PLAINTEXT_ENV: &str = "RSS_REDIS_ALLOW_PLAINTEXT";
+
+/// 组合根级 redis capability bundle 构造：`RSS_REDIS_URL` → typed TLS endpoint → deadpool redis pool + PING → [`redis::RedisRuntimeDeps`].
 ///
 /// 缺 `RSS_REDIS_URL` 或 Redis 不可达均 fail-fast；错误上下文只含 env/resource 名，不含 URL 值。
 /// 生命周期关闭经 `RedisRuntimeDeps::runtime_resources()` 单源进入
@@ -1295,9 +1312,16 @@ pub async fn run_settings_config_value_maintenance(args: &[String]) -> anyhow::R
 pub async fn build_redis_runtime_deps(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<redis::RedisRuntimeDeps> {
+    let policy = plaintext_endpoint_policy_from(&get, REDIS_ALLOW_PLAINTEXT_ENV)?;
     let url = get("RSS_REDIS_URL")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_REDIS_URL"))?;
-    let pool = deadpool_redis::Config::from_url(url)
+    let endpoint = secure::RedisEndpoint::parse(url, policy).context(
+        "RSS_REDIS_URL must be rediss:// or loopback redis:// with explicit plaintext opt-in",
+    )?;
+    #[allow(clippy::disallowed_methods)]
+    // reason: 唯一 Redis pool builder callsite；endpoint 已经由 secure::RedisEndpoint 校验。
+    let raw_url = endpoint.expose();
+    let pool = deadpool_redis::Config::from_url(raw_url)
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .context("create redis pool")?;
     verify_redis_pool(&pool)
@@ -3607,6 +3631,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_redis_runtime_deps_rejects_plaintext_by_default() {
+        let result = build_redis_runtime_deps(|name| {
+            (name == "RSS_REDIS_URL").then(|| "redis://127.0.0.1:6379/0".to_string())
+        })
+        .await;
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("RSS_REDIS_URL"), "{err}");
+        assert!(err.contains("rediss://"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn build_redis_runtime_deps_rejects_non_loopback_plaintext_even_with_opt_in() {
+        let result = build_redis_runtime_deps(|name| match name {
+            "RSS_REDIS_URL" => Some("redis://cache.internal:6379/0".to_string()),
+            REDIS_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+            _ => None,
+        })
+        .await;
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("loopback"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn build_redis_runtime_deps_rejects_invalid_plaintext_opt_in() {
+        let result = build_redis_runtime_deps(|name| match name {
+            "RSS_REDIS_URL" => Some("rediss://cache.internal:6379/0".to_string()),
+            REDIS_ALLOW_PLAINTEXT_ENV => Some("enabled".to_string()),
+            _ => None,
+        })
+        .await;
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains(REDIS_ALLOW_PLAINTEXT_ENV), "{err}");
+    }
+
+    #[test]
+    fn plaintext_endpoint_policy_accepts_dev_container_explicitly() {
+        let policy = plaintext_endpoint_policy_from(
+            |name| (name == REDIS_ALLOW_PLAINTEXT_ENV).then(|| "dev-container".to_string()),
+            REDIS_ALLOW_PLAINTEXT_ENV,
+        );
+        assert!(
+            matches!(policy, Ok(PlaintextEndpointPolicy::AllowDevContainer)),
+            "dev-container 是 demo compose 明文策略的唯一非 loopback opt-in"
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn build_redis_runtime_deps_unreachable_url_fails_fast() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3615,8 +3686,10 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
         drop(listener);
 
-        let result = build_redis_runtime_deps(|name| {
-            (name == "RSS_REDIS_URL").then(|| format!("redis://{addr}"))
+        let result = build_redis_runtime_deps(|name| match name {
+            "RSS_REDIS_URL" => Some(format!("redis://{addr}")),
+            REDIS_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+            _ => None,
         })
         .await;
         assert!(
@@ -3631,8 +3704,12 @@ mod tests {
     async fn build_redis_runtime_deps_valid_env_single_sources_pool_guard() {
         let fixture = testkit::env_or_redis().await.expect("redis fixture");
         let url = fixture.url().to_string();
-        let deps =
-            build_redis_runtime_deps(|name| (name == "RSS_REDIS_URL").then(|| url.clone())).await;
+        let deps = build_redis_runtime_deps(|name| match name {
+            "RSS_REDIS_URL" => Some(url.clone()),
+            REDIS_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+            _ => None,
+        })
+        .await;
         assert!(deps.is_ok(), "有效 redis url 须构造成功");
         let resources = deps.expect("valid redis deps").runtime_resources();
         assert_eq!(resources.len(), 1, "redis bundle 单源派生 pool guard");

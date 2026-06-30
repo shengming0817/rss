@@ -7,10 +7,11 @@
 //!
 //! # per-domain vhost/credential 隔离
 //!
-//! adapter 从**单个 per-domain AMQP URL**（`amqp://user:pass@host/vhost`）连接——隔离经 broker
+//! adapter 从**单个已验证 per-domain AMQP endpoint**（生产 `amqps://user:pass@host/vhost`）连接——隔离经 broker
 //! 侧的 **vhost + credential**（operator 为每个域 provision 独立 vhost/user），**不**经 exchange/queue
 //! 命名前缀（命名前缀会把域身份泄进 wire 且可绕过）。URL 由组合根经 `bootstrap::eventtransport` 决策
 //! 注入。凭据 non-leak：连接失败日志只经 `secure::redact_url_credentials` / `secure::redact_error`。
+//! 明文 `amqp://` 只允许 testcontainer / dev loopback fixture 显式 opt-in，非 loopback 明文不可表达。
 //!
 //! # P7 传输边界（manual-ack，at-least-once）
 //!
@@ -29,8 +30,8 @@
 //!
 //! 真实 lapin broker I/O 在 `backend` feature 下编译；默认 build（无 feature）退化为 sealed-marker
 //! 签名冻结壳（`todo!()` body），保 ADAPTER-PORT-FREEZE-01 默认 `cargo test` / `verify` 绿、不拉
-//! broker 客户端树。本 PR 仅明文 `amqp://`（rustls/native-tls 后端的 crypto provider license 不在
-//! deny.toml allow-list）；生产 AMQPS/TLS = follow-up。
+//! broker 客户端树。`backend` feature 使用 lapin rustls + ring + webpki roots；native-tls / OpenSSL /
+//! aws-lc provider 由 workspace feature 选择和 `deny.toml` bans 防漂移。
 //!
 //! ref: lapin examples/pubsub.rs@main（connect → create_channel → queue_declare → basic_publish →
 //! basic_consume → Consumer Stream），与 `adapters/memory` 的 `take_until(token)` 流取消范式一致。
