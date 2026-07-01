@@ -1,4 +1,4 @@
-//! consistency — RSS 一致性引擎接缝：outbox / saga / reconcile / projection / idempotency 纯态机 + 策略 trait（引擎层 L0–L4，依赖基础层）。
+//! consistency — RSS 一致性引擎接缝：outbox / inbox / saga / reconcile / projection / idempotency 纯态机 + 策略 trait（引擎层 L0–L4，依赖基础层）。
 //!
 //! # 派发范式（ADR-003 §2 / ADR-004 C1）
 //!
@@ -19,6 +19,7 @@
 //! | 模块 | 等级 |
 //! |------|------|
 //! | idempotency | L0 |
+//! | inbox | L0/L2 |
 //! | outbox | L1/L2 |
 //! | saga | L3 |
 //! | reconcile | L4 |
@@ -26,6 +27,7 @@
 
 pub mod error;
 pub mod idempotency;
+pub mod inbox;
 pub mod outbox;
 pub mod projection;
 pub mod reconcile;
@@ -37,6 +39,7 @@ pub use idempotency::{
     ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, LeaseOutcome,
     LeaseToken, SeenState,
 };
+pub use inbox::{InboxClaim, InboxLeaseFreshness, InboxState, InboxStatus, InboxStatusError};
 pub use outbox::{
     BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxPayload, OutboxRelay,
     OutboxSource, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,

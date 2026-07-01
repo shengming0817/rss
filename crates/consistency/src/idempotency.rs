@@ -76,6 +76,16 @@ pub enum SeenState {
     Duplicate,
 }
 
+impl SeenState {
+    /// Stable low-cardinality metrics/log label.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            SeenState::Fresh => "fresh",
+            SeenState::Duplicate => "duplicate",
+        }
+    }
+}
+
 /// 租约令牌（uuid v4 newtype，私有字段 + 唯一构造入口 [`LeaseToken::mint`]，#1213 / #1354 F4）。
 ///
 /// 消费方每次 claim 前 [`mint`](LeaseToken::mint) 一枚（内部铸 uuid v4 文本），随
@@ -123,6 +133,16 @@ pub enum LeaseOutcome {
     /// 令牌不符（claim 已被 TTL 重捞、他人接管或已 done）：**hard-fence**——消费方须把 Ack 降级为
     /// Requeue、**不** commit，避免 stale holder 双写。
     Lost,
+}
+
+impl LeaseOutcome {
+    /// Stable low-cardinality metrics/log label.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            LeaseOutcome::Held => "held",
+            LeaseOutcome::Lost => "lost",
+        }
+    }
 }
 
 /// 幂等去重 + 租约策略（L0 引擎策略 trait，native AFIT）。
@@ -288,6 +308,27 @@ mod tests {
     }
 
     // ─── 状态机测试（TDD）────────────────────────────────────────────────────────
+
+    #[test]
+    fn seen_state_labels_are_stable_and_distinct() {
+        let cases = [
+            (SeenState::Fresh, "fresh"),
+            (SeenState::Duplicate, "duplicate"),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(state.as_label(), expected);
+        }
+        assert_ne!(SeenState::Fresh.as_label(), SeenState::Duplicate.as_label());
+    }
+
+    #[test]
+    fn lease_outcome_labels_are_stable_and_distinct() {
+        let cases = [(LeaseOutcome::Held, "held"), (LeaseOutcome::Lost, "lost")];
+        for (outcome, expected) in cases {
+            assert_eq!(outcome.as_label(), expected);
+        }
+        assert_ne!(LeaseOutcome::Held.as_label(), LeaseOutcome::Lost.as_label());
+    }
 
     #[allow(clippy::unwrap_used)]
     // reason: 测试用 parse — 已知非空 key，item-level carve-out（error-handling.md §Carve-out）。

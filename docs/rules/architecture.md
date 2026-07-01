@@ -174,7 +174,7 @@ source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "cr
 这些 Medium(CI 门)由 **GitHub Actions CI lane**(`.github/workflows/ci.yml` 薄壳 → `cargo xtask ci`,issue #1132)在 PR 上自动跑、
 失败阻断合入(INVARIANT CI-PIPELINE-DELEGATE-01:YAML 只调一条聚合命令、不逐条重列门)——把治理从 Soft「人记得
 本地 `make verify`」上移到 Medium「CI 门」。`ci` = `verify` 全门(build/clippy 升 `--all-features --all-targets`)
-+ 覆盖率门(`cargo llvm-cov`,引擎-基础 ≥90%、consistency 因 L3/L4 冻结桩暂 ratchet 85%) + `public-api --check`
++ 覆盖率门(`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外) + `public-api --check`
 (轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) + cargo-audit(供应链漏洞,#1133)。
 **供应链门**(#1133):`cargo deny check`(advisories/RustSec+licenses+bans+sources)+ cargo-audit 在 PR 门阻断合入;
 另有每日 GitHub Actions `schedule:` cron 定时刷新 lane(`cargo xtask audit`=advisory-scoped deny+cargo-audit),捕「未变依赖」新披露

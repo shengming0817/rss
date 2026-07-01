@@ -148,6 +148,8 @@ pub fn consistency::idempotency::IdemKeyError::from(T) -> T
 #[non_exhaustive] pub enum consistency::idempotency::LeaseOutcome
 pub consistency::idempotency::LeaseOutcome::Held
 pub consistency::idempotency::LeaseOutcome::Lost
+impl consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::idempotency::LeaseOutcome
 pub fn consistency::idempotency::LeaseOutcome::clone(&self) -> consistency::idempotency::LeaseOutcome
 impl core::cmp::Eq for consistency::idempotency::LeaseOutcome
@@ -189,6 +191,8 @@ pub fn consistency::idempotency::LeaseOutcome::from(T) -> T
 #[non_exhaustive] pub enum consistency::idempotency::SeenState
 pub consistency::idempotency::SeenState::Duplicate
 pub consistency::idempotency::SeenState::Fresh
+impl consistency::idempotency::SeenState
+pub fn consistency::idempotency::SeenState::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::idempotency::SeenState
 pub fn consistency::idempotency::SeenState::clone(&self) -> consistency::idempotency::SeenState
 impl core::cmp::Eq for consistency::idempotency::SeenState
@@ -361,6 +365,229 @@ pub async fn consistency::idempotency::IdempotencyStore::commit(&self, &consiste
 pub async fn consistency::idempotency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::idempotency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
 pub async fn consistency::idempotency::IdempotencyStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub mod consistency::inbox
+#[non_exhaustive] pub enum consistency::inbox::InboxLeaseFreshness
+pub consistency::inbox::InboxLeaseFreshness::Active
+pub consistency::inbox::InboxLeaseFreshness::Expired
+impl consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::clone(&self) -> consistency::inbox::InboxLeaseFreshness
+impl core::cmp::Eq for consistency::inbox::InboxLeaseFreshness
+impl core::cmp::PartialEq for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::eq(&self, &consistency::inbox::InboxLeaseFreshness) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxLeaseFreshness
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Freeze for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Send for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Sync for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Unpin for consistency::inbox::InboxLeaseFreshness
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxLeaseFreshness
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxLeaseFreshness
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxLeaseFreshness
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxLeaseFreshness where U: core::convert::From<T>
+pub fn consistency::inbox::InboxLeaseFreshness::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxLeaseFreshness where U: core::convert::Into<T>
+pub type consistency::inbox::InboxLeaseFreshness::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxLeaseFreshness::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxLeaseFreshness where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxLeaseFreshness::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxLeaseFreshness::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxLeaseFreshness where T: core::clone::Clone
+pub type consistency::inbox::InboxLeaseFreshness::Owned = T
+pub fn consistency::inbox::InboxLeaseFreshness::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxLeaseFreshness::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxLeaseFreshness where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxLeaseFreshness::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxLeaseFreshness where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxLeaseFreshness::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxLeaseFreshness where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxLeaseFreshness::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxLeaseFreshness where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxLeaseFreshness::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::from(T) -> T
+#[non_exhaustive] pub enum consistency::inbox::InboxState
+pub consistency::inbox::InboxState::Absent
+pub consistency::inbox::InboxState::Claimed(consistency::inbox::InboxClaim)
+pub consistency::inbox::InboxState::Done
+impl consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::commit(self, &consistency::idempotency::LeaseToken) -> (consistency::idempotency::LeaseOutcome, Self)
+pub fn consistency::inbox::InboxState::extend(&self, &consistency::idempotency::LeaseToken) -> consistency::idempotency::LeaseOutcome
+pub fn consistency::inbox::InboxState::release(self, &consistency::idempotency::LeaseToken) -> Self
+pub fn consistency::inbox::InboxState::status(&self) -> core::option::Option<consistency::inbox::InboxStatus>
+pub fn consistency::inbox::InboxState::try_claim(self, consistency::idempotency::LeaseToken) -> (consistency::idempotency::SeenState, Self)
+impl core::clone::Clone for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::clone(&self) -> consistency::inbox::InboxState
+impl core::cmp::Eq for consistency::inbox::InboxState
+impl core::cmp::PartialEq for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::eq(&self, &consistency::inbox::InboxState) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxState
+impl core::marker::Freeze for consistency::inbox::InboxState
+impl core::marker::Send for consistency::inbox::InboxState
+impl core::marker::Sync for consistency::inbox::InboxState
+impl core::marker::Unpin for consistency::inbox::InboxState
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxState
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxState
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxState
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxState where U: core::convert::From<T>
+pub fn consistency::inbox::InboxState::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxState where U: core::convert::Into<T>
+pub type consistency::inbox::InboxState::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxState::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxState where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxState::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxState::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxState where T: core::clone::Clone
+pub type consistency::inbox::InboxState::Owned = T
+pub fn consistency::inbox::InboxState::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxState::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxState where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxState::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxState where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxState::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxState where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxState::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxState where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxState::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::from(T) -> T
+#[non_exhaustive] pub enum consistency::inbox::InboxStatus
+pub consistency::inbox::InboxStatus::Claimed
+pub consistency::inbox::InboxStatus::Done
+impl consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::as_label(self) -> &'static str
+pub fn consistency::inbox::InboxStatus::parse_label(&str) -> core::result::Result<Self, consistency::inbox::InboxStatusError>
+impl core::clone::Clone for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::clone(&self) -> consistency::inbox::InboxStatus
+impl core::cmp::Eq for consistency::inbox::InboxStatus
+impl core::cmp::PartialEq for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::eq(&self, &consistency::inbox::InboxStatus) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxStatus
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxStatus
+impl core::marker::Freeze for consistency::inbox::InboxStatus
+impl core::marker::Send for consistency::inbox::InboxStatus
+impl core::marker::Sync for consistency::inbox::InboxStatus
+impl core::marker::Unpin for consistency::inbox::InboxStatus
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxStatus
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxStatus where U: core::convert::From<T>
+pub fn consistency::inbox::InboxStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxStatus where U: core::convert::Into<T>
+pub type consistency::inbox::InboxStatus::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxStatus where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxStatus where T: core::clone::Clone
+pub type consistency::inbox::InboxStatus::Owned = T
+pub fn consistency::inbox::InboxStatus::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxStatus where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxStatus where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxStatus where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::inbox::InboxStatusError
+pub consistency::inbox::InboxStatusError::Unknown
+impl core::clone::Clone for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::clone(&self) -> consistency::inbox::InboxStatusError
+impl core::cmp::Eq for consistency::inbox::InboxStatusError
+impl core::cmp::PartialEq for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::eq(&self, &consistency::inbox::InboxStatusError) -> bool
+impl core::error::Error for consistency::inbox::InboxStatusError
+impl core::fmt::Debug for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxStatusError
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxStatusError
+impl core::marker::Freeze for consistency::inbox::InboxStatusError
+impl core::marker::Send for consistency::inbox::InboxStatusError
+impl core::marker::Sync for consistency::inbox::InboxStatusError
+impl core::marker::Unpin for consistency::inbox::InboxStatusError
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxStatusError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxStatusError
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxStatusError
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxStatusError where U: core::convert::From<T>
+pub fn consistency::inbox::InboxStatusError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxStatusError where U: core::convert::Into<T>
+pub type consistency::inbox::InboxStatusError::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxStatusError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxStatusError where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxStatusError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxStatusError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxStatusError where T: core::clone::Clone
+pub type consistency::inbox::InboxStatusError::Owned = T
+pub fn consistency::inbox::InboxStatusError::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxStatusError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::inbox::InboxStatusError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::inbox::InboxStatusError where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxStatusError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxStatusError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxStatusError where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxStatusError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::from(T) -> T
+pub struct consistency::inbox::InboxClaim
+impl consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::active(consistency::idempotency::LeaseToken) -> Self
+pub fn consistency::inbox::InboxClaim::expired(consistency::idempotency::LeaseToken) -> Self
+pub fn consistency::inbox::InboxClaim::freshness(&self) -> consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxClaim::lease(&self) -> &consistency::idempotency::LeaseToken
+impl core::clone::Clone for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::clone(&self) -> consistency::inbox::InboxClaim
+impl core::cmp::Eq for consistency::inbox::InboxClaim
+impl core::cmp::PartialEq for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::eq(&self, &consistency::inbox::InboxClaim) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxClaim
+impl core::marker::Freeze for consistency::inbox::InboxClaim
+impl core::marker::Send for consistency::inbox::InboxClaim
+impl core::marker::Sync for consistency::inbox::InboxClaim
+impl core::marker::Unpin for consistency::inbox::InboxClaim
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxClaim
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxClaim
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxClaim
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxClaim where U: core::convert::From<T>
+pub fn consistency::inbox::InboxClaim::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxClaim where U: core::convert::Into<T>
+pub type consistency::inbox::InboxClaim::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxClaim::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxClaim where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxClaim::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxClaim::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxClaim where T: core::clone::Clone
+pub type consistency::inbox::InboxClaim::Owned = T
+pub fn consistency::inbox::InboxClaim::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxClaim::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxClaim where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxClaim::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxClaim where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxClaim::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxClaim where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxClaim::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxClaim where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxClaim::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::from(T) -> T
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -1748,9 +1975,190 @@ impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::IdemKeyError wh
 pub fn consistency::idempotency::IdemKeyError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKeyError
 pub fn consistency::idempotency::IdemKeyError::from(T) -> T
+#[non_exhaustive] pub enum consistency::InboxLeaseFreshness
+pub consistency::InboxLeaseFreshness::Active
+pub consistency::InboxLeaseFreshness::Expired
+impl consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::clone(&self) -> consistency::inbox::InboxLeaseFreshness
+impl core::cmp::Eq for consistency::inbox::InboxLeaseFreshness
+impl core::cmp::PartialEq for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::eq(&self, &consistency::inbox::InboxLeaseFreshness) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxLeaseFreshness
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Freeze for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Send for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Sync for consistency::inbox::InboxLeaseFreshness
+impl core::marker::Unpin for consistency::inbox::InboxLeaseFreshness
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxLeaseFreshness
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxLeaseFreshness
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxLeaseFreshness
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxLeaseFreshness where U: core::convert::From<T>
+pub fn consistency::inbox::InboxLeaseFreshness::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxLeaseFreshness where U: core::convert::Into<T>
+pub type consistency::inbox::InboxLeaseFreshness::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxLeaseFreshness::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxLeaseFreshness where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxLeaseFreshness::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxLeaseFreshness::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxLeaseFreshness where T: core::clone::Clone
+pub type consistency::inbox::InboxLeaseFreshness::Owned = T
+pub fn consistency::inbox::InboxLeaseFreshness::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxLeaseFreshness::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxLeaseFreshness where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxLeaseFreshness::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxLeaseFreshness where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxLeaseFreshness::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxLeaseFreshness where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxLeaseFreshness::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxLeaseFreshness where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxLeaseFreshness::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxLeaseFreshness::from(T) -> T
+#[non_exhaustive] pub enum consistency::InboxState
+pub consistency::InboxState::Absent
+pub consistency::InboxState::Claimed(consistency::inbox::InboxClaim)
+pub consistency::InboxState::Done
+impl consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::commit(self, &consistency::idempotency::LeaseToken) -> (consistency::idempotency::LeaseOutcome, Self)
+pub fn consistency::inbox::InboxState::extend(&self, &consistency::idempotency::LeaseToken) -> consistency::idempotency::LeaseOutcome
+pub fn consistency::inbox::InboxState::release(self, &consistency::idempotency::LeaseToken) -> Self
+pub fn consistency::inbox::InboxState::status(&self) -> core::option::Option<consistency::inbox::InboxStatus>
+pub fn consistency::inbox::InboxState::try_claim(self, consistency::idempotency::LeaseToken) -> (consistency::idempotency::SeenState, Self)
+impl core::clone::Clone for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::clone(&self) -> consistency::inbox::InboxState
+impl core::cmp::Eq for consistency::inbox::InboxState
+impl core::cmp::PartialEq for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::eq(&self, &consistency::inbox::InboxState) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxState
+impl core::marker::Freeze for consistency::inbox::InboxState
+impl core::marker::Send for consistency::inbox::InboxState
+impl core::marker::Sync for consistency::inbox::InboxState
+impl core::marker::Unpin for consistency::inbox::InboxState
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxState
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxState
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxState
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxState where U: core::convert::From<T>
+pub fn consistency::inbox::InboxState::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxState where U: core::convert::Into<T>
+pub type consistency::inbox::InboxState::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxState::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxState where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxState::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxState::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxState where T: core::clone::Clone
+pub type consistency::inbox::InboxState::Owned = T
+pub fn consistency::inbox::InboxState::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxState::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxState where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxState::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxState where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxState::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxState where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxState::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxState where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxState::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxState
+pub fn consistency::inbox::InboxState::from(T) -> T
+#[non_exhaustive] pub enum consistency::InboxStatus
+pub consistency::InboxStatus::Claimed
+pub consistency::InboxStatus::Done
+impl consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::as_label(self) -> &'static str
+pub fn consistency::inbox::InboxStatus::parse_label(&str) -> core::result::Result<Self, consistency::inbox::InboxStatusError>
+impl core::clone::Clone for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::clone(&self) -> consistency::inbox::InboxStatus
+impl core::cmp::Eq for consistency::inbox::InboxStatus
+impl core::cmp::PartialEq for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::eq(&self, &consistency::inbox::InboxStatus) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxStatus
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxStatus
+impl core::marker::Freeze for consistency::inbox::InboxStatus
+impl core::marker::Send for consistency::inbox::InboxStatus
+impl core::marker::Sync for consistency::inbox::InboxStatus
+impl core::marker::Unpin for consistency::inbox::InboxStatus
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxStatus
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxStatus where U: core::convert::From<T>
+pub fn consistency::inbox::InboxStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxStatus where U: core::convert::Into<T>
+pub type consistency::inbox::InboxStatus::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxStatus where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxStatus where T: core::clone::Clone
+pub type consistency::inbox::InboxStatus::Owned = T
+pub fn consistency::inbox::InboxStatus::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxStatus where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxStatus where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxStatus where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxStatus
+pub fn consistency::inbox::InboxStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::InboxStatusError
+pub consistency::InboxStatusError::Unknown
+impl core::clone::Clone for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::clone(&self) -> consistency::inbox::InboxStatusError
+impl core::cmp::Eq for consistency::inbox::InboxStatusError
+impl core::cmp::PartialEq for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::eq(&self, &consistency::inbox::InboxStatusError) -> bool
+impl core::error::Error for consistency::inbox::InboxStatusError
+impl core::fmt::Debug for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxStatusError
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxStatusError
+impl core::marker::Freeze for consistency::inbox::InboxStatusError
+impl core::marker::Send for consistency::inbox::InboxStatusError
+impl core::marker::Sync for consistency::inbox::InboxStatusError
+impl core::marker::Unpin for consistency::inbox::InboxStatusError
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxStatusError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxStatusError
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxStatusError
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxStatusError where U: core::convert::From<T>
+pub fn consistency::inbox::InboxStatusError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxStatusError where U: core::convert::Into<T>
+pub type consistency::inbox::InboxStatusError::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxStatusError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxStatusError where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxStatusError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxStatusError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxStatusError where T: core::clone::Clone
+pub type consistency::inbox::InboxStatusError::Owned = T
+pub fn consistency::inbox::InboxStatusError::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxStatusError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::inbox::InboxStatusError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::inbox::InboxStatusError where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxStatusError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxStatusError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxStatusError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxStatusError where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxStatusError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxStatusError
+pub fn consistency::inbox::InboxStatusError::from(T) -> T
 #[non_exhaustive] pub enum consistency::LeaseOutcome
 pub consistency::LeaseOutcome::Held
 pub consistency::LeaseOutcome::Lost
+impl consistency::idempotency::LeaseOutcome
+pub fn consistency::idempotency::LeaseOutcome::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::idempotency::LeaseOutcome
 pub fn consistency::idempotency::LeaseOutcome::clone(&self) -> consistency::idempotency::LeaseOutcome
 impl core::cmp::Eq for consistency::idempotency::LeaseOutcome
@@ -1909,6 +2317,8 @@ pub fn consistency::saga::SagaOutcome::from(T) -> T
 #[non_exhaustive] pub enum consistency::SeenState
 pub consistency::SeenState::Duplicate
 pub consistency::SeenState::Fresh
+impl consistency::idempotency::SeenState
+pub fn consistency::idempotency::SeenState::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::idempotency::SeenState
 pub fn consistency::idempotency::SeenState::clone(&self) -> consistency::idempotency::SeenState
 impl core::cmp::Eq for consistency::idempotency::SeenState
@@ -2465,6 +2875,49 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::IdemKey where T
 pub unsafe fn consistency::idempotency::IdemKey::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKey
 pub fn consistency::idempotency::IdemKey::from(T) -> T
+pub struct consistency::InboxClaim
+impl consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::active(consistency::idempotency::LeaseToken) -> Self
+pub fn consistency::inbox::InboxClaim::expired(consistency::idempotency::LeaseToken) -> Self
+pub fn consistency::inbox::InboxClaim::freshness(&self) -> consistency::inbox::InboxLeaseFreshness
+pub fn consistency::inbox::InboxClaim::lease(&self) -> &consistency::idempotency::LeaseToken
+impl core::clone::Clone for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::clone(&self) -> consistency::inbox::InboxClaim
+impl core::cmp::Eq for consistency::inbox::InboxClaim
+impl core::cmp::PartialEq for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::eq(&self, &consistency::inbox::InboxClaim) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxClaim
+impl core::marker::Freeze for consistency::inbox::InboxClaim
+impl core::marker::Send for consistency::inbox::InboxClaim
+impl core::marker::Sync for consistency::inbox::InboxClaim
+impl core::marker::Unpin for consistency::inbox::InboxClaim
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxClaim
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxClaim
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxClaim
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxClaim where U: core::convert::From<T>
+pub fn consistency::inbox::InboxClaim::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxClaim where U: core::convert::Into<T>
+pub type consistency::inbox::InboxClaim::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxClaim::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxClaim where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxClaim::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxClaim::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxClaim where T: core::clone::Clone
+pub type consistency::inbox::InboxClaim::Owned = T
+pub fn consistency::inbox::InboxClaim::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxClaim::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxClaim where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxClaim::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxClaim where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxClaim::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxClaim where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxClaim::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxClaim where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxClaim::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxClaim
+pub fn consistency::inbox::InboxClaim::from(T) -> T
 pub struct consistency::LeaseToken(_)
 impl consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::as_str(&self) -> &str

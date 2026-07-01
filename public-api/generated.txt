@@ -941,6 +941,7 @@ pub type generated::http::audit_v1::AuditEntryView::Output = T
 pub struct generated::http::audit_v1::AuditListEntriesRequest
 pub generated::http::audit_v1::AuditListEntriesRequest::cursor: core::option::Option<alloc::string::String>
 pub generated::http::audit_v1::AuditListEntriesRequest::limit: core::num::nonzero::NonZeroU32
+pub generated::http::audit_v1::AuditListEntriesRequest::tenant_id: core::option::Option<alloc::string::String>
 impl core::clone::Clone for generated::http::audit_v1::AuditListEntriesRequest
 pub fn generated::http::audit_v1::AuditListEntriesRequest::clone(&self) -> generated::http::audit_v1::AuditListEntriesRequest
 impl core::default::Default for generated::http::audit_v1::AuditListEntriesRequest

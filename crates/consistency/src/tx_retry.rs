@@ -189,6 +189,7 @@ where
             Err(error) => {
                 let class = classify(&error);
                 if policy.should_retry(class, attempt) {
+                    drop(error);
                     sleep(policy.delay_after(attempt)).await;
                     attempt = attempt.saturating_add(1);
                     continue;
@@ -213,6 +214,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::rc::Rc;
     use std::time::Duration;
 
     use super::{
@@ -274,9 +276,78 @@ mod tests {
                 TxRetryFinalStatus::NotRetryable(TxRetryClass::OwnershipLost),
                 "ownership_lost",
             ),
+            (
+                TxRetryFinalStatus::NotRetryable(TxRetryClass::Transient),
+                "transient_not_retried",
+            ),
         ];
         for (status, expected) in cases {
             assert_eq!(status.as_label(), expected);
+        }
+    }
+
+    #[test]
+    fn default_policy_exposes_expected_attempt_budget() {
+        assert_eq!(TxRetryPolicy::DEFAULT.max_attempts(), 3);
+        assert_eq!(TxRetryPolicy::default().max_attempts(), 3);
+    }
+
+    #[test]
+    fn should_retry_only_transient_before_attempt_budget() {
+        let policy = TxRetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+        };
+
+        let cases = [
+            (TxRetryClass::Transient, 1, true),
+            (TxRetryClass::Transient, 2, true),
+            (TxRetryClass::Transient, 3, false),
+            (TxRetryClass::Conflict, 1, false),
+            (TxRetryClass::Permanent, 1, false),
+            (TxRetryClass::OwnershipLost, 1, false),
+        ];
+        for (class, attempt, expected) in cases {
+            assert_eq!(
+                policy.should_retry(class, attempt),
+                expected,
+                "class={class:?} attempt={attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn delay_after_uses_exponential_backoff_and_caps_at_max() {
+        let policy = TxRetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(20),
+        };
+
+        let cases = [
+            (0, Duration::from_millis(5)),
+            (1, Duration::from_millis(5)),
+            (2, Duration::from_millis(10)),
+            (3, Duration::from_millis(20)),
+            (4, Duration::from_millis(20)),
+            (40, Duration::from_millis(20)),
+        ];
+        for (attempt, expected) in cases {
+            assert_eq!(policy.delay_after(attempt), expected, "attempt={attempt}");
+        }
+    }
+
+    #[test]
+    fn delay_after_zero_base_stays_zero() {
+        let policy = TxRetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::from_millis(10),
+        };
+
+        for attempt in [0, 1, 2, 40] {
+            assert_eq!(policy.delay_after(attempt), Duration::ZERO);
         }
     }
 
@@ -317,9 +388,97 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result, Ok("done"));
+        assert!(matches!(result, Ok("done")));
         assert_eq!(calls.get(), 3);
         assert_eq!(report.attempts(), 3);
+        assert_eq!(report.final_status(), TxRetryFinalStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn transient_retry_sleeps_with_policy_delay() {
+        let calls = Cell::new(0);
+        let slept = Cell::new(Duration::ZERO);
+        let policy = TxRetryPolicy {
+            max_attempts: 2,
+            base_delay: Duration::from_millis(7),
+            max_delay: Duration::from_millis(50),
+        };
+
+        let (result, report) = run_tx_retry(
+            policy,
+            |attempt| {
+                calls.set(calls.get() + 1);
+                async move {
+                    if attempt == 1 {
+                        Err(FakeError::Transient)
+                    } else {
+                        Ok("done")
+                    }
+                }
+            },
+            classify,
+            |delay| {
+                slept.set(delay);
+                async {}
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Ok("done")));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(slept.get(), Duration::from_millis(7));
+        assert_eq!(report.attempts(), 2);
+        assert_eq!(report.final_status(), TxRetryFinalStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn retry_drops_failed_error_before_backoff_sleep() {
+        #[derive(Debug)]
+        struct DropSentinel {
+            dropped: Rc<Cell<bool>>,
+        }
+
+        impl Drop for DropSentinel {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+
+        let dropped = Rc::new(Cell::new(false));
+        let observed_before_sleep = Rc::new(Cell::new(false));
+        let policy = TxRetryPolicy {
+            max_attempts: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let dropped_for_op = Rc::clone(&dropped);
+        let observed_for_sleep = Rc::clone(&observed_before_sleep);
+
+        let (result, report) = run_tx_retry(
+            policy,
+            move |attempt| {
+                let dropped_for_op = Rc::clone(&dropped_for_op);
+                async move {
+                    if attempt == 1 {
+                        Err(DropSentinel {
+                            dropped: dropped_for_op,
+                        })
+                    } else {
+                        Ok("done")
+                    }
+                }
+            },
+            |_error| TxRetryClass::Transient,
+            move |_delay| {
+                observed_for_sleep.set(dropped.get());
+                async {}
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Ok("done")));
+        assert!(observed_before_sleep.get());
+        assert_eq!(report.attempts(), 2);
         assert_eq!(report.final_status(), TxRetryFinalStatus::Success);
     }
 

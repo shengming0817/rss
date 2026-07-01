@@ -14,10 +14,8 @@
 //! 单跑一次测试既是 nextest 门又出覆盖率（不重复跑）。集成测试 `#[cfg(feature="integration")]` 默认不
 //! 编入 ⇒ 无需 DB/broker。
 //!
-//! **ratchet 例外**：`consistency` 的 L3/L4 接缝（`saga`/`reconcile`/`projection`）当前是签名冻结
-//! `todo!()` 桩（「行为 PR 兑现」，无法测——调用即 panic），把 crate 覆盖率压到 ~88%。这**非测试债**
-//! （已实现的 idempotency/outbox/error ~100%）。故 `consistency` 暂设 ratchet 下限 85%（[`RATCHET_FLOORS`]，
-//! 留 thaw 余量）；待接缝兑现+测试落地后 restore 90%（follow-up #1146）。其余 STRICT crate 守默认 90%。
+//! 无 ratchet 例外：所有 STRICT crate 均守默认 90% 行覆盖率下限。历史 `consistency` 85% 例外已随
+//! inbox 行为模型与覆盖率补强移除。
 //!
 //! INVARIANT: COVERAGE-STRICT-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— [`STRICT_CRATES`] 任一 crate 行覆盖率 < 其 [`floor_for`] 下限
 //!   **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。缺测量也 fail：杜绝「没跑到 = 静默绿」的 vacuity。
@@ -38,11 +36,9 @@ pub(crate) const STRICT_CRATES: &[&str] = &["vocab", "ids", "consistency", "prim
 /// STRICT crate 默认行覆盖率下限（%）= CLAUDE.md 目标。
 const DEFAULT_MIN_PERCENT: f64 = 90.0;
 
-/// ratchet 例外：暂未达 [`DEFAULT_MIN_PERCENT`] 的 STRICT crate 的**有记录**下限（含原因）。仅
-/// `consistency`——其 L3/L4 接缝（saga/reconcile/projection）仍是签名冻结 `todo!()` 桩（行为 PR 未兑现，
-/// 无法测），把 crate 压到 ~88%；暂设 85（thaw 余量），待桩兑现+测试落地 restore 90（follow-up #1146）。
-/// **新增 ratchet 必须显式登记于此并附 follow-up**——`ratchet_floors_only_consistency` 测试守不被静默扩容。
-const RATCHET_FLOORS: &[(&str, f64)] = &[("consistency", 85.0)];
+/// ratchet 例外清单。当前必须为空：所有 STRICT crate 均守 [`DEFAULT_MIN_PERCENT`]。
+/// **新增 ratchet 必须显式登记于此并附 follow-up**——`ratchet_floors_are_empty` 测试守不被静默扩容。
+const RATCHET_FLOORS: &[(&str, f64)] = &[];
 
 /// 某 crate 的行覆盖率下限：有 ratchet 例外取例外值，否则取默认 90%。
 fn floor_for(crate_name: &str) -> f64 {
@@ -152,7 +148,7 @@ fn render_failures(failing: &[Shortfall]) -> String {
         })
         .collect();
     format!(
-        "{} 个 basis/engine crate 未达行覆盖率下限：{}（补表驱动测试或按 ratchet issue 处理）",
+        "{} 个 basis/engine crate 未达行覆盖率下限：{}（补表驱动测试）",
         failing.len(),
         items.join("; ")
     )
@@ -169,12 +165,16 @@ pub(crate) fn run() -> Result<()> {
     if !failing.is_empty() {
         bail!("coverage: {}", render_failures(&failing));
     }
-    // ratchet 提示从 RATCHET_FLOORS 派生（单源，避免硬编码 "85%" 与 ratchet 改动漂移）。
-    let ratchet = RATCHET_FLOORS
-        .iter()
-        .map(|(c, f)| format!("{c} ratchet {f:.0}%"))
-        .collect::<Vec<_>>()
-        .join("、");
+    // ratchet 提示从 RATCHET_FLOORS 派生（单源，避免门行为与诊断漂移）。
+    let ratchet = if RATCHET_FLOORS.is_empty() {
+        "无 ratchet".to_string()
+    } else {
+        RATCHET_FLOORS
+            .iter()
+            .map(|(c, f)| format!("{c} ratchet {f:.0}%"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
     eprintln!(
         "coverage: STRICT basis/engine crate 均达行覆盖率下限（{}；{ratchet}）",
         STRICT_CRATES.join(", ")
@@ -281,18 +281,18 @@ mod tests {
         );
     }
 
-    /// ratchet 例外只含 consistency（防 ratchet floor 被静默扩容架空 90% 目标）。
+    /// ratchet 例外必须为空（防 ratchet floor 被静默扩容架空 90% 目标）。
     #[test]
-    fn ratchet_floors_only_consistency() {
-        assert_eq!(RATCHET_FLOORS, &[("consistency", 85.0)]);
+    fn ratchet_floors_are_empty() {
+        assert!(RATCHET_FLOORS.is_empty());
     }
 
-    /// floor_for：默认 90，ratchet crate（consistency）取例外 85。
+    /// floor_for：所有 STRICT crate 默认 90。
     #[test]
-    fn floor_for_default_and_ratchet() {
+    fn floor_for_defaults_to_ninety() {
         assert_eq!(floor_for("vocab"), 90.0);
         assert_eq!(floor_for("primitives"), 90.0);
-        assert_eq!(floor_for("consistency"), 85.0);
+        assert_eq!(floor_for("consistency"), 90.0);
     }
 
     /// crate 归属：`crates/<name>/` → `<name>`；非 `crates/`（adapters/generated）→ `None`。
@@ -337,13 +337,13 @@ mod tests {
         assert!(aggregate("{\"data\":[{}]}", STRICT_CRATES).is_err()); // 缺 files 字段
     }
 
-    /// evaluate 绿例：全 STRICT crate ≥各自下限（含 consistency 88% ≥ ratchet 85）⇒ 无不达标项。
+    /// evaluate 绿例：全 STRICT crate ≥各自下限 ⇒ 无不达标项。
     #[test]
     fn evaluate_all_pass_is_empty() {
         let m = map(&[
             ("vocab", 95, 100),
             ("ids", 90, 100),
-            ("consistency", 88, 100), // 88 ≥ ratchet 85 ⇒ 过
+            ("consistency", 90, 100),
             ("primitives", 91, 100),
         ]);
         assert!(evaluate(&m, STRICT_CRATES).is_empty());
@@ -362,26 +362,26 @@ mod tests {
         assert_eq!(failing, vec![shortfall("vocab", Some(85.0), 90.0)]);
     }
 
-    /// ratchet 档（consistency）低于其 85% 下限才 fail（84 < 85 红；88 ≥ 85 绿见上）。
+    /// consistency 低于默认 90% 下限会 fail。
     #[test]
-    fn evaluate_ratchet_below_its_floor_fails() {
+    fn evaluate_consistency_below_default_floor_fails() {
         let m = map(&[
             ("vocab", 95, 100),
             ("ids", 95, 100),
-            ("consistency", 84, 100), // < 85 ratchet
+            ("consistency", 89, 100),
             ("primitives", 95, 100),
         ]);
         let failing = evaluate(&m, STRICT_CRATES);
-        assert_eq!(failing, vec![shortfall("consistency", Some(84.0), 85.0)]);
+        assert_eq!(failing, vec![shortfall("consistency", Some(89.0), 90.0)]);
     }
 
-    /// 边界：恰达下限通过（≥，非 >）——consistency 恰 85、vocab 恰 90 均过。
+    /// 边界：恰达下限通过（≥，非 >）——consistency / vocab 恰 90 均过。
     #[test]
     fn evaluate_exactly_floor_passes() {
         let m = map(&[
             ("vocab", 90, 100),
             ("ids", 90, 100),
-            ("consistency", 85, 100),
+            ("consistency", 90, 100),
             ("primitives", 90, 100),
         ]);
         assert!(evaluate(&m, STRICT_CRATES).is_empty());

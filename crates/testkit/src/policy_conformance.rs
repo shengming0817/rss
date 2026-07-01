@@ -319,6 +319,35 @@ where
         "assert_policy_store_tenant_isolation: tenant_a 与 tenant_b 必须不同"
     );
 
+    assert_tenant_a_policy_isolated::<_, _, _, _, _, _, _, _, CF, FF, LF, UF, DF, E>(&mut case)
+        .await?;
+    assert_tenant_b_create_isolated::<_, _, _, _, _, _, _, _, CF, FF, LF, UF, DF, E>(&mut case)
+        .await?;
+    assert_tenant_b_update_isolated::<_, _, _, _, _, _, _, _, CF, FF, LF, UF, DF, E>(&mut case)
+        .await?;
+    assert_tenant_b_delete_isolated::<_, _, _, _, _, _, _, _, CF, FF, LF, UF, DF, E>(&mut case)
+        .await
+}
+
+async fn assert_tenant_a_policy_isolated<T, K, P, C, F, L, U, D, CF, FF, LF, UF, DF, E>(
+    case: &mut PolicyTenantIsolationCase<T, K, P, C, F, L, U, D>,
+) -> Result<(), PolicyConformanceError>
+where
+    T: Copy + Debug + PartialEq,
+    K: Copy + Debug,
+    P: Clone + Debug + PartialEq,
+    C: FnMut(T, K, P) -> CF,
+    F: FnMut(T, K) -> FF,
+    L: FnMut(T) -> LF,
+    U: FnMut(T, K, P) -> UF,
+    D: FnMut(T, K) -> DF,
+    CF: Future<Output = Result<(), E>>,
+    FF: Future<Output = Result<Option<P>, E>>,
+    LF: Future<Output = Result<Vec<P>, E>>,
+    UF: Future<Output = Result<(), E>>,
+    DF: Future<Output = Result<(), E>>,
+    E: Debug,
+{
     (case.create)(case.tenant_a, case.key, case.tenant_a_policy.clone())
         .await
         .map_err(|e| provider("tenant A create", e))?;
@@ -342,8 +371,28 @@ where
             .await
             .map_err(|e| provider("tenant B list excludes tenant A policy", e))?,
         &[],
-    )?;
+    )
+}
 
+async fn assert_tenant_b_create_isolated<T, K, P, C, F, L, U, D, CF, FF, LF, UF, DF, E>(
+    case: &mut PolicyTenantIsolationCase<T, K, P, C, F, L, U, D>,
+) -> Result<(), PolicyConformanceError>
+where
+    T: Copy + Debug + PartialEq,
+    K: Copy + Debug,
+    P: Clone + Debug + PartialEq,
+    C: FnMut(T, K, P) -> CF,
+    F: FnMut(T, K) -> FF,
+    L: FnMut(T) -> LF,
+    U: FnMut(T, K, P) -> UF,
+    D: FnMut(T, K) -> DF,
+    CF: Future<Output = Result<(), E>>,
+    FF: Future<Output = Result<Option<P>, E>>,
+    LF: Future<Output = Result<Vec<P>, E>>,
+    UF: Future<Output = Result<(), E>>,
+    DF: Future<Output = Result<(), E>>,
+    E: Debug,
+{
     (case.create)(case.tenant_b, case.key, case.tenant_b_policy.clone())
         .await
         .map_err(|e| provider("tenant B create", e))?;
@@ -366,9 +415,29 @@ where
         (case.list)(case.tenant_a)
             .await
             .map_err(|e| provider("tenant A list excludes tenant B policy", e))?,
-        &[case.tenant_a_policy.clone()],
-    )?;
+        std::slice::from_ref(&case.tenant_a_policy),
+    )
+}
 
+async fn assert_tenant_b_update_isolated<T, K, P, C, F, L, U, D, CF, FF, LF, UF, DF, E>(
+    case: &mut PolicyTenantIsolationCase<T, K, P, C, F, L, U, D>,
+) -> Result<(), PolicyConformanceError>
+where
+    T: Copy + Debug + PartialEq,
+    K: Copy + Debug,
+    P: Clone + Debug + PartialEq,
+    C: FnMut(T, K, P) -> CF,
+    F: FnMut(T, K) -> FF,
+    L: FnMut(T) -> LF,
+    U: FnMut(T, K, P) -> UF,
+    D: FnMut(T, K) -> DF,
+    CF: Future<Output = Result<(), E>>,
+    FF: Future<Output = Result<Option<P>, E>>,
+    LF: Future<Output = Result<Vec<P>, E>>,
+    UF: Future<Output = Result<(), E>>,
+    DF: Future<Output = Result<(), E>>,
+    E: Debug,
+{
     (case.update)(
         case.tenant_b,
         case.key,
@@ -389,8 +458,28 @@ where
             .await
             .map_err(|e| provider("tenant B update applies only to tenant B", e))?,
         Some(&case.tenant_b_updated_policy),
-    )?;
+    )
+}
 
+async fn assert_tenant_b_delete_isolated<T, K, P, C, F, L, U, D, CF, FF, LF, UF, DF, E>(
+    case: &mut PolicyTenantIsolationCase<T, K, P, C, F, L, U, D>,
+) -> Result<(), PolicyConformanceError>
+where
+    T: Copy + Debug + PartialEq,
+    K: Copy + Debug,
+    P: Clone + Debug + PartialEq,
+    C: FnMut(T, K, P) -> CF,
+    F: FnMut(T, K) -> FF,
+    L: FnMut(T) -> LF,
+    U: FnMut(T, K, P) -> UF,
+    D: FnMut(T, K) -> DF,
+    CF: Future<Output = Result<(), E>>,
+    FF: Future<Output = Result<Option<P>, E>>,
+    LF: Future<Output = Result<Vec<P>, E>>,
+    UF: Future<Output = Result<(), E>>,
+    DF: Future<Output = Result<(), E>>,
+    E: Debug,
+{
     (case.delete)(case.tenant_b, case.key)
         .await
         .map_err(|e| provider("tenant B delete", e))?;

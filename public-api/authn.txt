@@ -586,7 +586,7 @@ pub fn authn::Principal::matches_subject(&self, &str) -> bool
 pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
 pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
 impl authn::Principal
-pub async fn authn::Principal::audited_cross_tenant_visibility(&self, &runctx::ctx::AppCtx, &diport::audit_sink::__dynosaur_macro_dynauditsink::DynAuditSink<'_>, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<vocab::tenant::RowVisibility, authn::CrossTenantError>
+pub async fn authn::Principal::audited_cross_tenant_visibility<S>(&self, &runctx::ctx::AppCtx, &S, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<vocab::tenant::RowVisibility, authn::CrossTenantError> where S: diport::audit_sink::AuditSink + core::marker::Send + core::marker::Sync + 'static
 impl runctx::ctx::PrincipalFacet for authn::Principal
 pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool

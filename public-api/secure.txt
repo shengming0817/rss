@@ -1426,6 +1426,195 @@ pub fn secure::refresh::OpaqueToken::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::refresh::OpaqueToken
 pub type secure::refresh::OpaqueToken::Output = T
 pub fn secure::refresh::digest(&str) -> [u8; 32]
+pub mod secure::transport_endpoint
+pub enum secure::transport_endpoint::PlaintextEndpointPolicy
+pub secure::transport_endpoint::PlaintextEndpointPolicy::AllowDevContainer
+pub secure::transport_endpoint::PlaintextEndpointPolicy::AllowLoopback
+pub secure::transport_endpoint::PlaintextEndpointPolicy::Deny
+impl core::clone::Clone for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::clone(&self) -> secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::cmp::Eq for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::cmp::PartialEq for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::eq(&self, &secure::transport_endpoint::PlaintextEndpointPolicy) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Freeze for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Send for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Sync for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Unpin for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::From<T>
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::Into<T>
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Owned = T
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::to_owned(&self) -> T
+impl<T> core::any::Any for secure::transport_endpoint::PlaintextEndpointPolicy where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::PlaintextEndpointPolicy
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Output = T
+#[non_exhaustive] pub enum secure::transport_endpoint::TransportEndpointError
+pub secure::transport_endpoint::TransportEndpointError::AmqpHostRequired
+pub secure::transport_endpoint::TransportEndpointError::AmqpVhostRequired
+pub secure::transport_endpoint::TransportEndpointError::InsecureScheme
+pub secure::transport_endpoint::TransportEndpointError::InsecureScheme::kind: &'static str
+pub secure::transport_endpoint::TransportEndpointError::InsecureScheme::secure_scheme: &'static str
+pub secure::transport_endpoint::TransportEndpointError::InvalidUrl
+pub secure::transport_endpoint::TransportEndpointError::PlaintextNotDevContainer
+pub secure::transport_endpoint::TransportEndpointError::PlaintextNotDevContainer::kind: &'static str
+pub secure::transport_endpoint::TransportEndpointError::PlaintextNotLoopback
+pub secure::transport_endpoint::TransportEndpointError::PlaintextNotLoopback::kind: &'static str
+pub secure::transport_endpoint::TransportEndpointError::RedisFragmentUnsupported
+pub secure::transport_endpoint::TransportEndpointError::UnsupportedScheme
+pub secure::transport_endpoint::TransportEndpointError::UnsupportedScheme::kind: &'static str
+impl core::cmp::Eq for secure::transport_endpoint::TransportEndpointError
+impl core::cmp::PartialEq for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::eq(&self, &secure::transport_endpoint::TransportEndpointError) -> bool
+impl core::error::Error for secure::transport_endpoint::TransportEndpointError
+impl core::fmt::Debug for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Freeze for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Send for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Sync for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Unpin for secure::transport_endpoint::TransportEndpointError
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::TransportEndpointError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::TransportEndpointError
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::TransportEndpointError
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::From<T>
+pub fn secure::transport_endpoint::TransportEndpointError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::Into<T>
+pub type secure::transport_endpoint::TransportEndpointError::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::TransportEndpointError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::TransportEndpointError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::TransportEndpointError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::transport_endpoint::TransportEndpointError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::TransportEndpointError where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::TransportEndpointError
+pub type secure::transport_endpoint::TransportEndpointError::Output = T
+pub struct secure::transport_endpoint::AmqpEndpoint(_)
+impl secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::expose(&self) -> &str
+pub fn secure::transport_endpoint::AmqpEndpoint::parse(impl core::convert::Into<alloc::string::String>, secure::transport_endpoint::PlaintextEndpointPolicy) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+impl core::clone::Clone for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::clone(&self) -> secure::transport_endpoint::AmqpEndpoint
+impl core::cmp::Eq for secure::transport_endpoint::AmqpEndpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::eq(&self, &secure::transport_endpoint::AmqpEndpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Freeze for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Send for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Sync for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Unpin for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::AmqpEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::AmqpEndpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::AmqpEndpoint
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::From<T>
+pub fn secure::transport_endpoint::AmqpEndpoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::Into<T>
+pub type secure::transport_endpoint::AmqpEndpoint::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::AmqpEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::AmqpEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::AmqpEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
+pub type secure::transport_endpoint::AmqpEndpoint::Owned = T
+pub fn secure::transport_endpoint::AmqpEndpoint::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::AmqpEndpoint::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::transport_endpoint::AmqpEndpoint where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::AmqpEndpoint where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::AmqpEndpoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::AmqpEndpoint
+pub type secure::transport_endpoint::AmqpEndpoint::Output = T
+pub struct secure::transport_endpoint::RedisEndpoint(_)
+impl secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::expose(&self) -> &str
+pub fn secure::transport_endpoint::RedisEndpoint::parse(impl core::convert::Into<alloc::string::String>, secure::transport_endpoint::PlaintextEndpointPolicy) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+impl core::clone::Clone for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::clone(&self) -> secure::transport_endpoint::RedisEndpoint
+impl core::cmp::Eq for secure::transport_endpoint::RedisEndpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::eq(&self, &secure::transport_endpoint::RedisEndpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Freeze for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Send for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Sync for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Unpin for secure::transport_endpoint::RedisEndpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::RedisEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::RedisEndpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::RedisEndpoint
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::From<T>
+pub fn secure::transport_endpoint::RedisEndpoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::Into<T>
+pub type secure::transport_endpoint::RedisEndpoint::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::RedisEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::RedisEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::RedisEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
+pub type secure::transport_endpoint::RedisEndpoint::Owned = T
+pub fn secure::transport_endpoint::RedisEndpoint::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::RedisEndpoint::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::transport_endpoint::RedisEndpoint where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::RedisEndpoint where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::RedisEndpoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::RedisEndpoint
+pub type secure::transport_endpoint::RedisEndpoint::Output = T
 #[non_exhaustive] pub enum secure::AadError
 pub secure::AadError::EmptyDimension
 impl core::error::Error for secure::protection::AadError
@@ -1805,6 +1994,50 @@ impl<T> core::convert::From<T> for secure::redaction::PiiKind
 pub fn secure::redaction::PiiKind::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::PiiKind
 pub type secure::redaction::PiiKind::Output = T
+pub enum secure::PlaintextEndpointPolicy
+pub secure::PlaintextEndpointPolicy::AllowDevContainer
+pub secure::PlaintextEndpointPolicy::AllowLoopback
+pub secure::PlaintextEndpointPolicy::Deny
+impl core::clone::Clone for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::clone(&self) -> secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::cmp::Eq for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::cmp::PartialEq for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::eq(&self, &secure::transport_endpoint::PlaintextEndpointPolicy) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Freeze for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Send for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Sync for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::Unpin for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::From<T>
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::Into<T>
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Owned = T
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::to_owned(&self) -> T
+impl<T> core::any::Any for secure::transport_endpoint::PlaintextEndpointPolicy where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::PlaintextEndpointPolicy
+pub fn secure::transport_endpoint::PlaintextEndpointPolicy::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::PlaintextEndpointPolicy
+pub type secure::transport_endpoint::PlaintextEndpointPolicy::Output = T
 #[non_exhaustive] pub enum secure::RedactScope
 pub secure::RedactScope::ServerLog
 pub secure::RedactScope::Wire
@@ -2082,6 +2315,103 @@ impl<T> core::convert::From<T> for secure::blind_index::Transform
 pub fn secure::blind_index::Transform::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::blind_index::Transform
 pub type secure::blind_index::Transform::Output = T
+#[non_exhaustive] pub enum secure::TransportEndpointError
+pub secure::TransportEndpointError::AmqpHostRequired
+pub secure::TransportEndpointError::AmqpVhostRequired
+pub secure::TransportEndpointError::InsecureScheme
+pub secure::TransportEndpointError::InsecureScheme::kind: &'static str
+pub secure::TransportEndpointError::InsecureScheme::secure_scheme: &'static str
+pub secure::TransportEndpointError::InvalidUrl
+pub secure::TransportEndpointError::PlaintextNotDevContainer
+pub secure::TransportEndpointError::PlaintextNotDevContainer::kind: &'static str
+pub secure::TransportEndpointError::PlaintextNotLoopback
+pub secure::TransportEndpointError::PlaintextNotLoopback::kind: &'static str
+pub secure::TransportEndpointError::RedisFragmentUnsupported
+pub secure::TransportEndpointError::UnsupportedScheme
+pub secure::TransportEndpointError::UnsupportedScheme::kind: &'static str
+impl core::cmp::Eq for secure::transport_endpoint::TransportEndpointError
+impl core::cmp::PartialEq for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::eq(&self, &secure::transport_endpoint::TransportEndpointError) -> bool
+impl core::error::Error for secure::transport_endpoint::TransportEndpointError
+impl core::fmt::Debug for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Freeze for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Send for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Sync for secure::transport_endpoint::TransportEndpointError
+impl core::marker::Unpin for secure::transport_endpoint::TransportEndpointError
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::TransportEndpointError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::TransportEndpointError
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::TransportEndpointError
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::From<T>
+pub fn secure::transport_endpoint::TransportEndpointError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::Into<T>
+pub type secure::transport_endpoint::TransportEndpointError::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::TransportEndpointError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::TransportEndpointError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::TransportEndpointError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for secure::transport_endpoint::TransportEndpointError where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::TransportEndpointError where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::TransportEndpointError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for secure::transport_endpoint::TransportEndpointError
+pub fn secure::transport_endpoint::TransportEndpointError::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::TransportEndpointError
+pub type secure::transport_endpoint::TransportEndpointError::Output = T
+pub struct secure::AmqpEndpoint(_)
+impl secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::expose(&self) -> &str
+pub fn secure::transport_endpoint::AmqpEndpoint::parse(impl core::convert::Into<alloc::string::String>, secure::transport_endpoint::PlaintextEndpointPolicy) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+impl core::clone::Clone for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::clone(&self) -> secure::transport_endpoint::AmqpEndpoint
+impl core::cmp::Eq for secure::transport_endpoint::AmqpEndpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::eq(&self, &secure::transport_endpoint::AmqpEndpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Freeze for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Send for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Sync for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::Unpin for secure::transport_endpoint::AmqpEndpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::AmqpEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::AmqpEndpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::AmqpEndpoint
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::From<T>
+pub fn secure::transport_endpoint::AmqpEndpoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::Into<T>
+pub type secure::transport_endpoint::AmqpEndpoint::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::AmqpEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::AmqpEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::AmqpEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
+pub type secure::transport_endpoint::AmqpEndpoint::Owned = T
+pub fn secure::transport_endpoint::AmqpEndpoint::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::AmqpEndpoint::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::transport_endpoint::AmqpEndpoint where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::AmqpEndpoint where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::AmqpEndpoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::AmqpEndpoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::AmqpEndpoint
+pub fn secure::transport_endpoint::AmqpEndpoint::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::AmqpEndpoint
+pub type secure::transport_endpoint::AmqpEndpoint::Output = T
 pub struct secure::BlindIndex<'a>
 impl<'a> secure::blind_index::BlindIndex<'a>
 pub fn secure::blind_index::BlindIndex<'a>::index(&self, &secure::blind_index::BlindIndexKey, &str) -> core::result::Result<secure::blind_index::BlindIndexValue, secure::blind_index::BlindIndexError>
@@ -2765,6 +3095,53 @@ impl<T> core::convert::From<T> for secure::redaction::RedactionHashKey
 pub fn secure::redaction::RedactionHashKey::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::redaction::RedactionHashKey
 pub type secure::redaction::RedactionHashKey::Output = T
+pub struct secure::RedisEndpoint(_)
+impl secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::expose(&self) -> &str
+pub fn secure::transport_endpoint::RedisEndpoint::parse(impl core::convert::Into<alloc::string::String>, secure::transport_endpoint::PlaintextEndpointPolicy) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+impl core::clone::Clone for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::clone(&self) -> secure::transport_endpoint::RedisEndpoint
+impl core::cmp::Eq for secure::transport_endpoint::RedisEndpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::eq(&self, &secure::transport_endpoint::RedisEndpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Freeze for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Send for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Sync for secure::transport_endpoint::RedisEndpoint
+impl core::marker::Unpin for secure::transport_endpoint::RedisEndpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::RedisEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::RedisEndpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::RedisEndpoint
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::From<T>
+pub fn secure::transport_endpoint::RedisEndpoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::Into<T>
+pub type secure::transport_endpoint::RedisEndpoint::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::RedisEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::RedisEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::RedisEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
+pub type secure::transport_endpoint::RedisEndpoint::Owned = T
+pub fn secure::transport_endpoint::RedisEndpoint::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::RedisEndpoint::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::transport_endpoint::RedisEndpoint where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::RedisEndpoint where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::RedisEndpoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::RedisEndpoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::RedisEndpoint
+pub fn secure::transport_endpoint::RedisEndpoint::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::RedisEndpoint
+pub type secure::transport_endpoint::RedisEndpoint::Output = T
 pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>
