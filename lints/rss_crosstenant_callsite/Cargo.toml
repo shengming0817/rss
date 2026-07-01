@@ -3,7 +3,7 @@ name = "rss_crosstenant_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS G0.4 治理：限定 vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin 仅 authn 已校验 super-admin 路径可调用（callsite-allowlist，INVARIANT TENANCY-CROSSTENANT-CAP-01）"
+description = "RSS G0.4 治理：限定 vocab 跨租户 All-scope mint 三步仅 authn 已校验 super-admin 路径可调用（callsite-allowlist，INVARIANT TENANCY-CROSSTENANT-CAP-01）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep vocab）

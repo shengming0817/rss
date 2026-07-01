@@ -12,8 +12,8 @@
 //! [`primitives::MacVerifier`] + [`primitives::MacKey`] 计算（key 是凭据，构造器必填 ⇒ 无 key 不可造
 //! hasher，防篡改属性类型层成立；缺 key 的旧 `link_hash` 自由函数已删）。`canonical_message` 字节布局
 //! **冻结**（单源 `docs/rules/audit-ledger.md`，INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }），golden 字节测试守。
-//! 真实 HMAC 实现（`sha2`/`hmac` adapter）+ postgres 每租户子链持久化是独立 follow-up；本模块泛型于
-//! `MacVerifier`、域单测用确定性 `#[cfg(test)]` verifier（不依赖 adapter crate）。
+//! postgres provider 承载每租户子链持久化；本模块泛型于 `MacVerifier`、域单测用确定性
+//! `#[cfg(test)]` verifier（不依赖 adapter crate）。
 
 use std::time::{Duration, SystemTime};
 

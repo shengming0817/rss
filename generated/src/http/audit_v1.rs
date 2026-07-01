@@ -137,6 +137,10 @@ pub struct AuditEntryView {
 ///      "format": "int32",
 ///      "maximum": 500.0,
 ///      "minimum": 1.0
+///    },
+///    "tenantId": {
+///      "description": "Optional target tenant for audited SuperAdmin cross-tenant reads. Omit for scoped tenant reads.",
+///      "type": "string"
 ///    }
 ///  },
 ///  "additionalProperties": false
@@ -153,6 +157,14 @@ pub struct AuditListEntriesRequest {
     #[serde(default = "defaults::default_nzu64::<::std::num::NonZeroU32, 50>")]
     #[redact(sensitivity = public)]
     pub limit: ::std::num::NonZeroU32,
+    ///Optional target tenant for audited SuperAdmin cross-tenant reads. Omit for scoped tenant reads.
+    #[serde(
+        rename = "tenantId",
+        default,
+        skip_serializing_if = "::std::option::Option::is_none"
+    )]
+    #[redact(sensitivity = public)]
+    pub tenant_id: ::std::option::Option<::std::string::String>,
 }
 #[allow(clippy::derivable_impls)]
 impl ::std::default::Default for AuditListEntriesRequest {
@@ -160,6 +172,7 @@ impl ::std::default::Default for AuditListEntriesRequest {
         Self {
             cursor: Default::default(),
             limit: defaults::default_nzu64::<::std::num::NonZeroU32, 50>(),
+            tenant_id: Default::default(),
         }
     }
 }

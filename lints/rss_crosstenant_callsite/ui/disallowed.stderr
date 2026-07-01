@@ -1,19 +1,35 @@
-warning: 跨租户 capability 仅 `authn` 已校验 super-admin 路径可签发：`CrossTenantCapability::issue_for_verified_super_admin` 不得在此 crate 调用
+warning: 跨租户 All-scope mint 仅 `authn` 已校验 super-admin 路径可执行：vocab 跨租户 mint 函数不得在此 crate 调用
   --> $DIR/disallowed.rs:11:16
    |
 LL |     let _cap = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin();
    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 在 `authn` 的已校验 super-admin 派生路径里签发 capability，其它 crate 经构造器接收；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`
+   = help: 在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`
    = note: `#[warn(rss_crosstenant_callsite)]` on by default
 
-warning: 跨租户 capability 仅 `authn` 已校验 super-admin 路径可签发：`CrossTenantCapability::issue_for_verified_super_admin` 不得在此 crate 调用
+warning: 跨租户 All-scope mint 仅 `authn` 已校验 super-admin 路径可执行：vocab 跨租户 mint 函数不得在此 crate 调用
   --> $DIR/disallowed.rs:14:17
    |
 LL |     let issue = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin;
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 在 `authn` 的已校验 super-admin 派生路径里签发 capability，其它 crate 经构造器接收；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`
+   = help: 在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`
 
-warning: 2 warnings emitted
+warning: 跨租户 All-scope mint 仅 `authn` 已校验 super-admin 路径可执行：vocab 跨租户 mint 函数不得在此 crate 调用
+  --> $DIR/disallowed.rs:18:21
+   |
+LL |     let authorize = vocab::tenant::CrossTenantVisibility::authorize;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`
+
+warning: 跨租户 All-scope mint 仅 `authn` 已校验 super-admin 路径可执行：vocab 跨租户 mint 函数不得在此 crate 调用
+  --> $DIR/disallowed.rs:19:28
+   |
+LL |     let new_cross_tenant = vocab::tenant::RowVisibility::new_cross_tenant;
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`
+
+warning: 4 warnings emitted
 

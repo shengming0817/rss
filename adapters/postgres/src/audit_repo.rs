@@ -12,12 +12,12 @@
 //!
 //! 原子性：append 经 `pg_advisory_xact_lock`（per-tenant i64 key）串行化同租户并发写——读 tail → 分配
 //! seq → INSERT 在单事务锁保护下，消除 seq 竞争 / 重复；`(tenant_id, seq)` PK 作兜底 unique 拦截。
-//! list / verify_tail 是只读路径（begin + SET LOCAL + SELECT + commit），增量 verify_window（窗口+1前驱）。
+//! list / verify_tail 是只读路径（begin + typed tenant scope + SELECT + commit），增量 verify_window（窗口+1前驱）。
 //!
-//! 租户隔离：写 / 读路径均 `SET LOCAL rss.tenant_id`（RLS policy current_setting 锚点）+ 显式
+//! 租户隔离：写 / 读路径均经 `PgTenantPool` typed scope funnel 注入租户 GUC + 显式
 //! `WHERE tenant_id = $1::uuid`（双重隔离，跨租 → 0 行 → fail-closed）。
 //!
-//! ref: adapters/postgres/src/credential_repo.rs（pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
+//! ref: adapters/postgres/src/credential_repo.rs（pool 注入 / tenant scope / storage 收口 / hydrate 范本）
 //! ref: crates/audit/src/internal/mem.rs（cursor encode/decode + verify_window 调用语义；postgres 改用 seq 键，
 //!   非 Vec 下标）
 
@@ -25,8 +25,9 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use audit::ports::{
-    AuditChainHasher, AuditEntry, AuditError, AuditListResult, AuditOutcome, AuditPage,
-    AuditRecord, AuditRepo, EntryHash, ResourceRef, TenantId, actor_kind_from_db, actor_kind_to_db,
+    AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditListResult, AuditOutcome,
+    AuditPage, AuditRecord, AuditRepo, EntryHash, ResourceRef, TenantId, actor_kind_from_db,
+    actor_kind_to_db,
 };
 use base64::Engine as _;
 use primitives::MacVerifier;
@@ -60,8 +61,27 @@ pub struct PgAuditRepo<M: primitives::MacVerifier> {
     hasher: Arc<AuditChainHasher<M>>,
 }
 
+/// audit 审计链的跨租户只读 admin adapter。
+///
+/// 使用专用 `rss_audit_admin` pool，但仍通过 [`PgTenantPool`] 注入 target tenant scope，
+/// 复用 `audit_entries` 现有 FORCE RLS tenant policy；本类型不实现 append/write 能力。
+pub struct PgAuditAdminRepo<M: primitives::MacVerifier> {
+    pool: PgTenantPool,
+    hasher: Arc<AuditChainHasher<M>>,
+}
+
 impl<M: MacVerifier + Send + Sync> PgAuditRepo<M> {
     /// 由 [`PgStore`] + `hasher` 构造（clone pool；hasher 持注入 verifier + key）。
+    pub(crate) fn new(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+        Self {
+            pool: PgTenantPool::new(store),
+            hasher: Arc::new(hasher),
+        }
+    }
+}
+
+impl<M: MacVerifier + Send + Sync> PgAuditAdminRepo<M> {
+    /// 由专用 admin [`PgStore`] + `hasher` 构造（clone pool；不暴露裸 pool）。
     pub(crate) fn new(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
         Self {
             pool: PgTenantPool::new(store),
@@ -498,6 +518,34 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
                 move |conn| {
                     Box::pin(async move {
                         verify_tail_in_tx(conn, &tenant_uuid, tenant, limit, &hasher).await
+                    })
+                },
+                storage,
+            )
+            .await
+    }
+}
+
+impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo<M> {
+    /// 按目标租户分页列出审计条目；tenant scope 由专用 admin pool 上的 `SET LOCAL` 注入。
+    async fn list_tenant(
+        &self,
+        tenant: TenantId,
+        page: AuditPage,
+    ) -> Result<AuditListResult, AuditError> {
+        let tenant_uuid = tenant_str(tenant);
+        let start_seq = match page.cursor.as_ref() {
+            Some(c) => decode_cursor(c)?,
+            None => 0u64,
+        };
+        let limit = usize::from(page.limit.get());
+        let hasher = Arc::clone(&self.hasher);
+        self.pool
+            .read_map(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        list_in_tx(conn, &tenant_uuid, tenant, start_seq, limit, &hasher).await
                     })
                 },
                 storage,

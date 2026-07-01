@@ -9,6 +9,8 @@
 //! **注入用 `Arc<DynAuditRepo>`（非 `Box`）**：订阅 handler（session→链 append）与 admin 读路由 clone 共享**同一
 //! 链 store**（in-mem 同一 `Mutex<State>` / postgres 同一池），故基 trait 带 `Send + Sync` 超 trait ⇒ erased
 //! `DynAuditRepo` 须 `Send + Sync` 以使 `Arc<DynAuditRepo>` 可被 spawn 的订阅 future / axum handler 闭包持有。
+//! 跨租户 admin read 使用独立 [`AuditAdminRepo`] port，只暴露 target-tenant 读能力，不复用 append-capable
+//! [`AuditRepo`]，避免把 SuperAdmin 读路径误接到可写 provider。
 //!
 //! 跨 crate 可见性：port 须 `pub`（独立 adapter crate impl）；签名实体（[`AuditEntry`] / [`EntryHash`] /
 //! [`ResourceRef`] / [`AuditOutcome`] / [`AuditError`] / [`AuditChainHasher`] + DB funnel）经下方 `pub use`
@@ -112,6 +114,27 @@ pub trait AuditRepoLocal: Send + Sync {
     async fn verify_tail(&self, tenant: TenantId, limit: u32) -> Result<(), AuditError>;
 }
 
+// ---------------------------------------------------------------------------
+// AuditAdminRepo —— 跨租户指定租户只读 port
+// ---------------------------------------------------------------------------
+
+/// 跨租户 admin audit read 的只读 provider。
+///
+/// 与 [`AuditRepo`] 分开是刻意的 capability 收窄：SuperAdmin target-tenant HTTP read 只需要读取指定租户
+/// 审计链并做完整性校验，不需要 append / verify_tail / write 能力。postgres provider 使用专用
+/// `rss_audit_admin` pool，经 `SET LOCAL rss.tenant_id = targetTenant` 复用现有 FORCE RLS policy。
+#[trait_variant::make(AuditAdminRepo: Send)]
+#[dynosaur(pub DynAuditAdminRepo = dyn(box) AuditAdminRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait AuditAdminRepoLocal: Send + Sync {
+    /// 按目标租户分页列出审计条目；provider 负责在读取窗口上做链完整性校验，失败即 Err。
+    async fn list_tenant(
+        &self,
+        tenant: TenantId,
+        page: AuditPage,
+    ) -> Result<AuditListResult, AuditError>;
+}
+
 #[cfg(test)]
 mod smoke {
     //! build smoke：域形 async repo port 可 native-AFIT impl，经 `Arc<DynAuditRepo>` 装入且 wrapper
@@ -119,7 +142,8 @@ mod smoke {
     use std::sync::Arc;
 
     use super::{
-        AuditError, AuditListResult, AuditPage, AuditRecord, AuditRepo, DynAuditRepo, TenantId,
+        AuditAdminRepo, AuditError, AuditListResult, AuditPage, AuditRecord, AuditRepo,
+        DynAuditAdminRepo, DynAuditRepo, TenantId,
     };
 
     struct NoopAuditRepo;
@@ -139,12 +163,30 @@ mod smoke {
         }
     }
 
+    struct NoopAuditAdminRepo;
+    impl AuditAdminRepo for NoopAuditAdminRepo {
+        async fn list_tenant(
+            &self,
+            _tenant: TenantId,
+            _page: AuditPage,
+        ) -> Result<AuditListResult, AuditError> {
+            todo!()
+        }
+    }
+
     fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
     // PORT-SHAPE：native-AFIT impl 经 `new_box` → `Arc<DynAuditRepo>`，wrapper `Send + Sync`（不调方法 → 不触 `todo!()`）。
     #[test]
     fn audit_repo_impl_loads_into_arc_dyn_send_sync() {
         let repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(NoopAuditRepo));
+        assert_send_sync(&repo);
+    }
+
+    #[test]
+    fn audit_admin_repo_impl_loads_into_arc_dyn_send_sync() {
+        let repo: Arc<DynAuditAdminRepo<'static>> =
+            Arc::from(DynAuditAdminRepo::new_box(NoopAuditAdminRepo));
         assert_send_sync(&repo);
     }
 }

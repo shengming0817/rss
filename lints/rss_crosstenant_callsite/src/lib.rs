@@ -1,6 +1,7 @@
 #![feature(rustc_private)]
-//! `rss_crosstenant_callsite` — RSS G0.4 治理 dylint lint：限定跨租户 capability 的签发入口
-//! `vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin()` 仅 `authn` crate 可调用。
+//! `rss_crosstenant_callsite` — RSS G0.4 治理 dylint lint：限定跨租户 All-scope mint 三步
+//! `CrossTenantCapability::issue_for_verified_super_admin()` / `CrossTenantVisibility::authorize()` /
+//! `RowVisibility::new_cross_tenant()` 仅 `authn` crate 可调用。
 //!
 //! INVARIANT: TENANCY-CROSSTENANT-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
@@ -33,13 +34,19 @@ use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
-/// 仅这些 crate 可调用 `issue_for_verified_super_admin`——单一 greppable 真源，扩项须治理评审
+/// 仅这些 crate 可调用跨租户 All-scope mint 三步——单一 greppable 真源，扩项须治理评审
 /// （等同对 funnel 本身的审视）。`authn` 持有「已校验 super-admin → 签发 capability」的派生路径。
 const ALLOWED_CALLER_CRATES: &[&str] = &["authn"];
 
+const FORBIDDEN_ASSOC_FNS: &[&str] = &[
+    "issue_for_verified_super_admin",
+    "authorize",
+    "new_cross_tenant",
+];
+
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记非 `authn` crate 对 `vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin` 的
+    /// 标记非 `authn` crate 对 vocab 跨租户 All-scope mint 三步的
     /// **任意 path 引用**（直接 call、`let f = Type::fn` 别名、fn-pointer 强转——凡解析到该 assoc fn DefId）。
     ///
     /// ### Why is this bad?
@@ -58,7 +65,7 @@ dylint_linting::declare_late_lint! {
     /// // 非 authn crate：
     /// let cap = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin(); // 触发
     /// ```
-    /// Use instead: 在 `authn` 的已校验 super-admin 派生路径里签发，其它 crate 经构造器接收 capability。
+    /// Use instead: 在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant。
     pub RSS_CROSSTENANT_CALLSITE,
     Warn,
     "跨租户 capability 签发仅限 authn 已校验 super-admin 路径（callsite-allowlist，INVARIANT TENANCY-CROSSTENANT-CAP-01）"
@@ -80,11 +87,10 @@ impl<'tcx> LateLintPass<'tcx> for RssCrosstenantCallsite {
     }
 }
 
-/// `did` 是 `vocab` 中关联 fn `issue_for_verified_super_admin`。按 crate 名 + item 名 + parent 为 impl 判定
-/// （对齐 rss_spawn_missing_scope 的反路径脆弱性思路；该 fn 名在 vocab 唯一）。
+/// `did` 是 `vocab` 中跨租户 All-scope mint 三步之一。按 crate 名 + item 名 + parent 为 impl 判定。
 fn is_cross_tenant_funnel_did(cx: &LateContext<'_>, did: DefId) -> bool {
     cx.tcx.crate_name(did.krate).as_str() == "vocab"
-        && cx.tcx.item_name(did).as_str() == "issue_for_verified_super_admin"
+        && FORBIDDEN_ASSOC_FNS.contains(&cx.tcx.item_name(did).as_str())
         && matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. })
 }
 
@@ -102,10 +108,10 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         RSS_CROSSTENANT_CALLSITE,
         hir_id,
         span,
-        "跨租户 capability 仅 `authn` 已校验 super-admin 路径可签发：`CrossTenantCapability::issue_for_verified_super_admin` 不得在此 crate 调用",
+        "跨租户 All-scope mint 仅 `authn` 已校验 super-admin 路径可执行：vocab 跨租户 mint 函数不得在此 crate 调用",
         |diag| {
             diag.help(
-                "在 `authn` 的已校验 super-admin 派生路径里签发 capability，其它 crate 经构造器接收；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`",
+                "在 `authn` 的已校验 super-admin 派生路径里完成 issue→authorize→new_cross_tenant；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_crosstenant_callsite)] // reason: ...`",
             );
         },
     );

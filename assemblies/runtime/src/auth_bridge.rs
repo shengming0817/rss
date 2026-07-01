@@ -151,7 +151,7 @@ fn mint_evidence(
     state: &VerifyState,
     token: &str,
     headers: &HeaderMap,
-) -> Option<(Authenticated, Option<runctx::AppCtx>)> {
+) -> Option<(Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>)> {
     match verify_principal(&state.provider, state.scheme, token, headers) {
         Some(Ok(verified)) => Some(allow_evidence(state.scheme, verified)),
         // err = AuthnError 变体（PdpError 经 verify_* 一一保真，三路），脱敏；不产证据 ⇒ enforce fail-closed。
@@ -186,7 +186,7 @@ fn mint_evidence(
 fn allow_evidence(
     scheme: RequiredScheme,
     verified: VerifiedPrincipal,
-) -> (Authenticated, Option<runctx::AppCtx>) {
+) -> (Authenticated, Option<runctx::AppCtx>, Arc<authn::Principal>) {
     let principal = Arc::new(verified.principal);
     let kind = principal.kind();
     let tenant = verified.ambient_tenant;
@@ -200,10 +200,10 @@ fn allow_evidence(
     );
     let evidence = Authenticated::new(scheme, kind, principal.audit_subject(), tenant);
     let ctx = tenant.map(|tenant| {
-        let facet: Arc<dyn runctx::PrincipalFacet> = principal;
+        let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
         runctx::RequestCtx::new(tenant, facet)
     });
-    (evidence, ctx)
+    (evidence, ctx, principal)
 }
 
 /// mTLS allow 分支：只消费 httpd mTLS listener 在 TLS handshake 后注入的 [`authn::VerifiedMtlsPeer`]。
@@ -308,10 +308,11 @@ async fn verify(State(state): State<VerifyState>, mut req: Request, next: Next) 
             .to_owned();
         let span =
             tracing::debug_span!("verify_bridge", scheme = ?state.scheme, request_id = %request_id);
-        if let Some((evidence, ctx)) =
+        if let Some((evidence, ctx, principal)) =
             span.in_scope(|| mint_evidence(&state, &token, req.headers()))
         {
             req.extensions_mut().insert(evidence);
+            req.extensions_mut().insert(principal);
             // **scope 不在桥建立**：把 scoped 主体的 AppCtx 经 `PendingScopeCtx` extension 传给内层 enforce，
             // 由其在 `Require`-Allow（认证路由放行，非 Public opt-out）后建 `runctx::scope`——使 ambient scope
             // 与 route auth 决策对齐（#1105 F2，验签桥在 enforce 外层、运行期读不到 opt_out）。跨租户主体

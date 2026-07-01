@@ -46,7 +46,7 @@ mod session_sweeper;
 mod tx;
 mod tx_retry;
 
-pub use audit_repo::PgAuditRepo;
+pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 pub use bundle::{
@@ -129,7 +129,10 @@ impl ManagedResource for PgStore {
 /// 经组合根 [`bootstrap::ShutdownStack::register_detached`] 注入 `ShutdownStack`；注册顺序须在
 /// listener/sampler **之前**——LIFO 下 pool 最后关（listener drain → sampler 停 → pool close，
 /// 确保 sampler 不会在已关闭的 pool 上发起 probe）。
-pub struct PgStoreGuard(Arc<PgStore>);
+pub struct PgStoreGuard {
+    store: Arc<PgStore>,
+    name: &'static str,
+}
 
 impl PgStoreGuard {
     /// 包装 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard。
@@ -137,17 +140,24 @@ impl PgStoreGuard {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅经 [`bundle::PgRuntimeDeps::store_guard`] 构造，
     /// 组合根不直接持 `Arc<PgStore>`。
     pub(crate) fn new(store: Arc<PgStore>) -> Self {
-        Self(store)
+        Self {
+            store,
+            name: PG_STORE_NAME,
+        }
+    }
+
+    pub(crate) fn new_named(store: Arc<PgStore>, name: &'static str) -> Self {
+        Self { store, name }
     }
 }
 
 impl ManagedResource for PgStoreGuard {
     fn name(&self) -> &str {
-        self.0.name()
+        self.name
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.0.shutdown().await
+        self.store.shutdown().await
     }
 }
 

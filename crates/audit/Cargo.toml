@@ -12,9 +12,11 @@ workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 runctx = { path = "../runctx" }
+diagctx = { path = "../diagctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
+authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
 generated = { path = "../../generated" }
 # AuditRepo 域形 repo DI port（ADR-005 Option 2）：async dyn 派发 = trait_variant Send 变体 + dynosaur DynAuditRepo
@@ -48,3 +50,4 @@ runctx = { path = "../runctx", features = ["test-support"] }
 # admin 读路由 finalize 测试经 httpserve test-util 取回裸 Router（`UnfinalizedRoutes::into_router_for_test`）做 oneshot；
 # 生产构建无此 feature ⇒ 该入口编译期不存在（ADR-009 §6 Soft→Medium）。
 httpserve = { path = "../httpserve", features = ["test-util"] }
+authn = { path = "../authn", features = ["test-support"] }

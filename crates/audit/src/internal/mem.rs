@@ -1,8 +1,8 @@
 //! audit::internal::mem — in-mem 每租户子链 store（`AuditRepo` 实现）。
 //!
 //! 单进程占位实现（域 crate + 测试自洽）：每租户一条 `Vec<AuditEntry>` append-only 子链，`Mutex` 串行化
-//! append（防并发 seq 竞争）。生产 postgres（advisory-lock 串行 + FORCE RLS + `rss_audit_admin` 池）是
-//! follow-up；本实现持注入的 [`AuditChainHasher`]，原子封链（读 tail → seq → prev → link → 存）。
+//! append（防并发 seq 竞争）。生产 postgres provider 使用 advisory-lock 串行 + FORCE RLS + optional
+//! `rss_audit_admin` 只读池；本实现持注入的 [`AuditChainHasher`]，原子封链（读 tail → seq → prev → link → 存）。
 
 use std::collections::HashMap;
 use std::sync::Mutex;

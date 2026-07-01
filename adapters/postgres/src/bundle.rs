@@ -61,12 +61,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections,
-    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditRepo, PgAuthAuditSink,
-    PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance, PgCredentialRepo,
-    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgOutbox, PgOutboxMaintenance, PgProjectionEvents, PgReadinessSampler, PgRefreshTokenStore,
-    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle,
-    PgSessionSweeper, PgStore, PgStoreGuard,
+    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
+    PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
+    PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
+    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgProjectionEvents,
+    PgReadinessSampler, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal,
+    PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -108,6 +108,7 @@ impl PgDomain for caps::Audit {}
 #[derive(Clone)]
 pub struct PgRuntimeDeps {
     store: Arc<PgStore>,
+    audit_admin_store: Option<Arc<PgStore>>,
     readiness: Arc<PgDbReadiness>,
     /// 启动期 RLS 能力门结果（true = `verify_rls_capability` 通过）；供 readyz 兜底探针读。setup 失败时进程
     /// 根本不返回 `Self`（fail-fast），故 `Self` 存在即此值为 true——探针把该不变式显式暴露到 readyz。
@@ -144,9 +145,10 @@ impl PgRuntimeDeps {
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
     ) -> Result<Self, PgError> {
-        Self::setup_with_legacy_config_policy(
+        Self::setup_with_audit_admin_config(
             migrator_config,
             serving_config,
+            None,
             LegacyConfigPlaintextPolicy::Deny,
         )
         .await
@@ -159,6 +161,23 @@ impl PgRuntimeDeps {
         serving_config: &PgConfig,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
     ) -> Result<Self, PgError> {
+        Self::setup_with_audit_admin_config(
+            migrator_config,
+            serving_config,
+            None,
+            legacy_config_plaintext_policy,
+        )
+        .await
+    }
+
+    /// 显式 audit admin pool 版本：admin config 缺省时仅 scoped audit read 可用；提供时启动期验证
+    /// `rss_audit_admin` 直连、NOBYPASSRLS、只读权限。
+    pub async fn setup_with_audit_admin_config(
+        migrator_config: &PgConfig,
+        serving_config: &PgConfig,
+        audit_admin_config: Option<&PgConfig>,
+        legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
+    ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
         migrator.run_migrations().await?;
         migrator
@@ -169,8 +188,17 @@ impl PgRuntimeDeps {
         let store = Arc::new(PgStore::connect(serving_config).await?);
         // durable RLS 能力门（fail-fast）：tenant 表须 FORCE RLS + policy 且 GUC roundtrip 通过，否则拒绝启动。
         store.verify_rls_capability().await?;
+        let audit_admin_store = match audit_admin_config {
+            Some(config) => {
+                let store = Arc::new(PgStore::connect(config).await?);
+                store.verify_audit_admin_capability().await?;
+                Some(store)
+            }
+            None => None,
+        };
         Ok(Self {
             store,
+            audit_admin_store,
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         })
@@ -195,6 +223,7 @@ impl PgRuntimeDeps {
     pub fn for_domain<D: PgDomain>(&self) -> PgDomainDeps<D> {
         PgDomainDeps {
             store: Arc::clone(&self.store),
+            audit_admin_store: self.audit_admin_store.as_ref().map(Arc::clone),
             _marker: PhantomData,
         }
     }
@@ -229,6 +258,14 @@ impl PgRuntimeDeps {
         PgStoreGuard::new(Arc::clone(&self.store))
     }
 
+    /// 包装 optional audit admin pool guard。未配置 admin pool 时返回 None。
+    #[must_use]
+    pub fn audit_admin_store_guard(&self) -> Option<PgStoreGuard> {
+        self.audit_admin_store
+            .as_ref()
+            .map(|store| PgStoreGuard::new_named(Arc::clone(store), "postgres-audit-admin"))
+    }
+
     /// spawn DB readiness 采样 worker 并 adopt 为 `ManagedResource`（收口 spawn + adopt 仪式，
     /// 私有持有 `Arc<PgStore>` 不外泄）。`token` 由 `ShutdownStack` 注入；采样 loop 写 readiness handle。
     #[must_use]
@@ -252,6 +289,7 @@ impl PgRuntimeDeps {
     pub(crate) fn from_store_for_test(store: Arc<PgStore>) -> Self {
         Self {
             store,
+            audit_admin_store: None,
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
@@ -291,7 +329,7 @@ impl PgMaintenanceDeps {
         sqlx::query(
             r#"
             INSERT INTO auth_audit_events (
-                occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, principal_tenant,
+                occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, tenant_context,
                 resource_kind, resource_id, action, outcome, failure_reason, request_id, correlation_id
             )
             VALUES ($1, $2, $3, 'service', NULL, 'settings.config-values.maintenance', $4, $5, $6, $7, NULL, NULL)
@@ -354,6 +392,7 @@ pub enum MaintenanceAuditOutcome<'a> {
 /// ```
 pub struct PgDomainDeps<D: PgDomain> {
     store: Arc<PgStore>,
+    audit_admin_store: Option<Arc<PgStore>>,
     _marker: PhantomData<D>,
 }
 
@@ -362,6 +401,7 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
+            audit_admin_store: self.audit_admin_store.as_ref().map(Arc::clone),
             _marker: PhantomData,
         }
     }
@@ -517,6 +557,20 @@ impl PgDomainDeps<caps::Audit> {
         M: primitives::MacVerifier + Send + Sync,
     {
         PgAuditRepo::new(&self.store, hasher)
+    }
+
+    /// audit 审计链跨租户只读 admin repo。未配置 `rss_audit_admin` pool 时返回 `None`。
+    #[must_use]
+    pub fn audit_admin_repo<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> Option<PgAuditAdminRepo<M>>
+    where
+        M: primitives::MacVerifier + Send + Sync,
+    {
+        self.audit_admin_store
+            .as_ref()
+            .map(|store| PgAuditAdminRepo::new(store, hasher))
     }
 
     /// Flat durable auth decision audit sink (`diport::AuditSink`) for httpserve enforcement.

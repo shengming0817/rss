@@ -20,7 +20,9 @@ use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-use crate::test_pg::{connect_pg, connect_pg_nobypass_role, connect_pg_rss_app_role};
+use crate::test_pg::{
+    connect_pg, connect_pg_audit_admin_role, connect_pg_nobypass_role, connect_pg_rss_app_role,
+};
 
 #[allow(clippy::unwrap_used)]
 fn test_tenant() -> vocab::TenantId {
@@ -280,6 +282,61 @@ async fn verify_rls_capability_ok_after_migrations() -> TestResult {
     assert_eq!(current_user, "rss_app", "serving pool 必须直连 rss_app");
     app.verify_rls_capability().await?; // rss_app + FORCE RLS + 规范 policy + GUC roundtrip 全通过
     app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// audit admin pool 角色必须是可直连 LOGIN role；部署只需注入密码，不应再把权限组 NOLOGIN 当连接身份。
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_admin_role_is_login_after_migrations() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let (can_login, bypass_rls): (bool, bool) = sqlx::query_as(
+        "SELECT rolcanlogin, rolbypassrls FROM pg_roles WHERE rolname = 'rss_audit_admin'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(can_login, "rss_audit_admin must be a LOGIN role");
+    assert!(!bypass_rls, "rss_audit_admin must remain NOBYPASSRLS");
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// audit admin 正例：迁移后注入密码即可直连，并通过 exact read-only capability gate。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_audit_admin_capability_ok_after_migrations() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
+    audit_admin.verify_audit_admin_capability().await?;
+    audit_admin.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// audit admin 负例：除 `audit_entries:SELECT` 外，任一 public table privilege 都必须启动期 fail-fast。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_audit_admin_capability_rejects_extra_table_privilege() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS _audit_admin_extra_privilege (id int)")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query("GRANT SELECT ON _audit_admin_extra_privilege TO rss_audit_admin")
+        .execute(&store.pool)
+        .await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
+
+    let verdict = audit_admin.verify_audit_admin_capability().await;
+
+    sqlx::query("DROP TABLE IF EXISTS _audit_admin_extra_privilege")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        matches!(verdict, Err(crate::PgError::AuditAdminPrivileges)),
+        "rss_audit_admin extra table privilege must fail startup gate, got: {verdict:?}"
+    );
+    audit_admin.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }

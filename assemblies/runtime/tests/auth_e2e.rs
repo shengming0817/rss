@@ -384,9 +384,23 @@ async fn status_with_tenant_values<'a>(
     bearer: Option<&str>,
     tenants: impl IntoIterator<Item = &'a str>,
 ) -> StatusCode {
+    status_with_tenant_values_and_request_id(app, uri, bearer, tenants, None).await
+}
+
+#[allow(clippy::unwrap_used)]
+async fn status_with_tenant_values_and_request_id<'a>(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+    tenants: impl IntoIterator<Item = &'a str>,
+    request_id: Option<&str>,
+) -> StatusCode {
     let mut builder = axum::http::Request::builder().method(Method::GET).uri(uri);
     if let Some(value) = bearer {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = request_id {
+        builder = builder.header("x-request-id", value);
     }
     for value in tenants {
         builder = builder.header(diport::SERVICE_TOKEN_TENANT_HEADER, value);
@@ -398,6 +412,22 @@ async fn status_with_tenant_values<'a>(
         .await
         .unwrap();
     resp.status()
+}
+
+async fn status_with_request_id(
+    app: httpserve::AuthenticatedRoutes,
+    uri: &str,
+    bearer: Option<&str>,
+    request_id: &str,
+) -> StatusCode {
+    status_with_tenant_values_and_request_id(
+        app,
+        uri,
+        bearer,
+        std::iter::empty::<&str>(),
+        Some(request_id),
+    )
+    .await
 }
 
 // ── BODYLIMIT-BEFORE-AUTH-01 tripwire ───────────────────────────────────────────
@@ -1232,6 +1262,13 @@ fn captured_since(start: usize) -> String {
     String::from_utf8(guard[start..].to_vec()).unwrap()
 }
 
+fn logs_for_request(logs: &str, request_id: &str) -> String {
+    logs.lines()
+        .filter(|line| line.contains(request_id))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[allow(clippy::unwrap_used)]
 fn block_on_current_thread<T>(fut: impl std::future::Future<Output = T>) -> T {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1248,15 +1285,18 @@ fn tracing_allow_logs_decision_and_kind_no_pii() {
     ensure_global_trace_capture();
 
     let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let request_id = "trace-allow-super-admin";
     let start = trace_len();
-    let st = block_on_current_thread(status(
+    let st = block_on_current_thread(status_with_request_id(
         jwt_router(Some(RequiredScheme::Jwt)),
         "/protected",
         Some(&format!("Bearer {token}")),
+        request_id,
     ));
     assert_eq!(st, StatusCode::OK);
 
-    let logs = captured_since(start);
+    let captured = captured_since(start);
+    let logs = logs_for_request(&captured, request_id);
     assert!(
         logs.contains("authz.decision"),
         "须记结构化字段键 authz.decision: {logs}"
@@ -1322,15 +1362,18 @@ fn tracing_deny_logs_per_variant_reason_no_pii() {
             "验签通过缺 tenant→PrincipalInvalid",
         ),
     ] {
+        let request_id = format!("trace-deny-{want_reason}");
         let start = trace_len();
-        let st = block_on_current_thread(status(
+        let st = block_on_current_thread(status_with_request_id(
             jwt_router(Some(RequiredScheme::Jwt)),
             "/protected",
             Some(&format!("Bearer {token}")),
+            &request_id,
         ));
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{label}");
 
-        let logs = captured_since(start);
+        let captured = captured_since(start);
+        let logs = logs_for_request(&captured, &request_id);
         assert!(
             logs.contains("authz.decision"),
             "{label}: 须记结构化字段键 authz.decision: {logs}"
@@ -1382,16 +1425,18 @@ fn tracing_service_token_binding_error_has_distinct_reason_no_pii() {
     let authed = httpserve::finalize_auth(routes, plan).expect("finalize_auth");
     let app = apply_verify_bridge(authed, Arc::new(provider), RequiredScheme::ServiceToken);
 
+    let request_id = "trace-service-token-binding";
     let start = trace_len();
-    let st = block_on_current_thread(status_with_tenant(
+    let st = block_on_current_thread(status_with_request_id(
         app,
         "/svc",
         Some(&format!("Bearer {token}")),
-        None,
+        request_id,
     ));
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 
-    let logs = captured_since(start);
+    let captured = captured_since(start);
+    let logs = logs_for_request(&captured, request_id);
     assert!(
         logs.contains("tenant_binding_invalid"),
         "service-token binding parser failure must have its own deny reason: {logs}"

@@ -42,6 +42,27 @@ pub const NOW_SECS: u64 = 1_000;
 /// 会话 ttl（确定性断言）。
 pub const TTL_SECS: u64 = 3_600;
 
+#[derive(Clone, Default)]
+pub struct NoopAuditSink;
+
+impl diport::AuditSink for NoopAuditSink {
+    async fn record(&self, _event: diport::AuditEvent) -> Result<(), diport::AuditSinkError> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
+        Ok(())
+    }
+}
+
+struct FixedAuditClock;
+
+impl diport::Clock for FixedAuditClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(NOW_SECS)
+    }
+}
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -216,17 +237,17 @@ pub fn dlx_payload_protector() -> postgres::DlxPayloadProtector {
 
 /// 构造 journey 用 audit 域 + 共享捕获句柄（注入捕获 verifier + 固定 32B key）。
 ///
-/// API（#1230）：`AuditDomain` 不再泛型；经 `AuditChainHasher::new`（`Option`，弱 key → `None`）+
+/// API：经 `AuditChainHasher::new`（`Option`，弱 key → `None`）+
 /// `InMemAuditRepo::new` + `Arc::from(DynAuditRepo::new_box(...))` 装配后经 `AuditDomain::new`
 /// （不可失败）注入——组合根装配路径与生产 `PgAuditRepo` 同形。
 #[allow(clippy::expect_used)]
-pub fn audit_domain() -> (AuditDomain, CapturingVerifier) {
+pub fn audit_domain() -> (AuditDomain<NoopAuditSink>, CapturingVerifier) {
     let verifier = CapturingVerifier::default();
     let hasher = AuditChainHasher::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
         .expect("32B audit key satisfies MIN_KEY_LEN");
     let repo: Arc<DynAuditRepo<'static>> =
         Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)));
-    let domain = AuditDomain::new(repo);
+    let domain = AuditDomain::new(repo, None, NoopAuditSink, Arc::new(FixedAuditClock));
     (domain, verifier)
 }
 

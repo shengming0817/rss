@@ -36,7 +36,8 @@ use runtime::event_transport::{
     bridge_generated_subscriptions, build_event_transport_config_from, wire_event_transport,
 };
 use runtime::{
-    SharedRuntimeDeps, build_redis_runtime_deps, build_vault_runtime_deps, wire_distributed,
+    SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, build_redis_runtime_deps,
+    build_vault_runtime_deps, wire_distributed,
 };
 
 // ── 共用常量（自 journeys/tests/common/mod.rs 复制，runtime 测试不能 mod common）────────────
@@ -160,13 +161,13 @@ impl MacVerifier for CapturingVerifier {
 
 #[allow(clippy::expect_used)]
 // reason: 32B audit key 满足 AuditChainHasher MIN_KEY_LEN（失败意味测试常量有误），panic 正当。
-fn audit_domain() -> (AuditDomain, CapturingVerifier) {
+fn audit_domain() -> (AuditDomain<TracingAuthAuditSink>, CapturingVerifier) {
     let verifier = CapturingVerifier::default();
     let hasher = AuditChainHasher::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
         .expect("32B audit key satisfies MIN_KEY_LEN");
     let repo: Arc<DynAuditRepo<'static>> =
         Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)));
-    let domain = AuditDomain::new(repo);
+    let domain = AuditDomain::new(repo, None, TracingAuthAuditSink, Arc::new(SystemClock));
     (domain, verifier)
 }
 

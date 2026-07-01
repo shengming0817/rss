@@ -18,6 +18,7 @@ workspace = true
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
 identity = { path = "../crates/identity", features = ["seed-login"] }
 audit = { path = "../crates/audit" }
+httpserve = { path = "../crates/httpserve" }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
 settings = { path = "../crates/settings", features = ["seed-data"] }
 bootstrap = { path = "../crates/bootstrap" }

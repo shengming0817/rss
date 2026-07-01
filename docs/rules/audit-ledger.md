@@ -55,12 +55,16 @@ entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
 | (C) `prev_hash = 上一条 entry_hash`（常数时间） | `ChainBroken` |
 | (D) 重算 `entry_hash` 与存储一致（常数时间；错 key / 篡改命中） | `HashMismatch` |
 
-## 持久化与跨租户读（follow-up adapter）
+## 持久化与跨租户读
 
 本 crate 以 in-mem 每租户子链 store 实现仓储 I/O 类型（`InMemAuditRepo` in `internal/mem`，无 port trait，YAGNI）+ 确定性测试 verifier。
-**生产持久化是独立 adapter issue**：`adapters/postgres` 每租户 genesis、advisory-lock 串行 append、
-FORCE RLS、`(tenant_id, seq)` 唯一、专用 `rss_audit_admin` 角色限定 permissive RLS 读取池；真实
-`sha2`/`hmac` 的 `MacVerifier` adapter。
+生产持久化由 `adapters/postgres` provider 承载：每租户 genesis、advisory-lock 串行 append、FORCE RLS、
+`(tenant_id, seq)` 唯一，读路径复用同一 keyed HMAC 链验证语义。
 
-**跨租户 admin 读**（`RowScope::All`）由该专用池服务（tenancy.md）；principal facet 落地后须补
-`RowScope::All → 501 guard`；本轮 admin 读为租户作用域（principal facet + 持久化 adapter 是 follow-up）。
+**跨租户 admin 读**只支持“指定租户”读取（`GET /api/v1/audit/entries?tenantId=<uuid>`），不提供全租户全局列表。
+handler 必须先 durable append cross-tenant audit event，append 成功后才调用 admin repo 读取；append 失败
+fail-closed 不读取。Postgres admin repo 使用可选专用 `rss_audit_admin` 只读池：直连角色必须为
+`rss_audit_admin` LOGIN 角色、非 superuser、`NOBYPASSRLS`，且仅有 `audit_entries` SELECT 权限。读取时在
+只读事务中 `SET LOCAL rss.tenant_id = targetTenant`，复用现有 tenant-isolation RLS policy；不得授写权限、
+其它 public relation 权限，也不得新增 allow-all RLS policy。admin 池未配置时 privileged audit read 返回
+501 `ERR_CORE_NOT_IMPLEMENTED`，配置不完整或权限不安全则启动失败。

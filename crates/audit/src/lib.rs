@@ -14,8 +14,8 @@
 //!
 //! # 持久化边界（#1014）
 //!
-//! 链逻辑泛型于 [`primitives::MacVerifier`]；生产 `sha2`/`hmac` 实现 + postgres 每租户子链持久化
-//! （advisory-lock / FORCE RLS / `rss_audit_admin` 池）是独立 follow-up adapter。本 crate 以 in-mem
+//! 链逻辑泛型于 [`primitives::MacVerifier`]；生产 postgres provider 承载每租户子链持久化
+//! （advisory-lock / FORCE RLS / optional `rss_audit_admin` 只读池）。本 crate 以 in-mem
 //! 实现仓储端口、域单测用确定性 `#[cfg(test)]` verifier（不依赖 adapter crate）。
 
 #![forbid(unsafe_code)]

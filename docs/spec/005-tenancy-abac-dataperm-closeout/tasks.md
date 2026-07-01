@@ -68,11 +68,11 @@
 
 **Independent Test**: super-admin all-scope issuance fails closed when audit append fails.
 
-- [ ] T019 [P] [US3] Add RowVisibility derivation tests for user/device/admin/super-admin in crates/authn
-- [ ] T020 [US3] Wire durable audit sink into audited cross-tenant visibility issuance in crates/authn and adapters/postgres
-- [ ] T021 [US3] Add failure-path tests proving audit append failure denies RowScopeAll in crates/authn
-- [ ] T022 [P] [US3] Add governance guard for cross-tenant visibility call sites in lints/rss_crosstenant_callsite or xtask
-- [ ] T023 [US3] Update docs/rules/tenancy.md with live audited issuance references
+- [x] T019 [P] [US3] Add RowVisibility derivation tests for user/device/admin/super-admin in crates/authn
+- [x] T020 [US3] Wire durable audit sink into audited cross-tenant visibility issuance in crates/authn and adapters/postgres
+- [x] T021 [US3] Add failure-path tests proving audit append failure denies RowScopeAll in crates/authn
+- [x] T022 [P] [US3] Add governance guard for cross-tenant visibility call sites in lints/rss_crosstenant_callsite or xtask
+- [x] T023 [US3] Update docs/rules/tenancy.md with live audited issuance references
 
 ---
 

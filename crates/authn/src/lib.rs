@@ -332,9 +332,6 @@ pub use crosstenant::{CrossTenantAuditContext, CrossTenantAuditError, CrossTenan
 /// crate，dylint `rss_crosstenant_callsite` allowlist=authn 不变）。
 mod crosstenant {
     use super::Principal;
-    // `record` 是 `AuditSink` trait 方法，须 trait 在 scope（`as _` 只引入方法、不污染名——funnel 全程
-    // 用 `diport::DynAuditSink` / `diport::AuditEvent` 全限定，同 row_visibility bridge 的 `Pdp as _`）。
-    use diport::AuditSink as _;
     use vocab::PrincipalKind;
     use vocab::tenant::{CrossTenantCapability, CrossTenantVisibility, RowVisibility};
 
@@ -463,7 +460,8 @@ mod crosstenant {
         /// 非 super-admin → `Err(CrossTenantError::NotSuperAdmin)`（不静默降级）。审计「先于」签发由 `?`-链
         /// 顺序保证（同 verify→mint bridge `verify_jwt` 范式）。
         ///
-        /// `sink` 取 dynosaur wrapper `&DynAuditSink`（caller 可持 `Box`/`Arc`，同 `verify_jwt` 的 `&DynPdp`）；
+        /// `sink` 取静态派发 `S: diport::AuditSink + Send + Sync`，避免 `Arc<DynAuditSink>` 在 multi-request
+        /// async handler 中跨 await 持有（DIPORT-ASYNC-ARC-SEND-01）。
         /// `clock` 取注入 [`diport::Clock`]（`occurred_at` 非系统时钟，rust-standards Clock 纪律）；`audit` 承载
         /// caller 提供的审计字段（super-admin 自身 `tenant=None`，`tenant_id` 取 ctx 行使 All-scope 的租户上下文）。
         ///
@@ -475,13 +473,16 @@ mod crosstenant {
         ///   不在此 defense-in-depth 处重复记录拒绝（follow-up issue 跟踪）。
         /// - `tracing` span 留 httpserve W 接线（同 `verify_jwt` 的 NOTE #1109）：当前无生产调用方，不引
         ///   `tracing` 依赖、不埋空转 span；W 注入时补「`authz.decision=allow` + `principal.kind`（无 PII）」。
-        pub async fn audited_cross_tenant_visibility(
+        pub async fn audited_cross_tenant_visibility<S>(
             &self,
             ctx: &runctx::AppCtx,
-            sink: &diport::DynAuditSink<'_>,
+            sink: &S,
             clock: &dyn diport::Clock,
             audit: &CrossTenantAuditContext,
-        ) -> Result<RowVisibility, CrossTenantError> {
+        ) -> Result<RowVisibility, CrossTenantError>
+        where
+            S: diport::AuditSink + Send + Sync + 'static,
+        {
             if self.kind != PrincipalKind::SuperAdmin {
                 return Err(CrossTenantError::NotSuperAdmin);
             }
@@ -1026,7 +1027,7 @@ mod audited_cross_tenant_tests {
     use super::{
         CrossTenantAuditContext, CrossTenantAuditError, CrossTenantError, Principal, PrincipalKind,
     };
-    use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, Clock, DynAuditSink};
+    use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, Clock};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
@@ -1117,13 +1118,12 @@ mod audited_cross_tenant_tests {
         let tid = tenant();
         let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let sink = RecordingAuditSink::ok();
-        let boxed = DynAuditSink::new_box(sink.clone());
         let clock = TestClock(t0);
         let principal = Principal::for_test(PrincipalKind::SuperAdmin, "root-subject", None);
         let ctx = runctx::test_support::app_ctx(tid, "root-subject");
 
         let vis = principal
-            .audited_cross_tenant_visibility(&ctx, &boxed, &clock, &audit_ctx())
+            .audited_cross_tenant_visibility(&ctx, &sink, &clock, &audit_ctx())
             .await
             .expect("super-admin audited 派生应成功");
 
@@ -1157,14 +1157,13 @@ mod audited_cross_tenant_tests {
     async fn audited_fail_closed_when_audit_fails() {
         let tid = tenant();
         let sink = RecordingAuditSink::failing();
-        let boxed = DynAuditSink::new_box(sink.clone());
         let clock = TestClock(SystemTime::UNIX_EPOCH);
         let principal = Principal::for_test(PrincipalKind::SuperAdmin, "root-subject", None);
         let ctx = runctx::test_support::app_ctx(tid, "root-subject");
 
         // RowVisibility 无 Debug（非 wire 类型）；map 到 () 以便诊断格式化。
         let r = principal
-            .audited_cross_tenant_visibility(&ctx, &boxed, &clock, &audit_ctx())
+            .audited_cross_tenant_visibility(&ctx, &sink, &clock, &audit_ctx())
             .await
             .map(|_| ());
 
@@ -1193,13 +1192,12 @@ mod audited_cross_tenant_tests {
             PrincipalKind::Anonymous,
         ] {
             let sink = RecordingAuditSink::ok();
-            let boxed = DynAuditSink::new_box(sink.clone());
             let clock = TestClock(SystemTime::UNIX_EPOCH);
             let principal = Principal::for_test(kind, "subject-x", Some(tid));
             let ctx = runctx::test_support::app_ctx(tid, "subject-x");
 
             let r = principal
-                .audited_cross_tenant_visibility(&ctx, &boxed, &clock, &audit_ctx())
+                .audited_cross_tenant_visibility(&ctx, &sink, &clock, &audit_ctx())
                 .await
                 .map(|_| ());
 

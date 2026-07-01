@@ -299,7 +299,7 @@ impl AuditSinkHandle {
         }
     }
 
-    async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
+    pub async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
         self.inner.record(event).await
     }
 }

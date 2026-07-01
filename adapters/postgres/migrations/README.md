@@ -81,6 +81,12 @@ Medium）扫描 schema 快照，缺三件套即门红。
 生产 `rss_app` LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。后续新增 tenant / append-only 表须在其
 建表迁移内为 `rss_app` 补最小授权（tenant 表 DML、append-only 表 SELECT+INSERT），与上表同范式。
 
+`rss_audit_admin` 是指定租户 audit read 的专用只读 LOGIN 角色，由 `0033` provision 为 `LOGIN NOBYPASSRLS`
+并重置为只拥有 `audit_entries` SELECT；密码由部署 out-of-band 注入，committed SQL 不含密码。runtime 如配置
+`RSS_PG_AUDIT_ADMIN_USERNAME/PASSWORD`，启动期会要求连接直连固定角色 `rss_audit_admin`、非 superuser、
+非 BYPASSRLS、无其它 public relation 权限，并在只读事务内 `SET LOCAL rss.tenant_id = targetTenant` 复用现有
+tenant-isolation policy。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

@@ -10,6 +10,8 @@ use testkit::PgFixture;
 
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
+const RSS_AUDIT_ADMIN_ROLE: &str = "rss_audit_admin";
+const RSS_AUDIT_ADMIN_PASSWORD: &str = "rss_audit_admin_test_pw";
 
 /// fixture（env 或 self-provision 容器）→ 连接 store。
 ///
@@ -88,6 +90,31 @@ pub(crate) async fn connect_pg_rss_app_role(
         p.database.clone(),
         RSS_APP_ROLE.to_string(),
         PgPassword::new(RSS_APP_PASSWORD.to_string()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(Duration::from_secs(5));
+    Ok(PgStore::connect(&config).await?)
+}
+
+/// 将迁移 provision 的 `rss_audit_admin` 设置测试密码，并以真实 audit-admin role 建连接。
+///
+/// migration 负责声明该角色可 LOGIN；测试 helper 仅补本地测试密码，模拟部署时凭据注入。
+pub(crate) async fn connect_pg_audit_admin_role(
+    fixture: &PgFixture,
+    store: &PgStore,
+) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
+    sqlx::query(&format!(
+        "ALTER ROLE {RSS_AUDIT_ADMIN_ROLE} PASSWORD '{RSS_AUDIT_ADMIN_PASSWORD}' NOBYPASSRLS"
+    ))
+    .execute(&store.pool)
+    .await?;
+    let p = fixture.params();
+    let config = PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        RSS_AUDIT_ADMIN_ROLE.to_string(),
+        PgPassword::new(RSS_AUDIT_ADMIN_PASSWORD.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));

@@ -7,4 +7,6 @@
 fn main() {
     // G：authn crate 调 funnel 不触发（已校验 super-admin 派生路径的生产入口）。
     let _cap = vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin();
+    let _authorize = vocab::tenant::CrossTenantVisibility::authorize;
+    let _new_cross_tenant = vocab::tenant::RowVisibility::new_cross_tenant;
 }

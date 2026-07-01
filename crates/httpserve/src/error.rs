@@ -73,6 +73,7 @@ fn status_for(kind: CoreErrorKind) -> StatusCode {
         CoreErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         CoreErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         CoreErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+        CoreErrorKind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
         // `CoreErrorKind` 是 `#[non_exhaustive]`：未知未来 kind fail-closed 映射 5xx
         // （→ details strip，绝不把未知 kind 当 4xx 误下发明细）。
         // 此 arm 在跨 crate 环境下结构上不可测试（外部无法构造新 variant），属预期覆盖盲区。
@@ -153,6 +154,11 @@ pub fn internal_error(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::Internal), request_id)
 }
 
+/// 501 Not Implemented 信封：`ERR_CORE_NOT_IMPLEMENTED` + `NOT_IMPLEMENTED` 固定配对。
+pub fn not_implemented(request_id: &str) -> axum::response::Response {
+    core_error_response(&CoreError::new(CoreErrorKind::NotImplemented), request_id)
+}
+
 /// 413 Payload Too Large 信封：`ERR_CORE_PAYLOAD_TOO_LARGE` + `PAYLOAD_TOO_LARGE` 固定配对。
 pub fn payload_too_large(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::PayloadTooLarge), request_id)
@@ -210,6 +216,11 @@ mod tests {
                 payload_too_large("rid"),
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "ERR_CORE_PAYLOAD_TOO_LARGE",
+            ),
+            (
+                not_implemented("rid"),
+                StatusCode::NOT_IMPLEMENTED,
+                "ERR_CORE_NOT_IMPLEMENTED",
             ),
             (
                 too_many_requests("rid", std::time::Duration::from_millis(1500)),
@@ -342,6 +353,7 @@ mod tests {
             (CoreErrorKind::Conflict, StatusCode::CONFLICT),
             (CoreErrorKind::Validation, StatusCode::BAD_REQUEST),
             (CoreErrorKind::Internal, StatusCode::INTERNAL_SERVER_ERROR),
+            (CoreErrorKind::NotImplemented, StatusCode::NOT_IMPLEMENTED),
             (
                 CoreErrorKind::PayloadTooLarge,
                 StatusCode::PAYLOAD_TOO_LARGE,

@@ -62,7 +62,7 @@ use oidc::OidcProvider;
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
-    LegacyConfigPlaintextPolicy, MaintenanceAuditOutcome, PgConfig, PgDbReadiness,
+    LegacyConfigPlaintextPolicy, MaintenanceAuditOutcome, PgAuthAuditSink, PgConfig, PgDbReadiness,
     PgMaintenanceDeps, PgPassword, PgRuntimeDeps, PgSslMode, PoolReadiness, caps,
 };
 use primitives::{
@@ -663,6 +663,32 @@ pub(crate) fn parse_pg_ssl_mode(raw: Option<String>) -> PgSslMode {
 /// 从 `std::env` 构造 `PgConfig`。
 pub fn build_pg_config() -> anyhow::Result<PgConfig> {
     build_pg_config_from(|name| std::env::var(name).ok())
+}
+
+pub(crate) fn build_pg_audit_admin_config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<PgConfig>> {
+    let username = get("RSS_PG_AUDIT_ADMIN_USERNAME");
+    let password = get("RSS_PG_AUDIT_ADMIN_PASSWORD");
+    match (username, password) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => build_pg_config_with_user_env(
+            &get,
+            "RSS_PG_AUDIT_ADMIN_USERNAME",
+            "RSS_PG_AUDIT_ADMIN_PASSWORD",
+        )
+        .map(Some),
+        (None, Some(_)) => Err(anyhow::anyhow!(
+            "missing required env var: RSS_PG_AUDIT_ADMIN_USERNAME"
+        )),
+        (Some(_), None) => Err(anyhow::anyhow!(
+            "missing required env var: RSS_PG_AUDIT_ADMIN_PASSWORD"
+        )),
+    }
+}
+
+pub fn build_pg_audit_admin_config() -> anyhow::Result<Option<PgConfig>> {
+    build_pg_audit_admin_config_from(|name| std::env::var(name).ok())
 }
 
 /// 从注入的配置读取器构造 migrator `PgConfig`。
@@ -2004,11 +2030,24 @@ fn build_audit_hasher(
 /// ——与跨租户 admin 读同一基础设施，统一随 Part B 落地。本 PR 的读路径完整性硬保证是 `list` 内增量
 /// [`AuditChainHasher::verify_window`]（篡改 fail-closed → 500，不下发脏数据）；per-tenant [`PgAuditRepo`] 的
 /// `verify_tail` 已就绪（集成测试覆盖），供 Part B boot sweep + 运维巡检调用。
-pub fn wire_audit(deps: &SharedRuntimeDeps) -> anyhow::Result<AuditDomain> {
+pub fn wire_audit(deps: &SharedRuntimeDeps) -> anyhow::Result<AuditDomain<PgAuthAuditSink>> {
     let hasher = build_audit_hasher(|name| std::env::var(name).ok()).context("audit chain key")?;
-    let repo = deps.pg.for_domain::<caps::Audit>().audit_repo(hasher);
+    let audit_deps = deps.pg.for_domain::<caps::Audit>();
+    let repo = audit_deps.audit_repo(hasher);
     let dyn_repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(repo));
-    Ok(AuditDomain::new(dyn_repo))
+    let admin_repo = build_audit_hasher(|name| std::env::var(name).ok())
+        .context("audit admin chain key")
+        .map(|hasher| {
+            audit_deps
+                .audit_admin_repo(hasher)
+                .map(|repo| Arc::from(audit::ports::DynAuditAdminRepo::new_box(repo)))
+        })?;
+    Ok(AuditDomain::new(
+        dyn_repo,
+        admin_repo,
+        audit_deps.auth_audit_sink(),
+        Arc::new(SystemClock),
+    ))
 }
 
 const DEFAULT_IDENTITY_SESSION_TTL_SECS: u64 = 3_600;
@@ -2655,9 +2694,12 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 
     // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
     // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
-    let pg = PgRuntimeDeps::setup_with_legacy_config_policy(
+    let audit_admin_config =
+        build_pg_audit_admin_config().context("build audit admin postgres config")?;
+    let pg = PgRuntimeDeps::setup_with_audit_admin_config(
         &build_pg_migrator_config()?,
         &build_pg_config()?,
+        audit_admin_config.as_ref(),
         legacy_config_plaintext_policy()?,
     )
     .await
@@ -2820,6 +2862,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         }
         // 再注册框架 pg infra（非域产物）：pool guard（LIFO 较后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
         stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
+        if let Some(guard) = pg.audit_admin_store_guard() {
+            stack.register_detached(DynManagedResource::new_box(guard));
+        }
         // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
         stack.register_with_token(move |token| {
             DynManagedResource::new_box(pg.spawn_readiness_sampler(pg_readiness_period, token))
@@ -3880,6 +3925,54 @@ mod tests {
         assert!(debug.contains("pg.internal"), "host 在 debug 输出中");
         assert!(debug.contains("rss_app"), "serving user 示例为 rss_app");
         assert!(!debug.contains("s3cr3t"), "password 不在 debug 输出中");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_audit_admin_config_absent_is_none() {
+        let cfg = build_pg_audit_admin_config_from(full_pg_get).expect("optional admin config");
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_audit_admin_config_requires_pair() {
+        let missing_password = build_pg_audit_admin_config_from(|k| match k {
+            "RSS_PG_AUDIT_ADMIN_USERNAME" => Some("rss_audit_admin".to_string()),
+            _ => full_pg_get(k),
+        })
+        .expect_err("missing password must fail");
+        assert!(
+            missing_password
+                .to_string()
+                .contains("RSS_PG_AUDIT_ADMIN_PASSWORD")
+        );
+
+        let missing_username = build_pg_audit_admin_config_from(|k| match k {
+            "RSS_PG_AUDIT_ADMIN_PASSWORD" => Some("admin_pw".to_string()),
+            _ => full_pg_get(k),
+        })
+        .expect_err("missing username must fail");
+        assert!(
+            missing_username
+                .to_string()
+                .contains("RSS_PG_AUDIT_ADMIN_USERNAME")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_audit_admin_config_happy() {
+        let cfg = build_pg_audit_admin_config_from(|k| match k {
+            "RSS_PG_AUDIT_ADMIN_USERNAME" => Some("rss_audit_admin".to_string()),
+            "RSS_PG_AUDIT_ADMIN_PASSWORD" => Some("admin_pw".to_string()),
+            _ => full_pg_get(k),
+        })
+        .expect("admin config ok")
+        .expect("configured");
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("rss_audit_admin"));
+        assert!(!debug.contains("admin_pw"));
     }
 
     /// `RSS_PG_HOST` 缺失 → Err 含变量名（fail-fast）。

@@ -54,7 +54,7 @@ fn system_time_parts(at: std::time::SystemTime) -> Result<(i64, i32), AuditSinkE
     Ok((secs, nanos))
 }
 
-fn tenant_str(event: &AuditEvent) -> Option<String> {
+fn tenant_context(event: &AuditEvent) -> Option<String> {
     event.tenant_id.map(|tenant| tenant.as_uuid().to_string())
 }
 
@@ -69,13 +69,13 @@ fn outcome_parts(outcome: &AuditOutcome) -> (&'static str, Option<&'static str>)
 impl AuditSink for PgAuthAuditSink {
     async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
         let (occurred_at_secs, occurred_at_nanos) = system_time_parts(event.occurred_at)?;
-        let principal_tenant = tenant_str(&event);
+        let tenant_context = tenant_context(&event);
         let principal_kind = actor_kind_to_db(event.principal_kind);
         let (outcome, failure_reason) = outcome_parts(&event.outcome);
 
         sqlx::query(&format!(
             "INSERT INTO {TABLE} \
-             (occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, principal_tenant, \
+             (occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, tenant_context, \
               resource_kind, resource_id, action, outcome, failure_reason, request_id, correlation_id) \
              VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, $8, $9, $10, $11, $12)"
         ))
@@ -83,7 +83,7 @@ impl AuditSink for PgAuthAuditSink {
         .bind(occurred_at_nanos)
         .bind(event.principal_id)
         .bind(principal_kind)
-        .bind(principal_tenant)
+        .bind(tenant_context)
         .bind(event.resource_kind)
         .bind(event.resource_id)
         .bind(event.action)

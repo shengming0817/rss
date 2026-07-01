@@ -28,8 +28,9 @@
 //! 须显式 `x-protection`、加密字段不得 nullable、blindIndex 只允许非 nullable scalar，均 fail-closed。
 //! 与 R16 observe redaction **正交不混用**（ADR-011 D1）。
 //! INVARIANT: CONTRACT-HTTP-SERVING-01 { level = "Medium", exec = "verify", source = "code" }— active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
-//! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only header 或
-//! service-token MAC 绑定 header（R19）。
+//! HTTP request schema 不得声明 ambient tenant `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only
+//! header 或 service-token MAC 绑定 header（R19）；#1583 audit.list-entries GET 顶层 query `tenantId`
+//! 是 target tenant，非 ambient tenant source，按窄例外放行。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -60,7 +61,9 @@ use super::manifest::{
 };
 use super::protection;
 use super::redaction;
-use super::{DiscoveredContract, discover, schema_declares_property};
+use super::{
+    DiscoveredContract, discover, http_request_tenant_id_allowed, schema_declares_property,
+};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
 
@@ -136,8 +139,9 @@ pub(crate) enum Rule {
     /// non-empty reason 且禁止 permission。当前最小 header 面只接受 `X-Tenant-ID` 的闭值模式，
     /// identity.login public serving 必须声明该 header。
     HttpAuth,
-    /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文、声明式 populate-only header
-    /// 或 service-token MAC 绑定 header。
+    /// R19：HTTP request schema 不得声明 ambient tenantId；tenant scope 必须来自认证上下文、声明式
+    /// populate-only header 或 service-token MAC 绑定 header。#1583 audit.list-entries GET 顶层 query
+    /// `tenantId` 表示 target tenant，按窄例外放行。
     HttpTenantSource,
     /// R20：嵌套形态（`{kind}/{domain}/{version}/{slug}/`）的 slug 段语法须收口——slug 经 kebab→snake 拼进
     /// generated `pub mod <slug_ident>`（见 codegen），须为合法 Rust 模块标识符前体（首 `a-z`、余 `[a-z0-9_-]`、
@@ -859,7 +863,9 @@ fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<F
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return Vec::new();
     };
-    if schema_declares_property(&value, "tenantId") {
+    if schema_declares_property(&value, "tenantId")
+        && !http_request_tenant_id_allowed(&c.manifest, &value)
+    {
         return vec![finding(
             Rule::HttpTenantSource,
             label,
@@ -2463,6 +2469,43 @@ mod tests {
             r#"{"title":"LoginRequest","type":"object","properties":{"profile":{"type":"object","properties":{"tenantId":{"type":"string"}}}}}"#,
             r#"{"title":"LoginResponse"}"#,
         )?;
+        let findings = rule_http_request_tenant_source(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::HttpTenantSource),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r19_audit_list_target_tenant_query_is_allowed() -> anyhow::Result<()> {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"AuditListEntriesRequest","type":"object","properties":{"tenantId":{"type":"string"}}}"#,
+            r#"{"title":"AuditListEntriesResponse"}"#,
+        )?;
+        c.manifest.id = "audit.list-entries".to_string();
+        c.manifest.domain = "audit".to_string();
+        c.manifest.version = "v1".to_string();
+        c.manifest.method = Some(HttpMethod::Get);
+        c.manifest.path = Some("/api/v1/audit/entries".to_string());
+        let findings = rule_http_request_tenant_source(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r19_audit_list_nested_tenant_id_is_still_rejected() -> anyhow::Result<()> {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"AuditListEntriesRequest","type":"object","properties":{"filter":{"type":"object","properties":{"tenantId":{"type":"string"}}}}}"#,
+            r#"{"title":"AuditListEntriesResponse"}"#,
+        )?;
+        c.manifest.id = "audit.list-entries".to_string();
+        c.manifest.domain = "audit".to_string();
+        c.manifest.version = "v1".to_string();
+        c.manifest.method = Some(HttpMethod::Get);
+        c.manifest.path = Some("/api/v1/audit/entries".to_string());
         let findings = rule_http_request_tenant_source(&c, "x");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(

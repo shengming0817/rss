@@ -18,6 +18,7 @@ pub enum CoreErrorKind {
     Validation,
     PayloadTooLarge,
     TooManyRequests,
+    NotImplemented,
     Internal,
 }
 
@@ -32,6 +33,7 @@ impl CoreErrorKind {
             CoreErrorKind::Validation => "validation error",
             CoreErrorKind::PayloadTooLarge => "payload too large",
             CoreErrorKind::TooManyRequests => "too many requests",
+            CoreErrorKind::NotImplemented => "not implemented",
             CoreErrorKind::Internal => "internal error",
         }
     }
@@ -50,6 +52,7 @@ impl CoreErrorKind {
             CoreErrorKind::Validation => "ERR_CORE_VALIDATION",
             CoreErrorKind::PayloadTooLarge => "ERR_CORE_PAYLOAD_TOO_LARGE",
             CoreErrorKind::TooManyRequests => "ERR_CORE_TOO_MANY_REQUESTS",
+            CoreErrorKind::NotImplemented => "ERR_CORE_NOT_IMPLEMENTED",
             CoreErrorKind::Internal => "ERR_CORE_INTERNAL",
         }
     }
@@ -153,6 +156,7 @@ mod tests {
             (CoreErrorKind::Validation, "validation error"),
             (CoreErrorKind::PayloadTooLarge, "payload too large"),
             (CoreErrorKind::TooManyRequests, "too many requests"),
+            (CoreErrorKind::NotImplemented, "not implemented"),
             (CoreErrorKind::Internal, "internal error"),
         ];
         for (kind, expected) in cases {
@@ -171,6 +175,7 @@ mod tests {
             (CoreErrorKind::Validation, "ERR_CORE_VALIDATION"),
             (CoreErrorKind::PayloadTooLarge, "ERR_CORE_PAYLOAD_TOO_LARGE"),
             (CoreErrorKind::TooManyRequests, "ERR_CORE_TOO_MANY_REQUESTS"),
+            (CoreErrorKind::NotImplemented, "ERR_CORE_NOT_IMPLEMENTED"),
             (CoreErrorKind::Internal, "ERR_CORE_INTERNAL"),
         ];
         for (kind, expected) in cases {

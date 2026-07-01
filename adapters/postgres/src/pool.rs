@@ -77,6 +77,17 @@ pub enum PgError {
     /// 也不得作为生产 serving pool，避免测试替身 / owner-like 角色漂进 bootstrap。
     #[error("postgres rls capability: serving role must be rss_app")]
     RlsUnexpectedServingRole,
+    /// audit admin 能力门：必须直连固定 `rss_audit_admin` 角色。
+    #[error("postgres audit admin capability: role must be rss_audit_admin")]
+    AuditAdminUnexpectedRole,
+    /// audit admin 能力门：admin read pool 不得为 superuser 或 BYPASSRLS。
+    #[error(
+        "postgres audit admin capability: connection role bypasses RLS (superuser or BYPASSRLS)"
+    )]
+    AuditAdminBypassRole,
+    /// audit admin 能力门：admin read pool 只能拥有 `audit_entries` SELECT，不得有其它 public relation 权限。
+    #[error("postgres audit admin capability: audit admin relation privileges are not exact")]
+    AuditAdminPrivileges,
     /// config_entries 中仍存在 legacy plaintext `ConfigValue` 行。默认启动 fail-closed；临时兼容只能经显式
     /// `LegacyConfigPlaintextPolicy::AllowTemporary` 放行。
     #[error("postgres legacy plaintext config values are present")]
@@ -347,6 +358,8 @@ impl PgStore {
 const RLS_PROBE_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// durable serving pool 唯一允许的 PostgreSQL role。
 const EXPECTED_SERVING_ROLE: &str = "rss_app";
+/// audit admin read pool 唯一允许的 PostgreSQL role。
+const EXPECTED_AUDIT_ADMIN_ROLE: &str = "rss_audit_admin";
 
 /// 不达标 tenant 表查询：动态派生（含 `tenant_id` 列的 public 表）后逐表判不达标——
 /// (a) 缺 `relrowsecurity AND relforcerowsecurity`（ENABLE+FORCE）；或
@@ -378,6 +391,28 @@ WHERE n.nspname = 'public' AND c.relkind = 'r' \
 /// 当前连接角色及其 RLS 绕过属性。serving pool 必须直连固定 `rss_app`，且不得 superuser/BYPASSRLS。
 const CONNECTION_ROLE_SQL: &str = "\
 SELECT session_user, current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user";
+
+const AUDIT_ADMIN_PRIVILEGES_SQL: &str = r#"
+WITH effective AS (
+    SELECT c.relname AS relation_name, p.privilege
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege)
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND has_table_privilege(current_user, format('%I.%I', n.nspname, c.relname), p.privilege)
+)
+SELECT COALESCE(bool_or(relation_name = 'audit_entries' AND privilege = 'SELECT'), false)
+           AS has_audit_entries_select,
+       COALESCE(
+           string_agg(
+               relation_name || ':' || privilege,
+               ',' ORDER BY relation_name, privilege
+           ) FILTER (WHERE NOT (relation_name = 'audit_entries' AND privilege = 'SELECT')),
+           ''
+       ) AS extra_privileges
+FROM effective
+"#;
 
 struct ServingRole {
     session_user: String,
@@ -421,6 +456,16 @@ impl PgStore {
         // 只读 + SET LOCAL 自检事务无副作用，显式 rollback 释放（失败不覆盖判定，仅 best-effort）。
         let _ = tx.rollback().await;
         ensure_no_offenders(offenders)
+    }
+
+    /// audit admin pool 能力门：直连固定 `rss_audit_admin`、不得绕过 RLS、只可 SELECT audit_entries。
+    pub(crate) async fn verify_audit_admin_capability(&self) -> Result<(), PgError> {
+        let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
+        ensure_audit_admin_role(&mut tx).await?;
+        verify_tenant_guc_roundtrip(&mut tx).await?;
+        ensure_audit_admin_read_only(&mut tx).await?;
+        let _ = tx.rollback().await;
+        Ok(())
     }
 }
 
@@ -488,6 +533,76 @@ fn log_serving_role_bypass(role: &ServingRole) {
         "rls capability gate: connection role is superuser or BYPASSRLS — RLS not enforceable; \
          serving connection must use rss_app as a non-superuser NOBYPASSRLS role (tenancy.md §RLS 与 PG scope)"
     );
+}
+
+async fn ensure_audit_admin_role(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (session_user, current_user, superuser, bypass_rls): (String, String, bool, bool) =
+        sqlx::query_as(CONNECTION_ROLE_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::RlsCapability)?;
+    let role = ServingRole {
+        session_user,
+        current_user,
+        superuser,
+        bypass_rls,
+    };
+    ensure_audit_admin_direct_role(&role)?;
+    ensure_audit_admin_no_bypass(&role)?;
+    Ok(())
+}
+
+fn ensure_audit_admin_direct_role(role: &ServingRole) -> Result<(), PgError> {
+    if role.session_user != EXPECTED_AUDIT_ADMIN_ROLE
+        || role.current_user != EXPECTED_AUDIT_ADMIN_ROLE
+    {
+        tracing::error!(
+            target: "postgres",
+            session_user = %role.session_user,
+            current_user = %role.current_user,
+            expected_user = EXPECTED_AUDIT_ADMIN_ROLE,
+            "audit admin capability gate: connection must log in directly as rss_audit_admin"
+        );
+        return Err(PgError::AuditAdminUnexpectedRole);
+    }
+    Ok(())
+}
+
+fn ensure_audit_admin_no_bypass(role: &ServingRole) -> Result<(), PgError> {
+    if role.superuser || role.bypass_rls {
+        tracing::error!(
+            target: "postgres",
+            session_user = %role.session_user,
+            current_user = %role.current_user,
+            superuser = role.superuser,
+            bypass_rls = role.bypass_rls,
+            "audit admin capability gate: connection role must not bypass RLS"
+        );
+        return Err(PgError::AuditAdminBypassRole);
+    }
+    Ok(())
+}
+
+async fn ensure_audit_admin_read_only(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let (has_audit_entries_select, extra_privileges): (bool, String) =
+        sqlx::query_as(AUDIT_ADMIN_PRIVILEGES_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::RlsCapability)?;
+    if has_audit_entries_select && extra_privileges.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        has_audit_entries_select,
+        extra_privileges = %extra_privileges,
+        "audit admin capability gate: role must have exactly public.audit_entries SELECT and no other public relation privileges"
+    );
+    Err(PgError::AuditAdminPrivileges)
 }
 
 /// 2. anti-vacuity：至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移 / 库不符预期）。
