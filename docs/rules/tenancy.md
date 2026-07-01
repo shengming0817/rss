@@ -22,7 +22,7 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
 `RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。「同址」由 `authn` audited 派生 funnel 类型层强制——先写审计成功才签发 All-scope，audit 写失败 fail-closed（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01，封闭符号见 `crates/authn/src/lib.rs`）；裸同步 `Principal::row_visibility` 的 super-admin 分支不再签发 All-scope（无 `AuditSink` 无法同址，返回 deny）。runtime JWT verify bridge 在认证成功后把具体 `Arc<authn::Principal>` 写入 request extension；跨租户 audit read handler 使用该 principal 做 SuperAdmin 判定和 durable audit。
 
-audit read 不传 `tenantId` 时只读 ambient `runctx` 租户。传 `tenantId` 时是**指定租户**读取：只允许已验证 SuperAdmin，普通 admin/user/device/service 即使目标是同租户也拒绝；不提供全租户全局列表。读取前必须先 durable append `action="audit:list-cross-tenant"`、`resource_kind="audit_entries"`、`resource_id=<targetTenant>`，append 失败不读取。cross-tenant cursor 必须绑定 target tenant，cursor 与请求 `tenantId` 不一致返回 400。
+audit read 不传 `tenantId` 时只读 ambient `runctx` 租户。传 `tenantId` 时是**指定租户**读取：只允许已验证 SuperAdmin，普通 admin/user/device/service 即使目标是同租户也拒绝；不提供全租户全局列表。读取前必须先 durable append `action="audit:list-cross-tenant"`、`resource_kind="audit_entries"`、`resource_id=<targetTenant>`，append 失败不读取。cross-tenant cursor 必须绑定 target tenant，cursor 与请求 `tenantId` 不一致返回 400。行/租户可见性通过后仍必须应用 `ResourceProjection`：SuperAdmin 只扩大 row scope，不自动获得字段明文。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed。指定租户的 super-admin audit read 只能走专用
 `rss_audit_admin` admin 读取池；该池直连固定 LOGIN 角色 `rss_audit_admin`，角色必须非 superuser、
@@ -171,14 +171,28 @@ NOBYPASSRLS` 已 provision，bootstrap serving pool 已由启动期 RLS 能力�
 - HTTP 路由门禁用 generated `HttpSpec` 派生 `httpserve::RoutePermission`，经
   `httpserve::RouteAuthorizer` 单一入口授权；handler 只消费 route gate 插入的
   `httpserve::AuthorizedSubject`，不用 `authn::any_role` / `authn::self_or` /
-  `authn::require_any_role` 做授权分支。
+  `authn::require_any_role` 做授权分支。Admin listener 的 audit read 因保持 Admin
+  `Route` 类型语义，读取前用同一 `RouteAuthorizer` 做等价 `audit:read` read gate。
 - `authz::Permission` 是 sealed 闭值集（枚举 / sealed 类型）；业务代码经 accessor 函数
   （如 `authz::perm_audit_read()`）取得 permission，不传 role 字符串。
 - handler 不手写 `Principal::has_role` 或遍历 `Principal.roles` 做授权。
 - `Effect::Allow` 规则必须声明至少一个 action；空 action 只允许用于
   `Effect::Deny` 的 deny-all。写侧和读侧都必须 fail-closed。
-- 路由门禁只做 coarse allow/deny，不执行 RowScope / FieldMask obligation。Allow
-  规则携带非零 obligation 时必须 fail-closed。
+- 路由门禁只做 coarse allow/deny；recognized FieldMask obligation 经 sealed
+  `ResourceProjection` 传给 read projection layer 消费。未知 obligation、RowScope obligation 或不能识别的
+  field obligation 必须 fail-closed。
+
+## ResourceProjection / FieldMask
+
+字段级数据权限由 `httpserve::ResourceProjection` 承载，字段集合来自闭枚举
+`vocab::ProjectionField`，不得用裸字符串、wildcard 或 handler-local bool 表达。粗粒度
+`audit:read` 缺 Authorizer 或被 Authorizer deny 时必须拒绝读取；读取已 allow 后，缺 projection、
+缺字段权限或未知未来字段时，敏感字段默认 mask。
+
+audit read 当前默认 mask `actor` 与 `resourceId`，以 `"<redacted>"` 保持 required string schema；`entryHash`、
+`seq`、`tenantId`、`actorKind`、`action`、`resourceKind`、`outcome`、`recordedAt`、`nextCursor`、`hasMore`
+保持明文。显式 unmask 只能由 `RouteAuthorizationDecision` 携带的 projection 进入 handler；audit handler
+只消费 projection，不读取角色、permission 字符串或 policy 细节。
 
 ## Resource ownership
 
@@ -213,9 +227,10 @@ ownership 规则。
 
 ## Authorizer 与 PDP
 
-Authorizer 经组合根注入 primary listener request context：runtime assembly 从 identity
-domain 取得 `Arc<dyn httpserve::RouteAuthorizer>`，并调用
-`httpserve::finalize_primary_auth_with_audit` 装配。域 crate 不依赖兄弟域 crate 的 Authorizer。
+Authorizer 经组合根注入 request context：runtime assembly 从 identity domain 取得
+`Arc<dyn httpserve::RouteAuthorizer>`，Primary listener 用
+`httpserve::finalize_primary_auth_with_audit` 装配；Admin listener 也注入同一 Authorizer，供 audit read
+请求 sealed field projection。域 crate 不依赖兄弟域 crate 的 Authorizer。
 
 强依赖缺失必须 fail-fast；可解析的 Authorizer 在 runtime router build（Init 后、
 serve 前）预解析。生产 Primary active route 通过必填 authorizer finalizer 装配；缺失 provider
@@ -256,9 +271,10 @@ self/RBAC/builtin baseline 独立判定；RBAC baseline 仍是 action-scoped + r
 tenant policy 可以叠加路由 coarse allow / deny，`Deny` 和 durable load/decode failure 覆盖 baseline，
 但不能扩大数据行可见性；数据可见性仍由 `RowScope` / FORCE RLS 独立治理。
 
-obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。当前 HTTP route gate 只执行
-coarse allow/deny，不解释 RowScope / FieldMask obligation；因此 allow 规则带非空 obligation 时，
-route gate 必须 fail-closed deny。
+obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。HTTP route gate 的默认语义仍是
+coarse allow/deny；唯一例外是 recognized FieldMask obligation 可转成 sealed `ResourceProjection`
+交给读模型渲染层。RowScope、未知 field obligation、或非 projection 路由上的 FieldMask obligation
+都必须 fail-closed deny。
 
 ## gRPC 授权
 

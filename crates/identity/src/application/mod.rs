@@ -64,8 +64,8 @@ use generated::http::identity_v1::{
     },
 };
 use generated::http::{
-    HttpAuthMode, HttpHeaderMode, HttpSpec, settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC,
-    settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
+    HttpAuthMode, HttpHeaderMode, HttpSpec, audit_v1::SPEC as AUDIT_LIST_HTTP_SPEC,
+    settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
 };
 use httpserve::{
     AuthorizedSubject, Primary, PrimaryRoute, RouteAuthorizationDecision,
@@ -76,14 +76,14 @@ use httpserve::{
 use primitives::ListenerKind;
 use primitives::RouteAuthOptOut;
 use uuid::Uuid;
-use vocab::{CoreError, CoreErrorKind, TenantId};
+use vocab::{CoreError, CoreErrorKind, ProjectionField, TenantId};
 
 use crate::domain::{
     AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PolicyEvaluation,
-    PolicyRouteScope, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RoleId,
-    Session, SessionId, evaluate_policies_for_tenant,
+    PolicyObligations, PolicyRouteScope, RefreshStatus, RefreshTokenHash, RefreshTokenId,
+    RefreshTokenRecord, RoleId, Session, SessionId, evaluate_policies_for_tenant,
 };
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo,
@@ -1067,7 +1067,7 @@ impl ContractAuthorizer {
     async fn authorize_request(
         &self,
         request: &RouteAuthorizationRequest,
-    ) -> Result<(), AuthReject> {
+    ) -> Result<RouteAuthorizationDecision, AuthReject> {
         let ctx = AuthSubjectContext {
             tenant: request.tenant_id.ok_or(AuthReject::Forbidden)?,
             subject: request.principal_id.clone(),
@@ -1076,8 +1076,9 @@ impl ContractAuthorizer {
         let policy = contract_auth_policy(request)?;
         match self.authorize_durable_policy(&ctx, request).await? {
             PolicyEvaluation::Deny => return Err(AuthReject::Forbidden),
-            PolicyEvaluation::Allow(obligations) if obligations.is_empty() => return Ok(()),
-            PolicyEvaluation::Allow(_) => return Err(AuthReject::Forbidden),
+            PolicyEvaluation::Allow(obligations) => {
+                return projection_decision_from_obligations(request, &obligations);
+            }
             PolicyEvaluation::NoMatch => {}
         }
         match policy {
@@ -1090,7 +1091,7 @@ impl ContractAuthorizer {
                     .as_ref()
                     .is_some_and(|resource| resource.id() == ctx.subject)
                 {
-                    Ok(())
+                    Ok(RouteAuthorizationDecision::Allow)
                 } else {
                     Err(AuthReject::Forbidden)
                 }
@@ -1135,12 +1136,17 @@ impl ContractAuthorizer {
         ctx: &AuthSubjectContext,
         contract_id: &'static str,
         permission: &str,
-    ) -> Result<(), AuthReject> {
+    ) -> Result<RouteAuthorizationDecision, AuthReject> {
+        if ctx.kind == vocab::PrincipalKind::SuperAdmin
+            && audit_projection_route(contract_id, permission)
+        {
+            return Ok(RouteAuthorizationDecision::Allow);
+        }
         if ctx.kind != vocab::PrincipalKind::Admin {
             return Err(AuthReject::Forbidden);
         }
         if builtin_admin_permission(contract_id, permission) {
-            return Ok(());
+            return Ok(RouteAuthorizationDecision::Allow);
         }
         let bindings = self
             .bindings
@@ -1163,6 +1169,8 @@ impl ContractAuthorizer {
             .map(|binding| binding.role_id().clone())
             .collect::<Vec<_>>();
 
+        let mut has_permission = false;
+        let mut fields = Vec::new();
         for role_id in role_ids {
             let role = self.roles.find(ctx.tenant, role_id).await.map_err(|err| {
                 tracing::warn!(
@@ -1174,11 +1182,80 @@ impl ContractAuthorizer {
                 );
                 AuthReject::Forbidden
             })?;
-            if role.is_some_and(|role| role.permission_ids().any(|p| p == permission)) {
-                return Ok(());
+            if let Some(role) = role {
+                for role_permission in role.permission_ids() {
+                    if role_permission == permission {
+                        has_permission = true;
+                    }
+                    if audit_projection_route(contract_id, permission) {
+                        projection_field_from_permission(role_permission, &mut fields);
+                    }
+                }
             }
         }
-        Err(AuthReject::Forbidden)
+        if has_permission {
+            Ok(projection_decision_from_fields(&fields))
+        } else {
+            Err(AuthReject::Forbidden)
+        }
+    }
+}
+
+fn audit_projection_route(contract_id: &'static str, permission: &str) -> bool {
+    contract_id == AUDIT_LIST_HTTP_SPEC.contract_id
+        && AUDIT_LIST_HTTP_SPEC.auth.permission == Some(permission)
+}
+
+fn projection_field_from_permission(permission: &str, fields: &mut Vec<ProjectionField>) {
+    let field = AUDIT_LIST_HTTP_SPEC
+        .projection_fields
+        .iter()
+        .find(|field| field.permission == permission)
+        .map(|field| field.field);
+    if let Some(field) = field
+        && !fields.contains(&field)
+    {
+        fields.push(field);
+    }
+}
+
+fn projection_decision_from_obligations(
+    request: &RouteAuthorizationRequest,
+    obligations: &PolicyObligations,
+) -> Result<RouteAuthorizationDecision, AuthReject> {
+    if obligations.row_scope().is_some() {
+        return Err(AuthReject::Forbidden);
+    }
+    if !obligations.field_mask().is_empty()
+        && !audit_projection_route(request.contract_id, request.permission)
+    {
+        return Err(AuthReject::Forbidden);
+    }
+    let mut fields = Vec::new();
+    for key in obligations.field_mask() {
+        let Some(field) = projection_field_from_obligation_key(key.as_str()) else {
+            return Err(AuthReject::Forbidden);
+        };
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    Ok(projection_decision_from_fields(&fields))
+}
+
+fn projection_field_from_obligation_key(key: &str) -> Option<ProjectionField> {
+    AUDIT_LIST_HTTP_SPEC
+        .projection_fields
+        .iter()
+        .find(|field| field.obligation_key == key)
+        .map(|field| field.field)
+}
+
+fn projection_decision_from_fields(fields: &[ProjectionField]) -> RouteAuthorizationDecision {
+    if fields.is_empty() {
+        RouteAuthorizationDecision::Allow
+    } else {
+        RouteAuthorizationDecision::allow_with_unmasked_fields(fields)
     }
 }
 
@@ -1214,7 +1291,7 @@ impl RouteAuthorizer for ContractAuthorizer {
     {
         Box::pin(async move {
             match self.authorize_request(&request).await {
-                Ok(()) => RouteAuthorizationDecision::Allow,
+                Ok(decision) => decision,
                 Err(_) => RouteAuthorizationDecision::Deny,
             }
         })
@@ -3062,6 +3139,229 @@ mod tests {
                 resource: None,
             })
             .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_audit_projection_role_field_permissions_become_projection()
+    -> Result<(), String> {
+        let repo = crate::internal::mem::InMemRoleRepo::new();
+        repo.save(
+            tid(CANON_TENANT),
+            role(
+                "role-audit",
+                "Audit",
+                &[
+                    vocab::AUDIT_READ_PERMISSION,
+                    vocab::AUDIT_FIELD_ACTOR_PERMISSION,
+                ],
+            ),
+        )
+        .await
+        .expect("save role");
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    role("role-audit", "Audit", &[]).id(),
+                    CANON_USER,
+                ),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                permission: vocab::AUDIT_READ_PERMISSION,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+
+        let projection = match decision {
+            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
+            other => return Err(format!("expected projection allow, got {other:?}")),
+        };
+        assert!(projection.allows(vocab::ProjectionField::AuditActor));
+        assert!(!projection.allows(vocab::ProjectionField::AuditResourceId));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_audit_projection_read_without_field_permission_stays_masked() {
+        let repo = crate::internal::mem::InMemRoleRepo::new();
+        repo.save(
+            tid(CANON_TENANT),
+            role("role-audit", "Audit", &[vocab::AUDIT_READ_PERMISSION]),
+        )
+        .await
+        .expect("save role");
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    role("role-audit", "Audit", &[]).id(),
+                    CANON_USER,
+                ),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                permission: vocab::AUDIT_READ_PERMISSION,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_super_admin_audit_read_defaults_masked() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                permission: vocab::AUDIT_READ_PERMISSION,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::SuperAdmin,
+                principal_id: "super-admin".to_string(),
+                resource: None,
+            })
+            .await;
+
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[test]
+    fn audit_projection_field_registry_is_generated_from_contract() {
+        let fields = AUDIT_LIST_HTTP_SPEC.projection_fields;
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|field| {
+            field.field == vocab::ProjectionField::AuditActor
+                && field.permission == vocab::AUDIT_FIELD_ACTOR_PERMISSION
+                && field.obligation_key == vocab::AUDIT_ACTOR_FIELD_OBLIGATION
+        }));
+        assert!(fields.iter().any(|field| {
+            field.field == vocab::ProjectionField::AuditResourceId
+                && field.permission == vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION
+                && field.obligation_key == vocab::AUDIT_RESOURCE_ID_FIELD_OBLIGATION
+        }));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_audit_projection_policy_field_mask_becomes_projection()
+    -> Result<(), String> {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy(
+                "policy-audit-field",
+                AUDIT_LIST_HTTP_SPEC.contract_id,
+                vocab::AUDIT_READ_PERMISSION,
+                PolicyEffect::Allow,
+                PolicyObligations::new(
+                    None,
+                    vec![AttributeKey::new(vocab::AUDIT_ACTOR_FIELD_OBLIGATION)],
+                ),
+            ),
+        ));
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                permission: vocab::AUDIT_READ_PERMISSION,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+
+        let projection = match decision {
+            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
+            other => return Err(format!("expected projection allow, got {other:?}")),
+        };
+        assert!(projection.allows(vocab::ProjectionField::AuditActor));
+        assert!(!projection.allows(vocab::ProjectionField::AuditResourceId));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_audit_projection_unknown_field_mask_obligation_denies() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy(
+                "policy-unknown-field",
+                AUDIT_LIST_HTTP_SPEC.contract_id,
+                vocab::AUDIT_READ_PERMISSION,
+                PolicyEffect::Allow,
+                PolicyObligations::new(None, vec![AttributeKey::new("audit.email")]),
+            ),
+        ));
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                permission: vocab::AUDIT_READ_PERMISSION,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+
         assert_eq!(decision, RouteAuthorizationDecision::Deny);
     }
 

@@ -42,7 +42,7 @@ use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
 use tower::Layer;
 use tower::Service;
-use vocab::{PrincipalKind, TenantId};
+use vocab::{PrincipalKind, ProjectionField, TenantId};
 
 use crate::middleware::RequestId;
 use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope};
@@ -113,6 +113,7 @@ pub struct AuthorizedSubject {
     principal_kind: PrincipalKind,
     principal_id: String,
     resource: Option<RouteResource>,
+    projection: ResourceProjection,
 }
 
 impl AuthorizedSubject {
@@ -121,12 +122,14 @@ impl AuthorizedSubject {
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
         resource: Option<RouteResource>,
+        projection: ResourceProjection,
     ) -> Self {
         Self {
             tenant_id,
             principal_kind,
             principal_id: principal_id.into(),
             resource,
+            projection,
         }
     }
 
@@ -137,7 +140,30 @@ impl AuthorizedSubject {
         principal_id: impl Into<String>,
         resource: Option<RouteResource>,
     ) -> Self {
-        Self::new(tenant_id, principal_kind, principal_id, resource)
+        Self::new(
+            tenant_id,
+            principal_kind,
+            principal_id,
+            resource,
+            ResourceProjection::default_masked(),
+        )
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn for_test_with_projection(
+        tenant_id: TenantId,
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        resource: Option<RouteResource>,
+        projection: ResourceProjection,
+    ) -> Self {
+        Self::new(
+            tenant_id,
+            principal_kind,
+            principal_id,
+            resource,
+            projection,
+        )
     }
 
     pub fn tenant_id(&self) -> TenantId {
@@ -155,6 +181,10 @@ impl AuthorizedSubject {
     pub fn resource(&self) -> Option<&RouteResource> {
         self.resource.as_ref()
     }
+
+    pub fn projection(&self) -> ResourceProjection {
+        self.projection
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,10 +197,97 @@ pub struct RouteAuthorizationRequest {
     pub resource: Option<RouteResource>,
 }
 
+/// Field mask carried by route authorization output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldMask {
+    audit_actor: bool,
+    audit_resource_id: bool,
+}
+
+impl FieldMask {
+    fn default_masked() -> Self {
+        Self {
+            audit_actor: false,
+            audit_resource_id: false,
+        }
+    }
+
+    fn allowing(fields: &[ProjectionField]) -> Self {
+        let mut mask = Self::default_masked();
+        for field in fields {
+            match field {
+                ProjectionField::AuditActor => mask.audit_actor = true,
+                ProjectionField::AuditResourceId => mask.audit_resource_id = true,
+                // reason: future fields must stay masked until explicitly wired.
+                _ => {}
+            }
+        }
+        mask
+    }
+
+    fn allows(self, field: ProjectionField) -> bool {
+        match field {
+            ProjectionField::AuditActor => self.audit_actor,
+            ProjectionField::AuditResourceId => self.audit_resource_id,
+            // reason: future fields must stay masked until explicitly wired.
+            _ => false,
+        }
+    }
+}
+
+/// Resource projection consumed by read-model rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceProjection {
+    mask: FieldMask,
+}
+
+impl ResourceProjection {
+    const MASKED: &'static str = "<redacted>";
+
+    pub fn default_masked() -> Self {
+        Self {
+            mask: FieldMask::default_masked(),
+        }
+    }
+
+    pub(crate) fn allowing(fields: &[ProjectionField]) -> Self {
+        Self {
+            mask: FieldMask::allowing(fields),
+        }
+    }
+
+    pub fn allows(self, field: ProjectionField) -> bool {
+        self.mask.allows(field)
+    }
+
+    pub fn render(self, field: ProjectionField, raw: &str) -> String {
+        if self.allows(field) {
+            raw.to_string()
+        } else {
+            Self::MASKED.to_string()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteAuthorizationDecision {
     Allow,
+    AllowWithProjection(ResourceProjection),
     Deny,
+}
+
+impl RouteAuthorizationDecision {
+    pub fn allow_with_unmasked_fields(fields: &[ProjectionField]) -> Self {
+        Self::AllowWithProjection(ResourceProjection::allowing(fields))
+    }
+
+    fn projection(self) -> Option<ResourceProjection> {
+        match self {
+            Self::Allow => Some(ResourceProjection::default_masked()),
+            Self::AllowWithProjection(projection) => Some(projection),
+            Self::Deny => None,
+        }
+    }
 }
 
 pub trait RouteAuthorizer: Send + Sync + 'static {
@@ -178,6 +295,46 @@ pub trait RouteAuthorizer: Send + Sync + 'static {
         &'a self,
         request: RouteAuthorizationRequest,
     ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>>;
+}
+
+/// Build an [`AuthorizedSubject`] from already-verified auth evidence and a route authorizer
+/// decision.
+///
+/// This keeps handlers from reading [`Authenticated`] principal fields while preserving the
+/// invariant that explicit projection can only enter request handling through
+/// [`RouteAuthorizationDecision`].
+pub async fn authorize_subject_for_permission(
+    authorizer: Option<Arc<dyn RouteAuthorizer>>,
+    evidence: Option<&Authenticated>,
+    contract_id: &'static str,
+    permission: &'static str,
+    tenant_id: TenantId,
+    resource: Option<RouteResource>,
+) -> Option<AuthorizedSubject> {
+    let authorizer = authorizer?;
+    let evidence =
+        evidence.filter(|evidence| evidence.principal_kind() != PrincipalKind::Anonymous)?;
+    let principal_id = evidence.self_scoped_principal_id().to_string();
+    let principal_kind = evidence.principal_kind();
+    let decision = authorizer
+        .authorize(RouteAuthorizationRequest {
+            contract_id,
+            permission,
+            tenant_id: Some(tenant_id),
+            principal_kind,
+            principal_id: principal_id.clone(),
+            resource: resource.clone(),
+        })
+        .await;
+    decision.projection().map(|projection| {
+        AuthorizedSubject::new(
+            tenant_id,
+            principal_kind,
+            principal_id,
+            resource,
+            projection,
+        )
+    })
 }
 
 /// 认证证据 extension：验签桥在凭据校验通过后注入请求 extension，enforce 层据此对 `Require` 路由放行
@@ -616,13 +773,17 @@ async fn authorize_route_permission(
             resource: resource.clone(),
         })
         .await;
-    if decision == RouteAuthorizationDecision::Allow {
-        Some(tenant_id.map(|tenant_id| {
-            AuthorizedSubject::new(tenant_id, principal_kind, principal_id, resource)
-        }))
-    } else {
-        None
-    }
+    decision.projection().map(|projection| {
+        tenant_id.map(|tenant_id| {
+            AuthorizedSubject::new(
+                tenant_id,
+                principal_kind,
+                principal_id,
+                resource,
+                projection,
+            )
+        })
+    })
 }
 
 async fn authorize_mtls_route(
@@ -642,7 +803,7 @@ async fn authorize_mtls_route(
         principal_id,
         resource: None,
     };
-    authorizer.authorize(request).await == RouteAuthorizationDecision::Allow
+    authorizer.authorize(request).await.projection().is_some()
 }
 
 impl<S> Service<Request> for EnforceService<S>
@@ -833,6 +994,36 @@ mod tests {
     use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
     use tower::ServiceExt;
 
+    #[test]
+    fn route_authorization_projection_defaults_masked_and_allows_only_named_fields()
+    -> Result<(), String> {
+        let default = ResourceProjection::default_masked();
+        assert!(!default.allows(ProjectionField::AuditActor));
+        assert!(!default.allows(ProjectionField::AuditResourceId));
+        assert_eq!(
+            default.render(ProjectionField::AuditActor, "subject"),
+            "<redacted>"
+        );
+
+        let decision =
+            RouteAuthorizationDecision::allow_with_unmasked_fields(&[ProjectionField::AuditActor]);
+        let projection = match decision {
+            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
+            other => return Err(format!("expected projection allow, got {other:?}")),
+        };
+        assert!(projection.allows(ProjectionField::AuditActor));
+        assert!(!projection.allows(ProjectionField::AuditResourceId));
+        assert_eq!(
+            projection.render(ProjectionField::AuditActor, "subject"),
+            "subject"
+        );
+        assert_eq!(
+            projection.render(ProjectionField::AuditResourceId, "resource"),
+            "<redacted>"
+        );
+        Ok(())
+    }
+
     use super::*;
 
     const TEST_CONTRACT: &str = "test.contract";
@@ -849,6 +1040,91 @@ mod tests {
 
     fn tenantless_authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
         Authenticated::new(scheme, kind, "platform-principal-1", None)
+    }
+
+    type SeenAuthzRequest = (
+        &'static str,
+        &'static str,
+        Option<TenantId>,
+        PrincipalKind,
+        String,
+    );
+
+    #[derive(Clone)]
+    struct TestProjectionAuthorizer {
+        decision: RouteAuthorizationDecision,
+        seen: Arc<Mutex<Vec<SeenAuthzRequest>>>,
+    }
+
+    impl RouteAuthorizer for TestProjectionAuthorizer {
+        fn authorize<'a>(
+            &'a self,
+            request: RouteAuthorizationRequest,
+        ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+            let decision = self.decision;
+            let seen = self.seen.clone();
+            Box::pin(async move {
+                seen.lock().unwrap_or_else(|e| e.into_inner()).push((
+                    request.contract_id,
+                    request.permission,
+                    request.tenant_id,
+                    request.principal_kind,
+                    request.principal_id,
+                ));
+                decision
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn route_authorization_projection_builds_authorized_subject_from_evidence()
+    -> Result<(), String> {
+        let authorizer_impl = Arc::new(TestProjectionAuthorizer {
+            decision: RouteAuthorizationDecision::allow_with_unmasked_fields(&[
+                ProjectionField::AuditActor,
+            ]),
+            seen: Arc::new(Mutex::new(Vec::new())),
+        });
+        let authorizer: Arc<dyn RouteAuthorizer> = authorizer_impl.clone();
+        let evidence = authed(RequiredScheme::Jwt, PrincipalKind::Admin);
+
+        let subject = authorize_subject_for_permission(
+            Some(authorizer),
+            Some(&evidence),
+            TEST_CONTRACT,
+            vocab::AUDIT_READ_PERMISSION,
+            tenant(),
+            None,
+        )
+        .await
+        .ok_or_else(|| "expected authorized subject".to_string())?;
+
+        assert_eq!(subject.tenant_id(), tenant());
+        assert_eq!(subject.principal_kind(), PrincipalKind::Admin);
+        assert_eq!(subject.principal_id(), "principal-1");
+        assert!(subject.projection().allows(ProjectionField::AuditActor));
+        assert!(
+            !subject
+                .projection()
+                .allows(ProjectionField::AuditResourceId)
+        );
+
+        let seen = authorizer_impl
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0],
+            (
+                TEST_CONTRACT,
+                vocab::AUDIT_READ_PERMISSION,
+                Some(tenant()),
+                PrincipalKind::Admin,
+                "principal-1".to_string()
+            )
+        );
+        Ok(())
     }
 
     #[derive(Clone)]

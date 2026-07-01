@@ -34,6 +34,7 @@ pub(crate) const FIELD_DELIVERY: &str = "delivery";
 pub(crate) const FIELD_SAGA: &str = "[saga]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
+pub(crate) const FIELD_ENDPOINTS_HTTP_PROJECTION: &str = "[endpoints.http.projection]";
 
 /// `contract.toml` 的解析目标。字段集冻结——见模块 INVARIANT。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -226,6 +227,8 @@ pub(crate) struct HttpEndpoint {
     pub(crate) self_scoped: bool,
     #[serde(default)]
     pub(crate) headers: BTreeMap<String, HttpHeaderMode>,
+    #[serde(default)]
+    pub(crate) projection: Option<HttpProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -265,6 +268,44 @@ impl HttpAuthMode {
 pub(crate) enum HttpHeaderMode {
     PopulateOnly,
     ServiceTokenTenantBound,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HttpProjection {
+    #[serde(default)]
+    pub(crate) fields: Vec<HttpProjectionField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct HttpProjectionField {
+    pub(crate) field: HttpProjectionFieldName,
+    pub(crate) permission: String,
+    pub(crate) obligation_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum HttpProjectionFieldName {
+    AuditActor,
+    AuditResourceId,
+}
+
+impl HttpProjectionFieldName {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            Self::AuditActor => "auditActor",
+            Self::AuditResourceId => "auditResourceId",
+        }
+    }
+
+    pub(crate) fn as_vocab_variant(self) -> &'static str {
+        match self {
+            Self::AuditActor => "AuditActor",
+            Self::AuditResourceId => "AuditResourceId",
+        }
+    }
 }
 
 /// 事件投递语义（event 契约 per-kind 字段）。三标准投递保证；非法值解析即 `Err`（Hard，类型层）。

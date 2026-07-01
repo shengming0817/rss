@@ -1,8 +1,7 @@
-# audit admin 读 HTTP 契约（draft，#1014 RW-W-audit）。
+# audit admin 读 HTTP 契约（#1014 RW-W-audit）。
 # 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
-# 不传 tenantId：本租户审计条目分页；传 tenantId：仅 verified SuperAdmin 读取指定租户，读取前必须 durable
-# append cross-tenant audit event，缺 admin pool 返回 501 ERR_CORE_NOT_IMPLEMENTED。
-# lifecycle 保持 draft：Admin listener route-level permission active contract 归 #1584，不能声明未实际执行的权限元数据。
+# 不传 tenantId：本租户审计条目分页；传 tenantId：仅 verified SuperAdmin 读取指定租户；最终 audit:read 授权
+# 通过后先 durable append cross-tenant audit event，再读取目标租户审计链；缺 admin pool 返回 501 ERR_CORE_NOT_IMPLEMENTED。
 id = "audit.list-entries"
 kind = "http"
 domain = "audit"
@@ -10,10 +9,20 @@ version = "v1"
 owner = "audit"
 # 纯读无事务无 outbox ⇒ LocalOnly(L0)；升 postgres adapter（读时链验证 + 池）时须复核是否升 L1。
 consistencyLevel = "LocalOnly"
-lifecycle = "draft"
+lifecycle = "active"
 # per-kind http 字段（#1035）：挂 Admin listener 的 operator 审计读取。
 path = "/api/v1/audit/entries"
 method = "GET"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "audit:read"
+
+[endpoints.http.projection]
+fields = [
+  { field = "auditActor", permission = "audit:field:actor", obligationKey = "audit.actor" },
+  { field = "auditResourceId", permission = "audit:field:resource_id", obligationKey = "audit.resource_id" },
+]
 
 [schemas]
 request = "request.schema.json"

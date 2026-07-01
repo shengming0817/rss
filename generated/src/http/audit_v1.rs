@@ -69,7 +69,8 @@ pub mod error {
 ///      "format": "int64"
 ///    },
 ///    "resourceId": {
-///      "type": "string"
+///      "type": "string",
+///      "x-pii": "generic"
 ///    },
 ///    "resourceKind": {
 ///      "type": "string"
@@ -107,7 +108,7 @@ pub struct AuditEntryView {
     #[redact(sensitivity = public)]
     pub recorded_at: i64,
     #[serde(rename = "resourceId")]
-    #[redact(sensitivity = public)]
+    #[redact(sensitivity = pii)]
     pub resource_id: ::std::string::String,
     #[serde(rename = "resourceKind")]
     #[redact(sensitivity = public)]
@@ -230,7 +231,8 @@ impl ::std::default::Default for AuditListEntriesRequest {
 ///            "format": "int64"
 ///          },
 ///          "resourceId": {
-///            "type": "string"
+///            "type": "string",
+///            "x-pii": "generic"
 ///          },
 ///          "resourceKind": {
 ///            "type": "string"
@@ -291,3 +293,37 @@ pub const CONTRACT_ID: &str = "audit.list-entries";
 /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("audit", "audit.list-entries");
+
+/// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PATH: &str = "/api/v1/audit/entries";
+
+/// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
+    super::HttpProjectionFieldSpec {
+        field: ::vocab::ProjectionField::AuditActor,
+        permission: "audit:field:actor",
+        obligation_key: "audit.actor",
+    },
+    super::HttpProjectionFieldSpec {
+        field: ::vocab::ProjectionField::AuditResourceId,
+        permission: "audit:field:resource_id",
+        obligation_key: "audit.resource_id",
+    },
+];
+
+/// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: super::HttpSpec = super::HttpSpec {
+    contract_id: CONTRACT_ID,
+    contract: CONTRACT,
+    path: PATH,
+    method: "GET",
+    auth: super::HttpAuthSpec {
+        mode: super::HttpAuthMode::Permission,
+        reason: None,
+        permission: Some("audit:read"),
+    },
+    resource: None,
+    self_scoped: false,
+    projection_fields: PROJECTION_FIELDS,
+    headers: &[],
+};

@@ -96,10 +96,10 @@
 
 **Independent Test**: Missing FieldMask obligation yields masked sensitive fields.
 
-- [ ] T029 [P] [US5] Define sealed FieldMask/ResourceProjection model in crates/vocab or the selected domain read-model module
-- [ ] T030 [US5] Apply ResourceProjection to audit/query read responses in crates/audit
-- [ ] T031 [US5] Add default-mask and explicit-unmask tests for sensitive fields in crates/audit
-- [ ] T032 [P] [US5] Add projection obligation consumption documentation in docs/rules/tenancy.md
+- [x] T029 [P] [US5] Define sealed FieldMask/ResourceProjection model in crates/vocab or the selected domain read-model module
+- [x] T030 [US5] Apply ResourceProjection to audit/query read responses in crates/audit
+- [x] T031 [US5] Add default-mask and explicit-unmask tests for sensitive fields in crates/audit
+- [x] T032 [P] [US5] Add projection obligation consumption documentation in docs/rules/tenancy.md
 
 ---
 

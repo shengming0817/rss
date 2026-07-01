@@ -451,7 +451,8 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// + rate-limit 中间件（组合根叠加点，INVARIANT RATELIMIT-BEFORE-AUTH-01）。
 ///
 /// Primary listener：`finalize_primary_auth_with_audit(routes, plan, ..., primary_authorizer)` 注入
-/// `RouteAuthorizer`；非 Primary listener：`finalize_auth_with_audit(routes, plan, ...)`。两者均消费
+/// `RouteAuthorizer`；Admin listener 也注入同一 Authorizer 供 field projection 消费；其它非 Primary
+/// listener：`finalize_auth_with_audit(routes, plan, ...)`。三者均消费
 /// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
 /// `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
 /// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
@@ -500,30 +501,15 @@ pub fn assemble_authed_routers(
         } else {
             None
         };
-        let authed = if listener == ListenerKind::Primary {
-            httpserve::finalize_primary_auth_with_audit(
-                routes,
-                plan,
-                audit_sink.clone(),
-                audit_clock.clone(),
-                primary_authorizer.clone(),
-            )
-        } else if scheme == AuthScheme::Mtls {
-            httpserve::finalize_auth_with_audit_and_authorizer(
-                routes,
-                plan,
-                audit_sink.clone(),
-                audit_clock.clone(),
-                mtls_route_authorizer_from_env(listener)?,
-            )
-        } else {
-            httpserve::finalize_auth_with_audit(
-                routes,
-                plan,
-                audit_sink.clone(),
-                audit_clock.clone(),
-            )
-        }
+        let authed = finalize_listener_auth(
+            listener,
+            routes,
+            plan,
+            audit_sink.clone(),
+            audit_clock.clone(),
+            primary_authorizer.clone(),
+            scheme,
+        )
         .context("finalize_auth")?;
         let required = required_scheme_for_auth_scheme(scheme);
         let wired = match required {
@@ -551,6 +537,48 @@ pub fn assemble_authed_routers(
         });
     }
     Ok(out)
+}
+
+fn finalize_listener_auth(
+    listener: ListenerKind,
+    routes: httpserve::UnfinalizedRoutes,
+    plan: AuthPlan,
+    audit_sink: httpserve::AuditSinkHandle,
+    audit_clock: Arc<dyn diport::Clock>,
+    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
+    scheme: AuthScheme,
+) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+    if listener == ListenerKind::Primary {
+        return httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            audit_sink,
+            audit_clock,
+            primary_authorizer,
+        )
+        .map_err(Into::into);
+    }
+    if listener == ListenerKind::Admin {
+        return httpserve::finalize_auth_with_audit_and_authorizer(
+            routes,
+            plan,
+            audit_sink,
+            audit_clock,
+            primary_authorizer,
+        )
+        .map_err(Into::into);
+    }
+    if scheme == AuthScheme::Mtls {
+        return httpserve::finalize_auth_with_audit_and_authorizer(
+            routes,
+            plan,
+            audit_sink,
+            audit_clock,
+            mtls_route_authorizer_from_env(listener)?,
+        )
+        .map_err(Into::into);
+    }
+    httpserve::finalize_auth_with_audit(routes, plan, audit_sink, audit_clock).map_err(Into::into)
 }
 
 // ── postgres 配置 wiring ─────────────────────────────────────────────────────────────────────
@@ -2952,6 +2980,637 @@ mod tests {
 
     fn allow_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
         Arc::new(AllowAuthorizer)
+    }
+
+    fn identity_storage_error(message: &'static str) -> identity::ports::IdentityError {
+        identity::ports::IdentityError::Storage(Box::new(std::io::Error::other(message)))
+    }
+
+    #[derive(Clone)]
+    struct StaticRoleRepo {
+        roles: Arc<std::collections::BTreeMap<String, identity::ports::Role>>,
+    }
+
+    impl StaticRoleRepo {
+        fn new(roles: Vec<identity::ports::Role>) -> Self {
+            Self {
+                roles: Arc::new(
+                    roles
+                        .into_iter()
+                        .map(|role| (role.id().as_str().to_string(), role))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl identity::ports::RoleRepo for StaticRoleRepo {
+        async fn find(
+            &self,
+            _tenant: vocab::TenantId,
+            id: identity::ports::RoleId,
+        ) -> Result<Option<identity::ports::Role>, identity::ports::IdentityError> {
+            Ok(self.roles.get(id.as_str()).cloned())
+        }
+
+        async fn save(
+            &self,
+            _tenant: vocab::TenantId,
+            _role: identity::ports::Role,
+        ) -> Result<(), identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test role repo is read-only",
+            ))
+        }
+
+        async fn list(
+            &self,
+            _tenant: vocab::TenantId,
+            _page: identity::ports::RolePage,
+        ) -> Result<identity::ports::RoleListResult, identity::ports::IdentityError> {
+            Ok(identity::ports::RoleListResult {
+                roles: self.roles.values().cloned().collect(),
+                has_more: false,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticRoleBindings {
+        bindings: Arc<Vec<(vocab::TenantId, String, String)>>,
+    }
+
+    impl StaticRoleBindings {
+        fn new(bindings: Vec<(vocab::TenantId, String, String)>) -> Self {
+            Self {
+                bindings: Arc::new(bindings),
+            }
+        }
+    }
+
+    impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
+        async fn assign_and_emit(
+            &self,
+            _binding: identity::ports::RoleBinding,
+            _entry: consistency::Entry,
+            _envelope: diport::OutboxEnvelopeParts,
+        ) -> Result<(), diport::OutboxEmitError> {
+            Err(diport::OutboxEmitError::new(std::io::Error::other(
+                "runtime test binding lifecycle is read-only",
+            )))
+        }
+
+        async fn revoke_and_emit(
+            &self,
+            _tenant: vocab::TenantId,
+            _role_id: identity::ports::RoleId,
+            _subject: String,
+            _entry: consistency::Entry,
+            _envelope: diport::OutboxEnvelopeParts,
+        ) -> Result<bool, diport::OutboxEmitError> {
+            Err(diport::OutboxEmitError::new(std::io::Error::other(
+                "runtime test binding lifecycle is read-only",
+            )))
+        }
+
+        async fn list_for_subject(
+            &self,
+            tenant: vocab::TenantId,
+            subject: String,
+        ) -> Result<Vec<identity::ports::RoleBinding>, identity::ports::IdentityError> {
+            self.bindings
+                .iter()
+                .filter(|(binding_tenant, binding_subject, _)| {
+                    *binding_tenant == tenant && *binding_subject == subject
+                })
+                .map(|(_, binding_subject, role_id)| {
+                    identity::ports::RoleBinding::hydrate(binding_subject.clone(), role_id, tenant)
+                })
+                .collect()
+        }
+    }
+
+    struct EmptyPolicyRepo;
+
+    impl identity::ports::PolicyRepo for EmptyPolicyRepo {
+        async fn create(
+            &self,
+            _tenant: vocab::TenantId,
+            _policy: identity::ports::Policy,
+        ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test policy repo is read-only",
+            ))
+        }
+
+        async fn update(
+            &self,
+            _tenant: vocab::TenantId,
+            _policy: identity::ports::Policy,
+            _expected: identity::ports::PolicyVersion,
+        ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test policy repo is read-only",
+            ))
+        }
+
+        async fn delete(
+            &self,
+            _tenant: vocab::TenantId,
+            _id: identity::ports::PolicyId,
+            _expected: identity::ports::PolicyVersion,
+        ) -> Result<bool, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test policy repo is read-only",
+            ))
+        }
+
+        async fn find(
+            &self,
+            _tenant: vocab::TenantId,
+            _id: identity::ports::PolicyId,
+        ) -> Result<Option<identity::ports::Policy>, identity::ports::IdentityError> {
+            Ok(None)
+        }
+
+        async fn list_effective(
+            &self,
+            _tenant: vocab::TenantId,
+            _scope: identity::ports::PolicyRouteScope,
+            _at: SystemTime,
+        ) -> Result<Vec<identity::ports::Policy>, identity::ports::IdentityError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct UnusedCredentialRepo;
+
+    impl identity::ports::CredentialRepo for UnusedCredentialRepo {
+        async fn find_by_user_id(
+            &self,
+            _tenant: vocab::TenantId,
+            _user_id: ids::UserId,
+        ) -> Result<Option<identity::ports::Credential>, identity::ports::IdentityError> {
+            Ok(None)
+        }
+
+        async fn authenticate(
+            &self,
+            _tenant: vocab::TenantId,
+            _login: identity::ports::LoginIdentifier,
+            _candidate: String,
+            _now: SystemTime,
+        ) -> Result<identity::ports::AuthOutcome, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test credential repo must not be called",
+            ))
+        }
+
+        async fn save(
+            &self,
+            _credential: identity::ports::Credential,
+        ) -> Result<(), identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test credential repo is read-only",
+            ))
+        }
+
+        async fn bump_version(
+            &self,
+            _expected: u32,
+            _next: identity::ports::Credential,
+        ) -> Result<(), identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test credential repo is read-only",
+            ))
+        }
+
+        async fn lockout_status(
+            &self,
+            _tenant: vocab::TenantId,
+            _login: identity::ports::LoginIdentifier,
+            _now: SystemTime,
+        ) -> Result<bool, identity::ports::IdentityError> {
+            Ok(false)
+        }
+    }
+
+    struct UnusedSessionLifecycle;
+
+    impl identity::ports::SessionLifecycle for UnusedSessionLifecycle {
+        async fn persist_session_and_emit(
+            &self,
+            _session: identity::ports::Session,
+            _entry: consistency::Entry,
+            _envelope: diport::OutboxEnvelopeParts,
+        ) -> Result<(), diport::OutboxEmitError> {
+            Err(diport::OutboxEmitError::new(std::io::Error::other(
+                "runtime test session lifecycle must not be called",
+            )))
+        }
+
+        async fn find(
+            &self,
+            _tenant: vocab::TenantId,
+            _session_id: identity::ports::SessionId,
+        ) -> Result<Option<identity::ports::Session>, identity::ports::IdentityError> {
+            Ok(None)
+        }
+
+        async fn revoke(
+            &self,
+            _tenant: vocab::TenantId,
+            _session_id: identity::ports::SessionId,
+        ) -> Result<(), identity::ports::IdentityError> {
+            Ok(())
+        }
+    }
+
+    struct UnusedRefreshStore;
+
+    impl identity::ports::RefreshTokenStore for UnusedRefreshStore {
+        async fn insert(
+            &self,
+            _record: identity::ports::RefreshTokenRecord,
+        ) -> Result<(), identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test refresh store must not be called",
+            ))
+        }
+
+        async fn find_by_hash(
+            &self,
+            _tenant: vocab::TenantId,
+            _hash: identity::ports::RefreshTokenHash,
+        ) -> Result<Option<identity::ports::RefreshTokenRecord>, identity::ports::IdentityError>
+        {
+            Ok(None)
+        }
+
+        async fn rotate(
+            &self,
+            _rotation: identity::ports::RefreshRotation,
+        ) -> Result<bool, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test refresh store must not be called",
+            ))
+        }
+
+        async fn revoke_lineage(
+            &self,
+            _tenant: vocab::TenantId,
+            _lineage_id: identity::ports::RefreshTokenId,
+        ) -> Result<(), identity::ports::IdentityError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestSigner;
+
+    impl diport::Signer for TestSigner {
+        async fn sign(
+            &self,
+            _req: diport::SignRequest,
+        ) -> Result<diport::Signature, diport::SignerError> {
+            Ok(diport::Signature::new(vec![0x5a; 64]))
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::SignerError> {
+            Ok(())
+        }
+    }
+
+    struct DelegatingAuditAdminRepo {
+        repo: Arc<audit::ports::DynAuditRepo<'static>>,
+    }
+
+    impl audit::ports::AuditAdminRepo for DelegatingAuditAdminRepo {
+        async fn list_tenant(
+            &self,
+            tenant: vocab::TenantId,
+            page: audit::ports::AuditPage,
+        ) -> Result<audit::ports::AuditListResult, audit::ports::AuditError> {
+            use audit::ports::AuditRepo as _;
+
+            self.repo.list(tenant, page).await
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_identity_domain_with_audit_role(
+        tenant: vocab::TenantId,
+    ) -> identity::IdentityDomain<TestSigner> {
+        let audit_role = identity::ports::Role::hydrate(
+            "audit-reader",
+            "Audit reader",
+            &[vocab::AUDIT_READ_PERMISSION.to_string()],
+        )
+        .expect("audit role");
+        let roles = Arc::from(identity::ports::DynRoleRepo::new_box(StaticRoleRepo::new(
+            vec![audit_role],
+        )));
+        let bindings = Arc::from(identity::ports::DynRoleBindingLifecycle::new_box(
+            StaticRoleBindings::new(vec![(
+                tenant,
+                "11111111-2222-4333-8444-555555555555".to_string(),
+                "audit-reader".to_string(),
+            )]),
+        ));
+        let issuer = Arc::new(
+            authn::JwtIssuer::new(
+                Arc::new(TestSigner),
+                Box::new(SystemClock),
+                authn::JwtIssuerConfig {
+                    key: diport::KeyId::new("runtime-test-key"),
+                    alg: authn::JwtAlg::Es256,
+                    purpose: diport::SigningPurpose::new("runtime-test"),
+                    issuer: "https://issuer.test".to_string(),
+                    audience: "rss-test".to_string(),
+                    ttl: Duration::from_secs(900),
+                },
+            )
+            .expect("jwt issuer"),
+        );
+        let refresh = Arc::new(identity::RefreshService::new(
+            identity::ports::DynRefreshTokenStore::new_box(UnusedRefreshStore),
+            issuer,
+            Box::new(SystemClock),
+            Duration::from_secs(900),
+        ));
+        let login = Arc::new(identity::LoginService::new(
+            Arc::from(identity::ports::DynCredentialRepo::new_box(
+                UnusedCredentialRepo,
+            )),
+            Arc::from(identity::ports::DynSessionLifecycle::new_box(
+                UnusedSessionLifecycle,
+            )),
+            Arc::clone(&refresh),
+            Box::new(SystemClock),
+            Duration::from_secs(900),
+        ));
+        let rbac_admin = Arc::new(identity::RbacAdminService::new(
+            Arc::clone(&roles),
+            Arc::clone(&bindings),
+            Box::new(SystemClock),
+        ));
+        identity::IdentityDomain::new(
+            login,
+            refresh,
+            rbac_admin,
+            roles,
+            bindings,
+            Arc::from(identity::ports::DynPolicyRepo::new_box(EmptyPolicyRepo)),
+            Arc::new(SystemClock),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_audit_repo() -> Arc<audit::ports::DynAuditRepo<'static>> {
+        let hasher = audit::ports::AuditChainHasher::new(
+            RustCryptoMacVerifier,
+            MacKey::from_bytes(vec![0x5a; 32]),
+        )
+        .expect("audit chain hasher");
+        Arc::from(audit::ports::DynAuditRepo::new_box(
+            audit::InMemAuditRepo::new(hasher),
+        ))
+    }
+
+    fn test_audit_admin_repo(
+        repo: Arc<audit::ports::DynAuditRepo<'static>>,
+    ) -> Arc<audit::ports::DynAuditAdminRepo<'static>> {
+        Arc::from(audit::ports::DynAuditAdminRepo::new_box(
+            DelegatingAuditAdminRepo { repo },
+        ))
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn append_sensitive_audit_record(
+        repo: &Arc<audit::ports::DynAuditRepo<'static>>,
+        tenant: vocab::TenantId,
+    ) {
+        use audit::ports::AuditRepo as _;
+
+        repo.append(audit::ports::AuditRecord {
+            tenant,
+            actor: ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("actor"),
+            actor_kind: vocab::PrincipalKind::Admin,
+            action: vocab::Action::parse("audit:read").expect("action"),
+            resource: audit::ports::ResourceRef::new(
+                "session",
+                "99999999-8888-4777-8666-555555555555",
+            ),
+            outcome: audit::ports::AuditOutcome::Success,
+            recorded_at: SystemTime::UNIX_EPOCH,
+        })
+        .await
+        .expect("append audit record");
+    }
+
+    #[allow(clippy::expect_used)]
+    fn runtime_test_provider() -> Arc<OidcProvider> {
+        use p256::ecdsa::SigningKey;
+
+        let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
+        Arc::new(
+            provider_from_b64(
+                "https://issuer.test",
+                "rss-test",
+                "admin,superAdmin",
+                Some(&B64.encode(key.verifying_key().to_encoded_point(false).as_bytes())),
+                Some(&B64.encode([9u8; 32])),
+                Some("cell-a.svc-a"),
+                Box::new(SystemClock),
+            )
+            .expect("provider"),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn runtime_test_jwt(kind: &str, tenant: Option<vocab::TenantId>) -> String {
+        use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
+
+        let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
+        let header = B64.encode(br#"{"alg":"ES256"}"#);
+        let tenant_claim = tenant
+            .map(|tenant| format!(r#","tenant_id":"{tenant}""#))
+            .unwrap_or_default();
+        let payload = format!(
+            r#"{{"sub":"11111111-2222-4333-8444-555555555555","exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","kind":"{kind}"{tenant_claim}}}"#
+        );
+        let body = B64.encode(payload.as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let sig: Signature = key.sign(signing_input.as_bytes());
+        format!("{signing_input}.{}", B64.encode(sig.to_bytes()))
+    }
+
+    fn extract_admin_router(assembled: Vec<AssembledListener>) -> anyhow::Result<axum::Router> {
+        assembled
+            .into_iter()
+            .find_map(|assembled| {
+                let (listener, routes) = assembled.into_parts();
+                (listener == ListenerKind::Admin).then(|| routes.into_router_for_test())
+            })
+            .context("admin router")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive_fields()
+    -> anyhow::Result<()> {
+        use tower::ServiceExt as _;
+
+        let tenant =
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        let audit_repo = test_audit_repo();
+        append_sensitive_audit_record(&audit_repo, tenant).await;
+        let identity_domain = test_identity_domain_with_audit_role(tenant);
+        let audit_domain = audit::AuditDomain::new(
+            Arc::clone(&audit_repo),
+            Some(test_audit_admin_repo(Arc::clone(&audit_repo))),
+            TracingAuthAuditSink,
+            Arc::new(SystemClock),
+        );
+        let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
+        let mut registry = bootstrap::compose(&domains)?;
+        let app = extract_admin_router(assemble_authed_routers(
+            &mut registry,
+            runtime_test_provider(),
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            identity_domain.primary_authorizer(),
+        )?)?;
+
+        let scoped_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri(generated::http::audit_v1::SPEC.path)
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", runtime_test_jwt("admin", Some(tenant))),
+                    )
+                    .body(axum::body::Body::empty())?,
+            )
+            .await?;
+        assert_eq!(scoped_response.status(), axum::http::StatusCode::OK);
+        let scoped_body = axum::body::to_bytes(scoped_response.into_body(), usize::MAX).await?;
+        let scoped_json: serde_json::Value = serde_json::from_slice(&scoped_body)?;
+        assert_eq!(scoped_json["data"][0]["actor"], "<redacted>");
+        assert_eq!(scoped_json["data"][0]["resourceId"], "<redacted>");
+
+        let target_response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "{}?tenantId={tenant}",
+                        generated::http::audit_v1::SPEC.path
+                    ))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", runtime_test_jwt("superAdmin", None)),
+                    )
+                    .body(axum::body::Body::empty())?,
+            )
+            .await?;
+        assert_eq!(target_response.status(), axum::http::StatusCode::OK);
+        let target_body = axum::body::to_bytes(target_response.into_body(), usize::MAX).await?;
+        let target_json: serde_json::Value = serde_json::from_slice(&target_body)?;
+        assert_eq!(target_json["data"][0]["actor"], "<redacted>");
+        assert_eq!(target_json["data"][0]["resourceId"], "<redacted>");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn finalize_listener_routes_injects_primary_authorizer_into_admin_listener() {
+        use axum::extract::Extension;
+        use axum::response::IntoResponse as _;
+        use tower::ServiceExt as _;
+
+        let admin =
+            httpserve::UnfinalizedRoutes::empty()
+                .nest_group::<httpserve::Admin, anyhow::Error>("/admin", |rb| {
+                    Ok(rb.mount(
+                        httpserve::Route {
+                            method: Method::GET,
+                            path: "/probe",
+                            contract_id: generated::http::audit_v1::SPEC.contract_id,
+                        },
+                        axum::routing::get(
+                            |Extension(authorizer): Extension<
+                                Arc<dyn httpserve::RouteAuthorizer>,
+                            >| async move {
+                                match authorizer
+                                    .authorize(httpserve::RouteAuthorizationRequest {
+                                        contract_id: generated::http::audit_v1::SPEC.contract_id,
+                                        permission: vocab::AUDIT_READ_PERMISSION,
+                                        tenant_id: Some(
+                                            vocab::TenantId::parse(
+                                                "00000000-0000-4000-8000-000000000001",
+                                            )
+                                            .expect("tenant"),
+                                        ),
+                                        principal_kind: vocab::PrincipalKind::Admin,
+                                        principal_id: "admin-subject".to_string(),
+                                        resource: None,
+                                    })
+                                    .await
+                                {
+                                    httpserve::RouteAuthorizationDecision::Allow
+                                    | httpserve::RouteAuthorizationDecision::AllowWithProjection(
+                                        _,
+                                    ) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                                    httpserve::RouteAuthorizationDecision::Deny => {
+                                        axum::http::StatusCode::FORBIDDEN.into_response()
+                                    }
+                                }
+                            },
+                        ),
+                    ))
+                })
+                .expect("admin route");
+        let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).expect("admin jwt plan");
+        let routes = finalize_listener_auth(
+            ListenerKind::Admin,
+            admin,
+            plan,
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            allow_authorizer(),
+            AuthScheme::Jwt,
+        )
+        .expect("finalize admin listener")
+        .layer(axum::middleware::from_fn(
+            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                req.extensions_mut().insert(httpserve::Authenticated::new(
+                    primitives::RequiredScheme::Jwt,
+                    vocab::PrincipalKind::Admin,
+                    "admin-subject",
+                    Some(
+                        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")
+                            .expect("tenant"),
+                    ),
+                ));
+                next.run(req).await
+            },
+        ));
+
+        let response = routes
+            .into_router_for_test()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/probe")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
     }
 
     fn args(parts: &[&str]) -> Vec<String> {

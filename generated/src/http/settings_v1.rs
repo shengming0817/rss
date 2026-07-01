@@ -174,6 +174,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/configs";
 
+/// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[];
+
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: super::HttpSpec = super::HttpSpec {
     contract_id: CONTRACT_ID,
@@ -187,5 +190,6 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
     },
     resource: None,
     self_scoped: false,
+    projection_fields: PROJECTION_FIELDS,
     headers: &[],
 };

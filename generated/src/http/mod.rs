@@ -10,6 +10,7 @@ pub struct HttpSpec {
     pub auth: HttpAuthSpec,
     pub resource: Option<&'static str>,
     pub self_scoped: bool,
+    pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
 }
 
@@ -27,6 +28,13 @@ pub enum HttpAuthMode {
     Bootstrap,
     ClientsOnly,
     ServiceOwned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpProjectionFieldSpec {
+    pub field: ::vocab::ProjectionField,
+    pub permission: &'static str,
+    pub obligation_key: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

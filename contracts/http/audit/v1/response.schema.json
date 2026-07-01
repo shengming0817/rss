@@ -28,7 +28,7 @@
           "actorKind": { "type": "string" },
           "action": { "type": "string" },
           "resourceKind": { "type": "string" },
-          "resourceId": { "type": "string" },
+          "resourceId": { "type": "string", "x-pii": "generic" },
           "outcome": { "type": "string" },
           "recordedAt": { "type": "integer", "format": "int64", "description": "Unix seconds (UTC)" },
           "entryHash": { "type": "string", "description": "Opaque per-entry HMAC integrity fingerprint (base64url); not independently verifiable without the chain key." }

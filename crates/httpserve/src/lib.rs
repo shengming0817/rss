@@ -15,9 +15,10 @@ pub mod protect;
 pub mod routes;
 
 pub use auth::{
-    AuditSinkHandle, Authenticated, AuthorizedSubject, PendingScopeCtx, RouteAuthorizationDecision,
-    RouteAuthorizationRequest, RouteAuthorizer, RouteMeta, RouteResource,
-    ServiceTokenTenantBindingError, service_token_tenant_binding,
+    AuditSinkHandle, Authenticated, AuthorizedSubject, FieldMask, PendingScopeCtx,
+    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    RouteMeta, RouteResource, ServiceTokenTenantBindingError, authorize_subject_for_permission,
+    service_token_tenant_binding,
 };
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};

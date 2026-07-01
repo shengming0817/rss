@@ -6,6 +6,7 @@ pub mod contract;
 pub mod epoch;
 pub mod error;
 pub mod principal;
+pub mod projection;
 pub mod query;
 pub mod tenant;
 
@@ -27,6 +28,10 @@ pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use principal::PrincipalKind;
+pub use projection::{
+    AUDIT_ACTOR_FIELD_OBLIGATION, AUDIT_FIELD_ACTOR_PERMISSION, AUDIT_FIELD_RESOURCE_ID_PERMISSION,
+    AUDIT_READ_PERMISSION, AUDIT_RESOURCE_ID_FIELD_OBLIGATION, ProjectionField,
+};
 pub use query::{Cursor, CursorError, Limit, LimitError};
 pub use tenant::{
     CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant, TenantId, TenantIdError,

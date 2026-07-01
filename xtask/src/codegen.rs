@@ -358,6 +358,35 @@ pub const CONTRACT: ::vocab::ContractBinding =
     let permission = render_option_str(auth.permission.as_deref(), "permission")?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
+    let mut projection_fields = Vec::new();
+    if let Some(projection) = &http.projection {
+        for field in &projection.fields {
+            for (name, value) in [
+                ("projection permission", field.permission.as_str()),
+                ("projection obligationKey", field.obligation_key.as_str()),
+            ] {
+                if !is_safe_codegen_string(value) {
+                    bail!(
+                        "契约 {}/{}/{} 的 {name} 含不安全字符（防注入生成字面量）: {value:?}",
+                        c.manifest.kind.as_dir(),
+                        c.manifest.domain,
+                        c.manifest.version,
+                    );
+                }
+            }
+            let variant = field.field.as_vocab_variant();
+            let permission = &field.permission;
+            let obligation_key = &field.obligation_key;
+            projection_fields.push(format!(
+                "    {sup}HttpProjectionFieldSpec {{ field: ::vocab::ProjectionField::{variant}, permission: \"{permission}\", obligation_key: \"{obligation_key}\" }}"
+            ));
+        }
+    }
+    let projection_fields_body = if projection_fields.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", projection_fields.join(",\n"))
+    };
     let mut headers = Vec::with_capacity(http.headers.len());
     for (name, mode) in &http.headers {
         if !is_safe_codegen_string(name) {
@@ -386,6 +415,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "{path}";
 
+/// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fields_body}];
+
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     contract_id: CONTRACT_ID,
@@ -399,6 +431,7 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     }},
     resource: {resource},
     self_scoped: {self_scoped},
+    projection_fields: PROJECTION_FIELDS,
     headers: &[{headers_body}],
 }};
 "#,
@@ -894,6 +927,7 @@ pub struct HttpSpec {
     pub auth: HttpAuthSpec,
     pub resource: Option<&'static str>,
     pub self_scoped: bool,
+    pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
 }
 
@@ -911,6 +945,13 @@ pub enum HttpAuthMode {
     Bootstrap,
     ClientsOnly,
     ServiceOwned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpProjectionFieldSpec {
+    pub field: ::vocab::ProjectionField,
+    pub permission: &'static str,
+    pub obligation_key: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

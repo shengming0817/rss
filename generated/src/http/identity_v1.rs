@@ -189,6 +189,9 @@ pub mod login {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/login";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -202,6 +205,7 @@ pub mod login {
         },
         resource: None,
         self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[super::super::HttpHeaderSpec {
             name: "X-Tenant-ID",
             mode: super::super::HttpHeaderMode::PopulateOnly,
@@ -339,6 +343,9 @@ pub mod logout {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/logout";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -352,6 +359,7 @@ pub mod logout {
         },
         resource: None,
         self_scoped: true,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
 }
@@ -493,6 +501,9 @@ pub mod password_change {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/password/change";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -506,6 +517,7 @@ pub mod password_change {
         },
         resource: None,
         self_scoped: true,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
 }
@@ -763,6 +775,9 @@ pub mod profile {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/profile";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -776,6 +791,7 @@ pub mod profile {
         },
         resource: None,
         self_scoped: true,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
 }
@@ -938,6 +954,9 @@ pub mod refresh {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/refresh";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -953,6 +972,7 @@ pub mod refresh {
         },
         resource: None,
         self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[super::super::HttpHeaderSpec {
             name: "X-Tenant-ID",
             mode: super::super::HttpHeaderMode::PopulateOnly,
@@ -1088,6 +1108,9 @@ pub mod roles_assign {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles/{roleId}/bindings";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -1101,6 +1124,7 @@ pub mod roles_assign {
         },
         resource: None,
         self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
 }
@@ -1309,6 +1333,9 @@ pub mod roles_list {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -1322,6 +1349,7 @@ pub mod roles_list {
         },
         resource: None,
         self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
 }
@@ -1448,6 +1476,9 @@ pub mod roles_revoke {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles/{roleId}/bindings/{subject}";
 
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
@@ -1461,6 +1492,7 @@ pub mod roles_revoke {
         },
         resource: None,
         self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
 }

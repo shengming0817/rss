@@ -55,9 +55,10 @@ use std::path::Path;
 
 use super::manifest::{
     ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery, FIELD_DELIVERY,
-    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_METHOD, FIELD_PATH, FIELD_SAGA,
-    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
-    Lifecycle, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
+    FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode,
+    HttpEndpoint, HttpHeaderMode, Lifecycle, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST,
+    SCHEMA_KEY_RESPONSE,
 };
 use super::protection;
 use super::redaction;
@@ -645,6 +646,7 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
     };
 
     rule_http_header_modes(http, label, &mut out);
+    rule_http_projection_fields(http, label, &mut out);
 
     if m.kind != ContractKind::Http || m.lifecycle != Lifecycle::Active {
         return out;
@@ -687,6 +689,59 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
         ));
     }
     out
+}
+
+fn rule_http_projection_fields(http: &HttpEndpoint, label: &str, out: &mut Vec<Finding>) {
+    let Some(projection) = &http.projection else {
+        return;
+    };
+    let mut fields = BTreeSet::new();
+    let mut permissions = BTreeSet::new();
+    let mut obligations = BTreeSet::new();
+    for field in &projection.fields {
+        if !fields.insert(field.field) {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} field {:?} 重复",
+                    field.field.as_wire()
+                ),
+            ));
+        }
+        if field.permission.trim().is_empty() {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} permission 必须非空"),
+            ));
+        } else if !permissions.insert(field.permission.as_str()) {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} permission {:?} 重复",
+                    field.permission
+                ),
+            ));
+        }
+        if field.obligation_key.trim().is_empty() {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} obligationKey 必须非空"),
+            ));
+        } else if !obligations.insert(field.obligation_key.as_str()) {
+            out.push(finding(
+                Rule::HttpAuth,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} obligationKey {:?} 重复",
+                    field.obligation_key
+                ),
+            ));
+        }
+    }
 }
 
 fn rule_http_header_modes(http: &HttpEndpoint, label: &str, out: &mut Vec<Finding>) {
@@ -1238,8 +1293,9 @@ mod tests {
     use super::*;
     use crate::contract::manifest::{
         CompensationOrder, Delivery, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint,
-        HttpHeaderMode, HttpMethod, Lifecycle, PartitionKeyStrategy, SagaBlock, SagaStep, Schemas,
-        SubscriberReadiness, Subscription, SubscriptionTopology,
+        HttpHeaderMode, HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
+        Lifecycle, PartitionKeyStrategy, SagaBlock, SagaStep, Schemas, SubscriberReadiness,
+        Subscription, SubscriptionTopology,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -1284,6 +1340,7 @@ mod tests {
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::PopulateOnly,
                 )]),
+                projection: None,
             }),
         }
     }
@@ -2064,6 +2121,7 @@ mod tests {
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::PopulateOnly,
                 )]),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2096,6 +2154,7 @@ mod tests {
                 resource: None,
                 self_scoped: false,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2126,9 +2185,96 @@ mod tests {
                 resource: None,
                 self_scoped: true,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         assert!(rule_http_auth(&m, "x").is_empty());
+    }
+
+    #[test]
+    fn r18_projection_fields_are_allowed() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/audit/entries".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("audit:read".to_string()),
+                }),
+                resource: None,
+                self_scoped: false,
+                headers: BTreeMap::new(),
+                projection: Some(HttpProjection {
+                    fields: vec![
+                        HttpProjectionField {
+                            field: HttpProjectionFieldName::AuditActor,
+                            permission: "audit:field:actor".to_string(),
+                            obligation_key: "audit.actor".to_string(),
+                        },
+                        HttpProjectionField {
+                            field: HttpProjectionFieldName::AuditResourceId,
+                            permission: "audit:field:resource_id".to_string(),
+                            obligation_key: "audit.resource_id".to_string(),
+                        },
+                    ],
+                }),
+            }),
+        });
+        assert!(rule_http_auth(&m, "x").is_empty());
+    }
+
+    #[test]
+    fn r18_projection_duplicate_permission_fails() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/audit/entries".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("audit:read".to_string()),
+                }),
+                resource: None,
+                self_scoped: false,
+                headers: BTreeMap::new(),
+                projection: Some(HttpProjection {
+                    fields: vec![
+                        HttpProjectionField {
+                            field: HttpProjectionFieldName::AuditActor,
+                            permission: "audit:field:same".to_string(),
+                            obligation_key: "audit.actor".to_string(),
+                        },
+                        HttpProjectionField {
+                            field: HttpProjectionFieldName::AuditResourceId,
+                            permission: "audit:field:same".to_string(),
+                            obligation_key: "audit.resource_id".to_string(),
+                        },
+                    ],
+                }),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("permission") && f.detail.contains("重复")),
+            "{findings:?}"
+        );
     }
 
     #[test]
@@ -2152,6 +2298,7 @@ mod tests {
                 resource: Some("subject".to_string()),
                 self_scoped: false,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2182,6 +2329,7 @@ mod tests {
                 resource: Some("roleId".to_string()),
                 self_scoped: true,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2212,6 +2360,7 @@ mod tests {
                 resource: None,
                 self_scoped: true,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2244,6 +2393,7 @@ mod tests {
                 resource: Some("id".to_string()),
                 self_scoped: false,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2274,6 +2424,7 @@ mod tests {
                 resource: Some(" ".to_string()),
                 self_scoped: false,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2307,6 +2458,7 @@ mod tests {
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
                 )]),
+                projection: None,
             }),
         });
         assert!(rule_http_auth(&m, "x").is_empty());
@@ -2336,6 +2488,7 @@ mod tests {
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
                 )]),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2368,6 +2521,7 @@ mod tests {
                 resource: None,
                 self_scoped: false,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2403,6 +2557,7 @@ mod tests {
                     "X-Other-Tenant".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
                 )]),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
@@ -2435,6 +2590,7 @@ mod tests {
                 resource: None,
                 self_scoped: false,
                 headers: BTreeMap::new(),
+                projection: None,
             }),
         });
         let findings = rule_http_auth(&m, "x");
