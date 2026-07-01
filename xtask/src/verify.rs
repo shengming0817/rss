@@ -42,7 +42,9 @@
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
-use crate::{archrules, assembly, codegen, contract, doc_contracts, layerdeps, wsdeps};
+use crate::{
+    archrules, assembly, codegen, consistency_fixtures, contract, doc_contracts, layerdeps, wsdeps,
+};
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::Stdio;
@@ -89,6 +91,8 @@ enum InternalCheck {
     WsDepsDrift,
     /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
     DocContracts,
+    /// consistency crash matrix fixture/DSL 骨架门（CONSISTENCY-CRASH-FIXTURE-01）。
+    ConsistencyFixtures,
     /// runtime event transport consumer 禁回 Redis claimer（EVENT-TRANSPORT-PG-INBOX-01）。
     EventTransportGuard,
     /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
@@ -129,6 +133,7 @@ impl InternalCheck {
             Self::LayerDeps => "xtask/src/layerdeps.rs",
             Self::WsDepsDrift => "xtask/src/wsdeps.rs",
             Self::DocContracts => "xtask/src/doc_contracts.rs",
+            Self::ConsistencyFixtures => "xtask/src/consistency_fixtures.rs",
             Self::EventTransportGuard => "xtask/src/event_transport_guard.rs",
             Self::ArchRules => "xtask/src/archrules.rs",
             Self::CodegenCheck => "xtask/src/codegen.rs",
@@ -265,6 +270,15 @@ fn step_doc_contracts() -> Step {
         label: "doc-contracts",
         args: &[],
         kind: StepKind::Internal(InternalCheck::DocContracts),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_consistency_fixtures() -> Step {
+    Step {
+        label: "consistency-fixtures",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ConsistencyFixtures),
         env: &[],
         needs_compile: false,
     }
@@ -760,6 +774,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_doc_contracts(),
+        step_consistency_fixtures(),
         step_event_transport_guard(),
         step_archrules(),
         step_codegen_check(),
@@ -794,6 +809,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_layer_deps(),
         step_wsdeps_drift(),
         step_doc_contracts(),
+        step_consistency_fixtures(),
         step_event_transport_guard(),
         step_archrules(),
         step_codegen_check(),
@@ -1032,6 +1048,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
+        InternalCheck::ConsistencyFixtures => run_check(&consistency_fixtures::ConsistencyFixtures),
         InternalCheck::EventTransportGuard => {
             run_check(&crate::event_transport_guard::EventTransportGuard)
         }
@@ -1134,6 +1151,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "consistency-fixtures",
                 "event-transport-guard",
                 "archrules",
                 "codegen-check",
@@ -1161,7 +1179,7 @@ mod tests {
         );
     }
 
-    /// `--fast` 只留无需编译的步：fmt + meta(14) + deny；裁掉 build/clippy/nextest/dylint。
+    /// `--fast` 只留无需编译的步：fmt + meta + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
         let plan = verify_plan(&opts(true, false));
@@ -1175,6 +1193,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "consistency-fixtures",
                 "event-transport-guard",
                 "archrules",
                 "codegen-check",
@@ -1193,8 +1212,8 @@ mod tests {
         }
     }
 
-    /// meta 十五项（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
-    /// doc-contracts / event-transport-guard / archrules / codegen /
+    /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
+    /// doc-contracts / consistency-fixtures / event-transport-guard / archrules / codegen /
     /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
     /// defer-gate）在两种模式恒在。
     #[test]
@@ -1215,6 +1234,7 @@ mod tests {
                     "layer-deps",
                     "wsdeps-drift",
                     "doc-contracts",
+                    "consistency-fixtures",
                     "event-transport-guard",
                     "archrules",
                     "codegen-check",
@@ -1364,6 +1384,7 @@ mod tests {
                 "layer-deps",
                 "wsdeps-drift",
                 "doc-contracts",
+                "consistency-fixtures",
                 "event-transport-guard",
                 "archrules",
                 "codegen-check",
@@ -1457,6 +1478,7 @@ mod tests {
             "layer-deps",
             "wsdeps-drift",
             "doc-contracts",
+            "consistency-fixtures",
             "event-transport-guard",
             "archrules",
             "codegen-check",

@@ -23,6 +23,8 @@
 mod request;
 mod response;
 
+pub mod crash_matrix;
+
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
 
