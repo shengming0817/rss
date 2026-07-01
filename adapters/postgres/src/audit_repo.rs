@@ -458,7 +458,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
                 record.tenant,
                 move |conn| {
                     Box::pin(async move {
-                        append_in_tx(conn, &tenant_uuid, lock_key, &record, &hasher).await
+                        append_in_tx(conn.conn(), &tenant_uuid, lock_key, &record, &hasher).await
                     })
                 },
                 storage,

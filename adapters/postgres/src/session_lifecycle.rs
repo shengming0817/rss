@@ -17,8 +17,9 @@
 //! session 行与 outbox 行在**同一** `PgStore` 事务内写入 → 共 commit / 共 rollback；无 API 可单提交其一。
 //! adapter 独占事务边界（`begin` → `SET LOCAL` tenant → INSERT session → `append_outbox` → 单 `commit`）；
 //! 域经 combined 方法 `persist_session_and_emit` 调用，**无半开事务句柄**——co-tx 不可拆解在类型层成立
-//! （**Hard**：域 split-tx 不可表达）。`append_outbox` 既有 OUTBOX-ATOMIC-IDEM-01（`&mut PgConnection`-only）
-//! 保证 outbox 写在同一 tx；session INSERT 同 `&mut *tx`。adapter same-tx 接线由集成测试 anti-vacuity 守：
+//! （**Hard**：域 split-tx 不可表达）。`append_outbox` 既有 OUTBOX-ATOMIC-IDEM-01（`&mut TxCapability`-only）
+//! 保证 outbox 只能由 postgres adapter 从 live `sqlx::Transaction` 铸造的 capability 写入；session INSERT
+//! 通过 `conn()` 在同一 capability 生命周期内借出连接执行。adapter same-tx 接线由集成测试 anti-vacuity 守：
 //! `t11`（真实 method commit 两行皆在）↔ 负向 `t12`（co-tx SQL 序列强制 Err 两写共回滚）+ `t14`（**直测真实
 //! method** rollback 分支：session INSERT 溢出 → 两行皆无）。
 //!
@@ -96,7 +97,7 @@ impl SessionLifecycle for PgSessionLifecycle {
                 &env,
                 move |conn| {
                     Box::pin(async move {
-                        write_session(conn, &session)
+                        write_session(conn.conn(), &session)
                             .await
                             .map_err(OutboxEmitError::new)
                     })
@@ -178,7 +179,7 @@ impl SessionLifecycle for PgSessionLifecycle {
                         )
                         .bind(&tenant_uuid)
                         .bind(session_id.as_str())
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(storage)
                         .map(|_| ())

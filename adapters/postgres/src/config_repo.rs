@@ -1216,9 +1216,9 @@ impl ConfigRepo for PgConfigRepo {
                         .retry_write(
                             tenant,
                             move |conn| {
-                                Box::pin(
-                                    async move { cas_insert(conn, tenant, &entry, &encoded).await },
-                                )
+                                Box::pin(async move {
+                                    cas_insert(conn.conn(), tenant, &entry, &encoded).await
+                                })
                             },
                             storage,
                         )
@@ -1296,7 +1296,7 @@ impl ConfigRepo for PgConfigRepo {
                                     .bind(encoded.protection_scheme)
                                     .bind(encoded.value_enc.as_deref())
                                     .bind(encoded.key_id.as_deref())
-                                    .execute(&mut *conn)
+                                    .execute(conn.conn())
                                     .await
                                     .map_err(storage)
                                     .map(|_| ())
@@ -1364,7 +1364,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
                             &env,
                             move |conn| {
                                 Box::pin(async move {
-                                    cas_insert(conn, tenant, &entry, &encoded).await?;
+                                    cas_insert(conn.conn(), tenant, &entry, &encoded).await?;
                                     #[cfg(all(test, feature = "integration"))]
                                     maybe_fail_config_retry(entry.key())?;
                                     Ok(())

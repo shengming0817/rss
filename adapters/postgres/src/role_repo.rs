@@ -119,7 +119,7 @@ impl RoleRepo for PgRoleRepo {
                         .bind(role.id().as_str())
                         .bind(role.name())
                         .bind(&permissions)
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(storage)
                         .map(|_| ())

@@ -129,7 +129,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
             .write(
                 tenant,
                 move |conn| {
-                    Box::pin(async move { do_insert(conn, &record).await.map_err(storage) })
+                    Box::pin(async move { do_insert(conn.conn(), &record).await.map_err(storage) })
                 },
                 storage,
             )
@@ -246,7 +246,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                 tenant,
                 move |conn| {
                     Box::pin(async move {
-                        do_rotate_tx(&tenant_uuid, conn, &old_id, &new)
+                        do_rotate_tx(&tenant_uuid, conn.conn(), &old_id, &new)
                             .await
                             .map_err(storage)
                     })
@@ -276,7 +276,7 @@ impl RefreshTokenStore for PgRefreshTokenStore {
                         .bind(&tenant_uuid)
                         .bind(lineage_id.as_str())
                         .bind(RefreshStatus::Revoked.as_db_str())
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(storage)
                         .map(|_| ())

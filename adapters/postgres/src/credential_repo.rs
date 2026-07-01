@@ -251,7 +251,8 @@ impl CredentialRepo for PgCredentialRepo {
                 tenant,
                 move |conn| {
                     Box::pin(async move {
-                        authenticate_in_tx(conn, &tenant_uuid, &login_str, &candidate, now).await
+                        authenticate_in_tx(conn.conn(), &tenant_uuid, &login_str, &candidate, now)
+                            .await
                     })
                 },
                 storage,
@@ -266,7 +267,9 @@ impl CredentialRepo for PgCredentialRepo {
             .write(
                 tenant,
                 move |conn| {
-                    Box::pin(async move { save_in_tx(conn, &tenant_uuid, &credential).await })
+                    Box::pin(
+                        async move { save_in_tx(conn.conn(), &tenant_uuid, &credential).await },
+                    )
                 },
                 storage,
             )
@@ -290,7 +293,7 @@ impl CredentialRepo for PgCredentialRepo {
                             move |conn| {
                                 Box::pin(async move {
                                     bump_version_in_tx(
-                                        conn,
+                                        conn.conn(),
                                         &tenant_uuid,
                                         &login_str,
                                         expected,
@@ -322,7 +325,7 @@ impl CredentialRepo for PgCredentialRepo {
                 tenant,
                 move |conn| {
                     Box::pin(async move {
-                        lockout_status_in_tx(conn, &tenant_uuid, &login_str, now).await
+                        lockout_status_in_tx(conn.conn(), &tenant_uuid, &login_str, now).await
                     })
                 },
                 storage,

@@ -52,6 +52,35 @@ pub(crate) fn commit_unknown(source: sqlx::Error) -> sqlx::Error {
 #[error("outbox envelope tenant does not match tenant-scoped transaction")]
 struct OutboxTenantMismatch;
 
+/// Postgres 事务能力令牌。
+///
+/// 只有本 crate 能从 live [`sqlx::Transaction`] 铸造本类型；外部 crate 无法构造、无法从
+/// [`PgPool`] / [`PgConnection`] mint。`append_outbox` 只接受本令牌，确保 outbox 双写入口不能被裸连接调用。
+///
+/// `ref: sqlx sqlx-core/src/transaction.rs@v0.8.6`（`Transaction` 从 `begin` 到 `commit`/`rollback` 持有连接，
+/// 并通过 `DerefMut` 借出底层 connection）。
+///
+/// # INVARIANT: PG-TX-CAPABILITY-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type boundary and trybuild UI" }
+pub(crate) struct TxCapability<'tx> {
+    conn: &'tx mut PgConnection,
+    _seal: (),
+}
+
+impl<'tx> TxCapability<'tx> {
+    /// 从真实 `sqlx::Transaction` 铸造事务能力令牌。
+    pub(crate) fn from_transaction(tx: &'tx mut Transaction<'_, Postgres>) -> Self {
+        Self {
+            conn: &mut **tx,
+            _seal: (),
+        }
+    }
+
+    /// 借出事务内连接供 adapter 内 SQL helper 使用。
+    pub(crate) fn conn(&mut self) -> &mut PgConnection {
+        self.conn
+    }
+}
+
 /// tenant-scoped Postgres pool wrapper.
 ///
 /// This is the typed production entry for RLS tenant-table access. It is cloneable for repo
@@ -110,7 +139,7 @@ impl PgTenantPool {
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<T, E>
     where
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
@@ -125,7 +154,7 @@ impl PgTenantPool {
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<T, E>
     where
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
@@ -142,7 +171,7 @@ impl PgTenantPool {
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<(), E>
     where
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
         E: Send,
     {
         co_tx_with_outbox(&self.pool, tenant, entry, env, business_write, map_storage).await
@@ -158,7 +187,7 @@ impl PgTenantPool {
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<(), E>
     where
-        F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
         E: Send,
     {
         co_tx_with_outbox_inner(
@@ -306,12 +335,16 @@ async fn tenant_scoped_write_inner<T, F, E>(
     bound_lock_wait: bool,
 ) -> Result<T, E>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
     E: Send,
     T: Send,
 {
     let mut tx = begin_tenant_scoped_write(pool, tenant, &map_storage, bound_lock_wait).await?;
-    match write(&mut tx).await {
+    let result = {
+        let mut tx_cap = TxCapability::from_transaction(&mut tx);
+        write(&mut tx_cap).await
+    };
+    match result {
         Ok(v) => {
             tx.commit().await.map_err(|e| {
                 tracing::warn!(
@@ -358,7 +391,7 @@ async fn begin_tenant_scoped_write<'p, E>(
 
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
 ///
-/// `business_write(&mut PgConnection) -> Result<(), E>`：在同一事务内执行业务写（如 CAS INSERT），可返回业务
+/// `business_write(&mut TxCapability) -> Result<(), E>`：在同一事务内执行业务写（如 CAS INSERT），可返回业务
 /// 错误 `E`（如 `VersionConflict`）使整事务回滚。骨架自身 sqlx 错误经 `map_storage` 映射为 `E`。任一步 Err ⇒
 /// rollback（失败仅 warn，不覆盖原错误）。`tenant` 为类型化租户标识（funnel 内 stringify + SET LOCAL 绑定）。
 ///
@@ -369,7 +402,7 @@ async fn begin_tenant_scoped_write<'p, E>(
 /// // sqlx 错误经 `map_storage` 收口为域错误 E（绕开 `E: From<sqlx::Error>` 跨 crate 约束）。
 /// co_tx_with_outbox(
 ///     &pool, tenant, &outbox_entry, &env,
-///     move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
+///     move |tx| Box::pin(async move { cas_insert(tx.conn(), tenant, &entry).await }),
 ///     |e| ConfigRepoError::Storage(Box::new(e)),
 /// ).await
 /// ```
@@ -382,7 +415,7 @@ pub(crate) async fn co_tx_with_outbox<F, E>(
     map_storage: impl Fn(sqlx::Error) -> E + Send,
 ) -> Result<(), E>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
     E: Send,
 {
     co_tx_with_outbox_inner(pool, tenant, entry, env, business_write, map_storage, false).await
@@ -398,7 +431,7 @@ async fn co_tx_with_outbox_inner<F, E>(
     bound_lock_wait: bool,
 ) -> Result<(), E>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
     E: Send,
 {
     let mut tx = pool.begin().await.map_err(&map_storage)?;
@@ -443,7 +476,7 @@ async fn write_in_tx<F, E>(
     bound_lock_wait: bool,
 ) -> Result<(), CoTxWriteError<E>>
 where
-    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<(), E>> + Send,
+    F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
 {
     // tenant scope（事务级，commit/rollback 自动失效；与 plain 写共享 set_local_tenant，F3）。
     set_local_tenant(tx, tenant)
@@ -459,13 +492,14 @@ where
             .await
             .map_err(CoTxWriteError::RetryLockTimeout)?;
     }
-    // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。`tx: &mut Transaction` 经 DerefMut 自动强制成
-    // 闭包参数 `&mut PgConnection`（reborrow，非 move——append_outbox 仍可再借）。
-    business_write(tx)
+    // 业务写（同 tx；CAS 0 行 → 业务 E::VersionConflict）。tx_cap 是从 live Transaction 铸造的能力令牌；
+    // append_outbox 也只接受该令牌，裸 PgPool/PgConnection 无法调用 outbox 双写入口。
+    let mut tx_cap = TxCapability::from_transaction(tx);
+    business_write(&mut tx_cap)
         .await
         .map_err(CoTxWriteError::BusinessWrite)?;
     // outbox append（同 tx — co-tx 原子性；复用 append_outbox + OUTBOX-ATOMIC-IDEM-01）。
-    append_outbox(tx, entry, env)
+    append_outbox(&mut tx_cap, entry, env)
         .await
         .map_err(CoTxWriteError::AppendOutbox)
 }
@@ -544,4 +578,20 @@ fn log_cotx_domain_error(entry: &Entry, env: &OutboxEnvelope, stage: &'static st
         stage,
         "co-tx: write failed; rolling back"
     );
+}
+
+#[cfg(test)]
+mod tx_capability_tests {
+    use super::{Postgres, Transaction, TxCapability};
+
+    #[test]
+    fn tx_capability_mint_signature_is_crate_private() {
+        fn mint_from_sqlx_transaction<'tx, 'p>(
+            tx: &'tx mut Transaction<'p, Postgres>,
+        ) -> TxCapability<'tx> {
+            TxCapability::from_transaction(tx)
+        }
+
+        let _ = mint_from_sqlx_transaction;
+    }
 }

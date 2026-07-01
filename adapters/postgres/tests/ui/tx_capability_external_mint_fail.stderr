@@ -1,0 +1,5 @@
+error[E0433]: cannot find `TxCapability` in `postgres`
+ --> tests/ui/tx_capability_external_mint_fail.rs:3:27
+  |
+3 |     let _mint = postgres::TxCapability::from_transaction;
+  |                           ^^^^^^^^^^^^ could not find `TxCapability` in `postgres`

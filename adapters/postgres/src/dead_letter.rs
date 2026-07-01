@@ -117,7 +117,7 @@ impl DeadLetterStore for PgDeadLetterStore {
                         .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
                         .bind(source_kind)
                         .bind(sqlx::types::Json(&metadata))
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(DeadLetterStoreError::new)
                         .map(|_| ())

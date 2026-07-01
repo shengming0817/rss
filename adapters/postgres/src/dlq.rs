@@ -93,7 +93,7 @@ impl DlqStore for PgDlqStore {
                         )
                         .bind(request.dead_letter_id().as_str())
                         .bind(request.tenant().to_string())
-                        .fetch_optional(&mut *conn)
+                        .fetch_optional(conn.conn())
                         .await
                         .map_err(db_error("replay.fetch_dead_letter"))?;
 
@@ -155,7 +155,7 @@ impl DlqStore for PgDlqStore {
                         .bind(payload)
                         .bind(metadata.to_string())
                         .bind(STATUS_PENDING)
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(db_error("replay.insert_outbox"))?;
 
@@ -191,7 +191,7 @@ impl DlqStore for PgDlqStore {
                         )
                         .bind(&event_id)
                         .bind(tenant.to_string())
-                        .fetch_one(&mut *conn)
+                        .fetch_one(conn.conn())
                         .await
                         .map_err(db_error("redrive.update_outbox"))?;
                         Ok(row.0)

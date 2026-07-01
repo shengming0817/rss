@@ -72,7 +72,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         .bind(binding.tenant().as_uuid().to_string())
                         .bind(binding.role_id().as_str())
                         .bind(binding.subject())
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(OutboxEmitError::new)
                         .map(|_| ())
@@ -112,7 +112,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         .bind(&tenant_uuid)
                         .bind(role_id.as_str())
                         .bind(&subject)
-                        .execute(&mut *conn)
+                        .execute(conn.conn())
                         .await
                         .map_err(OutboxEmitError::new)?
                         .rows_affected();

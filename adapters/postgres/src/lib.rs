@@ -7,8 +7,10 @@
 //!
 //! port 来源两类：provider-agnostic 基建 port 来自 `diport`（`ManagedResource`…）；**域形** repo port 来自
 //! 所属域 crate（`identity::ports::RoleRepo`…，Option 2/ADR-005）。事务运行器是**普通 inherent 方法**
-//! （非 dynosaur DI port）——签名暴露 `&mut sqlx::PgConnection`，放 provider-agnostic 的 `diport` 会破坏其
-//! 不变式（#1116 决策 1）；且为 `pub(crate)`（裸事务非公开 API，review F2）。
+//! （非 dynosaur DI port）——签名暴露 crate-private `TxCapability`，该令牌只能由 postgres
+//! adapter 从 live `sqlx::Transaction` 铸造；裸 `sqlx::PgConnection` 只在 capability 生命周期内经 `conn()`
+//! 借出。放 provider-agnostic 的 `diport` 会破坏其不变式（#1116 决策 1）；且为 `pub(crate)`（未做 tenant
+//! scope 的事务 capability 非公开 API，review F2）。
 //!
 //! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleRepo`，经 deny.toml identity wrapper +
 //! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由生产 [`PgRoleRepo`]（impl

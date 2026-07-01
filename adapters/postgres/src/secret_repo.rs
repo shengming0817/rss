@@ -268,7 +268,7 @@ impl SecretRepo for PgSecretRepo {
         self.pool
             .write(
                 tenant,
-                move |conn| Box::pin(async move { cas_insert(conn, tenant, &entry).await }),
+                move |conn| Box::pin(async move { cas_insert(conn.conn(), tenant, &entry).await }),
                 storage,
             )
             .await
@@ -296,7 +296,7 @@ impl SecretRepo for PgSecretRepo {
                 )
                 .bind(&tu)
                 .bind(&key_str)
-                .execute(&mut *conn)
+                .execute(conn.conn())
                 .await
                 .map_err(storage)
                 .map(|_| ())

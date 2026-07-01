@@ -19,7 +19,7 @@ use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::cotx::set_local_tenant;
+use crate::cotx::{TxCapability, set_local_tenant};
 use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
 
 type PgTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
@@ -72,7 +72,8 @@ impl OutboxEmitter for PgEmitter {
                 .with_actor(actor),
         )
         .with_partition_key_opt(partition_key);
-        // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut PgConnection` ⇒ 必在事务内）。与
+        // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut TxCapability` ⇒ 必从 live transaction 铸造）。
+        // 与
         // `PgStore::run_global_transaction` 同形（PgEmitter 经 share-pool 注入持 pool、非 PgStore 方法，故此处
         // 自持事务）。co-tx（session 写 + append 同事务）走 [`crate::PgSessionLifecycle`]，非本 emit-only 路径。
         let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
@@ -119,7 +120,8 @@ async fn append_entry_in_tx<'a>(
     entry: &Entry,
     env: &OutboxEnvelope,
 ) -> Result<PgTx<'a>, OutboxEmitError> {
-    if let Err(e) = append_outbox(&mut tx, entry, env).await {
+    let mut tx_cap = TxCapability::from_transaction(&mut tx);
+    if let Err(e) = append_outbox(&mut tx_cap, entry, env).await {
         tracing::warn!(
             target: "postgres",
             event_id = entry.idem_key().as_str(),

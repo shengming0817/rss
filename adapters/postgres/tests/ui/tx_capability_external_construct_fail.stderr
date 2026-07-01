@@ -1,0 +1,5 @@
+error[E0422]: cannot find struct, variant or union type `TxCapability` in crate `postgres`
+ --> tests/ui/tx_capability_external_construct_fail.rs:3:23
+  |
+3 |     let _ = postgres::TxCapability {};
+  |                       ^^^^^^^^^^^^ not found in `postgres`
