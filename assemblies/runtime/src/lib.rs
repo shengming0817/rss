@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -554,6 +555,8 @@ pub fn assemble_authed_routers(
 
 // ── postgres 配置 wiring ─────────────────────────────────────────────────────────────────────
 
+const PG_SSL_ROOT_CERT_PATH_ENV: &str = "RSS_PG_SSL_ROOT_CERT_PATH";
+
 /// 从注入的配置读取器构造 serving `PgConfig`（fail-fast：任一必填 env 缺失立即返 `Err`）。
 ///
 /// 必填变量：
@@ -564,8 +567,8 @@ pub fn assemble_authed_routers(
 /// - `RSS_PG_PASSWORD` — 连接密码（非空）。
 ///
 /// TLS 默认 `VerifyFull`（零信任）；可选 `RSS_PG_SSL_MODE` 经 [`parse_pg_ssl_mode`] 显式降级（容器内连
-/// 未启 TLS 的 dev postgres 时用 `prefer` / `disable`）。生产私有 CA 根证书经 `PgConfig::with_ssl_root_cert`
-/// 注入（待后续 TLS 切片，rustls+ring，pg/vault/listener 同批——非本运行时入口 #1320 范围）。
+/// 未启 TLS 的 dev postgres 时用 `prefer` / `disable`）。生产私有 CA 根证书经
+/// `RSS_PG_SSL_ROOT_CERT_PATH` → `PgConfig::with_ssl_root_cert` 注入。
 /// **禁止 localhost fallback**（生产配置规范，rust-standards §安全检查点）。
 pub(crate) fn build_pg_config_from(
     get: impl Fn(&str) -> Option<String>,
@@ -594,10 +597,35 @@ fn build_pg_config_with_user_env(
 
     // PgConfig::new 存储参数；validate 在 PgStore::connect 内调用（pub(crate)）。
     // 这里只做构造，连接时再 fail-fast（组合根在 wire_settings 中 connect）。
-    Ok(
-        PgConfig::new(host, port, database, username, PgPassword::new(password))
-            .with_ssl_mode(parse_pg_ssl_mode(get("RSS_PG_SSL_MODE"))),
-    )
+    let mut config = PgConfig::new(host, port, database, username, PgPassword::new(password))
+        .with_ssl_mode(parse_pg_ssl_mode(get("RSS_PG_SSL_MODE")));
+    if let Some(path) = pg_ssl_root_cert_path_from(get)? {
+        config = config.with_ssl_root_cert(path);
+    }
+    Ok(config)
+}
+
+fn pg_ssl_root_cert_path_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(raw) = get(PG_SSL_ROOT_CERT_PATH_ENV) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    anyhow::ensure!(
+        !trimmed.is_empty(),
+        "{PG_SSL_ROOT_CERT_PATH_ENV} must not be empty"
+    );
+    let path = PathBuf::from(trimmed);
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a readable file"))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{PG_SSL_ROOT_CERT_PATH_ENV} must point to a file"
+    );
+    let _ = fs::File::open(&path)
+        .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a readable file"))?;
+    Ok(Some(path))
 }
 
 /// 解析可选 `RSS_PG_SSL_MODE` → [`PgSslMode`]（libpq 拼写：`disable` / `allow` / `prefer` / `require` /
@@ -836,13 +864,25 @@ fn build_vault_tls_client_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().use_rustls_tls();
-    if let Some(path) = get(VAULT_CA_CERT_PEM_PATH_ENV).filter(|raw| !raw.trim().is_empty()) {
-        let pem = fs::read(path.trim()).with_context(|| {
+    if let Some(path) = get(VAULT_CA_CERT_PEM_PATH_ENV) {
+        let trimmed = path.trim();
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "{VAULT_CA_CERT_PEM_PATH_ENV} must not be empty"
+        );
+        let pem = fs::read(trimmed).with_context(|| {
             format!("read {VAULT_CA_CERT_PEM_PATH_ENV} PEM bundle for Vault TLS")
         })?;
-        let cert = reqwest::Certificate::from_pem(&pem)
-            .with_context(|| format!("{VAULT_CA_CERT_PEM_PATH_ENV} must point to a PEM CA cert"))?;
-        builder = builder.add_root_certificate(cert);
+        let certs = reqwest::Certificate::from_pem_bundle(&pem).with_context(|| {
+            format!("{VAULT_CA_CERT_PEM_PATH_ENV} must point to a PEM CA bundle")
+        })?;
+        anyhow::ensure!(
+            !certs.is_empty(),
+            "{VAULT_CA_CERT_PEM_PATH_ENV} must contain at least one PEM CA certificate"
+        );
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
     }
     builder.build().context("build vault rustls TLS client")
 }
@@ -2252,6 +2292,8 @@ pub fn health_listener(
 
 // ── listener bind 地址（per-listener env，缺配 fail-fast）─────────────────────────────────────────
 
+const LISTENER_ALLOW_PLAINTEXT_ENV: &str = "RSS_LISTENER_ALLOW_PLAINTEXT";
+
 /// listener → bind 地址 env 变量名（`RSS_<LISTENER>_LISTEN_ADDR`，值为 `host:port` SocketAddr 串）。
 ///
 /// `ListenerKind` 为 `non_exhaustive`：未知 listener 无 env、fail-fast（绝不静默 bind 未知 listener）。
@@ -2292,8 +2334,44 @@ fn listener_addr_from(
     let var = listener_addr_env(listener)?;
     let raw = get(var)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {var} (listener has routes)"))?;
-    raw.parse::<SocketAddr>()
-        .with_context(|| format!("{var} must be a valid host:port SocketAddr: {raw}"))
+    let addr = raw
+        .parse::<SocketAddr>()
+        .with_context(|| format!("{var} must be a valid host:port SocketAddr: {raw}"))?;
+    let scheme = auth_scheme_from(listener, &get)
+        .context("resolve listener auth scheme for plaintext policy")?;
+    enforce_listener_plaintext_policy(listener, scheme, addr, &get)?;
+    Ok(addr)
+}
+
+fn enforce_listener_plaintext_policy(
+    listener: ListenerKind,
+    scheme: AuthScheme,
+    addr: SocketAddr,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    if scheme == AuthScheme::Mtls {
+        return Ok(());
+    }
+    let policy = plaintext_endpoint_policy_from(get, LISTENER_ALLOW_PLAINTEXT_ENV)?;
+    match policy {
+        PlaintextEndpointPolicy::Deny => anyhow::bail!(
+            "{LISTENER_ALLOW_PLAINTEXT_ENV} must explicitly allow plaintext listener {listener:?} at {addr}"
+        ),
+        PlaintextEndpointPolicy::AllowLoopback => {
+            anyhow::ensure!(
+                addr.ip().is_loopback(),
+                "{LISTENER_ALLOW_PLAINTEXT_ENV}=true only allows loopback plaintext listener binds"
+            );
+            Ok(())
+        }
+        PlaintextEndpointPolicy::AllowDevContainer => {
+            anyhow::ensure!(
+                addr.ip().is_loopback() || addr.ip().is_unspecified(),
+                "{LISTENER_ALLOW_PLAINTEXT_ENV}=dev-container only allows loopback or wildcard demo listener binds"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// 从 `std::env` 解析 listener bind 地址（薄壳，委托 [`listener_addr_from`]）。
@@ -2767,9 +2845,44 @@ mod tests {
     use diport::ServiceTokenReplayGuard;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("rss-runtime-{}-{seq}-{name}", std::process::id()))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn write_temp_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
+        let path = unique_temp_path(name);
+        std::fs::write(&path, contents).expect("write temp file");
+        path
+    }
+
+    #[allow(clippy::expect_used)]
+    fn create_temp_dir(name: &str) -> std::path::PathBuf {
+        let path = unique_temp_path(name);
+        std::fs::create_dir(&path).expect("create temp dir");
+        path
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::expect_used)]
+    fn write_unreadable_temp_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = write_temp_file(name, contents);
+        let mut permissions = std::fs::metadata(&path)
+            .expect("metadata temp file")
+            .permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).expect("make temp file unreadable");
+        path
+    }
 
     /// 测试时钟（这些测试只验构造成功/失败，不验 token exp，故 SystemClock 即可）。
     fn clk() -> Box<dyn diport::Clock> {
@@ -3865,6 +3978,122 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
+    fn build_pg_config_applies_ssl_root_cert_path() {
+        let ca = write_temp_file("pg-root-ca.pem", b"test ca");
+        let cfg = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                Some(ca.display().to_string())
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect("valid pg config with root cert");
+        let debug = format!("{cfg:?}");
+        assert!(
+            debug.contains("pg-root-ca.pem"),
+            "root cert path must be captured in PgConfig: {debug}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_migrator_config_applies_ssl_root_cert_path() {
+        let ca = write_temp_file("pg-migrator-root-ca.pem", b"test ca");
+        let cfg = build_pg_migrator_config_from(|name| match name {
+            "RSS_PG_MIGRATOR_USERNAME" => Some("rss_migrator".to_string()),
+            "RSS_PG_MIGRATOR_PASSWORD" => Some("migrator-secret".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(ca.display().to_string()),
+            _ => full_pg_get(name),
+        })
+        .expect("valid pg migrator config with root cert");
+        let debug = format!("{cfg:?}");
+        assert!(
+            debug.contains("pg-migrator-root-ca.pem"),
+            "root cert path must be shared by serving and migrator configs: {debug}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_rejects_empty_ssl_root_cert_path() {
+        let err = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                Some("  ".to_string())
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect_err("empty root cert path is explicit misconfiguration");
+        assert!(
+            format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
+            "error must identify env var: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_rejects_missing_ssl_root_cert_path() {
+        let missing = unique_temp_path("missing-pg-root-ca.pem");
+        let err = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                Some(missing.display().to_string())
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect_err("missing root cert path must fail before connect");
+        assert!(
+            format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
+            "error must identify env var: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_rejects_non_file_ssl_root_cert_path() {
+        let dir = create_temp_dir("pg-root-ca-dir");
+        let err = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                Some(dir.display().to_string())
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect_err("directory root cert path must fail before connect");
+        assert!(
+            format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
+            "error must identify env var: {err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_rejects_unreadable_ssl_root_cert_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unreadable = write_unreadable_temp_file("unreadable-pg-root-ca.pem", b"test ca");
+        let err = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                Some(unreadable.display().to_string())
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect_err("unreadable root cert path must fail before connect");
+        let mut permissions = std::fs::metadata(&unreadable)
+            .expect("metadata unreadable temp file")
+            .permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&unreadable, permissions).expect("restore temp file permissions");
+        assert!(
+            format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
+            "error must identify env var: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     fn legacy_config_plaintext_policy_defaults_to_deny() {
         let policy = legacy_config_plaintext_policy_from(|_| None).expect("policy");
         assert_eq!(policy, LegacyConfigPlaintextPolicy::Deny);
@@ -4207,9 +4436,124 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn listener_addr_valid_value_parses() {
-        let addr = listener_addr_from(ListenerKind::Primary, |_| Some("0.0.0.0:8080".to_string()))
-            .expect("valid addr");
+        let addr = listener_addr_from(ListenerKind::Primary, |name| match name {
+            "RSS_PRIMARY_LISTEN_ADDR" => Some("0.0.0.0:8080".to_string()),
+            LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+            _ => None,
+        })
+        .expect("valid dev-container listener addr");
         assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_plaintext_default_rejects_loopback() {
+        let err = listener_addr_from(ListenerKind::Health, |name| {
+            (name == "RSS_HEALTH_LISTEN_ADDR").then(|| "127.0.0.1:8083".to_string())
+        })
+        .expect_err("plaintext listener needs explicit opt-in even on loopback");
+        assert!(
+            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
+            "error must identify plaintext opt-in env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_plaintext_default_rejects_non_loopback() {
+        let err = listener_addr_from(ListenerKind::Primary, |name| {
+            (name == "RSS_PRIMARY_LISTEN_ADDR").then(|| "0.0.0.0:8080".to_string())
+        })
+        .expect_err("non-loopback plaintext listener must fail closed by default");
+        assert!(
+            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
+            "error must identify plaintext opt-in env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_plaintext_true_allows_loopback_only() {
+        let loopback = listener_addr_from(ListenerKind::Health, |name| match name {
+            "RSS_HEALTH_LISTEN_ADDR" => Some("127.0.0.1:8083".to_string()),
+            LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+            _ => None,
+        })
+        .expect("explicit loopback opt-in should allow loopback bind");
+        assert!(loopback.ip().is_loopback());
+
+        let err = listener_addr_from(ListenerKind::Health, |name| match name {
+            "RSS_HEALTH_LISTEN_ADDR" => Some("10.0.0.8:8083".to_string()),
+            LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+            _ => None,
+        })
+        .expect_err("loopback opt-in must reject fixed non-loopback addresses");
+        assert!(format!("{err:#}").contains("loopback"), "{err:#}");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_plaintext_dev_container_allows_only_loopback_or_unspecified() {
+        for raw in ["0.0.0.0:8080", "[::]:8080", "127.0.0.1:8080"] {
+            let addr = listener_addr_from(ListenerKind::Primary, |name| match name {
+                "RSS_PRIMARY_LISTEN_ADDR" => Some(raw.to_string()),
+                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+                _ => None,
+            })
+            .expect("dev-container policy allows compose wildcard and loopback binds");
+            assert!(addr.ip().is_unspecified() || addr.ip().is_loopback());
+        }
+
+        let err = listener_addr_from(ListenerKind::Primary, |name| match name {
+            "RSS_PRIMARY_LISTEN_ADDR" => Some("10.0.0.8:8080".to_string()),
+            LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+            _ => None,
+        })
+        .expect_err("dev-container policy must not allow arbitrary non-loopback binds");
+        assert!(
+            format!("{err:#}").contains("dev-container"),
+            "error should mention dev-container policy: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_plaintext_invalid_opt_in_fails_fast() {
+        let err = listener_addr_from(ListenerKind::Health, |name| match name {
+            "RSS_HEALTH_LISTEN_ADDR" => Some("127.0.0.1:8083".to_string()),
+            LISTENER_ALLOW_PLAINTEXT_ENV => Some("enabled".to_string()),
+            _ => None,
+        })
+        .expect_err("invalid plaintext opt-in should fail");
+        assert!(
+            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
+            "error must identify opt-in env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_mtls_listener_is_not_plaintext() {
+        let addr = listener_addr_from(ListenerKind::Internal, |name| {
+            (name == "RSS_INTERNAL_LISTEN_ADDR").then(|| "0.0.0.0:8081".to_string())
+        })
+        .expect("default Internal listener is mTLS and not gated as plaintext");
+        assert!(addr.ip().is_unspecified());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_service_token_listener_is_plaintext_and_requires_opt_in() {
+        let err = listener_addr_from(ListenerKind::Internal, |name| match name {
+            "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
+            "RSS_INTERNAL_AUTH_SCHEME" => Some("service-token".to_string()),
+            _ => None,
+        })
+        .expect_err("Internal service-token mode is plaintext and must be gated");
+        assert!(
+            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
+            "error must identify plaintext opt-in env: {err:#}"
+        );
     }
 
     // ── shutdown 失败聚合（report_shutdown_failures）────────────────────────────────────
@@ -4582,6 +4926,168 @@ mod tests {
             matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_TRANSIT_MOUNT_ENV)),
             "缺 vault transit mount 须 fail-fast 且错误含变量名"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_vault_tls_client_rejects_empty_ca_path() {
+        let err = build_vault_tls_client_from(|name| {
+            (name == VAULT_CA_CERT_PEM_PATH_ENV).then(|| "  ".to_string())
+        })
+        .map(|_| ())
+        .expect_err("empty Vault CA path is explicit misconfiguration");
+        assert!(
+            format!("{err:#}").contains(VAULT_CA_CERT_PEM_PATH_ENV),
+            "error must identify Vault CA env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_vault_tls_client_rejects_missing_ca_path() {
+        let missing = unique_temp_path("missing-vault-ca.pem");
+        let err = build_vault_tls_client_from(|name| {
+            (name == VAULT_CA_CERT_PEM_PATH_ENV).then(|| missing.display().to_string())
+        })
+        .map(|_| ())
+        .expect_err("missing Vault CA path must fail fast");
+        assert!(
+            format!("{err:#}").contains(VAULT_CA_CERT_PEM_PATH_ENV),
+            "error must identify Vault CA env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_vault_tls_client_rejects_invalid_ca_pem() {
+        let invalid = write_temp_file("vault-invalid-ca.pem", b"not a pem");
+        let err = build_vault_tls_client_from(|name| {
+            (name == VAULT_CA_CERT_PEM_PATH_ENV).then(|| invalid.display().to_string())
+        })
+        .map(|_| ())
+        .expect_err("invalid Vault CA PEM must fail fast");
+        assert!(
+            format!("{err:#}").contains(VAULT_CA_CERT_PEM_PATH_ENV),
+            "error must identify Vault CA env: {err:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_vault_client_construction_uses_rustls_builder_only() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        assert!(
+            production_source.contains("use_rustls_tls()"),
+            "Vault client construction must explicitly select rustls"
+        );
+        assert!(
+            !production_source.contains("reqwest::Client::new("),
+            "runtime production source must not use reqwest::Client::new()"
+        );
+        assert!(
+            !production_source.contains("Client::new("),
+            "runtime production source must not use Client::new()"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_ca() -> rcgen::CertifiedIssuer<'static, rcgen::KeyPair> {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, IsCa, KeyPair,
+            KeyUsagePurpose,
+        };
+
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        CertifiedIssuer::self_signed(params, KeyPair::generate().expect("ca key"))
+            .expect("self-signed ca")
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn spawn_private_ca_https_server() -> (String, String) {
+        use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType};
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ca = test_ca();
+        let signing_key = KeyPair::generate().expect("server key");
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().expect("dns"))];
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_cert = params
+            .signed_by(&signing_key, &ca)
+            .expect("server cert signed by private ca");
+        let server_key =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![server_cert.der().clone()], server_key)
+            .expect("server tls config");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind https fixture");
+        let addr = listener.local_addr().expect("local addr");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        tokio::spawn(async move {
+            let Ok((tcp, _peer)) = listener.accept().await else {
+                return;
+            };
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = tokio::time::timeout(Duration::from_secs(2), tls.read(&mut buf)).await;
+            let _ = tls
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await;
+            let _ = tls.shutdown().await;
+        });
+        (format!("https://localhost:{}/", addr.port()), ca.pem())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn build_vault_tls_client_private_ca_round_trip_requires_configured_ca() {
+        let (untrusted_url, _ca_pem) = spawn_private_ca_https_server().await;
+        let default_client = build_vault_tls_client_from(|_| None).expect("default vault client");
+        let untrusted = tokio::time::timeout(
+            Duration::from_secs(5),
+            default_client.get(&untrusted_url).send(),
+        )
+        .await
+        .expect("request completes");
+        assert!(
+            untrusted.is_err(),
+            "private CA endpoint must not be trusted without configured CA"
+        );
+
+        let (trusted_url, ca_pem) = spawn_private_ca_https_server().await;
+        let ca_path = write_temp_file("vault-private-ca.pem", ca_pem.as_bytes());
+        let trusted_client = build_vault_tls_client_from(|name| {
+            (name == VAULT_CA_CERT_PEM_PATH_ENV).then(|| ca_path.display().to_string())
+        })
+        .expect("vault client with private CA");
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            trusted_client.get(&trusted_url).send(),
+        )
+        .await
+        .expect("trusted request completes")
+        .expect("trusted request succeeds");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.text().await.expect("response body");
+        assert_eq!(body, "ok");
     }
 
     // ── build_jwt_issuer_config fail-fast 测试 ───────────────────────────────────────────────

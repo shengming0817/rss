@@ -111,3 +111,6 @@ sqlx = { workspace = true }
 # mock 请求/响应；vocab::{TenantId,PrincipalKind} 构造 JwtIssuer::issue 入参（hermetic，无 live vault）。
 wiremock = { workspace = true }
 serde_json = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rcgen = { workspace = true }

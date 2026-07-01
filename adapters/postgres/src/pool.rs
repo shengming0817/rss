@@ -679,6 +679,19 @@ mod tests {
     }
 
     #[test]
+    fn with_ssl_root_cert_preserves_path_and_verify_full_default() {
+        let opts = sample()
+            .with_ssl_root_cert("/run/rss/pg-root-ca.pem")
+            .connect_options();
+        assert!(matches!(opts.get_ssl_mode(), PgSslMode::VerifyFull));
+        let rendered = format!("{opts:?}");
+        assert!(
+            rendered.contains("pg-root-ca.pem"),
+            "root cert path must be passed to sqlx connect options: {rendered}"
+        );
+    }
+
+    #[test]
     fn defaults_applied_on_new() {
         // tuning 默认在 new 时落定（无静默系统默认；显式常量单源）。
         assert!(sample().validate().is_ok());

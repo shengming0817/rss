@@ -145,6 +145,7 @@ spiffe-rustls-tokio = "0.4.0"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-pki-types = "1"
+rcgen = "0.14.8"
 tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
 # 限流 provider（adapters/ratelimit，#1011）：keyed GCRA 限流器，x/time/rate（token bucket）的 Rust 工业等价。
 # 自带 monotonic clock（DefaultClock/QuantaClock；FakeRelativeClock 供确定性测试）——不经 diport::Clock
