@@ -17,8 +17,9 @@ use diport::{
 };
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use identity::ports::{
-    DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Role, RoleBinding, RoleBindingLifecycle,
-    RoleId, RoleListResult, RolePage, RoleRepo,
+    DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Policy, PolicyId,
+    PolicyRepo, PolicyRouteScope, PolicyVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId,
+    RoleListResult, RolePage, RoleRepo,
 };
 use identity::{IdentityDomain, LoginService, RbacAdminService, RefreshService};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
@@ -306,6 +307,49 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
     }
 }
 
+struct NoopPolicyRepo;
+
+impl PolicyRepo for NoopPolicyRepo {
+    async fn create(&self, _tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError> {
+        Ok(policy)
+    }
+
+    async fn update(
+        &self,
+        _tenant: TenantId,
+        policy: Policy,
+        _expected: PolicyVersion,
+    ) -> Result<Policy, IdentityError> {
+        Ok(policy)
+    }
+
+    async fn delete(
+        &self,
+        _tenant: TenantId,
+        _id: PolicyId,
+        _expected: PolicyVersion,
+    ) -> Result<bool, IdentityError> {
+        Ok(false)
+    }
+
+    async fn find(
+        &self,
+        _tenant: TenantId,
+        _id: PolicyId,
+    ) -> Result<Option<Policy>, IdentityError> {
+        Ok(None)
+    }
+
+    async fn list_effective(
+        &self,
+        _tenant: TenantId,
+        _scope: PolicyRouteScope,
+        _at: std::time::SystemTime,
+    ) -> Result<Vec<Policy>, IdentityError> {
+        Ok(Vec::new())
+    }
+}
+
 /// 构造 identity 域，并为本 journey 不触达的 RBAC 端点注入 no-op 依赖。
 pub fn identity_domain<S>(
     login: Arc<LoginService<S>>,
@@ -317,12 +361,21 @@ where
     let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(NoopRoleRepo));
     let bindings: Arc<DynRoleBindingLifecycle<'static>> =
         Arc::from(DynRoleBindingLifecycle::new_box(NoopRoleBindingLifecycle));
+    let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(NoopPolicyRepo));
     let rbac = Arc::new(RbacAdminService::new(
         roles.clone(),
         Arc::clone(&bindings),
         Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     ));
-    IdentityDomain::new(login, refresh, rbac, roles, bindings)
+    IdentityDomain::new(
+        login,
+        refresh,
+        rbac,
+        roles,
+        bindings,
+        policies,
+        Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
+    )
 }
 
 /// 取唯一 session-created 订阅绑定（断言恰一个）。

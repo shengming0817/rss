@@ -48,10 +48,16 @@ pub use refresh::{
 };
 // reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
 // 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
-#[allow(unused_imports)]
-pub(crate) use abac::{
-    AbacAttribute, GlobPattern, Operator, Policy, PolicyEffect, PolicyRule, evaluate_abac,
+#[cfg(test)]
+pub(crate) use abac::evaluate_abac;
+pub use abac::{
+    AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
+    POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
+    POLICY_ATTR_TENANT_ID, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
+    PolicyRouteScope, PolicyRule, PolicyVersion,
 };
+#[allow(unused_imports)]
+pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
 // Credential（find/authenticate/save/bump 签名实体）/ LoginIdentifier（查找键签名实体）/ AuthOutcome
 // （authenticate 返回）/ AccountStatus 是 pub——经 ports facade 跨 crate 收发；字段私有 + 构造器 pub(crate)
 // funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 虽不在 port 签名（锁定推进折叠进 authenticate /
@@ -128,7 +134,7 @@ fn parse_id(raw: &str) -> Result<String, IdParseError> {
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum IdParseError {
+pub enum IdParseError {
     #[error("id is empty")]
     Empty,
     #[error("id has invalid format")]
@@ -259,7 +265,7 @@ impl ResourcePattern {
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum AttributeKeyError {
+pub enum AttributeKeyError {
     #[error("attribute key is empty")]
     Empty,
     #[error("attribute key has invalid format")]
@@ -270,13 +276,18 @@ pub(crate) enum AttributeKeyError {
 // reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct AttributeKey(String);
+pub struct AttributeKey(String);
 
 // reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl AttributeKey {
+    /// 构造 AttributeKey（由已校验字符串；crate 内常量路径使用，外部入口走 `parse`）。
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
     /// 解析属性键；拒绝空值 / 非法格式（严格白名单：字母数字 + `_` `-` `.`，fail-closed）。
-    pub(crate) fn parse(raw: &str) -> Result<Self, AttributeKeyError> {
+    pub fn parse(raw: &str) -> Result<Self, AttributeKeyError> {
         let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
         validate_token(raw, ATTR_KEY_MAX_LEN, allowed).map_err(|r| match r {
             Reason::Empty => AttributeKeyError::Empty,
@@ -286,7 +297,7 @@ impl AttributeKey {
     }
 
     /// 取键字符串引用。
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -297,7 +308,7 @@ impl AttributeKey {
 // reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct AttributeValue(String);
+pub struct AttributeValue(String);
 
 impl std::fmt::Debug for AttributeValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -314,12 +325,12 @@ impl AttributeValue {
     /// 载荷（claim / 设备属性 / 租户标签），无句法白名单可言；且冻结签名为不可失败构造（返回 `Self` 非
     /// `Result`），无法在此 fail-closed。值的语义校验与长度上界（若需 DoS 防护）由 ABAC 求值 / 持久化
     /// 边界承载（PR2，spec 003 US2）。本类型仅保证 Debug 脱敏，防 PII 泄漏。
-    pub(crate) fn new(raw: impl Into<String>) -> Self {
+    pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
 
     /// 取值字符串引用。
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -332,18 +343,23 @@ impl AttributeValue {
 // reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct PolicyId(String);
+pub struct PolicyId(String);
 
 // reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
 impl PolicyId {
+    /// 构造 PolicyId（由已校验字符串；crate 内测试/seed 使用，外部入口走 `parse`）。
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
     /// 解析字符串为 PolicyId；拒绝空值 / 非法格式（严格白名单，fail-closed）。
-    pub(crate) fn parse(raw: &str) -> Result<Self, IdParseError> {
+    pub fn parse(raw: &str) -> Result<Self, IdParseError> {
         Ok(Self(parse_id(raw)?))
     }
 
     /// 取 ID 字符串引用。
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -376,6 +392,10 @@ impl PolicyId {
 pub enum IdentityError {
     #[error("role not found")]
     RoleNotFound,
+    #[error("policy not found")]
+    PolicyNotFound,
+    #[error("policy already exists")]
+    PolicyAlreadyExists,
     #[error("permission denied")]
     PermissionDenied,
     #[error("policy is invalid")]

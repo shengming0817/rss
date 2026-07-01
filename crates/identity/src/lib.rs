@@ -100,9 +100,9 @@ mod smoke {
 
     use crate::domain::{
         AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, Credential,
-        IdentityError, Operator, Permission, PermissionId, Policy, PolicyEffect, PolicyId,
-        PolicyRule, ResourcePattern, Role, RoleBinding, RoleId, Session, SessionId, authorize_rbac,
-        evaluate_abac,
+        IdentityError, Operator, Permission, PermissionId, Policy, PolicyCondition, PolicyEffect,
+        PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, ResourcePattern,
+        Role, RoleBinding, RoleId, Session, SessionId, authorize_rbac, evaluate_abac,
     };
 
     // 证明主要类型是 Send（跨 await 点传播）。
@@ -121,7 +121,11 @@ mod smoke {
         _assert_send::<AttributeKey>();
         _assert_send::<AttributeValue>();
         _assert_send::<Policy>();
+        _assert_send::<PolicyVersion>();
+        _assert_send::<PolicyRouteScope>();
+        _assert_send::<PolicyCondition>();
         _assert_send::<PolicyRule>();
+        _assert_send::<PolicyObligations>();
         _assert_send::<Credential>();
         _assert_send::<AccountLockout>();
         _assert_send::<SessionId>();
@@ -147,6 +151,8 @@ mod smoke {
         let e = IdentityError::RoleNotFound;
         match e {
             IdentityError::RoleNotFound => {}
+            IdentityError::PolicyNotFound => {}
+            IdentityError::PolicyAlreadyExists => {}
             IdentityError::PermissionDenied => {}
             IdentityError::InvalidPolicy => {}
             IdentityError::CredentialNotFound => {}

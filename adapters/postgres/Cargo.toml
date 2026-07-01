@@ -48,6 +48,8 @@ thiserror = { workspace = true }
 # outbox envelope metadata 序列化（OutboxEnvelope.metadata: serde_json::Value）；
 # 绑 jsonb 时 serde_json::to_string → $N::jsonb（不给 sqlx 加 uuid/json/time feature，全 server-side）。
 serde_json = { workspace = true }
+# ABAC policy JSONB codec DTO（adapter-local；identity domain types 不 derive serde）。
+serde = { workspace = true }
 # audit_repo cursor encode/decode（base64url URL_SAFE_NO_PAD；与 vocab::Cursor 相同引擎）。
 base64 = { workspace = true }
 # 后台周期 DB liveness 采样 loop（pg_readiness_sampling_loop + PgReadinessSampler worker）。

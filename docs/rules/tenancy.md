@@ -79,7 +79,7 @@ Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SEC
 NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前向迁移升级）；缺失即门红。
 
 app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
-（sessions / config_entries / roles / secret_refs / credentials / refresh_tokens；audit_entries 仅
+（sessions / config_entries / roles / secret_refs / credentials / refresh_tokens / abac_policies；audit_entries 仅
 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
 不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
 bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving pool 必须以 `rss_app`
@@ -221,9 +221,11 @@ domain 取得 `Arc<dyn httpserve::RouteAuthorizer>`，并调用
 serve 前）预解析。生产 Primary active route 通过必填 authorizer finalizer 装配；缺失 provider
 在启动期 fail-fast（构造器必填参数缺失即编译期 / 启动期报错），而不是首请求暴露。
 
-PDP 默认 fail-closed：缺 Authorizer、缺租户、store 不可用或无适用 permit 都 deny。
-baseline 是 action-scoped + role-conditioned 的 allow 规则，不是 allow-all。租户 policy
-可以叠加 allow / deny；deny 优先。
+PDP 默认 fail-closed：缺 Authorizer、缺租户或 store 不可用都 deny；无适用 durable permit
+只表示 durable source 不授予权限，若没有独立 baseline allow 则 deny。
+baseline authorization source 是既有 self/RBAC/builtin 路由授权；其中 RBAC baseline 是
+action-scoped + role-conditioned 的 allow 规则，不是 allow-all。租户 durable policy 是独立
+route-scoped source，可以叠加 allow / deny；deny 与 durable store/load failure 优先于 baseline。
 
 新装环境的 active settings publish API 在 role 管理面完整前有窄兜底：trusted `Admin` 主体对
 generated settings `config-publish` / `secret-publish` 两条无 resource route 内置 Allow；其它权限仍必须经
@@ -232,6 +234,31 @@ role binding 命中，普通 user/device/service 不享有该兜底。
 租户 allow 可以放宽路由门禁，但不能扩大数据访问。读端点的数据可见性由 principal
 派生的 `RowScope` 决定；写端点没有 RowScope 维度，必须依赖 typed tenant 参数和 FORCE
 RLS 维护 tenant 边界。
+
+## Durable ABAC policy store
+
+ABAC policy store 是 tenant-scoped durable PG store：每条 policy 必须带 `tenant_id`，
+并受 `ENABLE/FORCE ROW LEVEL SECURITY` + tenant-isolation policy 约束。生产读写入口必须经
+typed tenant 参数和 PG tenant scope funnel 注入当前租户；不得提供全局 current policy 读取路径。
+
+policy 以 version + effective window 表达生效集。查询 active policy 时只加载当前租户中
+`effective_from <= now < effective_until`（无上界按 open-ended 处理）的版本；未生效、已过期或已删除
+版本不参与 PDP current active set。delete 必须保留 tombstone 并推进 version；普通 create 不复活同 id
+tombstone，也不得把 version 水位重置回 1。版本推进必须单调；同一租户内的更新不得影响其它租户同 key policy。
+
+policy load 必须 fail-closed：缺租户、store 不可用、反序列化失败、malformed JSON、未知字段、
+版本窗口非法或 storage error 都视为不可用 / 无有效 permit，PDP 和 route gate 返回 deny，不回退到
+内置 allow-all、旧缓存 allow 或跨租户默认值。malformed / unknown-field 输入必须在写侧拒绝落库；
+读侧遇到既有坏数据也必须拒绝授权。
+
+baseline semantics 保持最小允许面：durable active set 为空或没有命中时不授予权限，只允许既有
+self/RBAC/builtin baseline 独立判定；RBAC baseline 仍是 action-scoped + role-conditioned allow。
+tenant policy 可以叠加路由 coarse allow / deny，`Deny` 和 durable load/decode failure 覆盖 baseline，
+但不能扩大数据行可见性；数据可见性仍由 `RowScope` / FORCE RLS 独立治理。
+
+obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。当前 HTTP route gate 只执行
+coarse allow/deny，不解释 RowScope / FieldMask obligation；因此 allow 规则带非空 obligation 时，
+route gate 必须 fail-closed deny。
 
 ## gRPC 授权
 

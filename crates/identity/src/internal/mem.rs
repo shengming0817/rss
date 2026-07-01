@@ -35,9 +35,9 @@ use crate::ports::RefreshTokenStore;
 
 // RBAC 角色仓储 + 绑定生命周期 in-mem 替身（`#[cfg(test)]` 门控，#1190）。
 #[cfg(test)]
-use crate::domain::{Role, RoleBinding, RoleId};
+use crate::domain::{Policy, PolicyId, PolicyRouteScope, PolicyVersion, Role, RoleBinding, RoleId};
 #[cfg(test)]
-use crate::ports::{RoleBindingLifecycle, RoleRepo};
+use crate::ports::{PolicyRepo, RoleBindingLifecycle, RoleRepo};
 #[cfg(test)]
 use std::collections::HashSet;
 
@@ -255,6 +255,170 @@ impl SessionLifecycle for InMemSessionLifecycle {
             entry.1 = true; // 跨租 no-op；幂等
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InMemPolicyRepo — durable ABAC policy store in-mem 替身（#1588）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+type PolicyStoreKey = (String, String); // (tenant, policy_id)
+#[cfg(test)]
+struct StoredPolicy {
+    version: PolicyVersion,
+    active: Option<Policy>,
+}
+#[cfg(test)]
+type PolicyStore = HashMap<PolicyStoreKey, StoredPolicy>;
+#[cfg(test)]
+type PolicyStoreGuard<'a> = std::sync::MutexGuard<'a, PolicyStore>;
+
+#[cfg(test)]
+impl StoredPolicy {
+    fn active(policy: Policy) -> Self {
+        Self {
+            version: policy.version(),
+            active: Some(policy),
+        }
+    }
+}
+
+/// `PolicyRepo` 的 in-memory 替身：仅 test 编译，生产无 allow-all fallback。
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct InMemPolicyRepo {
+    policies: Arc<Mutex<PolicyStore>>, // (tenant, policy_id)
+    fail_reads: bool,
+}
+
+#[cfg(test)]
+impl InMemPolicyRepo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn failing_reads() -> Self {
+        Self {
+            fail_reads: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_policy(self, policy: Policy) -> Self {
+        recover(&self.policies).insert(
+            (
+                policy.tenant().to_string(),
+                policy.id().as_str().to_string(),
+            ),
+            StoredPolicy::active(policy),
+        );
+        self
+    }
+
+    fn key(tenant: TenantId, id: &PolicyId) -> (String, String) {
+        (tenant.to_string(), id.as_str().to_string())
+    }
+
+    fn read_guard(&self) -> Result<PolicyStoreGuard<'_>, IdentityError> {
+        if self.fail_reads {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-policy-read-fail",
+            ))));
+        }
+        Ok(recover(&self.policies))
+    }
+}
+
+#[cfg(test)]
+impl PolicyRepo for InMemPolicyRepo {
+    async fn create(&self, tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError> {
+        if policy.tenant() != tenant || policy.version() != PolicyVersion::first() {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let key = Self::key(tenant, policy.id());
+        let mut guard = recover(&self.policies);
+        if guard.contains_key(&key) {
+            return Err(IdentityError::PolicyAlreadyExists);
+        }
+        guard.insert(key, StoredPolicy::active(policy.clone()));
+        Ok(policy)
+    }
+
+    async fn update(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        expected: PolicyVersion,
+    ) -> Result<Policy, IdentityError> {
+        if policy.tenant() != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let key = Self::key(tenant, policy.id());
+        let mut guard = recover(&self.policies);
+        let Some(current) = guard.get_mut(&key) else {
+            return Err(IdentityError::PolicyNotFound);
+        };
+        if current.active.is_none() {
+            return Err(IdentityError::PolicyNotFound);
+        }
+        if current.version != expected {
+            return Err(IdentityError::VersionConflict);
+        }
+        let next = policy.with_version(expected.next()?);
+        current.version = next.version();
+        current.active = Some(next.clone());
+        Ok(next)
+    }
+
+    async fn delete(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+        expected: PolicyVersion,
+    ) -> Result<bool, IdentityError> {
+        let key = Self::key(tenant, &id);
+        let mut guard = recover(&self.policies);
+        let Some(current) = guard.get_mut(&key) else {
+            return Ok(false);
+        };
+        let Some(active) = current.active.as_ref() else {
+            return Ok(false);
+        };
+        if active.version() != expected {
+            return Err(IdentityError::VersionConflict);
+        }
+        current.version = expected.next()?;
+        current.active = None;
+        Ok(true)
+    }
+
+    async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError> {
+        Ok(self
+            .read_guard()?
+            .get(&Self::key(tenant, &id))
+            .and_then(|stored| stored.active.clone()))
+    }
+
+    async fn list_effective(
+        &self,
+        tenant: TenantId,
+        scope: PolicyRouteScope,
+        at: SystemTime,
+    ) -> Result<Vec<Policy>, IdentityError> {
+        let mut policies = self
+            .read_guard()?
+            .values()
+            .filter_map(|stored| stored.active.as_ref())
+            .filter(|policy| {
+                policy.tenant() == tenant
+                    && policy.route_scope() == &scope
+                    && policy.is_effective_at(at)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        policies.sort_by(|a, b| a.id().as_str().cmp(b.id().as_str()));
+        Ok(policies)
     }
 }
 
@@ -554,9 +718,14 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{Credential, InMemCredentialRepo, InMemSessionLifecycle, TenantId};
-    use crate::domain::{AuthOutcome, IdentityError, LoginIdentifier, Session, SessionId};
-    use crate::ports::{CredentialRepo, SessionLifecycle};
+    use super::{
+        Credential, InMemCredentialRepo, InMemPolicyRepo, InMemSessionLifecycle, TenantId,
+    };
+    use crate::domain::{
+        AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId, PolicyVersion, Session,
+        SessionId,
+    };
+    use crate::ports::{CredentialRepo, PolicyRepo, SessionLifecycle};
     use consistency::{Entry, IdemKey, OutboxPayload, Topic};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
     use std::time::{Duration, SystemTime};
@@ -604,6 +773,14 @@ mod tests {
             now + Duration::from_secs(3_600),
             now,
         )
+    }
+
+    fn policy_id(raw: &str) -> PolicyId {
+        PolicyId::parse(raw).expect("valid policy id")
+    }
+
+    fn policy(raw: &str, tenant: TenantId) -> Policy {
+        Policy::new(policy_id(raw), tenant, Vec::new())
     }
 
     // co-tx 创建入参占位（InMemSessionLifecycle::persist_session_and_emit 忽略 entry/envelope，仅存 session）。
@@ -827,6 +1004,45 @@ mod tests {
             .bump_version(1, cred("ghost", USER_ALICE, "x", 1, t))
             .await;
         assert!(matches!(missing, Err(IdentityError::CredentialNotFound)));
+    }
+
+    #[tokio::test]
+    async fn policy_delete_leaves_tombstone_and_rejects_recreate() {
+        let repo = InMemPolicyRepo::new();
+        let tenant = tid(TENANT_A);
+        let id = policy_id("policy-tombstone");
+
+        repo.create(tenant, policy("policy-tombstone", tenant))
+            .await
+            .expect("create policy");
+        assert!(
+            repo.delete(tenant, id.clone(), PolicyVersion::first())
+                .await
+                .expect("delete policy"),
+            "first delete succeeds"
+        );
+        assert!(
+            repo.find(tenant, id.clone())
+                .await
+                .expect("find after delete")
+                .is_none(),
+            "tombstoned policy is not active"
+        );
+
+        let recreate = repo
+            .create(tenant, policy("policy-tombstone", tenant))
+            .await;
+        assert!(
+            matches!(recreate, Err(IdentityError::PolicyAlreadyExists)),
+            "deleted policy id keeps tombstone and rejects recreate, got: {recreate:?}"
+        );
+        assert!(
+            repo.find(tenant, id)
+                .await
+                .expect("find after rejected recreate")
+                .is_none(),
+            "rejected recreate must not restore active policy"
+        );
     }
 
     #[tokio::test]

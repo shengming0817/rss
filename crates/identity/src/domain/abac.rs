@@ -1,78 +1,199 @@
-//! identity::domain::abac — ABAC 属性 / 策略值类型与策略求值（dylint rss_domain_no_serialize 守护区）。
+//! identity::domain::abac — ABAC 属性 / durable route policy 值类型与策略求值。
 //!
-//! `AbacAttribute` / `PolicyRule`（typed `operator` + `effect`）/ `Policy` + `evaluate_abac`
-//! （L0 纯计算，deny-overrides，fail-closed）。
-//! 共享 newtype（`AttributeKey` / `AttributeValue` / `PolicyId`）定义在 `super`（`domain/mod.rs`）。
+//! `Policy` 是 tenant-scoped、route-scoped、versioned 的 durable policy facade；字段私有、
+//! 构造经 hydrate/build funnel，adapter 可命名/收发/读取但不可绕过校验伪造。
 //!
 //! # 求值语义（deny-overrides）
 //!
-//! `evaluate_abac` 遍历**命中**的规则：任一命中的 `Deny` 规则 → 整体 `Decision::Deny`（短路）；
-//! 否则有命中的 `Allow` 规则 → `Allow`；无规则命中 → 默认 `Deny`（比 casbin 更严的 fail-closed
-//! 缺省，对齐零信任）。跨租 / 类型不匹配 / 缺失属性均 fail-closed 判**不命中**（不 panic）。
-//!
-//! # 对标
+//! 单个 policy 内：任一命中 `Deny` 规则 → `Deny`；否则命中 `Allow` 规则 → `Allow(obligations)`；
+//! 无规则命中 → `NoMatch`。对外旧 `evaluate_abac` 仍把 `NoMatch` 映射为 `Decision::Deny`，保持
+//! fail-closed 二值接口。
 //!
 //! ref: casbin/casbin-rs src/effector.rs@fc425d4（`EffectKind{Allow,Indeterminate,Deny}`，
-//! `DefaultEffectStream::push_effect`：单条 Deny 压过任意 Allow——本模块 deny-overrides 同形）。
-//! 偏离：casbin 用 matcher 表达式 DSL，本模块用 typed `Operator` 枚举（eq/ne/like/gt/lt/eq_attr）
-//! 做属性比较——更窄、编译期可枚举、无运行期表达式解析攻击面（优雅简洁 + AI-HARD）。
+//! `DefaultEffectStream::push_effect` 中 Deny 压过 Allow）。
 
-use super::{AttributeKey, AttributeValue, PolicyId};
+use std::time::SystemTime;
 
-/// `like` glob 模式长度上界（字节；防超长模式 DoS，parse 阶段 fail-closed）。
-// reason: 仅被 GlobPattern::parse funnel 引用，生产调用方待 W 阶段（PR4/PR5）⇒ 非 test 构建 dead（ADR-004 C8）。
-#[allow(dead_code)]
+use super::{AttributeKey, AttributeValue, IdentityError, PolicyId};
+
 const GLOB_MAX_LEN: usize = 256;
+const ROUTE_SCOPE_MAX_LEN: usize = 256;
+
+/// Route policy attribute key for the principal kind (`user`, `admin`, `service`, ...).
+pub const POLICY_ATTR_PRINCIPAL_KIND: &str = "principal.kind";
+/// Route policy attribute key for the authenticated subject id.
+pub const POLICY_ATTR_PRINCIPAL_ID: &str = "principal.id";
+/// Route policy attribute key for the tenant id.
+pub const POLICY_ATTR_TENANT_ID: &str = "tenant.id";
+/// Route policy attribute key for the contract id.
+pub const POLICY_ATTR_CONTRACT_ID: &str = "contract.id";
+/// Route policy attribute key for the contract permission.
+pub const POLICY_ATTR_PERMISSION: &str = "permission";
+/// Route policy attribute key for the optional route resource id.
+pub const POLICY_ATTR_RESOURCE_ID: &str = "resource.id";
 
 // ---------------------------------------------------------------------------
 // ABAC 属性
 // ---------------------------------------------------------------------------
 
 /// ABAC 属性（key-value 对；不 derive Serialize——域类型）。
-// reason: 实现已落地，生产调用方（handler / authz 接线）待 W 阶段（PR4/PR5）；当前仅测试消费，
-// 非 test 构建无调用方 ⇒ 仍 dead，保留 allow 以过 `-D warnings`（ADR-004 C8 遗留期 carve-out）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct AbacAttribute {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbacAttribute {
     key: AttributeKey,
     value: AttributeValue,
 }
 
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
 impl AbacAttribute {
     /// 构造 ABAC 属性。
-    pub(crate) fn new(key: AttributeKey, value: AttributeValue) -> Self {
+    pub fn new(key: AttributeKey, value: AttributeValue) -> Self {
         Self { key, value }
     }
 
     /// 取属性键引用。
-    pub(crate) fn key(&self) -> &AttributeKey {
+    pub fn key(&self) -> &AttributeKey {
         &self.key
     }
 
     /// 取属性值引用。
-    pub(crate) fn value(&self) -> &AttributeValue {
+    pub fn value(&self) -> &AttributeValue {
         &self.value
     }
 }
 
 // ---------------------------------------------------------------------------
-// Operator / PolicyEffect — 规则条件与效果
+// Route scope / version / obligations
 // ---------------------------------------------------------------------------
 
-/// 比较 operator（operand 内联——illegal 组合「eq_attr 配字面值 / like 配非 glob」类型层不可表达，
-/// AI-HARD；不 derive Serialize——域类型）。
+/// durable policy 适用的 route scope（contract_id + permission）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PolicyRouteScope {
+    contract_id: String,
+    permission: String,
+}
+
+impl PolicyRouteScope {
+    pub fn parse(contract_id: &str, permission: &str) -> Result<Self, IdentityError> {
+        validate_route_token(contract_id)?;
+        validate_route_token(permission)?;
+        Ok(Self {
+            contract_id: contract_id.to_string(),
+            permission: permission.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_unchecked(
+        contract_id: impl Into<String>,
+        permission: impl Into<String>,
+    ) -> Self {
+        Self {
+            contract_id: contract_id.into(),
+            permission: permission.into(),
+        }
+    }
+
+    pub fn contract_id(&self) -> &str {
+        &self.contract_id
+    }
+
+    pub fn permission(&self) -> &str {
+        &self.permission
+    }
+
+    pub fn matches(&self, contract_id: &str, permission: &str) -> bool {
+        self.contract_id == contract_id && self.permission == permission
+    }
+}
+
+fn validate_route_token(raw: &str) -> Result<(), IdentityError> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/');
+    super::validate_token(raw, ROUTE_SCOPE_MAX_LEN, allowed)
+        .map_err(|_| IdentityError::InvalidPolicy)
+}
+
+/// current-row CAS version for a policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PolicyVersion(u32);
+
+impl PolicyVersion {
+    pub fn new(raw: u32) -> Result<Self, IdentityError> {
+        if raw == 0 {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        Ok(Self(raw))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first() -> Self {
+        Self(1)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next(self) -> Result<Self, IdentityError> {
+        self.0
+            .checked_add(1)
+            .map(Self)
+            .ok_or(IdentityError::VersionConflict)
+    }
+}
+
+/// Policy obligations captured by PDP evaluation.
 ///
-/// - `Eq` / `Ne`：subject 属性值与字面值（不）等值。
-/// - `Like`：subject 属性值 glob 匹配（`*` 任意序列 / `?` 单字符，无正则）。
-/// - `Gt` / `Lt`：subject 属性值与字面值**数值**比较（双方 parse `f64` 且有限，否则类型不匹配不命中）。
-/// - `EqAttr`：subject 属性值与**另一属性**值等值（跨属性比较）。
-// reason: 同上（实现已落地，消费方待 W；变体仅测试构造 ⇒ 非 test 构建 dead；ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
+/// Row-scope uses `ScopedTenant`, not `RowScope`, so ordinary policy rows cannot express `All`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PolicyObligations {
+    row_scope: Option<vocab::ScopedTenant>,
+    field_mask: Vec<AttributeKey>,
+}
+
+impl PolicyObligations {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn new(row_scope: Option<vocab::ScopedTenant>, field_mask: Vec<AttributeKey>) -> Self {
+        Self {
+            row_scope,
+            field_mask,
+        }
+    }
+
+    pub fn row_scope(&self) -> Option<vocab::ScopedTenant> {
+        self.row_scope
+    }
+
+    pub fn field_mask(&self) -> &[AttributeKey] {
+        &self.field_mask
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.row_scope.is_none() && self.field_mask.is_empty()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        if self.row_scope.is_none() {
+            self.row_scope = other.row_scope;
+        }
+        for key in &other.field_mask {
+            if !self.field_mask.iter().any(|existing| existing == key) {
+                self.field_mask.push(key.clone());
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operator / PolicyEffect / PolicyCondition
+// ---------------------------------------------------------------------------
+
+/// 比较 operator。
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub(crate) enum Operator {
+pub enum Operator {
     Eq(AttributeValue),
     Ne(AttributeValue),
     Like(GlobPattern),
@@ -82,27 +203,19 @@ pub(crate) enum Operator {
 }
 
 /// 规则效果（命中后贡献 Allow 或 Deny；deny-overrides 下 Deny 压过 Allow）。
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub(crate) enum PolicyEffect {
+pub enum PolicyEffect {
     Allow,
     Deny,
 }
 
-/// `like` glob 模式 newtype（私有字段；parse funnel fail-closed：非空 / ≤256 字节 / ASCII graphic
-/// 白名单——超长或含非法字符在 parse 阶段拒绝，防超长模式 DoS；不 derive Serialize——域类型）。
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
+/// `like` glob 模式 newtype（私有字段；parse funnel fail-closed）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GlobPattern(String);
+pub struct GlobPattern(String);
 
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
 impl GlobPattern {
-    /// 解析 glob 模式；拒绝空 / 越界（>256 字节）/ 含 ASCII graphic 白名单外字符（fail-closed，永不 panic）。
-    pub(crate) fn parse(raw: &str) -> Result<Self, GlobPatternError> {
+    pub fn parse(raw: &str) -> Result<Self, GlobPatternError> {
         super::validate_token(raw, GLOB_MAX_LEN, |c| c.is_ascii_graphic()).map_err(
             |r| match r {
                 super::Reason::Empty => GlobPatternError::Empty,
@@ -112,176 +225,311 @@ impl GlobPattern {
         Ok(Self(raw.to_string()))
     }
 
-    /// 取模式字符串引用。
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 /// glob 模式解析错误。
-// reason: 库错误枚举尚无生产返回方（funnel 调用方待 W），dead_code 来自遗留期（ADR-004 C8）。
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum GlobPatternError {
+pub enum GlobPatternError {
     #[error("glob pattern is empty")]
     Empty,
     #[error("glob pattern is too long or has invalid characters")]
     Format,
 }
 
-// ---------------------------------------------------------------------------
-// Policy / PolicyRule — ABAC 策略
-// ---------------------------------------------------------------------------
-
-/// 策略规则（属性键 + 比较 operator + 效果；不 derive Serialize——域类型）。
-///
-/// 单条规则在 subject 属性集上「命中」= 属性存在 ∧ operator 比较为真（类型不匹配 / 缺失属性 →
-/// 不命中，fail-closed）；命中后按 `effect` 贡献 Allow 或 Deny（deny-overrides）。
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct PolicyRule {
+/// 单条规则条件（属性键 + 比较 operator）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyCondition {
     attribute_key: AttributeKey,
     operator: Operator,
-    effect: PolicyEffect,
 }
 
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
+impl PolicyCondition {
+    pub fn new(attribute_key: AttributeKey, operator: Operator) -> Self {
+        Self {
+            attribute_key,
+            operator,
+        }
+    }
+
+    pub fn attribute_key(&self) -> &AttributeKey {
+        &self.attribute_key
+    }
+
+    pub fn operator(&self) -> &Operator {
+        &self.operator
+    }
+}
+
+/// 策略规则（条件 + 效果 + obligations；不 derive Serialize——域类型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRule {
+    condition: PolicyCondition,
+    effect: PolicyEffect,
+    obligations: PolicyObligations,
+}
+
 impl PolicyRule {
-    /// 构造策略规则（属性键 + operator + 效果，均必填）。
+    /// 兼容域内纯求值测试的空-obligation 构造器。
+    #[cfg(test)]
     pub(crate) fn new(
         attribute_key: AttributeKey,
         operator: Operator,
         effect: PolicyEffect,
     ) -> Self {
-        Self {
-            attribute_key,
-            operator,
+        Self::with_obligations(
+            PolicyCondition::new(attribute_key, operator),
             effect,
+            PolicyObligations::empty(),
+        )
+    }
+
+    pub fn with_obligations(
+        condition: PolicyCondition,
+        effect: PolicyEffect,
+        obligations: PolicyObligations,
+    ) -> Self {
+        Self {
+            condition,
+            effect,
+            obligations,
         }
     }
 
-    /// 取属性键引用。
-    pub(crate) fn attribute_key(&self) -> &AttributeKey {
-        &self.attribute_key
+    pub fn condition(&self) -> &PolicyCondition {
+        &self.condition
     }
 
-    /// 取比较 operator 引用。
-    pub(crate) fn operator(&self) -> &Operator {
-        &self.operator
+    pub fn attribute_key(&self) -> &AttributeKey {
+        self.condition.attribute_key()
     }
 
-    /// 取规则效果。
-    pub(crate) fn effect(&self) -> PolicyEffect {
+    pub fn operator(&self) -> &Operator {
+        self.condition.operator()
+    }
+
+    pub fn effect(&self) -> PolicyEffect {
         self.effect
+    }
+
+    pub fn obligations(&self) -> &PolicyObligations {
+        &self.obligations
     }
 }
 
-/// ABAC 策略（规则集；deny-overrides 求值；不 derive Serialize——域类型）。
-///
-/// 多租隔离：策略必须归属租户（对标 `RoleBinding.tenant`）；跨租求值 fail-closed Deny。
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct Policy {
+// ---------------------------------------------------------------------------
+// Policy
+// ---------------------------------------------------------------------------
+
+/// ABAC durable policy（tenant + route scope + version + effective window + rules）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Policy {
     id: PolicyId,
     tenant: vocab::TenantId,
+    route_scope: PolicyRouteScope,
+    version: PolicyVersion,
+    effective_from: SystemTime,
+    effective_until: Option<SystemTime>,
     rules: Vec<PolicyRule>,
 }
 
-// reason: 同上（实现已落地，消费方待 W；ADR-004 C8）。
-#[allow(dead_code)]
 impl Policy {
-    /// 构造策略（id + tenant + 规则集，必填）。
+    /// 域内测试用构造器：默认 version=1、立即生效、不带 route 约束。
+    #[cfg(test)]
     pub(crate) fn new(id: PolicyId, tenant: vocab::TenantId, rules: Vec<PolicyRule>) -> Self {
-        Self { id, tenant, rules }
+        Self {
+            id,
+            tenant,
+            route_scope: PolicyRouteScope::new_unchecked("test.contract", "test:permission"),
+            version: PolicyVersion::first(),
+            effective_from: SystemTime::UNIX_EPOCH,
+            effective_until: None,
+            rules,
+        }
     }
 
-    /// 取策略 ID 引用。
-    pub(crate) fn id(&self) -> &PolicyId {
+    /// 跨 crate 受控重建 funnel（postgres adapter 从持久化行重建）。
+    pub fn hydrate(
+        id: &str,
+        tenant: vocab::TenantId,
+        route_scope: PolicyRouteScope,
+        version: u32,
+        effective_from: SystemTime,
+        effective_until: Option<SystemTime>,
+        rules: Vec<PolicyRule>,
+    ) -> Result<Self, IdentityError> {
+        if effective_until.is_some_and(|until| until <= effective_from) {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        Ok(Self {
+            id: PolicyId::parse(id).map_err(|_| IdentityError::InvalidPolicy)?,
+            tenant,
+            route_scope,
+            version: PolicyVersion::new(version)?,
+            effective_from,
+            effective_until,
+            rules,
+        })
+    }
+
+    /// 构建新的 authoring policy；新 row 的 CAS version 固定从 1 开始。
+    pub fn build(
+        id: &str,
+        tenant: vocab::TenantId,
+        route_scope: PolicyRouteScope,
+        effective_from: SystemTime,
+        effective_until: Option<SystemTime>,
+        rules: Vec<PolicyRule>,
+    ) -> Result<Self, IdentityError> {
+        Self::hydrate(
+            id,
+            tenant,
+            route_scope,
+            1,
+            effective_from,
+            effective_until,
+            rules,
+        )
+    }
+
+    pub fn id(&self) -> &PolicyId {
         &self.id
     }
 
-    /// 取绑定租户。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> vocab::TenantId {
         self.tenant
     }
 
-    /// 取规则列表引用。
-    pub(crate) fn rules(&self) -> &[PolicyRule] {
+    pub fn route_scope(&self) -> &PolicyRouteScope {
+        &self.route_scope
+    }
+
+    pub fn version(&self) -> PolicyVersion {
+        self.version
+    }
+
+    pub fn effective_from(&self) -> SystemTime {
+        self.effective_from
+    }
+
+    pub fn effective_until(&self) -> Option<SystemTime> {
+        self.effective_until
+    }
+
+    pub fn rules(&self) -> &[PolicyRule] {
         &self.rules
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_version(self, version: PolicyVersion) -> Self {
+        Self { version, ..self }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_effective_at(&self, at: SystemTime) -> bool {
+        self.effective_from <= at && self.effective_until.is_none_or(|until| at < until)
     }
 }
 
 // ---------------------------------------------------------------------------
-// 非 DI 纯逻辑自由函数（L0 纯计算；deny-overrides，fail-closed）
+// Evaluation
 // ---------------------------------------------------------------------------
 
-/// ABAC 策略求值（纯函数，L0；deny-overrides + fail-closed）。
-///
-/// INVARIANT: IDENTITY-AUTHZ-TENANT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— 实现仅对 `policy.tenant() == principal.tenant()`
-/// 的策略求值；`principal.tenant()` 为 `None`（Service/SuperAdmin 跨租场景）或租户不匹配时返回
-/// `Decision::Deny`（通用 ABAC 路径不放行跨租，跨租走独立管理面）。
-///
-/// 与 `rbac::authorize_rbac` **共用同一 INVARIANT ID**（有意）：两者是「仅同租记录参与求值 +
-/// `principal.tenant()==None` → Deny」的两个实例——RBAC 按 `binding.tenant`、ABAC 按 `policy.tenant`，
-/// 租户隔离语义等价。签名 `principal` 位参使「跨租 mismatch fail-closed」由签名承载（Hard）。
-///
-/// deny-overrides：遍历命中规则——任一命中 `Deny` → 整体 `Deny`（短路）；否则有命中 `Allow` → `Allow`；
-/// 无规则命中（空策略 / 全不命中）→ 默认 `Deny`。缺失属性 / 类型不匹配 → 该规则不命中（fail-closed）。
-/// **重复属性 key**（单值模型下歧义输入）→ 求值入口整体 `Deny`（防 Deny 规则被重复 key 顺序绕过）。
-/// （ref: casbin/casbin-rs src/effector.rs@fc425d4，deny-overrides 同形）
-///
-/// 设计决策（可观测性）：返回纯 `Decision`（不携 deny-reason / 命中规则）。决策链路的结构化追踪
-/// （区分租户门 Deny vs 规则 Deny vs 无命中 Deny）由 W 阶段 handler/authz 接线层在调用点记 `tracing`
-/// span 承载——L0 纯函数不引入 I/O / tracing。审计所需的 obligations 解析是 T011 后续项（出本 PR 范围）。
-// reason: 实现已落地，但生产调用方（handler / authz 接线）待 W 阶段（PR4/PR5）；当前仅测试消费，
-// 非 test 构建无调用方 ⇒ 仍 dead，保留 allow 以过 `-D warnings`（ADR-004 C8 遗留期 carve-out）。
-#[allow(dead_code)]
-pub(crate) fn evaluate_abac(
-    principal: &authn::Principal,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyEvaluation {
+    NoMatch,
+    Allow(PolicyObligations),
+    Deny,
+}
+
+impl PolicyEvaluation {
+    #[cfg(test)]
+    pub(crate) fn route_allows(&self) -> bool {
+        matches!(self, Self::Allow(obligations) if obligations.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn to_decision(&self) -> vocab::Decision {
+        match self {
+            Self::Allow(_) => vocab::Decision::Allow,
+            Self::NoMatch | Self::Deny => vocab::Decision::Deny,
+        }
+    }
+}
+
+pub(crate) fn evaluate_abac_for_tenant(
+    tenant: Option<vocab::TenantId>,
     attrs: &[AbacAttribute],
     policy: &Policy,
-) -> vocab::Decision {
-    // 租户门：无租户主体（Service / SuperAdmin）或跨租 → fail-closed（INVARIANT IDENTITY-AUTHZ-TENANT-01）。
-    let Some(tenant) = principal.tenant() else {
-        return vocab::Decision::Deny;
+) -> PolicyEvaluation {
+    let Some(tenant) = tenant else {
+        return PolicyEvaluation::Deny;
     };
-    if policy.tenant() != tenant {
-        return vocab::Decision::Deny;
+    if policy.tenant() != tenant || has_duplicate_key(attrs) {
+        return PolicyEvaluation::Deny;
     }
-    // 重复属性 key fail-closed：单值属性模型下 `find_attr` 只取首个同 key 值，重复 key 会让后置 Deny
-    // 规则读不到第二个值而漏判（deny-overrides 被输入顺序绕过）。歧义属性集不可信 → 整体 Deny，把唯一性
-    // 责任显式留给 W 阶段输入边界（类型层 unique-attr funnel 需改本 wave 冻结签名，留后续）。
-    if has_duplicate_key(attrs) {
-        return vocab::Decision::Deny;
-    }
-    // deny-overrides：命中 Deny 立即短路；记录是否见过命中 Allow；末尾无命中 → 默认 Deny。
+
+    let mut obligations = PolicyObligations::empty();
     let mut saw_allow = false;
     for rule in policy.rules() {
         if !rule_matches(rule, attrs) {
             continue;
         }
         match rule.effect() {
-            PolicyEffect::Deny => return vocab::Decision::Deny,
-            PolicyEffect::Allow => saw_allow = true,
+            PolicyEffect::Deny => return PolicyEvaluation::Deny,
+            PolicyEffect::Allow => {
+                saw_allow = true;
+                obligations.merge(rule.obligations());
+            }
         }
     }
     if saw_allow {
-        vocab::Decision::Allow
+        PolicyEvaluation::Allow(obligations)
     } else {
-        vocab::Decision::Deny
+        PolicyEvaluation::NoMatch
     }
 }
 
-/// 单条规则是否命中（属性存在 ∧ operator 比较为真；缺失 / 类型不匹配 → false，fail-closed）。
-// reason: 仅被 evaluate_abac（dead 待 W）调用 ⇒ 非 test 构建 dead（ADR-004 C8）。
-#[allow(dead_code)]
+pub(crate) fn evaluate_policies_for_tenant(
+    tenant: Option<vocab::TenantId>,
+    attrs: &[AbacAttribute],
+    policies: &[Policy],
+) -> PolicyEvaluation {
+    let mut obligations = PolicyObligations::empty();
+    let mut saw_allow = false;
+    for policy in policies {
+        match evaluate_abac_for_tenant(tenant, attrs, policy) {
+            PolicyEvaluation::Deny => return PolicyEvaluation::Deny,
+            PolicyEvaluation::NoMatch => {}
+            PolicyEvaluation::Allow(next) => {
+                saw_allow = true;
+                obligations.merge(&next);
+            }
+        }
+    }
+    if saw_allow {
+        PolicyEvaluation::Allow(obligations)
+    } else {
+        PolicyEvaluation::NoMatch
+    }
+}
+
+/// 旧二值 ABAC 求值入口：NoMatch 也按 Deny 落地。
+#[cfg(test)]
+pub(crate) fn evaluate_abac(
+    principal: &authn::Principal,
+    attrs: &[AbacAttribute],
+    policy: &Policy,
+) -> vocab::Decision {
+    evaluate_abac_for_tenant(principal.tenant(), attrs, policy).to_decision()
+}
+
 fn rule_matches(rule: &PolicyRule, attrs: &[AbacAttribute]) -> bool {
     let Some(actual) = find_attr(attrs, rule.attribute_key()) else {
-        return false; // 缺失属性 → 不命中。
+        return false;
     };
     match rule.operator() {
         Operator::Eq(expected) => actual == expected,
@@ -295,9 +543,6 @@ fn rule_matches(rule: &PolicyRule, attrs: &[AbacAttribute]) -> bool {
     }
 }
 
-/// 在属性集中按键查找属性值（首个匹配；调用方须先经 `has_duplicate_key` 排除重复 key 歧义）。
-// reason: 同 rule_matches（dead 待 W；ADR-004 C8）。
-#[allow(dead_code)]
 fn find_attr<'a>(attrs: &'a [AbacAttribute], key: &AttributeKey) -> Option<&'a AttributeValue> {
     attrs
         .iter()
@@ -305,17 +550,11 @@ fn find_attr<'a>(attrs: &'a [AbacAttribute], key: &AttributeKey) -> Option<&'a A
         .map(AbacAttribute::value)
 }
 
-/// 属性集是否含重复 key（单值属性模型下重复 = 歧义输入；`AttributeKey: Hash + Eq` ⇒ O(n) 判定）。
-// reason: 同 rule_matches（仅 evaluate_abac 调用，dead 待 W；ADR-004 C8）。
-#[allow(dead_code)]
 fn has_duplicate_key(attrs: &[AbacAttribute]) -> bool {
     let mut seen = std::collections::HashSet::with_capacity(attrs.len());
     !attrs.iter().all(|a| seen.insert(a.key()))
 }
 
-/// 数值比较：双方 parse `f64` 且有限时按 `want` 比较，否则类型不匹配 → false（fail-closed，不 panic）。
-// reason: 同 rule_matches（dead 待 W；ADR-004 C8）。
-#[allow(dead_code)]
 fn numeric_cmp(
     actual: &AttributeValue,
     threshold: &AttributeValue,
@@ -327,30 +566,14 @@ fn numeric_cmp(
     }
 }
 
-/// 解析有限 `f64`（拒 NaN / Inf——非有限值视作类型不匹配）。
-///
-/// 精度上限 = `f64` 尾数（整数精确到 2^53）；超界整数策略阈值（如 `Gt("9007199254740993")`）会经
-/// `f64` 截断，比较可能不直觉。MDM 数值属性（level / count / age）远在此界内，故不引入 `Decimal`。
-// reason: 同 rule_matches（dead 待 W；ADR-004 C8）。
-#[allow(dead_code)]
 fn numeric(raw: &str) -> Option<f64> {
     raw.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
-/// glob 匹配（`*` 匹配任意（含空）字符序列、`?` 匹配单字符；无正则、无转义）。
-///
-/// **`*` 跨路径分隔符**：shell-glob 风格，`*` 匹配含 `/` 的任意序列（非 fnmatch `FNM_PATHNAME`）；
-/// 路径形 ABAC 策略（`/docs/*`）作者须知 `*` 会跨目录层级。
-///
-/// 标准单回溯迭代算法：遇 `*` 记录回溯点；不匹配则回退到最近 `*` 并多吞一个字符。
-/// 复杂度受 `pattern` 长度（≤256，parse 期约束）约束，线性有界（无 ReDoS）。
-// reason: 同 rule_matches（dead 待 W；ADR-004 C8）。
-#[allow(dead_code)]
 fn glob_match(pattern: &str, value: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let val: Vec<char> = value.chars().collect();
     let (mut p, mut v) = (0usize, 0usize);
-    // star = 最近 `*` 在 pat 的下标；mark = 该 `*` 已吞到 val 的下标（回溯点）。
     let (mut star, mut mark): (Option<usize>, usize) = (None, 0);
     while v < val.len() {
         if p < pat.len() && (pat[p] == '?' || pat[p] == val[v]) {
@@ -368,39 +591,37 @@ fn glob_match(pattern: &str, value: &str) -> bool {
             return false;
         }
     }
-    // 尾部剩余 pattern 必须全是 `*` 才算整体匹配。
     while p < pat.len() && pat[p] == '*' {
         p += 1;
     }
     p == pat.len()
 }
 
-// ---------------------------------------------------------------------------
-// 测试（实体构造 / 访问器 / Debug 脱敏 + operator 表驱动 + deny-overrides / 默认 Deny / 跨租）
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime};
+
     use super::{
-        AbacAttribute, GlobPattern, Operator, Policy, PolicyEffect, PolicyRule, evaluate_abac,
+        AbacAttribute, GlobPattern, Operator, Policy, PolicyCondition, PolicyEffect,
+        PolicyEvaluation, PolicyObligations, PolicyRouteScope, PolicyRule, evaluate_abac,
+        evaluate_abac_for_tenant, evaluate_policies_for_tenant,
     };
     use crate::domain::{AttributeKey, AttributeValue, PolicyId};
     use authn::Principal;
     use rstest::rstest;
-    use vocab::tenant::TenantId;
+    use vocab::tenant::{ScopedTenant, TenantId};
     use vocab::{Decision, PrincipalKind};
 
-    // 两个 canonical UUID：tenant A（principal 所属）/ tenant B（跨租）。
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-    #[allow(clippy::expect_used)]
     fn tid(raw: &str) -> TenantId {
+        #[allow(clippy::expect_used)]
         TenantId::parse(raw).expect("canonical tenant uuid")
     }
 
-    #[allow(clippy::expect_used)]
     fn akey(raw: &str) -> AttributeKey {
+        #[allow(clippy::expect_used)]
         AttributeKey::parse(raw).expect("valid attribute key")
     }
 
@@ -412,13 +633,13 @@ mod tests {
         AbacAttribute::new(akey(key), aval(value))
     }
 
-    #[allow(clippy::expect_used)]
     fn glob(raw: &str) -> GlobPattern {
+        #[allow(clippy::expect_used)]
         GlobPattern::parse(raw).expect("valid glob pattern")
     }
 
-    #[allow(clippy::expect_used)]
     fn pid(raw: &str) -> PolicyId {
+        #[allow(clippy::expect_used)]
         PolicyId::parse(raw).expect("valid policy id")
     }
 
@@ -430,13 +651,11 @@ mod tests {
         PolicyRule::new(akey(key), operator, effect)
     }
 
-    /// 单租（tenant A）下用一组规则求值（principal 同租，租户门必过）。
     fn eval(attrs: &[AbacAttribute], rules: Vec<PolicyRule>) -> Decision {
         let policy = Policy::new(pid("pol-1"), tid(TENANT_A), rules);
         evaluate_abac(&user(Some(TENANT_A)), attrs, &policy)
     }
 
-    /// 实体构造器 / 访问器回声。
     #[test]
     fn entity_accessors_echo() {
         let a = attr("dept", "eng");
@@ -447,23 +666,31 @@ mod tests {
         assert_eq!(r.attribute_key().as_str(), "dept");
         assert!(matches!(r.operator(), Operator::Eq(_)));
         assert_eq!(r.effect(), PolicyEffect::Allow);
+        assert!(r.obligations().is_empty());
 
         let p = Policy::new(pid("pol-1"), tid(TENANT_A), vec![r]);
         assert_eq!(p.id().as_str(), "pol-1");
         assert_eq!(p.tenant(), tid(TENANT_A));
+        assert_eq!(p.version().get(), 1);
+        assert!(p.is_effective_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1)));
         assert_eq!(p.rules().len(), 1);
     }
 
-    /// AttributeValue Debug 脱敏：属性值（可能含 PII）不得原文打印。
     #[test]
-    fn attribute_value_debug_redacts() {
-        let a = attr("ssn", "123-45-6789");
-        let dbg = format!("{a:?}");
-        assert!(dbg.contains("<redacted>"), "属性值必须脱敏: {dbg}");
-        assert!(!dbg.contains("123-45-6789"), "Debug 不得泄露属性值明文");
+    fn hydrate_rejects_invalid_version_and_window() -> Result<(), crate::domain::IdentityError> {
+        let scope = PolicyRouteScope::parse("identity.roles", "identity:role:read")?;
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        assert!(matches!(
+            Policy::hydrate("pol-1", tid(TENANT_A), scope.clone(), 0, base, None, vec![]),
+            Err(crate::domain::IdentityError::InvalidPolicy)
+        ));
+        assert!(matches!(
+            Policy::hydrate("pol-1", tid(TENANT_A), scope, 1, base, Some(base), vec![]),
+            Err(crate::domain::IdentityError::InvalidPolicy)
+        ));
+        Ok(())
     }
 
-    /// operator 真 / 假 / 类型不匹配（命中→Allow，不命中→Deny；单条 Allow 规则、同租）。
     enum Op {
         EqTrue,
         EqFalse,
@@ -507,7 +734,6 @@ mod tests {
                 vec![attr("role", "admin")],
                 rule("role", Operator::Ne(aval("admin")), allow),
             ),
-            // 缺失属性 → 不命中（fail-closed），即便是 Ne。
             Op::NeMissing => (vec![], rule("role", Operator::Ne(aval("admin")), allow)),
             Op::LikeStar => (
                 vec![attr("path", "/docs/a/b")],
@@ -533,12 +759,10 @@ mod tests {
                 vec![attr("level", "2")],
                 rule("level", Operator::Gt(aval("3")), allow),
             ),
-            // 等值边界 → Gt 是严格 `>`，level==threshold 不命中（fail-closed，锁「不含等值」语义）。
             Op::GtEqual => (
                 vec![attr("level", "3")],
                 rule("level", Operator::Gt(aval("3")), allow),
             ),
-            // 非数值属性值 → 类型不匹配 → 不命中。
             Op::GtTypeMismatch => (
                 vec![attr("level", "high")],
                 rule("level", Operator::Gt(aval("3")), allow),
@@ -551,7 +775,6 @@ mod tests {
                 vec![attr("level", "5")],
                 rule("level", Operator::Lt(aval("3")), allow),
             ),
-            // 等值边界 → Lt 是严格 `<`，level==threshold 不命中（fail-closed）。
             Op::LtEqual => (
                 vec![attr("level", "3")],
                 rule("level", Operator::Lt(aval("3")), allow),
@@ -564,7 +787,6 @@ mod tests {
                 vec![attr("owner", "alice"), attr("requester", "bob")],
                 rule("owner", Operator::EqAttr(akey("requester")), allow),
             ),
-            // 第二属性缺失 → 不命中（fail-closed）。
             Op::EqAttrMissing => (
                 vec![attr("owner", "alice")],
                 rule("owner", Operator::EqAttr(akey("requester")), allow),
@@ -598,7 +820,6 @@ mod tests {
         assert_eq!(eval(&attrs, vec![r]), want);
     }
 
-    /// deny-overrides：同策略并存命中 Deny + 命中 Allow → 整体 Deny（两种规则顺序均验证短路与顺序无关）。
     #[rstest]
     #[case::deny_after_allow(false)]
     #[case::deny_before_allow(true)]
@@ -614,113 +835,118 @@ mod tests {
         assert_eq!(eval(&attrs, rules), Decision::Deny);
     }
 
-    /// deny-overrides 短路独立于 `saw_allow`：命中 Deny + **不命中** Allow → 仍 Deny。
-    /// （锁 `return Deny` 短路路径与 saw_allow 标志无关——防「只有 saw_allow=true 才 Deny」误改回归。）
     #[test]
-    fn deny_hit_with_allow_miss_still_deny() {
+    fn deny_hit_with_allow_miss_still_denies() {
         let attrs = vec![attr("role", "admin")];
-        // Allow 规则要求 role==user（不命中）；Deny 规则要求 role==admin（命中）。
         let allow = rule("role", Operator::Eq(aval("user")), PolicyEffect::Allow);
         let deny = rule("role", Operator::Eq(aval("admin")), PolicyEffect::Deny);
         assert_eq!(eval(&attrs, vec![allow, deny]), Decision::Deny);
     }
 
-    /// 重复属性 key fail-closed：单值属性模型下重复 key = 歧义/不可信输入 → 整体 Deny。
-    /// （回归：`find_attr` 只取首值会让后置 Deny 被重复 key 顺序绕过——
-    /// case 1 直接绕过、case 2 经无关 Allow 绕过，两变体均须 Deny。）
-    #[rstest]
-    #[case::direct_bypass(vec![attr("clearance", "public"), attr("clearance", "secret")])]
-    #[case::via_unrelated_allow(vec![
-        attr("dept", "eng"),
-        attr("clearance", "public"),
-        attr("clearance", "secret"),
-    ])]
-    fn duplicate_attribute_key_denies(#[case] attrs: Vec<AbacAttribute>) {
-        // Allow(dept==eng 或 clearance==public) 本可命中放行；Deny(clearance==secret) 因 find_attr
-        // 只读首个 clearance(public) 而漏判。重复 key 必须在求值入口整体 fail-closed Deny。
-        let allow_dept = rule("dept", Operator::Eq(aval("eng")), PolicyEffect::Allow);
-        let allow_clearance = rule(
+    #[test]
+    fn duplicate_attribute_key_denies() {
+        let attrs = vec![attr("clearance", "public"), attr("clearance", "secret")];
+        let allow = rule(
             "clearance",
             Operator::Eq(aval("public")),
             PolicyEffect::Allow,
         );
-        let deny = rule(
-            "clearance",
-            Operator::Eq(aval("secret")),
-            PolicyEffect::Deny,
+        assert_eq!(eval(&attrs, vec![allow]), Decision::Deny);
+    }
+
+    #[test]
+    fn default_deny_and_single_allow() {
+        let allow = rule("role", Operator::Eq(aval("admin")), PolicyEffect::Allow);
+        assert_eq!(
+            eval(&[attr("role", "user")], vec![allow.clone()]),
+            Decision::Deny
+        );
+        assert_eq!(eval(&[attr("role", "admin")], vec![allow]), Decision::Allow);
+    }
+
+    #[test]
+    fn empty_rule_set_denies() {
+        assert_eq!(eval(&[attr("role", "admin")], vec![]), Decision::Deny);
+    }
+
+    #[rstest]
+    #[case::cross_tenant(user(Some(TENANT_B)))]
+    #[case::no_tenant(authn::test_support::principal(PrincipalKind::Service, "svc", None))]
+    fn tenant_gate_denies(#[case] principal: Principal) {
+        let policy = Policy::new(
+            pid("pol-1"),
+            tid(TENANT_A),
+            vec![rule(
+                "role",
+                Operator::Eq(aval("admin")),
+                PolicyEffect::Allow,
+            )],
         );
         assert_eq!(
-            eval(&attrs, vec![allow_dept, allow_clearance, deny]),
+            evaluate_abac(&principal, &[attr("role", "admin")], &policy),
             Decision::Deny
         );
     }
 
-    /// 默认 Deny：空属性集 / 全不命中 → Deny（规则要求 role==admin，二者均不命中）。
-    #[rstest]
-    #[case::empty_attrs(vec![])]
-    #[case::all_miss(vec![attr("role", "user")])]
-    fn default_deny(#[case] attrs: Vec<AbacAttribute>) {
-        let rules = vec![rule(
-            "role",
-            Operator::Eq(aval("admin")),
-            PolicyEffect::Allow,
-        )];
-        assert_eq!(eval(&attrs, rules), Decision::Deny);
-    }
-
-    /// 真·空规则集：即便有本可匹配的属性，无任何规则 → 默认 Deny（锁 saw_allow=false 末尾分支）。
     #[test]
-    fn empty_rule_set_denies() {
-        let attrs = vec![attr("role", "admin")];
-        assert_eq!(eval(&attrs, vec![]), Decision::Deny);
+    fn obligations_are_preserved_but_route_allow_requires_empty_obligations() {
+        let obligations = PolicyObligations::new(Some(ScopedTenant::Tenant), vec![akey("email")]);
+        let rule = PolicyRule::with_obligations(
+            PolicyCondition::new(akey("role"), Operator::Eq(aval("admin"))),
+            PolicyEffect::Allow,
+            obligations.clone(),
+        );
+        let policy = Policy::new(pid("pol-1"), tid(TENANT_A), vec![rule]);
+        let got = evaluate_abac_for_tenant(Some(tid(TENANT_A)), &[attr("role", "admin")], &policy);
+        assert_eq!(got, PolicyEvaluation::Allow(obligations));
+        assert!(
+            !got.route_allows(),
+            "route gate cannot discharge obligations"
+        );
     }
 
-    /// 单条命中 Allow 规则 → Allow（无 Deny 时正向放行）。
     #[test]
-    fn single_allow_grants() {
-        let attrs = vec![attr("role", "admin")];
-        let rules = vec![rule(
-            "role",
-            Operator::Eq(aval("admin")),
-            PolicyEffect::Allow,
-        )];
-        assert_eq!(eval(&attrs, rules), Decision::Allow);
+    fn multiple_policies_merge_allows_and_deny_overrides() {
+        let empty_allow = Policy::new(
+            pid("allow-1"),
+            tid(TENANT_A),
+            vec![rule(
+                "role",
+                Operator::Eq(aval("admin")),
+                PolicyEffect::Allow,
+            )],
+        );
+        let obligated_allow = Policy::new(
+            pid("allow-2"),
+            tid(TENANT_A),
+            vec![PolicyRule::with_obligations(
+                PolicyCondition::new(akey("dept"), Operator::Eq(aval("eng"))),
+                PolicyEffect::Allow,
+                PolicyObligations::new(Some(ScopedTenant::Tenant), vec![]),
+            )],
+        );
+        let attrs = vec![attr("role", "admin"), attr("dept", "eng")];
+        let got = evaluate_policies_for_tenant(
+            Some(tid(TENANT_A)),
+            &attrs,
+            &[empty_allow, obligated_allow],
+        );
+        assert!(matches!(got, PolicyEvaluation::Allow(ref o) if !o.is_empty()));
+        assert!(!got.route_allows());
+
+        let deny = Policy::new(
+            pid("deny-1"),
+            tid(TENANT_A),
+            vec![rule(
+                "role",
+                Operator::Eq(aval("admin")),
+                PolicyEffect::Deny,
+            )],
+        );
+        let got = evaluate_policies_for_tenant(Some(tid(TENANT_A)), &attrs, &[deny]);
+        assert_eq!(got, PolicyEvaluation::Deny);
     }
 
-    /// 跨租 fail-closed：策略租户 ≠ principal 租户、或 principal 无租户 → Deny（即便规则命中 Allow）。
-    enum TenantScn {
-        CrossTenant,
-        NoTenantSuperAdmin,
-        NoTenantService,
-    }
-
-    #[rstest]
-    #[case::cross_tenant(TenantScn::CrossTenant)]
-    #[case::no_tenant_super_admin(TenantScn::NoTenantSuperAdmin)]
-    #[case::no_tenant_service(TenantScn::NoTenantService)]
-    fn cross_tenant_deny(#[case] scn: TenantScn) {
-        let attrs = vec![attr("role", "admin")];
-        // 命中 Allow 规则：唯一阻断来源是租户门。
-        let rules = vec![rule(
-            "role",
-            Operator::Eq(aval("admin")),
-            PolicyEffect::Allow,
-        )];
-        let policy = Policy::new(pid("pol-1"), tid(TENANT_A), rules);
-        let principal = match scn {
-            // principal 在 tenant B，策略在 tenant A → 跨租。
-            TenantScn::CrossTenant => user(Some(TENANT_B)),
-            TenantScn::NoTenantSuperAdmin => {
-                authn::test_support::principal(PrincipalKind::SuperAdmin, "root", None)
-            }
-            TenantScn::NoTenantService => {
-                authn::test_support::principal(PrincipalKind::Service, "svc", None)
-            }
-        };
-        assert_eq!(evaluate_abac(&principal, &attrs, &policy), Decision::Deny);
-    }
-
-    /// GlobPattern::parse fail-closed：空 / 越界 / 非 ASCII graphic / 含空格 → Err；合法（含边界 256）→ Ok。
     #[rstest]
     #[case::ok_literal("docs".to_string(), true)]
     #[case::ok_wildcards("a?b*c".to_string(), true)]
@@ -736,7 +962,6 @@ mod tests {
         assert_eq!(GlobPattern::parse(&raw).is_ok(), ok);
     }
 
-    /// glob_match 语义边界（直接覆盖匹配器分支：前缀 / 后缀 / 中段 / 多 `*` 回溯 / `?` 边界 / `*` 跨 `/`）。
     #[rstest]
     #[case("*", "anything", true)]
     #[case("*", "", true)]
@@ -748,11 +973,9 @@ mod tests {
     #[case("a?c", "abc", true)]
     #[case("a?c", "ac", false)]
     #[case("a*b*c", "a-b-c", true)]
-    // 多 `*` 回溯：`*` 均匹配空 / 多次回溯 / 缺中段失败（锁单回溯算法分支）。
     #[case("a*b*c", "abc", true)]
     #[case("a*b*c", "a-b-b-c", true)]
     #[case("a*b*c", "aXc", false)]
-    // `*` 跨路径分隔符 `/`（shell-glob 风格，非 fnmatch；路径策略须知此语义）。
     #[case("*", "a/b/c", true)]
     #[case("/docs/*", "/docs/x/y", true)]
     #[case("abc", "abc", true)]

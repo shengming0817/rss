@@ -25,7 +25,9 @@ use consistency::OutboxSource;
 use diport::{DynPublisher, MessageId, PublishRequest, Publisher, Topic};
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::login::IdentityLoginRequest;
-use identity::ports::{DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, TenantId};
+use identity::ports::{
+    DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, TenantId,
+};
 use identity::{IdentityDomain, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
@@ -300,6 +302,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )?);
     let roles_for_admin = Arc::from(DynRoleRepo::new_box(id.role_repo()));
     let roles_for_list = Arc::from(DynRoleRepo::new_box(id.role_repo()));
+    let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
     let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
         id.role_binding_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
@@ -314,6 +317,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
         rbac_admin,
         roles_for_list,
         bindings,
+        policies,
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
 
     // ── 步骤 4：compose + drain subscribers（audit 的 session-created 订阅绑定）────────────────

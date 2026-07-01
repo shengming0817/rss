@@ -64,7 +64,7 @@ use crate::{
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
     PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
-    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgProjectionEvents,
+    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgPolicyRepo, PgProjectionEvents,
     PgReadinessSampler, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal,
     PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgStore, PgStoreGuard,
 };
@@ -534,6 +534,12 @@ impl PgDomainDeps<caps::Identity> {
         PgRoleRepo::new(&self.store)
     }
 
+    /// durable ABAC policy store（abac_policies 表 + tenant scope）。
+    #[must_use]
+    pub fn policy_repo(&self) -> PgPolicyRepo {
+        PgPolicyRepo::new(&self.store)
+    }
+
     /// 角色绑定生命周期（binding co-tx + role event outbox）。
     #[must_use]
     pub fn role_binding_lifecycle(&self, clock: Box<dyn Clock>) -> PgRoleBindingLifecycle {
@@ -914,6 +920,7 @@ mod tests {
         // F1 补齐的 identity 域 repo（credentials / roles / refresh tokens）——纯 pool clone，无 I/O。
         let _ = i.credential_repo();
         let _ = i.role_repo();
+        let _ = i.policy_repo();
         let _ = i.refresh_token_store();
     }
 

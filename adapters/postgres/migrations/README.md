@@ -87,6 +87,9 @@ Medium）扫描 schema 快照，缺三件套即门红。
 非 BYPASSRLS、无其它 public relation 权限，并在只读事务内 `SET LOCAL rss.tenant_id = targetTenant` 复用现有
 tenant-isolation policy。
 
+`0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
+tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

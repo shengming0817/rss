@@ -54,8 +54,8 @@ use httpd::HttpServer;
 use identity::{
     IdentityDomain, LoginService, RbacAdminService, RefreshService,
     ports::{
-        DynCredentialRepo, DynRefreshTokenStore, DynRoleBindingLifecycle, DynRoleRepo,
-        DynSessionLifecycle,
+        DynCredentialRepo, DynPolicyRepo, DynRefreshTokenStore, DynRoleBindingLifecycle,
+        DynRoleRepo, DynSessionLifecycle,
     },
 };
 use oidc::OidcProvider;
@@ -2213,6 +2213,7 @@ pub fn wire_identity_with(
     ));
     let roles_for_admin = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
     let roles_for_list = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
+    let policies = Arc::from(DynPolicyRepo::new_box(identity_pg.policy_repo()));
     let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
         identity_pg.role_binding_lifecycle(Box::new(SystemClock)),
     ));
@@ -2253,6 +2254,8 @@ pub fn wire_identity_with(
         rbac_admin,
         roles_for_list,
         bindings,
+        policies,
+        Arc::new(SystemClock),
     ))
 }
 

@@ -7690,15 +7690,104 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
 // 取得——RoleId 构造封闭（`pub(crate)` parse/new），测试不可裸 mint，符合 funnel 设计（外部可读不可伪造）。
 // ───────────────────────────────────────────────────────────────────────────
 
-use identity::ports::{DynRoleBindingLifecycle, DynRoleRepo, Role, RolePage, RoleRepo};
+use identity::ports::{
+    AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Operator,
+    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyObligations,
+    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, Role, RolePage, RoleRepo,
+};
 
-use crate::{PgRoleBindingLifecycle, PgRoleRepo};
+use crate::{PgPolicyRepo, PgRoleBindingLifecycle, PgRoleRepo};
 
 const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 fn role_tenant(raw: &str) -> Result<TenantId, Box<dyn std::error::Error + Send + Sync>> {
     Ok(TenantId::parse(raw)?)
+}
+
+const POLICY_CONTRACT_ID: &str = "identity.roles";
+const POLICY_PERMISSION: &str = "identity:role:read";
+
+fn policy_time(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+fn policy_scope() -> Result<PolicyRouteScope, IdentityError> {
+    PolicyRouteScope::parse(POLICY_CONTRACT_ID, POLICY_PERMISSION)
+}
+
+fn policy_id(raw: &str) -> Result<PolicyId, IdentityError> {
+    PolicyId::parse(raw).map_err(|_| IdentityError::InvalidPolicy)
+}
+
+fn policy_version(raw: u32) -> Result<PolicyVersion, IdentityError> {
+    PolicyVersion::new(raw)
+}
+
+fn policy_rule(
+    effect: PolicyEffect,
+    obligations: PolicyObligations,
+) -> Result<PolicyRule, IdentityError> {
+    Ok(PolicyRule::with_obligations(
+        PolicyCondition::new(
+            AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)
+                .map_err(|_| IdentityError::InvalidPolicy)?,
+            Operator::Eq(AttributeValue::new("admin")),
+        ),
+        effect,
+        obligations,
+    ))
+}
+
+fn policy_fixture(
+    id: &str,
+    tenant: TenantId,
+    version: u32,
+    effective_from: u64,
+    effective_until: Option<u64>,
+    effect: PolicyEffect,
+    obligations: PolicyObligations,
+) -> Result<Policy, IdentityError> {
+    let scope = policy_scope()?;
+    let rules = vec![policy_rule(effect, obligations)?];
+    if version == 1 {
+        Policy::build(
+            id,
+            tenant,
+            scope,
+            policy_time(effective_from),
+            effective_until.map(policy_time),
+            rules,
+        )
+    } else {
+        Policy::hydrate(
+            id,
+            tenant,
+            scope,
+            version,
+            policy_time(effective_from),
+            effective_until.map(policy_time),
+            rules,
+        )
+    }
+}
+
+fn first_policy_obligations(policy: &Policy) -> PolicyObligations {
+    policy
+        .rules()
+        .first()
+        .map(|rule| rule.obligations().clone())
+        .unwrap_or_else(PolicyObligations::empty)
+}
+
+fn policy_rejection(err: &IdentityError) -> bool {
+    matches!(err, IdentityError::InvalidPolicy)
+}
+
+fn principal_kind_rule_json(operator_json: &str) -> String {
+    format!(
+        r#"{{"rules":[{{"condition":{{"attribute":"{POLICY_ATTR_PRINCIPAL_KIND}","operator":{operator_json}}},"effect":"allow"}}]}}"#
+    )
 }
 
 // CRUD：save 新角色 → find 往返一致；同 id 二次 save → upsert 覆盖 name+permissions（非新增行）；查无 → None。
@@ -7822,6 +7911,650 @@ async fn role_repo_tenant_conformance() -> TestResult {
         },
     )
     .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy repo enrollment：统一 conformance 覆盖 create/find/list/update/delete。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_lifecycle_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let created = policy_fixture(
+        "policy-lifecycle",
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let updated = policy_fixture(
+        "policy-lifecycle",
+        tenant,
+        2,
+        10,
+        None,
+        PolicyEffect::Deny,
+        PolicyObligations::empty(),
+    )?;
+
+    testkit::policy_conformance::assert_policy_store_lifecycle(
+        testkit::policy_conformance::PolicyLifecycleCase {
+            tenant,
+            key: "policy-lifecycle",
+            created_policy: created,
+            updated_policy: updated,
+            create: |tenant, _key, policy| {
+                let repo = &repo;
+                async move { repo.create(tenant, policy).await.map(|_| ()) }
+            },
+            find: |tenant, key| {
+                let repo = &repo;
+                async move { repo.find(tenant, policy_id(key)?).await }
+            },
+            list: |tenant| {
+                let repo = &repo;
+                async move {
+                    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+                        .await
+                }
+            },
+            update: |tenant, _key, policy| {
+                let repo = &repo;
+                async move {
+                    repo.update(tenant, policy, policy_version(1)?)
+                        .await
+                        .map(|_| ())
+                }
+            },
+            delete: |tenant, key| {
+                let repo = &repo;
+                async move {
+                    repo.delete(tenant, policy_id(key)?, policy_version(2)?)
+                        .await
+                        .map(|_| ())
+                }
+            },
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy repo delete tombstone：删除后同 id 不允许通过普通 create 重建并重置 version。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let created = policy_fixture(
+        "policy-delete-tombstone",
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let recreated = policy_fixture(
+        "policy-delete-tombstone",
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Deny,
+        PolicyObligations::empty(),
+    )?;
+
+    testkit::policy_conformance::assert_policy_delete_leaves_tombstone(
+        testkit::policy_conformance::PolicyDeleteTombstoneCase {
+            tenant,
+            key: "policy-delete-tombstone",
+            created_policy: created,
+            recreated_policy: recreated,
+            create: |tenant, _key, policy| {
+                let repo = &repo;
+                async move { repo.create(tenant, policy).await.map(|_| ()) }
+            },
+            find: |tenant, key| {
+                let repo = &repo;
+                async move { repo.find(tenant, policy_id(key)?).await }
+            },
+            list: |tenant| {
+                let repo = &repo;
+                async move {
+                    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+                        .await
+                }
+            },
+            delete: |tenant, key| {
+                let repo = &repo;
+                async move {
+                    repo.delete(tenant, policy_id(key)?, policy_version(1)?)
+                        .await
+                        .map(|_| ())
+                }
+            },
+            is_recreate_rejected: |err: &IdentityError| {
+                matches!(err, IdentityError::PolicyAlreadyExists)
+            },
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy repo tenant isolation：同 id 在不同 tenant 下互不可见，B 的 update/delete 不影响 A。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_tenant_isolation_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let tenant_a = role_tenant(ROLE_TENANT_A)?;
+    let tenant_b = role_tenant(ROLE_TENANT_B)?;
+    let tenant_a_policy = policy_fixture(
+        "policy-tenant-isolation",
+        tenant_a,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let tenant_b_policy = policy_fixture(
+        "policy-tenant-isolation",
+        tenant_b,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let tenant_b_updated_policy = policy_fixture(
+        "policy-tenant-isolation",
+        tenant_b,
+        2,
+        10,
+        None,
+        PolicyEffect::Deny,
+        PolicyObligations::empty(),
+    )?;
+
+    testkit::policy_conformance::assert_policy_store_tenant_isolation(
+        testkit::policy_conformance::PolicyTenantIsolationCase {
+            tenant_a,
+            tenant_b,
+            key: "policy-tenant-isolation",
+            tenant_a_policy,
+            tenant_b_policy,
+            tenant_b_updated_policy,
+            create: |tenant, _key, policy| {
+                let repo = &repo;
+                async move { repo.create(tenant, policy).await.map(|_| ()) }
+            },
+            find: |tenant, key| {
+                let repo = &repo;
+                async move { repo.find(tenant, policy_id(key)?).await }
+            },
+            list: |tenant| {
+                let repo = &repo;
+                async move {
+                    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+                        .await
+                }
+            },
+            update: |tenant, _key, policy| {
+                let repo = &repo;
+                async move {
+                    repo.update(tenant, policy, policy_version(1)?)
+                        .await
+                        .map(|_| ())
+                }
+            },
+            delete: |tenant, key| {
+                let repo = &repo;
+                async move {
+                    repo.delete(tenant, policy_id(key)?, policy_version(2)?)
+                        .await
+                        .map(|_| ())
+                }
+            },
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy repo CAS：update/delete 必须使用 current-row version；错版冲突，不回退成 blind write。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_cas_update_delete_conflicts() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let created = policy_fixture(
+        "policy-cas",
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    repo.create(tenant, created).await?;
+
+    let stale_update = repo
+        .update(
+            tenant,
+            policy_fixture(
+                "policy-cas",
+                tenant,
+                2,
+                10,
+                None,
+                PolicyEffect::Deny,
+                PolicyObligations::empty(),
+            )?,
+            policy_version(2)?,
+        )
+        .await;
+    assert!(
+        matches!(stale_update, Err(IdentityError::VersionConflict)),
+        "wrong expected version must conflict, got: {stale_update:?}"
+    );
+
+    let stale_delete = repo
+        .delete(tenant, policy_id("policy-cas")?, policy_version(2)?)
+        .await;
+    assert!(
+        matches!(stale_delete, Err(IdentityError::VersionConflict)),
+        "delete with wrong expected version must conflict, got: {stale_delete:?}"
+    );
+
+    let updated = repo
+        .update(
+            tenant,
+            policy_fixture(
+                "policy-cas",
+                tenant,
+                2,
+                10,
+                None,
+                PolicyEffect::Deny,
+                PolicyObligations::empty(),
+            )?,
+            policy_version(1)?,
+        )
+        .await?;
+    assert_eq!(updated.version().get(), 2, "CAS update increments version");
+
+    let stale_delete_after_update = repo
+        .delete(tenant, policy_id("policy-cas")?, policy_version(1)?)
+        .await;
+    assert!(
+        matches!(
+            stale_delete_after_update,
+            Err(IdentityError::VersionConflict)
+        ),
+        "stale delete after update must conflict, got: {stale_delete_after_update:?}"
+    );
+    assert!(
+        repo.delete(tenant, policy_id("policy-cas")?, policy_version(2)?)
+            .await?,
+        "delete at current version succeeds"
+    );
+    assert!(
+        !repo
+            .delete(tenant, policy_id("policy-cas")?, policy_version(2)?)
+            .await?,
+        "delete of missing policy is idempotent false"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy repo active-window：effective_from <= at < effective_until；NULL until 表示不过期。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_active_window_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let expired = policy_fixture(
+        "policy-window-expired",
+        tenant,
+        1,
+        10,
+        Some(20),
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let active = policy_fixture(
+        "policy-window-active",
+        tenant,
+        1,
+        20,
+        Some(40),
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let future = policy_fixture(
+        "policy-window-future",
+        tenant,
+        1,
+        50,
+        Some(80),
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+
+    testkit::policy_conformance::assert_policy_active_window(
+        testkit::policy_conformance::PolicyActiveWindowCase {
+            tenant,
+            expired_key: "policy-window-expired",
+            active_key: "policy-window-active",
+            future_key: "policy-window-future",
+            expired_policy: expired.clone(),
+            active_policy: active.clone(),
+            future_policy: future,
+            instant_before: 15,
+            instant_during: 30,
+            instant_after: 90,
+            expected_before: vec![expired],
+            expected_during: vec![active],
+            expected_after: Vec::new(),
+            create: |tenant, _key, policy| {
+                let repo = &repo;
+                async move { repo.create(tenant, policy).await.map(|_| ()) }
+            },
+            active_at: |tenant, at| {
+                let repo = &repo;
+                async move {
+                    repo.list_effective(tenant, policy_scope()?, policy_time(at as u64))
+                        .await
+                }
+            },
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+async fn insert_raw_policy_and_load(
+    store: &PgStore,
+    repo: &PgPolicyRepo,
+    id: &str,
+    rules_json: &str,
+) -> Result<(), IdentityError> {
+    let tenant = TenantId::parse(ROLE_TENANT_A).map_err(|_| IdentityError::InvalidPolicy)?;
+    sqlx::query("DELETE FROM abac_policies WHERE tenant_id = $1::uuid")
+        .bind(ROLE_TENANT_A)
+        .execute(&store.pool)
+        .await
+        .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+    sqlx::query(
+        "INSERT INTO abac_policies \
+         (tenant_id, id, version, contract_id, permission, effective_from, effective_until, rules) \
+         VALUES ($1::uuid, $2, 1, $3, $4, to_timestamp(10), NULL, $5::jsonb)",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind(id)
+    .bind(POLICY_CONTRACT_ID)
+    .bind(POLICY_PERMISSION)
+    .bind(rules_json)
+    .execute(&store.pool)
+    .await
+    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+
+    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+        .await
+        .map(|_| ())
+}
+
+/// policy repo decode is strict：语义非法与未知 JSON 字段都会使 active load fail-closed。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_rejects_malformed_persisted_json() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+
+    testkit::policy_conformance::assert_policy_rejects_malformed(
+        (
+            "policy-malformed",
+            principal_kind_rule_json(r#"{"kind":"like","pattern":""}"#),
+        ),
+        ("policy-unknown-field", r#"{"rules":[],"unexpected":true}"#),
+        |(id, rules_json)| {
+            let store = &store;
+            let repo = &repo;
+            async move { insert_raw_policy_and_load(store, repo, id, &rules_json).await }
+        },
+        |(id, rules_json)| {
+            let store = &store;
+            let repo = &repo;
+            async move { insert_raw_policy_and_load(store, repo, id, rules_json).await }
+        },
+        policy_rejection,
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy obligations：row scope 与 field mask 必须经 JSONB 原样 round-trip。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let obligations = PolicyObligations::new(
+        Some(vocab::ScopedTenant::Tenant),
+        vec![AttributeKey::parse("email").map_err(|_| IdentityError::InvalidPolicy)?],
+    );
+    let policy = policy_fixture(
+        "policy-obligations",
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        obligations.clone(),
+    )?;
+
+    testkit::policy_conformance::assert_policy_obligation_round_trip(
+        testkit::policy_conformance::PolicyObligationCase {
+            tenant,
+            key: "policy-obligations",
+            policy,
+            expected_obligations: obligations,
+            create: |tenant, _key, policy| {
+                let repo = &repo;
+                async move { repo.create(tenant, policy).await.map(|_| ()) }
+            },
+            find: |tenant, key| {
+                let repo = &repo;
+                async move { repo.find(tenant, policy_id(key)?).await }
+            },
+            obligations: first_policy_obligations,
+        },
+    )
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// route gate conformance：durable allow 携带非空 obligations 时，当前 HTTP route gate 必须 deny。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_route_gate_conformance_denies_nonempty_obligations() -> TestResult {
+    testkit::policy_conformance::assert_route_gate_denies_nonempty_obligations(
+        PolicyObligations::empty(),
+        PolicyObligations::new(Some(vocab::ScopedTenant::Tenant), Vec::new()),
+        |obligations| async move { Ok::<bool, IdentityError>(obligations.is_empty()) },
+    )
+    .await?;
+    Ok(())
+}
+
+/// migration 0034：abac_policies 必须授予 rss_app 窄 DML 权限，并由 FORCE RLS 执行 tenant isolation。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid::Uuid::new_v4().to_string() 与固定测试 JSON 均为合法构造；item-level carve-out。
+async fn policy_repo_rls_grants_and_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let (rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, \
+                has_table_privilege('rss_app', 'abac_policies', 'SELECT'), \
+                has_table_privilege('rss_app', 'abac_policies', 'INSERT'), \
+                has_table_privilege('rss_app', 'abac_policies', 'UPDATE'), \
+                has_table_privilege('rss_app', 'abac_policies', 'DELETE') \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'abac_policies'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(rls_enabled, "abac_policies must ENABLE RLS");
+    assert!(rls_forced, "abac_policies must FORCE RLS");
+    assert!(can_select, "rss_app must SELECT abac_policies");
+    assert!(can_insert, "rss_app must INSERT abac_policies");
+    assert!(can_update, "rss_app must UPDATE abac_policies");
+    assert!(
+        !can_delete,
+        "rss_app must not DELETE abac_policies; policy delete is versioned tombstone UPDATE"
+    );
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let rules_json = principal_kind_rule_json(r#"{"kind":"eq","value":"admin"}"#);
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO abac_policies \
+             (tenant_id, id, version, contract_id, permission, effective_from, effective_until, rules) \
+             VALUES ($1::uuid, 'rls-policy-a', 1, $2, $3, now(), NULL, $4::jsonb)",
+        )
+        .bind(&tenant_a)
+        .bind(POLICY_CONTRACT_ID)
+        .bind(POLICY_PERMISSION)
+        .bind(&rules_json)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM abac_policies WHERE id = 'rls-policy-a'")
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(cnt.0, 1, "tenant A scope must see tenant A policy");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM abac_policies WHERE id = 'rls-policy-a'")
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(cnt.0, 0, "tenant B scope must not see tenant A policy");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO abac_policies \
+             (tenant_id, id, version, contract_id, permission, effective_from, effective_until, rules) \
+             VALUES ($1::uuid, 'rls-policy-b', 1, $2, $3, now(), NULL, $4::jsonb)",
+        )
+        .bind(&tenant_b)
+        .bind(POLICY_CONTRACT_ID)
+        .bind(POLICY_PERMISSION)
+        .bind(&rules_json)
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "WITH CHECK must reject tenant B row while rss.tenant_id is tenant A"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM abac_policies")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "missing rss.tenant_id must make abac_policies invisible"
+        );
+        tx.rollback().await?;
+    }
 
     store.shutdown().await?;
     Ok(())
@@ -9697,7 +10430,7 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
 // `InMemCredentialRepo` 单测（crates/identity/src/internal/mem.rs），此处证 postgres provider 行为等价 + durable。
 // ───────────────────────────────────────────────────────────────────────────
 
-use identity::ports::{AuthOutcome, Credential, CredentialRepo, IdentityError, LoginIdentifier};
+use identity::ports::{AuthOutcome, Credential, CredentialRepo, LoginIdentifier};
 
 use crate::PgCredentialRepo;
 use crate::credential_repo::{arm_credential_retry_failpoint, credential_retry_failpoint_hits};

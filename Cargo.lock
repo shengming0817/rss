@@ -3934,6 +3934,7 @@ dependencies = [
  "primitives",
  "runctx",
  "secure",
+ "serde",
  "serde_json",
  "settings",
  "sqlx",

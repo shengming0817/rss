@@ -79,12 +79,16 @@ use uuid::Uuid;
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
 use crate::domain::{
-    AuthOutcome, IdentityError, LoginIdentifier, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, RoleId, Session, SessionId,
+    AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
+    POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
+    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PolicyEvaluation,
+    PolicyRouteScope, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RoleId,
+    Session, SessionId, evaluate_policies_for_tenant,
 };
 use crate::ports::{
-    CredentialRepo, DynCredentialRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
-    RefreshTokenStore, RoleBindingLifecycle, RolePage, RoleRepo, SessionLifecycle,
+    CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo,
+    DynSessionLifecycle, PolicyRepo, RefreshTokenStore, RoleBindingLifecycle, RolePage, RoleRepo,
+    SessionLifecycle,
 };
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
@@ -983,6 +987,8 @@ struct AuthUserContext {
 struct ContractAuthorizer {
     roles: Arc<DynRoleRepo<'static>>,
     bindings: Arc<DynRoleBindingLifecycle<'static>>,
+    policies: Arc<DynPolicyRepo<'static>>,
+    clock: Arc<dyn Clock>,
 }
 
 enum ContractAuthPolicy {
@@ -1047,8 +1053,15 @@ impl ContractAuthorizer {
     fn new(
         roles: Arc<DynRoleRepo<'static>>,
         bindings: Arc<DynRoleBindingLifecycle<'static>>,
+        policies: Arc<DynPolicyRepo<'static>>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
-        Self { roles, bindings }
+        Self {
+            roles,
+            bindings,
+            policies,
+            clock,
+        }
     }
 
     async fn authorize_request(
@@ -1060,7 +1073,14 @@ impl ContractAuthorizer {
             subject: request.principal_id.clone(),
             kind: request.principal_kind,
         };
-        match contract_auth_policy(request)? {
+        let policy = contract_auth_policy(request)?;
+        match self.authorize_durable_policy(&ctx, request).await? {
+            PolicyEvaluation::Deny => return Err(AuthReject::Forbidden),
+            PolicyEvaluation::Allow(obligations) if obligations.is_empty() => return Ok(()),
+            PolicyEvaluation::Allow(_) => return Err(AuthReject::Forbidden),
+            PolicyEvaluation::NoMatch => {}
+        }
+        match policy {
             ContractAuthPolicy::SelfScoped => {
                 if matches!(
                     ctx.kind,
@@ -1080,6 +1100,34 @@ impl ContractAuthorizer {
                     .await
             }
         }
+    }
+
+    async fn authorize_durable_policy(
+        &self,
+        ctx: &AuthSubjectContext,
+        request: &RouteAuthorizationRequest,
+    ) -> Result<PolicyEvaluation, AuthReject> {
+        let scope = PolicyRouteScope::parse(request.contract_id, request.permission)
+            .map_err(|_| AuthReject::Forbidden)?;
+        let policies = self
+            .policies
+            .list_effective(ctx.tenant, scope, self.clock.now())
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %ctx.tenant,
+                    contract_id = request.contract_id,
+                    "identity contract authorizer policy lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+        Ok(evaluate_policies_for_tenant(
+            Some(ctx.tenant),
+            &route_policy_attributes(ctx, request),
+            &policies,
+        ))
     }
 
     async fn authorize_role_permission(
@@ -1132,6 +1180,30 @@ impl ContractAuthorizer {
         }
         Err(AuthReject::Forbidden)
     }
+}
+
+fn route_policy_attributes(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+) -> Vec<AbacAttribute> {
+    let mut attrs = vec![
+        policy_attr(
+            POLICY_ATTR_PRINCIPAL_KIND,
+            ctx.kind.as_actor_metadata_label(),
+        ),
+        policy_attr(POLICY_ATTR_PRINCIPAL_ID, &ctx.subject),
+        policy_attr(POLICY_ATTR_TENANT_ID, &ctx.tenant.to_string()),
+        policy_attr(POLICY_ATTR_CONTRACT_ID, request.contract_id),
+        policy_attr(POLICY_ATTR_PERMISSION, request.permission),
+    ];
+    if let Some(resource) = request.resource.as_ref() {
+        attrs.push(policy_attr(POLICY_ATTR_RESOURCE_ID, resource.id()));
+    }
+    attrs
+}
+
+fn policy_attr(key: &str, value: &str) -> AbacAttribute {
+    AbacAttribute::new(AttributeKey::new(key), AttributeValue::new(value))
 }
 
 impl RouteAuthorizer for ContractAuthorizer {
@@ -1601,8 +1673,15 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
         rbac_admin: Arc<RbacAdminService>,
         roles: Arc<DynRoleRepo<'static>>,
         bindings: Arc<DynRoleBindingLifecycle<'static>>,
+        policies: Arc<DynPolicyRepo<'static>>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
-        let authorizer = Arc::new(ContractAuthorizer::new(Arc::clone(&roles), bindings));
+        let authorizer = Arc::new(ContractAuthorizer::new(
+            Arc::clone(&roles),
+            bindings,
+            policies,
+            clock,
+        ));
         Self {
             login,
             refresh,
@@ -1676,7 +1755,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::ports::Role;
+    use crate::ports::{
+        Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule, Role,
+    };
     use diport::OutboxEmitError;
     use testkit::ContractRequest;
 
@@ -1746,6 +1827,12 @@ mod tests {
 
     fn make_clock(now_secs: u64) -> Box<dyn Clock> {
         Box::new(FixedClock(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs),
+        ))
+    }
+
+    fn make_shared_clock(now_secs: u64) -> Arc<dyn Clock> {
+        Arc::new(FixedClock(
             SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs),
         ))
     }
@@ -1825,7 +1912,15 @@ mod tests {
             Arc::clone(&bindings),
             make_clock(now_secs),
         ));
-        IdentityDomain::new(login, refresh, rbac_admin, roles_for_list, bindings)
+        IdentityDomain::new(
+            login,
+            refresh,
+            rbac_admin,
+            roles_for_list,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(now_secs),
+        )
     }
 
     fn user_evidence(subject: &str) -> AuthorizedSubject {
@@ -1862,6 +1957,43 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .expect("valid role")
+    }
+
+    fn empty_policy_repo() -> Arc<DynPolicyRepo<'static>> {
+        Arc::from(DynPolicyRepo::new_box(
+            crate::internal::mem::InMemPolicyRepo::new(),
+        ))
+    }
+
+    fn policy_repo(repo: crate::internal::mem::InMemPolicyRepo) -> Arc<DynPolicyRepo<'static>> {
+        Arc::from(DynPolicyRepo::new_box(repo))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn route_policy(
+        id: &str,
+        contract_id: &'static str,
+        permission: &str,
+        effect: PolicyEffect,
+        obligations: PolicyObligations,
+    ) -> Policy {
+        let rule = PolicyRule::with_obligations(
+            PolicyCondition::new(
+                AttributeKey::new(POLICY_ATTR_PRINCIPAL_KIND),
+                Operator::Eq(AttributeValue::new("admin")),
+            ),
+            effect,
+            obligations,
+        );
+        Policy::build(
+            id,
+            tid(CANON_TENANT),
+            PolicyRouteScope::parse(contract_id, permission).expect("valid route scope"),
+            SystemTime::UNIX_EPOCH,
+            None,
+            vec![rule],
+        )
+        .expect("valid policy")
     }
 
     #[allow(clippy::expect_used)]
@@ -2734,7 +2866,12 @@ mod tests {
                     CANON_USER,
                 ),
             ));
-        let authorizer = ContractAuthorizer::new(roles, bindings);
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: ROLES_ASSIGN_HTTP_SPEC.contract_id,
@@ -2758,7 +2895,12 @@ mod tests {
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
-        let authorizer = ContractAuthorizer::new(roles, bindings);
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
 
         for spec in [SETTINGS_CONFIG_HTTP_SPEC, SETTINGS_SECRET_HTTP_SPEC] {
             let decision = authorizer
@@ -2782,6 +2924,180 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn contract_authorizer_empty_durable_store_grants_nothing_without_baseline() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_durable_allow_permits_without_rbac_binding() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy(
+                "policy-allow",
+                "other.contract",
+                "other:read",
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            ),
+        ));
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_durable_deny_overrides_builtin_baseline() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let permission = SETTINGS_CONFIG_HTTP_SPEC
+            .auth
+            .permission
+            .expect("settings permission");
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy(
+                "policy-deny",
+                SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                permission,
+                PolicyEffect::Deny,
+                PolicyObligations::empty(),
+            ),
+        ));
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                permission,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_non_empty_obligation_denies_at_route_gate() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let permission = SETTINGS_CONFIG_HTTP_SPEC
+            .auth
+            .permission
+            .expect("settings permission");
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy(
+                "policy-obligation",
+                SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                permission,
+                PolicyEffect::Allow,
+                PolicyObligations::new(Some(vocab::ScopedTenant::Tenant), vec![]),
+            ),
+        ));
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                permission,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_policy_store_error_denies_before_baseline() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::failing_reads());
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let permission = SETTINGS_CONFIG_HTTP_SPEC
+            .auth
+            .permission
+            .expect("settings permission");
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                permission,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn contract_authorizer_allows_non_identity_permission_route_by_rbac() {
         let external_permission = "other:read";
         let repo = crate::internal::mem::InMemRoleRepo::new();
@@ -2800,7 +3116,12 @@ mod tests {
                     CANON_USER,
                 ),
             ));
-        let authorizer = ContractAuthorizer::new(roles, bindings);
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            make_shared_clock(1_000),
+        );
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",

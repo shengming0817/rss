@@ -27,11 +27,50 @@ use dynosaur::dynosaur;
 // PgCredentialRepo 须在事务内对其 from_parts 重建 / record_failure 推进 / 访问器回写锁定三列 ⇒ 经本 facade
 // 跨 crate 暴露（策略阈值仍域内单源、字段私有不可伪造）。其余符号均为现役 port 签名实体。
 pub use crate::domain::{
-    AccountLockout, AccountStatus, AuthOutcome, Credential, IdentityError, LoginIdentifier,
-    RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, Role,
-    RoleBinding, RoleId, Session, SessionId, kind_from_db, kind_to_db,
+    AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, AuthOutcome,
+    Credential, GlobPattern, IdentityError, LoginIdentifier, Operator, POLICY_ATTR_CONTRACT_ID,
+    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
+    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy, PolicyCondition, PolicyEffect,
+    PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, RefreshRotation,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, Role, RoleBinding, RoleId,
+    Session, SessionId, kind_from_db, kind_to_db,
 };
 pub use vocab::TenantId;
+
+/// durable ABAC policy repository DI port（tenant-scoped，domain-shaped）。
+///
+/// 本 port 只暴露 repo 能力；产品管理 HTTP API 不在本 PR 范围。`list_effective` 是授权热路径读口：
+/// provider 必须按 `(tenant, route scope, effective window)` 收敛，任何存储 / decode / validation 错误由
+/// caller fail-closed 映射为 deny。
+#[trait_variant::make(PolicyRepo: Send)]
+#[dynosaur(pub DynPolicyRepo = dyn(box) PolicyRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait PolicyRepoLocal: Send + Sync {
+    async fn create(&self, tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError>;
+
+    async fn update(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        expected: PolicyVersion,
+    ) -> Result<Policy, IdentityError>;
+
+    async fn delete(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+        expected: PolicyVersion,
+    ) -> Result<bool, IdentityError>;
+
+    async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError>;
+
+    async fn list_effective(
+        &self,
+        tenant: TenantId,
+        scope: PolicyRouteScope,
+        at: SystemTime,
+    ) -> Result<Vec<Policy>, IdentityError>;
+}
 
 /// 角色仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///

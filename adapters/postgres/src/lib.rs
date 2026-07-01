@@ -33,6 +33,7 @@ mod emitter;
 mod inbox;
 mod migrator;
 mod outbox;
+mod policy_repo;
 mod pool;
 mod projection_events;
 mod readiness;
@@ -66,6 +67,7 @@ pub use dead_letter_payload::DlxPayloadProtector;
 pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
+pub use policy_repo::PgPolicyRepo;
 // NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
 // sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径 read_from + PgProjectionRecord 公开。
 pub use projection_events::{PgProjectionEvents, PgProjectionRecord, ProjectionEventsError};
@@ -184,6 +186,7 @@ mod smoke {
     fn assert_pg_domain<D: super::PgDomain>(_: PhantomData<D>) {}
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
+    fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
     fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
@@ -204,6 +207,8 @@ mod smoke {
         assert_managed_resource(PhantomData::<super::PgStore>);
         // `PgRoleRepo: RoleRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
         assert_role_repo(PhantomData::<super::PgRoleRepo>);
+        // `PgPolicyRepo: PolicyRepo` 真实 impl——tenant-scoped durable ABAC policy store（#1588）。
+        assert_policy_repo(PhantomData::<super::PgPolicyRepo>);
         // `PgCredentialRepo: CredentialRepo` 真实 impl（非 edge proof）——credentials 表 + 折叠锁定态 +
         // SELECT FOR UPDATE 原子 RMW（#1316）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
         assert_credential_repo(PhantomData::<super::PgCredentialRepo>);

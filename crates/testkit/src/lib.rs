@@ -44,6 +44,8 @@ pub use containers::{
 #[cfg(feature = "containers")]
 pub mod eventing_conformance;
 #[cfg(feature = "containers")]
+pub mod policy_conformance;
+#[cfg(feature = "containers")]
 pub mod repo_conformance;
 #[cfg(feature = "containers")]
 pub mod tenant_conformance;
