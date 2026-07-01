@@ -17,6 +17,7 @@
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
+//!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（GitHub Actions 与本地共用同一门）：fmt + meta（contract
 //!                                      validate / assembly validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
@@ -65,6 +66,7 @@ mod publicapi;
 mod schema_rls;
 mod setlocal_funnel;
 mod src_scan;
+mod tenancy_closeout;
 #[cfg(test)]
 mod testutil;
 mod verify;
@@ -121,6 +123,8 @@ enum Command {
     SetLocalFunnel,
     /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01）。
     PgTenantTxGuard,
+    /// tenancy/AuthZ/projection closeout reverse self-check（TENANCY-CLOSEOUT-REVERSE-01）。
+    TenancyCloseout,
     DeferGate,
     Migrations,
 }
@@ -149,11 +153,12 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["schema-rls"] => Ok(Command::SchemaRls),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
         ["pg-tenant-tx-guard"] => Ok(Command::PgTenantTxGuard),
+        ["tenancy-closeout"] => Ok(Command::TenancyCloseout),
         ["defer-gate"] => Ok(Command::DeferGate),
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | setlocal-funnel | pg-tenant-tx-guard | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | setlocal-funnel | pg-tenant-tx-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -359,6 +364,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::SetLocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
         Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
+        Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
         Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
     }
@@ -835,6 +841,22 @@ mod tests {
     fn parse_command_pg_tenant_tx_guard_rejects_trailing_args() {
         assert!(parse_command(&s(&["pg-tenant-tx-guard", "--bogus"])).is_err());
         assert!(parse_command(&s(&["pg-tenant-tx-guard", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_tenancy_closeout() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["tenancy-closeout"]))?,
+            Command::TenancyCloseout
+        );
+        Ok(())
+    }
+
+    /// tenancy-closeout fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_tenancy_closeout_rejects_trailing_args() {
+        assert!(parse_command(&s(&["tenancy-closeout", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["tenancy-closeout", "extra"])).is_err());
     }
 
     #[test]

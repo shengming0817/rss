@@ -251,12 +251,20 @@ impl Probe for RlsReadyProbe {
 
 ---
 
-## 8. Follow-up（落地同步点 + 后续 issue）
+## 8. Closeout 状态（落地同步点）
 
-- outbox / inbox `tenant_id` 列 + RLS 三件套（outbox partition_key typed scope）：**#1405**（本 PR 解锁后推进）。
-- 完整 repo conformance testkit（CAS / rollback / co-tx / tenant / outbox 验收）：**#1426**（本 PR seed 为基础）。
-- PG tx funnel / raw-pool guard（`TxManager` 旁路保护）：**#1436**（本 PR funnel 收口后推进）。
-- dual-pool bootstrap 接线（`rss_app` serving 非 superuser 角色经组合根注入）：独立 follow-up，已记
-  `tenancy.md` §RLS 与 PG scope（未立 issue，不阻塞本 PR）。
+- dual-pool bootstrap 已接线：durable serving pool 使用非 superuser、`NOBYPASSRLS` 的 `rss_app`
+  角色，启动期 `verify_rls_capability()` 会拒绝 owner/superuser、`BYPASSRLS` 角色和非 `rss_app`
+  serving role。最终规则见 `docs/rules/tenancy.md` §RLS 与 PG scope。
+- outbox tenant scope 已落地：`outbox.tenant_id` + RLS 三件套 + 固定 `SECURITY DEFINER`
+  维护函数已成为最终边界；ordered delivery head-of-partition gating 按
+  `(tenant_id, domain, partition_key)` 判队头。`inbox_dedup` 仍保持既有去重维度，不属于本
+  ADR 的 closeout 变更面。
+- PG tx funnel / raw-pool guard 已落地：`PgTenantPool` 是 tenant 表生产路径的 typed funnel，
+  `cargo xtask setlocal-funnel` 与 `cargo xtask pg-tenant-tx-guard` 接入 verify/ci，防
+  `TxManager` / raw-pool bypass。
+- repo tenant isolation conformance 已纳入真实 postgres repos（config seed + role / audit /
+  dead_letter 等），完整 CAS / rollback / co-tx 扩展按后续 conformance 范围推进，不改变本 ADR 的
+  tenant-scope 合约。
 - setlocal-funnel 守卫 Hard 化（proc-macro 限定 call-site）：未立项，Medium 当前足够，登记为技术债
   候选，待 Hard 化收益明显时再评估。

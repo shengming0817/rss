@@ -1125,6 +1125,7 @@ fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
         | "xtask/src/schema_rls.rs"
         | "xtask/src/setlocal_funnel.rs"
         | "xtask/src/src_scan.rs"
+        | "xtask/src/tenancy_closeout.rs"
         | "xtask/src/wsdeps.rs"
         | "xtask/src/contract/breaking.rs"
         | "xtask/src/contract/manifest.rs"

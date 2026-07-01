@@ -4,6 +4,7 @@
 
 ```bash
 cargo fmt --all -- --check
+cargo xtask verify --fast
 cargo xtask verify
 cargo test --workspace
 ```
@@ -13,6 +14,9 @@ cargo test --workspace
 ```bash
 cargo xtask schema-rls
 cargo xtask setlocal-funnel
+cargo xtask pg-tenant-tx-guard
+cargo xtask tenancy-closeout
+cargo test -p xtask tenancy_closeout
 cargo test -p postgres --features integration
 cargo test -p identity
 cargo test -p authn

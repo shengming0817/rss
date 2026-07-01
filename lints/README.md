@@ -50,6 +50,14 @@ cd lints/rss_domain_no_serialize && cargo test
 
 ## 已落地 lint
 
+当前注册清单（与根 `Cargo.toml [workspace.metadata.dylint]` 和 `lints/Cargo.toml` 同步）：
+`rss_domain_no_serialize`、`rss_spawn_missing_scope`、`rss_crosstenant_callsite`、
+`rss_dlq_operator_callsite`、`rss_diport_impl_allowlist`、`rss_principal_facet_impl_allowlist`、
+`rss_authplan_callsite`、`rss_authenticated_callsite`、`rss_handler_local_principal_authz`、
+`rss_diport_error_debug_redacted`、`rss_diport_dto_debug_redacted`、`rss_pdp_impl_adapter_only`、
+`rss_projection_append_only`、`rss_partition_serial_allowlist`、`rss_diport_envelope_reserved_writer`、
+`rss_redact_debug_required`。
+
 | lint id | INVARIANT | 守的约束 |
 |---------|-----------|---------|
 | `rss_domain_no_serialize` | SERDE-DOMAIN-FREEZE-01 | domain 实体禁 derive serde `Serialize`/`Deserialize`（只有 contract/DTO/`generated` 可序列化到 wire）。默认 `Warn`。 |
@@ -58,7 +66,15 @@ cd lints/rss_domain_no_serialize && cargo test
 | `rss_dlq_operator_callsite` | EVENTBUS-DLQ-OPERATOR-CAP-01 | `eventexec::OperatorDlqCapability::issue_for_authorized_operator()` 仅 admin/PDP 边界 crate（当前 `httpserve`）可调用（DLQ replay/redrive mutation capability 签发 callsite-allowlist；上游私有 `_seal` 字段为 Hard，本 lint 守下游「谁可调」为 Medium）。默认 `Warn`。捕获直接 call 与函数项别名；`#[cfg(test)]` 子树默认不扫，测试 fixtures 可直接 mint。 |
 | `rss_diport_impl_allowlist` | DIPORT-IMPL-ALLOWLIST-01 | `diport` DI port trait（`Signer`/`Publisher`/`ManagedResource`… + 基 trait `*Local` + `Clock`/`SubscribeInitializer`）仅 adapter / 组合根可 impl（impl-site allowlist；funnel 下游约束——上游 `deny.toml` wrapper 守「port 只在 diport 定义」DIPORT-MACRO-CONFINE-01 为 Medium，本 lint 守下游「谁可 impl」为 Medium，#1060 闭环 ADR-003 §4.2 方案 ② 缺口）。默认 `Warn`。trait 归属按**被 impl trait 的 crate 名 == `diport`**（覆盖全部 + 未来新增 port，无名单漂移）；impl 站点二选一放行（均键 **package 身份 / 位置**，非源文件路径）——① 被编译 crate 是 `diport` 自身（含 dynosaur/trait-variant 宏生成 bridge impl，按 `LOCAL_CRATE` 身份判，**同时关掉**域 crate 用宏展开 impl 的绕过面），② 被编译 package 的 `CARGO_MANIFEST_DIR` **父目录名** ∈ `adapters`/`bins`/`assemblies`（对齐 `xtask/src/layers.rs` 顶层成员，新 adapter 自动覆盖；`xtask` 故意不入）。键 package 位置而非源文件 ⇒ 域 crate 把 impl 放进 `crates/<domain>/src/adapters/` 子目录无法绕过。`#[cfg(test)]` 子树默认不扫（test mock impl 放行）。**路径 allowlist 绿分支无法在 UI harness 模拟**（harness 控制 example 源路径），其 anti-vacuity 由真 workspace `cargo dylint --all`（12 adapter 0 诊断）承载；UI 单 example target（`rss_diport_impl_allowlist_ui` 红 + 内嵌非 port trait / inherent / item-level `#[allow]` 绿子例）。 |
 | `rss_principal_facet_impl_allowlist` | PRINCIPAL-FACET-IMPL-AUTHN-01 | `runctx::PrincipalFacet` 仅 `authn`（+ 定义 crate `runctx` 的 test facet）可 impl（impl-site caller-crate allowlist；`AppCtx` 生产**伪造门**——principal payload 是 `Arc<dyn PrincipalFacet>`，外部 crate impl 不了 facet 就造不出 `AppCtx`、无法伪造任意 tenant/principal 越权）。默认 `Warn`。跨 crate「只有 authn 能 impl」类型层不可表达（sealed-trait 跨 crate 不可行，ADR-003 §4.2 / ADR-002 §D5），dylint 为最强可用载体（Medium）。trait 归属按**被 impl trait 的 crate 名 == `runctx` 且 item 名 == `PrincipalFacet`**（runctx 还导出非-trait `RequestCtx`/`MissingCtx`，故按 crate+name 精确判）；impl 站点放行按 `LOCAL_CRATE` 名 ∈ {`runctx`, `authn`}（caller-crate allowlist，同 `rss_crosstenant_callsite` 范式）。`#[cfg(test)]` 子树默认不扫（test mock facet impl 放行）。UI 两个 example target（`rss_principal_facet_impl_allowlist_ui` 红 + 内嵌非 runctx trait / inherent / item-level `#[allow]` 绿子例 / `authn` 绿）；绿向 anti-vacuity 另由真 workspace `cargo dylint --all`（authn 真实 facet impl 0 诊断）双锁。 |
+| `rss_authplan_callsite` | AUTH-PLAN-MINT-01 | `primitives::authplan::AuthPlan` 构造入口仅组合根可调用，listener 级认证计划不得在业务 crate 内散装 mint。默认 `Warn`。 |
+| `rss_authenticated_callsite` | AUTH-EVIDENCE-MINT-01 | `httpserve::Authenticated` 与 audit subject 读取 funnel 仅组合根验签桥可构造/调用，防 handler 绕过认证边界。默认 `Warn`。 |
+| `rss_handler_local_principal_authz` | HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 | handler/domain 禁用 `Authenticated` / `Principal` 上的 role/self 本地授权分支，必须消费 route gate 插入的 `AuthorizedSubject`。默认 `Warn`。 |
 | `rss_diport_error_debug_redacted` | DIPORT-ERR-RAWSOURCE-BAN-01 | 受守护 crate（`diport` / `bootstrap` / `eventexec`）error struct 禁持裸 `Box<dyn std::error::Error + Send + Sync + 'static>` source 字段；改用 `diport::RedactedSource` newtype（`Debug`/`Display` 恒 `<redacted>`，不展开内层，#1144）。默认 `Warn`。上游 Hard：`RedactedSource` 类型系统保证脱敏（DIPORT-ERR-SOURCE-REDACT-01）；本 lint 下游 Medium gate：守「受守护 error struct 确实采纳该 newtype」。守护范围限 `LOCAL_CRATE ∈ {diport, bootstrap, eventexec}`（其它 crate 合法持裸 Box 不误报）。`check_field_def` 逐字段检测语法形状 `Box<dyn Error...>`（`sym::Error` diagnostic item 识别 std::error::Error）；**消费侧**用 `RedactedSource` 字段（命名 ADT、非 trait-object）天然不命中；**canonical `diport::redacted::RedactedSource` 定义自身**（内层为裸 Box）按 `DefId` 路径结构性豁免，`bootstrap` / `eventexec` 中同名假类型仍触发。UI 四个 example target（`diport` 红含 canonical 豁免绿子例 / `bootstrap` 红含同名绕过红例 / `eventexec` 红含同名绕过红例 / `not_diport` 绿）分别证受守护 crate 激活、canonical 豁免与非激活。 |
+| `rss_diport_dto_debug_redacted` | DIPORT-DTO-RAWBYTES-BAN-01 | `diport` DTO 字段禁裸字节缓冲（`Vec<u8>` / `[u8;N]` / `Box<[u8]>` / `Option` 包装），改用 `RedactedBytes` newtype。默认 `Warn`。 |
+| `rss_pdp_impl_adapter_only` | PDP-IMPL-ADAPTER-ONLY-01 | `diport::Pdp` 验签端口仅 provider adapter 可 impl，组合根/域不得内联 always-allow PDP。默认 `Warn`。 |
+| `rss_projection_append_only` | PROJECTION-APPEND-ONLY-01 | `projection_events` 表 append-only：不得对其 `DELETE` 或 `TRUNCATE`。默认 `Warn`。 |
+| `rss_partition_serial_allowlist` | PARTITION-SERIAL-IMPL-ALLOWLIST-01 | `consistency::PartitionSerialDelivery` 仅 adapter / 组合根可 impl，守 projection serial witness 的 Medium 半段。默认 `Warn`。 |
+| `rss_diport_envelope_reserved_writer` | DIPORT-ENVELOPE-WIRE-WRITER-01 | `EnvelopeMetadata::insert_wire_pair` reserved-capable wire 写面仅 adapter / 组合根可调用；业务写 metadata 走拒 reserved key 的普通入口。默认 `Warn`。 |
 | `rss_redact_debug_required` | REDACT-DEBUG-REQUIRED-01 | issue #1359 高风险敏感 DTO（`AuditEvent` / `RoleBinding` / `Session` / `RequestCtx` / `SecretMaterial` 等）禁止裸 `derive(Debug)`；改用 `#[derive(secure::Redact)]` + 逐字段 `#[redact(...)]`。默认 `Warn`。 |
 
 逃生门：确需豁免的 callsite（如确需序列化的非 DTO 类型、确需读裸 ctx 的 spawn），在该 item 上加

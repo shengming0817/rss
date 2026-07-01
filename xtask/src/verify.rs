@@ -4,7 +4,7 @@
 //! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + assembly validate + archrules + layer-deps + codegen --check
+//!   2. in-process meta：contract validate + assembly validate + archrules + layer-deps + codegen --check + tenancy-closeout
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
@@ -108,6 +108,8 @@ enum InternalCheck {
     SetLocalFunnel,
     /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01；no-compile）。
     PgTenantTxGuard,
+    /// tenancy/AuthZ/projection closeout reverse self-check（TENANCY-CLOSEOUT-REVERSE-01；no-compile）。
+    TenancyCloseout,
     /// migration 文件序号唯一性 + 连续性守卫（MIGRATION-SERIAL-UNIQUE-01；内容扫描文件名，no-compile）。
     MigrationsSerial,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
@@ -144,6 +146,7 @@ impl InternalCheck {
             Self::SchemaRlsGuard => "xtask/src/schema_rls.rs",
             Self::SetLocalFunnel => "xtask/src/setlocal_funnel.rs",
             Self::PgTenantTxGuard => "xtask/src/pg_tenant_tx_guard.rs",
+            Self::TenancyCloseout => "xtask/src/tenancy_closeout.rs",
             Self::MigrationsSerial => "xtask/src/migrations.rs",
             Self::CommandSymmetry => "xtask/src/command_symmetry.rs",
             Self::DeferGate => "xtask/src/defergate.rs",
@@ -187,6 +190,10 @@ pub(crate) struct Step {
 }
 
 impl Step {
+    pub(crate) fn label(&self) -> &'static str {
+        self.label
+    }
+
     /// 该步对应的 xtask carrier 源文件——仅 in-process 检查（`Internal` / `ToolGatedInternal`）有；
     /// `CargoBuiltin`（fmt/build/clippy…）与外部 `Tool`（deny/audit/dylint/nextest）非 archrules carrier，返回 `None`。
     /// 供 gate↔plan 绑定测试遍历（ARCHRULES-GATE-PLAN-BIND-01，#1574）。
@@ -354,6 +361,15 @@ fn step_pg_tenant_tx_guard() -> Step {
         label: "pg-tenant-tx-guard",
         args: &[],
         kind: StepKind::Internal(InternalCheck::PgTenantTxGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_tenancy_closeout() -> Step {
+    Step {
+        label: "tenancy-closeout",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::TenancyCloseout),
         env: &[],
         needs_compile: false,
     }
@@ -795,6 +811,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_schema_rls_guard(),
         step_setlocal_funnel(),
         step_pg_tenant_tx_guard(),
+        step_tenancy_closeout(),
         step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
@@ -831,6 +848,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_schema_rls_guard(),
         step_setlocal_funnel(),
         step_pg_tenant_tx_guard(),
+        step_tenancy_closeout(),
         step_migrations_serial(),
         step_command_symmetry(),
         step_defer_gate(),
@@ -1075,6 +1093,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
         InternalCheck::SetLocalFunnel => run_check(&crate::setlocal_funnel::SetLocalFunnelGuard),
         InternalCheck::PgTenantTxGuard => run_check(&crate::pg_tenant_tx_guard::PgTenantTxGuard),
+        InternalCheck::TenancyCloseout => run_check(&crate::tenancy_closeout::TenancyCloseout),
         InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
@@ -1177,6 +1196,7 @@ mod tests {
                 "schema-rls",
                 "setlocal-funnel",
                 "pg-tenant-tx-guard",
+                "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1220,6 +1240,7 @@ mod tests {
                 "schema-rls",
                 "setlocal-funnel",
                 "pg-tenant-tx-guard",
+                "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1233,8 +1254,8 @@ mod tests {
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / archrules / codegen /
-    /// pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel / migrations-serial /
-    /// command-symmetry / defer-gate）在两种模式恒在。
+    /// pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel / pg-tenant-tx-guard /
+    /// tenancy-closeout / migrations-serial / command-symmetry / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -1262,6 +1283,7 @@ mod tests {
                     "schema-rls",
                     "setlocal-funnel",
                     "pg-tenant-tx-guard",
+                    "tenancy-closeout",
                     "migrations-serial",
                     "command-symmetry",
                     "defer-gate"
@@ -1413,6 +1435,7 @@ mod tests {
                 "schema-rls",
                 "setlocal-funnel",
                 "pg-tenant-tx-guard",
+                "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
                 "defer-gate",
@@ -1508,6 +1531,7 @@ mod tests {
             "schema-rls",
             "setlocal-funnel",
             "pg-tenant-tx-guard",
+            "tenancy-closeout",
             "migrations-serial",
             "command-symmetry",
             "defer-gate",

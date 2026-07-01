@@ -9,6 +9,13 @@
 
 > **Superseded by #1500（2026-06-30）**：HTTP/Internal 当前执行策略已切为 SPIFFE/SPIRE + listener 级
 > mTLS 默认，service-token 仅作为显式迁移 listener 路径保留。本文保留为 2026-06-23 的历史裁决记录。
+>
+> **Closeout addendum（#1577 / #1586）**：service-token tenant header MAC 绑定已落地为
+> `diport::ServiceTokenTenantBinding` / `diport::service_token_mac_input` +
+> `httpserve::service_token_tenant_binding`；HS256 service-token 签名输入绑定 canonical
+> `x-tenant-id:<tenant>`。下文关于「MAC binding 尚未实装 / service-token 验签空窗」的表述仅保留为
+> 2026-06-23 历史状态，不再代表当前 tenant-header closeout 状态。SPIFFE/mTLS 切换判据仍保留为未来
+> 架构依据。
 
 ---
 

@@ -109,10 +109,10 @@
 
 **Independent Test**: `cargo xtask verify` passes and no completed tenant/ABAC/data-permission item remains documented as future work.
 
-- [ ] T033 [P] [US6] Update docs/architecture ADR references for tenant/RLS/AuthZ/data-permission closeout
-- [ ] T034 [US6] Add final reverse self-check to xtask verify for tenant/AuthZ/RLS/masking invariants
-- [ ] T035 [P] [US6] Update docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md with final verification commands
-- [ ] T036 [US6] Run cargo fmt, cargo xtask verify, and cargo test --workspace for the feature closeout PR
+- [x] T033 [P] [US6] Update docs/architecture ADR references for tenant/RLS/AuthZ/data-permission closeout
+- [x] T034 [US6] Add final reverse self-check to xtask verify for tenant/AuthZ/RLS/masking invariants
+- [x] T035 [P] [US6] Update docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md with final verification commands
+- [x] T036 [US6] Run cargo fmt, cargo xtask verify, and cargo test --workspace for the feature closeout PR
 
 ## Dependencies
 

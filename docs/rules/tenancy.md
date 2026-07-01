@@ -317,3 +317,24 @@ HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必
 
 契约 codegen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
 `cargo xtask` / governance 规则只做纵深检查，不能替代 codegen 强制门。
+
+## Governance reverse self-check
+
+`cargo xtask tenancy-closeout` 是本规则的最终 no-compile 反向自检，并接入
+`cargo xtask verify` / `cargo xtask ci`。它不重做业务测试，而是锁以下 governance 锚点：
+
+- verify/ci plan 必须包含 tenant/RLS/AuthZ 相关门：`contract-validate`、`codegen-check`、
+  `schema-rls`、`setlocal-funnel`、`pg-tenant-tx-guard`、`pdp-allow-guard`、
+  `tenancy-closeout`，以及实际可用时的 `dylint`。
+- RLS 静态与运行期纵深必须同时可见：迁移 DDL 由 `schema-rls` 守，SET LOCAL 注入由
+  `setlocal-funnel` 守，tenant 表 raw-pool / `TxManager` bypass 由 `pg-tenant-tx-guard` 守，
+  durable startup 由 `verify_rls_capability()` 守。
+- AuthZ 路由 gate 必须经 `RouteAuthorizer`，handler 只消费 `AuthorizedSubject`，不回退到
+  handler-local role/self 分支。
+- 字段级数据权限必须从 contract projection fields 派生到 generated spec，经
+  `RouteAuthorizationDecision::AllowWithProjection` 传入 `ResourceProjection`，并由 audit read
+  response rendering 消费；缺 projection 时敏感字段默认 mask。
+- tenant/AuthZ/projection dylint 注册清单必须在根 `Cargo.toml`、`lints/Cargo.toml`、
+  `docs/rules/architecture.md` 和 `lints/README.md` 中一致。
+- governed closeout docs 不得把 #1577-#1585 已完成的 tenant/RLS/AuthZ/projection 项继续描述成
+  future work。

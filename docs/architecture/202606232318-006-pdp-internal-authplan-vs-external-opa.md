@@ -7,6 +7,12 @@
 - **归属**：framework（授权决策接缝归属，provider-agnostic 基础设施治理）
 - **AI-robust 评级**：见 §6
 
+> **Closeout addendum（#1584 / #1586）**：`diport::Pdp`、`RawCredential`、`VerifiedClaims`、
+> `PdpError`、`authn::VerifiedJwt` / `VerifiedServiceToken` 以及 authn-owned
+> `verify_jwt` / `verify_service_token` verify→mint bridge 已落地；`rss_pdp_impl_adapter_only`
+> 已注册为 dylint gate。下文把 `Pdp` port / verified newtype 描述为 future 的段落保留为
+> 2026-06-23 历史裁决背景，不再代表当前 AuthZ closeout 状态。是否引外置 OPA 的切换判据仍有效。
+
 ---
 
 ## 1. 背景
