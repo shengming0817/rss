@@ -25,9 +25,10 @@ use consistency::{
     OutboxRelay, OutboxSource, RetentionSweeper, Topic,
 };
 use diport::{
-    DeadLetterSource, DynPublisher, EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR,
-    KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError,
-    OutboxActor, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
+    DeadLetterSource, DynPublisher, EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSubjectId,
+    KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+    KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, OutboxActor, PublishRequest,
+    Publisher, PublisherError, RESERVED_METADATA_KEYS,
 };
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use sqlx::Row;
@@ -62,6 +63,8 @@ pub(crate) const STATUS_PUBLISHING: &str = "publishing";
 pub(crate) const STATUS_PUBLISHED: &str = "published";
 pub(crate) const STATUS_DLX: &str = "dlx";
 const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
+const OUTBOX_RELAY_ENVELOPE_DLX_SUMMARY: &str = "outbox relay envelope validation failed";
+const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 type AcquiredLeaseRow = (i32, String, String, String, String, String, String, i64);
 
 struct TenantAuthoritySignInput<'a> {
@@ -82,6 +85,103 @@ impl<'a> TenantAuthoritySignInput<'a> {
             self.topic,
             self.event_id,
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayEnvelopeValidationReason {
+    MissingTenantId,
+    InvalidTenantId,
+    MissingSchemaVersion,
+    InvalidSchemaVersion,
+    MissingSchemaHash,
+    InvalidSchemaHash,
+    SchemaVersionMismatch,
+    SchemaHashMismatch,
+}
+
+impl RelayEnvelopeValidationReason {
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::MissingTenantId => "envelope_missing_tenant_id",
+            Self::InvalidTenantId => "envelope_invalid_tenant_id",
+            Self::MissingSchemaVersion => "envelope_missing_schema_version",
+            Self::InvalidSchemaVersion => "envelope_invalid_schema_version",
+            Self::MissingSchemaHash => "envelope_missing_schema_hash",
+            Self::InvalidSchemaHash => "envelope_invalid_schema_hash",
+            Self::SchemaVersionMismatch => "envelope_schema_version_mismatch",
+            Self::SchemaHashMismatch => "envelope_schema_hash_mismatch",
+        }
+    }
+}
+
+impl From<&EnvelopeHeaderError> for RelayEnvelopeValidationReason {
+    fn from(error: &EnvelopeHeaderError) -> Self {
+        match error {
+            EnvelopeHeaderError::MissingTenantId => Self::MissingTenantId,
+            EnvelopeHeaderError::InvalidTenantId => Self::InvalidTenantId,
+            EnvelopeHeaderError::MissingSchemaVersion => Self::MissingSchemaVersion,
+            EnvelopeHeaderError::InvalidSchemaVersion => Self::InvalidSchemaVersion,
+            EnvelopeHeaderError::MissingSchemaHash => Self::MissingSchemaHash,
+            EnvelopeHeaderError::InvalidSchemaHash => Self::InvalidSchemaHash,
+            EnvelopeHeaderError::SchemaVersionMismatch => Self::SchemaVersionMismatch,
+            EnvelopeHeaderError::SchemaHashMismatch => Self::SchemaHashMismatch,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("outbox relay envelope validation failed")]
+struct RelayEnvelopeValidationError {
+    reason: RelayEnvelopeValidationReason,
+    #[source]
+    source: EnvelopeHeaderError,
+}
+
+impl RelayEnvelopeValidationError {
+    fn new(source: EnvelopeHeaderError) -> Self {
+        let reason = RelayEnvelopeValidationReason::from(&source);
+        Self { reason, source }
+    }
+
+    fn reason(&self) -> RelayEnvelopeValidationReason {
+        self.reason
+    }
+}
+
+enum RelayPublishFailure {
+    Publisher(PublisherError),
+    Envelope(RelayEnvelopeValidationError),
+}
+
+impl RelayPublishFailure {
+    fn is_permanent(&self) -> bool {
+        match self {
+            Self::Publisher(err) => err.is_permanent(),
+            Self::Envelope(_) => true,
+        }
+    }
+
+    fn reason_label(&self) -> &'static str {
+        match self {
+            Self::Publisher(err) if err.is_transient() => "publisher_transient",
+            Self::Publisher(_) => "publisher_permanent",
+            Self::Envelope(err) => err.reason().as_label(),
+        }
+    }
+
+    fn dlx_summary(&self) -> &'static str {
+        match self {
+            Self::Publisher(_) => OUTBOX_RELAY_DLX_SUMMARY,
+            Self::Envelope(_) => OUTBOX_RELAY_ENVELOPE_DLX_SUMMARY,
+        }
+    }
+
+    fn relay_failure_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Publisher(_) => None,
+            Self::Envelope(err) => Some(err.reason().as_label()),
+        }
     }
 }
 
@@ -109,16 +209,22 @@ pub(crate) struct OutboxMetadata {
 }
 
 impl OutboxMetadata {
-    /// 由 reserved `occurred_at`（unix 秒 i64，producer 端事件发生时刻）+ typed `tenantId` 构造。
+    /// 由 reserved `occurred_at`（unix 秒 i64，producer 端事件发生时刻）+ typed `tenantId`
+    /// + codegen 契约绑定 schema header 构造。
     ///
-    /// occurred_at / tenantId 注入折叠进构造器 ⇒「无 occurred_at/tenantId 的 outbox metadata」**类型层不可表达**（Hard），杜绝
+    /// occurred_at / tenantId / schemaVersion / schemaHash 注入折叠进构造器 ⇒「缺标准 header 的 outbox
+    /// metadata」**类型层不可表达**（Hard），杜绝
     /// producer 漏接：三条生产路径（`PgEmitter` / `PgSessionLifecycle` / `PgConfigRepo`）各从注入 `Clock`
     /// 取 `unix_secs(clock.now())` 传入，新增 producer 也必须提供（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
     /// `occurredAt` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace 经
     /// #1224 接线（emit 侧 `tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397。
-    pub(crate) fn new(occurred_at_secs: i64, tenant: vocab::TenantId) -> Self {
+    pub(crate) fn new(
+        occurred_at_secs: i64,
+        tenant: vocab::TenantId,
+        contract: vocab::ContractBinding,
+    ) -> Self {
         // KEY_OCCURRED_AT = diport 单源（#1160 A4）。
         let mut map = serde_json::Map::new();
         map.insert(
@@ -128,6 +234,14 @@ impl OutboxMetadata {
         map.insert(
             KEY_TENANT_ID.to_string(),
             serde_json::Value::String(tenant.to_string()),
+        );
+        map.insert(
+            KEY_SCHEMA_VERSION.to_string(),
+            serde_json::Value::String(contract.version().to_string()),
+        );
+        map.insert(
+            KEY_SCHEMA_HASH.to_string(),
+            serde_json::Value::String(contract.schema_hash().to_string()),
         );
         Self { tenant, map }
     }
@@ -259,8 +373,9 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 pub(crate) fn metadata_with_ambient(
     occurred_at_secs: i64,
     tenant: vocab::TenantId,
+    contract: vocab::ContractBinding,
 ) -> OutboxMetadata {
-    let mut m = OutboxMetadata::new(occurred_at_secs, tenant);
+    let mut m = OutboxMetadata::new(occurred_at_secs, tenant, contract);
     if let Some(c) = diagctx::correlation() {
         m = m.with_correlation(c.as_str());
     }
@@ -526,6 +641,7 @@ impl OutboxRelay for PgOutbox {
         let tenant = parse_tenant_id(&tenant_id)?;
         let mut metadata = hydrate_envelope_metadata(&metadata_json);
         metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
+        relay_schema_for_known_contract(&mut metadata, &domain, &contract_id, &topic);
         let metadata = self.sign_metadata(
             metadata,
             TenantAuthoritySignInput {
@@ -541,17 +657,23 @@ impl OutboxRelay for PgOutbox {
         // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
         //    （至少一次 + 幂等去重端到端，eventbus.md §DLX 与幂等）。
         //    metadata_json 从 outbox.metadata 列 hydrate → EnvelopeMetadata（#1160 A4）。
-        let publish_result = self
-            .publisher
-            .publish(
-                PublishRequest::new(
-                    diport::Topic::new(entry.topic().as_str()),
-                    diport::MessageId::new(event_id),
-                    entry.payload().to_vec(),
-                )
-                .with_metadata(metadata),
-            )
-            .await;
+        let request = PublishRequest::new(
+            diport::Topic::new(entry.topic().as_str()),
+            diport::MessageId::new(event_id),
+            entry.payload().to_vec(),
+        )
+        .with_metadata(metadata);
+        let publish_result = match validate_publish_request_envelope(&request) {
+            Ok(()) => self
+                .publisher
+                .publish(request)
+                .await
+                .map_err(RelayPublishFailure::Publisher),
+            Err(e) => {
+                record_relay_envelope_validation_failure(&domain, e.reason());
+                Err(RelayPublishFailure::Envelope(e))
+            }
+        };
 
         match publish_result {
             Ok(()) => {
@@ -633,6 +755,86 @@ fn hydrate_envelope_metadata(json: &str) -> EnvelopeMetadata {
     md
 }
 
+struct KnownContractSchema {
+    version: &'static str,
+    hash: &'static str,
+}
+
+fn known_contract_schema(
+    domain: &str,
+    contract_id: &str,
+    topic: &str,
+) -> Option<KnownContractSchema> {
+    let schema = match (domain, contract_id, topic) {
+        ("_seed", "seed.thing-happened", "seed.thing-happened") => KnownContractSchema {
+            version: "v1",
+            hash: "sha256:016334bee5ce3a5205f0e31d2cb6f9ca20bbefc741f82111a08bb5506a50be23",
+        },
+        ("_seed", "seed.do-thing", "seed.commands.do-thing") => KnownContractSchema {
+            version: "v1",
+            hash: "sha256:a369f1548799cc66da6f3d539dfd3048f7e5d94e87e8b130c3d816b5da75a71b",
+        },
+        ("identity", "identity.role-assigned", "identity.role-assigned") => KnownContractSchema {
+            version: "v1",
+            hash: "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
+        },
+        ("identity", "identity.role-revoked", "identity.role-revoked") => KnownContractSchema {
+            version: "v1",
+            hash: "sha256:5907e4ae46c66b849cd4edca354d4e11abdd6209ad898f37196002fb65ed9a51",
+        },
+        ("identity", "identity.session-created", "identity.session-created") => {
+            KnownContractSchema {
+                version: "v1",
+                hash: "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516",
+            }
+        }
+        ("settings", "settings.config-version-changed", "settings.config-version-changed") => {
+            KnownContractSchema {
+                version: "v1",
+                hash: "sha256:1e9ad2529beb3a274d37a734a5093847cb8418082f4d04f9cb180d3df181e864",
+            }
+        }
+        _ => return None,
+    };
+    Some(schema)
+}
+
+fn relay_schema_for_known_contract(
+    metadata: &mut EnvelopeMetadata,
+    domain: &str,
+    contract_id: &str,
+    topic: &str,
+) {
+    let Some(schema) = known_contract_schema(domain, contract_id, topic) else {
+        return;
+    };
+    if metadata.get(KEY_SCHEMA_VERSION).is_none() {
+        metadata.insert_wire_pair(KEY_SCHEMA_VERSION, schema.version);
+    }
+    if metadata.get(KEY_SCHEMA_HASH).is_none() {
+        metadata.insert_wire_pair(KEY_SCHEMA_HASH, schema.hash);
+    }
+}
+
+/// Relay 发布前标准 envelope header gate：缺 tenant/schema header 视为永久发布失败，进入现有 DLX 分流。
+fn validate_publish_request_envelope(
+    request: &PublishRequest,
+) -> Result<(), RelayEnvelopeValidationError> {
+    request
+        .try_header()
+        .map(|_| ())
+        .map_err(RelayEnvelopeValidationError::new)
+}
+
+fn record_relay_envelope_validation_failure(domain: &str, reason: RelayEnvelopeValidationReason) {
+    metrics::counter!(
+        "outbox_relay_envelope_validation_failure_total",
+        "domain" => domain.to_owned(),
+        "reason" => reason.as_label(),
+    )
+    .increment(1);
+}
+
 /// publish 失败处置（抽出控制 `relay` 认知复杂度 ≤15）：永久错误首投即 dlx、预算耗尽 → dlx；否则退避 retry
 /// （#1212，分流谓词见 [`dlx_decision`]）。
 ///
@@ -644,16 +846,26 @@ async fn settle_publish_failure(
     entry: &Entry,
     retry_count: i32,
     lease_token: &str,
-    err: &PublisherError,
+    err: &RelayPublishFailure,
 ) -> Result<consistency::Disposition, EngineError> {
     let event_id = entry.idem_key().as_str();
     let new_count = retry_count + 1;
     let permanent = err.is_permanent();
     log_publish_failed(event_id, entry.topic().as_str(), retry_count, err);
     if dlx_decision(permanent, new_count) {
-        match settle_dlx(pool, payload_protector, event_id, new_count, lease_token).await? {
+        match settle_dlx(
+            pool,
+            payload_protector,
+            event_id,
+            new_count,
+            lease_token,
+            err.dlx_summary(),
+            err.relay_failure_reason(),
+        )
+        .await?
+        {
             SettleOutcome::Settled => {
-                log_dlx(event_id, new_count, permanent);
+                log_dlx(event_id, new_count, permanent, err.reason_label());
                 Ok(consistency::Disposition::Reject)
             }
             SettleOutcome::LostLease => {
@@ -678,8 +890,40 @@ async fn settle_publish_failure(
 /// publish 失败：退避/dlx 前结构化记录（带 `event_id` 关联键，F9）。
 /// `PublisherError::Display` 是受控安全摘要（diport PII 边界）；`permanent` 字段（#1212）让单条日志即可
 /// 区分「瞬态退避重试」与「永久即将首投 DLX」，无需关联后续 `log_dlx`（便于 metric 聚合 / alert）。
-fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &PublisherError) {
-    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent = err.is_permanent(), error = %secure::redact_error(err), "outbox: publish failed");
+fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &RelayPublishFailure) {
+    match err {
+        RelayPublishFailure::Publisher(source) => log_publisher_failed(
+            event_id,
+            topic,
+            retry_count,
+            err.is_permanent(),
+            err.reason_label(),
+            source,
+        ),
+        RelayPublishFailure::Envelope(source) => {
+            log_envelope_validation_failed(event_id, topic, retry_count, source);
+        }
+    }
+}
+
+fn log_publisher_failed(
+    event_id: &str,
+    topic: &str,
+    retry_count: i32,
+    permanent: bool,
+    reason: &'static str,
+    err: &PublisherError,
+) {
+    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent, reason, error = %secure::redact_error(err), "outbox: publish failed");
+}
+
+fn log_envelope_validation_failed(
+    event_id: &str,
+    topic: &str,
+    retry_count: i32,
+    err: &RelayEnvelopeValidationError,
+) {
+    tracing::warn!(target: "postgres", event_id, topic, retry_count, permanent = true, reason = err.reason().as_label(), error = %secure::redact_error(err), "outbox: publish failed");
 }
 
 /// 进 dlx（运维须感知）。`permanent`：`true`=错误本身永久（首投即 DLX，跳过预算）；`false`=瞬态重试预算耗尽。
@@ -688,8 +932,8 @@ fn log_publish_failed(event_id: &str, topic: &str, retry_count: i32, err: &Publi
 /// `SELECT partition_key, domain FROM outbox WHERE event_id = $event_id` 定位被冻结的 partition，
 /// 再经 `DlqStore::redrive_outbox`（底层固定函数 `rss_outbox_redrive(text, uuid)`）解冻队头并放行后继。
 /// 主动 partition 级监控信号（batch dlx gauge）见 issue **#1406**（不在本 PR）。
-fn log_dlx(event_id: &str, attempts: i32, permanent: bool) {
-    tracing::error!(target: "postgres", event_id, attempts, permanent, "outbox: publish failed, moved to dlx");
+fn log_dlx(event_id: &str, attempts: i32, permanent: bool, reason: &'static str) {
+    tracing::error!(target: "postgres", event_id, attempts, permanent, reason, "outbox: publish failed, moved to dlx");
 }
 
 /// settle CAS 0 行（lost-lease fencing miss）：行已被新租约接管或已终结。结构化 warn（benign handoff，
@@ -894,6 +1138,8 @@ async fn settle_dlx(
     event_id: &str,
     new_retry_count: i32,
     lease_token: &str,
+    error_summary: &'static str,
+    relay_failure_reason: Option<&'static str>,
 ) -> Result<SettleOutcome, EngineError> {
     let mut tx = pool.begin().await.map_err(|e| {
         tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx begin db error");
@@ -925,7 +1171,7 @@ async fn settle_dlx(
     };
 
     let tenant = parse_tenant_id(&tenant_id)?;
-    let metadata = metadata_json_with_column_tenant(&metadata_json, tenant)?;
+    let metadata = metadata_json_with_relay_failure(&metadata_json, tenant, relay_failure_reason)?;
     set_local_tenant(&mut tx, tenant).await.map_err(|e| {
         tracing::warn!(target: "postgres", event_id, operation = "settle_dlx", error = %secure::redact_error(&e), "outbox: settle_dlx set tenant db error");
         EngineError::new(EngineErrorKind::Transient)
@@ -967,7 +1213,7 @@ async fn settle_dlx(
     .bind(protected.key_ref())
     .bind(protected.payload_len())
     .bind(DLX_ORIGINAL_ENTRY_ENCODING)
-    .bind(OUTBOX_RELAY_DLX_SUMMARY)
+    .bind(error_summary)
     .bind(new_retry_count)
     .bind(DeadLetterSource::OutboxRelay.as_str())
     .bind(sqlx::types::Json(&metadata))
@@ -1010,6 +1256,24 @@ fn metadata_json_with_column_tenant(
         KEY_TENANT_ID.to_string(),
         serde_json::Value::String(tenant.to_string()),
     );
+    Ok(metadata)
+}
+
+fn metadata_json_with_relay_failure(
+    json: &str,
+    tenant: vocab::TenantId,
+    relay_failure_reason: Option<&'static str>,
+) -> Result<serde_json::Value, EngineError> {
+    let mut metadata = metadata_json_with_column_tenant(json, tenant)?;
+    let serde_json::Value::Object(ref mut map) = metadata else {
+        return Err(EngineError::new(EngineErrorKind::Invariant));
+    };
+    if let Some(reason) = relay_failure_reason {
+        map.insert(
+            KEY_RELAY_FAILURE_REASON.to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+    }
     Ok(metadata)
 }
 
@@ -1093,14 +1357,21 @@ mod tests {
     use super::{
         LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, STATUS_DLX,
         STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, backoff_seconds, dlx_decision,
-        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient, unix_secs,
+        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient,
+        relay_schema_for_known_contract, unix_secs, validate_publish_request_envelope,
     };
     use diport::{
-        EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE, MetadataError,
-        OpaqueActorId, OutboxActor, RESERVED_METADATA_KEYS,
+        EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
+        KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID, KEY_TRACE, MessageId, MetadataError,
+        OpaqueActorId, OutboxActor, PublishRequest, RESERVED_METADATA_KEYS, Topic as PublishTopic,
     };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn contract() -> vocab::ContractBinding {
+        vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH)
+    }
 
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
@@ -1108,7 +1379,15 @@ mod tests {
     }
 
     fn metadata(occurred_at_secs: i64) -> OutboxMetadata {
-        OutboxMetadata::new(occurred_at_secs, tenant())
+        OutboxMetadata::new(occurred_at_secs, tenant(), contract())
+    }
+
+    fn valid_publish_metadata() -> EnvelopeMetadata {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
+        md
     }
 
     #[allow(clippy::expect_used)]
@@ -1124,6 +1403,63 @@ mod tests {
             tenant(),
             vocab::ScopedTenant::Tenant,
         )
+    }
+
+    #[test]
+    fn validate_publish_request_envelope_rejects_missing_schema_permanently() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        let request = PublishRequest::new(
+            PublishTopic::new("session.created"),
+            MessageId::new("evt-missing-schema"),
+            b"payload".to_vec(),
+        )
+        .with_metadata(md);
+
+        let result = validate_publish_request_envelope(&request);
+        assert!(
+            result.is_err(),
+            "missing schema header must be rejected before publish"
+        );
+        let Err(err) = result else {
+            return;
+        };
+        assert_eq!(
+            err.reason().as_label(),
+            "envelope_missing_schema_version",
+            "missing schema must carry a structured relay validation reason"
+        );
+    }
+
+    #[test]
+    fn validate_publish_request_envelope_accepts_standard_header() {
+        let request = PublishRequest::new(
+            PublishTopic::new("session.created"),
+            MessageId::new("evt-standard-header"),
+            b"payload".to_vec(),
+        )
+        .with_metadata(valid_publish_metadata());
+
+        assert!(validate_publish_request_envelope(&request).is_ok());
+    }
+
+    #[test]
+    fn relay_backfills_known_contract_schema_headers_for_legacy_metadata() {
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+
+        relay_schema_for_known_contract(
+            &mut md,
+            "identity",
+            "identity.session-created",
+            "identity.session-created",
+        );
+
+        assert_eq!(md.get(KEY_SCHEMA_VERSION), Some("v1"));
+        assert_eq!(
+            md.get(KEY_SCHEMA_HASH),
+            Some("sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516")
+        );
     }
 
     // #1212 dlx 分流谓词表驱动：permanent 首投（new_count=1）即 dlx；transient 仅预算耗尽
@@ -1165,26 +1501,35 @@ mod tests {
                 "occurredAt": 1_700_000_000,
                 "subjectId": "tenant-42",
                 "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "schemaVersion": "v1",
+                "schemaHash": HASH,
             })
         );
         Ok(())
     }
 
-    // #262 F1：occurredAt 构造期必填——`new(secs)` 仅 occurredAt（无 subject）即含该 reserved key。
+    // #262/#1618 F1：标准 header 构造期必填——`new(secs, tenant, contract)` 即含该 reserved key 集。
     #[test]
-    fn metadata_new_always_carries_occurred_at() {
+    fn metadata_new_always_carries_standard_header() -> Result<(), serde_json::Error> {
         use super::OutboxEnvelope;
         let env = OutboxEnvelope::new("d".to_string(), "c".to_string(), metadata(0));
+        let parsed = serde_json::from_str::<serde_json::Value>(&env.metadata_json())?;
         assert_eq!(
-            env.metadata_json(),
-            r#"{"occurredAt":0,"tenantId":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#
+            parsed,
+            serde_json::json!({
+                "occurredAt": 0,
+                "tenantId": TENANT,
+                "schemaVersion": "v1",
+                "schemaHash": HASH,
+            })
         );
+        Ok(())
     }
 
     // F1 负向（anti-vacuity，INVARIANT OUTBOX-METADATA-FUNNEL-01）：reserved key 经 try_insert
     // fail-closed 拒；非 reserved key 接受并经 funnel 序列化（occurredAt 由 new 构造期注入）。
     #[test]
-    fn metadata_try_insert_rejects_reserved_key() {
+    fn metadata_try_insert_rejects_reserved_key() -> serde_json::Result<()> {
         for reserved in RESERVED_METADATA_KEYS {
             let mut m = metadata(0);
             assert_eq!(
@@ -1199,11 +1544,13 @@ mod tests {
                 .is_ok()
         );
         let env = super::OutboxEnvelope::new("d".to_string(), "c".to_string(), ok);
-        // 键序字母：occurredAt < tenantTier。
-        assert_eq!(
-            env.metadata_json(),
-            r#"{"occurredAt":0,"tenantId":"f47ac10b-58cc-4372-a567-0e02b2c3d479","tenantTier":"gold"}"#
-        );
+        let parsed = serde_json::from_str::<serde_json::Value>(&env.metadata_json())?;
+        assert_eq!(parsed["occurredAt"], 0);
+        assert_eq!(parsed["tenantId"], TENANT);
+        assert_eq!(parsed["schemaVersion"], "v1");
+        assert_eq!(parsed["schemaHash"], HASH);
+        assert_eq!(parsed["tenantTier"], "gold");
+        Ok(())
     }
 
     // #1129/#262 F1：new(secs) 构造期注入 reserved occurredAt（unix 秒 i64）；opaque subjectId 共存。
@@ -1280,12 +1627,14 @@ mod tests {
             r#""subjectId":"subj-1""#,
             r#""trace":"trace-abc""#,
             r#""correlation":"corr-xyz""#,
+            r#""schemaVersion":"v1""#,
         ] {
             assert!(
                 json.contains(kv),
                 "sealed setter metadata 应含 {kv}: {json}"
             );
         }
+        assert!(json.contains(HASH), "schemaHash 应存在: {json}");
         let parsed: serde_json::Value = serde_json::from_str(&json)?;
         assert_eq!(parsed["actor"]["kind"], "admin");
         assert_eq!(parsed["actor"]["id"], "actor-1");
@@ -1311,7 +1660,13 @@ mod tests {
     // #1193 drift-lock：sealed setter 注入的 trace / correlation key 必属 reserved 集（注入集 ⊆ 拒绝集）。
     #[test]
     fn reserved_setter_keys_are_reserved() {
-        for key in [KEY_TRACE, KEY_CORRELATION, KEY_ACTOR] {
+        for key in [
+            KEY_TRACE,
+            KEY_CORRELATION,
+            KEY_ACTOR,
+            KEY_SCHEMA_VERSION,
+            KEY_SCHEMA_HASH,
+        ] {
             assert!(
                 RESERVED_METADATA_KEYS.contains(&key),
                 "sealed setter 写的 {key} 必须在 RESERVED_METADATA_KEYS 内"
@@ -1571,7 +1926,7 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let ctx = diagctx::DiagnosticCtx::new(diagctx::CorrelationId::parse("corr-x").unwrap());
         let json = diagctx::scope(ctx, async {
-            let m = metadata_with_ambient(42, tenant());
+            let m = metadata_with_ambient(42, tenant(), contract());
             OutboxEnvelope::new("d".to_string(), "c".to_string(), m).metadata_json()
         })
         .await;
@@ -1583,13 +1938,17 @@ mod tests {
             json.contains(r#""occurredAt":42"#),
             "occurredAt 应存在: {json}"
         );
+        assert!(
+            json.contains(r#""schemaVersion":"v1""#) && json.contains(HASH),
+            "schema header 应存在: {json}"
+        );
     }
 
     // 无 scope → correlation 不注入（fail-open 省略），occurredAt 仍在。
     // anti-vacuity：无 scope 不 panic、不 Err（fail-open 契约）。
     #[tokio::test]
     async fn metadata_with_ambient_omits_correlation_outside_scope() {
-        let m = metadata_with_ambient(42, tenant());
+        let m = metadata_with_ambient(42, tenant(), contract());
         let json = OutboxEnvelope::new("d".to_string(), "c".to_string(), m).metadata_json();
         assert!(
             !json.contains("correlation"),
@@ -1598,6 +1957,10 @@ mod tests {
         assert!(
             json.contains(r#""occurredAt":42"#),
             "occurredAt 应存在: {json}"
+        );
+        assert!(
+            json.contains(r#""schemaVersion":"v1""#) && json.contains(HASH),
+            "schema header 应存在: {json}"
         );
     }
 
@@ -1613,7 +1976,7 @@ mod tests {
                 OutboxEnvelope::new(
                     "d".to_string(),
                     "c".to_string(),
-                    metadata_with_ambient(7, tenant()),
+                    metadata_with_ambient(7, tenant(), contract()),
                 )
                 .metadata_json()
             })
@@ -1635,7 +1998,7 @@ mod tests {
         let json = OutboxEnvelope::new(
             "d".to_string(),
             "c".to_string(),
-            metadata_with_ambient(7, tenant()),
+            metadata_with_ambient(7, tenant(), contract()),
         )
         .metadata_json();
         assert!(

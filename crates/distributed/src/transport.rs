@@ -188,7 +188,7 @@ impl DomainRequest {
         }
     }
 
-    /// Contract binding (target domain + contract id, same-source; the two cannot drift).
+    /// Contract binding (target domain + contract id + version + schema hash, same-source).
     pub fn contract(&self) -> &ContractBinding {
         &self.contract
     }
@@ -446,8 +446,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: 测试用 allowlisted literal 构造 TransportHeaders，item-level carve-out（error-handling.md §Carve-out）。
     fn request() -> DomainRequest {
+        const HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         DomainRequest::new(
-            ContractBinding::from_static("identity", "identity.login"),
+            ContractBinding::from_static("identity", "identity.login", "v1", HASH),
             DomainMethod::Post,
             "/api/v1/tenant-123/session",
             TransportHeaders::try_new(vec![("x-correlation-id".to_owned(), "corr-abc".to_owned())])
@@ -472,7 +474,7 @@ mod tests {
     #[test]
     fn domain_request_debug_redacts_sensitive_fields() {
         let dbg = format!("{:?}", request());
-        // contract binding is public routing metadata (domain + contract_id shown).
+        // contract binding is public routing metadata (domain + contract_id shown; schema fields remain typed accessors).
         assert!(dbg.contains("identity.login"), "{dbg}");
         assert!(dbg.contains("Post"), "{dbg}");
         // path / headers / body are secret-redacted: neither resource ids nor header values leak.
@@ -484,7 +486,7 @@ mod tests {
 
     #[test]
     fn contract_binding_is_single_source() {
-        // F1: domain + contract_id derive from one ContractBinding, so they cannot drift.
+        // F1: domain + contract_id + version + schema_hash derive from one ContractBinding, so they cannot drift.
         let req = request();
         assert_eq!(req.contract().domain(), "identity");
         assert_eq!(req.contract().contract_id(), "identity.login");

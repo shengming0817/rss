@@ -113,7 +113,8 @@ pub async fn emit_async(
 /// 消息 `payload` 经 `serde_json` 解码为 typed `R` 后交 `handler`；解码失败 = 永久 `reject`（坏 wire 不可
 /// 恢复 → DLX，不 Requeue 无限重投）。同 DispatchId（`Message.id` = dispatch key）二次投递 → claimer
 /// `try_claim` 返 `Duplicate` → handler 不调、幂等短路（= claimer 拒）。claim→handle→commit/dlx 全复用
-/// `run_consumer`，零新去重原语。
+/// `run_consumer`，零新去重原语。`contract` 同时提供 contract id 与 expected schema fingerprint，命令路径
+/// 与事件订阅路径共享同一 envelope header gate。
 ///
 /// **生命周期接线（调用方必须遵守）**：本函数 `.await` 后进入无限消费循环（持续驱动 `stream`）；
 /// 调用方**必须**将其 spawn 到组合根的 `ManagedResource` / `ShutdownStack` 可取消任务栈，以保证
@@ -130,7 +131,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     idempotency: Arc<S>,
     dlx: Box<DynDeadLetterStore<'static>>,
     domain: impl Into<String>,
-    contract_id: impl Into<String>,
+    contract: vocab::ContractBinding,
     topic: impl Into<String>,
     consumer_group: impl Into<String>,
     tenant_authority: Arc<TenantAuthority>,
@@ -142,7 +143,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     H: Fn(R) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = HandleResult> + Send + 'static,
 {
-    let contract_id_s: Arc<str> = contract_id.into().into();
+    let contract_id_s: Arc<str> = contract.contract_id().into();
     let topic_s: Arc<str> = topic.into().into();
     let meta = ConsumerMeta::new(
         domain.into(),
@@ -151,7 +152,8 @@ pub async fn register_command_handler<S, R, H, Fut>(
         &*topic_s,
         consumer_group,
         tenant_authority,
-    );
+    )
+    .with_expected_schema(contract.version(), contract.schema_hash());
     let handler = Arc::new(handler);
     run_consumer(
         stream,
@@ -205,8 +207,9 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{
-        DynOutboxEmitter, EnvelopeMetadata, EnvelopeSubjectId, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
-        Message, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
+        DynOutboxEmitter, EnvelopeMetadata, EnvelopeSubjectId, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, OpaqueActorId, OutboxActor, OutboxEmitError,
+        OutboxEmitter, OutboxEnvelopeParts,
     };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
@@ -214,6 +217,8 @@ mod tests {
     use crate::MAX_REDELIVERY;
     use crate::TenantAuthority;
     use crate::tenant_authority::TenantAuthorityBinding;
+
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// 测试用 lease 配置（续租间隔大，命令消费测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
@@ -223,6 +228,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
         vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    }
+
+    fn command_contract() -> vocab::ContractBinding {
+        vocab::ContractBinding::from_static("seed", "seed.do-thing", "v1", HASH)
     }
 
     #[allow(clippy::expect_used)]
@@ -335,7 +344,7 @@ mod tests {
             &emitter,
             dispatch,
             "seed.commands.do-thing",
-            vocab::ContractBinding::from_static("seed", "seed.do-thing"),
+            vocab::ContractBinding::from_static("seed", "seed.do-thing", "v1", HASH),
             tenant(),
             b"{\"amount\":7}".to_vec(),
             subject("subject-opaque"),
@@ -374,7 +383,7 @@ mod tests {
             &emitter,
             dispatch,
             "Not A Topic",
-            vocab::ContractBinding::from_static("seed", "seed.do-thing"),
+            vocab::ContractBinding::from_static("seed", "seed.do-thing", "v1", HASH),
             tenant(),
             b"{}".to_vec(),
             subject("s"),
@@ -509,7 +518,11 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn stream_of(items: &[(&str, &[u8])]) -> diport::MessageStream {
+    fn stream_of_with_schema(
+        items: &[(&str, &[u8])],
+        schema_version: &str,
+        schema_hash: &str,
+    ) -> diport::MessageStream {
         let msgs: Vec<Message> = items
             .iter()
             .map(|(id, p)| {
@@ -525,10 +538,16 @@ mod tests {
                     .expect("tenant authority test signing cannot fail");
                 md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
                 md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+                md.insert_wire_pair(KEY_SCHEMA_VERSION, schema_version);
+                md.insert_wire_pair(KEY_SCHEMA_HASH, schema_hash);
                 Message::new_with_metadata(*id, p.to_vec(), md)
             })
             .collect();
         Box::pin(futures::stream::iter(msgs))
+    }
+
+    fn stream_of(items: &[(&str, &[u8])]) -> diport::MessageStream {
+        stream_of_with_schema(items, "v1", HASH)
     }
 
     #[derive(serde::Deserialize)]
@@ -548,7 +567,7 @@ mod tests {
             idem.clone(),
             box_dlx(dlx.clone()),
             "seed",
-            "seed.do-thing",
+            command_contract(),
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
@@ -572,6 +591,48 @@ mod tests {
         assert_eq!(dlx.write_count(), 0, "无 DLX");
     }
 
+    #[tokio::test]
+    async fn register_rejects_schema_hash_mismatch_before_claim() {
+        const OTHER_HASH: &str =
+            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let idem = FakeStore::fresh();
+        let dlx = FakeDlx::new();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+
+        register_command_handler::<_, DoThing, _, _>(
+            stream_of_with_schema(
+                &[("dispatch-wrong-schema", b"{\"amount\":9}")],
+                "v1",
+                OTHER_HASH,
+            ),
+            idem.clone(),
+            box_dlx(dlx.clone()),
+            "seed",
+            command_contract(),
+            "seed.commands.do-thing",
+            "seed.do-thing.consumer",
+            tenant_authority(),
+            move |_req: DoThing| {
+                let calls2 = calls2.clone();
+                async move {
+                    calls2.fetch_add(1, Ordering::Relaxed);
+                    HandleResult::ack()
+                }
+            },
+            lease_cfg(),
+        )
+        .await;
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "schema mismatch must be rejected before typed handler"
+        );
+        assert_eq!(idem.commits(), 0, "schema mismatch must not claim/commit");
+        assert_eq!(dlx.write_count(), 0, "header gate must skip app DLX");
+    }
+
     /// 同 DispatchId 二次（claimer 返 Duplicate）→ handler 不调、不 commit（= claimer 拒，两阶段去重）。
     #[tokio::test]
     async fn register_duplicate_dispatch_id_rejected_by_claimer() {
@@ -584,7 +645,7 @@ mod tests {
             idem.clone(),
             box_dlx(dlx.clone()),
             "seed",
-            "seed.do-thing",
+            command_contract(),
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
@@ -616,7 +677,7 @@ mod tests {
             idem.clone(),
             box_dlx(dlx.clone()),
             "seed",
-            "seed.do-thing",
+            command_contract(),
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
@@ -653,7 +714,7 @@ mod tests {
             &emitter,
             dispatch,
             "seed.commands.fail",
-            vocab::ContractBinding::from_static("seed", "seed.fail"),
+            vocab::ContractBinding::from_static("seed", "seed.fail", "v1", HASH),
             tenant(),
             b"{}".to_vec(),
             subject("subject-opaque"),
@@ -680,7 +741,7 @@ mod tests {
             idem.clone(),
             box_dlx(dlx.clone()),
             "seed",
-            "seed.do-thing",
+            command_contract(),
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),

@@ -31,7 +31,7 @@ impl PgRoleBindingLifecycle {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now()), tenant)
+            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )

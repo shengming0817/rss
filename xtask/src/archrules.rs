@@ -1112,6 +1112,7 @@ fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
         | "xtask/src/assembly.rs"
         | "xtask/src/codegen.rs"
         | "xtask/src/command_symmetry.rs"
+        | "xtask/src/contract_binding_guard.rs"
         | "xtask/src/consistency_fixtures.rs"
         | "xtask/src/defergate.rs"
         | "xtask/src/doc_contracts.rs"

@@ -182,9 +182,13 @@ pub mod login {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.login";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.login");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.login",
+        "v1",
+        "sha256:a3658b1037bc219db4d090d659f4f9e94790a468a1ba6918f301dc39566d554b",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/login";
@@ -336,9 +340,13 @@ pub mod logout {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.logout";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.logout");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.logout",
+        "v1",
+        "sha256:472b836cd8a76a9eef01457a1e93585152b8c6e0246896d42bbd1754ebdbd962",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/logout";
@@ -494,9 +502,13 @@ pub mod password_change {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.password-change";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.password-change");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.password-change",
+        "v1",
+        "sha256:5b2df127b17dbea700129981a49729011007597f04bd9a6bc572703dd05110a1",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/password/change";
@@ -768,9 +780,13 @@ pub mod profile {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.profile";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.profile");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.profile",
+        "v1",
+        "sha256:f1358369143725cc688150244dde1c8336159de136d04894e2f0fc651b6314c3",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/profile";
@@ -947,9 +963,13 @@ pub mod refresh {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.refresh";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.refresh");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.refresh",
+        "v1",
+        "sha256:ff2d88cb737b1e52acf209a619f7dd3ee81417eb8e012389fe659fa7a7ba1cf9",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/refresh";
@@ -1101,9 +1121,13 @@ pub mod roles_assign {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.roles-assign";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.roles-assign");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.roles-assign",
+        "v1",
+        "sha256:2cb896982ba29b53666e9616a4edb8d3e866f2d514a068f16820e4e5faa1496a",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles/{roleId}/bindings";
@@ -1326,9 +1350,13 @@ pub mod roles_list {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.roles-list";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.roles-list");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.roles-list",
+        "v1",
+        "sha256:6bdaa66424e945b48b364503afd7a5dae1a552cd08af62045b5a43ffc4b9b993",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles";
@@ -1469,9 +1497,13 @@ pub mod roles_revoke {
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "identity.roles-revoke";
 
-    /// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.roles-revoke");
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.roles-revoke",
+        "v1",
+        "sha256:8ec303f31dbe2d3fdbccf5d6f7051befc9ef7cc665b705de7058732df3bc3477",
+    );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles/{roleId}/bindings/{subject}";

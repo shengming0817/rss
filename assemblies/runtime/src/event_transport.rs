@@ -225,6 +225,14 @@ impl BridgedSubscription {
         self.spec.topic
     }
 
+    fn schema_version(&self) -> &'static str {
+        self.spec.schema_version
+    }
+
+    fn schema_hash(&self) -> &'static str {
+        self.spec.schema_hash
+    }
+
     fn consumer(&self) -> &'static str {
         self.spec.consumer
     }
@@ -295,6 +303,7 @@ fn consumer_meta_for_subscription(
         subscription.group().as_str(),
         tenant_authority,
     )
+    .with_expected_schema(subscription.schema_version(), subscription.schema_hash())
 }
 
 pub fn bridge_generated_subscriptions(
@@ -1115,6 +1124,10 @@ fn build_dlx_payload_protector_from(
 
 #[cfg(test)]
 mod tests {
+    const TEST_SCHEMA_VERSION: &str = "v1";
+    const TEST_SCHEMA_HASH: &str =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     use super::*;
     use bootstrap::{SubscriberBinding, SubscriberHandlerError};
     use futures::future::BoxFuture;
@@ -1157,6 +1170,8 @@ mod tests {
         let spec = Box::leak(Box::new([SubscriptionSpec {
             contract_id,
             topic,
+            schema_version: TEST_SCHEMA_VERSION,
+            schema_hash: TEST_SCHEMA_HASH,
             consumer,
             group,
             partition_key: "none",
@@ -1225,6 +1240,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "test.event",
                 topic: "identity.session-created",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "test-consumer",
                 group: "test.group",
                 partition_key: "none",
@@ -1233,6 +1250,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "test.event",
                 topic: "identity.token-refreshed",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "test-consumer",
                 group: "test.group",
                 partition_key: "none",
@@ -1241,6 +1260,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "test.event",
                 topic: "audit.entry-written",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "test-consumer",
                 group: "test.group",
                 partition_key: "none",
@@ -1281,6 +1302,8 @@ mod tests {
         static SPECS: &[SubscriptionSpec] = &[SubscriptionSpec {
             contract_id: "identity.session-created",
             topic: "identity.session-created",
+            schema_version: TEST_SCHEMA_VERSION,
+            schema_hash: TEST_SCHEMA_HASH,
             consumer: "audit",
             group: "audit.session-created",
             partition_key: "none",
@@ -1360,6 +1383,8 @@ mod tests {
         static SPECS: &[SubscriptionSpec] = &[SubscriptionSpec {
             contract_id: "identity.session-created",
             topic: "identity.session-created",
+            schema_version: TEST_SCHEMA_VERSION,
+            schema_hash: TEST_SCHEMA_HASH,
             consumer: "audit",
             group: "audit.session-created",
             partition_key: "none",
@@ -1399,6 +1424,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "identity.session-created",
                 topic: "identity.session-created",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "audit",
                 group: "audit.session-created",
                 partition_key: "none",
@@ -1407,6 +1434,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "identity.session-created",
                 topic: "identity.session-created",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "audit",
                 group: "audit.session-created",
                 partition_key: "none",
@@ -1452,6 +1481,8 @@ mod tests {
         static SPECS: &[SubscriptionSpec] = &[SubscriptionSpec {
             contract_id: "identity.session-created",
             topic: "identity.session-created",
+            schema_version: TEST_SCHEMA_VERSION,
+            schema_hash: TEST_SCHEMA_HASH,
             consumer: "audit",
             group: "audit.session-created",
             partition_key: "none",
@@ -1497,6 +1528,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "identity.session-created",
                 topic: "identity.session-created",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "audit",
                 group: "audit.session-created",
                 partition_key: "none",
@@ -1505,6 +1538,8 @@ mod tests {
             SubscriptionSpec {
                 contract_id: "identity.token-refreshed",
                 topic: "identity.token-refreshed",
+                schema_version: TEST_SCHEMA_VERSION,
+                schema_hash: TEST_SCHEMA_HASH,
                 consumer: "audit",
                 group: "audit.token-refreshed",
                 partition_key: "none",

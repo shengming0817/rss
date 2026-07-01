@@ -309,7 +309,8 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
             OutboxPayload::from_reviewed_event_bytes(bytes),
         );
-        // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；business 只给 opaque subject。
+        // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
+        // business 只给 opaque subject。
         let subject_id =
             EnvelopeSubjectId::from_opaque(subject.clone()).map_err(|_| LoginError::EntryBuild)?;
         let actor_id =
@@ -2254,7 +2255,7 @@ mod tests {
         assert_eq!(payload.session_id, resp.data.session_id);
         assert_eq!(payload.occurred_at, 1_000);
 
-        // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id 同源，#1193）；
+        // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id + version + schema_hash 同源，#1193/#1618）；
         // subject_id = canonical user id（登录标识不进 broker metadata）。
         assert_eq!(*envelope.contract(), CONTRACT);
         assert_eq!(envelope.subject_id().as_str(), CANON_USER);

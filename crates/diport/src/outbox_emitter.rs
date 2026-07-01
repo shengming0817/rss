@@ -188,8 +188,8 @@ impl std::fmt::Debug for OutboxActor {
 
 /// outbox envelope 的 **opaque** 字段集（域传，adapter 组装成 provider 私有 envelope）。
 ///
-/// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain + contract_id
-/// 同源契约归属，#1193——business 不再裸 string 分别 author，杜绝 domain/contract_id 漂移）、`tenant` 是
+/// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain / contract_id /
+/// version / schema_hash 同源契约归属，#1193/#1618——business 不再裸 string 分别 author，杜绝 envelope header 漂移）、`tenant` 是
 /// typed 租户 scope（adapter 盖章进 reserved `tenantId`）、`subject_id` 是
 /// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
@@ -200,15 +200,15 @@ impl std::fmt::Debug for OutboxActor {
 /// 构造器分别 set domain/contract_id 字段，只能给 `(contract, tenant, subject_id)`。`contract` 的**预期**来源是
 /// `generated::event::{domain}_v1::CONTRACT`（契约派生常量 + golden 锁，CONTRACT-BINDING-FUNNEL-01，**Medium**）——
 /// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
-/// 同 `ContractOwner::of_domain`，统一守卫见 #1327 / #1091）。
+/// 同 `ContractOwner::of_domain`，由 `cargo xtask verify` 的 `contract-binding-guard` 收口生产调用站点）。
 ///
-/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Debug` 仅输出路由元数据（`contract` 的 domain / contract_id）；
+/// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Debug` 仅输出公开契约元数据（`contract` 的 domain / contract_id / version / schema_hash）；
 /// `subject_id` 固定渲染为 `<redacted>`；`partition_key` 只渲染 presence（Some/None），其值经 `PartitionKey`
 /// 脱敏 Debug 收口为 `<redacted>`（可能凭据级，如 tenant-scoped 含 sessionId，F3 #1211 review）。防主体标识 /
 /// 分区键经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
 #[derive(Clone)]
 pub struct OutboxEnvelopeParts {
-    /// 契约绑定（domain + contract_id 同源；`generated::…::CONTRACT`）。
+    /// 契约绑定（domain + contract_id + version + schema_hash 同源；`generated::…::CONTRACT`）。
     contract: vocab::ContractBinding,
     /// 租户标识（canonical UUID；adapter 将其盖章进 reserved `tenantId` envelope）。
     tenant: vocab::TenantId,
@@ -338,6 +338,7 @@ mod pii_debug {
     use super::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
@@ -367,7 +368,7 @@ mod pii_debug {
             "前提失效：普通字符串 Debug 未携 marker"
         );
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
             tenant(),
             subject("SECRET-SUBJECT"),
             actor(),
@@ -389,7 +390,7 @@ mod pii_debug {
         use consistency::PartitionKey;
 
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -406,7 +407,7 @@ mod pii_debug {
 
         // None 路径。
         let parts_none = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -428,6 +429,7 @@ mod partition_key_tests {
     use super::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
@@ -455,7 +457,7 @@ mod partition_key_tests {
     fn with_partition_key_roundtrips_through_into_parts() {
         let key = PartitionKey::parse("aggregate-123").unwrap();
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -474,7 +476,7 @@ mod partition_key_tests {
     #[test]
     fn without_partition_key_into_parts_gives_none() {
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -496,6 +498,7 @@ mod smoke {
     };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
     fn tenant() -> vocab::TenantId {
@@ -537,7 +540,7 @@ mod smoke {
             OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
         let env = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created"),
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
             tenant(),
             subject("subject-opaque"),
             actor(),

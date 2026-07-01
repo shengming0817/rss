@@ -52,6 +52,21 @@ consumer 凭据只允许 consume runtime 为其 declared 的 queue，并只能 b
 AMQP header / MQTT user property 中的 `tenantId` 不是授权凭据；消费侧写 app DLX 前只信任 relay 签发的
 `tenantAuthority`，不能把 broker header tenant 当作 authority。
 
+## 标准 Envelope Header
+
+broker-visible delivery envelope header 的标准字段为：
+
+- `tenantId`：canonical `vocab::TenantId`，缺失或非 canonical 时消费侧 typed header fail-closed。
+- `schemaVersion`：契约版本（`v{N}`），由 generated `CONTRACT.version()` 在 outbox metadata 构造期盖章。
+- `schemaHash`：声明 schema bundle 摘要（`sha256:<64 lowercase hex>`），由 generated `CONTRACT.schema_hash()` 在 outbox metadata 构造期盖章。
+- `occurredAt`：事件发生 unix 秒，producer 注入 `Clock` 后写入；缺失或非法只影响观测时间，不参与 relay 查询谓词。
+- `trace` / `correlation`：观测字段，缺失或畸形 fail-open，不阻断投递。
+- `tenantAuthority`：relay 签发的租户权威 token；消费侧写 app DLX 前必须验签。
+
+`subjectId` / `actor` / `principal` 与业务 free-form metadata 是 persisted-only，不进 AMQP header / MQTT
+user property。业务写入口 `EnvelopeMetadata::try_insert` 对所有 reserved key fail-closed；adapter 只在
+outbox relay/subscriber rehydrate 的受控路径调用 `insert_wire_pair`。
+
 ## 复用层选型（claimer / nonce，topology-gated）
 
 组合根的 outbox 消费幂等 claimer + 内部 listener service-token nonce store 同样经
@@ -270,7 +285,8 @@ producer 与 consumer **双侧**都收口到 codegen typed API。五层 funnel�
 ```
 业务/组合根
   → generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)
-      // per-command wrapper（codegen 生成）；bake CONTRACT_ID/TOPIC + 锁 typed Request
+      // per-command wrapper（codegen 生成）；bake CONTRACT/TOPIC + 锁 typed Request
+      // CONTRACT 必填（落 reserved schemaVersion/schemaHash + domain/contract_id 路由列）
       // tenant 必填（typed RLS scope，落 reserved tenantId envelope）
       // subject_id + actor 必填（typed envelope identity，persisted-only，不进 broker header）
       // idempotency_key 可选（Some→稳定 DispatchId / None→随机）
@@ -296,7 +312,9 @@ funneling 而无需依赖 runtime——组合根 bridge impl 是唯一衔接点�
 类型，`generated` 依赖图禁止命名它。wrapper 锁 topic + contract + typed Request + tenant +
 subject_id + actor + idempotency_key（后者经组合根 bridge mint DispatchId：`Some`→`from_idempotency_key`、
 `None`→随机）。`tenant` 是 `vocab::TenantId` typed scope，由 runtime 写入 reserved `tenantId`
-envelope；`subject_id` 是 `diport::EnvelopeSubjectId`，`actor` 是 `diport::OutboxActor`。两者由 runtime
+envelope；`contract` 是 generated `vocab::ContractBinding`，由 runtime 写入 reserved
+`schemaVersion` / `schemaHash` envelope；`subject_id` 是 `diport::EnvelopeSubjectId`，`actor` 是
+`diport::OutboxActor`。`subject_id` / `actor` 由 runtime
 写入 persisted metadata，broker header / MQTT user property 不可见；组合根 bridge 只透传，不从 payload 重新派生。
 command-topic `Entry::new` 是设计上的构造收口点，但 `Entry::new` 仍 public（类型层未 sealed，见 funnel
 图注；裸构造由 AST 治理门 + follow-up Hard 化守）。

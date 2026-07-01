@@ -297,7 +297,10 @@ mod tests {
 /// `extract_metadata` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
 #[cfg(test)]
 mod extract_metadata_tests {
-    use diport::{KEY_ACTOR, KEY_CORRELATION, KEY_PRINCIPAL, KEY_SUBJECT_ID};
+    use diport::{
+        KEY_ACTOR, KEY_CORRELATION, KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_SUBJECT_ID,
+    };
     use lapin::BasicProperties;
     use lapin::types::{AMQPValue, FieldTable};
 
@@ -324,9 +327,26 @@ mod extract_metadata_tests {
             KEY_CORRELATION.into(),
             AMQPValue::LongString(b"corr-9".to_vec().into()),
         );
+        table.insert(
+            KEY_SCHEMA_VERSION.into(),
+            AMQPValue::LongString(b"v1".to_vec().into()),
+        );
+        table.insert(
+            KEY_SCHEMA_HASH.into(),
+            AMQPValue::LongString(
+                b"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_vec()
+                    .into(),
+            ),
+        );
         let props = BasicProperties::default().with_headers(table);
         let md = extract_metadata(&props);
         assert_eq!(md.get(KEY_CORRELATION), Some("corr-9"));
+        assert_eq!(md.get(KEY_SCHEMA_VERSION), Some("v1"));
+        assert_eq!(
+            md.get(KEY_SCHEMA_HASH),
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
     }
 
     #[test]

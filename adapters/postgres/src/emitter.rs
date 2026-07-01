@@ -59,7 +59,8 @@ impl OutboxEmitter for PgEmitter {
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。`contract` 是契约派生
-        // 绑定（#1193：domain + contract_id 同源、business 不可伪造），routing 列经 `domain()`/`contract_id()` 取。
+        // 绑定（#1193/#1618：domain + contract_id + version + schema_hash 同源、business 不可伪造），
+        // routing 列经 `domain()`/`contract_id()` 取，标准 header 经 `version()`/`schema_hash()` 盖章。
         // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接
         // 编译期不可表达）；trace / correlation 经 sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
         // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（observability.md §Outbox Envelope）。
@@ -67,7 +68,7 @@ impl OutboxEmitter for PgEmitter {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now()), tenant)
+            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )

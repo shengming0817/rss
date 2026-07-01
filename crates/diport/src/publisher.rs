@@ -2,7 +2,7 @@
 
 use dynosaur::dynosaur;
 
-use crate::envelope::EnvelopeMetadata;
+use crate::envelope::{EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, MessageEnvelope};
 use crate::redacted::RedactedSource;
 use crate::redacted_bytes::RedactedBytes;
 use crate::subscriber::MessageId;
@@ -154,6 +154,20 @@ impl PublishRequest {
     /// occurredAt / tenantId / tenantAuthority）。
     pub fn metadata(&self) -> &EnvelopeMetadata {
         &self.metadata
+    }
+
+    /// 将发布请求视为标准 delivery envelope；缺 tenant/schema header 时 fail-closed。
+    pub fn try_envelope(&self) -> Result<MessageEnvelope, EnvelopeHeaderError> {
+        MessageEnvelope::try_from_metadata(
+            self.payload.as_bytes().to_vec(),
+            self.metadata.clone(),
+            None,
+        )
+    }
+
+    /// 只解析标准 delivery envelope header；不 materialize payload。
+    pub fn try_header(&self) -> Result<EnvelopeHeader, EnvelopeHeaderError> {
+        EnvelopeHeader::try_from_metadata(&self.metadata, None)
     }
 
     /// move 出 payload（adapter publish 避 clone）。

@@ -18,7 +18,7 @@ use diport::dead_letter_store::{
     DeadLetterRecord, DeadLetterStore as _, DeadLetterStoreError, DeadLetterSummary,
     DynDeadLetterStore,
 };
-use diport::{Acker as _, Message, MessageStream, WritableDeadLetterSource};
+use diport::{Acker as _, EnvelopeHeaderError, Message, MessageStream, WritableDeadLetterSource};
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
 
@@ -73,6 +73,8 @@ pub struct ConsumerMeta {
     contract_id: String,
     topic: String,
     consumer_group: String,
+    expected_schema_version: Option<String>,
+    expected_schema_hash: Option<String>,
     tenant_authority: Arc<TenantAuthority>,
 }
 
@@ -92,8 +94,20 @@ impl ConsumerMeta {
             contract_id: contract_id.into(),
             topic: topic.into(),
             consumer_group: consumer_group.into(),
+            expected_schema_version: None,
+            expected_schema_hash: None,
             tenant_authority,
         }
+    }
+
+    pub fn with_expected_schema(
+        mut self,
+        schema_version: impl Into<String>,
+        schema_hash: impl Into<String>,
+    ) -> Self {
+        self.expected_schema_version = Some(schema_version.into());
+        self.expected_schema_hash = Some(schema_hash.into());
+        self
     }
 
     pub(crate) fn domain(&self) -> &str {
@@ -134,6 +148,25 @@ impl ConsumerMeta {
             ),
             &msg.metadata,
         )
+    }
+
+    fn verify_envelope_header(&self, msg: &Message) -> Result<(), EnvelopeHeaderError> {
+        let header = msg.try_header()?;
+        if self
+            .expected_schema_version
+            .as_deref()
+            .is_some_and(|expected| header.schema_version().as_str() != expected)
+        {
+            return Err(EnvelopeHeaderError::SchemaVersionMismatch);
+        }
+        if self
+            .expected_schema_hash
+            .as_deref()
+            .is_some_and(|expected| header.schema_hash().as_str() != expected)
+        {
+            return Err(EnvelopeHeaderError::SchemaHashMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -224,7 +257,7 @@ pub async fn run_consumer_ackable<S, H>(
     }
 }
 
-/// 处理单条消息：parse key → try_claim → handle_fresh 或幂等短路。
+/// 处理单条消息：parse key → envelope header gate → try_claim → handle_fresh 或幂等短路。
 /// 从 `run_consumer` 抽出，控制各自认知复杂度 ≤15（rust-standards §工程护栏）。
 async fn consume_one<S, H>(
     idempotency: &Arc<S>,
@@ -254,6 +287,11 @@ async fn consume_one<S, H>(
             return;
         }
     };
+
+    if let Err(error) = meta.verify_envelope_header(&msg) {
+        reject_invalid_envelope_header(meta, &msg, acker, &error).await;
+        return;
+    }
 
     // 本次 claim 的租约令牌（消费方铸，uuid v4 内置于 mint）：try_claim 在 claimed 行 stamp，extend/commit/release 凭它 CAS。
     let lease = LeaseToken::mint();
@@ -710,6 +748,37 @@ fn record_dead_letter_skip(meta: &ConsumerMeta, reason: &'static str) {
     .increment(1);
 }
 
+async fn reject_invalid_envelope_header(
+    meta: &ConsumerMeta,
+    msg: &Message,
+    acker: Option<&diport::DynAcker<'static>>,
+    error: &EnvelopeHeaderError,
+) {
+    let reason = envelope_header_error_reason(error);
+    record_dead_letter_skip(meta, reason);
+    log_invalid_envelope_header(meta, msg, reason, error);
+    settle(
+        acker,
+        diport::AckAction::Reject,
+        meta.domain(),
+        msg.id.as_str(),
+    )
+    .await;
+}
+
+fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str {
+    match error {
+        EnvelopeHeaderError::MissingTenantId => "envelope_missing_tenant_id",
+        EnvelopeHeaderError::InvalidTenantId => "envelope_invalid_tenant_id",
+        EnvelopeHeaderError::MissingSchemaVersion => "envelope_missing_schema_version",
+        EnvelopeHeaderError::InvalidSchemaVersion => "envelope_invalid_schema_version",
+        EnvelopeHeaderError::MissingSchemaHash => "envelope_missing_schema_hash",
+        EnvelopeHeaderError::InvalidSchemaHash => "envelope_invalid_schema_hash",
+        EnvelopeHeaderError::SchemaVersionMismatch => "envelope_schema_version_mismatch",
+        EnvelopeHeaderError::SchemaHashMismatch => "envelope_schema_hash_mismatch",
+    }
+}
+
 // ── 日志 helper（tracing 宏收口，控制调用方认知复杂度 ≤15；同 lib.rs::log_dropped_* 范式）──
 
 /// IdemKey parse 失败（malformed id，fail-closed 不重投）。
@@ -754,6 +823,23 @@ fn log_duplicate(msg: &Message, meta: &ConsumerMeta) {
         contract_id = meta.contract_id(),
         topic = meta.topic(),
         "consumer: duplicate message, skipping"
+    );
+}
+
+fn log_invalid_envelope_header(
+    meta: &ConsumerMeta,
+    msg: &Message,
+    reason: &'static str,
+    error: &EnvelopeHeaderError,
+) {
+    tracing::warn!(
+        message_id = msg.id.as_str(),
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        reason,
+        error = %error,
+        "consumer: standard envelope header invalid, rejected before handler"
     );
 }
 
@@ -922,7 +1008,10 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{AckAction, Acker, DeliveryStream, DynAcker};
-    use diport::{EnvelopeMetadata, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message};
+    use diport::{
+        EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
+        Message,
+    };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
@@ -942,6 +1031,9 @@ mod tests {
     }
 
     // ── 工厂 helper ──────────────────────────────────────────────────────────
+
+    const SCHEMA_HASH: &str =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// 构造单条消息流（复用 lib.rs 范式）。
     fn stream_of(payloads: &[(&str, &[u8])]) -> diport::MessageStream {
@@ -983,8 +1075,13 @@ mod tests {
         )
     }
 
+    fn insert_schema_header(md: &mut EnvelopeMetadata) {
+        md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
+    }
+
     #[allow(clippy::expect_used)]
-    fn tenant_metadata_for(
+    fn tenant_authority_metadata_for(
         message_id: &str,
         domain: &str,
         contract_id: &str,
@@ -1003,6 +1100,26 @@ mod tests {
             .expect("tenant authority test signing cannot fail");
         md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+        md
+    }
+
+    fn tenant_authority_metadata(message_id: &str) -> EnvelopeMetadata {
+        tenant_authority_metadata_for(
+            message_id,
+            "identity",
+            "contract-session",
+            "session.created",
+        )
+    }
+
+    fn tenant_metadata_for(
+        message_id: &str,
+        domain: &str,
+        contract_id: &str,
+        topic: &str,
+    ) -> EnvelopeMetadata {
+        let mut md = tenant_authority_metadata_for(message_id, domain, contract_id, topic);
+        insert_schema_header(&mut md);
         md
     }
 
@@ -1028,6 +1145,7 @@ mod tests {
             "identity.session.consumer",
             tenant_authority(),
         )
+        .with_expected_schema("v1", SCHEMA_HASH)
     }
 
     fn cross_domain_meta() -> ConsumerMeta {
@@ -1039,6 +1157,7 @@ mod tests {
             "audit.session-created",
             tenant_authority(),
         )
+        .with_expected_schema("v1", SCHEMA_HASH)
     }
 
     // ── FakeIdempotencyStore ─────────────────────────────────────────────────
@@ -1685,17 +1804,117 @@ mod tests {
 
         assert_eq!(
             handler_count.load(Ordering::Relaxed),
-            1,
-            "handler 应调 1 次"
+            0,
+            "缺标准头应在 handler 前拒绝"
         );
+        assert_eq!(idem.claim_count(), 0, "缺标准头不得 try_claim");
         assert_eq!(dlx_store.write_count(), 0, "缺 tenant 不得写 app DLX");
-        assert_eq!(idem.commit_count(), 0, "未写 DLX 不得 commit done");
-        assert_eq!(idem.release_count(), 1, "缺 tenant 应释放 claim");
+        assert_eq!(idem.commit_count(), 0, "缺标准头不得 commit done");
+        assert_eq!(
+            idem.release_count(),
+            0,
+            "缺标准头发生在 claim 前，无需 release"
+        );
         assert_eq!(
             acker.settled_actions(),
             vec![AckAction::Reject],
             "ackable 缺 tenant 应 settle Reject"
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn tc3d_invalid_standard_header_rejects_before_claim() {
+        const OTHER_SCHEMA_HASH: &str =
+            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let cases: [(&str, EnvelopeMetadata, &str); 6] = [
+            (
+                "msg-no-schema",
+                tenant_authority_metadata("msg-no-schema"),
+                "envelope_missing_schema_version",
+            ),
+            {
+                let mut md = tenant_authority_metadata("msg-invalid-version");
+                md.insert_wire_pair(KEY_SCHEMA_VERSION, "1");
+                md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
+                ("msg-invalid-version", md, "envelope_invalid_schema_version")
+            },
+            {
+                let mut md = tenant_authority_metadata("msg-wrong-version");
+                md.insert_wire_pair(KEY_SCHEMA_VERSION, "v2");
+                md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
+                ("msg-wrong-version", md, "envelope_schema_version_mismatch")
+            },
+            {
+                let mut md = tenant_authority_metadata("msg-missing-hash");
+                md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+                ("msg-missing-hash", md, "envelope_missing_schema_hash")
+            },
+            {
+                let mut md = tenant_metadata("msg-invalid-hash");
+                md.insert_wire_pair(KEY_SCHEMA_HASH, "sha256:ABC");
+                ("msg-invalid-hash", md, "envelope_invalid_schema_hash")
+            },
+            {
+                let mut md = tenant_metadata("msg-wrong-hash");
+                md.insert_wire_pair(KEY_SCHEMA_HASH, OTHER_SCHEMA_HASH);
+                ("msg-wrong-hash", md, "envelope_schema_hash_mismatch")
+            },
+        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for (message_id, metadata, reason) in cases {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let idem = FakeIdempotencyStore::fresh();
+            let dlx_store = FakeDeadLetterStore::new();
+            let dlx = fake_dlx(dlx_store.clone());
+            let handler_count = Arc::new(AtomicU32::new(0));
+            let (acker, boxed) = FakeAcker::new();
+            let stream: DeliveryStream =
+                Box::pin(futures::stream::iter(vec![diport::Delivery::new(
+                    Message::new_with_metadata(message_id, b"payload".to_vec(), metadata),
+                    boxed,
+                )]));
+
+            metrics::with_local_recorder(&recorder, || {
+                rt.block_on(run_consumer_ackable(
+                    stream,
+                    idem.clone(),
+                    dlx,
+                    meta(),
+                    handler_ack(handler_count.clone()),
+                    lease_cfg_test(),
+                ));
+            });
+
+            assert_eq!(
+                handler_count.load(Ordering::Relaxed),
+                0,
+                "{message_id}: invalid standard header 不得进入 handler"
+            );
+            assert_eq!(idem.claim_count(), 0, "{message_id}: 不得 try_claim");
+            assert_eq!(idem.commit_count(), 0, "{message_id}: 不得 commit");
+            assert_eq!(idem.release_count(), 0, "{message_id}: 不得 release");
+            assert_eq!(
+                dlx_store.write_count(),
+                0,
+                "{message_id}: header gate 不写 app DLX"
+            );
+            assert_eq!(acker.settled_actions(), vec![AckAction::Reject]);
+            let rendered = handle.render();
+            assert!(
+                rendered.contains("consumer_dlx_skip_total"),
+                "{message_id}: 缺 skip metric: {rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("reason=\"{reason}\"")),
+                "{message_id}: 缺 reason={reason}: {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -1731,6 +1950,7 @@ mod tests {
                     .expect("sign expired token");
                 md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
                 md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+                insert_schema_header(&mut md);
                 ("msg-expired", md, "tenant_authority_expired")
             },
             {
@@ -1746,6 +1966,7 @@ mod tests {
                     .expect("sign mismatched token");
                 md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
                 md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+                insert_schema_header(&mut md);
                 ("msg-binding", md, "tenant_authority_binding_mismatch")
             },
         ];
@@ -2862,7 +3083,7 @@ mod tests {
                 .expect("producer traceparent");
 
             // broker 透传等价物：subscriber 从 header rehydrate 出带 trace 键的 Message。
-            let mut md = diport::EnvelopeMetadata::empty();
+            let mut md = tenant_metadata("msg-e2e-trace");
             md.insert_wire_pair(diport::KEY_TRACE, producer_tp.clone());
             let msg = Message::new_with_metadata("msg-e2e-trace", b"payload".to_vec(), md);
 

@@ -392,7 +392,6 @@ mod tests {
 
     use consistency::error::EngineError;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
-    use diport::EnvelopeMetadata;
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary,
         WritableDeadLetterSource,
@@ -400,6 +399,9 @@ mod tests {
     use diport::{
         AckAction, AckError, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
         ManagedResource, SubscriberError, Topic,
+    };
+    use diport::{
+        EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
     };
     use futures::StreamExt;
     use primitives::healthz::{HealthStatus, ProbeName};
@@ -412,6 +414,11 @@ mod tests {
         spawn_consumer_ackable, spawn_consumer_ackable_subscriber, spawn_relay,
     };
     use crate::TenantAuthority;
+    use crate::tenant_authority::TenantAuthorityBinding;
+
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const SCHEMA_HASH: &str =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
@@ -422,10 +429,7 @@ mod tests {
 
     /// 有限消息流（处理完即终止，确定性 join）。
     fn finite_stream(msgs: &[(&str, &[u8])]) -> MessageStream {
-        let msgs: Vec<Message> = msgs
-            .iter()
-            .map(|(id, p)| Message::new(*id, p.to_vec()))
-            .collect();
+        let msgs: Vec<Message> = msgs.iter().map(|(id, p)| message(id, p)).collect();
         Box::pin(futures::stream::iter(msgs))
     }
 
@@ -447,7 +451,7 @@ mod tests {
             .iter()
             .map(|(id, p)| {
                 Delivery::new(
-                    Message::new(*id, p.to_vec()),
+                    message(id, p),
                     DynAcker::new_box(RecordingAcker(actions.clone())),
                 )
             })
@@ -586,6 +590,30 @@ mod tests {
 
     fn error_dlx() -> Box<DynDeadLetterStore<'static>> {
         DynDeadLetterStore::new_box(ErrorDlx)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn message(id: &str, payload: &[u8]) -> Message {
+        let token = tenant_authority()
+            .sign(TenantAuthorityBinding::new(
+                tenant(),
+                "audit",
+                "contract-session",
+                "session.created",
+                id,
+            ))
+            .expect("tenant authority test signing cannot fail");
+        let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+        md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
+        Message::new_with_metadata(id, payload.to_vec(), md)
     }
 
     #[allow(clippy::expect_used)]

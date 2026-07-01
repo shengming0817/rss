@@ -142,6 +142,7 @@ outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` �
 |--------|------|-------|------|
 | `outbox_publish_total` | Counter | `domain`,`status` | relay 单条结算（status=ack/requeue/reject） |
 | `outbox_dlx_total` | Counter | `domain` | 永久失败进 DLX（= status=reject） |
+| `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`reason` | relay 发布前本地 envelope header 校验失败 |
 | `outbox_pending_depth` | Gauge | `domain` | pending 且到期行数（采样器） |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain` | 最老 pending 龄；无 pending ⇒ 0（非缺失） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=poll/publish；settle 并入 publish，见 §settle 相说明） |
@@ -152,6 +153,10 @@ label 闭值集纪律：
   `observ::EventLabel`（其 `DispositionLabel` 为 `Ack`/`Nack`/`Requeue`，与 outbox 的 `Reject` 语义不符）。
   `phase` 闭合于 `eventexec::RelayPhase::as_label()`（`poll`/`publish`）。两者均 crate 自有 `as_label()`
   闭映射——单源、无副本可漂移。
+- `outbox_relay_envelope_validation_failure_total.reason` 闭合于 postgres relay 的
+  `RelayEnvelopeValidationReason::as_label()`：`envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
+  `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
+  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch`。
 - `domain` label 值来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式，
   非请求/租户派生），基数有界，是 §HTTP Metrics domain Label 同款「assembly/config 声明 closed set」的
   合法低基数用法。`eventexec`（Service 层）依层矩阵不能依赖 `observ`，故这些 label 暂不经 `observ`
@@ -167,7 +172,7 @@ at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker �
 | metric | 类型 | label | 语义 |
 |--------|------|-------|------|
 | `consumer_settle_total` | Counter | `domain`,`action`,`outcome` | 单条 broker 结算（action=ack/requeue/reject；outcome=ok/error） |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed 路径主动跳过 app DLX 写入（reason=`tenant_authority_missing`/`tenant_authority_invalid`/`tenant_authority_expired`/`tenant_authority_binding_mismatch`；missing 覆盖缺 token 或缺 tenant metadata） |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed 路径主动跳过 app DLX 写入（tenant authority 或 envelope header 校验失败） |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | app DLX store 写入结果（outcome=ok/error）；error 同时把 consumer health 标为 degraded |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release claim 也失败；consumer 必须 broker `Reject`，不能 `Ack` 或 `Requeue` |
 
@@ -176,7 +181,11 @@ label 闭值集纪律：
 - `action` 闭合于 `diport::AckAction::as_label()`（`ack`/`requeue`/`reject`）；`outcome` 闭合于
   `ok`/`error`（settle 调用是否成功）——crate 自有闭映射，无副本可漂移。
 - `reason` 闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 `&'static str` 常量调用点；新增 reason
-  必须同步本表和 ops 契约，禁止把 handler error / tenant / payload 派生值写入 label。
+  必须同步本表和 ops 契约，禁止把 handler error / tenant / payload 派生值写入 label。当前闭集：
+  `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
+  `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
+  `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
+  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch`。
 - `consumer_dlx_write_total.outcome` 闭合于 `eventexec::consumer_worker` 的 DLX wrapper（`ok`/`error`），禁止把
   store 错误、message_id、tenant、payload 派生值写入 label。
 - `domain` 来自 `eventexec::ConsumerMeta`（注册期绑定的 domain/contract/topic 三元组），非请求/租户派生，基数有界。
@@ -215,7 +224,8 @@ label 闭值集纪律：
 
 dispatch span（`domain_transport.dispatch`）只记录 `transport_mode`、目标 `domain`、`contract_id`（三者均为
 路由元数据）；path / headers / body 经 `secure::Redact` 字段策略脱敏，不得明文进入 Debug 或 span 字段。契约身份
-经 `vocab::ContractBinding` 单源绑定（domain + contract_id 不可漂移）；caller-supplied header 经
+经 `vocab::ContractBinding` 单源绑定（domain + contract_id + version + schema_hash 同源；dispatch span 只取路由二字段）；
+caller-supplied header 经
 `distributed::TransportHeaders` fail-closed 白名单（仅诊断 / trace-context 头，拒 `authorization` / `cookie` /
 `x-tenant-id` 等），认证 / 租户 / 服务凭据由 adapter 从已认证信道铸造、不经此 seam。remote HTTP adapter 仅实现
 `DomainTransport`，不另建一套指标标签。
@@ -242,12 +252,16 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 
 ## Outbox Envelope
 
-trace、correlation、principal、occurred_at 等 reserved envelope 字段由 **adapter 在受控构造点经
-sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；同 crate 时间编码
+trace、correlation、principal、occurred_at、schemaVersion、schemaHash 等 reserved envelope 字段由 **adapter 在受控构造点经
+sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；schema 字段来自 generated
+`vocab::ContractBinding`；同 crate 时间编码
 单源）。`consistency::Entry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
 在 `diport`，`consistency` 不可依赖之）。注入源现状（#1296 分链）：
 
 - `occurred_at`：✅ 取注入 `Clock`（构造期必填，见下）。
+- `schemaVersion` / `schemaHash`：✅ 取 generated `CONTRACT`（`version()` / `schema_hash()`）并在
+  `OutboxMetadata::new(occurred_at, tenant, contract)` 构造期写入。缺失或非法时
+  `diport::EnvelopeHeader::try_from_metadata` fail-closed；`trace` / `correlation` 仍 fail-open。
 - `correlation`：✅ **源已接线**（#1160）——`diagctx` ambient 诊断信道（httpserve correlation middleware
   解析 `X-Correlation-ID` → `diagctx::scope` 绑定；三条 outbox emit 构造点经 `diagctx::correlation()`
   **fail-open** 读回 → `OutboxMetadata::with_correlation`）。按 ADR-002 §D1-bis 走独立可读诊断信道，**非**
@@ -270,7 +284,7 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
 broker header（AMQP `with_timestamp`(occurred_at) + transport-safe `FieldTable` headers / MQTT v5
 transport-safe `user_properties` / memory 直传）。broker-visible metadata 只能来自
 `EnvelopeMetadata::iter_transport_headers()` allowlist：`trace`、`correlation`、`occurredAt`、`tenantId`、
-`tenantAuthority`。`subjectId` / `principal` / `actor` 与业务 free-form metadata 只可经
+`tenantAuthority`、`schemaVersion`、`schemaHash`。`subjectId` / `principal` / `actor` 与业务 free-form metadata 只可经
 `iter_persisted_metadata()` 留在持久化 / dead-letter 边界，不回填 broker header。subscriber 反向只读 broker
 传来的 transport-safe 元数据，handler 经 `msg.metadata.get(..)` 消费。
 ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、CloudEvents binary content-mode。
@@ -284,10 +298,11 @@ issuer/audience、TTL、topic、contract、message id 与 tenant 绑定；缺失
 不信任 metadata `tenantId`、不写 app DLX，释放 claim 后 broker `Reject`，并记录
 `consumer_dlx_skip_total{reason=tenant_authority_*}`。不保留 unsigned metadata tenant 兼容路径。
 
-envelope 的**契约归属**（`domain` + `contract_id` 路由列）由 **typed `vocab::ContractBinding`** 承载（#1193）：
-两字段同源一份 `contract.toml`，经 `cargo xtask codegen` 派生为 `generated::event::{domain}_v1::CONTRACT`
-（golden 字节锁）；producer 经 `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 传入。domain +
-contract_id 收进**单一绑定值**，tenant 是 `vocab::TenantId` typed scope（adapter 盖章进 reserved `tenantId`
+envelope 的**契约归属**（`domain` + `contract_id` 路由列，`schemaVersion` + `schemaHash` header）由
+**typed `vocab::ContractBinding`** 承载（#1193/#1618）：四字段同源一份 `contract.toml` + declared schema bundle，
+经 `cargo xtask codegen` 派生为 `generated::{event,http,command}::*::CONTRACT`（golden 字节锁）；
+producer 经 `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 传入。domain + contract_id +
+version + schema_hash 收进**单一绑定值**，tenant 是 `vocab::TenantId` typed scope（adapter 盖章进 reserved `tenantId`
 envelope），subject 是 `diport::EnvelopeSubjectId`，actor 是 `diport::OutboxActor`。contract 归属、tenant
 scope、subject、actor 都不从裸 string / payload 重新派生；`OutboxEnvelopeParts` 字段私有
 （input-struct-field-exclusion，Hard）。
@@ -305,12 +320,14 @@ aggregate 路由键，不需要把 tenant id 再拼进 key；跨租同 business 
 
 两类 Hard 保证：
 
-- **producer 不可漏接** `occurred_at` / subject / actor：`occurred_at` 由 metadata funnel 的构造器
-  `OutboxMetadata::new(occurred_at)` **必填位置参**承载；subject / actor 由
+- **producer 不可漏接** `occurred_at` / `schemaVersion` / `schemaHash` / subject / actor：`occurred_at`
+  与 schema 字段由 metadata funnel 的构造器
+  `OutboxMetadata::new(occurred_at, tenant, contract)` **必填位置参**承载；subject / actor 由
   `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 必填。新增 outbox producer 缺任一项即编译错误。
 - **业务不可伪造** reserved key（producer + wire 两侧）：
   - producer 侧（落库）：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集
-    fail-closed 拒；reserved key（含 trace / correlation / subjectId / actor）只经 funnel 内 sealed setter 写入（INVARIANT
+    fail-closed 拒；reserved key（含 trace / correlation / subjectId / actor / schemaVersion / schemaHash）
+    只经 funnel 内 sealed setter / 构造器写入（INVARIANT
     OUTBOX-METADATA-FUNNEL-01）。
   - wire 侧（`diport::EnvelopeMetadata`，#1160）：业务 `try_insert` 同样 fail-closed 拒 reserved（Hard，
     类型层）；reserved-capable 透传写面 `insert_wire_pair` 仅 relay / subscriber 从**已 sealed 来源**
@@ -318,10 +335,10 @@ aggregate 路由键，不需要把 tenant id 再拼进 key；跨租同 business 
     adapter / 组合根（Medium，INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01）。**真正 Hard 锚点在 emit 层**：域只
     经 `OutboxEmitter::emit`（入参 `OutboxEnvelopeParts` 无 reserved 槽）发事件，永不构造 wire envelope。
 
-契约归属（`CONTRACT-BINDING-FUNNEL-01`）是 **Medium，非 Hard**：golden 锁（`codegen --check`）只保证 generated
-`CONTRACT` 常量正确、不漂移；`vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务 crate **仍可裸构造**
-任意绑定（residual，跨 crate sealing 在 vocab 基础层不可 Hard 强制，同 `ContractOwner::of_domain` #1091）。「业务
-只用 generated `CONTRACT`、不伪造」当前靠约定 + golden；统一机器守卫见 **#1327**。
+契约归属（`CONTRACT-BINDING-FUNNEL-01`）是 **Medium，非 Hard**：golden 锁（`codegen --check`）保证 generated
+`CONTRACT` 常量正确、不漂移；`cargo xtask verify` 的 `contract-binding-guard` 扫生产 Rust AST，禁止非测试代码裸调用
+`vocab::ContractBinding::from_static`。残余原因：`from_static` 必须保持 `pub const fn` 供 generated 跨 crate
+发射常量，跨 crate sealing 在 vocab 基础层不可 Hard 强制（同 `ContractOwner::of_domain` #1091）。
 
 ## Audit
 

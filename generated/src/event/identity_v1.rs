@@ -94,12 +94,16 @@ pub mod role_assigned {
     /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const TOPIC: &str = "identity.role-assigned";
 
-    /// 契约绑定（`domain` + `id` 同源类型化常量，#1193）。outbox envelope / 事件 producer 以
+    /// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
     /// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
-    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` 派生；勿手改（golden 字节锁，INVARIANT
+    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.role-assigned");
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.role-assigned",
+        "v1",
+        "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
+    );
 
     /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
     /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
@@ -203,12 +207,16 @@ pub mod role_revoked {
     /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const TOPIC: &str = "identity.role-revoked";
 
-    /// 契约绑定（`domain` + `id` 同源类型化常量，#1193）。outbox envelope / 事件 producer 以
+    /// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
     /// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
-    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` 派生；勿手改（golden 字节锁，INVARIANT
+    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.role-revoked");
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.role-revoked",
+        "v1",
+        "sha256:5907e4ae46c66b849cd4edca354d4e11abdd6209ad898f37196002fb65ed9a51",
+    );
 
     /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
     /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
@@ -305,12 +313,16 @@ pub mod session_created {
     /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const TOPIC: &str = "identity.session-created";
 
-    /// 契约绑定（`domain` + `id` 同源类型化常量，#1193）。outbox envelope / 事件 producer 以
+    /// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
     /// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
-    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` 派生；勿手改（golden 字节锁，INVARIANT
+    /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding =
-        ::vocab::ContractBinding::from_static("identity", "identity.session-created");
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.session-created",
+        "v1",
+        "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516",
+    );
 
     /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
     /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
@@ -321,6 +333,8 @@ pub mod session_created {
         &[super::super::SubscriptionSpec {
             contract_id: CONTRACT_ID,
             topic: TOPIC,
+            schema_version: CONTRACT.version(),
+            schema_hash: CONTRACT.schema_hash(),
             consumer: "audit",
             group: "audit.session-created",
             partition_key: "none",

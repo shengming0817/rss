@@ -129,6 +129,10 @@ pub struct SeedEchoResponse {
 /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "seed.echo";
 
-/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("_seed", "seed.echo");
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+    "_seed",
+    "seed.echo",
+    "v1",
+    "sha256:35ea782aff9af08bbdc562c341a9be18e6fb9aa69fd79f1cfc776cf2dd5c0eb0",
+);

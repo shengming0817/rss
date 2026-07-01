@@ -54,10 +54,10 @@ pub trait CommandRegister {
     type Outcome;
     /// `register` 的返回类型（如 `Result<(), KernelError>`）。
     type Output;
-    /// 把 typed `R` handler 绑到 `contract_id` / `topic`。typed decode + claimer 接线在实现侧。
+    /// 把 typed `R` handler 绑到 `contract` / `topic`。typed decode + claimer 接线在实现侧。
     fn register<R, H, Fut>(
         &mut self,
-        contract_id: &'static str,
+        contract: ::vocab::ContractBinding,
         topic: &'static str,
         handler: H,
     ) -> Self::Output

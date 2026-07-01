@@ -1,0 +1,22 @@
+error[E0451]: fields `tenant_id`, `schema_version`, `schema_hash`, `occurred_at_secs`, `trace`, `correlation`, `tenant_authority` and `partition_key` of struct `EnvelopeHeader` are private
+  --> tests/ui/envelope_header_private_fields_fail.rs:7:9
+   |
+ 6 |     let _ = EnvelopeHeader {
+   |             -------------- in this type
+ 7 |         tenant_id: tenant,
+   |         ^^^^^^^^^ private field
+ 8 |         schema_version: EnvelopeSchemaVersion::parse("v1").expect("version"),
+   |         ^^^^^^^^^^^^^^ private field
+ 9 |         schema_hash: EnvelopeSchemaHash::parse(
+   |         ^^^^^^^^^^^ private field
+...
+13 |         occurred_at_secs: None,
+   |         ^^^^^^^^^^^^^^^^ private field
+14 |         trace: None,
+   |         ^^^^^ private field
+15 |         correlation: None,
+   |         ^^^^^^^^^^^ private field
+16 |         tenant_authority: None,
+   |         ^^^^^^^^^^^^^^^^ private field
+17 |         partition_key: None,
+   |         ^^^^^^^^^^^^^ private field

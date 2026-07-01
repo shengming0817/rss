@@ -20,6 +20,7 @@ prettyplease = { workspace = true }
 syn = { workspace = true, features = ["visit"] }   # visit: CMD-FUNNEL-01 守卫 AST 扫描子进程构造点
 proc-macro2 = { workspace = true }
 semver = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

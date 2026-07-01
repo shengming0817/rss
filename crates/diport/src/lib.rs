@@ -130,8 +130,10 @@ pub use dead_letter_store::{
     DynDeadLetterStore, WritableDeadLetterSource,
 };
 pub use envelope::{
-    EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SUBJECT_ID,
-    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, MetadataError, RESERVED_METADATA_KEYS,
+    EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSchemaHash,
+    EnvelopeSchemaVersion, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
+    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
+    KEY_TRACE, MessageEnvelope, MetadataError, RESERVED_METADATA_KEYS,
 };
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,

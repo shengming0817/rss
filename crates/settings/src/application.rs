@@ -262,7 +262,8 @@ impl SettingsService {
             IdemKey::parse(&event_id).map_err(|_| SettingsServiceError::EntryBuild)?,
             OutboxPayload::from_reviewed_event_bytes(bytes),
         );
-        // 契约归属经 generated `CONTRACT`（domain + contract_id 同源绑定，#1193）；subject = opaque 配置 key。
+        // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
+        // subject = opaque 配置 key。
         let subject_id = EnvelopeSubjectId::from_opaque(key.as_str())
             .map_err(|_| SettingsServiceError::EntryBuild)?;
         let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor);

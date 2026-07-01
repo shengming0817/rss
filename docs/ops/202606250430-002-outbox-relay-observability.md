@@ -17,10 +17,11 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 |--------|------|-------|--------|------|
 | `outbox_publish_total` | Counter | `domain`,`status` | relay tick 逐条结算 | status=`ack`(已投递)/`requeue`(退避重投)/`reject`(进 DLX) |
 | `outbox_dlx_total` | Counter | `domain` | relay 结算 Reject 时 | 永久失败进 DLX；= `outbox_publish_total{status="reject"}` |
+| `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`reason` | relay 发布前本地 envelope header 校验失败 | reason 为 envelope header 闭集 |
 | `outbox_pending_depth` | Gauge | `domain` | backlog 采样器（默认 ≤60s/轮） | status=pending 且到期行数 |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain` | backlog 采样器 | `now()−min(created_at)`；**无 pending ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`poll`(扫描相)/`publish`(逐条中继+adapter 内 settle 相) |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；reason=`tenant_authority_missing`/`tenant_authority_invalid`/`tenant_authority_expired`/`tenant_authority_binding_mismatch`；`tenant_authority_missing` 覆盖缺 token 或缺 tenant metadata |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；reason 为 tenant authority 或 envelope header 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；consumer broker `Reject`，避免 Requeue 后被 Duplicate→Ack 吞掉 |
 
@@ -33,7 +34,14 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   非请求/租户派生，基数有界。**不**经 `observ` typed enum（层矩阵禁 `eventexec`→`observ`）；收敛进 `observ`
   词表统一 otel 映射是 #1076 后续项。
 - `consumer_dlx_skip_total.reason`：闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 literal 调用点；
-  禁止携带 handler error、tenant、message id 或 payload 派生值。
+  禁止携带 handler error、tenant、message id 或 payload 派生值。当前闭集：
+  `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
+  `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
+  `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
+  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch`。
+- `outbox_relay_envelope_validation_failure_total.reason`：闭合于 postgres relay 的 envelope validation reason，
+  与 consumer envelope reason 同一字符串集合；该 metric 只描述本地 header gate，broker publish failure
+  仍看 `outbox_publish_total` / `outbox_dlx_total`。
 - `consumer_dlx_write_total.outcome`：闭合于 `eventexec::consumer_worker` 的 DLX wrapper，值 `ok`/`error`；
   禁止携带 handler error、tenant、message id 或 payload 派生值。
 
@@ -54,6 +62,9 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 `consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支。`consumer_dlx_write_total{outcome="error"}`
 是告警面：DLX 未落库时 consumer 会 release inbox claim；release 成功则 broker Requeue，release 失败则
 `consumer_release_failed_total{domain}` 增长并 broker Reject，必须由 degraded health + metric 共同暴露。
+`outbox_relay_envelope_validation_failure_total` 不单独配置告警：对应行会按 permanent failure 进入 outbox
+DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历史行缺 schema header、schemaVersion
+格式错误、schemaHash 格式错误等本地 envelope 问题；对应 dead_letter metadata 会带 `relayFailureReason`。
 
 规则文件 `docs/ops/outbox-relay-alerts.rules.yaml`，`promtool check rules` 校验。
 

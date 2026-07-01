@@ -290,9 +290,13 @@ pub mod defaults {
 /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "audit.list-entries";
 
-/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("audit", "audit.list-entries");
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+    "audit",
+    "audit.list-entries",
+    "v1",
+    "sha256:30a15ee2a02c082bf79c495a9f53c3c6b829cb14b1496ef7d70b4590809ebc44",
+);
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/audit/entries";

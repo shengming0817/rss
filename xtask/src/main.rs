@@ -48,6 +48,7 @@ mod codegen;
 mod command_symmetry;
 mod consistency_fixtures;
 mod contract;
+mod contract_binding_guard;
 mod coverage;
 mod defergate;
 mod diagnostic;

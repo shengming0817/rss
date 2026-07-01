@@ -263,6 +263,8 @@ fn envelope_metadata(
 ) -> Result<diport::EnvelopeMetadata, Box<dyn Error + Send + Sync>> {
     let mut metadata = diport::EnvelopeMetadata::empty();
     metadata.insert_wire_pair(diport::KEY_TENANT_ID, envelope.tenant().to_string());
+    metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, envelope.contract().version());
+    metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, envelope.contract().schema_hash());
     if let Some(signer) = signer {
         let token = signer.sign_tenant_metadata(TenantMetadataBinding::new(
             envelope.tenant(),
@@ -1151,6 +1153,7 @@ mod tests {
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TOPIC: &str = "identity.session-created";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[derive(Default)]
     struct RecordingTenantSigner {
@@ -1300,7 +1303,7 @@ mod tests {
         let tenant =
             vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let env = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", TOPIC),
+            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
             tenant,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque").expect("subject"),
             diport::OutboxActor::scoped(
@@ -1322,6 +1325,8 @@ mod tests {
             Some(vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
             "MemEmitter 应透传 tenantId metadata"
         );
+        assert_eq!(msg.metadata.get(diport::KEY_SCHEMA_VERSION), Some("v1"));
+        assert_eq!(msg.metadata.get(diport::KEY_SCHEMA_HASH), Some(HASH));
         assert_eq!(
             msg.metadata.get(diport::KEY_SUBJECT_ID),
             None,
@@ -1352,7 +1357,7 @@ mod tests {
         );
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let env = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", TOPIC),
+            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
             tenant,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque").expect("subject"),
             diport::OutboxActor::scoped(
@@ -1408,7 +1413,7 @@ mod tests {
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
         let envelope = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", TOPIC),
+            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
             tenant,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
             diport::OutboxActor::scoped(

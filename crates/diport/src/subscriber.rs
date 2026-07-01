@@ -11,7 +11,7 @@ use dynosaur::dynosaur;
 use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
-use crate::envelope::EnvelopeMetadata;
+use crate::envelope::{EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, MessageEnvelope};
 use crate::publisher::Topic;
 use crate::redacted::RedactedSource;
 use crate::redacted_bytes::RedactedBytes;
@@ -76,6 +76,20 @@ impl Message {
             metadata,
             payload: RedactedBytes::new(payload),
         }
+    }
+
+    /// 将订阅消息视为标准 delivery envelope；缺 tenant/schema header 时 fail-closed。
+    pub fn try_envelope(&self) -> Result<MessageEnvelope, EnvelopeHeaderError> {
+        MessageEnvelope::try_from_metadata(
+            self.payload.as_bytes().to_vec(),
+            self.metadata.clone(),
+            None,
+        )
+    }
+
+    /// 只解析标准 delivery envelope header；不 materialize payload。
+    pub fn try_header(&self) -> Result<EnvelopeHeader, EnvelopeHeaderError> {
+        EnvelopeHeader::try_from_metadata(&self.metadata, None)
     }
 }
 

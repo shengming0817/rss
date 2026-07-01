@@ -51,6 +51,25 @@ fn actor_for(tenant: vocab::TenantId) -> diport::OutboxActor {
 
 /// 测试用固定事件发生时刻（unix 秒）——t10/t11 断言 envelope `occurred_at`（#1129）。
 const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
+const TEST_SCHEMA_HASH: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn test_contract() -> vocab::ContractBinding {
+    vocab::ContractBinding::from_static("test", "test.contract", "v1", TEST_SCHEMA_HASH)
+}
+
+fn session_contract() -> vocab::ContractBinding {
+    vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC, "v1", TEST_SCHEMA_HASH)
+}
+
+fn config_contract() -> vocab::ContractBinding {
+    vocab::ContractBinding::from_static(
+        "settings",
+        CONFIG_VERSION_CHANGED_TOPIC,
+        "v1",
+        TEST_SCHEMA_HASH,
+    )
+}
 
 /// 固定时钟时刻（`Duration::from_secs` 取 `u64`）。
 fn fixed_clock_time() -> std::time::SystemTime {
@@ -61,6 +80,18 @@ fn fixed_clock_time() -> std::time::SystemTime {
 /// 避免断言端 `u64` 字面量与写入端 `i64` 在边界值上漂移（review F4）。
 fn expected_occurred_at() -> i64 {
     crate::outbox::unix_secs(fixed_clock_time())
+}
+
+fn assert_metadata_text_has_standard_schema_header(metadata: &str, context: &str) {
+    let compact = metadata.replace(' ', "");
+    assert!(
+        compact.contains(r#""schemaVersion":"v1""#),
+        "{context} metadata 应含 schemaVersion: {metadata}"
+    );
+    assert!(
+        compact.contains(&format!(r#""schemaHash":"{TEST_SCHEMA_HASH}""#)),
+        "{context} metadata 应含 schemaHash: {metadata}"
+    );
 }
 
 /// 集成测试固定时钟（impl [`diport::Clock`]）：确定性 `occurred_at`，不取系统时钟（#1129）。
@@ -702,16 +733,17 @@ fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
         "contract-1".to_string(),
-        OutboxMetadata::new(0, test_tenant()).with_subject_id(subject_id(event_id)),
+        OutboxMetadata::new(0, test_tenant(), test_contract())
+            .with_subject_id(subject_id(event_id)),
     )
 }
 
-/// 构造测试 envelope（domain + contract_id，仅占位 `occurred_at=0` 的 metadata）——去重 `OutboxEnvelope::new` 内联重复。
+/// 构造测试 envelope（routing domain + contract_id；metadata 带标准 schema header，仅占位 `occurred_at=0`）——去重 `OutboxEnvelope::new` 内联重复。
 fn make_test_env(domain: &str, contract_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
         contract_id.to_string(),
-        OutboxMetadata::new(0, test_tenant()),
+        OutboxMetadata::new(0, test_tenant(), test_contract()),
     )
 }
 
@@ -724,7 +756,7 @@ fn make_test_env_for_tenant(
     OutboxEnvelope::new(
         domain.to_string(),
         contract_id.to_string(),
-        OutboxMetadata::new(0, tenant),
+        OutboxMetadata::new(0, tenant, test_contract()),
     )
 }
 
@@ -1707,7 +1739,7 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0, test_tenant())
+                OutboxMetadata::new(0, test_tenant(), test_contract())
                     .with_subject_id(subject_id(event_id.as_str())),
             );
             Box::pin(async move {
@@ -1751,7 +1783,7 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0, test_tenant())
+                OutboxMetadata::new(0, test_tenant(), test_contract())
                     .with_subject_id(subject_id(event_id.as_str())),
             );
             Box::pin(async move {
@@ -1798,7 +1830,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
             let env = OutboxEnvelope::new(
                 env.domain().to_string(),
                 env.contract_id().to_string(),
-                OutboxMetadata::new(0, test_tenant()),
+                OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
                 append_outbox(cap, &entry, &env).await?;
@@ -1846,7 +1878,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
             let env = OutboxEnvelope::new(
                 "t4-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(0, test_tenant()),
+                OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
                 append_outbox(cap, &entry, &env).await?;
@@ -1917,7 +1949,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
             let env = OutboxEnvelope::new(
                 "t5-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(0, test_tenant()),
+                OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
                 append_outbox(cap, &entry, &env).await?;
@@ -1976,7 +2008,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
             let env = OutboxEnvelope::new(
                 "t5b-domain".to_string(),
                 "c".to_string(),
-                OutboxMetadata::new(0, test_tenant()),
+                OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
                 append_outbox(cap, &entry, &env).await?;
@@ -3288,7 +3320,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 // append_outbox + 事务，故原子性结构上同源。本测覆盖 emit commit 路径的写正确性（acc #1 的 entry 形态）。
 
 /// PgEmitter::emit 落 durable outbox：恰 1 行 pending，event_id(=EventId)/domain/topic 正确，
-/// metadata 仅含 opaque subjectId（无 PII / 无 reserved key，FR-020）。
+/// metadata 含标准 header + opaque subjectId（无完整 PII，FR-020）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path——Topic/IdemKey parse 已知合法值；函数级 item-level carve-out（error-handling.md §Carve-out）。
@@ -3312,7 +3344,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         .emit(
             entry,
             OutboxEnvelopeParts::new(
-                vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                session_contract(),
                 tenant,
                 subject_id("subj-opaque-77"),
                 actor_for(tenant),
@@ -3332,7 +3364,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     // contract_id 列 = ContractBinding.contract_id()（#1193 typed 绑定经 adapter 落库的 drift-lock）。
     assert_eq!(row.3, "identity.session-created", "contract_id");
     assert_eq!(row.4, "pending", "新 entry pending 待 relay");
-    // metadata 含 opaque subjectId + actor + sealed 注入的 reserved occurred_at（#1129）；无完整 PII（FR-020 funnel）。
+    // metadata 含标准 header + opaque subjectId + actor + sealed 注入的 reserved occurred_at（#1129/#1618）；无完整 PII（FR-020 funnel）。
     assert_eq!(
         row.5.get("subjectId").and_then(serde_json::Value::as_str),
         Some("subj-opaque-77"),
@@ -3343,6 +3375,20 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         row.5.get("occurredAt").and_then(serde_json::Value::as_i64),
         Some(expected_occurred_at()),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
+        row.5
+    );
+    assert_eq!(
+        row.5
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_str),
+        Some("v1"),
+        "metadata 应含 schemaVersion: {}",
+        row.5
+    );
+    assert_eq!(
+        row.5.get("schemaHash").and_then(serde_json::Value::as_str),
+        Some(TEST_SCHEMA_HASH),
+        "metadata 应含 schemaHash: {}",
         row.5
     );
     let Some(actor) = row.5.get("actor") else {
@@ -3421,7 +3467,7 @@ fn session_entry(event_id: &str) -> Entry {
 /// 构造 session-created envelope（opaque subject）。
 fn session_envelope() -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
-        vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+        session_contract(),
         test_tenant(),
         subject_id("subj-opaque-cotx"),
         actor_for(test_tenant()),
@@ -3486,6 +3532,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
         "co-tx outbox metadata 应含 sealed 注入的 occurred_at: {}",
         meta.0
     );
+    assert_metadata_text_has_standard_schema_header(&meta.0, "co-tx outbox");
 
     store.shutdown().await?;
     Ok(())
@@ -3507,7 +3554,7 @@ async fn t11b_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let session =
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
     let envelope = OutboxEnvelopeParts::new(
-        vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+        session_contract(),
         envelope_tenant,
         subject_id("subj-opaque-cotx"),
         actor_for(envelope_tenant),
@@ -3550,7 +3597,8 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
     let env = OutboxEnvelope::new(
         "identity".to_string(),
         SESSION_CREATED_TOPIC.to_string(),
-        OutboxMetadata::new(0, test_tenant()).with_subject_id(subject_id("subj-12")),
+        OutboxMetadata::new(0, test_tenant(), test_contract())
+            .with_subject_id(subject_id("subj-12")),
     );
     let tenant = COTX_TENANT_A.to_string();
     let sid = session_id.clone();
@@ -3654,6 +3702,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
         "幂等重写不应覆盖首次 occurred_at: {}",
         meta.0
     );
+    assert_metadata_text_has_standard_schema_header(&meta.0, "idempotent rewrite outbox");
 
     store.shutdown().await?;
     Ok(())
@@ -4735,7 +4784,7 @@ async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
         .emit(
             entry,
             OutboxEnvelopeParts::new(
-                vocab::ContractBinding::from_static("identity", SESSION_CREATED_TOPIC),
+                session_contract(),
                 test_tenant(),
                 subject_id("subj-opaque-30"),
                 actor_for(test_tenant()),
@@ -5459,7 +5508,7 @@ fn config_outbox_entry(event_id: &str) -> Entry {
 /// 构造 config-version-changed envelope（opaque subject = 配置 key）。
 fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
-        vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
+        config_contract(),
         config_tenant(),
         subject_id(subject),
         actor_for(config_tenant()),
@@ -6226,6 +6275,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
         "bundle writer co-tx outbox metadata 应含注入 clock 的 occurred_at: {}",
         cfg_meta.0
     );
+    assert_metadata_text_has_standard_schema_header(&cfg_meta.0, "bundle writer co-tx outbox");
     Ok(())
 }
 
@@ -6553,6 +6603,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         "config co-tx outbox metadata 应含构造期注入的 occurred_at: {}",
         cfg_meta.0
     );
+    assert_metadata_text_has_standard_schema_header(&cfg_meta.0, "config co-tx outbox");
     // 值经 find 取回正确。
     assert_eq!(
         repo.find(tenant, &SettingKey::parse("app.k").unwrap())
@@ -6576,7 +6627,7 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5b-evt");
     let envelope = OutboxEnvelopeParts::new(
-        vocab::ContractBinding::from_static("settings", CONFIG_VERSION_CHANGED_TOPIC),
+        config_contract(),
         TenantId::parse(CONFIG_TENANT_B).unwrap(),
         subject_id("app.mismatch"),
         actor_for(TenantId::parse(CONFIG_TENANT_B).unwrap()),
@@ -6623,7 +6674,8 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     let env = OutboxEnvelope::new(
         "settings".to_string(),
         CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-        OutboxMetadata::new(0, test_tenant()).with_subject_id(subject_id("app.rollback")),
+        OutboxMetadata::new(0, test_tenant(), test_contract())
+            .with_subject_id(subject_id("app.rollback")),
     );
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
@@ -6774,7 +6826,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                 let env = OutboxEnvelope::new(
                     "settings".to_string(),
                     CONFIG_VERSION_CHANGED_TOPIC.to_string(),
-                    OutboxMetadata::new(0, test_tenant())
+                    OutboxMetadata::new(0, test_tenant(), test_contract())
                         .with_subject_id(subject_id("app.cotx-rollback")),
                 );
                 co_tx_with_outbox(
@@ -6943,10 +6995,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                     config_entry("app.retry-permanent", "v1", 1),
                     config_outbox_entry(&permanent_event),
                     OutboxEnvelopeParts::new(
-                        vocab::ContractBinding::from_static(
-                            "settings",
-                            CONFIG_VERSION_CHANGED_TOPIC,
-                        ),
+                        config_contract(),
                         TenantId::parse(CONFIG_TENANT_B).unwrap(),
                         subject_id("app.retry-permanent"),
                         actor_for(TenantId::parse(CONFIG_TENANT_B).unwrap()),

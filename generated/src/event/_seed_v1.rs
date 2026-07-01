@@ -68,12 +68,16 @@ pub const CONTRACT_ID: &str = "seed.thing-happened";
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "seed.thing-happened";
 
-/// 契约绑定（`domain` + `id` 同源类型化常量，#1193）。outbox envelope / 事件 producer 以
+/// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
 /// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
-/// 由 `cargo xtask codegen` 从 manifest `domain` + `id` 派生；勿手改（golden 字节锁，INVARIANT
+/// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
 /// CONTRACT-BINDING-FUNNEL-01）。
-pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("_seed", "seed.thing-happened");
+pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+    "_seed",
+    "seed.thing-happened",
+    "v1",
+    "sha256:016334bee5ce3a5205f0e31d2cb6f9ca20bbefc741f82111a08bb5506a50be23",
+);
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
 /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、

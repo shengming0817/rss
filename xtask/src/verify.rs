@@ -100,6 +100,8 @@ enum InternalCheck {
     CodegenCheck,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
+    /// 生产代码禁止裸调用 `ContractBinding::from_static`，只能使用 generated `CONTRACT`。
+    ContractBindingGuard,
     /// tenant 表 RLS 三件套守卫（TENANCY-RLS-FORCE-01；内容扫描迁移 SQL，no-compile）。
     SchemaRlsGuard,
     /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01；内容扫描 Rust 源，no-compile）。
@@ -138,6 +140,7 @@ impl InternalCheck {
             Self::ArchRules => "xtask/src/archrules.rs",
             Self::CodegenCheck => "xtask/src/codegen.rs",
             Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
+            Self::ContractBindingGuard => "xtask/src/contract_binding_guard.rs",
             Self::SchemaRlsGuard => "xtask/src/schema_rls.rs",
             Self::SetLocalFunnel => "xtask/src/setlocal_funnel.rs",
             Self::PgTenantTxGuard => "xtask/src/pg_tenant_tx_guard.rs",
@@ -315,6 +318,15 @@ fn step_pdp_allow_guard() -> Step {
         label: "pdp-allow-guard",
         args: &[],
         kind: StepKind::Internal(InternalCheck::PdpAllowGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_contract_binding_guard() -> Step {
+    Step {
+        label: "contract-binding-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ContractBindingGuard),
         env: &[],
         needs_compile: false,
     }
@@ -779,6 +791,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
+        step_contract_binding_guard(),
         step_schema_rls_guard(),
         step_setlocal_funnel(),
         step_pg_tenant_tx_guard(),
@@ -814,6 +827,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
+        step_contract_binding_guard(),
         step_schema_rls_guard(),
         step_setlocal_funnel(),
         step_pg_tenant_tx_guard(),
@@ -1055,6 +1069,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
+        InternalCheck::ContractBindingGuard => {
+            run_check(&crate::contract_binding_guard::ContractBindingGuard)
+        }
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
         InternalCheck::SetLocalFunnel => run_check(&crate::setlocal_funnel::SetLocalFunnelGuard),
         InternalCheck::PgTenantTxGuard => run_check(&crate::pg_tenant_tx_guard::PgTenantTxGuard),
@@ -1156,6 +1173,7 @@ mod tests {
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
+                "contract-binding-guard",
                 "schema-rls",
                 "setlocal-funnel",
                 "pg-tenant-tx-guard",
@@ -1198,6 +1216,7 @@ mod tests {
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
+                "contract-binding-guard",
                 "schema-rls",
                 "setlocal-funnel",
                 "pg-tenant-tx-guard",
@@ -1214,8 +1233,8 @@ mod tests {
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / archrules / codegen /
-    /// pdp-allow-guard / schema-rls / setlocal-funnel / migrations-serial / command-symmetry /
-    /// defer-gate）在两种模式恒在。
+    /// pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel / migrations-serial /
+    /// command-symmetry / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -1239,6 +1258,7 @@ mod tests {
                     "archrules",
                     "codegen-check",
                     "pdp-allow-guard",
+                    "contract-binding-guard",
                     "schema-rls",
                     "setlocal-funnel",
                     "pg-tenant-tx-guard",
@@ -1389,6 +1409,7 @@ mod tests {
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
+                "contract-binding-guard",
                 "schema-rls",
                 "setlocal-funnel",
                 "pg-tenant-tx-guard",
@@ -1483,6 +1504,7 @@ mod tests {
             "archrules",
             "codegen-check",
             "pdp-allow-guard",
+            "contract-binding-guard",
             "schema-rls",
             "setlocal-funnel",
             "pg-tenant-tx-guard",

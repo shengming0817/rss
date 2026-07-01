@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result, bail};
 use schemars::schema::RootSchema;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
@@ -192,6 +193,58 @@ fn render_module_file(group: &[&DiscoveredContract]) -> Result<String> {
     Ok(out)
 }
 
+fn schema_hash(c: &DiscoveredContract) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rss-schema-hash-v1\0");
+    for file in c.manifest.declared_schema_files() {
+        validate_schema_filename(file)?;
+        let path = c.dir.join(file);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("读 schema {}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("解析 schema {}", path.display()))?;
+        let canonical = serde_json::to_vec(&canonical_json(value))
+            .with_context(|| format!("canonicalize schema {}", path.display()))?;
+        hasher.update(file.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(canonical.len().to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&canonical);
+        hasher.update(b"\0");
+    }
+    Ok(format!("sha256:{}", lower_hex(&hasher.finalize())))
+}
+
+fn canonical_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, canonical_json(v)))
+                .collect();
+            let mut out = serde_json::Map::new();
+            for (k, v) in sorted {
+                out.insert(k, v);
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
 /// slug（kebab）→ generated 子模块标识符（snake）。经 `syn::Ident` 收口（拒非法标识符 / raw `r#`），与
 /// command request title 同款防注入闭环；R20 是 authoring 上游闸门，本守卫是 codegen 写盘前自守。
 fn slug_module_ident(slug: &str) -> Result<String> {
@@ -295,7 +348,13 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
 fn render_http_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let domain = &c.manifest.domain;
     let contract_id = &c.manifest.id;
-    for (field, value) in [("domain", domain.as_str()), ("id", contract_id.as_str())] {
+    let version = &c.manifest.version;
+    let schema_hash = schema_hash(c)?;
+    for (field, value) in [
+        ("domain", domain.as_str()),
+        ("id", contract_id.as_str()),
+        ("version", version.as_str()),
+    ] {
         if !is_safe_codegen_ident(value) {
             bail!(
                 "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
@@ -305,14 +364,22 @@ fn render_http_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             );
         }
     }
+    if !is_safe_codegen_string(&schema_hash) {
+        bail!(
+            "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
+            c.manifest.kind.as_dir(),
+            c.manifest.domain,
+            c.manifest.version,
+        );
+    }
     let mut out = format!(
         r#"
 /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "{contract_id}";
 
-/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 "#
     );
     if c.manifest.lifecycle != Lifecycle::Active {
@@ -461,16 +528,41 @@ fn render_option_str(value: Option<&str>, field: &str) -> Result<String> {
 fn render_command_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let domain = &c.manifest.domain;
     let contract_id = &c.manifest.id;
+    let version = &c.manifest.version;
+    let schema_hash = schema_hash(c)?;
     let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+    for (field, value) in [
+        ("domain", domain.as_str()),
+        ("id", contract_id.as_str()),
+        ("version", version.as_str()),
+        ("topic", topic),
+    ] {
+        if !is_safe_codegen_ident(value) {
+            bail!(
+                "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
+    }
+    if !is_safe_codegen_string(&schema_hash) {
+        bail!(
+            "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
+            c.manifest.kind.as_dir(),
+            c.manifest.domain,
+            c.manifest.version,
+        );
+    }
     let request_ty = command_request_type_name(c)?;
     Ok(format!(
         r#"
 /// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "{contract_id}";
 
-/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -495,14 +587,14 @@ pub async fn emit_async<E: {sup}CommandEmit>(
 }}
 
 /// Consumer wrapper（consumer 侧对称收口）：把 typed [`{request_ty}`] handler 注册到注入的
-/// [`super::CommandRegister`]。baked `CONTRACT_ID` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
+/// [`super::CommandRegister`]。baked `CONTRACT` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
 pub fn register_handler<Reg, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output
 where
     Reg: {sup}CommandRegister,
     H: Fn({request_ty}) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
     Fut: ::core::future::Future<Output = Reg::Outcome> + ::core::marker::Send + 'static,
 {{
-    registrar.register::<{request_ty}, H, Fut>(CONTRACT_ID, TOPIC, handler)
+    registrar.register::<{request_ty}, H, Fut>(CONTRACT, TOPIC, handler)
 }}
 "#
     ))
@@ -551,8 +643,11 @@ fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
 /// 派生防御），非只锁单侧 callsite。
 fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let contract_id = &c.manifest.id;
-    // domain + id 同源绑成 `CONTRACT: ContractBinding`（#1193）；domain 取自 manifest domain 字段（非 id 派生）。
+    // domain + id + version + schema_hash 同源绑成 `CONTRACT: ContractBinding`（#1193/#1618）；
+    // domain 取自 manifest domain 字段（非 id 派生），schema_hash 取 declared schema canonical digest。
     let domain = &c.manifest.domain;
+    let version = &c.manifest.version;
+    let schema_hash = schema_hash(c)?;
     // active event 必有 topic（R8）；draft 无 topic 则回退用 id，保持确定性（不出现 Option 条件代码分歧）。
     let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
     // 防注入自守（review #271 F4）：domain / id / topic 拼进生成 Rust 字符串字面量（`CONTRACT_ID` / `TOPIC` /
@@ -562,6 +657,7 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     for (field, value) in [
         ("domain", domain.as_str()),
         ("id", contract_id.as_str()),
+        ("version", version.as_str()),
         ("topic", topic),
     ] {
         if !is_safe_codegen_ident(value) {
@@ -572,6 +668,14 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
                 c.manifest.version,
             );
         }
+    }
+    if !is_safe_codegen_string(&schema_hash) {
+        bail!(
+            "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
+            c.manifest.kind.as_dir(),
+            c.manifest.domain,
+            c.manifest.version,
+        );
     }
     // 每个 [[subscriptions]] 条目一行 SubscriptionSpec 字面量；拼前防注入收口（见函数 doc）。
     let mut subs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
@@ -595,7 +699,7 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             );
         }
         subs.push(format!(
-            "    {sup}SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
+            "    {sup}SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, schema_version: CONTRACT.version(), schema_hash: CONTRACT.schema_hash(), consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
             s.consumer,
             s.group,
             s.topology.partition_key.as_wire(),
@@ -617,12 +721,12 @@ pub const CONTRACT_ID: &str = "{contract_id}";
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "{topic}";
 
-/// 契约绑定（`domain` + `id` 同源类型化常量，#1193）。outbox envelope / 事件 producer 以
+/// 契约绑定（`domain` + `id` + `version` + `schema_hash` 同源类型化常量，#1193/#1618）。outbox envelope / 事件 producer 以
 /// `OutboxEnvelopeParts::new(CONTRACT, ..)` 传入契约归属，杜绝裸 string 分别 author domain / contract_id。
-/// 由 `cargo xtask codegen` 从 manifest `domain` + `id` 派生；勿手改（golden 字节锁，INVARIANT
+/// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
 /// CONTRACT-BINDING-FUNNEL-01）。
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}");
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 
 /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
 /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
@@ -895,8 +999,9 @@ fn generated_header(source: &str) -> String {
 const SUBSCRIPTION_SPEC_DEF: &str = r#"
 /// 订阅注册规格——event 契约 `[[subscriptions]]` 的 codegen 派生表示。
 ///
-/// 全字段均为 `&'static str`（零运行时分配）；`contract_id`/`topic` 由同模块的
-/// `CONTRACT_ID`/`TOPIC` 常量绑定（generated，勿手改）。bootstrap 消费 `SUBSCRIPTIONS` 切片接线。
+/// 全字段均为 `&'static str`（零运行时分配）；`contract_id`/`topic`/`schema_version`/`schema_hash`
+/// 由同模块的 `CONTRACT_ID`/`TOPIC`/`CONTRACT` 常量绑定（generated，勿手改）。
+/// bootstrap 消费 `SUBSCRIPTIONS` 切片接线。
 ///
 /// 由 `cargo xtask codegen` 从 `contract.toml` `[[subscriptions]]` 派生；勿手改。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -905,6 +1010,10 @@ pub struct SubscriptionSpec {
     pub contract_id: &'static str,
     /// 事件 topic（broker routing key）。
     pub topic: &'static str,
+    /// 契约版本（`CONTRACT.version()`）。
+    pub schema_version: &'static str,
+    /// canonical schema bundle digest（`CONTRACT.schema_hash()`）。
+    pub schema_hash: &'static str,
     /// 消费者域 DomainId。
     pub consumer: &'static str,
     /// 稳定 consumer group 名（broker 消费位点唯一键）。
@@ -1026,10 +1135,10 @@ pub trait CommandRegister {
     type Outcome;
     /// `register` 的返回类型（如 `Result<(), KernelError>`）。
     type Output;
-    /// 把 typed `R` handler 绑到 `contract_id` / `topic`。typed decode + claimer 接线在实现侧。
+    /// 把 typed `R` handler 绑到 `contract` / `topic`。typed decode + claimer 接线在实现侧。
     fn register<R, H, Fut>(
         &mut self,
-        contract_id: &'static str,
+        contract: ::vocab::ContractBinding,
         topic: &'static str,
         handler: H,
     ) -> Self::Output
@@ -1129,7 +1238,7 @@ fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<S
         };
         for s in &c.manifest.subscriptions {
             entries.push(format!(
-                "    SubscriptionSpec {{ contract_id: {path}::CONTRACT_ID, topic: {path}::TOPIC, consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
+                "    SubscriptionSpec {{ contract_id: {path}::CONTRACT_ID, topic: {path}::TOPIC, schema_version: {path}::CONTRACT.version(), schema_hash: {path}::CONTRACT.schema_hash(), consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
                 s.consumer,
                 s.group,
                 s.topology.partition_key.as_wire(),
@@ -1280,6 +1389,10 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::unique_tmp;
+
+    fn assert_generated_contains(source: &str, needle: &str, message: &str) {
+        assert!(source.contains(needle), "{message}:\n{source}");
+    }
 
     /// 在 `root/contracts/http/_seed/v1` 落一个最小 http 契约。
     fn seed_http(root: &Path) -> Result<()> {
@@ -1880,7 +1993,7 @@ mod tests {
     /// anti-vacuity：无 subscriptions 的 draft event 仍生成空 SUBSCRIPTIONS 切片 + CONTRACT_ID / TOPIC（正向对照）。
     ///
     /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
-    /// 同源派生（domain 取自 manifest 而非 id 前缀；`from_static("_seed", "seed.happened")`），golden 锁。
+    /// + `version` + declared schema hash 同源派生（domain 取自 manifest 而非 id 前缀），golden 锁。
     #[test]
     fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_glue");
@@ -1901,10 +2014,14 @@ mod tests {
             rendered.contains(r#"pub const TOPIC: &str = "seed.happened";"#),
             "缺 TOPIC 常量:\n{rendered}"
         );
-        // CONTRACT binding（#1193）：domain + id 同源；domain "_seed" ≠ id 首段 "seed" ⇒ 证明 domain
+        // CONTRACT binding（#1193/#1618）：domain + id + version + schema_hash 同源；domain "_seed" ≠ id 首段 "seed" ⇒ 证明 domain
         // 取自 manifest domain 字段而非从 id 派生（rustfmt 可能换行，断言 from_static 调用子串）。
         assert!(
-            rendered.contains(r#"::vocab::ContractBinding::from_static("_seed", "seed.happened")"#),
+            rendered.contains("::vocab::ContractBinding::from_static(")
+                && rendered.contains(r#""_seed","#)
+                && rendered.contains(r#""seed.happened","#)
+                && rendered.contains(r#""v1","#)
+                && rendered.contains(r#""sha256:"#),
             "缺 CONTRACT binding 常量:\n{rendered}"
         );
         // SUBSCRIPTIONS 切片含 consumer / group 字面量
@@ -1915,6 +2032,16 @@ mod tests {
         assert!(
             rendered.contains(r#"group: "audit.seed-happened""#),
             "SUBSCRIPTIONS 缺 group 字面量:\n{rendered}"
+        );
+        assert_generated_contains(
+            &rendered,
+            "schema_version: CONTRACT.version()",
+            "SUBSCRIPTIONS 缺 schema_version 绑定",
+        );
+        assert_generated_contains(
+            &rendered,
+            "schema_hash: CONTRACT.schema_hash()",
+            "SUBSCRIPTIONS 缺 schema_hash 绑定",
         );
         assert!(
             rendered.contains(r#"partition_key: "none""#),
@@ -1940,6 +2067,16 @@ mod tests {
         assert!(
             mod_rs.contains("topic: _seed_v1::TOPIC"),
             "root registry 应引用生成模块 TOPIC:\n{mod_rs}"
+        );
+        assert_generated_contains(
+            &mod_rs,
+            "schema_version: _seed_v1::CONTRACT.version()",
+            "root registry 应引用生成模块 CONTRACT.version()",
+        );
+        assert_generated_contains(
+            &mod_rs,
+            "schema_hash: _seed_v1::CONTRACT.schema_hash()",
+            "root registry 应引用生成模块 CONTRACT.schema_hash()",
         );
         assert!(
             mod_rs.contains(r#"consumer: "audit""#),
@@ -1971,9 +2108,13 @@ mod tests {
             rendered.contains(r#"pub const CONTRACT_ID: &str = "seed.happened";"#),
             "缺 CONTRACT_ID:\n{rendered}"
         );
-        // CONTRACT binding 仍发射（draft 亦有；domain "_seed" 取自 manifest，#1193）
+        // CONTRACT binding 仍发射（draft 亦有；domain "_seed" 取自 manifest，#1193/#1618）
         assert!(
-            rendered.contains(r#"::vocab::ContractBinding::from_static("_seed", "seed.happened")"#),
+            rendered.contains("::vocab::ContractBinding::from_static(")
+                && rendered.contains(r#""_seed","#)
+                && rendered.contains(r#""seed.happened","#)
+                && rendered.contains(r#""v1","#)
+                && rendered.contains(r#""sha256:"#),
             "draft 缺 CONTRACT binding 常量:\n{rendered}"
         );
         // 空 subscriptions 切片
@@ -2217,6 +2358,12 @@ mod tests {
             rendered.contains("pub fn register_handler<Reg, H, Fut>"),
             "缺 register_handler wrapper:\n{rendered}"
         );
+        assert!(
+            rendered.contains(
+                "registrar.register::<SeedDoThingRequest, H, Fut>(CONTRACT, TOPIC, handler)"
+            ),
+            "register_handler 必须把 CONTRACT 传给 seam 以携带 schema fingerprint:\n{rendered}"
+        );
         // wrapper 锁 typed Request（= request schema title 派生）
         assert!(
             rendered.contains("request: SeedDoThingRequest"),
@@ -2240,6 +2387,10 @@ mod tests {
                 && mod_rs.contains("actor: Self::Actor")
                 && mod_rs.contains("idempotency_key: ::core::option::Option<&str>"),
             "CommandEmit::emit seam 须含 tenant + subject_id + actor + idempotency_key 参数:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("contract: ::vocab::ContractBinding"),
+            "CommandRegister::register seam 须接收 ContractBinding:\n{mod_rs}"
         );
         // seam 定义在 mod.rs，子模块经 super:: 引用
         assert!(

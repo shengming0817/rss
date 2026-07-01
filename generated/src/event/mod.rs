@@ -2,8 +2,9 @@
 
 /// 订阅注册规格——event 契约 `[[subscriptions]]` 的 codegen 派生表示。
 ///
-/// 全字段均为 `&'static str`（零运行时分配）；`contract_id`/`topic` 由同模块的
-/// `CONTRACT_ID`/`TOPIC` 常量绑定（generated，勿手改）。bootstrap 消费 `SUBSCRIPTIONS` 切片接线。
+/// 全字段均为 `&'static str`（零运行时分配）；`contract_id`/`topic`/`schema_version`/`schema_hash`
+/// 由同模块的 `CONTRACT_ID`/`TOPIC`/`CONTRACT` 常量绑定（generated，勿手改）。
+/// bootstrap 消费 `SUBSCRIPTIONS` 切片接线。
 ///
 /// 由 `cargo xtask codegen` 从 `contract.toml` `[[subscriptions]]` 派生；勿手改。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +13,10 @@ pub struct SubscriptionSpec {
     pub contract_id: &'static str,
     /// 事件 topic（broker routing key）。
     pub topic: &'static str,
+    /// 契约版本（`CONTRACT.version()`）。
+    pub schema_version: &'static str,
+    /// canonical schema bundle digest（`CONTRACT.schema_hash()`）。
+    pub schema_hash: &'static str,
     /// 消费者域 DomainId。
     pub consumer: &'static str,
     /// 稳定 consumer group 名（broker 消费位点唯一键）。
@@ -32,6 +37,8 @@ pub mod settings_v1;
 pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[SubscriptionSpec {
     contract_id: identity_v1::session_created::CONTRACT_ID,
     topic: identity_v1::session_created::TOPIC,
+    schema_version: identity_v1::session_created::CONTRACT.version(),
+    schema_hash: identity_v1::session_created::CONTRACT.schema_hash(),
     consumer: "audit",
     group: "audit.session-created",
     partition_key: "none",

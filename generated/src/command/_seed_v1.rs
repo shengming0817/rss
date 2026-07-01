@@ -63,9 +63,13 @@ pub struct SeedDoThingRequest {
 /// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "seed.do-thing";
 
-/// 契约归属绑定（`domain` + `id` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("_seed", "seed.do-thing");
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+    "_seed",
+    "seed.do-thing",
+    "v1",
+    "sha256:a369f1548799cc66da6f3d539dfd3048f7e5d94e87e8b130c3d816b5da75a71b",
+);
 
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -98,12 +102,12 @@ pub async fn emit_async<E: super::CommandEmit>(
 }
 
 /// Consumer wrapper（consumer 侧对称收口）：把 typed [`SeedDoThingRequest`] handler 注册到注入的
-/// [`super::CommandRegister`]。baked `CONTRACT_ID` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
+/// [`super::CommandRegister`]。baked `CONTRACT` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
 pub fn register_handler<Reg, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output
 where
     Reg: super::CommandRegister,
     H: Fn(SeedDoThingRequest) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
     Fut: ::core::future::Future<Output = Reg::Outcome> + ::core::marker::Send + 'static,
 {
-    registrar.register::<SeedDoThingRequest, H, Fut>(CONTRACT_ID, TOPIC, handler)
+    registrar.register::<SeedDoThingRequest, H, Fut>(CONTRACT, TOPIC, handler)
 }

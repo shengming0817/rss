@@ -338,7 +338,7 @@ mod classify_tests {
 mod build_properties_tests {
     use diport::{
         EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
-        KEY_SUBJECT_ID,
+        KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID,
     };
     use lapin::types::AMQPValue;
 
@@ -397,6 +397,11 @@ mod build_properties_tests {
     fn transport_metadata_goes_to_headers_and_sensitive_metadata_is_excluded() {
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_CORRELATION, "corr-9");
+        md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        md.insert_wire_pair(
+            KEY_SCHEMA_HASH,
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
         md.insert_wire_pair(KEY_SUBJECT_ID, "user-42");
         md.insert_wire_pair(KEY_PRINCIPAL, "principal-42");
         md.insert_wire_pair(KEY_ACTOR, "actor-42");
@@ -418,6 +423,11 @@ mod build_properties_tests {
             })
         };
         assert_eq!(get(KEY_CORRELATION).as_deref(), Some("corr-9"));
+        assert_eq!(get(KEY_SCHEMA_VERSION).as_deref(), Some("v1"));
+        assert_eq!(
+            get(KEY_SCHEMA_HASH).as_deref(),
+            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
         assert_eq!(get(KEY_SUBJECT_ID), None);
         assert_eq!(get(KEY_PRINCIPAL), None);
         assert_eq!(get(KEY_ACTOR), None);
