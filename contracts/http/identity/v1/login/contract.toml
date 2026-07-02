@@ -20,3 +20,8 @@ reason = "login is pre-auth; tenant scope is populated from X-Tenant-ID"
 
 [endpoints.http.headers]
 "X-Tenant-ID" = "populate-only"
+
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["identity.session-created"]

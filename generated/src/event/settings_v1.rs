@@ -194,4 +194,13 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
 /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
 /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
 /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];
+pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[super::SubscriptionSpec {
+    contract_id: CONTRACT_ID,
+    topic: TOPIC,
+    schema_version: CONTRACT.version(),
+    schema_hash: CONTRACT.schema_hash(),
+    consumer: "settings",
+    group: "settings.config-version-changed",
+    partition_key: "none",
+    readiness: "required",
+}];

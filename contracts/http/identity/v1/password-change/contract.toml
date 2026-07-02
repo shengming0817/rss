@@ -19,3 +19,6 @@ selfScoped = true
 [endpoints.http.auth]
 mode = "permission"
 permission = "identity:profile:write"
+
+[capabilities.localTx]
+boundary = "single-domain"

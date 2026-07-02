@@ -20,3 +20,6 @@ reason = "refresh presents the refresh token as its own credential; access token
 
 [endpoints.http.headers]
 "X-Tenant-ID" = "populate-only"
+
+[capabilities.localTx]
+boundary = "single-domain"

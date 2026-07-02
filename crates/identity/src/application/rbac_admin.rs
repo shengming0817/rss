@@ -17,10 +17,12 @@ use diport::{
     Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
 };
 use generated::event::identity_v1::role_assigned::{
-    CONTRACT as ROLE_ASSIGNED_CONTRACT, IdentityRoleAssignedPayload, TOPIC as ROLE_ASSIGNED_TOPIC,
+    CONTRACT as ROLE_ASSIGNED_CONTRACT, IdentityRoleAssignedPayload,
+    IdentityRoleAssignedPayloadActorKind, TOPIC as ROLE_ASSIGNED_TOPIC,
 };
 use generated::event::identity_v1::role_revoked::{
-    CONTRACT as ROLE_REVOKED_CONTRACT, IdentityRoleRevokedPayload, TOPIC as ROLE_REVOKED_TOPIC,
+    CONTRACT as ROLE_REVOKED_CONTRACT, IdentityRoleRevokedPayload,
+    IdentityRoleRevokedPayloadActorKind, TOPIC as ROLE_REVOKED_TOPIC,
 };
 use uuid::Uuid;
 use vocab::TenantId;
@@ -116,6 +118,7 @@ impl RbacAdminService {
             role_id: role_id.as_str().to_string(),
             subject: subject.clone(),
             assigned_by: actor.as_uuid(),
+            actor_kind: role_assigned_actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(now),
         };
@@ -168,6 +171,7 @@ impl RbacAdminService {
             role_id: role_id.as_str().to_string(),
             subject: subject.clone(),
             revoked_by: actor.as_uuid(),
+            actor_kind: role_revoked_actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(now),
         };
@@ -201,6 +205,34 @@ fn build_entry(topic: &str, bytes: Vec<u8>) -> Result<Entry, RbacAdminError> {
         IdemKey::parse(&event_id).map_err(|_| RbacAdminError::EntryBuild)?,
         OutboxPayload::from_reviewed_event_bytes(bytes),
     ))
+}
+
+fn role_assigned_actor_kind_wire(
+    kind: vocab::PrincipalKind,
+) -> Result<IdentityRoleAssignedPayloadActorKind, RbacAdminError> {
+    match kind {
+        vocab::PrincipalKind::User => Ok(IdentityRoleAssignedPayloadActorKind::User),
+        vocab::PrincipalKind::Device => Ok(IdentityRoleAssignedPayloadActorKind::Device),
+        vocab::PrincipalKind::Admin => Ok(IdentityRoleAssignedPayloadActorKind::Admin),
+        vocab::PrincipalKind::SuperAdmin => Ok(IdentityRoleAssignedPayloadActorKind::SuperAdmin),
+        vocab::PrincipalKind::Service => Ok(IdentityRoleAssignedPayloadActorKind::Service),
+        vocab::PrincipalKind::Anonymous => Ok(IdentityRoleAssignedPayloadActorKind::Anonymous),
+        _ => Err(RbacAdminError::EntryBuild),
+    }
+}
+
+fn role_revoked_actor_kind_wire(
+    kind: vocab::PrincipalKind,
+) -> Result<IdentityRoleRevokedPayloadActorKind, RbacAdminError> {
+    match kind {
+        vocab::PrincipalKind::User => Ok(IdentityRoleRevokedPayloadActorKind::User),
+        vocab::PrincipalKind::Device => Ok(IdentityRoleRevokedPayloadActorKind::Device),
+        vocab::PrincipalKind::Admin => Ok(IdentityRoleRevokedPayloadActorKind::Admin),
+        vocab::PrincipalKind::SuperAdmin => Ok(IdentityRoleRevokedPayloadActorKind::SuperAdmin),
+        vocab::PrincipalKind::Service => Ok(IdentityRoleRevokedPayloadActorKind::Service),
+        vocab::PrincipalKind::Anonymous => Ok(IdentityRoleRevokedPayloadActorKind::Anonymous),
+        _ => Err(RbacAdminError::EntryBuild),
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +325,11 @@ mod tests {
             payload.assigned_by,
             actor().as_uuid(),
             "payload assigned_by = actor"
+        );
+        assert_eq!(
+            payload.actor_kind,
+            IdentityRoleAssignedPayloadActorKind::Admin,
+            "payload actorKind = authenticated actor kind"
         );
         assert_eq!(payload.tenant_id, t.to_string());
         // envelope（F2/F3）：contract 绑定 + 租户 scope + subject_id = **actor opaque id**（非 target，FR-020）。
@@ -423,6 +460,11 @@ mod tests {
             payload.revoked_by,
             actor().as_uuid(),
             "payload revoked_by = actor"
+        );
+        assert_eq!(
+            payload.actor_kind,
+            IdentityRoleRevokedPayloadActorKind::Admin,
+            "payload actorKind = authenticated actor kind"
         );
         // envelope（F2/F3）：contract 绑定 + subject_id = actor opaque id（非 target）。
         assert_eq!(emitted[0].contract_id, "identity.role-revoked");

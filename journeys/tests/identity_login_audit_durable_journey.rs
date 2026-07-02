@@ -27,7 +27,7 @@ use bootstrap::SubscriberHandler;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
     SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
-    single_subscription, tenant_authority,
+    session_created_subscription, tenant_authority,
 };
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
 use diagctx::{CorrelationId, DiagnosticCtx};
@@ -209,7 +209,7 @@ async fn login_audit_durable_topology() -> Result<()> {
     )?);
     let identity_domain = identity_domain(login_identity, refresh_identity);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
-    let binding = single_subscription(registry)?;
+    let binding = session_created_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
 
     // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。

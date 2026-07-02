@@ -1,4 +1,4 @@
-//! Shared journey test helpers: [`CapturingVerifier`], [`audit_domain`], [`single_subscription`],
+//! Shared journey test helpers: [`CapturingVerifier`], [`audit_domain`], [`session_created_subscription`],
 //! and shared constants ([`CANON_TENANT`] / [`AUDIT_KEY`] / …).
 //!
 //! This module is compiled into each including test binary separately (via `mod common;`). Items
@@ -16,6 +16,7 @@ use diport::{
     KeyRef, KeyVersion, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
 };
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
+use generated::event::identity_v1::session_created;
 use identity::ports::{
     DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Policy, PolicyId,
     PolicyRepo, PolicyRouteScope, PolicyVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId,
@@ -386,11 +387,17 @@ where
     )
 }
 
-/// 取唯一 session-created 订阅绑定（断言恰一个）。
-pub fn single_subscription(
+/// 取 session-created 订阅绑定（audit 域可能还声明其它 event subscriptions）。
+pub fn session_created_subscription(
     mut registry: bootstrap::Registry,
 ) -> anyhow::Result<bootstrap::SubscriberBinding> {
-    let mut subs = registry.drain_subscribers();
-    anyhow::ensure!(subs.len() == 1, "恰一个 session-created 订阅");
-    subs.pop().ok_or_else(|| anyhow::anyhow!("订阅缺失"))
+    registry
+        .drain_subscribers()
+        .into_iter()
+        .find(|sub| {
+            sub.contract_id == session_created::CONTRACT_ID
+                && sub.topic == session_created::TOPIC
+                && sub.consumer == "audit"
+        })
+        .ok_or_else(|| anyhow::anyhow!("session-created 订阅缺失"))
 }

@@ -20,3 +20,6 @@ response = "response.schema.json"
 [endpoints.http.auth]
 mode = "permission"
 permission = "settings.secret-publish"
+
+[capabilities.localTx]
+boundary = "single-domain"

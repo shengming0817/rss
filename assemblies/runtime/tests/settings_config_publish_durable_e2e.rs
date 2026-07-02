@@ -4,16 +4,12 @@
 //! - settings publish uses the production `PgConfigUnitOfWork` path;
 //! - config row and outbox row are committed in the same transaction;
 //! - a real `PgOutbox` relay settles the settings event as published;
-//! - relay/sampler metrics and relay readyz are observable without requiring a
-//!   RabbitMQ consumer for the draft settings event.
+//! - relay/sampler metrics and relay readyz are observable for the active settings event.
 //!
 //! This journey deliberately injects a test `Publisher` instead of
-//! `wire_event_transport`'s AMQP publisher: the production AMQP adapter uses
-//! mandatory publishes, and `settings.config-version-changed` currently has no
-//! bound consumer queue. A real RabbitMQ relay would correctly treat that as an
-//! unroutable publish rather than settle the row as `published`; production
-//! wiring therefore excludes settings from AMQP relay domains until the event
-//! graduates with a real subscriber/topology.
+//! `wire_event_transport`'s AMQP publisher so the test can assert the settings relay
+//! path without provisioning RabbitMQ; production wiring now includes settings because
+//! `settings.config-version-changed` has active subscriber topology.
 //!
 //! `#![cfg(feature = "integration")]`: requires a real Postgres fixture. Without
 //! Docker, `cargo test -p runtime --features integration --no-run` is the compile gate.

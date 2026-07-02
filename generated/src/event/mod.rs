@@ -34,13 +34,45 @@ pub mod settings_v1;
 ///
 /// Runtime composition consumes this single registry through its bridge before constructing
 /// consumer bundle inputs. Do not enumerate per-contract subscription slices in runtime wiring.
-pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[SubscriptionSpec {
-    contract_id: identity_v1::session_created::CONTRACT_ID,
-    topic: identity_v1::session_created::TOPIC,
-    schema_version: identity_v1::session_created::CONTRACT.version(),
-    schema_hash: identity_v1::session_created::CONTRACT.schema_hash(),
-    consumer: "audit",
-    group: "audit.session-created",
-    partition_key: "none",
-    readiness: "required",
-}];
+pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[
+    SubscriptionSpec {
+        contract_id: identity_v1::role_assigned::CONTRACT_ID,
+        topic: identity_v1::role_assigned::TOPIC,
+        schema_version: identity_v1::role_assigned::CONTRACT.version(),
+        schema_hash: identity_v1::role_assigned::CONTRACT.schema_hash(),
+        consumer: "audit",
+        group: "audit.role-assigned",
+        partition_key: "none",
+        readiness: "required",
+    },
+    SubscriptionSpec {
+        contract_id: identity_v1::role_revoked::CONTRACT_ID,
+        topic: identity_v1::role_revoked::TOPIC,
+        schema_version: identity_v1::role_revoked::CONTRACT.version(),
+        schema_hash: identity_v1::role_revoked::CONTRACT.schema_hash(),
+        consumer: "audit",
+        group: "audit.role-revoked",
+        partition_key: "none",
+        readiness: "required",
+    },
+    SubscriptionSpec {
+        contract_id: identity_v1::session_created::CONTRACT_ID,
+        topic: identity_v1::session_created::TOPIC,
+        schema_version: identity_v1::session_created::CONTRACT.version(),
+        schema_hash: identity_v1::session_created::CONTRACT.schema_hash(),
+        consumer: "audit",
+        group: "audit.session-created",
+        partition_key: "none",
+        readiness: "required",
+    },
+    SubscriptionSpec {
+        contract_id: settings_v1::CONTRACT_ID,
+        topic: settings_v1::TOPIC,
+        schema_version: settings_v1::CONTRACT.version(),
+        schema_hash: settings_v1::CONTRACT.schema_hash(),
+        consumer: "settings",
+        group: "settings.config-version-changed",
+        partition_key: "none",
+        readiness: "required",
+    },
+];

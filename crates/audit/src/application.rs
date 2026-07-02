@@ -29,8 +29,19 @@ use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHand
 use consistency::ConsumerGroup;
 use diport::Message;
 use futures::future::BoxFuture;
-use generated::event::identity_v1::session_created::{
-    IdentitySessionCreatedPayload, SUBSCRIPTIONS,
+use generated::event::SubscriptionSpec;
+use generated::event::identity_v1::{
+    role_assigned::{
+        IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind,
+        SUBSCRIPTIONS as ROLE_ASSIGNED_SUBSCRIPTIONS,
+    },
+    role_revoked::{
+        IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind,
+        SUBSCRIPTIONS as ROLE_REVOKED_SUBSCRIPTIONS,
+    },
+    session_created::{
+        IdentitySessionCreatedPayload, SUBSCRIPTIONS as SESSION_CREATED_SUBSCRIPTIONS,
+    },
 };
 use generated::http::audit_v1::{
     AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse, SPEC as AUDIT_LIST_HTTP_SPEC,
@@ -51,8 +62,11 @@ const AUDIT_DOMAIN: &str = "audit";
 
 /// 审计资源类别（const literal）。
 const RESOURCE_KIND_SESSION: &str = "session";
+const RESOURCE_KIND_ROLE_BINDING: &str = "role-binding";
 /// 登录动作（`domain:verb`，vocab::Action 形态）。
 const ACTION_LOGIN: &str = "identity:login";
+const ACTION_ROLE_ASSIGN: &str = "identity:role_assign";
+const ACTION_ROLE_REVOKE: &str = "identity:role_revoke";
 
 /// admin 读路由组 nest 前缀（Admin listener；与 contracts/http/audit/v1 单源对齐）。
 const AUDIT_ROUTE_PREFIX: &str = "/api/v1/audit";
@@ -548,6 +562,175 @@ impl SubscriberHandler for SessionCreatedAuditHandler {
     }
 }
 
+fn parse_event_tenant(
+    message_id: &str,
+    event_name: &'static str,
+    raw: &str,
+) -> Result<vocab::TenantId, SubscriberHandlerError> {
+    vocab::TenantId::parse(raw).map_err(|e| {
+        tracing::error!(
+            message_id,
+            event_name,
+            error = %e,
+            "audit handler: non-canonical tenant, refusing to audit"
+        );
+        SubscriberHandlerError::permanent(e)
+    })
+}
+
+fn parse_audit_action(
+    message_id: &str,
+    action_raw: &'static str,
+) -> Result<vocab::Action, SubscriberHandlerError> {
+    vocab::Action::parse(action_raw).map_err(|e| {
+        tracing::error!(
+            message_id,
+            action = action_raw,
+            error = %e,
+            "audit handler: invalid audit action literal"
+        );
+        SubscriberHandlerError::permanent(e)
+    })
+}
+
+fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &str) -> String {
+    format!("tenant/{tenant}/role/{role_id}/subject/{subject}")
+}
+
+fn assigned_actor_kind(kind: IdentityRoleAssignedPayloadActorKind) -> vocab::PrincipalKind {
+    match kind {
+        IdentityRoleAssignedPayloadActorKind::User => vocab::PrincipalKind::User,
+        IdentityRoleAssignedPayloadActorKind::Device => vocab::PrincipalKind::Device,
+        IdentityRoleAssignedPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
+        IdentityRoleAssignedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
+        IdentityRoleAssignedPayloadActorKind::Service => vocab::PrincipalKind::Service,
+        IdentityRoleAssignedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
+    }
+}
+
+fn revoked_actor_kind(kind: IdentityRoleRevokedPayloadActorKind) -> vocab::PrincipalKind {
+    match kind {
+        IdentityRoleRevokedPayloadActorKind::User => vocab::PrincipalKind::User,
+        IdentityRoleRevokedPayloadActorKind::Device => vocab::PrincipalKind::Device,
+        IdentityRoleRevokedPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
+        IdentityRoleRevokedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
+        IdentityRoleRevokedPayloadActorKind::Service => vocab::PrincipalKind::Service,
+        IdentityRoleRevokedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
+    }
+}
+
+async fn append_audit_record(
+    repo: Arc<DynAuditRepo<'static>>,
+    message_id: &str,
+    event_name: &'static str,
+    record: AuditRecord,
+) -> Result<(), SubscriberHandlerError> {
+    repo.append(record).await.map_err(|e| {
+        tracing::error!(
+            message_id,
+            event_name,
+            error = %e,
+            "audit handler: chain append failed"
+        );
+        SubscriberHandlerError::transient(e)
+    })
+}
+
+pub(crate) struct RoleAssignedAuditHandler {
+    repo: Arc<DynAuditRepo<'static>>,
+}
+
+impl RoleAssignedAuditHandler {
+    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
+        Self { repo }
+    }
+}
+
+impl SubscriberHandler for RoleAssignedAuditHandler {
+    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+        let repo = self.repo.clone();
+        Box::pin(async move {
+            let msg_id = message.id.as_str().to_string();
+            let payload: IdentityRoleAssignedPayload =
+                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
+                    tracing::error!(
+                        message_id = msg_id.as_str(),
+                        category = ?e.classify(),
+                        "audit handler: role-assigned payload decode failed"
+                    );
+                    SubscriberHandlerError::permanent(e)
+                })?;
+            let tenant = parse_event_tenant(&msg_id, "identity.role-assigned", &payload.tenant_id)?;
+            let action = parse_audit_action(&msg_id, ACTION_ROLE_ASSIGN)?;
+            let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
+            let record = AuditRecord {
+                tenant,
+                actor: ids::UserId::new(payload.assigned_by),
+                actor_kind: assigned_actor_kind(payload.actor_kind),
+                action,
+                resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
+                outcome: AuditOutcome::Success,
+                recorded_at: from_unix_secs(payload.occurred_at),
+            };
+            append_audit_record(repo, &msg_id, "identity.role-assigned", record).await
+        })
+    }
+}
+
+pub(crate) struct RoleRevokedAuditHandler {
+    repo: Arc<DynAuditRepo<'static>>,
+}
+
+impl RoleRevokedAuditHandler {
+    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
+        Self { repo }
+    }
+}
+
+impl SubscriberHandler for RoleRevokedAuditHandler {
+    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+        let repo = self.repo.clone();
+        Box::pin(async move {
+            let msg_id = message.id.as_str().to_string();
+            let payload: IdentityRoleRevokedPayload =
+                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
+                    tracing::error!(
+                        message_id = msg_id.as_str(),
+                        category = ?e.classify(),
+                        "audit handler: role-revoked payload decode failed"
+                    );
+                    SubscriberHandlerError::permanent(e)
+                })?;
+            let tenant = parse_event_tenant(&msg_id, "identity.role-revoked", &payload.tenant_id)?;
+            let action = parse_audit_action(&msg_id, ACTION_ROLE_REVOKE)?;
+            let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
+            let record = AuditRecord {
+                tenant,
+                actor: ids::UserId::new(payload.revoked_by),
+                actor_kind: revoked_actor_kind(payload.actor_kind),
+                action,
+                resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
+                outcome: AuditOutcome::Success,
+                recorded_at: from_unix_secs(payload.occurred_at),
+            };
+            append_audit_record(repo, &msg_id, "identity.role-revoked", record).await
+        })
+    }
+}
+
+fn register_audit_subscriber(
+    reg: &mut Registry,
+    specs: &[SubscriptionSpec],
+    handler: Box<dyn SubscriberHandler>,
+) -> Result<(), KernelError> {
+    let spec = specs
+        .iter()
+        .find(|s| s.consumer == AUDIT_DOMAIN)
+        .ok_or(KernelError::Subscriber)?;
+    let group = ConsumerGroup::parse(spec.group).map_err(|_| KernelError::Subscriber)?;
+    reg.subscriber(spec.contract_id, spec.topic, spec.consumer, group, handler)
+}
+
 /// audit 域 bootstrap 生命周期：声明 session-created 订阅 + admin 读路由组。
 ///
 /// 持 erased [`Arc<DynAuditRepo>`](crate::ports::DynAuditRepo)（ADR-005 Option 2 域形 repo port 注入；组合根选
@@ -595,17 +778,20 @@ where
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
         // 订阅元数据（contract_id / topic / group）单源自 generated `SUBSCRIPTIONS`（契约 codegen 派生）——
         // 不手维护平行 const，消除 contract↔consumer 漂移（AI-HARD：codegen funnel + golden）。缺失即 fail-fast。
-        let spec = SUBSCRIPTIONS
-            .iter()
-            .find(|s| s.consumer == AUDIT_DOMAIN)
-            .ok_or(KernelError::Subscriber)?;
-        let group = ConsumerGroup::parse(spec.group).map_err(|_| KernelError::Subscriber)?;
-        reg.subscriber(
-            spec.contract_id,
-            spec.topic,
-            spec.consumer,
-            group,
+        register_audit_subscriber(
+            reg,
+            SESSION_CREATED_SUBSCRIPTIONS,
             Box::new(SessionCreatedAuditHandler::new(self.repo.clone())),
+        )?;
+        register_audit_subscriber(
+            reg,
+            ROLE_ASSIGNED_SUBSCRIPTIONS,
+            Box::new(RoleAssignedAuditHandler::new(self.repo.clone())),
+        )?;
+        register_audit_subscriber(
+            reg,
+            ROLE_REVOKED_SUBSCRIPTIONS,
+            Box::new(RoleRevokedAuditHandler::new(self.repo.clone())),
         )?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
@@ -679,6 +865,7 @@ mod tests {
     const CANON_SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
     /// canonical UUID session_id（审计 resource id 是 typed `ids::SessionId`，非 uuid 被 fail-closed 拒，F3）。
     const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
+    const ROLE_ID: &str = "tenant-admin";
     /// contract.toml 声明的完整路径（= `AUDIT_ROUTE_PREFIX` ‖ `AUDIT_ENTRIES_SUBPATH`）；测试据此断言
     /// finalize 后真实挂载路径 + 直挂 handler-logic 测试路径。
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
@@ -875,6 +1062,54 @@ mod tests {
         serde_json::to_vec(&payload).expect("encode")
     }
 
+    #[allow(clippy::expect_used)]
+    fn role_assigned_payload_bytes() -> Vec<u8> {
+        role_assigned_payload_bytes_for("target-subject")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn role_assigned_payload_bytes_for(subject: &str) -> Vec<u8> {
+        role_assigned_payload_bytes_for_kind(subject, IdentityRoleAssignedPayloadActorKind::Admin)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn role_assigned_payload_bytes_for_kind(
+        subject: &str,
+        actor_kind: IdentityRoleAssignedPayloadActorKind,
+    ) -> Vec<u8> {
+        let payload = IdentityRoleAssignedPayload {
+            role_id: ROLE_ID.to_string(),
+            subject: subject.to_string(),
+            assigned_by: uuid::Uuid::parse_str(CANON_SUBJECT).expect("canonical actor uuid"),
+            actor_kind,
+            tenant_id: CANON_TENANT.to_string(),
+            occurred_at: 1_700_000_100,
+        };
+        serde_json::to_vec(&payload).expect("encode")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn role_revoked_payload_bytes() -> Vec<u8> {
+        role_revoked_payload_bytes_for("target-subject")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn role_revoked_payload_bytes_for(subject: &str) -> Vec<u8> {
+        let payload = IdentityRoleRevokedPayload {
+            role_id: ROLE_ID.to_string(),
+            subject: subject.to_string(),
+            revoked_by: uuid::Uuid::parse_str(CANON_SUBJECT).expect("canonical actor uuid"),
+            actor_kind: IdentityRoleRevokedPayloadActorKind::Admin,
+            tenant_id: CANON_TENANT.to_string(),
+            occurred_at: 1_700_000_200,
+        };
+        serde_json::to_vec(&payload).expect("encode")
+    }
+
+    fn expected_role_binding_resource_id(subject: &str) -> String {
+        format!("tenant/{CANON_TENANT}/role/{ROLE_ID}/subject/{subject}")
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn session_created_appends_verifiable_chain_entry() {
@@ -904,6 +1139,144 @@ mod tests {
         // 落库链条可被同 key hasher 验证完整。
         let verifier: AuditChainHasher<TestKeyedHasher> = keyed_hasher(0x5a);
         assert!(verifier.verify(&listed.entries).is_ok());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn role_assigned_appends_audit_entry() {
+        let repo = repo();
+        let handler = RoleAssignedAuditHandler::new(repo.clone());
+        handler
+            .handle(Message::new(
+                "m-role-assigned",
+                role_assigned_payload_bytes(),
+            ))
+            .await
+            .expect("handle ok");
+
+        let listed = repo
+            .list(
+                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                AuditPage {
+                    limit: vocab::Limit::new(10).expect("limit"),
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed.entries.len(), 1);
+        let entry = &listed.entries[0];
+        assert_eq!(entry.action().as_str(), ACTION_ROLE_ASSIGN);
+        assert_eq!(entry.resource().kind(), RESOURCE_KIND_ROLE_BINDING);
+        assert_eq!(
+            entry.resource().id(),
+            expected_role_binding_resource_id("target-subject")
+        );
+        assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
+        assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn role_revoked_appends_audit_entry() {
+        let repo = repo();
+        let handler = RoleRevokedAuditHandler::new(repo.clone());
+        handler
+            .handle(Message::new("m-role-revoked", role_revoked_payload_bytes()))
+            .await
+            .expect("handle ok");
+
+        let listed = repo
+            .list(
+                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                AuditPage {
+                    limit: vocab::Limit::new(10).expect("limit"),
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed.entries.len(), 1);
+        let entry = &listed.entries[0];
+        assert_eq!(entry.action().as_str(), ACTION_ROLE_REVOKE);
+        assert_eq!(entry.resource().kind(), RESOURCE_KIND_ROLE_BINDING);
+        assert_eq!(
+            entry.resource().id(),
+            expected_role_binding_resource_id("target-subject")
+        );
+        assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
+        assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn role_assigned_preserves_service_actor_kind() {
+        let repo = repo();
+        let handler = RoleAssignedAuditHandler::new(repo.clone());
+        handler
+            .handle(Message::new(
+                "m-role-assigned-service",
+                role_assigned_payload_bytes_for_kind(
+                    "target-subject",
+                    IdentityRoleAssignedPayloadActorKind::Service,
+                ),
+            ))
+            .await
+            .expect("handle ok");
+
+        let listed = repo
+            .list(
+                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                AuditPage {
+                    limit: vocab::Limit::new(10).expect("limit"),
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(
+            listed.entries[0].actor_kind(),
+            vocab::PrincipalKind::Service
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn role_binding_audit_resource_distinguishes_subjects() {
+        let repo = repo();
+        let handler = RoleAssignedAuditHandler::new(repo.clone());
+        handler
+            .handle(Message::new(
+                "m-role-assigned-a",
+                role_assigned_payload_bytes_for("target-a"),
+            ))
+            .await
+            .expect("handle target-a");
+        handler
+            .handle(Message::new(
+                "m-role-assigned-b",
+                role_assigned_payload_bytes_for("target-b"),
+            ))
+            .await
+            .expect("handle target-b");
+
+        let listed = repo
+            .list(
+                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                AuditPage {
+                    limit: vocab::Limit::new(10).expect("limit"),
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed.entries.len(), 2);
+        let first = listed.entries[0].resource().id();
+        let second = listed.entries[1].resource().id();
+        assert_ne!(first, second, "role binding resource must include subject");
+        assert_eq!(first, expected_role_binding_resource_id("target-a"));
+        assert_eq!(second, expected_role_binding_resource_id("target-b"));
     }
 
     #[tokio::test]
@@ -1012,13 +1385,27 @@ mod tests {
             Some(vocab::AUDIT_READ_PERMISSION)
         );
         let subs = reg.drain_subscribers();
-        assert_eq!(subs.len(), 1);
-        let spec = SUBSCRIPTIONS[0];
-        assert_eq!(spec.consumer, AUDIT_DOMAIN);
-        assert_eq!(subs[0].contract_id, spec.contract_id);
-        assert_eq!(subs[0].topic, spec.topic);
-        assert_eq!(subs[0].consumer, spec.consumer);
-        assert_eq!(subs[0].group.as_str(), spec.group);
+        let expected: Vec<_> = [
+            SESSION_CREATED_SUBSCRIPTIONS,
+            ROLE_ASSIGNED_SUBSCRIPTIONS,
+            ROLE_REVOKED_SUBSCRIPTIONS,
+        ]
+        .into_iter()
+        .flat_map(|specs| specs.iter())
+        .collect();
+        assert_eq!(expected.len(), 3);
+        assert_eq!(subs.len(), expected.len());
+        for spec in expected {
+            assert_eq!(spec.consumer, AUDIT_DOMAIN);
+            assert!(
+                subs.iter().any(|sub| sub.contract_id == spec.contract_id
+                    && sub.topic == spec.topic
+                    && sub.consumer == spec.consumer
+                    && sub.group.as_str() == spec.group),
+                "missing subscriber binding for {}",
+                spec.contract_id
+            );
+        }
     }
 
     /// 在注入 ctx tenant 的 Router 上 oneshot 一个 GET（参数绑定 + 状态码 + 响应体）。

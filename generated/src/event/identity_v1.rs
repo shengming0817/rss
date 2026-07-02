@@ -37,6 +37,7 @@ pub mod role_assigned {
     ///  "title": "IdentityRoleAssignedPayload",
     ///  "type": "object",
     ///  "required": [
+    ///    "actorKind",
     ///    "assignedBy",
     ///    "occurredAt",
     ///    "roleId",
@@ -44,6 +45,17 @@ pub mod role_assigned {
     ///    "tenantId"
     ///  ],
     ///  "properties": {
+    ///    "actorKind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "user",
+    ///        "device",
+    ///        "admin",
+    ///        "superAdmin",
+    ///        "service",
+    ///        "anonymous"
+    ///      ]
+    ///    },
     ///    "assignedBy": {
     ///      "type": "string",
     ///      "format": "uuid",
@@ -71,6 +83,9 @@ pub mod role_assigned {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityRoleAssignedPayload {
+        #[serde(rename = "actorKind")]
+        #[redact(sensitivity = public)]
+        pub actor_kind: IdentityRoleAssignedPayloadActorKind,
         #[serde(rename = "assignedBy")]
         #[redact(sensitivity = pii)]
         pub assigned_by: ::uuid::Uuid,
@@ -85,6 +100,98 @@ pub mod role_assigned {
         #[serde(rename = "tenantId")]
         #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
+    }
+    ///`IdentityRoleAssignedPayloadActorKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "user",
+    ///    "device",
+    ///    "admin",
+    ///    "superAdmin",
+    ///    "service",
+    ///    "anonymous"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityRoleAssignedPayloadActorKind {
+        #[serde(rename = "user")]
+        User,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "admin")]
+        Admin,
+        #[serde(rename = "superAdmin")]
+        SuperAdmin,
+        #[serde(rename = "service")]
+        Service,
+        #[serde(rename = "anonymous")]
+        Anonymous,
+    }
+    impl ::std::fmt::Display for IdentityRoleAssignedPayloadActorKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::User => f.write_str("user"),
+                Self::Device => f.write_str("device"),
+                Self::Admin => f.write_str("admin"),
+                Self::SuperAdmin => f.write_str("superAdmin"),
+                Self::Service => f.write_str("service"),
+                Self::Anonymous => f.write_str("anonymous"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityRoleAssignedPayloadActorKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "user" => Ok(Self::User),
+                "device" => Ok(Self::Device),
+                "admin" => Ok(Self::Admin),
+                "superAdmin" => Ok(Self::SuperAdmin),
+                "service" => Ok(Self::Service),
+                "anonymous" => Ok(Self::Anonymous),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityRoleAssignedPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityRoleAssignedPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityRoleAssignedPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
 
     /// 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -102,7 +209,7 @@ pub mod role_assigned {
         "identity",
         "identity.role-assigned",
         "v1",
-        "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
+        "sha256:fc6a7fae4a70adde19490fdc933f3aee257a3ea758902b4c834890922681171d",
     );
 
     /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
@@ -110,7 +217,17 @@ pub mod role_assigned {
     /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
     /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
     /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] = &[];
+    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] =
+        &[super::super::SubscriptionSpec {
+            contract_id: CONTRACT_ID,
+            topic: TOPIC,
+            schema_version: CONTRACT.version(),
+            schema_hash: CONTRACT.schema_hash(),
+            consumer: "audit",
+            group: "audit.role-assigned",
+            partition_key: "none",
+            readiness: "required",
+        }];
 }
 
 /// 端点 `role-revoked` 派生契约（源 `role-revoked/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
@@ -150,6 +267,7 @@ pub mod role_revoked {
     ///  "title": "IdentityRoleRevokedPayload",
     ///  "type": "object",
     ///  "required": [
+    ///    "actorKind",
     ///    "occurredAt",
     ///    "revokedBy",
     ///    "roleId",
@@ -157,6 +275,17 @@ pub mod role_revoked {
     ///    "tenantId"
     ///  ],
     ///  "properties": {
+    ///    "actorKind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "user",
+    ///        "device",
+    ///        "admin",
+    ///        "superAdmin",
+    ///        "service",
+    ///        "anonymous"
+    ///      ]
+    ///    },
     ///    "occurredAt": {
     ///      "type": "integer",
     ///      "format": "int64"
@@ -184,6 +313,9 @@ pub mod role_revoked {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityRoleRevokedPayload {
+        #[serde(rename = "actorKind")]
+        #[redact(sensitivity = public)]
+        pub actor_kind: IdentityRoleRevokedPayloadActorKind,
         #[serde(rename = "occurredAt")]
         #[redact(sensitivity = public)]
         pub occurred_at: i64,
@@ -198,6 +330,98 @@ pub mod role_revoked {
         #[serde(rename = "tenantId")]
         #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
+    }
+    ///`IdentityRoleRevokedPayloadActorKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "user",
+    ///    "device",
+    ///    "admin",
+    ///    "superAdmin",
+    ///    "service",
+    ///    "anonymous"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityRoleRevokedPayloadActorKind {
+        #[serde(rename = "user")]
+        User,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "admin")]
+        Admin,
+        #[serde(rename = "superAdmin")]
+        SuperAdmin,
+        #[serde(rename = "service")]
+        Service,
+        #[serde(rename = "anonymous")]
+        Anonymous,
+    }
+    impl ::std::fmt::Display for IdentityRoleRevokedPayloadActorKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::User => f.write_str("user"),
+                Self::Device => f.write_str("device"),
+                Self::Admin => f.write_str("admin"),
+                Self::SuperAdmin => f.write_str("superAdmin"),
+                Self::Service => f.write_str("service"),
+                Self::Anonymous => f.write_str("anonymous"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityRoleRevokedPayloadActorKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "user" => Ok(Self::User),
+                "device" => Ok(Self::Device),
+                "admin" => Ok(Self::Admin),
+                "superAdmin" => Ok(Self::SuperAdmin),
+                "service" => Ok(Self::Service),
+                "anonymous" => Ok(Self::Anonymous),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityRoleRevokedPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityRoleRevokedPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityRoleRevokedPayloadActorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
 
     /// 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -215,7 +439,7 @@ pub mod role_revoked {
         "identity",
         "identity.role-revoked",
         "v1",
-        "sha256:5907e4ae46c66b849cd4edca354d4e11abdd6209ad898f37196002fb65ed9a51",
+        "sha256:c590835ecdadb62478a2074dbce19d3e3729066ccaa2e8b6f6f811006fa78f66",
     );
 
     /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
@@ -223,7 +447,17 @@ pub mod role_revoked {
     /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
     /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
     /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] = &[];
+    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] =
+        &[super::super::SubscriptionSpec {
+            contract_id: CONTRACT_ID,
+            topic: TOPIC,
+            schema_version: CONTRACT.version(),
+            schema_hash: CONTRACT.schema_hash(),
+            consumer: "audit",
+            group: "audit.role-revoked",
+            partition_key: "none",
+            readiness: "required",
+        }];
 }
 
 /// 端点 `session-created` 派生契约（源 `session-created/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。

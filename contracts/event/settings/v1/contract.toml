@@ -1,17 +1,30 @@
-# settings config-version-changed event 契约（draft）——RW-W 配置版本化发布/回滚 outbox fact。
+# settings config-version-changed event 契约（active）——RW-W 配置版本化发布/回滚 outbox fact。
 # 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
 # 发布/回滚均生成新活跃版本并发同一 fact ⇒ consistencyLevel = OutboxFact（L2）。`changeKind` 区分
 # published / rolledBack（contracts 布局每 domain/version 单事件，用 kind 判别承载两类版本变更语义）。
-# draft：追踪弹验接缝；graduate 到 active（active event 须有 subscriber，订阅缓存 #1120）留后续单元。
+# active：config publish/rollback → durable outbox → relay → settings cache subscriber decode/ready 闭环。
 id = "settings.config-version-changed"
 kind = "event"
 domain = "settings"
 version = "v1"
 owner = "settings"
 consistencyLevel = "OutboxFact"
-lifecycle = "draft"
+lifecycle = "active"
+# active event 必填（R8）：稳定 dotted topic（broker routing key）+ 投递语义（R11 仅放行 at-least-once）。
+topic = "settings.config-version-changed"
+delivery = "at-least-once"
 
 [schemas]
 payload = "payload.schema.json"
 
-# TODO: graduate 到 active 时补 [[subscriptions]] 订阅缓存 consumer（#1120）+ changeKind 收紧为 enum（已 defer #1216）
+[capabilities.outbox]
+role = "fact"
+
+# active event 须有 subscriber（R14，EVENT-ACTIVE-SUB-01）：settings 域消费自身配置变更并承担 readiness。
+[[subscriptions]]
+consumer = "settings"
+group = "settings.config-version-changed"
+
+[subscriptions.topology]
+partitionKey = "none"
+readiness = "required"

@@ -106,12 +106,10 @@ impl Default for EventRuntime {
 
 /// 生产 AMQP relay 发布域集。
 ///
-/// 只列已经具备 broker routing 拓扑的 active 事件域。`settings.config-version-changed`
-/// 当前仍是 draft 且没有 consumer queue；AMQP publisher 使用 `mandatory=true`，若在生产
-/// durable runtime 接入 settings relay，会把该事件正确判为 unroutable 并反复 retry/DLX。
-/// 因此 settings 的 durable journey 只验证 PgOutbox + 测试 Publisher 模板，待事件升 active
-/// 并补 consumer/topology 后再加入此列表和 `wire_durable` relay block。
-const RELAY_DOMAINS: &[&str] = &["identity"];
+/// 只列已经具备 broker routing 拓扑的 active 事件域。每个域必须同时满足：
+/// active event contract + generated subscription + runtime subscriber binding；否则 AMQP
+/// publisher 的 `mandatory=true` 会把未接线事件判为 unroutable 并反复 retry/DLX。
+const RELAY_DOMAINS: &[&str] = &["identity", "settings"];
 
 #[cfg(test)]
 fn relay_domains_for_test() -> &'static [&'static str] {
@@ -619,6 +617,15 @@ async fn wire_durable(
             security.dlx_payload_protector.clone(),
         );
         wire_domain_relay("identity", outbox, &timing, &mut module)?;
+    }
+    {
+        let publisher = relay_publisher(&amqp_map, "settings")?;
+        let outbox = pg.for_domain::<caps::Settings>().outbox(
+            publisher,
+            Arc::clone(&security.tenant_authority),
+            security.dlx_payload_protector.clone(),
+        );
+        wire_domain_relay("settings", outbox, &timing, &mut module)?;
     }
     wire_outbox_maintenance(pg, distributed, &security, &timing, &mut module)?;
 
@@ -1206,7 +1213,10 @@ mod tests {
     #[test]
     fn required_domains_includes_publishing_domains_without_subscribers() {
         // 无 subscriber → 仍含 production RELAY_DOMAINS 发布域（relay 需 per-domain vhost）。
-        assert_eq!(required_domains(&[]), vec!["identity".to_string()]);
+        assert_eq!(
+            required_domains(&[]),
+            vec!["identity".to_string(), "settings".to_string()]
+        );
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1277,9 +1287,9 @@ mod tests {
             SPECS,
         )
         .unwrap();
-        // subscriber owner {identity, audit} ∪ RELAY_DOMAINS {identity} → 去重排序。
+        // subscriber owner {identity, audit} ∪ RELAY_DOMAINS {identity, settings} → 去重排序。
         let domains = required_domains(&bindings);
-        assert_eq!(domains, vec!["audit", "identity"]);
+        assert_eq!(domains, vec!["audit", "identity", "settings"]);
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1883,10 +1893,10 @@ mod tests {
     }
 
     #[test]
-    fn draft_settings_event_is_not_in_production_relay_domains() {
+    fn active_settings_event_is_in_production_relay_domains() {
         assert!(
-            !relay_domains_for_test().contains(&"settings"),
-            "settings.config-version-changed is draft and has no consumer queue; production AMQP relay would be unroutable"
+            relay_domains_for_test().contains(&"settings"),
+            "settings.config-version-changed is active and has subscriber topology; production relay must publish settings outbox rows"
         );
         assert!(
             primitives::ProbeName::parse(OUTBOX_SAMPLER_PROBE).is_ok(),

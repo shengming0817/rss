@@ -17,7 +17,10 @@
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
 //! ref: crates/identity/src/application.rs（L2 OutboxFact 经 OutboxEmitter 落 durable outbox 范式，#1100）
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use axum::Json;
@@ -26,12 +29,12 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use bootstrap::{Domain, KernelError, Registry};
-use consistency::{Entry, IdemKey, OutboxPayload, Topic};
-use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHandlerError};
+use consistency::{ConsumerGroup, Entry, IdemKey, OutboxPayload, Topic};
+use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
-    CONTRACT, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
-    TOPIC as VERSION_CHANGED_TOPIC,
+    CONTRACT, SUBSCRIPTIONS as VERSION_CHANGED_SUBSCRIPTIONS, SettingsConfigChangeKind,
+    SettingsConfigVersionChangedPayload, TOPIC as VERSION_CHANGED_TOPIC,
 };
 use generated::http::HttpAuthMode;
 use generated::http::settings_v1::{
@@ -63,6 +66,31 @@ use crate::ports::{
 
 /// 配置路由组前缀（Primary listener，业务 API）。
 pub const SETTINGS_ROUTE_PREFIX: &str = "/api/v1/settings";
+const SETTINGS_DOMAIN: &str = "settings";
+
+type ConfigCacheKey = (TenantId, String);
+
+#[derive(Default)]
+struct ConfigCache {
+    entries: Mutex<HashMap<ConfigCacheKey, ConfigEntry>>,
+}
+
+impl ConfigCache {
+    fn find(&self, tenant: TenantId, key: &SettingKey) -> Option<ConfigEntry> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.get(&(tenant, key.as_str().to_string())).cloned()
+    }
+
+    fn upsert(&self, entry: ConfigEntry) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.insert((entry.tenant(), entry.key().as_str().to_string()), entry);
+    }
+
+    fn remove(&self, tenant: TenantId, key: &SettingKey) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.remove(&(tenant, key.as_str().to_string()));
+    }
+}
 
 /// settings 应用层错误。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射）。
 #[derive(Debug, thiserror::Error)]
@@ -151,6 +179,7 @@ pub struct SettingsService {
     configs: Box<DynConfigRepo<'static>>,
     writer: Box<DynConfigUnitOfWork<'static>>,
     flags: Box<dyn FlagStore>,
+    cache: Arc<ConfigCache>,
     clock: Box<dyn Clock>,
 }
 
@@ -171,6 +200,7 @@ impl SettingsService {
             configs,
             writer,
             flags: flags.0,
+            cache: Arc::new(ConfigCache::default()),
             clock,
         }
     }
@@ -188,6 +218,7 @@ impl SettingsService {
             configs,
             writer,
             flags,
+            cache: Arc::new(ConfigCache::default()),
             clock,
         }
     }
@@ -299,8 +330,9 @@ impl SettingsService {
         // co-tx：CAS 配置写 + outbox append 同事务（both-or-neither）——冲突冒泡 `VersionConflict`，
         // 存储失败冒泡 `Storage`；二者皆使配置写与 outbox 行共回滚（消除 write-without-event 窗口）。
         self.writer
-            .save_and_append_outbox(tenant, entry, outbox_entry, envelope)
+            .save_and_append_outbox(tenant, entry.clone(), outbox_entry, envelope)
             .await?;
+        self.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
             data: SettingsConfigPublishData {
                 key: key.as_str().to_string(),
@@ -341,8 +373,9 @@ impl SettingsService {
         // 不可变无 TOCTOU；新版本号（`next_version`）存在 read-then-write 窗口，由 CAS INSERT 守住——并发
         // 冲突返 `VersionConflict`，调用方读后重写重试。
         self.writer
-            .save_and_append_outbox(tenant, entry, outbox_entry, envelope)
+            .save_and_append_outbox(tenant, entry.clone(), outbox_entry, envelope)
             .await?;
+        self.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
             data: SettingsConfigPublishData {
                 key: key.as_str().to_string(),
@@ -359,11 +392,14 @@ impl SettingsService {
         key: &str,
     ) -> Result<Option<String>, SettingsServiceError> {
         let key = SettingKey::parse(key)?;
-        Ok(self
-            .configs
-            .find(tenant, &key)
-            .await?
-            .map(|entry| entry.value().to_string()))
+        if let Some(entry) = self.cache.find(tenant, &key) {
+            return Ok(Some(entry.value().to_string()));
+        }
+        let entry = self.configs.find(tenant, &key).await?;
+        if let Some(entry) = &entry {
+            self.cache.upsert(entry.clone());
+        }
+        Ok(entry.map(|entry| entry.value().to_string()))
     }
 
     /// 软删除 key（tombstone，幂等）：仓储在 `max+1` 追加 tombstone 版本 → version 单调不重置（防 event_id
@@ -375,6 +411,7 @@ impl SettingsService {
     pub async fn delete(&self, tenant: TenantId, key: &str) -> Result<(), SettingsServiceError> {
         let key = SettingKey::parse(key)?;
         self.configs.delete(tenant, &key).await?;
+        self.cache.remove(tenant, &key);
         Ok(())
     }
 
@@ -396,6 +433,60 @@ impl SettingsService {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
         Ok(evaluate_flag(&state, &EvalContext::new(&owned)) == FlagDecision::Enabled)
+    }
+
+    async fn apply_config_version_changed(
+        &self,
+        tenant: TenantId,
+        key: SettingKey,
+        version: u64,
+    ) -> Result<(), SubscriberHandlerError> {
+        let latest = self
+            .configs
+            .latest_version(tenant, &key)
+            .await
+            .map_err(SubscriberHandlerError::transient)?;
+        match latest {
+            Some(current) if current > version => {
+                let current = self
+                    .configs
+                    .find(tenant, &key)
+                    .await
+                    .map_err(SubscriberHandlerError::transient)?;
+                match current {
+                    Some(entry) => self.cache.upsert(entry),
+                    None => self.cache.remove(tenant, &key),
+                }
+                return Ok(());
+            }
+            Some(current) if current < version => {
+                return Err(SubscriberHandlerError::transient(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "config version from event is not visible yet",
+                )));
+            }
+            Some(_) => {}
+            None => {
+                return Err(SubscriberHandlerError::transient(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "config key from event was not found",
+                )));
+            }
+        }
+
+        let entry = self
+            .configs
+            .find_version(tenant, &key, version)
+            .await
+            .map_err(SubscriberHandlerError::transient)?
+            .ok_or_else(|| {
+                SubscriberHandlerError::transient(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "config version from event was not found",
+                ))
+            })?;
+        self.cache.upsert(entry);
+        Ok(())
     }
 }
 
@@ -574,6 +665,70 @@ fn config_error_response(
     httpserve::error::core_error_response(&CoreError::new(kind), request_id)
 }
 
+struct ConfigVersionChangedSubscriber {
+    service: Arc<SettingsService>,
+}
+
+impl ConfigVersionChangedSubscriber {
+    fn new(service: Arc<SettingsService>) -> Self {
+        Self { service }
+    }
+}
+
+impl SubscriberHandler for ConfigVersionChangedSubscriber {
+    fn handle(
+        &self,
+        message: Message,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SubscriberHandlerError>> + Send + 'static>> {
+        let service = self.service.clone();
+        Box::pin(async move {
+            let msg_id = message.id.as_str().to_string();
+            let payload: SettingsConfigVersionChangedPayload =
+                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
+                    tracing::error!(
+                        message_id = msg_id.as_str(),
+                        category = ?e.classify(),
+                        "settings subscriber: config-version-changed payload decode failed"
+                    );
+                    SubscriberHandlerError::permanent(e)
+                })?;
+            let tenant = TenantId::parse(&payload.tenant_id).map_err(|e| {
+                tracing::error!(
+                    message_id = msg_id.as_str(),
+                    error = %e,
+                    "settings subscriber: non-canonical tenant in config-version-changed"
+                );
+                SubscriberHandlerError::permanent(e)
+            })?;
+            let key = SettingKey::parse(&payload.key).map_err(|e| {
+                tracing::error!(
+                    message_id = msg_id.as_str(),
+                    tenant_id = %tenant,
+                    error = %e,
+                    "settings subscriber: invalid config key in config-version-changed"
+                );
+                SubscriberHandlerError::permanent(e)
+            })?;
+            let version = u64::try_from(payload.version).map_err(|_| {
+                let err = std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "config-version-changed version must be non-negative",
+                );
+                tracing::error!(
+                    message_id = msg_id.as_str(),
+                    tenant_id = %tenant,
+                    version = payload.version,
+                    "settings subscriber: invalid config version in config-version-changed"
+                );
+                SubscriberHandlerError::permanent(err)
+            })?;
+            service
+                .apply_config_version_changed(tenant, key, version)
+                .await
+        })
+    }
+}
+
 /// settings 域 bootstrap 生命周期：挂载 config-publish / secret-publish 业务路由（Primary listener）。
 ///
 /// 持有 config 应用服务 + secret 仓储端口（构造器必填位置参注入，缺失即编译错误，rust-standards §工程护栏）；
@@ -603,6 +758,21 @@ impl SettingsDomain {
 
 impl Domain for SettingsDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+        let spec = VERSION_CHANGED_SUBSCRIPTIONS
+            .iter()
+            .find(|s| s.consumer == SETTINGS_DOMAIN)
+            .ok_or(KernelError::Subscriber)?;
+        let group = ConsumerGroup::parse(spec.group).map_err(|_| KernelError::Subscriber)?;
+        reg.subscriber(
+            spec.contract_id,
+            spec.topic,
+            spec.consumer,
+            group,
+            Box::new(ConfigVersionChangedSubscriber::new(Arc::clone(
+                &self.config,
+            ))),
+        )?;
+
         let config = Arc::clone(&self.config);
         let secret_repo = Arc::clone(&self.secret_repo);
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
@@ -968,6 +1138,113 @@ mod tests {
         );
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, SETTINGS_ROUTE_PREFIX);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn settings_domain_declares_config_version_changed_subscriber() {
+        let domain = settings_domain_for_test();
+        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let subs = reg.drain_subscribers();
+        let spec = VERSION_CHANGED_SUBSCRIPTIONS[0];
+        assert_eq!(spec.consumer, SETTINGS_DOMAIN);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].contract_id, spec.contract_id);
+        assert_eq!(subs[0].topic, spec.topic);
+        assert_eq!(subs[0].consumer, spec.consumer);
+        assert_eq!(subs[0].group.as_str(), spec.group);
+    }
+
+    #[allow(clippy::expect_used)]
+    fn version_changed_payload(tenant_id: &str) -> Vec<u8> {
+        version_changed_payload_for(tenant_id, "app.feature", 1)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn version_changed_payload_for(tenant_id: &str, key: &str, version: i64) -> Vec<u8> {
+        let payload = SettingsConfigVersionChangedPayload {
+            change_kind: SettingsConfigChangeKind::Published,
+            key: key.to_string(),
+            occurred_at: 1_700_000_000,
+            source_version: None,
+            tenant_id: tenant_id.to_string(),
+            version,
+        };
+        serde_json::to_vec(&payload).expect("encode")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_version_changed_subscriber_refreshes_config_cache() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .await
+            .expect("publish config");
+        let key = SettingKey::parse("app.feature").expect("valid key");
+        service.cache.remove(tenant(), &key);
+        assert!(
+            service.cache.find(tenant(), &key).is_none(),
+            "test must start with an empty cache slot"
+        );
+
+        let handler = ConfigVersionChangedSubscriber::new(Arc::clone(&service));
+        let result = handler
+            .handle(Message::new("m-settings", version_changed_payload(TENANT)))
+            .await;
+        assert!(result.is_ok());
+        let cached = service
+            .cache
+            .find(tenant(), &key)
+            .expect("subscriber refreshed cache");
+        assert_eq!(cached.value(), "enabled");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_version_changed_subscriber_ignores_stale_event_version() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.feature", "v1"))
+            .await
+            .expect("publish v1");
+        service
+            .publish_config(tenant(), actor(), publish_req("app.feature", "v2"))
+            .await
+            .expect("publish v2");
+        let key = SettingKey::parse("app.feature").expect("valid key");
+        service.cache.remove(tenant(), &key);
+
+        let handler = ConfigVersionChangedSubscriber::new(Arc::clone(&service));
+        let result = handler
+            .handle(Message::new(
+                "m-settings-stale",
+                version_changed_payload_for(TENANT, "app.feature", 1),
+            ))
+            .await;
+        assert!(result.is_ok());
+        let cached = service
+            .cache
+            .find(tenant(), &key)
+            .expect("stale event refreshes to latest active value");
+        assert_eq!(cached.value(), "v2");
+        assert_eq!(cached.version(), 2);
+    }
+
+    #[tokio::test]
+    async fn config_version_changed_subscriber_rejects_invalid_tenant() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let handler = ConfigVersionChangedSubscriber::new(service);
+        let result = handler
+            .handle(Message::new(
+                "m-settings",
+                version_changed_payload("not-a-uuid"),
+            ))
+            .await;
+        assert!(result.is_err());
     }
 
     #[test]

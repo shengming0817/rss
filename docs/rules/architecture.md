@@ -34,7 +34,7 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 | Contract | `contracts/{kind}/{domain}/{version}/` 的 `contract.toml` + `*.schema.json` 声明源 | typify/xtask 派生 Rust 进 `generated/` crate;跨边界唯一 wire 载体 |
 | Contract 归属 | `owner` = 域 crate 名 / `_framework`(sentinel) | provider-agnostic 中立契约归框架 |
 | Assembly | `assemblies/{name}/` 的 `assembly.toml`(+ `bins/server` / bin crate) | 依赖闭包 = 物理打包；DI provider 注入事实源 |
-| 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 | 与 wire 语义同源(决策 #1);不放域 crate manifest |
+| 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 + typed `[capabilities.*]` 证据块 | 与 wire 语义同源(决策 #1);不放域 crate manifest；`xtask` R22 强制等级与能力证据一致 |
 | context 控制流值(tenant/principal) | `runctx::RequestCtx`/`AppCtx`(`task_local` 传播);tenant payload = `vocab::tenant::TenantId` | sealed 构造 + redacted Debug + fail-closed 取用(决策 #2 → ADR-002);base intra-base DAG `runctx → vocab` |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
@@ -159,14 +159,14 @@ rss/
 | 机制 | 载体 | 评级 |
 |---|---|---|
 | contracts 跨边界单源 + 扇出闭环 | `xtask` 校验器 | Medium(CI 门) |
-| L0–L4 一致性声明 + governance(拓扑/引用完整性/格式) | `xtask` | Medium(CI 门) |
+| L0–L4 一致性声明 + typed capability evidence(拓扑/引用完整性/active producer readiness/格式/能力门) | `xtask` | Medium(CI 门) |
 | wire contract 版本目录(轴 B) | `xtask` | Medium(CI 门) |
 | 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml [dependencies] 按 §分层 矩阵校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..07) | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 
 **残留运行期/CI 检查**(类型系统 / crate 图管不到)显式为 **Medium(xtask/CI 门),严禁 Soft**:active subscriber
-存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
+存在性、active HTTP outbox producer 目标 readiness、consistency capability evidence、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
 守已声明边的「下层依赖上层成环」；不成环的反向边 / 兄弟域互斥 / adapter·generated scope 由 `cargo xtask layer-deps`
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
 `.claude/rules/rss/ai-robust.md`)。

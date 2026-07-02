@@ -22,9 +22,15 @@ use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
 use consistency::OutboxSource;
-use diport::{DynPublisher, MessageId, PublishRequest, Publisher, Topic};
+use diport::{
+    DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef,
+    KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest, Publisher, RedactedBytes,
+    Topic,
+};
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
+use generated::event::settings_v1;
 use generated::http::identity_v1::login::IdentityLoginRequest;
+use generated::http::settings_v1::SettingsConfigPublishRequest;
 use identity::ports::{
     DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, TenantId,
 };
@@ -41,6 +47,7 @@ use runtime::{
     SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, build_redis_runtime_deps,
     build_vault_runtime_deps, wire_distributed,
 };
+use settings::{SettingsDomain, SettingsService, empty_flag_store};
 
 // ── 共用常量（自 journeys/tests/common/mod.rs 复制，runtime 测试不能 mod common）────────────
 
@@ -80,6 +87,63 @@ impl diport::Clock for FixedClock {
     fn now(&self) -> SystemTime {
         self.0
     }
+}
+
+#[derive(Clone)]
+struct TestKeyProvider;
+
+impl KeyProvider for TestKeyProvider {
+    async fn encrypt(
+        &self,
+        key: KeyName,
+        plaintext: secure::Plaintext,
+        _aad: secure::DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        let ciphertext: Vec<u8> = plaintext.expose().iter().map(|byte| byte ^ 0xA5).collect();
+        Ok(EncryptOutput::new(
+            ciphertext,
+            KeyRef::new(key, KeyVersion::new(1)),
+        ))
+    }
+
+    async fn decrypt(
+        &self,
+        ciphertext: RedactedBytes,
+        _key: KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, KeyProviderError> {
+        let plaintext: Vec<u8> = ciphertext
+            .into_bytes()
+            .into_iter()
+            .map(|byte| byte ^ 0xA5)
+            .collect();
+        Ok(secure::Plaintext::new(plaintext))
+    }
+
+    async fn rewrap(
+        &self,
+        _ciphertext: RedactedBytes,
+        _key: KeyRef,
+        _aad: secure::DerivedAad,
+    ) -> Result<EncryptOutput, KeyProviderError> {
+        Err(KeyProviderError::new(
+            diport::key_provider::KeyProviderErrorKind::Forbidden,
+            std::io::Error::other("test key provider does not rewrap"),
+        ))
+    }
+
+    async fn shutdown(&self) -> Result<(), KeyProviderError> {
+        Ok(())
+    }
+}
+
+fn config_value_protections() -> Result<postgres::ConfigValueProtections> {
+    let key = KeyName::try_new("settings-config")?;
+    Ok(postgres::ConfigValueProtections::new(
+        DynKeyProvider::new_box(TestKeyProvider),
+        DynKeyProvider::new_box(TestKeyProvider),
+        key,
+    ))
 }
 
 // ── NoopPublisher（outbox read-only poll view；publish 从不调用）────────────────────────────
@@ -253,6 +317,23 @@ async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> R
     Ok(count)
 }
 
+async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) -> Result<String> {
+    let (event_id,): (String,) = sqlx::query_as(
+        r#"
+        SELECT event_id
+        FROM outbox
+        WHERE domain = $1 AND topic = $2
+        ORDER BY created_at DESC, event_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(domain)
+    .bind(topic)
+    .fetch_one(pool)
+    .await?;
+    Ok(event_id)
+}
+
 // ── e2e 测试主体 ───────────────────────────────────────────────────────────────────────────
 
 /// durable e2e：`wire_event_transport` 真容器贯通验收（#1251 task 6）。
@@ -278,8 +359,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .connect_with(pg_owner_connect_options(pgfix.params()))
         .await?;
     let id = pg.for_domain::<caps::Identity>();
+    let settings_pg = pg.for_domain::<caps::Settings>();
 
-    // ── 步骤 3：域装配（identity + audit）────────────────────────────────────────────────────
+    // ── 步骤 3：域装配（identity + settings + audit）────────────────────────────────────────
 
     let (audit_domain_inst, audit) = audit_domain();
 
@@ -320,10 +402,25 @@ async fn event_transport_durable_e2e() -> Result<()> {
         policies,
         Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
+    let (settings_configs, settings_writer, settings_secrets) = settings_pg
+        .settings_bundle(
+            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+            config_value_protections()?,
+        )
+        .into_parts();
+    let settings_service = Arc::new(SettingsService::with_postgres(
+        settings_configs,
+        settings_writer,
+        empty_flag_store(),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+    ));
+    let settings_domain =
+        SettingsDomain::new(Arc::clone(&settings_service), Arc::from(settings_secrets));
 
-    // ── 步骤 4：compose + drain subscribers（audit 的 session-created 订阅绑定）────────────────
+    // ── 步骤 4：compose + drain subscribers（generated event topology 对应的订阅绑定）────────────
 
-    let mut registry = bootstrap::compose(&[&identity_domain, &audit_domain_inst])?;
+    let mut registry =
+        bootstrap::compose(&[&identity_domain, &settings_domain, &audit_domain_inst])?;
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
     let consumer_group = generated::event::SUBSCRIPTIONS
         .iter()
@@ -333,6 +430,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         })
         .map(|spec| spec.group.to_owned())
         .context("e2e must declare audit session-created subscriber")?;
+    let settings_consumer_group = generated::event::SUBSCRIPTIONS
+        .iter()
+        .find(|spec| spec.contract_id == settings_v1::CONTRACT_ID && spec.consumer == "settings")
+        .map(|spec| spec.group.to_owned())
+        .context("e2e must declare settings config-version-changed subscriber")?;
 
     // ── 步骤 5：构造 EventTransportConfig（注入式 env builder，无 ambient env 侧效应）────────────
 
@@ -405,8 +507,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     );
     assert_eq!(
         event_runtime.module.workers.len(),
-        6,
-        "identity relay + consumer + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
+        9,
+        "identity/settings relays + generated consumers + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
     );
     let probe_names: Vec<&str> = event_runtime
         .module
@@ -421,8 +523,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
         );
     }
     assert!(
-        !probe_names.contains(&"outbox_relay_settings"),
-        "draft settings event has no consumer queue; production AMQP relay must not be wired"
+        probe_names.contains(&"outbox_relay_settings"),
+        "settings.config-version-changed is active and must have a production relay"
     );
 
     // ── 步骤 7：注册 ShutdownStack（infra_guards 先注册 → LIFO 最后关；workers 后注册 → LIFO 最先 drain）
@@ -439,9 +541,60 @@ async fn event_transport_durable_e2e() -> Result<()> {
         stack.register_with_token(worker);
     }
 
-    // ── 步骤 8：生产侧登录（PgSessionLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
+    // ── 步骤 8a：settings active event 走生产 relay + AMQP consumer bridge ───────────────────
 
     let tenant = TenantId::parse(CANON_TENANT)?;
+    let settings_key = "app.runtime-e2e";
+    let settings_actor = OutboxActor::scoped(
+        vocab::PrincipalKind::Admin,
+        OpaqueActorId::from_opaque("settings-event-transport-e2e")?,
+        tenant,
+        vocab::ScopedTenant::Tenant,
+    );
+    settings_service
+        .publish_config(
+            tenant,
+            settings_actor,
+            SettingsConfigPublishRequest {
+                key: settings_key.to_string(),
+                value: "enabled".to_string(),
+            },
+        )
+        .await?;
+    let settings_event_id =
+        latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if inbox_done_count(
+                &assertion_pool,
+                &settings_event_id,
+                &settings_consumer_group,
+            )
+            .await
+            .is_ok_and(|count| count == 1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "timeout 20s 内 settings config-version-changed 未被 settings subscriber 消费"
+        )
+    })?;
+    assert_eq!(
+        settings_service
+            .get_value(tenant, settings_key)
+            .await?
+            .as_deref(),
+        Some("enabled"),
+        "settings subscriber path must leave the published config readable"
+    );
+
+    // ── 步骤 8：生产侧登录（PgSessionLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
+
     // 第二个 LoginService 实例（同种子凭据），用于直接调用 .login()。
     let refresh_for_login = identity::seed_refresh_service(
         || Box::new(FixedClock::at_unix_secs(NOW_SECS)),

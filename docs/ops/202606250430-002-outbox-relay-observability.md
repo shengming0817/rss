@@ -107,9 +107,11 @@ DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历
   用真实 Postgres + `PgConfigUnitOfWork` + `PgOutbox` + 测试 publisher 验证 `settings` 写入、co-tx outbox、
   relay settle、`outbox_publish_total{domain="settings",contract_id="settings.config-version-changed",tenant_id="...",status="ack"}`、
   `outbox_pending_depth{domain="settings",contract_id="settings.config-version-changed",tenant_id="..."}`
-  与测试 `outbox_relay_settings` readyz 闭环。该模板刻意不走生产 AMQP publisher：`settings.config-version-changed`
-  仍是 draft 且无 consumer queue，生产 `mandatory=true` AMQP relay 会把它判为 unroutable；事件升 active 并补
-  subscriber/topology 前不接入 production relay domain。运行：
+  与测试 `outbox_relay_settings` readyz 闭环。`settings.config-version-changed` 现为 active 事件，生产
+  relay domain 已包含 `settings`；runtime 通过 generated subscription 接线到 settings subscriber，consumer
+  处理时按事件 `(tenant,key,version)` 回读配置仓储并刷新本进程 config cache。该模板仍刻意注入测试 publisher，
+  用于隔离验证 settings outbox/relay 指标；生产 AMQP publisher/consumer bridge 覆盖见 runtime durable E2E。
+  运行：
   `cargo test -p runtime --features integration --test settings_config_publish_durable_e2e`。
 
 ## 配置护栏（误配防护）
@@ -159,8 +161,9 @@ maintenance 权限，也不暴露 tenant / raw SQL / retain 参数入口。
 runtime durable event transport 现在把 outbox relay / sampler / sweeper 与 consumer bundle 作为
 `DomainModuleResult` 产物输出：
 
-- per-domain relay：`outbox_relay_identity` readyz probe，按 active/provisioned 发布域 AMQP publisher 中继
-  outbox；draft 且无 consumer queue 的 settings 暂不接 production relay。
+- per-domain relay：`outbox_relay_identity` / `outbox_relay_settings` readyz probe，按 active/provisioned
+  发布域 AMQP publisher 中继 outbox；`settings.config-version-changed` 已有 production consumer queue 与
+  settings subscriber。
 - sampler：`outbox_sampler` readyz probe，按 `RSS_RELAY_SAMPLE_INTERVAL_MS` 采样 backlog gauges。
 - sweeper：`outbox_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
   `RSS_OUTBOX_RETAIN_SECONDS` 的 `published` outbox 行。

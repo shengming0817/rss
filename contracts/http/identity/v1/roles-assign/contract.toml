@@ -16,3 +16,8 @@ response = "response.schema.json"
 [endpoints.http.auth]
 mode = "permission"
 permission = "identity:role:assign"
+
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["identity.role-assigned"]

@@ -76,6 +76,10 @@ pub(crate) struct ContractManifest {
     /// active event 必须非空（EVENT-ACTIVE-SUB-01，R14）；draft/deprecated 豁免。
     #[serde(default)]
     pub(crate) subscriptions: Vec<Subscription>,
+    /// L0-L4 consistency capability evidence. `consistencyLevel` names the intended
+    /// semantics; this typed block provides the machine-checkable proof surface.
+    #[serde(default)]
+    pub(crate) capabilities: Capabilities,
 }
 
 impl ContractManifest {
@@ -125,6 +129,136 @@ pub(crate) enum ConsistencyLevel {
     OutboxFact,
     WorkflowEventual,
     DeviceLatent,
+}
+
+/// Typed capability evidence for `consistencyLevel`.
+///
+/// Blocks are optional at parse time so diagnostics can be emitted as governance
+/// findings with contract ids. Unknown fields and unknown enum values still fail
+/// at parse time via `deny_unknown_fields` and closed enums.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct Capabilities {
+    #[serde(default)]
+    pub(crate) local_tx: Option<LocalTxCapability>,
+    #[serde(default)]
+    pub(crate) outbox: Option<OutboxCapability>,
+    #[serde(default)]
+    pub(crate) workflow: Option<WorkflowCapability>,
+    #[serde(default)]
+    pub(crate) device_latent: Option<DeviceLatentCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocalTxCapability {
+    pub(crate) boundary: LocalTxBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LocalTxBoundary {
+    SingleDomain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutboxCapability {
+    pub(crate) role: OutboxRole,
+    #[serde(default)]
+    pub(crate) atomicity: Option<OutboxAtomicity>,
+    #[serde(default)]
+    pub(crate) emits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OutboxRole {
+    Producer,
+    Fact,
+    Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OutboxAtomicity {
+    SameTransaction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowCapability {
+    pub(crate) mode: WorkflowMode,
+    #[serde(default)]
+    pub(crate) inputs: Vec<String>,
+    #[serde(default)]
+    pub(crate) ordering: Option<WorkflowOrdering>,
+    #[serde(default)]
+    pub(crate) checkpoint: Option<WorkflowRequirement>,
+    #[serde(default)]
+    pub(crate) replay: Option<WorkflowRequirement>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WorkflowMode {
+    Saga,
+    Projection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WorkflowOrdering {
+    SerialInOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WorkflowRequirement {
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct DeviceLatentCapability {
+    #[serde(rename = "loop")]
+    pub(crate) loop_kind: DeviceLatentLoop,
+    pub(crate) tenancy: DeviceLatentTenancy,
+    pub(crate) trigger: DeviceLatentTrigger,
+    pub(crate) fencing: DeviceLatentFencing,
+    pub(crate) late_message_policy: DeviceLatentLateMessagePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeviceLatentLoop {
+    Reconcile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeviceLatentTenancy {
+    SingleTenant,
+    TenantScoped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeviceLatentTrigger {
+    Interval,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeviceLatentFencing {
+    Required,
+    SingleProcess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DeviceLatentLateMessagePolicy {
+    Idempotent,
 }
 
 /// 契约生命周期。`active` 才需 assembly 接线（见 contract-fanout.md §契约归属）。
@@ -538,6 +672,72 @@ mod tests {
     }
 
     #[test]
+    fn parses_typed_capabilities() -> anyhow::Result<()> {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [capabilities.localTx]
+            boundary = "single-domain"
+
+            [capabilities.outbox]
+            role = "producer"
+            atomicity = "same-transaction"
+            emits = ["identity.session-created"]
+
+            [capabilities.workflow]
+            mode = "projection"
+            inputs = ["identity.session-created"]
+            ordering = "serial-in-order"
+            checkpoint = "required"
+            replay = "required"
+
+            [capabilities.deviceLatent]
+            loop = "reconcile"
+            tenancy = "tenant-scoped"
+            trigger = "interval"
+            fencing = "required"
+            lateMessagePolicy = "idempotent"
+        "#
+        );
+        let m = ContractManifest::from_toml_str(&toml)?;
+        assert_eq!(
+            m.capabilities.local_tx.as_ref().map(|c| c.boundary),
+            Some(LocalTxBoundary::SingleDomain)
+        );
+        let outbox = m
+            .capabilities
+            .outbox
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("outbox capability should parse"))?;
+        assert_eq!(outbox.role, OutboxRole::Producer);
+        assert_eq!(outbox.atomicity, Some(OutboxAtomicity::SameTransaction));
+        assert_eq!(outbox.emits, vec!["identity.session-created"]);
+        let workflow = m
+            .capabilities
+            .workflow
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("workflow capability should parse"))?;
+        assert_eq!(workflow.mode, WorkflowMode::Projection);
+        assert_eq!(workflow.ordering, Some(WorkflowOrdering::SerialInOrder));
+        assert_eq!(workflow.checkpoint, Some(WorkflowRequirement::Required));
+        assert_eq!(workflow.replay, Some(WorkflowRequirement::Required));
+        let device = m
+            .capabilities
+            .device_latent
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("deviceLatent capability should parse"))?;
+        assert_eq!(device.loop_kind, DeviceLatentLoop::Reconcile);
+        assert_eq!(device.tenancy, DeviceLatentTenancy::TenantScoped);
+        assert_eq!(device.trigger, DeviceLatentTrigger::Interval);
+        assert_eq!(device.fencing, DeviceLatentFencing::Required);
+        assert_eq!(
+            device.late_message_policy,
+            DeviceLatentLateMessagePolicy::Idempotent
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rejects_unknown_method() {
         let toml = VALID_HTTP.replace("\"POST\"", "\"FETCH\"");
         assert!(ContractManifest::from_toml_str(&toml).is_err());
@@ -552,6 +752,33 @@ mod tests {
     #[test]
     fn rejects_unknown_compensation_order() {
         let toml = VALID_SAGA.replace("\"reverse\"", "\"forward\"");
+        assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_capability_value() {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [capabilities.outbox]
+            role = "maybe"
+        "#
+        );
+        assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_device_latent_capability() {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [capabilities.deviceLatent]
+            loop = "reconcile"
+            tenancy = "tenant-scoped"
+            trigger = "interval"
+            fencing = "required"
+        "#
+        );
         assert!(ContractManifest::from_toml_str(&toml).is_err());
     }
 

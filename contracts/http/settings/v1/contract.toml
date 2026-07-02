@@ -21,3 +21,8 @@ response = "response.schema.json"
 [endpoints.http.auth]
 mode = "permission"
 permission = "settings.config-publish"
+
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["settings.config-version-changed"]

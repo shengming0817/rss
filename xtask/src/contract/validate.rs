@@ -31,6 +31,9 @@
 //! HTTP request schema 不得声明 ambient tenant `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only
 //! header 或 service-token MAC 绑定 header（R19）；#1583 audit.list-entries GET 顶层 query `tenantId`
 //! 是 target tenant，非 ambient tenant source，按窄例外放行。
+//! INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— `consistencyLevel`
+//! 必须有 typed `[capabilities.*]` 证据，且能力块不得跨等级漂移（R22）。HTTP L2 producer 的 `emits`
+//! 须引用存在的 L2 active event contract，L3/L4 只接受当前 manifest 能表达的 workflow / device-latent 证据。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -47,18 +50,20 @@
 //!   → R9 PerKindFieldScope → R18 HttpAuth → R19 HttpTenantSource → R10 SagaBlock
 //!   → R11 ActiveDeliverySupported → R13 SchemaTitle → R16 SchemaRedaction → R17 SchemaProtection
 //!   → R14 ActiveSubscriber → R20 SlugSyntax
-//!   跨契约（validate_cross，需全局视图）：R12 DuplicateId → R21 SlugMixing
+//!   跨契约（validate_cross，需全局视图）：R12 DuplicateId → R21 SlugMixing → R22 ConsistencyCapability
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use syn::visit::Visit;
 
 use super::manifest::{
-    ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery, FIELD_DELIVERY,
-    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
-    FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode,
-    HttpEndpoint, HttpHeaderMode, Lifecycle, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST,
-    SCHEMA_KEY_RESPONSE,
+    Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
+    FIELD_DELIVERY, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
+    FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS,
+    FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode, Lifecycle, LocalTxBoundary,
+    OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+    WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -69,6 +74,29 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
+
+const CAP_LOCAL_TX: &str = "capabilities.localTx";
+const CAP_OUTBOX: &str = "capabilities.outbox";
+const CAP_WORKFLOW: &str = "capabilities.workflow";
+const CAP_DEVICE_LATENT: &str = "capabilities.deviceLatent";
+
+const CAP_OUTBOX_ROLE_FACT: &str = "capabilities.outbox.role=fact";
+const CAP_OUTBOX_ROLE_COMMAND: &str = "capabilities.outbox.role=command";
+const CAP_OUTBOX_ROLE_PRODUCER: &str = "capabilities.outbox.role=producer";
+const CAP_OUTBOX_ATOMICITY: &str = "capabilities.outbox.atomicity";
+const CAP_OUTBOX_EMITS: &str = "capabilities.outbox.emits";
+const CAP_OUTBOX_EMITS_ACTIVE: &str = "capabilities.outbox.emits.active";
+const CAP_OUTBOX_FIELD_SCOPE: &str = "capabilities.outbox.field-scope";
+const CAP_RUNTIME_RELAY_DOMAIN: &str = "runtime.relay.domain";
+const CAP_RUNTIME_RELAY_WIRING: &str = "runtime.relay.wiring";
+const CAP_WORKFLOW_MODE_SAGA: &str = "capabilities.workflow.mode=saga";
+const CAP_WORKFLOW_INPUTS: &str = "capabilities.workflow.inputs";
+const CAP_WORKFLOW_ORDERING: &str = "capabilities.workflow.ordering";
+const CAP_WORKFLOW_CHECKPOINT: &str = "capabilities.workflow.checkpoint";
+const CAP_WORKFLOW_REPLAY: &str = "capabilities.workflow.replay";
+const CAP_WORKFLOW_FIELD_SCOPE: &str = "capabilities.workflow.field-scope";
+const CAP_CAPABILITY_SCOPE: &str = "capability-scope";
+const RUNTIME_EVENT_TRANSPORT_RS: &str = "assemblies/runtime/src/event_transport.rs";
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +185,11 @@ pub(crate) enum Rule {
     /// INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 { level = "Medium", exec = "verify", source = "code" }— 一个 `{domain}/{version}` 模块要么全扁平（恰一契约）、要么全嵌套
     /// （≥1 子契约），不得既含直接 `contract.toml` 又含子目录契约（Medium，CI 门）。跨契约规则（需 group 视图）。
     SlugMixing,
+    /// R22：`consistencyLevel` 须匹配 typed `[capabilities.*]` 证据；HTTP L2 producer 的 emits 引用须存在且为 L2 event。
+    ///
+    /// INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— 一致性等级不能只停留在字符串枚举；
+    /// 必须有闭值 typed 能力证据，禁止跨等级 stray capability，防 L2/L3/L4 语义虚开。
+    ConsistencyCapability,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -168,29 +201,562 @@ impl GovernanceCheck for ContractValidate {
         "contract validate"
     }
     fn check(&self) -> Result<(String, Vec<Finding>)> {
-        let contracts_root = crate::workspace_root()?.join("contracts");
-        let (count, findings) = validate_root(&contracts_root)?;
+        let root = crate::workspace_root()?;
+        let (count, findings) = validate_workspace(&root)?;
         Ok((format!("{count} 契约全部通过"), findings))
     }
 }
 
-/// 校验给定根下全部契约，返回（契约数, findings）。根可注入便于测试。
-pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding>)> {
-    let contracts = discover(contracts_root)?;
-    let mut findings = Vec::new();
-    for c in &contracts {
-        findings.extend(validate_contract(c));
-    }
-    findings.extend(validate_cross(&contracts));
+fn validate_workspace(root: &Path) -> Result<(usize, Vec<Finding>)> {
+    let contracts_root = root.join("contracts");
+    let contracts = discover(&contracts_root)?;
+    let runtime_relay = read_runtime_relay_wiring(root)?;
+    let mut findings = validate_discovered_contracts(&contracts);
+    findings.extend(rule_runtime_relay_coverage(&contracts, &runtime_relay));
     Ok((contracts.len(), findings))
 }
 
+/// 校验给定根下全部契约，返回（契约数, findings）。根可注入便于测试。
+#[cfg(test)]
+pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding>)> {
+    let contracts = discover(contracts_root)?;
+    let findings = validate_discovered_contracts(&contracts);
+    Ok((contracts.len(), findings))
+}
+
+fn validate_discovered_contracts(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for c in contracts {
+        findings.extend(validate_contract(c));
+    }
+    findings.extend(validate_cross(contracts));
+    findings
+}
+
 /// 跨契约规则聚合点：需要**全局视图**（看到所有契约才能判定），无法在逐契约的 [`validate_contract`]
-/// 内表达。现含 R12 DuplicateId、R21 SlugMixing；后续跨契约不变式在此追加。
+/// 内表达。现含 R12 DuplicateId、R21 SlugMixing、R22 ConsistencyCapability；后续跨契约不变式在此追加。
 fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
     let mut out = rule_duplicate_id(contracts);
     out.extend(rule_slug_mixing(contracts));
+    out.extend(rule_consistency_capability(contracts));
     out
+}
+
+fn read_runtime_relay_wiring(root: &Path) -> Result<RuntimeRelayWiring> {
+    let path = root.join(RUNTIME_EVENT_TRANSPORT_RS);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取 runtime event transport 接线 {}", path.display()))?;
+    parse_runtime_relay_wiring(&content)
+        .with_context(|| format!("解析 runtime event transport 接线 {}", path.display()))
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RuntimeRelayWiring {
+    relay_domains: BTreeSet<String>,
+    wired_domains: BTreeSet<String>,
+}
+
+fn parse_runtime_relay_wiring(content: &str) -> Result<RuntimeRelayWiring> {
+    let file = syn::parse_file(content)?;
+    let mut visitor = RuntimeRelayVisitor::default();
+    visitor.visit_file(&file);
+    Ok(visitor.wiring)
+}
+
+#[derive(Default)]
+struct RuntimeRelayVisitor {
+    wiring: RuntimeRelayWiring,
+}
+
+impl<'ast> Visit<'ast> for RuntimeRelayVisitor {
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if node.ident == "RELAY_DOMAINS" {
+            self.wiring
+                .relay_domains
+                .extend(expr_string_array_literals(&node.expr));
+        }
+        syn::visit::visit_item_const(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if expr_call_is_ident(&node.func, "wire_domain_relay")
+            && let Some(first) = node.args.first()
+            && let Some(domain) = expr_string_literal(first)
+        {
+            self.wiring.wired_domains.insert(domain);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+fn expr_string_array_literals(expr: &syn::Expr) -> Vec<String> {
+    match expr {
+        syn::Expr::Array(array) => array.elems.iter().filter_map(expr_string_literal).collect(),
+        syn::Expr::Group(group) => expr_string_array_literals(&group.expr),
+        syn::Expr::Paren(paren) => expr_string_array_literals(&paren.expr),
+        syn::Expr::Reference(reference) => expr_string_array_literals(&reference.expr),
+        _ => Vec::new(),
+    }
+}
+
+fn expr_string_literal(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Str(s) => Some(s.value()),
+            _ => None,
+        },
+        syn::Expr::Group(group) => expr_string_literal(&group.expr),
+        syn::Expr::Paren(paren) => expr_string_literal(&paren.expr),
+        syn::Expr::Reference(reference) => expr_string_literal(&reference.expr),
+        _ => None,
+    }
+}
+
+fn expr_call_is_ident(expr: &syn::Expr, ident: &str) -> bool {
+    match expr {
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == ident),
+        syn::Expr::Group(group) => expr_call_is_ident(&group.expr, ident),
+        syn::Expr::Paren(paren) => expr_call_is_ident(&paren.expr, ident),
+        _ => false,
+    }
+}
+
+fn rule_runtime_relay_coverage(
+    contracts: &[DiscoveredContract],
+    runtime: &RuntimeRelayWiring,
+) -> Vec<Finding> {
+    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+        .iter()
+        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .collect();
+    let mut out = Vec::new();
+    for producer in contracts {
+        let manifest = &producer.manifest;
+        if manifest.kind != ContractKind::Http
+            || manifest.lifecycle != Lifecycle::Active
+            || manifest.consistency_level != ConsistencyLevel::OutboxFact
+        {
+            continue;
+        }
+        let Some(outbox) = &manifest.capabilities.outbox else {
+            continue;
+        };
+        if outbox.role != OutboxRole::Producer {
+            continue;
+        }
+        let label = contract_label(producer);
+        for emitted_id in &outbox.emits {
+            let Some(target) = by_id.get(emitted_id.as_str()) else {
+                continue;
+            };
+            if !active_outbox_event_ready(target) {
+                continue;
+            }
+            let domain = target.manifest.domain.as_str();
+            if !runtime.relay_domains.contains(domain) {
+                out.push(finding(
+                    Rule::ConsistencyCapability,
+                    label.clone(),
+                    format!(
+                        "contract id={} missing capability={CAP_RUNTIME_RELAY_DOMAIN} missing capability ref={emitted_id}；active HTTP OutboxFact producer 发出的 active event domain={domain} 必须出现在 {RUNTIME_EVENT_TRANSPORT_RS} 的 RELAY_DOMAINS",
+                        manifest.id
+                    ),
+                ));
+            }
+            if !runtime.wired_domains.contains(domain) {
+                out.push(finding(
+                    Rule::ConsistencyCapability,
+                    label.clone(),
+                    format!(
+                        "contract id={} missing capability={CAP_RUNTIME_RELAY_WIRING} missing capability ref={emitted_id}；active HTTP OutboxFact producer 发出的 active event domain={domain} 必须经 {RUNTIME_EVENT_TRANSPORT_RS} 调用 wire_domain_relay",
+                        manifest.id
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn active_outbox_event_ready(contract: &DiscoveredContract) -> bool {
+    let manifest = &contract.manifest;
+    manifest.kind == ContractKind::Event
+        && manifest.lifecycle == Lifecycle::Active
+        && manifest.consistency_level == ConsistencyLevel::OutboxFact
+        && !manifest.subscriptions.is_empty()
+}
+
+/// R22：consistencyLevel capability gate。跨契约原因：HTTP L2 producer 的 `emits` 必须引用存在的
+/// `kind=event && consistencyLevel=OutboxFact` contract id。
+fn rule_consistency_capability(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+        .iter()
+        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .collect();
+    let mut out = Vec::new();
+    for contract in contracts {
+        let label = contract_label(contract);
+        out.extend(rule_consistency_capability_one(contract, &label, &by_id));
+    }
+    out
+}
+
+fn rule_consistency_capability_one(
+    c: &DiscoveredContract,
+    label: &str,
+    by_id: &BTreeMap<&str, &DiscoveredContract>,
+) -> Vec<Finding> {
+    let m = &c.manifest;
+    let mut out = Vec::new();
+    match m.consistency_level {
+        ConsistencyLevel::LocalOnly => {
+            if m.kind != ContractKind::Http {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    "local-only-http",
+                    "LocalOnly 当前只允许 kind=http 契约声明本地纯能力",
+                ));
+            }
+            out.extend(unexpected_capabilities(m, label, &[]));
+        }
+        ConsistencyLevel::LocalTx => {
+            if m.kind != ContractKind::Http {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_LOCAL_TX,
+                    "LocalTx 须由 kind=http + [capabilities.localTx] 证明",
+                ));
+            }
+            match &m.capabilities.local_tx {
+                Some(local_tx) if local_tx.boundary == LocalTxBoundary::SingleDomain => {}
+                _ => out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_LOCAL_TX,
+                    "LocalTx 须声明 boundary=\"single-domain\"",
+                )),
+            }
+            out.extend(unexpected_capabilities(m, label, &[CAP_LOCAL_TX]));
+        }
+        ConsistencyLevel::OutboxFact => {
+            out.extend(rule_outbox_capability(c, label, by_id));
+            out.extend(unexpected_capabilities(m, label, &[CAP_OUTBOX]));
+        }
+        ConsistencyLevel::WorkflowEventual => {
+            out.extend(rule_workflow_capability(c, label, by_id));
+            out.extend(unexpected_capabilities(m, label, &[CAP_WORKFLOW]));
+        }
+        ConsistencyLevel::DeviceLatent => {
+            if m.kind != ContractKind::Http {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_DEVICE_LATENT,
+                    "DeviceLatent 当前须由 kind=http + [capabilities.deviceLatent] 声明设备长延迟收敛入口",
+                ));
+            }
+            if m.capabilities.device_latent.is_none() {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_DEVICE_LATENT,
+                    "DeviceLatent 须声明 reconcile/tenancy/trigger/fencing/lateMessagePolicy",
+                ));
+            }
+            out.extend(unexpected_capabilities(m, label, &[CAP_DEVICE_LATENT]));
+        }
+    }
+    out
+}
+
+fn rule_outbox_capability(
+    c: &DiscoveredContract,
+    label: &str,
+    by_id: &BTreeMap<&str, &DiscoveredContract>,
+) -> Vec<Finding> {
+    let m = &c.manifest;
+    let mut out = Vec::new();
+    let Some(outbox) = &m.capabilities.outbox else {
+        return vec![consistency_capability_finding(
+            m,
+            label,
+            CAP_OUTBOX,
+            "OutboxFact 须声明 [capabilities.outbox]",
+        )];
+    };
+    match m.kind {
+        ContractKind::Event => {
+            if outbox.role != OutboxRole::Fact {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_OUTBOX_ROLE_FACT,
+                    "kind=event 的 OutboxFact 须声明 outbox fact role",
+                ));
+            }
+            out.extend(unexpected_outbox_payload_fields(
+                m,
+                label,
+                outbox.atomicity.is_some(),
+                !outbox.emits.is_empty(),
+                "event fact",
+            ));
+        }
+        ContractKind::Command => {
+            if outbox.role != OutboxRole::Command {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_OUTBOX_ROLE_COMMAND,
+                    "kind=command 的 OutboxFact 须声明 command role",
+                ));
+            }
+            out.extend(unexpected_outbox_payload_fields(
+                m,
+                label,
+                outbox.atomicity.is_some(),
+                !outbox.emits.is_empty(),
+                "command",
+            ));
+        }
+        ContractKind::Http => {
+            if outbox.role != OutboxRole::Producer {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_OUTBOX_ROLE_PRODUCER,
+                    "kind=http 的 OutboxFact 须声明 producer role",
+                ));
+            }
+            if outbox.atomicity != Some(OutboxAtomicity::SameTransaction) {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_OUTBOX_ATOMICITY,
+                    "HTTP OutboxFact producer 须声明 atomicity=\"same-transaction\"",
+                ));
+            }
+            if outbox.emits.is_empty() {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_OUTBOX_EMITS,
+                    "HTTP OutboxFact producer 须声明至少一个 emitted event contract id",
+                ));
+            }
+            for emitted_id in &outbox.emits {
+                match by_id.get(emitted_id.as_str()) {
+                    Some(target)
+                        if target.manifest.kind == ContractKind::Event
+                            && target.manifest.consistency_level == ConsistencyLevel::OutboxFact =>
+                    {
+                        if m.lifecycle == Lifecycle::Active
+                            && (target.manifest.lifecycle != Lifecycle::Active
+                                || target.manifest.subscriptions.is_empty())
+                        {
+                            out.push(finding(
+                                Rule::ConsistencyCapability,
+                                label,
+                                format!(
+                                    "contract id={} missing capability={CAP_OUTBOX_EMITS_ACTIVE} missing capability ref={emitted_id}；active HTTP OutboxFact producer 的 [capabilities.outbox].emits 必须引用 active 且声明 [[subscriptions]] readiness 的 L2 event contract",
+                                    m.id
+                                ),
+                            ));
+                        }
+                    }
+                    _ => out.push(finding(
+                        Rule::ConsistencyCapability,
+                        label,
+                        format!(
+                            "contract id={} missing capability ref={emitted_id}；[capabilities.outbox].emits 必须引用存在的 kind=event 且 consistencyLevel=OutboxFact 的 contract id",
+                            m.id
+                        ),
+                    )),
+                }
+            }
+        }
+        ContractKind::Saga => out.push(consistency_capability_finding(
+            m,
+            label,
+            "outbox-compatible-kind",
+            "OutboxFact 不允许 kind=saga；saga workflow 须使用 consistencyLevel=WorkflowEventual",
+        )),
+    }
+    out
+}
+
+fn rule_workflow_capability(
+    c: &DiscoveredContract,
+    label: &str,
+    by_id: &BTreeMap<&str, &DiscoveredContract>,
+) -> Vec<Finding> {
+    let m = &c.manifest;
+    let mut out = Vec::new();
+    let Some(workflow) = &m.capabilities.workflow else {
+        return vec![consistency_capability_finding(
+            m,
+            label,
+            CAP_WORKFLOW,
+            "WorkflowEventual 须声明 [capabilities.workflow]",
+        )];
+    };
+    match workflow.mode {
+        WorkflowMode::Saga => {
+            if m.kind != ContractKind::Saga || m.saga.is_none() {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_MODE_SAGA,
+                    "saga workflow 须由 kind=saga + [saga] block 共同证明",
+                ));
+            }
+            if !workflow.inputs.is_empty()
+                || workflow.ordering.is_some()
+                || workflow.checkpoint.is_some()
+                || workflow.replay.is_some()
+            {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_FIELD_SCOPE,
+                    "saga workflow 不得携带 projection-only inputs/ordering/checkpoint/replay 字段",
+                ));
+            }
+        }
+        WorkflowMode::Projection => {
+            if workflow.inputs.is_empty() {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_INPUTS,
+                    "projection workflow 须声明至少一个 input contract id",
+                ));
+            }
+            for input_id in &workflow.inputs {
+                match by_id.get(input_id.as_str()) {
+                    Some(target)
+                        if target.manifest.kind == ContractKind::Event
+                            && target.manifest.consistency_level == ConsistencyLevel::OutboxFact => {}
+                    _ => out.push(finding(
+                        Rule::ConsistencyCapability,
+                        label,
+                        format!(
+                            "contract id={} missing capability ref={input_id}；[capabilities.workflow].inputs 必须引用存在的 kind=event 且 consistencyLevel=OutboxFact 的 contract id",
+                            m.id
+                        ),
+                    )),
+                }
+            }
+            if workflow.ordering != Some(WorkflowOrdering::SerialInOrder) {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_ORDERING,
+                    "projection workflow 须声明 ordering=\"serial-in-order\"",
+                ));
+            }
+            if workflow.checkpoint != Some(WorkflowRequirement::Required) {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_CHECKPOINT,
+                    "projection workflow 须声明 checkpoint=\"required\"",
+                ));
+            }
+            if workflow.replay != Some(WorkflowRequirement::Required) {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_REPLAY,
+                    "projection workflow 须声明 replay=\"required\"",
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn unexpected_capabilities(
+    m: &ContractManifest,
+    label: &str,
+    allowed: &[&'static str],
+) -> Vec<Finding> {
+    present_capabilities(&m.capabilities)
+        .into_iter()
+        .filter(|(name, _)| !allowed.contains(name))
+        .map(|(name, _)| {
+            consistency_capability_finding(
+                m,
+                label,
+                CAP_CAPABILITY_SCOPE,
+                &format!(
+                    "unexpected capability={name} 不允许用于 consistencyLevel={:?}",
+                    m.consistency_level
+                ),
+            )
+        })
+        .collect()
+}
+
+fn present_capabilities(caps: &Capabilities) -> Vec<(&'static str, bool)> {
+    [
+        (CAP_LOCAL_TX, caps.local_tx.is_some()),
+        (CAP_OUTBOX, caps.outbox.is_some()),
+        (CAP_WORKFLOW, caps.workflow.is_some()),
+        (CAP_DEVICE_LATENT, caps.device_latent.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, present)| *present)
+    .collect()
+}
+
+fn unexpected_outbox_payload_fields(
+    m: &ContractManifest,
+    label: &str,
+    has_atomicity: bool,
+    has_emits: bool,
+    role_label: &str,
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if has_atomicity {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_OUTBOX_FIELD_SCOPE,
+            &format!("{role_label} outbox capability 不得声明 producer-only atomicity 字段"),
+        ));
+    }
+    if has_emits {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_OUTBOX_FIELD_SCOPE,
+            &format!("{role_label} outbox capability 不得声明 producer-only emits 字段"),
+        ));
+    }
+    out
+}
+
+fn consistency_capability_finding(
+    m: &ContractManifest,
+    label: &str,
+    missing: &str,
+    detail: &str,
+) -> Finding {
+    finding(
+        Rule::ConsistencyCapability,
+        label,
+        format!(
+            "contract id={} missing capability={missing}；{detail}",
+            m.id
+        ),
+    )
 }
 
 /// R21：同 `{kind}/{domain}/{version}` 下扁平 / 嵌套形态不可混用（INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 { level = "Medium", exec = "verify", source = "code" }）。
@@ -1292,10 +1858,12 @@ fn is_domain_name(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::contract::manifest::{
-        CompensationOrder, Delivery, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint,
-        HttpHeaderMode, HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
-        Lifecycle, PartitionKeyStrategy, SagaBlock, SagaStep, Schemas, SubscriberReadiness,
-        Subscription, SubscriptionTopology,
+        Capabilities, CompensationOrder, Delivery, DeviceLatentCapability, DeviceLatentFencing,
+        DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentTenancy, DeviceLatentTrigger,
+        Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod,
+        HttpProjection, HttpProjectionField, HttpProjectionFieldName, Lifecycle, LocalTxCapability,
+        OutboxCapability, PartitionKeyStrategy, SagaBlock, SagaStep, Schemas, SubscriberReadiness,
+        Subscription, SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -1323,6 +1891,7 @@ mod tests {
             delivery: None,
             saga: None,
             subscriptions: Vec::new(),
+            capabilities: Capabilities::default(),
         }
     }
 
@@ -1368,6 +1937,91 @@ mod tests {
         Schemas {
             payload: Some("payload.schema.json".to_string()),
             ..Schemas::default()
+        }
+    }
+
+    fn local_tx_capability() -> Capabilities {
+        Capabilities {
+            local_tx: Some(LocalTxCapability {
+                boundary: LocalTxBoundary::SingleDomain,
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn outbox_fact_capability() -> Capabilities {
+        Capabilities {
+            outbox: Some(OutboxCapability {
+                role: OutboxRole::Fact,
+                atomicity: None,
+                emits: Vec::new(),
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn outbox_command_capability() -> Capabilities {
+        Capabilities {
+            outbox: Some(OutboxCapability {
+                role: OutboxRole::Command,
+                atomicity: None,
+                emits: Vec::new(),
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn outbox_producer_capability(emits: &[&str]) -> Capabilities {
+        Capabilities {
+            outbox: Some(OutboxCapability {
+                role: OutboxRole::Producer,
+                atomicity: Some(OutboxAtomicity::SameTransaction),
+                emits: emits.iter().map(|s| (*s).to_string()).collect(),
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn workflow_saga_capability() -> Capabilities {
+        Capabilities {
+            workflow: Some(WorkflowCapability {
+                mode: WorkflowMode::Saga,
+                inputs: Vec::new(),
+                ordering: None,
+                checkpoint: None,
+                replay: None,
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn workflow_projection_capability() -> Capabilities {
+        workflow_projection_capability_with_inputs(&["identity.session-created"])
+    }
+
+    fn workflow_projection_capability_with_inputs(inputs: &[&str]) -> Capabilities {
+        Capabilities {
+            workflow: Some(WorkflowCapability {
+                mode: WorkflowMode::Projection,
+                inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
+                ordering: Some(WorkflowOrdering::SerialInOrder),
+                checkpoint: Some(WorkflowRequirement::Required),
+                replay: Some(WorkflowRequirement::Required),
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn device_latent_capability() -> Capabilities {
+        Capabilities {
+            device_latent: Some(DeviceLatentCapability {
+                loop_kind: DeviceLatentLoop::Reconcile,
+                tenancy: DeviceLatentTenancy::TenantScoped,
+                trigger: DeviceLatentTrigger::Interval,
+                fencing: DeviceLatentFencing::Required,
+                late_message_policy: DeviceLatentLateMessagePolicy::Idempotent,
+            }),
+            ..Capabilities::default()
         }
     }
 
@@ -3294,6 +3948,486 @@ mod tests {
             discovered_event_slug("identity", "v2", Some("role-assigned")),
         ];
         assert!(rule_slug_mixing(&contracts).is_empty());
+    }
+
+    // ── R22 ConsistencyCapability（L0-L4 ability gate）──────────────────────
+
+    fn assert_r22_detail(findings: &[Finding], contract_id: &str, missing: &str) {
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsistencyCapability
+                    && f.detail.contains(&format!("contract id={contract_id}"))
+                    && f.detail.contains(&format!("missing capability={missing}"))
+            }),
+            "expected R22 finding for id={contract_id}, missing={missing}; got {findings:?}"
+        );
+    }
+
+    fn active_http_outbox_producer(domain: &str, id: &str, emits: &[&str]) -> DiscoveredContract {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain(domain.to_string()),
+            http_schemas(),
+        );
+        m.id = id.to_string();
+        m.domain = domain.to_string();
+        m.lifecycle = Lifecycle::Active;
+        m.capabilities = outbox_producer_capability(emits);
+        discovered(m, PathBuf::from(format!("/{id}")))
+    }
+
+    fn active_outbox_event(domain: &str, id: &str) -> DiscoveredContract {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain(domain.to_string()),
+            payload_schemas(),
+        );
+        m.id = id.to_string();
+        m.domain = domain.to_string();
+        m.lifecycle = Lifecycle::Active;
+        m.subscriptions = vec![one_subscription()];
+        m.capabilities = outbox_fact_capability();
+        discovered(m, PathBuf::from(format!("/{id}")))
+    }
+
+    fn runtime_relay_wiring(relay_domains: &[&str], wired_domains: &[&str]) -> RuntimeRelayWiring {
+        RuntimeRelayWiring {
+            relay_domains: relay_domains.iter().map(|s| (*s).to_string()).collect(),
+            wired_domains: wired_domains.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn r22_runtime_relay_parser_reads_registry_and_wiring_calls() -> anyhow::Result<()> {
+        let wiring = parse_runtime_relay_wiring(
+            r#"
+            const RELAY_DOMAINS: &[&str] = &["identity", "settings"];
+
+            fn wire() -> anyhow::Result<()> {
+                wire_domain_relay("identity", identity_outbox, &timing, &mut module)?;
+                wire_domain_relay("settings", settings_outbox, &timing, &mut module)?;
+                Ok(())
+            }
+            "#,
+        )?;
+        assert_eq!(
+            wiring,
+            runtime_relay_wiring(&["identity", "settings"], &["identity", "settings"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r22_active_http_outbox_emits_requires_runtime_relay_domain_registry() {
+        let contracts = vec![
+            active_http_outbox_producer(
+                "billing",
+                "billing.invoice-create",
+                &["billing.invoice-created"],
+            ),
+            active_outbox_event("billing", "billing.invoice-created"),
+        ];
+        let runtime = runtime_relay_wiring(&[], &["billing"]);
+        let findings = rule_runtime_relay_coverage(&contracts, &runtime);
+        assert_r22_detail(
+            &findings,
+            "billing.invoice-create",
+            CAP_RUNTIME_RELAY_DOMAIN,
+        );
+    }
+
+    #[test]
+    fn r22_active_http_outbox_emits_requires_runtime_relay_wiring() {
+        let contracts = vec![
+            active_http_outbox_producer(
+                "billing",
+                "billing.invoice-create",
+                &["billing.invoice-created"],
+            ),
+            active_outbox_event("billing", "billing.invoice-created"),
+        ];
+        let runtime = runtime_relay_wiring(&["billing"], &[]);
+        let findings = rule_runtime_relay_coverage(&contracts, &runtime);
+        assert_r22_detail(
+            &findings,
+            "billing.invoice-create",
+            CAP_RUNTIME_RELAY_WIRING,
+        );
+    }
+
+    #[test]
+    fn r22_consistency_localonly_event_and_stray_outbox_rejected() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        m.id = "seed.local-event".to_string();
+        m.capabilities = outbox_fact_capability();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "seed.local-event", "local-only-http");
+        assert_r22_detail(&findings, "seed.local-event", "capability-scope");
+    }
+
+    #[test]
+    fn r22_consistency_localtx_requires_http_and_localtx_capability() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::LocalTx,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.id = "identity.local-tx-event".to_string();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "identity.local-tx-event", CAP_LOCAL_TX);
+    }
+
+    #[test]
+    fn r22_consistency_event_outbox_wrong_role_and_stray_payload_fields_rejected() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.id = "identity.session-created".to_string();
+        m.capabilities = outbox_producer_capability(&["identity.session-created"]);
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "identity.session-created", CAP_OUTBOX_ROLE_FACT);
+        assert_r22_detail(
+            &findings,
+            "identity.session-created",
+            CAP_OUTBOX_FIELD_SCOPE,
+        );
+    }
+
+    #[test]
+    fn r22_consistency_command_outbox_wrong_role_rejected() {
+        let mut m = command_manifest(ConsistencyLevel::OutboxFact);
+        m.capabilities = outbox_fact_capability();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "seed.do-thing", CAP_OUTBOX_ROLE_COMMAND);
+    }
+
+    #[test]
+    fn r22_consistency_http_outbox_missing_producer_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        m.id = "identity.login".to_string();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "identity.login", "capabilities.outbox");
+    }
+
+    #[test]
+    fn r22_consistency_http_outbox_missing_emits_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        m.id = "identity.login".to_string();
+        m.capabilities = outbox_producer_capability(&[]);
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "identity.login", "capabilities.outbox.emits");
+    }
+
+    #[test]
+    fn r22_consistency_http_outbox_emits_ref_must_target_l2_event() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        m.id = "identity.login".to_string();
+        m.capabilities = outbox_producer_capability(&["identity.missing-event"]);
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsistencyCapability
+                    && f.detail.contains("contract id=identity.login")
+                    && f.detail
+                        .contains("missing capability ref=identity.missing-event")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r22_consistency_http_outbox_emits_ref_rejects_non_event_target() {
+        let mut producer = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        producer.id = "identity.login".to_string();
+        producer.capabilities = outbox_producer_capability(&["identity.create-session"]);
+
+        let mut command = command_manifest(ConsistencyLevel::OutboxFact);
+        command.id = "identity.create-session".to_string();
+        command.capabilities = outbox_command_capability();
+
+        let findings = rule_consistency_capability(&[
+            discovered(producer, PathBuf::from("/producer")),
+            discovered(command, PathBuf::from("/command")),
+        ]);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsistencyCapability
+                    && f.detail.contains("contract id=identity.login")
+                    && f.detail
+                        .contains("missing capability ref=identity.create-session")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r22_consistency_active_http_outbox_emits_ref_requires_active_event_readiness() {
+        let mut producer = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        producer.id = "identity.roles-assign".to_string();
+        producer.lifecycle = Lifecycle::Active;
+        producer.capabilities = outbox_producer_capability(&["identity.role-assigned"]);
+
+        let mut draft_event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        draft_event.id = "identity.role-assigned".to_string();
+        draft_event.lifecycle = Lifecycle::Draft;
+        draft_event.capabilities = outbox_fact_capability();
+
+        let findings = rule_consistency_capability(&[
+            discovered(producer, PathBuf::from("/producer")),
+            discovered(draft_event, PathBuf::from("/event")),
+        ]);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsistencyCapability
+                    && f.detail.contains("contract id=identity.roles-assign")
+                    && f.detail
+                        .contains("missing capability ref=identity.role-assigned")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r22_consistency_workflow_missing_capability_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Domain("billing".to_string()),
+            http_schemas(),
+        );
+        m.id = "billing.projection".to_string();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "billing.projection", "capabilities.workflow");
+    }
+
+    #[test]
+    fn r22_consistency_saga_workflow_requires_saga_block() {
+        let mut m = saga_manifest(None);
+        m.capabilities = workflow_saga_capability();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(
+            &findings,
+            "billing.checkout",
+            "capabilities.workflow.mode=saga",
+        );
+    }
+
+    #[test]
+    fn r22_consistency_saga_workflow_rejects_projection_only_fields() {
+        let mut m = saga_manifest(Some(valid_saga_block()));
+        m.capabilities = workflow_saga_capability();
+        let Some(workflow) = m.capabilities.workflow.as_mut() else {
+            unreachable!("workflow_saga_capability sets workflow");
+        };
+        workflow.inputs = vec!["identity.session-created".to_string()];
+        workflow.ordering = Some(WorkflowOrdering::SerialInOrder);
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "billing.checkout", CAP_WORKFLOW_FIELD_SCOPE);
+    }
+
+    #[test]
+    fn r22_consistency_projection_inputs_ref_must_target_l2_event() {
+        let mut projection = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Domain("audit".to_string()),
+            http_schemas(),
+        );
+        projection.id = "audit.session-projection".to_string();
+        projection.capabilities =
+            workflow_projection_capability_with_inputs(&["identity.create-session"]);
+
+        let mut command = command_manifest(ConsistencyLevel::OutboxFact);
+        command.id = "identity.create-session".to_string();
+        command.capabilities = outbox_command_capability();
+
+        let findings = rule_consistency_capability(&[
+            discovered(projection, PathBuf::from("/projection")),
+            discovered(command, PathBuf::from("/command")),
+        ]);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsistencyCapability
+                    && f.detail.contains("contract id=audit.session-projection")
+                    && f.detail
+                        .contains("missing capability ref=identity.create-session")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r22_consistency_projection_missing_evidence_fields_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Domain("audit".to_string()),
+            http_schemas(),
+        );
+        m.id = "audit.session-projection".to_string();
+        m.capabilities = workflow_projection_capability_with_inputs(&[]);
+        let Some(workflow) = m.capabilities.workflow.as_mut() else {
+            unreachable!("workflow_projection_capability_with_inputs sets workflow");
+        };
+        workflow.ordering = None;
+        workflow.checkpoint = None;
+        workflow.replay = None;
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "audit.session-projection", CAP_WORKFLOW_INPUTS);
+        assert_r22_detail(&findings, "audit.session-projection", CAP_WORKFLOW_ORDERING);
+        assert_r22_detail(
+            &findings,
+            "audit.session-projection",
+            CAP_WORKFLOW_CHECKPOINT,
+        );
+        assert_r22_detail(&findings, "audit.session-projection", CAP_WORKFLOW_REPLAY);
+    }
+
+    #[test]
+    fn r22_consistency_device_latent_missing_capability_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::DeviceLatent,
+            ContractOwner::Domain("device".to_string()),
+            http_schemas(),
+        );
+        m.id = "device.cert-reconcile".to_string();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(
+            &findings,
+            "device.cert-reconcile",
+            "capabilities.deviceLatent",
+        );
+    }
+
+    #[test]
+    fn r22_consistency_device_latent_requires_http_kind() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::DeviceLatent,
+            ContractOwner::Domain("device".to_string()),
+            payload_schemas(),
+        );
+        m.id = "device.cert-reconcile".to_string();
+        m.capabilities = device_latent_capability();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "device.cert-reconcile", CAP_DEVICE_LATENT);
+    }
+
+    #[test]
+    fn r22_consistency_valid_matrix_ok() {
+        let mut local = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        local.id = "seed.local".to_string();
+
+        let mut local_tx = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalTx,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        local_tx.id = "identity.logout".to_string();
+        local_tx.capabilities = local_tx_capability();
+
+        let mut fact = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        fact.id = "identity.session-created".to_string();
+        fact.capabilities = outbox_fact_capability();
+
+        let mut command = command_manifest(ConsistencyLevel::OutboxFact);
+        command.capabilities = outbox_command_capability();
+
+        let mut producer = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            http_schemas(),
+        );
+        producer.id = "identity.login".to_string();
+        producer.capabilities = outbox_producer_capability(&["identity.session-created"]);
+
+        let mut saga = saga_manifest(Some(valid_saga_block()));
+        saga.capabilities = workflow_saga_capability();
+
+        let mut projection = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Domain("audit".to_string()),
+            http_schemas(),
+        );
+        projection.id = "audit.session-projection".to_string();
+        projection.capabilities = workflow_projection_capability();
+
+        let mut device = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::DeviceLatent,
+            ContractOwner::Domain("device".to_string()),
+            http_schemas(),
+        );
+        device.id = "device.cert-reconcile".to_string();
+        device.capabilities = device_latent_capability();
+
+        let contracts = vec![
+            discovered(local, PathBuf::from("/x")),
+            discovered(local_tx, PathBuf::from("/x")),
+            discovered(fact, PathBuf::from("/x")),
+            discovered(command, PathBuf::from("/x")),
+            discovered(producer, PathBuf::from("/x")),
+            discovered(saga, PathBuf::from("/x")),
+            discovered(projection, PathBuf::from("/x")),
+            discovered(device, PathBuf::from("/x")),
+        ];
+        let findings = rule_consistency_capability(&contracts);
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     // ── R13 SchemaTitle（per-contract，读 declared schema 文件）──────────────

@@ -21,3 +21,6 @@ steps = [
     { name = "reserve_funds", outputSchema = "reserve.schema.json" },
     { name = "capture", outputSchema = "capture.schema.json" },
 ]
+
+[capabilities.workflow]
+mode = "saga"

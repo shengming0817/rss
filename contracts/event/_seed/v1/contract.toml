@@ -13,3 +13,6 @@ delivery = "at-least-once"
 
 [schemas]
 payload = "payload.schema.json"
+
+[capabilities.outbox]
+role = "fact"
