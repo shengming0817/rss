@@ -947,7 +947,8 @@ mod tests {
             &self,
             _domain: &str,
             _limit: usize,
-        ) -> Result<Vec<consistency::outbox::Entry>, consistency::error::EngineError> {
+        ) -> Result<Vec<consistency::outbox::PendingEntry>, consistency::error::EngineError>
+        {
             Ok(vec![])
         }
     }
@@ -955,7 +956,7 @@ mod tests {
     impl consistency::OutboxRelay for NoopRelayStore {
         async fn relay(
             &self,
-            _entry: &consistency::outbox::Entry,
+            _entry: &consistency::outbox::PendingEntry,
         ) -> Result<consistency::outbox::Disposition, consistency::error::EngineError> {
             Ok(consistency::outbox::Disposition::Ack)
         }
@@ -972,8 +973,13 @@ mod tests {
     /// noop metrics（spawn_relay 测试不断言发射计数）。
     struct NoopRelayMetrics;
     impl crate::OutboxMetrics for NoopRelayMetrics {
-        fn record_publish(&self, _: &vocab::DomainName, _: consistency::outbox::Disposition) {}
-        fn record_backlog(&self, _: &vocab::DomainName, _: consistency::BacklogSample) {}
+        fn record_publish(
+            &self,
+            _: &crate::OutboxMetricScope<'_>,
+            _: consistency::outbox::Disposition,
+        ) {
+        }
+        fn record_backlog(&self, _: &crate::OutboxMetricScope<'_>, _: consistency::BacklogSample) {}
         fn record_tick_duration(&self, _: crate::RelayPhase, _: f64) {}
     }
 

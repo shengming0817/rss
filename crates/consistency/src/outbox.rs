@@ -170,6 +170,38 @@ impl Topic {
     }
 }
 
+/// Outbox metric contract id newtype（私有字段；稳定 dotted contract id）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OutboxContractId(String);
+
+/// `OutboxContractId` 解析错误。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OutboxContractIdError {
+    #[error("outbox contract id is empty")]
+    Empty,
+    #[error("outbox contract id is not a canonical dotted name")]
+    Format,
+}
+
+impl OutboxContractId {
+    /// 解析 outbox metric contract id；语法同 contract `id` / [`Topic`] dotted grammar。
+    pub fn parse(raw: &str) -> Result<Self, OutboxContractIdError> {
+        if raw.is_empty() {
+            return Err(OutboxContractIdError::Empty);
+        }
+        if !is_canonical_dotted(raw) {
+            return Err(OutboxContractIdError::Format);
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// 借出底层字符串视图。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// canonical dotted 文法：非空、每 `.` 段首字节 `[a-z]`、整段 `[a-z0-9-]`。
 ///
 /// 本谓词（经 `Topic::parse`）是 dotted-id / topic 文法的**单一事实源**——topic 是 wire routing key，
@@ -326,6 +358,72 @@ impl Entry {
     }
 }
 
+/// Outbox metric subject：tenant + contract 的低基数路由维度。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxMetricSubject {
+    tenant_id: vocab::TenantId,
+    contract_id: OutboxContractId,
+}
+
+impl OutboxMetricSubject {
+    /// 由已解析的 tenant / contract 构造 metric subject。
+    pub fn new(tenant_id: vocab::TenantId, contract_id: OutboxContractId) -> Self {
+        Self {
+            tenant_id,
+            contract_id,
+        }
+    }
+
+    /// 借出租户 id。
+    pub fn tenant_id(&self) -> vocab::TenantId {
+        self.tenant_id
+    }
+
+    /// 借出 contract id。
+    pub fn contract_id(&self) -> &OutboxContractId {
+        &self.contract_id
+    }
+}
+
+/// 已持久化、可中继的 outbox entry，携带 metric subject。
+#[derive(Debug, Clone)]
+pub struct PendingEntry {
+    entry: Entry,
+    subject: OutboxMetricSubject,
+}
+
+impl PendingEntry {
+    /// 由业务 entry + metric subject 构造 pending entry。
+    pub fn new(entry: Entry, subject: OutboxMetricSubject) -> Self {
+        Self { entry, subject }
+    }
+
+    /// 借出业务 entry。
+    pub fn entry(&self) -> &Entry {
+        &self.entry
+    }
+
+    /// 借出目标 topic。
+    pub fn topic(&self) -> &Topic {
+        self.entry.topic()
+    }
+
+    /// 借出幂等 key。
+    pub fn idem_key(&self) -> &crate::idempotency::IdemKey {
+        self.entry.idem_key()
+    }
+
+    /// 借出已编码 payload。
+    pub fn payload(&self) -> &[u8] {
+        self.entry.payload()
+    }
+
+    /// 借出 metric subject。
+    pub fn subject(&self) -> &OutboxMetricSubject {
+        &self.subject
+    }
+}
+
 /// Outbox 中继策略（L1 引擎策略 trait，native AFIT）。
 ///
 /// 把**已持久化**的 outbox entry 中继到 broker（demo=进程内 bus / postgres=真实 broker，eventbus.md
@@ -334,7 +432,7 @@ impl Entry {
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait OutboxRelay {
     /// 中继单条已持久化 entry。返回处置驱动 receipt commit / DLX / 退避（穷尽 `Disposition`）。
-    async fn relay(&self, entry: &Entry) -> Result<Disposition, crate::error::EngineError>;
+    async fn relay(&self, entry: &PendingEntry) -> Result<Disposition, crate::error::EngineError>;
 }
 
 /// Outbox 扫描源（L1 引擎策略 trait，native AFIT）。
@@ -343,13 +441,14 @@ pub trait OutboxRelay {
 /// relay 环逐条中继。读侧端口，与 [`OutboxRelay`]（写侧中继）同源构成 outbox 引擎接缝——SQL 在 adapter，
 /// 本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，消费方泛型 `<S: OutboxSource>`，禁 `Box<dyn>`。
 ///
-/// 返回的 [`Entry`] 是 adapter 内部按行重建（topic/idem_key/payload），**不**携 row id / lease_token——
+/// 返回的 [`PendingEntry`] 是 adapter 内部按行重建（topic/idem_key/payload + metric subject），
+/// **不**携 row id / lease_token——
 /// relay 的 CAS settle 以 `entry.idem_key()`（= event_id 幂等锚）为键收口，故扫描与中继解耦无需透传 lease。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait OutboxSource {
     /// 扫描某 `domain` 至多 `limit` 条待发 entry（pending 且 `retry_after` 到期，或 lease 过期的 in-flight
-    /// 可回收行）。返回已重建的引擎 [`Entry`]；空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
+    /// 可回收行）。返回已重建的引擎 [`PendingEntry`]；空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
     ///
     /// 若 adapter 走分区串行投递，须在此实现 head-of-partition gating：同
     /// `(tenant_id, domain, partition_key)` 仅放行 min(seq) 的队头行，确保同 tenant partition 内严格按
@@ -360,7 +459,7 @@ pub trait OutboxSource {
         &self,
         domain: &str,
         limit: usize,
-    ) -> Result<Vec<Entry>, crate::error::EngineError>;
+    ) -> Result<Vec<PendingEntry>, crate::error::EngineError>;
 }
 
 /// 保留期清理端口（L1 引擎策略 trait，native AFIT）——**跨 durable 表通用**。
@@ -423,6 +522,30 @@ impl BacklogSample {
     }
 }
 
+/// 单个 outbox metric subject 的 backlog 快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogMetricSample {
+    subject: OutboxMetricSubject,
+    sample: BacklogSample,
+}
+
+impl BacklogMetricSample {
+    /// 由 metric subject + backlog 标量构造 scoped backlog sample。
+    pub fn new(subject: OutboxMetricSubject, sample: BacklogSample) -> Self {
+        Self { subject, sample }
+    }
+
+    /// 借出 metric subject。
+    pub fn subject(&self) -> &OutboxMetricSubject {
+        &self.subject
+    }
+
+    /// 借出 backlog 标量。
+    pub fn sample(&self) -> BacklogSample {
+        self.sample
+    }
+}
+
 /// Outbox 积压采样端口（L1 引擎策略 trait，native AFIT）。
 ///
 /// 由可观测性采样背景 worker 周期驱动：聚合某 domain 的 pending 深度 + 最老 pending 龄，发射 backlog
@@ -436,21 +559,23 @@ pub trait OutboxBacklog {
     /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxSource::poll_pending`]
     /// 的可重捞集合**同源**：`(pending 且到期) OR (stale publishing，lease 过期可被 relay 重捞)`——stale
     /// publishing 会被重投，属可恢复积压必须计入；只排除 lease 仍有效的正常 in-flight，避免把正常中继中的行
-    /// 误计入。无可投递行 ⇒ [`BacklogSample::empty`]。`Transient` 错误 ⇒ 本轮跳过采样。
+    /// 误计入。已观测 `(tenant_id, contract_id)` scope 无可投递行 ⇒ 带 [`BacklogSample::empty`] 的样本；
+    /// 从未出现或已被清理到无历史行的 scope 不返回样本。`Transient` 错误 ⇒ 本轮跳过采样。
     ///
     /// head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
     /// partition 对 SLO 失明），故 backlog 谓词刻意不含 head-of-partition gate（#1211）。
     async fn sample_backlog(
         &self,
         domain: &str,
-    ) -> Result<BacklogSample, crate::error::EngineError>;
+    ) -> Result<Vec<BacklogMetricSample>, crate::error::EngineError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogSample, Disposition, Entry, HandleResult, OutboxPayload, PartitionKey,
-        PartitionKeyError, PermanentError, PermanentErrorKind, Topic, TopicError,
+        BacklogMetricSample, BacklogSample, Disposition, Entry, HandleResult, OutboxContractId,
+        OutboxContractIdError, OutboxMetricSubject, OutboxPayload, PartitionKey, PartitionKeyError,
+        PendingEntry, PermanentError, PermanentErrorKind, Topic, TopicError,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -612,6 +737,53 @@ mod tests {
         }
     }
 
+    // OutboxContractId 复用 canonical dotted grammar：接受 contract id 常见形态并往返。
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 happy-path 断言已知合法输入，item-level carve-out。
+    fn outbox_contract_id_accepts_canonical_dotted_and_round_trips() {
+        let cases: &[&str] = &[
+            "identity.session-created",
+            "settings.config-version-changed",
+            "seed.thing-happened",
+            "foo",
+        ];
+        for &raw in cases {
+            let id = OutboxContractId::parse(raw).unwrap();
+            assert_eq!(id.as_str(), raw);
+        }
+    }
+
+    #[test]
+    fn outbox_contract_id_rejects_empty() {
+        assert!(matches!(
+            OutboxContractId::parse(""),
+            Err(OutboxContractIdError::Empty)
+        ));
+    }
+
+    #[test]
+    fn outbox_contract_id_rejects_invalid_format() {
+        for raw in [
+            ".x",
+            "x.",
+            "a..b",
+            "Identity.session-created",
+            "identity.SessionCreated",
+            "1identity.session-created",
+            "identity._session",
+            "identity.session created",
+        ] {
+            assert!(
+                matches!(
+                    OutboxContractId::parse(raw),
+                    Err(OutboxContractIdError::Format)
+                ),
+                "expected Format for raw={raw:?}"
+            );
+        }
+    }
+
     // 私有文法谓词独立语义（`parse` 已前置拒空，此处守 helper 独立调用时空串短路 false 分支，
     // 文法分支全覆盖；本谓词是 xtask `is_dotted_id` 反向 delegate 的单源被委托方）。
     #[test]
@@ -638,6 +810,30 @@ mod tests {
         assert_eq!(entry.topic(), &topic);
         assert_eq!(entry.idem_key(), &key);
         assert_eq!(entry.payload(), payload.as_slice());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 happy-path 构造已知合法值，item-level carve-out。
+    fn pending_entry_and_metric_samples_expose_scope() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let contract_id = OutboxContractId::parse("identity.session-created").unwrap();
+        let subject = OutboxMetricSubject::new(tenant, contract_id.clone());
+        assert_eq!(subject.tenant_id(), tenant);
+        assert_eq!(subject.contract_id(), &contract_id);
+
+        let entry = Entry::new(
+            Topic::parse("session.created").unwrap(),
+            IdemKey::parse("evt-scoped").unwrap(),
+            OutboxPayload::from_reviewed_event_bytes(vec![1, 2, 3]),
+        );
+        let pending = PendingEntry::new(entry.clone(), subject.clone());
+        assert_eq!(pending.entry().idem_key(), entry.idem_key());
+        assert_eq!(pending.subject(), &subject);
+
+        let backlog = BacklogMetricSample::new(subject.clone(), BacklogSample::empty());
+        assert_eq!(backlog.subject(), &subject);
+        assert_eq!(backlog.sample(), BacklogSample::empty());
     }
 
     #[test]

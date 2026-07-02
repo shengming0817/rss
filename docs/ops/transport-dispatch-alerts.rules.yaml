@@ -7,7 +7,8 @@
 # 校验：promtool check rules docs/ops/transport-dispatch-alerts.rules.yaml
 #
 # 注：transport_mode/outcome 是闭值集低基数 label（distributed::{TransportMode,TransportOutcome}::as_label）。
-# 目标 domain/contract_id 故意不入 metric label（基数随契约增长），故告警按 transport_mode 聚合定位 in-proc/remote。
+# 目标 domain/contract_id 故意不入 distributed transport metric label（基数随契约增长），故告警按
+# transport_mode 聚合定位 in-proc/remote；outbox relay 的 #1625 route labels 是独立例外。
 groups:
   - name: transport-dispatch
     rules:

@@ -21,8 +21,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey, OutboxBacklog, OutboxPayload,
-    OutboxRelay, OutboxSource, RetentionSweeper, Topic,
+    BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey,
+    OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxPayload, OutboxRelay, OutboxSource,
+    PendingEntry, RetentionSweeper, Topic,
 };
 use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
@@ -699,10 +700,14 @@ impl OutboxSource for PgOutbox {
     /// parse 失败（topic / idem_key 无效）→ `EngineErrorKind::Invariant`（我们写入的数据不该无效）。
     ///
     /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
-    async fn poll_pending(&self, domain: &str, limit: usize) -> Result<Vec<Entry>, EngineError> {
-        let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
+    async fn poll_pending(
+        &self,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<PendingEntry>, EngineError> {
+        let rows: Vec<(String, String, String, String, Vec<u8>)> = sqlx::query_as(
             r#"
-            SELECT topic, event_id, payload
+            SELECT tenant_id, contract_id, topic, event_id, payload
             FROM rss_outbox_poll_pending($1, $2)
             "#,
         )
@@ -716,16 +721,18 @@ impl OutboxSource for PgOutbox {
         })?;
 
         rows.into_iter()
-            .map(|(topic_str, event_id, payload)| {
+            .map(|(tenant_id, contract_id, topic_str, event_id, payload)| {
+                let subject = parse_metric_subject(&tenant_id, &contract_id)?;
                 let topic = Topic::parse(&topic_str)
                     .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                 let idem_key = IdemKey::parse(&event_id)
                     .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                Ok(Entry::new(
+                let entry = Entry::new(
                     topic,
                     idem_key,
                     OutboxPayload::from_reviewed_event_bytes(payload),
-                ))
+                );
+                Ok(PendingEntry::new(entry, subject))
             })
             .collect()
     }
@@ -739,7 +746,8 @@ impl OutboxRelay for PgOutbox {
     /// `PublisherError` 携 kind（#1212）——`Permanent`（序列化 / 路由 / 编码非法）首投即 dlx（跳过重试预算）；
     /// `Transient`（连接闪断等可恢复）退避重试至预算耗尽再 dlx。分流见 [`settle_publish_failure`] /
     /// [`dlx_decision`]。DB/CAS 失败返 `Err(EngineError)`；publish 失败是**已处置**（返 `Ok(Disposition)`）。
-    async fn relay(&self, entry: &Entry) -> Result<consistency::Disposition, EngineError> {
+    async fn relay(&self, pending: &PendingEntry) -> Result<consistency::Disposition, EngineError> {
+        let entry = pending.entry();
         let event_id = entry.idem_key().as_str();
 
         // 1. CAS acquire：把 pending（或 stale publishing）行翻转到 publishing，返 (retry_count, lease_token)。
@@ -762,6 +770,8 @@ impl OutboxRelay for PgOutbox {
             Some(lease) => lease,
         };
         let tenant = parse_tenant_id(&tenant_id)?;
+        let row_contract = parse_outbox_contract_id(&contract_id)?;
+        validate_lease_scope(event_id, pending.subject(), tenant, &row_contract)?;
         let mut metadata = hydrate_envelope_metadata(&metadata_json);
         metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
         apply_schema_headers_from_columns(&mut metadata, &contract_version, &schema_hash);
@@ -793,7 +803,7 @@ impl OutboxRelay for PgOutbox {
                 .await
                 .map_err(RelayPublishFailure::Publisher),
             Err(e) => {
-                record_relay_envelope_validation_failure(&domain, e.reason());
+                record_relay_envelope_validation_failure(&domain, pending.subject(), e.reason());
                 Err(RelayPublishFailure::Envelope(e))
             }
         };
@@ -890,10 +900,16 @@ fn validate_publish_request_envelope(
         .map_err(RelayEnvelopeValidationError::new)
 }
 
-fn record_relay_envelope_validation_failure(domain: &str, reason: RelayEnvelopeValidationReason) {
+fn record_relay_envelope_validation_failure(
+    domain: &str,
+    subject: &OutboxMetricSubject,
+    reason: RelayEnvelopeValidationReason,
+) {
     metrics::counter!(
         "outbox_relay_envelope_validation_failure_total",
         "domain" => domain.to_owned(),
+        "contract_id" => subject.contract_id().as_str().to_owned(),
+        "tenant_id" => subject.tenant_id().to_string(),
         "reason" => reason.as_label(),
     )
     .increment(1);
@@ -1053,14 +1069,14 @@ impl OutboxBacklog for PgOutbox {
     /// **head-of-partition gate 是 poll-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
     /// partition 对 SLO 失明）。backlog 谓词刻意不含 head-of-partition gate（见 `poll_pending` INVARIANT:
     /// OUTBOX-PARTITION-ORDER-01）。
-    async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
+    async fn sample_backlog(&self, domain: &str) -> Result<Vec<BacklogMetricSample>, EngineError> {
         sample_outbox_backlog(&self.pool, domain).await
     }
 }
 
 impl OutboxBacklog for PgOutboxMaintenance {
     /// 采样 `domain` 的**可投递积压**（深度 + 最老积压龄）。
-    async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
+    async fn sample_backlog(&self, domain: &str) -> Result<Vec<BacklogMetricSample>, EngineError> {
         sample_outbox_backlog(&self.pool, domain).await
     }
 }
@@ -1095,32 +1111,38 @@ async fn sweep_published_outbox(
 async fn sample_outbox_backlog(
     pool: &sqlx::PgPool,
     domain: &str,
-) -> Result<BacklogSample, EngineError> {
-    let row: (i64, i64) = sqlx::query_as(
+) -> Result<Vec<BacklogMetricSample>, EngineError> {
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
         r#"
-        SELECT depth, oldest_age_seconds
+        SELECT tenant_id, contract_id, depth, oldest_age_seconds
         FROM rss_outbox_sample_backlog($1)
         "#,
     )
     .bind(domain)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| {
         tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: sample_backlog db error");
         EngineError::new(EngineErrorKind::Transient)
     })?;
 
-    let (raw_depth, raw_age) = row;
+    rows.into_iter()
+        .map(|(tenant_id, contract_id, raw_depth, raw_age)| {
+            let subject = parse_metric_subject(&tenant_id, &contract_id)?;
+            // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
+            let depth = u64::try_from(raw_depth)
+                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
 
-    // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
-    let depth =
-        u64::try_from(raw_depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+            // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
+            let oldest_age_seconds = u64::try_from(raw_age.max(0))
+                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
 
-    // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
-    let oldest_age_seconds =
-        u64::try_from(raw_age.max(0)).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-
-    Ok(BacklogSample::new(depth, oldest_age_seconds))
+            Ok(BacklogMetricSample::new(
+                subject,
+                BacklogSample::new(depth, oldest_age_seconds),
+            ))
+        })
+        .collect()
 }
 
 // ── relay 拆分 helper fn（认知复杂度 ≤ 15）────────────────────────────────────
@@ -1369,6 +1391,41 @@ fn parse_tenant_id(raw: &str) -> Result<vocab::TenantId, EngineError> {
     vocab::TenantId::parse(raw).map_err(|_| EngineError::new(EngineErrorKind::Invariant))
 }
 
+fn parse_outbox_contract_id(raw: &str) -> Result<OutboxContractId, EngineError> {
+    OutboxContractId::parse(raw).map_err(|_| EngineError::new(EngineErrorKind::Invariant))
+}
+
+fn parse_metric_subject(
+    tenant_id: &str,
+    contract_id: &str,
+) -> Result<OutboxMetricSubject, EngineError> {
+    Ok(OutboxMetricSubject::new(
+        parse_tenant_id(tenant_id)?,
+        parse_outbox_contract_id(contract_id)?,
+    ))
+}
+
+fn validate_lease_scope(
+    event_id: &str,
+    expected: &OutboxMetricSubject,
+    row_tenant: vocab::TenantId,
+    row_contract_id: &OutboxContractId,
+) -> Result<(), EngineError> {
+    if expected.tenant_id() == row_tenant && expected.contract_id() == row_contract_id {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        event_id,
+        expected_tenant = %expected.tenant_id(),
+        row_tenant = %row_tenant,
+        expected_contract_id = expected.contract_id().as_str(),
+        row_contract_id = row_contract_id.as_str(),
+        "outbox: acquired lease scope differs from pending entry scope"
+    );
+    Err(EngineError::new(EngineErrorKind::Invariant))
+}
+
 fn metadata_json_with_column_tenant(
     json: &str,
     tenant: vocab::TenantId,
@@ -1490,10 +1547,11 @@ pub(crate) const fn max_redelivery_window_secs() -> i64 {
 mod tests {
     // reserved key / subject key 常量来自 diport 单源（#1160 A4）。
     use super::{
-        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, STATUS_DLX,
-        STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns,
-        backoff_seconds, dlx_decision, hydrate_envelope_metadata, max_redelivery_window_secs,
-        metadata_with_ambient, unix_secs, validate_publish_request_envelope,
+        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata,
+        RelayEnvelopeValidationReason, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED,
+        STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds, dlx_decision,
+        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient,
+        record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
     };
     use diport::{
         EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
@@ -1515,6 +1573,15 @@ mod tests {
 
     fn metadata(occurred_at_secs: i64) -> OutboxMetadata {
         OutboxMetadata::new(occurred_at_secs, tenant(), contract())
+    }
+
+    #[allow(clippy::expect_used)]
+    fn metric_subject() -> consistency::OutboxMetricSubject {
+        consistency::OutboxMetricSubject::new(
+            tenant(),
+            consistency::OutboxContractId::parse("identity.session-created")
+                .expect("valid contract id"),
+        )
     }
 
     fn valid_publish_metadata() -> EnvelopeMetadata {
@@ -1576,6 +1643,39 @@ mod tests {
         .with_metadata(valid_publish_metadata());
 
         assert!(validate_publish_request_envelope(&request).is_ok());
+    }
+
+    #[test]
+    fn relay_validation_failure_metric_emits_scope_and_reason_labels() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let subject = metric_subject();
+        metrics::with_local_recorder(&recorder, || {
+            record_relay_envelope_validation_failure(
+                "identity",
+                &subject,
+                RelayEnvelopeValidationReason::MissingSchemaVersion,
+            );
+        });
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("outbox_relay_envelope_validation_failure_total"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(r#"domain="identity""#), "{rendered}");
+        assert!(
+            rendered.contains(r#"contract_id="identity.session-created""#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(r#"tenant_id="{TENANT}""#)),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"reason="envelope_missing_schema_version""#),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -1894,6 +1994,8 @@ mod tests {
         const MIGRATION: &str = include_str!("../migrations/0031_harden_outbox_tenant_scope.sql");
         const MIGRATION_0036: &str =
             include_str!("../migrations/0036_add_outbox_schema_columns.sql");
+        const MIGRATION_0037: &str =
+            include_str!("../migrations/0037_outbox_metric_scope_functions.sql");
         let ttl = format!("make_interval(secs => {LEASE_TTL_SECONDS})");
         assert_eq!(
             MIGRATION.matches(&ttl).count(),
@@ -1942,6 +2044,26 @@ mod tests {
             assert!(
                 MIGRATION_0036.contains(needle),
                 "0036 drift: missing {needle}"
+            );
+        }
+        assert_eq!(
+            MIGRATION_0037.matches(&ttl).count(),
+            2,
+            "0037 poll/backlog SQL must use the Rust lease TTL constant everywhere"
+        );
+        for needle in [
+            "DROP FUNCTION IF EXISTS rss_outbox_poll_pending(text, bigint)",
+            "RETURNS TABLE(tenant_id text, contract_id text, topic text, event_id text, payload bytea)",
+            "DROP FUNCTION IF EXISTS rss_outbox_sample_backlog(text)",
+            "RETURNS TABLE(tenant_id text, contract_id text, depth bigint, oldest_age_seconds bigint)",
+            "count(*) FILTER (WHERE is_backlog)::bigint AS depth",
+            "GROUP BY tenant_id, contract_id",
+            "GRANT EXECUTE ON FUNCTION rss_outbox_poll_pending(text, bigint) TO rss_app",
+            "GRANT EXECUTE ON FUNCTION rss_outbox_sample_backlog(text) TO rss_app",
+        ] {
+            assert!(
+                MIGRATION_0037.contains(needle),
+                "0037 drift: missing {needle}"
             );
         }
     }

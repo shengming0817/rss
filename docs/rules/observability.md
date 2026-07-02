@@ -140,11 +140,11 @@ outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` �
 
 | metric | 类型 | label | 语义 |
 |--------|------|-------|------|
-| `outbox_publish_total` | Counter | `domain`,`status` | relay 单条结算（status=ack/requeue/reject） |
-| `outbox_dlx_total` | Counter | `domain` | 永久失败进 DLX（= status=reject） |
-| `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`reason` | relay 发布前本地 envelope header 校验失败 |
-| `outbox_pending_depth` | Gauge | `domain` | pending 且到期行数（采样器） |
-| `outbox_oldest_pending_age_seconds` | Gauge | `domain` | 最老 pending 龄；无 pending ⇒ 0（非缺失） |
+| `outbox_publish_total` | Counter | `domain`,`contract_id`,`tenant_id`,`status` | relay 单条结算（status=ack/requeue/reject） |
+| `outbox_dlx_total` | Counter | `domain`,`contract_id`,`tenant_id` | 永久失败进 DLX（= status=reject） |
+| `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`reason` | relay 发布前本地 envelope header 校验失败 |
+| `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | 可投递 backlog：到期 pending + stale publishing（采样器） |
+| `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | 最老 backlog 龄；进程内已观测 scope 无 backlog ⇒ 0（非缺失） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=poll/publish；settle 并入 publish，见 §settle 相说明） |
 
 label 闭值集纪律：
@@ -161,6 +161,13 @@ label 闭值集纪律：
   非请求/租户派生），基数有界，是 §HTTP Metrics domain Label 同款「assembly/config 声明 closed set」的
   合法低基数用法。`eventexec`（Service 层）依层矩阵不能依赖 `observ`，故这些 label 暂不经 `observ`
   typed enum 入口；把 outbox label 收敛进 `observ` 词表（供 otel 映射统一）是 **#1076** 后续项。
+- `contract_id` / `tenant_id` 是 **#1625** 明确要求的 outbox 可观测路由维度：`contract_id` 必须先经
+  `consistency::OutboxContractId` canonical dotted grammar 校验，`tenant_id` 必须来自 typed
+  `vocab::TenantId`。这是本节对「业务 ID 不入 label」的有界例外，不外推到其它 metric。
+- PII / 高基数边界：outbox metric label 仍禁止 payload、topic、subject、actor、metadata、error text、
+  handler error 或任意请求输入。backlog zero sample 对 adapter 返回的历史 outbox scope 以及同一 sampler
+  进程内曾返回、后续成功采样时消失的 `(domain, tenant_id, contract_id)` 输出；从未出现、新进程尚未观测或
+  recorder 已清理的 scope 不造假 label。
 
 新增或改名上述 metric / label 必须同步 schema、tests、dashboard、`docs/ops/outbox-relay-alerts.rules.yaml`
 与 emit site。
@@ -220,7 +227,9 @@ label 闭值集纪律：
 - `transport_mode` 闭合于 `distributed::TransportMode::as_label()`（`in_proc`/`remote`）；`outcome` 闭合于
   `distributed::TransportOutcome::as_label()`（`ok`/`error`）——crate 自有 `as_label()` 闭映射，单源、无副本可漂移。
 - 每次分发都记录 `outcome`，不能只记录成功路径。错误细节（kind / source）**不进入** metric label，保持低基数。
-- 目标 domain、`contract_id` **不入 metric label**（基数随契约数增长）：它们只进 dispatch span。
+- 目标 domain、`contract_id` **不入 distributed transport metric label**（基数随契约数增长）：它们只进
+  dispatch span。Outbox relay 的 `contract_id` / `tenant_id` label 是 §Outbox Relay Metrics 的 #1625
+  明确例外，不适用本条。
 
 dispatch span（`domain_transport.dispatch`）只记录 `transport_mode`、目标 `domain`、`contract_id`（三者均为
 路由元数据）；path / headers / body 经 `secure::Redact` 字段策略脱敏，不得明文进入 Debug 或 span 字段。契约身份

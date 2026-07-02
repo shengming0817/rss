@@ -8,7 +8,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use consistency::{BacklogSample, EngineError, EngineErrorKind, OutboxBacklog, RetentionSweeper};
+use consistency::{
+    BacklogMetricSample, EngineError, EngineErrorKind, OutboxBacklog, RetentionSweeper,
+};
 use distributed::{CasKey, CasOutcome, CasRequest, DistError, FencingToken, LockGrant, LockKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -254,11 +256,11 @@ impl<B> OutboxBacklog for CoordinatedOutboxBacklog<B>
 where
     B: OutboxBacklog + Send + Sync,
 {
-    async fn sample_backlog(&self, domain: &str) -> Result<BacklogSample, EngineError> {
+    async fn sample_backlog(&self, domain: &str) -> Result<Vec<BacklogMetricSample>, EngineError> {
         self.coordinator
             .run_active(self.inner.sample_backlog(domain))
             .await
-            .map(|sample| sample.unwrap_or_else(BacklogSample::empty))
+            .map(|samples| samples.unwrap_or_default())
     }
 }
 
@@ -295,11 +297,25 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Notify;
 
+    use consistency::{BacklogSample, OutboxContractId, OutboxMetricSubject};
     use diport::{CasStore, CasStoreOutcome, LockAcquireOutcome, LockRenewOutcome, LockStore};
 
     type LockMap = HashMap<String, (Option<vocab::Epoch>, u64)>;
     type CasMap = HashMap<String, (Vec<u8>, vocab::Epoch)>;
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    #[allow(clippy::expect_used)]
+    // reason: runtime wrapper tests use fixed known-valid tenant/contract fixtures.
+    fn backlog_metric_sample(depth: u64, oldest_age_seconds: u64) -> BacklogMetricSample {
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("valid tenant fixture");
+        let contract =
+            OutboxContractId::parse("identity.session-created").expect("valid contract fixture");
+        BacklogMetricSample::new(
+            OutboxMetricSubject::new(tenant, contract),
+            BacklogSample::new(depth, oldest_age_seconds),
+        )
+    }
 
     #[derive(Clone, Default)]
     struct FakeDistributedStore {
@@ -463,9 +479,12 @@ mod tests {
     }
 
     impl OutboxBacklog for CountingBacklog {
-        async fn sample_backlog(&self, _domain: &str) -> Result<BacklogSample, EngineError> {
+        async fn sample_backlog(
+            &self,
+            _domain: &str,
+        ) -> Result<Vec<BacklogMetricSample>, EngineError> {
             *self.calls.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-            Ok(BacklogSample::new(7, 11))
+            Ok(vec![backlog_metric_sample(7, 11)])
         }
     }
 
@@ -482,11 +501,14 @@ mod tests {
     }
 
     impl OutboxBacklog for SlowBacklog {
-        async fn sample_backlog(&self, _domain: &str) -> Result<BacklogSample, EngineError> {
+        async fn sample_backlog(
+            &self,
+            _domain: &str,
+        ) -> Result<Vec<BacklogMetricSample>, EngineError> {
             self.started.notify_waiters();
             time::sleep(Duration::from_secs(1)).await;
             self.completed.store(true, Ordering::SeqCst);
-            Ok(BacklogSample::new(13, 17))
+            Ok(vec![backlog_metric_sample(13, 17)])
         }
     }
 
@@ -499,7 +521,7 @@ mod tests {
 
         let sample = wrapped.sample_backlog("identity").await?;
 
-        assert_eq!(sample, BacklogSample::new(7, 11));
+        assert_eq!(sample, vec![backlog_metric_sample(7, 11)]);
         assert_eq!(backlog.calls(), 1);
         Ok(())
     }
@@ -515,7 +537,7 @@ mod tests {
 
         let sample = wrapped.sample_backlog("identity").await?;
 
-        assert_eq!(sample, BacklogSample::empty());
+        assert!(sample.is_empty());
         assert_eq!(backlog.calls(), 0);
         Ok(())
     }
@@ -529,7 +551,7 @@ mod tests {
 
         let sample = wrapped.sample_backlog("identity").await?;
 
-        assert_eq!(sample, BacklogSample::empty());
+        assert!(sample.is_empty());
         assert_eq!(store.renew_calls(), 1);
         assert!(
             !backlog.completed(),

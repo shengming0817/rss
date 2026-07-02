@@ -15,11 +15,11 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 
 | metric | 类型 | label | 采集点 | 语义 |
 |--------|------|-------|--------|------|
-| `outbox_publish_total` | Counter | `domain`,`status` | relay tick 逐条结算 | status=`ack`(已投递)/`requeue`(退避重投)/`reject`(进 DLX) |
-| `outbox_dlx_total` | Counter | `domain` | relay 结算 Reject 时 | 永久失败进 DLX；= `outbox_publish_total{status="reject"}` |
-| `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`reason` | relay 发布前本地 envelope header 校验失败 | reason 为 envelope header 闭集 |
-| `outbox_pending_depth` | Gauge | `domain` | backlog 采样器（默认 ≤60s/轮） | status=pending 且到期行数 |
-| `outbox_oldest_pending_age_seconds` | Gauge | `domain` | backlog 采样器 | `now()−min(created_at)`；**无 pending ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
+| `outbox_publish_total` | Counter | `domain`,`contract_id`,`tenant_id`,`status` | relay tick 逐条结算 | status=`ack`(已投递)/`requeue`(退避重投)/`reject`(进 DLX) |
+| `outbox_dlx_total` | Counter | `domain`,`contract_id`,`tenant_id` | relay 结算 Reject 时 | 永久失败进 DLX；= `outbox_publish_total{status="reject"}` |
+| `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`reason` | relay 发布前本地 envelope header 校验失败 | reason 为 envelope header 闭集 |
+| `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器（默认 ≤60s/轮） | 可投递 backlog：到期 pending + stale publishing；正常 in-flight publishing 排除 |
+| `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | `now()−min(created_at)`；**进程内已观测 scope 后续无 backlog ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`poll`(扫描相)/`publish`(逐条中继+adapter 内 settle 相) |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；reason 为 tenant authority 或 envelope header 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
@@ -33,6 +33,11 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 - `domain`：来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式），operator 配置、
   非请求/租户派生，基数有界。**不**经 `observ` typed enum（层矩阵禁 `eventexec`→`observ`）；收敛进 `observ`
   词表统一 otel 映射是 #1076 后续项。
+- `contract_id` / `tenant_id`：#1625 例外的 outbox 路由维度，分别来自
+  `consistency::OutboxContractId` 与 `vocab::TenantId`。禁止把 payload、topic、subject、actor、metadata、
+  error text、handler error 或请求输入放入 label。backlog zero sample 覆盖 adapter 本轮返回的历史 outbox
+  scope，以及同一 sampler 进程内曾返回、后续成功采样时消失的 `(domain, tenant_id, contract_id)`；从未出现、
+  新进程尚未观测或 recorder 已清理的 scope 不补 series。
 - `consumer_dlx_skip_total.reason`：闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 literal 调用点；
   禁止携带 handler error、tenant、message id 或 payload 派生值。当前闭集：
   `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
@@ -54,11 +59,15 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | pending 深度 | > 10k 持续 5min | warning | `OutboxPendingDepthHigh` |
 | 重试风暴（requeue 速率） | > 5/s 持续 5min | warning | `OutboxRequeueStorm` |
 | relay tick P95 耗时 | > 5s 持续 5min | warning | `OutboxRelayTickSlow` |
-| 采样器停更 | 10min 无新样本 | warning | `OutboxSamplerNoData` |
 | consumer DLX 写失败 | 5min 内 `outcome="error"` 增长 > 0 | critical | `ConsumerDlxWriteError` |
 | consumer release 失败 | 5min 内增长 > 0 | critical | `ConsumerReleaseFailed` |
 
-告警均 `by (domain)` / `by (phase)` 聚合保来源可定位。采样器停更用 `absent_over_time`（捕捉运行后卡死，非仅首启动）。
+outbox 告警在 PromQL 层按 domain 聚合：depth 用 `sum by (domain)`，oldest age 用 `max by (domain)`，
+DLX/requeue 用 `sum by (domain)`，tick 用 `by (phase)`。scoped backlog gauges 对 adapter 返回或进程内已观测的
+`(domain, tenant_id, contract_id)` 输出；已观测 scope drain / sweep 后会保留零值 series，空部署、从未出现、
+新进程尚未观测或 recorder 已清理的 scope 可以没有 `outbox_pending_depth` series，因此 Prometheus 侧不再用
+`absent_over_time(outbox_pending_depth)` 判采样器停更。
+采样器/relay worker liveness 的权威信号是 readyz probe（`outbox_sampler` / `outbox_relay`）和外部监控。
 `consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支。`consumer_dlx_write_total{outcome="error"}`
 是告警面：DLX 未落库时 consumer 会 release inbox claim；release 成功则 broker Requeue，release 失败则
 `consumer_release_failed_total{domain}` 增长并 broker Reject，必须由 degraded health + metric 共同暴露。
@@ -70,10 +79,10 @@ DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历
 
 ## Dashboard 面板建议
 
-1. **投递延迟**：`max(outbox_oldest_pending_age_seconds) by (domain)` 折线 + 5min SLO 阈值线。
-2. **积压深度**：`outbox_pending_depth` by domain 折线 / 堆叠。
-3. **投递速率与处置分布**：`rate(outbox_publish_total[5m])` by status（ack/requeue/reject 堆叠）。
-4. **DLX 速率**：`rate(outbox_dlx_total[5m])` by domain。
+1. **投递延迟**：`max by (domain) (outbox_oldest_pending_age_seconds)` 折线 + 5min SLO 阈值线。
+2. **积压深度**：`sum by (domain) (outbox_pending_depth)` 折线 / 堆叠。
+3. **投递速率与处置分布**：`sum by (domain, status) (rate(outbox_publish_total[5m]))`（ack/requeue/reject 堆叠）。
+4. **DLX 速率**：`sum by (domain) (rate(outbox_dlx_total[5m]))`。
 5. **relay tick 耗时**：`histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))`（classic histogram 须 `sum by (..., le)` 包住 `rate(..._bucket)` 再 `histogram_quantile`）。
 
 ## 已知差距 / 范围说明
@@ -87,15 +96,17 @@ DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历
   fail-open**：broker 失败走 `Requeue` 退避 / 预算耗尽 `Reject` 进 DLX，无 drop 路径，故不设 `fail_open_drop` metric。
 - **relay/sampler worker unhealthy 无专属 Prometheus 告警**：worker 健康经 `WorkerHealth` → readyz probe
   （`outbox_relay`/`outbox_sweeper`/`outbox_sampler`，未导出为 metric）暴露，权威 liveness 信号是 readyz endpoint 的
-  外部监控（k8s liveness/readiness）。Prometheus 侧 worker 卡死靠 `OutboxSamplerNoData`（采样停更）+
-  `OutboxBacklogOldestAgeHigh`（积压增长）间接体现。如需 worker health gauge，属 #1208 接线时决策。
+  外部监控（k8s liveness/readiness）。scoped backlog gauges 可在进程内保留零值 series，但空部署 / 新进程无已观测
+  scope 时仍可完全缺失，不能作为采样器 heartbeat；Prometheus 侧仅保留 `OutboxBacklogOldestAgeHigh`（积压增长）等业务信号。如需 worker health
+  gauge/heartbeat，属 #1208 接线时决策。
 - **acceptance 边界**：#1209 验收标准 = 仪表 seam + 护栏 + 生产实现 + 单元测试（含 facade
   `with_local_recorder` 渲染断言 + postgres `OutboxBacklog` 集成测试 T15–T18，testcontainers gated）。**E2E
   metrics 经 /metrics 实采集**需 runtime 装配 relay/sampler worker（#1429）并挂 HealthListener；验收项为
   `/metrics` 返回 `outbox_publish_total` / `outbox_pending_depth` 等。
 - **settings durable journey 模板（#1433）**：`assemblies/runtime/tests/settings_config_publish_durable_e2e.rs`
   用真实 Postgres + `PgConfigUnitOfWork` + `PgOutbox` + 测试 publisher 验证 `settings` 写入、co-tx outbox、
-  relay settle、`outbox_publish_total{domain="settings",status="ack"}`、`outbox_pending_depth{domain="settings"}`
+  relay settle、`outbox_publish_total{domain="settings",contract_id="settings.config-version-changed",tenant_id="...",status="ack"}`、
+  `outbox_pending_depth{domain="settings",contract_id="settings.config-version-changed",tenant_id="..."}`
   与测试 `outbox_relay_settings` readyz 闭环。该模板刻意不走生产 AMQP publisher：`settings.config-version-changed`
   仍是 draft 且无 consumer queue，生产 `mandatory=true` AMQP relay 会把它判为 unroutable；事件升 active 并补
   subscriber/topology 前不接入 production relay domain。运行：

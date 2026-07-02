@@ -43,9 +43,10 @@ pub use inbox::{
     InboxStore,
 };
 pub use outbox::{
-    BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxPayload, OutboxRelay,
-    OutboxSource, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,
-    RetentionSweeper, Topic, TopicError,
+    BacklogMetricSample, BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog,
+    OutboxContractId, OutboxContractIdError, OutboxMetricSubject, OutboxPayload, OutboxRelay,
+    OutboxSource, PartitionKey, PartitionKeyError, PendingEntry, PermanentError,
+    PermanentErrorKind, RetentionSweeper, Topic, TopicError,
 };
 pub use projection::{
     Lsn, PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrder, SerialInOrderGuarantor,

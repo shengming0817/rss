@@ -38,7 +38,7 @@ pub use relay::{
 pub mod relay_config;
 pub use relay_config::{RelayConfig, RelayConfigError, SweeperConfig, SweeperConfigError};
 pub mod relay_metrics;
-pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetrics, RelayPhase};
+pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, RelayPhase};
 
 pub mod dlq;
 pub use dlq::{

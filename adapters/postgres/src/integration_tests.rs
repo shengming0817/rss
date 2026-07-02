@@ -655,13 +655,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use consistency::{
-    Disposition, Entry, HandleResult, OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper,
-    Topic,
+    BacklogMetricSample, BacklogSample, Disposition, EngineErrorKind, Entry, HandleResult,
+    OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay, OutboxSource, PendingEntry,
+    RetentionSweeper, Topic,
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
-    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata,
-    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, PublishRequest, Publisher, PublisherError,
+    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata, KEY_SCHEMA_HASH,
+    KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, PublishRequest, Publisher,
+    PublisherError,
 };
 use eventexec::{
     ConsumerMeta, LeaseConfig, MAX_REDELIVERY, TenantAuthority, TenantAuthorityBinding,
@@ -726,6 +728,50 @@ fn make_entry(event_id: &str) -> Entry {
         IdemKey::parse(event_id).unwrap(),
         reviewed_payload(b"payload"),
     )
+}
+
+fn make_pending_entry(entry: Entry, tenant: vocab::TenantId, contract_id: &str) -> PendingEntry {
+    #[allow(clippy::unwrap_used)]
+    // reason: integration fixture uses known-valid contract ids.
+    PendingEntry::new(
+        entry,
+        OutboxMetricSubject::new(tenant, OutboxContractId::parse(contract_id).unwrap()),
+    )
+}
+
+async fn pending_entry_for_event(store: &PgStore, event_id: &str) -> Result<PendingEntry, String> {
+    let row: (String, String, String, Vec<u8>) = sqlx::query_as(
+        r#"
+        SELECT tenant_id::text, contract_id, topic, payload
+        FROM outbox
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_one(&store.pool)
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+
+    let (tenant_id, contract_id, topic, payload) = row;
+    let tenant = vocab::TenantId::parse(&tenant_id).map_err(|e| format!("{e:?}"))?;
+    let topic = Topic::parse(&topic).map_err(|e| format!("{e:?}"))?;
+    let idem_key = IdemKey::parse(event_id).map_err(|e| format!("{e:?}"))?;
+    let entry = Entry::new(
+        topic,
+        idem_key,
+        OutboxPayload::from_reviewed_event_bytes(payload),
+    );
+    Ok(make_pending_entry(entry, tenant, &contract_id))
+}
+
+fn summarize_backlog(samples: &[BacklogMetricSample]) -> BacklogSample {
+    let depth = samples.iter().map(|s| s.sample().depth()).sum();
+    let oldest_age_seconds = samples
+        .iter()
+        .map(|s| s.sample().oldest_age_seconds())
+        .max()
+        .unwrap_or(0);
+    BacklogSample::new(depth, oldest_age_seconds)
 }
 
 /// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
@@ -949,8 +995,8 @@ async fn conf_relay(
 ) -> Result<eventconf::RelayObservation, String> {
     let (publisher, messages) = ConformancePublisher::new(mode);
     let outbox = make_pg_outbox_with_publisher(store, publisher);
-    let entry = make_entry(&event_id);
-    let disposition = outbox.relay(&entry).await.map_err(|e| format!("{e:?}"))?;
+    let pending = pending_entry_for_event(store, &event_id).await?;
+    let disposition = outbox.relay(&pending).await.map_err(|e| format!("{e:?}"))?;
     let messages = messages.lock().unwrap_or_else(|e| e.into_inner());
     let message_id = messages.last().cloned();
     let publish_count = messages.len() as u64;
@@ -1051,9 +1097,12 @@ async fn conf_sample_backlog(
     outbox
         .sample_backlog(&domain)
         .await
-        .map(|s| eventconf::BacklogSample {
-            depth: s.depth(),
-            oldest_age_seconds: s.oldest_age_seconds(),
+        .map(|samples| {
+            let summary = summarize_backlog(&samples);
+            eventconf::BacklogSample {
+                depth: summary.depth(),
+                oldest_age_seconds: summary.oldest_age_seconds(),
+            }
         })
         .map_err(|e| format!("{e:?}"))
 }
@@ -1381,6 +1430,8 @@ fn conf_consumer_metadata(event_id: &str) -> EnvelopeMetadata {
     let mut metadata = EnvelopeMetadata::empty();
     metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
     metadata.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+    metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+    metadata.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
     metadata
 }
 
@@ -1406,6 +1457,7 @@ fn conf_consumer_meta(group: &str) -> ConsumerMeta {
         group,
         test_tenant_authority(),
     )
+    .with_expected_schema("v1", TEST_SCHEMA_HASH)
 }
 
 fn conf_expected_dlx() -> eventconf::DlxFields {
@@ -1844,7 +1896,8 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
     let (pub_, calls) = RecordingPublisher::always_ok();
     let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
-    let disposition = outbox.relay(&entry).await?;
+    let pending = pending_entry_for_event(&store, &event_id).await?;
+    let disposition = outbox.relay(&pending).await?;
     assert_eq!(disposition, Disposition::Ack, "should Ack on publish Ok");
 
     // DB 状态 published。
@@ -1892,7 +1945,8 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
     let (pub_, _) = RecordingPublisher::always_transient();
     let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
-    let disposition = outbox.relay(&entry).await?;
+    let pending = pending_entry_for_event(&store, &event_id).await?;
+    let disposition = outbox.relay(&pending).await?;
     assert_eq!(
         disposition,
         Disposition::Requeue,
@@ -1970,7 +2024,8 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
     let (pub_, _) = RecordingPublisher::always_transient();
     let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
-    let disposition = outbox.relay(&entry).await?;
+    let pending = pending_entry_for_event(&store, &event_id).await?;
+    let disposition = outbox.relay(&pending).await?;
     assert_eq!(
         disposition,
         Disposition::Reject,
@@ -2022,7 +2077,8 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
     let (pub_, calls) = RecordingPublisher::always_permanent();
     let outbox = make_pg_outbox_with_publisher(&store, pub_);
 
-    let disposition = outbox.relay(&entry).await?;
+    let pending = pending_entry_for_event(&store, &event_id).await?;
+    let disposition = outbox.relay(&pending).await?;
     assert_eq!(
         disposition,
         Disposition::Reject,
@@ -2185,8 +2241,9 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
     let outbox2 = make_pg_outbox_with_publisher(&store, pub2);
 
     // 两个 relay 并发执行：只有一个能 CAS acquire 成功，另一个返回 Ack（0 行更新）。
-    let entry_clone = entry.clone();
-    let (d1, d2) = tokio::join!(outbox1.relay(&entry), outbox2.relay(&entry_clone));
+    let pending = pending_entry_for_event(&store, &event_id).await?;
+    let pending_clone = pending.clone();
+    let (d1, d2) = tokio::join!(outbox1.relay(&pending), outbox2.relay(&pending_clone));
 
     assert!(d1.is_ok() && d2.is_ok(), "both relay should return Ok");
     let d1 = d1?;
@@ -3434,7 +3491,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let (publisher, calls) = RecordingPublisher::always_permanent();
     let outbox = make_pg_outbox_with_publisher(&store, publisher);
-    let disposition = outbox.relay(&entry).await?;
+    let pending = pending_entry_for_event(&store, &event_id).await?;
+    let disposition = outbox.relay(&pending).await?;
     assert_eq!(disposition, Disposition::Reject);
     assert_eq!(*calls.lock().unwrap(), 1);
 
@@ -4109,9 +4167,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
 // T17: oldest_age_seconds 来自 min(created_at)（最老 pending 行；允许小容差）。
 // T18: retry_after > now() 的行排除在 depth 之外（与 poll_pending pending 谓词同源）。
 
-use consistency::BacklogSample;
-
-/// T15: 对一个无任何用例写入的专属 domain（`t15-domain`）采样 → sample_backlog 返 BacklogSample::empty()。
+/// T15: 对一个无任何用例写入的专属 domain（`t15-domain`）采样 → 无 scoped sample。
 /// domain-scoped 断言：不依赖全表净起点，去掉 `setup_outbox` 全表 DELETE 后仍恒空（#1194）。
 #[tokio::test(flavor = "multi_thread")]
 async fn t15_sample_backlog_empty_domain_returns_empty() -> TestResult {
@@ -4120,15 +4176,98 @@ async fn t15_sample_backlog_empty_domain_returns_empty() -> TestResult {
 
     let outbox = make_pg_outbox(&store, || Ok(()));
     // 用 t15 专属 domain（无任何其它用例写入）→ domain-scoped 采样恒空，断言不依赖全表净起点（#1194）。
-    let sample = outbox.sample_backlog("t15-domain").await?;
+    let samples = outbox.sample_backlog("t15-domain").await?;
+    let sample = summarize_backlog(&samples);
 
+    assert!(
+        samples.is_empty(),
+        "从未观测的专属 domain 不应造假输出 metric scope"
+    );
     assert_eq!(
         sample,
         BacklogSample::empty(),
-        "无写入的专属 domain 采样应返 BacklogSample::empty()"
+        "无写入的专属 domain 聚合后应为 BacklogSample::empty()"
     );
     assert_eq!(sample.depth(), 0);
     assert_eq!(sample.oldest_age_seconds(), 0);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T15b: 已观测 scope 当前无可投递 backlog 时输出 depth=0/age=0；从未出现的 scope 不补 label。
+#[tokio::test(flavor = "multi_thread")]
+async fn t15b_sample_backlog_observed_scope_without_backlog_returns_zero() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t15b-domain");
+    let event_id = unique_event_id("t15b-published");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            let entry = make_entry(&event_id);
+            let env = make_test_env(&domain, "metrics.zero");
+            Box::pin(async move {
+                append_outbox(cap, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    sqlx::query("UPDATE outbox SET status = 'published' WHERE event_id = $1")
+        .bind(&event_id)
+        .execute(&store.pool)
+        .await?;
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let samples = outbox.sample_backlog(&domain).await?;
+
+    assert_eq!(
+        samples.len(),
+        1,
+        "已观测 scope 当前无 backlog 时仍应输出 zero sample"
+    );
+    let sample = samples[0].sample();
+    assert_eq!(sample.depth(), 0);
+    assert_eq!(sample.oldest_age_seconds(), 0);
+    assert_eq!(samples[0].subject().tenant_id(), test_tenant());
+    assert_eq!(samples[0].subject().contract_id().as_str(), "metrics.zero");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T15c: DB 中非法 contract_id 回读到 typed metric subject 时 fail-closed 为 Invariant。
+#[tokio::test(flavor = "multi_thread")]
+async fn t15c_poll_pending_rejects_invalid_persisted_contract_id() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t15c-domain");
+    let event_id = unique_event_id("t15c-invalid-contract");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            let entry = make_entry(&event_id);
+            let env = make_test_env(&domain, "metrics.valid");
+            Box::pin(async move {
+                append_outbox(cap, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    sqlx::query("UPDATE outbox SET contract_id = 'Metrics.Invalid' WHERE event_id = $1")
+        .bind(&event_id)
+        .execute(&store.pool)
+        .await?;
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let Err(err) = outbox.poll_pending(&domain, 10).await else {
+        return Err("poll_pending must reject invalid persisted contract_id".into());
+    };
+    assert_eq!(
+        err.kind(),
+        EngineErrorKind::Invariant,
+        "invalid persisted contract_id should be an invariant failure"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -4174,7 +4313,8 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let sample = outbox.sample_backlog(domain).await?;
+    let samples = outbox.sample_backlog(domain).await?;
+    let sample = summarize_backlog(&samples);
 
     assert_eq!(sample.depth(), 1, "仅 pending 行计入 depth，应为 1");
 
@@ -4227,7 +4367,8 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     .await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let sample = outbox.sample_backlog(domain).await?;
+    let samples = outbox.sample_backlog(domain).await?;
+    let sample = summarize_backlog(&samples);
 
     assert_eq!(sample.depth(), 2, "两条 pending 行");
     // oldest_age_seconds 须 ≥ 10（旧行回拨 10s）；上限放宽容差至 20s 吸收 testcontainer/CI round-trip
@@ -4290,7 +4431,8 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     .await?;
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let sample = outbox.sample_backlog(domain).await?;
+    let samples = outbox.sample_backlog(domain).await?;
+    let sample = summarize_backlog(&samples);
 
     // 仅 due_id（retry_after IS NULL）计入；future_id（retry_after > now()）排除。
     assert_eq!(
@@ -4348,7 +4490,8 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    let sample = outbox.sample_backlog(domain).await?;
+    let samples = outbox.sample_backlog(domain).await?;
+    let sample = summarize_backlog(&samples);
 
     // 仅 stale publishing 计入（fresh 行 lease 有效、属正常 in-flight 排除）。
     assert_eq!(
@@ -5227,21 +5370,22 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         "unexpected negative sweep error: {negative_sweep_err}"
     );
 
-    let can_execute: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    let can_execute: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
         SELECT has_function_privilege('rss_app', 'rss_outbox_poll_pending(text, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_acquire_lease(text)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_mark_dlx(text, int, uuid)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_redrive(text, uuid)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_sweep_outbox_published(bigint)', 'EXECUTE')
+               has_function_privilege('rss_app', 'rss_sweep_outbox_published(bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_sample_backlog(text)', 'EXECUTE')
         "#,
     )
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(
         can_execute,
-        (true, true, true, true, true, true),
+        (true, true, true, true, true, true, true),
         "rss_app should only receive the fixed outbox function surface"
     );
 
@@ -5361,7 +5505,8 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     let outbox = make_pg_outbox(&store, || Ok(()));
 
     // sample_backlog depth = 4（全部计入，gate 不减少 backlog 深度）。
-    let sample = outbox.sample_backlog(&domain).await?;
+    let samples = outbox.sample_backlog(&domain).await?;
+    let sample = summarize_backlog(&samples);
     assert_eq!(
         sample.depth(),
         4,

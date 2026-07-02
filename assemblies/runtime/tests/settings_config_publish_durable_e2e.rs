@@ -32,7 +32,9 @@ use diport::{
     KeyVersion, ManagedResource as _, OpaqueActorId, OutboxActor, PublishRequest, Publisher,
     PublisherError, RedactedBytes,
 };
-use eventexec::{OutboxMetrics, RelayConfig, RelayPhase, WorkerHealth, backlog_sampler_loop};
+use eventexec::{
+    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, WorkerHealth, backlog_sampler_loop,
+};
 use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
@@ -172,12 +174,16 @@ impl Publisher for CapturingPublisher {
 #[derive(Clone, Debug, PartialEq)]
 struct PublishMetric {
     domain: String,
+    contract_id: String,
+    tenant_id: String,
     status: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct BacklogMetric {
     domain: String,
+    contract_id: String,
+    tenant_id: String,
     depth: u64,
     oldest_age_seconds: u64,
 }
@@ -195,7 +201,12 @@ impl TestTelemetry {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|m| m.domain == "settings" && m.status == "ack")
+            .any(|m| {
+                m.domain == "settings"
+                    && m.contract_id == settings_v1::CONTRACT_ID
+                    && m.tenant_id == CANON_TENANT
+                    && m.status == "ack"
+            })
     }
 
     fn has_pending_settings_backlog(&self) -> bool {
@@ -203,27 +214,36 @@ impl TestTelemetry {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|m| m.domain == "settings" && m.depth >= 1)
+            .any(|m| {
+                m.domain == "settings"
+                    && m.contract_id == settings_v1::CONTRACT_ID
+                    && m.tenant_id == CANON_TENANT
+                    && m.depth >= 1
+            })
     }
 }
 
 impl OutboxMetrics for TestTelemetry {
-    fn record_publish(&self, domain: &vocab::DomainName, disposition: Disposition) {
+    fn record_publish(&self, scope: &OutboxMetricScope<'_>, disposition: Disposition) {
         self.publishes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(PublishMetric {
-                domain: domain.as_str().to_owned(),
+                domain: scope.domain_label().to_owned(),
+                contract_id: scope.contract_id_label().to_owned(),
+                tenant_id: scope.tenant_id_label(),
                 status: disposition.as_label(),
             });
     }
 
-    fn record_backlog(&self, domain: &vocab::DomainName, sample: BacklogSample) {
+    fn record_backlog(&self, scope: &OutboxMetricScope<'_>, sample: BacklogSample) {
         self.backlogs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(BacklogMetric {
-                domain: domain.as_str().to_owned(),
+                domain: scope.domain_label().to_owned(),
+                contract_id: scope.contract_id_label().to_owned(),
+                tenant_id: scope.tenant_id_label(),
                 depth: sample.depth(),
                 oldest_age_seconds: sample.oldest_age_seconds(),
             });
@@ -247,8 +267,8 @@ impl diport::MetricsExporter for TestTelemetry {
             .iter()
         {
             out.push_str(&format!(
-                "outbox_publish_total{{domain=\"{}\",status=\"{}\"}} 1\n",
-                metric.domain, metric.status
+                "outbox_publish_total{{domain=\"{}\",contract_id=\"{}\",tenant_id=\"{}\",status=\"{}\"}} 1\n",
+                metric.domain, metric.contract_id, metric.tenant_id, metric.status
             ));
         }
         for metric in self
@@ -258,12 +278,12 @@ impl diport::MetricsExporter for TestTelemetry {
             .iter()
         {
             out.push_str(&format!(
-                "outbox_pending_depth{{domain=\"{}\"}} {}\n",
-                metric.domain, metric.depth
+                "outbox_pending_depth{{domain=\"{}\",contract_id=\"{}\",tenant_id=\"{}\"}} {}\n",
+                metric.domain, metric.contract_id, metric.tenant_id, metric.depth
             ));
             out.push_str(&format!(
-                "outbox_oldest_pending_age_seconds{{domain=\"{}\"}} {}\n",
-                metric.domain, metric.oldest_age_seconds
+                "outbox_oldest_pending_age_seconds{{domain=\"{}\",contract_id=\"{}\",tenant_id=\"{}\"}} {}\n",
+                metric.domain, metric.contract_id, metric.tenant_id, metric.oldest_age_seconds
             ));
         }
         for phase in self
@@ -652,11 +672,19 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
             .to_vec(),
     )?;
     assert!(
-        metrics_body.contains(r#"outbox_publish_total{domain="settings",status="ack"}"#),
+        metrics_body.contains(&format!(
+            r#"outbox_publish_total{{domain="settings",contract_id="{}",tenant_id="{}",status="ack"}}"#,
+            settings_v1::CONTRACT_ID,
+            CANON_TENANT
+        )),
         "metrics must expose settings ack counter: {metrics_body}"
     );
     assert!(
-        metrics_body.contains(r#"outbox_pending_depth{domain="settings"}"#),
+        metrics_body.contains(&format!(
+            r#"outbox_pending_depth{{domain="settings",contract_id="{}",tenant_id="{}"}}"#,
+            settings_v1::CONTRACT_ID,
+            CANON_TENANT
+        )),
         "metrics must expose settings backlog gauge: {metrics_body}"
     );
 

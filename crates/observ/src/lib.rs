@@ -8,6 +8,9 @@
 //! 已迁 `diport`（issue #1075，ADR-003 DI port 收敛）——消费方经 `diport::AuditSink` 注入。
 //!
 //! 层级：服务层（依赖基础 + 引擎；不依赖域 / adapters）。
+//! #1625 outbox metrics 的 `tenant_id` / `contract_id` 是运行期 typed route scope，由
+//! `consistency` / `eventexec` 收口；`eventexec` 不能依赖 sibling service crate `observ`，所以这里
+//! 不新增动态 `LabelValue` 或 outbox label enum。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
 
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────
@@ -295,5 +298,25 @@ mod tests {
         );
         // anti-vacuity：不同 literal 必须不等（双向验证 PartialEq）
         assert_ne!(LabelValue::Static("a"), LabelValue::Static("b"));
+    }
+
+    // #1625：outbox tenant/contract scope 在 consistency/eventexec typed scope 内收口；
+    // observ 仍保持 static-only label value，避免为运行期 scope 打开通用动态 label 入口。
+    #[test]
+    fn label_value_remains_static_only_for_outbox_scope() {
+        let labels = [
+            HttpLabel::Domain("identity").value(),
+            EventLabel::Topic("session.created").value(),
+            CertLabel::TenantClass("enterprise").value(),
+        ];
+
+        assert_eq!(
+            labels,
+            [
+                LabelValue::Static("identity"),
+                LabelValue::Static("session.created"),
+                LabelValue::Static("enterprise"),
+            ]
+        );
     }
 }

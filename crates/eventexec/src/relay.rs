@@ -11,6 +11,7 @@
 //!
 //! ref: serverlesstechnology/cqrs（背景 relay 解耦 + 取消安全两阶段关闭，偏离 event-sourcing 同步派发）。
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime};
@@ -18,12 +19,15 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use consistency::{Disposition, Entry, OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
+use consistency::{
+    BacklogSample, Disposition, OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay,
+    OutboxSource, PendingEntry, RetentionSweeper,
+};
 use primitives::healthz::HealthStatus;
 use vocab::DomainName;
 
 use crate::relay_config::{RelayConfig, SweeperConfig};
-use crate::relay_metrics::{OutboxMetrics, RelayPhase};
+use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
 
 // ── probe 名常量 ────────────────────────────────────────────────────────────
 
@@ -293,7 +297,7 @@ where
 async fn relay_batch<A>(
     store: &Arc<A>,
     domain: &DomainName,
-    entries: Vec<Entry>,
+    entries: Vec<PendingEntry>,
     metrics: &dyn OutboxMetrics,
 ) -> TickOutcome
 where
@@ -303,7 +307,8 @@ where
     for entry in entries {
         match store.relay(&entry).await {
             Ok(disposition) => {
-                metrics.record_publish(domain, disposition);
+                let scope = OutboxMetricScope::new(domain, entry.subject());
+                metrics.record_publish(&scope, disposition);
                 if disposition != Disposition::Ack {
                     // Requeue（broker 瞬态失败，退避重投）/ Reject（预算耗尽进 DLX）——业务处置通道映射为
                     // Degraded（F4）。`!= Ack` 兜底 `Disposition` 的 `#[non_exhaustive]` 未来处置（保守降级）。
@@ -426,10 +431,33 @@ fn log_sweep_failed(target: &'static str, e: &impl std::fmt::Display) {
 
 // ── backlog_sampler_loop（泛型，不 spawn）────────────────────────────────────
 
+type BacklogScopeState = HashMap<String, HashSet<ObservedBacklogScope>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ObservedBacklogScope {
+    tenant_id: vocab::TenantId,
+    contract_id: OutboxContractId,
+}
+
+impl ObservedBacklogScope {
+    fn from_subject(subject: &OutboxMetricSubject) -> Self {
+        Self {
+            tenant_id: subject.tenant_id(),
+            contract_id: subject.contract_id().clone(),
+        }
+    }
+
+    fn to_subject(&self) -> OutboxMetricSubject {
+        OutboxMetricSubject::new(self.tenant_id, self.contract_id.clone())
+    }
+}
+
 /// Outbox backlog 采样驱动循环（泛型，**不** spawn；spawn 在具体类型 call site）。
 ///
 /// 每轮 tick 逐 `config.domains()` 采样 backlog（pending depth + 最老 pending 龄）→ 经 `metrics`
-/// set `outbox_pending_depth{domain}` / `outbox_oldest_pending_age_seconds{domain}` gauge（#1209）。
+/// set `outbox_pending_depth{domain,contract_id,tenant_id}` /
+/// `outbox_oldest_pending_age_seconds{domain,contract_id,tenant_id}` gauge；同一进程内已观测 scope
+/// 后续从成功采样结果消失时显式置 0，避免保留陈旧非零 series（#1209/#1625）。
 /// 独立于 relay/sweeper 的专用 worker（独立 [`WorkerHealth`]）：gauge 新鲜度由 `config.sample_interval()`
 /// 解耦 relay 吞吐与 retention 周期（默认数十秒，远密于 5min oldest-age SLO 窗口），采样失败只降级
 /// `outbox_sampler` probe、不污染 relay readyz。取消/错误骨架同 `sweeper_loop`。
@@ -445,23 +473,32 @@ pub async fn backlog_sampler_loop<B>(
     B: OutboxBacklog,
 {
     let mut ticker = tokio::time::interval(config.sample_interval());
+    let mut observed_scopes = BacklogScopeState::default();
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
-                sampler_tick(&store, config.domains(), &health, metrics.as_ref()).await;
+                sampler_tick(
+                    &store,
+                    config.domains(),
+                    &mut observed_scopes,
+                    &health,
+                    metrics.as_ref(),
+                ).await;
             }
         }
     }
     health.mark_stopped();
 }
 
-/// sampler 单轮 tick：逐 domain 采样 + 发 gauge；任一 domain 采样 Err → 整轮 Degraded（其余 domain 仍尝试，
-/// 不早退——单 domain 故障不致全停采样）。全干净 → Healthy（F5 自愈）。
+/// sampler 单轮 tick：逐 domain 采样 + 发 gauge；成功采样时补齐“上一轮有、本轮无”的 scope 零值。
+/// 任一 domain 采样 Err → 整轮 Degraded 且不清理该 domain 的上一轮状态（其余 domain 仍尝试，不早退）。
+/// 全干净 → Healthy（F5 自愈）。
 async fn sampler_tick<B>(
     store: &Arc<B>,
     domains: &[DomainName],
+    observed_scopes: &mut BacklogScopeState,
     health: &Arc<WorkerHealth>,
     metrics: &dyn OutboxMetrics,
 ) where
@@ -470,7 +507,33 @@ async fn sampler_tick<B>(
     let mut degraded = false;
     for domain in domains {
         match store.sample_backlog(domain.as_str()).await {
-            Ok(sample) => metrics.record_backlog(domain, sample),
+            Ok(samples) => {
+                let mut current_scopes = HashSet::with_capacity(samples.len());
+                for sample in samples {
+                    current_scopes.insert(ObservedBacklogScope::from_subject(sample.subject()));
+                    let scope = OutboxMetricScope::new(domain, sample.subject());
+                    metrics.record_backlog(&scope, sample.sample());
+                }
+                let stale_scopes = observed_scopes
+                    .get(domain.as_str())
+                    .map(|previous| {
+                        previous
+                            .difference(&current_scopes)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for stale_scope in stale_scopes {
+                    let subject = stale_scope.to_subject();
+                    let scope = OutboxMetricScope::new(domain, &subject);
+                    metrics.record_backlog(&scope, BacklogSample::empty());
+                }
+                if current_scopes.is_empty() {
+                    observed_scopes.remove(domain.as_str());
+                } else {
+                    observed_scopes.insert(domain.as_str().to_owned(), current_scopes);
+                }
+            }
             Err(e) => {
                 log_sample_failed(domain.as_str(), &e);
                 degraded = true;
@@ -656,7 +719,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use consistency::outbox::{BacklogSample, Disposition, Entry, OutboxPayload, Topic};
+    use consistency::outbox::{
+        BacklogMetricSample, BacklogSample, Disposition, Entry, OutboxContractId,
+        OutboxMetricSubject, OutboxPayload, PendingEntry, Topic,
+    };
     use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use diport::ManagedResource;
     use primitives::healthz::{HealthStatus, ProbeName};
@@ -668,9 +734,7 @@ mod tests {
     };
     use crate::relay::{RelayWorker, relay_loop};
     use crate::relay_config::{RelayConfig, SweeperConfig};
-    use crate::relay_metrics::{OutboxMetrics, RelayPhase};
-    use vocab::DomainName;
-
+    use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
     // ── 测试配置 / metrics 辅助 ───────────────────────────────────────────────
 
     /// 合法测试 RelayConfig（batch=10, sample=15s；domains 经 &[&str]）。
@@ -716,11 +780,25 @@ mod tests {
         vocab::DomainName::parse(s).expect("valid test domain")
     }
 
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path 已知合法 tenant / contract。
+    fn subject(contract_id: &str) -> OutboxMetricSubject {
+        OutboxMetricSubject::new(
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("valid test tenant"),
+            OutboxContractId::parse(contract_id).expect("valid test contract"),
+        )
+    }
+
+    fn backlog_sample(contract_id: &str, sample: BacklogSample) -> BacklogMetricSample {
+        BacklogMetricSample::new(subject(contract_id), sample)
+    }
+
     /// 记录发射调用的 metrics fake（确定性断言；不碰全局 recorder）。
     #[derive(Default)]
     struct CountingMetrics {
-        publishes: Mutex<Vec<(String, Disposition)>>,
-        backlogs: Mutex<Vec<(String, BacklogSample)>>,
+        publishes: Mutex<Vec<(String, String, String, Disposition)>>,
+        backlogs: Mutex<Vec<(String, String, String, BacklogSample)>>,
         tick_phases: Mutex<Vec<RelayPhase>>,
     }
 
@@ -730,12 +808,12 @@ mod tests {
         }
         #[allow(clippy::unwrap_used)]
         // reason: Mutex lock in test，item-level carve-out。
-        fn publishes(&self) -> Vec<(String, Disposition)> {
+        fn publishes(&self) -> Vec<(String, String, String, Disposition)> {
             self.publishes.lock().unwrap().clone()
         }
         #[allow(clippy::unwrap_used)]
         // reason: 同上。
-        fn backlogs(&self) -> Vec<(String, BacklogSample)> {
+        fn backlogs(&self) -> Vec<(String, String, String, BacklogSample)> {
             self.backlogs.lock().unwrap().clone()
         }
         #[allow(clippy::unwrap_used)]
@@ -748,19 +826,23 @@ mod tests {
     impl OutboxMetrics for CountingMetrics {
         #[allow(clippy::unwrap_used)]
         // reason: Mutex lock in test。
-        fn record_publish(&self, domain: &DomainName, disposition: Disposition) {
-            self.publishes
-                .lock()
-                .unwrap()
-                .push((domain.as_str().to_string(), disposition));
+        fn record_publish(&self, scope: &OutboxMetricScope<'_>, disposition: Disposition) {
+            self.publishes.lock().unwrap().push((
+                scope.domain_label().to_string(),
+                scope.contract_id_label().to_string(),
+                scope.tenant_id_label(),
+                disposition,
+            ));
         }
         #[allow(clippy::unwrap_used)]
         // reason: 同上。
-        fn record_backlog(&self, domain: &DomainName, sample: BacklogSample) {
-            self.backlogs
-                .lock()
-                .unwrap()
-                .push((domain.as_str().to_string(), sample));
+        fn record_backlog(&self, scope: &OutboxMetricScope<'_>, sample: BacklogSample) {
+            self.backlogs.lock().unwrap().push((
+                scope.domain_label().to_string(),
+                scope.contract_id_label().to_string(),
+                scope.tenant_id_label(),
+                sample,
+            ));
         }
         #[allow(clippy::unwrap_used)]
         // reason: 同上。
@@ -771,17 +853,20 @@ mod tests {
 
     /// Fake backlog 采样源：返预置 sample 或 Err。
     struct FakeBacklog {
-        sample: BacklogSample,
+        samples: Vec<BacklogMetricSample>,
         err: Option<consistency::error::EngineErrorKind>,
     }
 
     impl FakeBacklog {
         fn new(sample: BacklogSample) -> Arc<Self> {
-            Arc::new(Self { sample, err: None })
+            Self::with_samples(vec![backlog_sample("identity.session-created", sample)])
+        }
+        fn with_samples(samples: Vec<BacklogMetricSample>) -> Arc<Self> {
+            Arc::new(Self { samples, err: None })
         }
         fn with_err(kind: consistency::error::EngineErrorKind) -> Arc<Self> {
             Arc::new(Self {
-                sample: BacklogSample::empty(),
+                samples: vec![],
                 err: Some(kind),
             })
         }
@@ -791,11 +876,11 @@ mod tests {
         async fn sample_backlog(
             &self,
             _domain: &str,
-        ) -> Result<BacklogSample, consistency::error::EngineError> {
+        ) -> Result<Vec<BacklogMetricSample>, consistency::error::EngineError> {
             if let Some(kind) = self.err {
                 return Err(consistency::error::EngineError::new(kind));
             }
-            Ok(self.sample)
+            Ok(self.samples.clone())
         }
     }
 
@@ -810,6 +895,11 @@ mod tests {
             consistency::idempotency::IdemKey::parse("evt-001").unwrap(),
             OutboxPayload::from_reviewed_event_bytes(vec![1u8, 2, 3]),
         )
+    }
+
+    /// 构造带 metric subject 的测试 PendingEntry。
+    fn make_pending_entry() -> PendingEntry {
+        PendingEntry::new(make_entry(), subject("identity.session-created"))
     }
 
     /// bounded yield：让 spawned worker task 推进，至多 32 次 yield 等到 `want` 状态后返回 true。
@@ -830,7 +920,7 @@ mod tests {
     /// - relay：计数调用，按预置策略返 Ok(Disposition)/Err。
     struct FakeStore {
         /// 预置 entries（每次 poll 弹出头部 batch 条）。
-        pending: Mutex<Vec<Entry>>,
+        pending: Mutex<Vec<PendingEntry>>,
         /// relay 调用计数。
         relay_count: AtomicUsize,
         /// relay 返回错误策略：None=Ok(relay_disposition)，Some(kind)=Err。
@@ -842,7 +932,7 @@ mod tests {
     }
 
     impl FakeStore {
-        fn new(entries: Vec<Entry>) -> Arc<Self> {
+        fn new(entries: Vec<PendingEntry>) -> Arc<Self> {
             Arc::new(Self {
                 pending: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
@@ -853,7 +943,7 @@ mod tests {
         }
 
         fn with_relay_err(
-            entries: Vec<Entry>,
+            entries: Vec<PendingEntry>,
             kind: consistency::error::EngineErrorKind,
         ) -> Arc<Self> {
             Arc::new(Self {
@@ -866,7 +956,10 @@ mod tests {
         }
 
         /// relay 成功但返回非-Ack 处置（Requeue/Reject）——测 F4 health 映射。
-        fn with_relay_disposition(entries: Vec<Entry>, disposition: Disposition) -> Arc<Self> {
+        fn with_relay_disposition(
+            entries: Vec<PendingEntry>,
+            disposition: Disposition,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 pending: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
@@ -896,7 +989,7 @@ mod tests {
             &self,
             _domain: &str,
             limit: usize,
-        ) -> Result<Vec<Entry>, consistency::error::EngineError> {
+        ) -> Result<Vec<PendingEntry>, consistency::error::EngineError> {
             if let Some(kind) = self.poll_err {
                 return Err(consistency::error::EngineError::new(kind));
             }
@@ -904,7 +997,7 @@ mod tests {
             // reason: Mutex lock in test，item-level carve-out
             let mut pending = self.pending.lock().unwrap();
             let drain_end = limit.min(pending.len());
-            let batch: Vec<Entry> = pending.drain(..drain_end).collect();
+            let batch: Vec<PendingEntry> = pending.drain(..drain_end).collect();
             Ok(batch)
         }
     }
@@ -912,7 +1005,7 @@ mod tests {
     impl OutboxRelay for FakeStore {
         async fn relay(
             &self,
-            _entry: &Entry,
+            _entry: &PendingEntry,
         ) -> Result<Disposition, consistency::error::EngineError> {
             if let Some(kind) = self.relay_err {
                 return Err(consistency::error::EngineError::new(kind));
@@ -971,7 +1064,7 @@ mod tests {
     /// 再 cancel → shutdown → 断言 relay_count == entry 数。
     #[tokio::test(start_paused = true)]
     async fn t8_shutdown_drains_in_flight_entries() {
-        let entries: Vec<Entry> = (0..3).map(|_| make_entry()).collect();
+        let entries: Vec<PendingEntry> = (0..3).map(|_| make_pending_entry()).collect();
         let entry_count = entries.len();
         let store = FakeStore::new(entries);
         let health = Arc::new(WorkerHealth::healthy());
@@ -1118,7 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn t10b_relay_error_marks_degraded() {
         let store = FakeStore::with_relay_err(
-            vec![make_entry()],
+            vec![make_pending_entry()],
             consistency::error::EngineErrorKind::Transient,
         );
         let health = Arc::new(WorkerHealth::healthy());
@@ -1143,7 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn relay_non_ack_disposition_marks_degraded() {
         for disposition in [Disposition::Requeue, Disposition::Reject] {
-            let store = FakeStore::with_relay_disposition(vec![make_entry()], disposition);
+            let store = FakeStore::with_relay_disposition(vec![make_pending_entry()], disposition);
             let health = Arc::new(WorkerHealth::healthy());
             super::relay_tick(
                 &store,
@@ -1170,7 +1263,7 @@ mod tests {
         let domains = [dn("dom")];
         // 第一轮：relay Err → Degraded。
         let erroring = FakeStore::with_relay_err(
-            vec![make_entry()],
+            vec![make_pending_entry()],
             consistency::error::EngineErrorKind::Transient,
         );
         super::relay_tick(
@@ -1213,7 +1306,7 @@ mod tests {
         let domains = [dn("dom")];
         // 第一轮：relay Err → Degraded。
         let erroring = FakeStore::with_relay_err(
-            vec![make_entry()],
+            vec![make_pending_entry()],
             consistency::error::EngineErrorKind::Transient,
         );
         super::relay_tick(
@@ -1231,7 +1324,7 @@ mod tests {
             "relay error → Degraded"
         );
         // 第二轮：非空批次、全 Ack（默认 disposition）→ relay_batch 执行但 outcome Clean → Healthy。
-        let all_ack = FakeStore::new(vec![make_entry(), make_entry()]);
+        let all_ack = FakeStore::new(vec![make_pending_entry(), make_pending_entry()]);
         super::relay_tick(
             &all_ack,
             &domains,
@@ -1457,7 +1550,7 @@ mod tests {
     #[tokio::test]
     async fn relay_records_publish_counter_per_disposition() {
         for disposition in [Disposition::Ack, Disposition::Requeue, Disposition::Reject] {
-            let store = FakeStore::with_relay_disposition(vec![make_entry()], disposition);
+            let store = FakeStore::with_relay_disposition(vec![make_pending_entry()], disposition);
             let health = Arc::new(WorkerHealth::healthy());
             let metrics = CountingMetrics::new();
             super::relay_tick(
@@ -1471,7 +1564,12 @@ mod tests {
             .await;
             assert_eq!(
                 metrics.publishes(),
-                vec![("identity".to_string(), disposition)],
+                vec![(
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    disposition,
+                )],
                 "publish counter must record disposition {}",
                 disposition.as_label()
             );
@@ -1481,7 +1579,7 @@ mod tests {
     /// relay tick 每 domain 各发一次 poll 相 + 一次 publish 相耗时（settle 并入 publish）。
     #[tokio::test]
     async fn relay_records_tick_duration_poll_and_publish() {
-        let store = FakeStore::new(vec![make_entry()]);
+        let store = FakeStore::new(vec![make_pending_entry()]);
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
         super::relay_tick(
@@ -1503,12 +1601,90 @@ mod tests {
     /// sampler tick 逐 domain set backlog gauge（record_backlog 携采样值）+ 干净轮 Healthy。
     #[tokio::test]
     async fn sampler_records_backlog_gauge() {
-        let sample = BacklogSample::new(42, 305);
-        let store = FakeBacklog::new(sample);
+        let sample_a = BacklogSample::new(42, 305);
+        let sample_b = BacklogSample::empty();
+        let store = FakeBacklog::with_samples(vec![
+            backlog_sample("identity.session-created", sample_a),
+            backlog_sample("identity.role-assigned", sample_b),
+        ]);
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
-        super::sampler_tick(&store, &[dn("identity")], &health, metrics.as_ref()).await;
-        assert_eq!(metrics.backlogs(), vec![("identity".to_string(), sample)]);
+        let mut observed_scopes = super::BacklogScopeState::default();
+        super::sampler_tick(
+            &store,
+            &[dn("identity")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+        assert_eq!(
+            metrics.backlogs(),
+            vec![
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    sample_a,
+                ),
+                (
+                    "identity".to_string(),
+                    "identity.role-assigned".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    sample_b,
+                ),
+            ]
+        );
+        assert_eq!(health.status(), HealthStatus::Healthy);
+    }
+
+    /// sampler 进程内已观测 scope 本轮消失时显式置零，避免保留陈旧非零 gauge。
+    #[tokio::test]
+    async fn sampler_zeroes_previously_observed_scope_when_sample_disappears() {
+        let health = Arc::new(WorkerHealth::healthy());
+        let metrics = CountingMetrics::new();
+        let mut observed_scopes = super::BacklogScopeState::default();
+
+        let first = FakeBacklog::with_samples(vec![backlog_sample(
+            "identity.session-created",
+            BacklogSample::new(42, 305),
+        )]);
+        super::sampler_tick(
+            &first,
+            &[dn("identity")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+
+        let second = FakeBacklog::with_samples(vec![]);
+        super::sampler_tick(
+            &second,
+            &[dn("identity")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+
+        assert_eq!(
+            metrics.backlogs(),
+            vec![
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    BacklogSample::new(42, 305),
+                ),
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    BacklogSample::empty(),
+                ),
+            ]
+        );
         assert_eq!(health.status(), HealthStatus::Healthy);
     }
 
@@ -1517,9 +1693,17 @@ mod tests {
     async fn sampler_error_marks_degraded_then_recovers() {
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
+        let mut observed_scopes = super::BacklogScopeState::default();
         // 第一轮：采样 Err → Degraded、无 gauge 发射。
         let erroring = FakeBacklog::with_err(consistency::error::EngineErrorKind::Transient);
-        super::sampler_tick(&erroring, &[dn("dom")], &health, metrics.as_ref()).await;
+        super::sampler_tick(
+            &erroring,
+            &[dn("dom")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
         assert_eq!(health.status(), HealthStatus::Degraded);
         assert!(
             metrics.backlogs().is_empty(),
@@ -1527,7 +1711,14 @@ mod tests {
         );
         // 第二轮：干净采样 → 恢复 Healthy。
         let clean = FakeBacklog::new(BacklogSample::empty());
-        super::sampler_tick(&clean, &[dn("dom")], &health, metrics.as_ref()).await;
+        super::sampler_tick(
+            &clean,
+            &[dn("dom")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
         assert_eq!(health.status(), HealthStatus::Healthy);
     }
 }
