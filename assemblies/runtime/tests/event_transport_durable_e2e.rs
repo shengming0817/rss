@@ -23,11 +23,12 @@ use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
 use consistency::OutboxSource;
 use diport::{
-    DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef,
-    KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest, Publisher, RedactedBytes,
-    Topic,
+    DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider,
+    KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
+    Publisher, RedactedBytes, Topic,
 };
-use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
+use eventexec::TenantAuthorityBinding;
+use generated::event::identity_v1::session_created::{self, IdentitySessionCreatedPayload};
 use generated::event::settings_v1;
 use generated::http::identity_v1::login::IdentityLoginRequest;
 use generated::http::settings_v1::SettingsConfigPublishRequest;
@@ -98,6 +99,32 @@ fn amqp_endpoint(url: &str) -> Result<secure::AmqpEndpoint> {
         url,
         secure::PlaintextEndpointPolicy::AllowLoopback,
     )?)
+}
+
+fn signed_session_metadata(
+    authority: &eventexec::TenantAuthority,
+    message_id: &str,
+) -> Result<EnvelopeMetadata> {
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let token = authority.sign(TenantAuthorityBinding::new(
+        tenant,
+        session_created::CONTRACT.domain(),
+        session_created::CONTRACT.contract_id(),
+        session_created::TOPIC,
+        message_id,
+    ))?;
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
+    metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    metadata.insert_wire_pair(
+        diport::KEY_SCHEMA_VERSION,
+        session_created::CONTRACT.version(),
+    );
+    metadata.insert_wire_pair(
+        diport::KEY_SCHEMA_HASH,
+        session_created::CONTRACT.schema_hash(),
+    );
+    Ok(metadata)
 }
 
 // ── FixedClock（inline；memory crate 被 deny.toml 限定 journeys/xtask，runtime 不可用）─────────
@@ -336,7 +363,7 @@ fn pg_owner_connect_options(p: &testkit::PgConnParams) -> PgConnectOptions {
 
 async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<i64> {
     let (count,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2 AND status = 'done'",
+        "SELECT count(*) FROM inbox_receipts WHERE event_id = $1 AND consumer_group = $2 AND status = 'done'",
     )
     .bind(event_id)
     .bind(group)
@@ -368,7 +395,7 @@ async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) 
 ///
 /// - 断言 A：login → PgOutbox(pending) → relay → AMQP → consumer → PG inbox(Fresh) → audit append（至少一次）。
 /// - 断言 B：重投同一 event_id（duplicate）+ tracer（新 event_id）→ tracer 被消费正向见证 duplicate 已消费；
-///   稳定 audit len==2 + `inbox_dedup` done 行证明 duplicate 命中 PG inbox Duplicate 去重。
+///   稳定 audit len==2 + `inbox_receipts` done 行证明 duplicate 命中 PG inbox Duplicate 去重。
 ///
 /// 需 docker：`cargo test -p runtime --features integration event_transport_durable -- --nocapture`
 /// 或 `cargo nextest run -p runtime --features integration`。无 docker 时只需通过
@@ -491,6 +518,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .tenant_authority
         .clone()
         .context("durable e2e tenant authority missing")?;
+    let redeliver_tenant_authority = Arc::clone(&poll_tenant_authority);
     let poll_dlx_payload_protector = cfg
         .dlx_payload_protector
         .clone()
@@ -718,7 +746,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     assert_eq!(
         inbox_done_count(&assertion_pool, &captured_event_id, &consumer_group).await?,
         1,
-        "断言 A：original event 必须在 PG inbox_dedup 标记 done"
+        "断言 A：original event 必须在 PG inbox_receipts 标记 done"
     );
 
     // ── 步骤 11：断言 B（PG inbox 幂等去重）──────────────────────────────────────────────────
@@ -730,18 +758,30 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // （original + tracer）；去重失效 → duplicate 也 append、升到 3，被下方 fail-fast 捕获。
     let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
     let pubr = amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver").await?;
-    pubr.publish(PublishRequest::new(
-        Topic::new(SESSION_CREATED_TOPIC),
-        MessageId::new(&captured_event_id),
-        captured_payload.clone(),
-    ))
+    pubr.publish(
+        PublishRequest::new(
+            Topic::new(SESSION_CREATED_TOPIC),
+            MessageId::new(&captured_event_id),
+            captured_payload.clone(),
+        )
+        .with_metadata(signed_session_metadata(
+            &redeliver_tenant_authority,
+            &captured_event_id,
+        )?),
+    )
     .await?;
     let tracer_id = format!("{captured_event_id}-tracer");
-    pubr.publish(PublishRequest::new(
-        Topic::new(SESSION_CREATED_TOPIC),
-        MessageId::new(&tracer_id),
-        captured_payload,
-    ))
+    pubr.publish(
+        PublishRequest::new(
+            Topic::new(SESSION_CREATED_TOPIC),
+            MessageId::new(&tracer_id),
+            captured_payload,
+        )
+        .with_metadata(signed_session_metadata(
+            &redeliver_tenant_authority,
+            &tracer_id,
+        )?),
+    )
     .await?;
 
     // 正向见证：等 audit 至少再 append 一次（len>=2）——证明重投流被 consumer 真实消费（消除假阴性）。
@@ -774,12 +814,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
     assert_eq!(
         inbox_done_count(&assertion_pool, &captured_event_id, &consumer_group).await?,
         1,
-        "断言 B：duplicate 不得新增 original 的 inbox_dedup done 行"
+        "断言 B：duplicate 不得新增 original 的 inbox_receipts done 行"
     );
     assert_eq!(
         inbox_done_count(&assertion_pool, &tracer_id, &consumer_group).await?,
         1,
-        "断言 B：tracer 新 event 必须在 PG inbox_dedup 标记 done"
+        "断言 B：tracer 新 event 必须在 PG inbox_receipts 标记 done"
     );
 
     pubr.shutdown().await?;

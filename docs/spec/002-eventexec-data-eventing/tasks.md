@@ -60,8 +60,8 @@
 **触及**: `adapters/postgres/src/inbox.rs`+migration · `adapters/redis/src/{claimer.rs,lib.rs}` · `crates/bootstrap/src/replaydeps.rs` · **等级**: L0 · **blocked-by**: T001,T003 · **并行**: 与 T004/T006 并行。
 
 - [ ] T005.1 [US3] 先写测试：首见 Fresh/再见 Duplicate（pg INSERT ON CONFLICT、redis CAS）；consumer group 漂移→去重失效（负向）；replaydeps demo→in-mem、多副本缺 redis→fail-closed —— FAIL
-- [ ] T005.2 [US3] postgres `inbox_dedup` 表 + `impl InboxStore`（claim-or-skip）
-- [ ] T005.3 [US3] redis claimer（`_runtime:{event_id}:{group}` namespace）+ `impl ManagedResource`
+- [ ] T005.2 [US3] postgres `inbox_receipts` 表 + `impl InboxStore`（tenant-scoped claim-or-skip）
+- [ ] T005.3 [US3] redis claimer（`_runtime:inbox_receipts:<tenant>:<group>:<idem>` namespace）+ `impl ManagedResource`
 - [ ] T005.4 [US3] `bootstrap/replaydeps.rs` sealed resolver（demo in-mem claimer / 多副本 redis；fail-closed，TOPO-INMEM-SEAL-01 + TOPO-FAILCLOSED-01）
 - [ ] T005.5 [US3] L0 表驱动 + resolver 单测；clippy/fmt 绿
 

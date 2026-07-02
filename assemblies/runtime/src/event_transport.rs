@@ -863,7 +863,6 @@ fn wire_consumer_resource_bundle(
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
     for subscription in subscribers {
-        let group = subscription.group().clone();
         let owner = subscription.topic_owner();
         let amqp_conn = amqp_map
             .get(&owner)
@@ -875,7 +874,7 @@ fn wire_consumer_resource_bundle(
         let topic = Topic::new(topic_name);
         let meta =
             consumer_meta_for_subscription(&subscription, Arc::clone(&security.tenant_authority));
-        let inbox = pg.infra().inbox(group);
+        let inbox = pg.infra().inbox();
         let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
         let idempotency = Arc::new(inbox);
         let consumer_health = Arc::new(WorkerHealth::starting());
@@ -920,19 +919,25 @@ fn wire_inbox_sweeper(
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let config = SweeperConfig::new(postgres::INBOX_DEDUP_RETENTION_SECONDS, timing.sweep)
+    let config = SweeperConfig::new(postgres::INBOX_RECEIPT_RETENTION_SECONDS, timing.sweep)
         .context("build inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
     let sweeper = pg.infra().inbox_sweeper();
     let worker: WorkerSpec = Box::new(move |token| {
-        let handle = tokio::spawn(sweeper_loop(
-            Arc::new(sweeper),
-            config,
-            token.clone(),
-            Arc::clone(&worker_health),
-            "inbox_dedup",
-        ));
+        let loop_health = Arc::clone(&worker_health);
+        let loop_token = token.clone();
+        let handle = tokio::spawn(async move {
+            let _stopped = loop_health.stopped_on_exit();
+            sweeper_loop(
+                Arc::new(sweeper),
+                config,
+                loop_token,
+                Arc::clone(&loop_health),
+                "inbox_receipts",
+            )
+            .await;
+        });
         DynManagedResource::new_box(SweeperWorker::adopt(
             INBOX_SWEEPER_WORKER_NAME,
             handle,

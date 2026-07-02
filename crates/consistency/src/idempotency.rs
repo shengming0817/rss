@@ -148,14 +148,14 @@ impl LeaseOutcome {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
 
     use super::{
         ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, LeaseOutcome, LeaseToken,
         SeenState,
     };
     use crate::error::EngineError;
-    use crate::inbox::InboxStore;
+    use crate::inbox::{InboxReceiptContext, InboxStore};
 
     // ─── in-mem fake（测试专用，覆盖完整 token CAS 状态机）──────────────────────────
 
@@ -182,6 +182,7 @@ mod tests {
     impl InboxStore for FakeStore {
         async fn try_claim(
             &self,
+            _ctx: &InboxReceiptContext,
             key: &IdemKey,
             lease: &LeaseToken,
         ) -> Result<SeenState, EngineError> {
@@ -204,6 +205,7 @@ mod tests {
 
         async fn extend(
             &self,
+            _ctx: &InboxReceiptContext,
             key: &IdemKey,
             lease: &LeaseToken,
         ) -> Result<LeaseOutcome, EngineError> {
@@ -222,6 +224,7 @@ mod tests {
 
         async fn commit(
             &self,
+            _ctx: &InboxReceiptContext,
             key: &IdemKey,
             lease: &LeaseToken,
         ) -> Result<LeaseOutcome, EngineError> {
@@ -236,7 +239,12 @@ mod tests {
             }
         }
 
-        async fn release(&self, key: &IdemKey, lease: &LeaseToken) -> Result<(), EngineError> {
+        async fn release(
+            &self,
+            _ctx: &InboxReceiptContext,
+            key: &IdemKey,
+            lease: &LeaseToken,
+        ) -> Result<(), EngineError> {
             // reason: in-mem release 恒 Ok；仅 token 匹配的 claimed 行删除（CAS），否则 no-op。
             let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(map.get(key.as_str()), Some(e) if !e.done && e.token == lease.as_str()) {
@@ -280,6 +288,26 @@ mod tests {
         LeaseToken::mint()
     }
 
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 fixture 使用固定合法值，构造失败即测试本身配置错误。
+    fn ctx() -> &'static InboxReceiptContext {
+        static CTX: OnceLock<InboxReceiptContext> = OnceLock::new();
+        CTX.get_or_init(|| {
+            InboxReceiptContext::new(
+                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+                ConsumerGroup::parse("test-consumer").unwrap(),
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                None,
+                None,
+            )
+            .unwrap()
+        })
+    }
+
     /// claim → commit(Held) → 再 try_claim = Duplicate（done 永久去重）。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
@@ -288,10 +316,16 @@ mod tests {
         let store = FakeStore::new();
         let key = k("evt-commit-1");
         let t = tok();
-        assert_eq!(store.try_claim(&key, &t).await.unwrap(), SeenState::Fresh);
-        assert_eq!(store.commit(&key, &t).await.unwrap(), LeaseOutcome::Held);
         assert_eq!(
-            store.try_claim(&key, &tok()).await.unwrap(),
+            store.try_claim(ctx(), &key, &t).await.unwrap(),
+            SeenState::Fresh
+        );
+        assert_eq!(
+            store.commit(ctx(), &key, &t).await.unwrap(),
+            LeaseOutcome::Held
+        );
+        assert_eq!(
+            store.try_claim(ctx(), &key, &tok()).await.unwrap(),
             SeenState::Duplicate
         );
     }
@@ -304,10 +338,13 @@ mod tests {
         let store = FakeStore::new();
         let key = k("evt-release-1");
         let t = tok();
-        assert_eq!(store.try_claim(&key, &t).await.unwrap(), SeenState::Fresh);
-        store.release(&key, &t).await.unwrap();
         assert_eq!(
-            store.try_claim(&key, &tok()).await.unwrap(),
+            store.try_claim(ctx(), &key, &t).await.unwrap(),
+            SeenState::Fresh
+        );
+        store.release(ctx(), &key, &t).await.unwrap();
+        assert_eq!(
+            store.try_claim(ctx(), &key, &tok()).await.unwrap(),
             SeenState::Fresh
         );
     }
@@ -321,12 +358,12 @@ mod tests {
         let key = k("evt-absent-commit");
         // 直接 commit，未 claim → Lost（无匹配 CAS）
         assert_eq!(
-            store.commit(&key, &tok()).await.unwrap(),
+            store.commit(ctx(), &key, &tok()).await.unwrap(),
             LeaseOutcome::Lost
         );
         // 之后 try_claim 仍可 Fresh（absent 状态未被写入 done）
         assert_eq!(
-            store.try_claim(&key, &tok()).await.unwrap(),
+            store.try_claim(ctx(), &key, &tok()).await.unwrap(),
             SeenState::Fresh
         );
     }
@@ -339,10 +376,10 @@ mod tests {
         let store = FakeStore::new();
         let key = k("evt-absent-release");
         // 直接 release，未 claim
-        assert!(store.release(&key, &tok()).await.is_ok());
+        assert!(store.release(ctx(), &key, &tok()).await.is_ok());
         // 之后 try_claim 仍可 Fresh
         assert_eq!(
-            store.try_claim(&key, &tok()).await.unwrap(),
+            store.try_claim(ctx(), &key, &tok()).await.unwrap(),
             SeenState::Fresh
         );
     }
@@ -356,14 +393,17 @@ mod tests {
         let key = k("evt-extend-1");
         let mine = tok();
         assert_eq!(
-            store.try_claim(&key, &mine).await.unwrap(),
+            store.try_claim(ctx(), &key, &mine).await.unwrap(),
             SeenState::Fresh
         );
         // 持有者续租成功
-        assert_eq!(store.extend(&key, &mine).await.unwrap(), LeaseOutcome::Held);
+        assert_eq!(
+            store.extend(ctx(), &key, &mine).await.unwrap(),
+            LeaseOutcome::Held
+        );
         // 他人令牌续租 → Lost
         assert_eq!(
-            store.extend(&key, &tok()).await.unwrap(),
+            store.extend(ctx(), &key, &tok()).await.unwrap(),
             LeaseOutcome::Lost
         );
     }
@@ -377,16 +417,19 @@ mod tests {
         let key = k("evt-fence-1");
         let mine = tok();
         assert_eq!(
-            store.try_claim(&key, &mine).await.unwrap(),
+            store.try_claim(ctx(), &key, &mine).await.unwrap(),
             SeenState::Fresh
         );
         // stale holder（错误 token）commit → Lost（不可降级为 done）
         assert_eq!(
-            store.commit(&key, &tok()).await.unwrap(),
+            store.commit(ctx(), &key, &tok()).await.unwrap(),
             LeaseOutcome::Lost
         );
         // 真持有者 commit → Held
-        assert_eq!(store.commit(&key, &mine).await.unwrap(), LeaseOutcome::Held);
+        assert_eq!(
+            store.commit(ctx(), &key, &mine).await.unwrap(),
+            LeaseOutcome::Held
+        );
     }
 
     /// commit 后再 extend = Lost（done 行不可续租）。
@@ -397,9 +440,18 @@ mod tests {
         let store = FakeStore::new();
         let key = k("evt-extend-done");
         let t = tok();
-        assert_eq!(store.try_claim(&key, &t).await.unwrap(), SeenState::Fresh);
-        assert_eq!(store.commit(&key, &t).await.unwrap(), LeaseOutcome::Held);
-        assert_eq!(store.extend(&key, &t).await.unwrap(), LeaseOutcome::Lost);
+        assert_eq!(
+            store.try_claim(ctx(), &key, &t).await.unwrap(),
+            SeenState::Fresh
+        );
+        assert_eq!(
+            store.commit(ctx(), &key, &t).await.unwrap(),
+            LeaseOutcome::Held
+        );
+        assert_eq!(
+            store.extend(ctx(), &key, &t).await.unwrap(),
+            LeaseOutcome::Lost
+        );
     }
 
     /// release token CAS：他人 token release 为 no-op（不误删，仍 Duplicate）。
@@ -411,14 +463,14 @@ mod tests {
         let key = k("evt-release-cas");
         let mine = tok();
         assert_eq!(
-            store.try_claim(&key, &mine).await.unwrap(),
+            store.try_claim(ctx(), &key, &mine).await.unwrap(),
             SeenState::Fresh
         );
         // stale token release → no-op
-        store.release(&key, &tok()).await.unwrap();
+        store.release(ctx(), &key, &tok()).await.unwrap();
         // claim 仍在（未被误删）→ Duplicate
         assert_eq!(
-            store.try_claim(&key, &tok()).await.unwrap(),
+            store.try_claim(ctx(), &key, &tok()).await.unwrap(),
             SeenState::Duplicate
         );
     }
@@ -434,30 +486,30 @@ mod tests {
         // 全部 claim
         for &raw in keys {
             assert_eq!(
-                store.try_claim(&k(raw), &t).await.unwrap(),
+                store.try_claim(ctx(), &k(raw), &t).await.unwrap(),
                 SeenState::Fresh,
                 "raw={raw}"
             );
         }
         // A commit，B release，C 留 claimed
         assert_eq!(
-            store.commit(&k("evt-A"), &t).await.unwrap(),
+            store.commit(ctx(), &k("evt-A"), &t).await.unwrap(),
             LeaseOutcome::Held
         );
-        store.release(&k("evt-B"), &t).await.unwrap();
+        store.release(ctx(), &k("evt-B"), &t).await.unwrap();
         // A：done → Duplicate
         assert_eq!(
-            store.try_claim(&k("evt-A"), &t).await.unwrap(),
+            store.try_claim(ctx(), &k("evt-A"), &t).await.unwrap(),
             SeenState::Duplicate
         );
         // B：absent → Fresh
         assert_eq!(
-            store.try_claim(&k("evt-B"), &t).await.unwrap(),
+            store.try_claim(ctx(), &k("evt-B"), &t).await.unwrap(),
             SeenState::Fresh
         );
         // C：still claimed → Duplicate
         assert_eq!(
-            store.try_claim(&k("evt-C"), &t).await.unwrap(),
+            store.try_claim(ctx(), &k("evt-C"), &t).await.unwrap(),
             SeenState::Duplicate
         );
     }

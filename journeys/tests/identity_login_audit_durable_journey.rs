@@ -11,7 +11,7 @@
 //! 本 journey 聚焦 producer durable 落库 + relay CAS + 消费侧 PgInbox 幂等的端到端贯通）。
 //!
 //! 无清表：每次登录 mint **独立 EventId**（opaque UUID，非 session_id；payload.sessionId 仅用于关联本轮 entry），
-//! outbox/inbox_dedup 以 event_id 为键，跨轮次不冲突；relay 仅中继本轮 event_id 的 entry（不碰他轮 pending 行），
+//! outbox/inbox_receipts 以 event_id 为键，跨轮次不冲突；relay 仅中继本轮 event_id 的 entry（不碰他轮 pending 行），
 //! 故消费侧只收本轮事件。
 
 #![cfg(feature = "integration")]
@@ -27,7 +27,7 @@ use bootstrap::SubscriberHandler;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
     SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
-    session_created_subscription, tenant_authority,
+    session_created_subscription, signed_metadata, tenant_authority,
 };
 use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
 use diagctx::{CorrelationId, DiagnosticCtx};
@@ -211,9 +211,12 @@ async fn login_audit_durable_topology() -> Result<()> {
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
     let binding = session_created_subscription(registry)?;
     anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
+    let event_domain = binding.topic.split('.').next().unwrap_or(binding.topic);
+    let event_contract_id = binding.contract_id;
+    let event_topic = binding.topic;
 
     // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
-    let claimer = Arc::new(deps.infra().inbox(binding.group.clone()));
+    let claimer = Arc::new(deps.infra().inbox());
     let token = CancellationToken::new();
     let stream = bus
         .subscriber()
@@ -316,11 +319,19 @@ async fn login_audit_durable_topology() -> Result<()> {
 
         // 重投同一 EventId（模拟 broker 重投）→ PgInbox Duplicate → audit 不重复。
         bus.publisher()
-            .publish(PublishRequest::new(
-                Topic::new(SESSION_CREATED_TOPIC),
-                MessageId::new(event_id.as_str()),
-                payload,
-            ))
+            .publish(
+                PublishRequest::new(
+                    Topic::new(SESSION_CREATED_TOPIC),
+                    MessageId::new(event_id.as_str()),
+                    payload,
+                )
+                .with_metadata(signed_metadata(
+                    event_domain,
+                    event_contract_id,
+                    event_topic,
+                    event_id.as_str(),
+                )?),
+            )
             .await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         token.cancel();

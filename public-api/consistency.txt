@@ -404,6 +404,57 @@ impl<T> core::clone::CloneToUninit for consistency::inbox::InboxLeaseFreshness w
 pub unsafe fn consistency::inbox::InboxLeaseFreshness::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::inbox::InboxLeaseFreshness
 pub fn consistency::inbox::InboxLeaseFreshness::from(T) -> T
+#[non_exhaustive] pub enum consistency::inbox::InboxReceiptContextError
+pub consistency::inbox::InboxReceiptContextError::EmptyContractId
+pub consistency::inbox::InboxReceiptContextError::EmptyDomain
+pub consistency::inbox::InboxReceiptContextError::EmptyTopic
+pub consistency::inbox::InboxReceiptContextError::InvalidContractVersion
+pub consistency::inbox::InboxReceiptContextError::InvalidCorrelationId
+pub consistency::inbox::InboxReceiptContextError::InvalidSchemaHash
+pub consistency::inbox::InboxReceiptContextError::InvalidTrace
+impl core::clone::Clone for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::clone(&self) -> consistency::inbox::InboxReceiptContextError
+impl core::cmp::Eq for consistency::inbox::InboxReceiptContextError
+impl core::cmp::PartialEq for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::eq(&self, &consistency::inbox::InboxReceiptContextError) -> bool
+impl core::error::Error for consistency::inbox::InboxReceiptContextError
+impl core::fmt::Debug for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxReceiptContextError
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxReceiptContextError
+impl core::marker::Freeze for consistency::inbox::InboxReceiptContextError
+impl core::marker::Send for consistency::inbox::InboxReceiptContextError
+impl core::marker::Sync for consistency::inbox::InboxReceiptContextError
+impl core::marker::Unpin for consistency::inbox::InboxReceiptContextError
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxReceiptContextError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxReceiptContextError
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxReceiptContextError
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxReceiptContextError where U: core::convert::From<T>
+pub fn consistency::inbox::InboxReceiptContextError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxReceiptContextError where U: core::convert::Into<T>
+pub type consistency::inbox::InboxReceiptContextError::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxReceiptContextError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxReceiptContextError where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxReceiptContextError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxReceiptContextError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxReceiptContextError where T: core::clone::Clone
+pub type consistency::inbox::InboxReceiptContextError::Owned = T
+pub fn consistency::inbox::InboxReceiptContextError::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxReceiptContextError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::inbox::InboxReceiptContextError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::inbox::InboxReceiptContextError where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxReceiptContextError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxReceiptContextError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxReceiptContextError where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxReceiptContextError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::from(T) -> T
 #[non_exhaustive] pub enum consistency::inbox::InboxState
 pub consistency::inbox::InboxState::Absent
 pub consistency::inbox::InboxState::Claimed(consistency::inbox::InboxClaim)
@@ -540,6 +591,48 @@ impl<T> core::clone::CloneToUninit for consistency::inbox::InboxStatusError wher
 pub unsafe fn consistency::inbox::InboxStatusError::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::inbox::InboxStatusError
 pub fn consistency::inbox::InboxStatusError::from(T) -> T
+pub struct consistency::inbox::InboxBacklogScope
+impl consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
+pub fn consistency::inbox::InboxBacklogScope::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup) -> Self
+pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::clone(&self) -> consistency::inbox::InboxBacklogScope
+impl core::cmp::Eq for consistency::inbox::InboxBacklogScope
+impl core::cmp::PartialEq for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::eq(&self, &consistency::inbox::InboxBacklogScope) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxBacklogScope
+impl core::marker::Freeze for consistency::inbox::InboxBacklogScope
+impl core::marker::Send for consistency::inbox::InboxBacklogScope
+impl core::marker::Sync for consistency::inbox::InboxBacklogScope
+impl core::marker::Unpin for consistency::inbox::InboxBacklogScope
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxBacklogScope
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxBacklogScope
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxBacklogScope
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxBacklogScope where U: core::convert::From<T>
+pub fn consistency::inbox::InboxBacklogScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxBacklogScope where U: core::convert::Into<T>
+pub type consistency::inbox::InboxBacklogScope::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxBacklogScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxBacklogScope where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxBacklogScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxBacklogScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxBacklogScope where T: core::clone::Clone
+pub type consistency::inbox::InboxBacklogScope::Owned = T
+pub fn consistency::inbox::InboxBacklogScope::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxBacklogScope::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxBacklogScope where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxBacklogScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxBacklogScope where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxBacklogScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxBacklogScope where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxBacklogScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxBacklogScope where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxBacklogScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::from(T) -> T
 pub struct consistency::inbox::InboxClaim
 impl consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::active(consistency::idempotency::LeaseToken) -> Self
@@ -583,13 +676,64 @@ impl<T> core::clone::CloneToUninit for consistency::inbox::InboxClaim where T: c
 pub unsafe fn consistency::inbox::InboxClaim::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::from(T) -> T
+pub struct consistency::inbox::InboxReceiptContext
+impl consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
+pub fn consistency::inbox::InboxReceiptContext::contract_id(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::contract_version(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::correlation_id(&self) -> core::option::Option<&str>
+pub fn consistency::inbox::InboxReceiptContext::domain(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<Self, consistency::inbox::InboxReceiptContextError>
+pub fn consistency::inbox::InboxReceiptContext::schema_hash(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::inbox::InboxReceiptContext::topic(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::trace(&self) -> core::option::Option<&str>
+impl core::clone::Clone for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::clone(&self) -> consistency::inbox::InboxReceiptContext
+impl core::cmp::Eq for consistency::inbox::InboxReceiptContext
+impl core::cmp::PartialEq for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::eq(&self, &consistency::inbox::InboxReceiptContext) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxReceiptContext
+impl core::marker::Freeze for consistency::inbox::InboxReceiptContext
+impl core::marker::Send for consistency::inbox::InboxReceiptContext
+impl core::marker::Sync for consistency::inbox::InboxReceiptContext
+impl core::marker::Unpin for consistency::inbox::InboxReceiptContext
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxReceiptContext
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxReceiptContext
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxReceiptContext
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxReceiptContext where U: core::convert::From<T>
+pub fn consistency::inbox::InboxReceiptContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxReceiptContext where U: core::convert::Into<T>
+pub type consistency::inbox::InboxReceiptContext::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxReceiptContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxReceiptContext where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxReceiptContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxReceiptContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxReceiptContext where T: core::clone::Clone
+pub type consistency::inbox::InboxReceiptContext::Owned = T
+pub fn consistency::inbox::InboxReceiptContext::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxReceiptContext::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxReceiptContext where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxReceiptContext where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxReceiptContext where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxReceiptContext where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxReceiptContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::from(T) -> T
+pub const consistency::inbox::INBOX_RECEIPT_CORRELATION_MAX_LEN: usize
+pub const consistency::inbox::INBOX_RECEIPT_TRACE_MAX_LEN: usize
 pub trait consistency::inbox::InboxBacklog
-pub async fn consistency::inbox::InboxBacklog::sample_backlog(&self) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
+pub async fn consistency::inbox::InboxBacklog::sample_backlog(&self, &consistency::inbox::InboxBacklogScope) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::inbox::InboxStore
-pub async fn consistency::inbox::InboxStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::inbox::InboxStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::inbox::InboxStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
-pub async fn consistency::inbox::InboxStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::commit(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::extend(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::release(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::try_claim(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -3292,6 +3436,57 @@ impl<T> core::clone::CloneToUninit for consistency::inbox::InboxLeaseFreshness w
 pub unsafe fn consistency::inbox::InboxLeaseFreshness::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::inbox::InboxLeaseFreshness
 pub fn consistency::inbox::InboxLeaseFreshness::from(T) -> T
+#[non_exhaustive] pub enum consistency::InboxReceiptContextError
+pub consistency::InboxReceiptContextError::EmptyContractId
+pub consistency::InboxReceiptContextError::EmptyDomain
+pub consistency::InboxReceiptContextError::EmptyTopic
+pub consistency::InboxReceiptContextError::InvalidContractVersion
+pub consistency::InboxReceiptContextError::InvalidCorrelationId
+pub consistency::InboxReceiptContextError::InvalidSchemaHash
+pub consistency::InboxReceiptContextError::InvalidTrace
+impl core::clone::Clone for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::clone(&self) -> consistency::inbox::InboxReceiptContextError
+impl core::cmp::Eq for consistency::inbox::InboxReceiptContextError
+impl core::cmp::PartialEq for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::eq(&self, &consistency::inbox::InboxReceiptContextError) -> bool
+impl core::error::Error for consistency::inbox::InboxReceiptContextError
+impl core::fmt::Debug for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::inbox::InboxReceiptContextError
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxReceiptContextError
+impl core::marker::Freeze for consistency::inbox::InboxReceiptContextError
+impl core::marker::Send for consistency::inbox::InboxReceiptContextError
+impl core::marker::Sync for consistency::inbox::InboxReceiptContextError
+impl core::marker::Unpin for consistency::inbox::InboxReceiptContextError
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxReceiptContextError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxReceiptContextError
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxReceiptContextError
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxReceiptContextError where U: core::convert::From<T>
+pub fn consistency::inbox::InboxReceiptContextError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxReceiptContextError where U: core::convert::Into<T>
+pub type consistency::inbox::InboxReceiptContextError::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxReceiptContextError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxReceiptContextError where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxReceiptContextError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxReceiptContextError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxReceiptContextError where T: core::clone::Clone
+pub type consistency::inbox::InboxReceiptContextError::Owned = T
+pub fn consistency::inbox::InboxReceiptContextError::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxReceiptContextError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::inbox::InboxReceiptContextError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::inbox::InboxReceiptContextError where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxReceiptContextError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxReceiptContextError where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContextError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxReceiptContextError where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxReceiptContextError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxReceiptContextError
+pub fn consistency::inbox::InboxReceiptContextError::from(T) -> T
 #[non_exhaustive] pub enum consistency::InboxState
 pub consistency::InboxState::Absent
 pub consistency::InboxState::Claimed(consistency::inbox::InboxClaim)
@@ -4698,6 +4893,48 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::IdemKey where T
 pub unsafe fn consistency::idempotency::IdemKey::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::IdemKey
 pub fn consistency::idempotency::IdemKey::from(T) -> T
+pub struct consistency::InboxBacklogScope
+impl consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
+pub fn consistency::inbox::InboxBacklogScope::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup) -> Self
+pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::clone(&self) -> consistency::inbox::InboxBacklogScope
+impl core::cmp::Eq for consistency::inbox::InboxBacklogScope
+impl core::cmp::PartialEq for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::eq(&self, &consistency::inbox::InboxBacklogScope) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxBacklogScope
+impl core::marker::Freeze for consistency::inbox::InboxBacklogScope
+impl core::marker::Send for consistency::inbox::InboxBacklogScope
+impl core::marker::Sync for consistency::inbox::InboxBacklogScope
+impl core::marker::Unpin for consistency::inbox::InboxBacklogScope
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxBacklogScope
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxBacklogScope
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxBacklogScope
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxBacklogScope where U: core::convert::From<T>
+pub fn consistency::inbox::InboxBacklogScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxBacklogScope where U: core::convert::Into<T>
+pub type consistency::inbox::InboxBacklogScope::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxBacklogScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxBacklogScope where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxBacklogScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxBacklogScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxBacklogScope where T: core::clone::Clone
+pub type consistency::inbox::InboxBacklogScope::Owned = T
+pub fn consistency::inbox::InboxBacklogScope::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxBacklogScope::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxBacklogScope where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxBacklogScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxBacklogScope where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxBacklogScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxBacklogScope where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxBacklogScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxBacklogScope where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxBacklogScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxBacklogScope
+pub fn consistency::inbox::InboxBacklogScope::from(T) -> T
 pub struct consistency::InboxClaim
 impl consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::active(consistency::idempotency::LeaseToken) -> Self
@@ -4741,6 +4978,55 @@ impl<T> core::clone::CloneToUninit for consistency::inbox::InboxClaim where T: c
 pub unsafe fn consistency::inbox::InboxClaim::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::from(T) -> T
+pub struct consistency::InboxReceiptContext
+impl consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
+pub fn consistency::inbox::InboxReceiptContext::contract_id(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::contract_version(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::correlation_id(&self) -> core::option::Option<&str>
+pub fn consistency::inbox::InboxReceiptContext::domain(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<Self, consistency::inbox::InboxReceiptContextError>
+pub fn consistency::inbox::InboxReceiptContext::schema_hash(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::inbox::InboxReceiptContext::topic(&self) -> &str
+pub fn consistency::inbox::InboxReceiptContext::trace(&self) -> core::option::Option<&str>
+impl core::clone::Clone for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::clone(&self) -> consistency::inbox::InboxReceiptContext
+impl core::cmp::Eq for consistency::inbox::InboxReceiptContext
+impl core::cmp::PartialEq for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::eq(&self, &consistency::inbox::InboxReceiptContext) -> bool
+impl core::fmt::Debug for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::inbox::InboxReceiptContext
+impl core::marker::Freeze for consistency::inbox::InboxReceiptContext
+impl core::marker::Send for consistency::inbox::InboxReceiptContext
+impl core::marker::Sync for consistency::inbox::InboxReceiptContext
+impl core::marker::Unpin for consistency::inbox::InboxReceiptContext
+impl core::marker::UnsafeUnpin for consistency::inbox::InboxReceiptContext
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxReceiptContext
+impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxReceiptContext
+impl<T, U> core::convert::Into<U> for consistency::inbox::InboxReceiptContext where U: core::convert::From<T>
+pub fn consistency::inbox::InboxReceiptContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::inbox::InboxReceiptContext where U: core::convert::Into<T>
+pub type consistency::inbox::InboxReceiptContext::Error = core::convert::Infallible
+pub fn consistency::inbox::InboxReceiptContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::inbox::InboxReceiptContext where U: core::convert::TryFrom<T>
+pub type consistency::inbox::InboxReceiptContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::inbox::InboxReceiptContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::inbox::InboxReceiptContext where T: core::clone::Clone
+pub type consistency::inbox::InboxReceiptContext::Owned = T
+pub fn consistency::inbox::InboxReceiptContext::clone_into(&self, &mut T)
+pub fn consistency::inbox::InboxReceiptContext::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::inbox::InboxReceiptContext where T: 'static + ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::inbox::InboxReceiptContext where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::inbox::InboxReceiptContext where T: ?core::marker::Sized
+pub fn consistency::inbox::InboxReceiptContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::inbox::InboxReceiptContext where T: core::clone::Clone
+pub unsafe fn consistency::inbox::InboxReceiptContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::inbox::InboxReceiptContext
+pub fn consistency::inbox::InboxReceiptContext::from(T) -> T
 pub struct consistency::LeaseToken(_)
 impl consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::as_str(&self) -> &str
@@ -5820,13 +6106,15 @@ impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryReport wher
 pub unsafe fn consistency::tx_retry::TxRetryReport::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryReport
 pub fn consistency::tx_retry::TxRetryReport::from(T) -> T
+pub const consistency::INBOX_RECEIPT_CORRELATION_MAX_LEN: usize
+pub const consistency::INBOX_RECEIPT_TRACE_MAX_LEN: usize
 pub trait consistency::InboxBacklog
-pub async fn consistency::InboxBacklog::sample_backlog(&self) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
+pub async fn consistency::InboxBacklog::sample_backlog(&self, &consistency::inbox::InboxBacklogScope) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::InboxStore
-pub async fn consistency::InboxStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::InboxStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::InboxStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
-pub async fn consistency::InboxStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub async fn consistency::InboxStore::commit(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::InboxStore::extend(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::InboxStore::release(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::InboxStore::try_claim(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
 pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
 pub trait consistency::OutboxRelay

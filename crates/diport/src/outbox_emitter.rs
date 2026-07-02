@@ -20,7 +20,7 @@
 //!
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 //! ref: eventuate-tram-core io.eventuate.tram.consumer.common.DuplicateMessageDetector@master
-//!      （message-id 作幂等键，对应 RSS `inbox_dedup(event_id, consumer_group)`）
+//!      （message-id 作幂等键，对应 RSS `inbox_receipts(event_id, consumer_group)`）
 
 use dynosaur::dynosaur;
 

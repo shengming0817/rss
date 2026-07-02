@@ -1528,8 +1528,8 @@ pub(crate) const fn backoff_seconds(retry_count: i32) -> i64 {
 /// outbox 发布侧最坏重投窗口（秒）：`Σ backoff_seconds(0..MAX_PUBLISH_ATTEMPTS)`——一条 entry 从首投到
 /// 耗尽重试预算（转 dlx）期间所有退避之和（当前策略 = 1+2+…+512 = 1023s）。
 ///
-/// `inbox_dedup` 保留期下限校验引用此窗口（NServiceBus 去重铁律：去重保留期必须 > 重投窗口，否则迟到重投被
-/// 误判 Fresh 重复执行；见 `inbox.rs` INVARIANT INBOX-DEDUP-RETENTION-FLOOR-01）。`const fn` ⇒ 可在
+/// `inbox_receipts` 保留期下限校验引用此窗口（NServiceBus 去重铁律：去重保留期必须 > 重投窗口，否则迟到重投被
+/// 误判 Fresh 重复执行；见 `inbox.rs` INVARIANT INBOX-RECEIPT-RETENTION-FLOOR-01）。`const fn` ⇒ 可在
 /// `const { assert!(..) }` 编译期断言中求值（把铁律上移到常量层，违反即编译失败，非运行期治理测试）。
 pub(crate) const fn max_redelivery_window_secs() -> i64 {
     let mut total = 0i64;
@@ -2096,7 +2096,7 @@ mod tests {
             );
         }
         assert!(
-            LEGACY_GRANTS.contains("ON inbox_dedup TO rss_app"),
+            LEGACY_GRANTS.contains("ON dead_letter TO rss_app"),
             "anti-vacuity: runtime serving migration should still contain serving grants"
         );
     }

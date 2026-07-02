@@ -390,6 +390,7 @@ where
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use consistency::InboxReceiptContext;
     use consistency::error::EngineError;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
     use diport::dead_letter_store::{
@@ -530,6 +531,7 @@ mod tests {
     impl InboxStore for FreshStore {
         async fn try_claim(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<SeenState, EngineError> {
@@ -537,6 +539,7 @@ mod tests {
         }
         async fn extend(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, EngineError> {
@@ -545,13 +548,19 @@ mod tests {
         }
         async fn commit(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, EngineError> {
             self.commits.fetch_add(1, Ordering::Release);
             Ok(LeaseOutcome::Held)
         }
-        async fn release(&self, _key: &IdemKey, _lease: &LeaseToken) -> Result<(), EngineError> {
+        async fn release(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<(), EngineError> {
             Ok(())
         }
     }

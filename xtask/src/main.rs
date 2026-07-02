@@ -16,6 +16,7 @@
 //!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
+//!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
 //!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
@@ -56,6 +57,7 @@ mod diagnostic;
 mod diffcov;
 mod doc_contracts;
 mod event_transport_guard;
+mod inbox_cutover_guard;
 mod layerdeps;
 mod layers;
 mod migrations;
@@ -119,6 +121,8 @@ enum Command {
         allow_missing_tools: bool,
     },
     SchemaRls,
+    /// inbox receipt runtime cutover old-token guard（INBOX-RECEIPTS-CUTOVER-01）。
+    InboxCutoverGuard,
     /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01）。
     SetLocalFunnel,
     /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01）。
@@ -151,6 +155,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["audit", rest @ ..] => parse_audit(rest),
         ["integration", rest @ ..] => parse_integration(rest),
         ["schema-rls"] => Ok(Command::SchemaRls),
+        ["inbox-cutover-guard"] => Ok(Command::InboxCutoverGuard),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
         ["pg-tenant-tx-guard"] => Ok(Command::PgTenantTxGuard),
         ["tenancy-closeout"] => Ok(Command::TenancyCloseout),
@@ -158,7 +163,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | setlocal-funnel | pg-tenant-tx-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -362,6 +367,9 @@ fn dispatch(args: &[String]) -> Result<()> {
             allow_missing_tools,
         } => verify::run_integration(allow_missing_tools),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
+        Command::InboxCutoverGuard => {
+            diagnostic::run_check(&inbox_cutover_guard::InboxCutoverGuard)
+        }
         Command::SetLocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
         Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
         Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
@@ -809,6 +817,22 @@ mod tests {
     fn parse_command_schema_rls_rejects_trailing_args() {
         assert!(parse_command(&s(&["schema-rls", "--bogus"])).is_err());
         assert!(parse_command(&s(&["schema-rls", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_inbox_cutover_guard() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["inbox-cutover-guard"]))?,
+            Command::InboxCutoverGuard
+        );
+        Ok(())
+    }
+
+    /// inbox-cutover-guard fail-closed：尾参即 `Err`。
+    #[test]
+    fn parse_command_inbox_cutover_guard_rejects_trailing_args() {
+        assert!(parse_command(&s(&["inbox-cutover-guard", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["inbox-cutover-guard", "extra"])).is_err());
     }
 
     #[test]

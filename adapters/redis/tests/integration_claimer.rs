@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use consistency::{ConsumerGroup, IdemKey, InboxStore, LeaseOutcome, LeaseToken, SeenState};
+use consistency::{
+    ConsumerGroup, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState,
+};
 use deadpool_redis::{Config, Runtime};
 use diport::{
     CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, LockAcquireOutcome, LockRenewOutcome,
@@ -56,9 +58,80 @@ fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
     Ok(RedisRuntimeDeps::setup(pool))
 }
 
-fn make_store(url: &str, ttl: Duration, group: &str) -> Result<RedisInboxStore, FixtureError> {
-    let group = ConsumerGroup::parse(group)?;
-    Ok(make_deps(url)?.infra().inbox(group, ttl)?)
+#[allow(clippy::expect_used)]
+// reason: 测试 fixture 使用固定合法 receipt metadata，构造失败即测试配置错误。
+fn receipt_ctx_for(tenant: &str, group: &str) -> Result<InboxReceiptContext, FixtureError> {
+    Ok(InboxReceiptContext::new(
+        vocab::TenantId::parse(tenant)?,
+        ConsumerGroup::parse(group)?,
+        "identity",
+        "identity.session-created",
+        "identity.session-created",
+        "v1",
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        None,
+        None,
+    )
+    .expect("valid inbox receipt context"))
+}
+
+struct ScopedRedisInboxStore {
+    store: RedisInboxStore,
+    ctx: InboxReceiptContext,
+}
+
+impl ScopedRedisInboxStore {
+    async fn try_claim(
+        &self,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<SeenState, consistency::EngineError> {
+        self.store.try_claim(&self.ctx, key, lease).await
+    }
+
+    async fn extend(
+        &self,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, consistency::EngineError> {
+        self.store.extend(&self.ctx, key, lease).await
+    }
+
+    async fn commit(
+        &self,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, consistency::EngineError> {
+        self.store.commit(&self.ctx, key, lease).await
+    }
+
+    async fn release(
+        &self,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<(), consistency::EngineError> {
+        self.store.release(&self.ctx, key, lease).await
+    }
+}
+
+fn make_store(
+    url: &str,
+    ttl: Duration,
+    group: &str,
+) -> Result<ScopedRedisInboxStore, FixtureError> {
+    make_store_for(url, ttl, "f47ac10b-58cc-4372-a567-0e02b2c3d479", group)
+}
+
+fn make_store_for(
+    url: &str,
+    ttl: Duration,
+    tenant: &str,
+    group: &str,
+) -> Result<ScopedRedisInboxStore, FixtureError> {
+    Ok(ScopedRedisInboxStore {
+        store: make_deps(url)?.infra().inbox(ttl)?,
+        ctx: receipt_ctx_for(tenant, group)?,
+    })
 }
 
 // ─── 既有基础行为（更新至新签名：try_claim/commit/release 均携带 lease token）────────────────
@@ -127,6 +200,12 @@ async fn integration_distinct_groups_do_not_dedup_same_key() -> Result<(), Fixtu
     let url = redis.url();
     let store_a = make_store(url, Duration::from_secs(60), "group-a")?;
     let store_b = make_store(url, Duration::from_secs(60), "group-b")?;
+    let store_tenant_b = make_store_for(
+        url,
+        Duration::from_secs(60),
+        "00000000-0000-4000-8000-000000000abc",
+        "group-a",
+    )?;
     let key = unique_key("integration_cross_group");
 
     let lease_a = mint_token();
@@ -139,6 +218,14 @@ async fn integration_distinct_groups_do_not_dedup_same_key() -> Result<(), Fixtu
         b,
         SeenState::Fresh,
         "group-b 对同一 key 独立首见须 Fresh（组隔离，非跨组去重）"
+    );
+
+    let lease_tenant_b = mint_token();
+    let tenant_b = store_tenant_b.try_claim(&key, &lease_tenant_b).await?;
+    assert_eq!(
+        tenant_b,
+        SeenState::Fresh,
+        "tenant-b 对同一 group/key 独立首见须 Fresh（租户隔离）"
     );
     Ok(())
 }

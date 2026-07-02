@@ -199,7 +199,11 @@ label 闭值集纪律：
   `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
   `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
-  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch`。
+  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch` /
+  `inbox_receipt_invalid_consumer_group` / `inbox_receipt_empty_domain` / `inbox_receipt_empty_topic` /
+  `inbox_receipt_empty_contract_id` / `inbox_receipt_invalid_contract_version` /
+  `inbox_receipt_invalid_schema_hash` / `inbox_receipt_invalid_trace` /
+  `inbox_receipt_invalid_correlation_id` / `inbox_receipt_invalid_context`。
 - `consumer_dlx_write_total.outcome` 闭合于 `eventexec::consumer_worker` 的 DLX wrapper（`ok`/`error`），禁止把
   store 错误、message_id、tenant、payload 派生值写入 label。
 - `domain` 来自 `eventexec::ConsumerMeta`（注册期绑定的 domain/contract/topic 三元组），非请求/租户派生，基数有界。
@@ -258,7 +262,7 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 `_runtime` 只用于框架级、无 domain 上下文的 shared-infra 原语。当前允许：
 
 - outbox 消费幂等 claimer（两阶段 lease/done）：`_runtime:{eventID}:lease|done`
-- 通用幂等 claimer（`consistency::InboxStore`，`adapters/redis`）：`_runtime:idem:<glen>:<group>:<idemKey>`——claimed value=lease token（带 TTL）/ done value=哨兵（无 TTL，永久去重）；`SET NX PX` claim + Lua CAS extend/commit/release。固定字面 `idem` 第二段与上下两条（第二段为 UUID 形 `{eventID}`/`<tenant>`）**结构互斥**。`ConsumerGroup`/`IdemKey` 均 opaque（允许冒号），故 **group 段以字节长度 `<glen>` 前缀单射封边**——杜绝 `(group,key)` 裸冒号拼接碰撞（#279 review F3；旧 `<group>:<idemKey>` 直接拼接不安全）
+- 通用幂等 claimer（`consistency::InboxStore`，`adapters/redis`）：`_runtime:inbox_receipts:<tlen>:<tenant>:<glen>:<group>:<idemKey>`——claimed value=lease token（带 TTL）/ done value=哨兵（无 TTL，永久去重）；`SET NX PX` claim + Lua CAS extend/commit/release。固定字面 `inbox_receipts` 第二段与上下两条（第二段为 UUID 形 `{eventID}`/`<tenant>`）**结构互斥**。`tenant` 来自 `InboxReceiptContext`，`ConsumerGroup`/`IdemKey` 均 opaque（允许冒号），故 **tenant/group 段均以字节长度前缀单射封边**——杜绝裸冒号拼接碰撞（#279 review F3；旧 `<group>:<idemKey>` 直接拼接不安全）
 - 通用分布式锁（`diport::LockStore`，`adapters/redis`）：`_runtime:distlock:<klen>:<key>:held` / `_runtime:distlock:<klen>:<key>:seq`——`held` 保存当前 fencing token（TTL），`seq` 保存 per-key 单调 token 计数；Lua 原子 acquire/renew/release。`key` opaque（允许冒号），故以字节长度 `<klen>` 前缀单射封边。
 - 通用状态 CAS（`diport::CasStore`，`adapters/redis`）：`_runtime:cas:<klen>:<key>`——单 Redis hash 保存 `value` / `token`；Lua 原子 compare-and-swap，返回 Applied / Conflict / Fenced。`key` opaque（允许冒号），故以字节长度 `<klen>` 前缀单射封边。
 - HTTP 幂等 store：`_runtime:<tenant>:{key}:resp|lease|fp`

@@ -8,8 +8,204 @@
 //! ref: MassTransit/MassTransit src/Persistence/MassTransit.EntityFrameworkCoreIntegration/EntityFrameworkCoreIntegration/InboxState.cs@62ab339afa3bac2e9b3fe1769d0d35d7e44778e9
 
 use crate::error::EngineError;
-use crate::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
+use crate::idempotency::{ConsumerGroup, IdemKey, LeaseOutcome, LeaseToken, SeenState};
 use crate::outbox::BacklogSample;
+
+/// Maximum persisted `trace` metadata length for inbox receipts.
+pub const INBOX_RECEIPT_TRACE_MAX_LEN: usize = 512;
+
+/// Maximum persisted `correlation_id` metadata length for inbox receipts.
+pub const INBOX_RECEIPT_CORRELATION_MAX_LEN: usize = 256;
+
+/// Tenant-scoped receipt context for consumer-side idempotency.
+///
+/// This context is the only metadata fanout accepted by [`InboxStore`]. It is built after the
+/// consumer has verified the envelope header and broker tenant authority, then carried unchanged
+/// through claim, renewal, commit, and release. Fields are private and there is no `Default` or
+/// empty constructor, so callers cannot express an unscoped receipt operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxReceiptContext {
+    tenant_id: vocab::TenantId,
+    consumer_group: ConsumerGroup,
+    domain: String,
+    topic: String,
+    contract_id: String,
+    contract_version: String,
+    schema_hash: String,
+    trace: Option<String>,
+    correlation_id: Option<String>,
+}
+
+impl InboxReceiptContext {
+    /// Build a validated receipt context.
+    #[allow(clippy::too_many_arguments)]
+    // reason: the receipt row schema is intentionally explicit; bundling these fields before the
+    // validation funnel would create a second unvalidated shape.
+    pub fn new(
+        tenant_id: vocab::TenantId,
+        consumer_group: ConsumerGroup,
+        domain: impl Into<String>,
+        topic: impl Into<String>,
+        contract_id: impl Into<String>,
+        contract_version: impl Into<String>,
+        schema_hash: impl Into<String>,
+        trace: Option<String>,
+        correlation_id: Option<String>,
+    ) -> Result<Self, InboxReceiptContextError> {
+        let domain = non_empty(domain.into()).ok_or(InboxReceiptContextError::EmptyDomain)?;
+        let topic = non_empty(topic.into()).ok_or(InboxReceiptContextError::EmptyTopic)?;
+        let contract_id =
+            non_empty(contract_id.into()).ok_or(InboxReceiptContextError::EmptyContractId)?;
+        let contract_version = contract_version.into();
+        if !is_contract_version(&contract_version) {
+            return Err(InboxReceiptContextError::InvalidContractVersion);
+        }
+        let schema_hash = schema_hash.into();
+        if !is_schema_hash(&schema_hash) {
+            return Err(InboxReceiptContextError::InvalidSchemaHash);
+        }
+        validate_optional_metadata(&trace, INBOX_RECEIPT_TRACE_MAX_LEN)
+            .map_err(|_| InboxReceiptContextError::InvalidTrace)?;
+        validate_optional_metadata(&correlation_id, INBOX_RECEIPT_CORRELATION_MAX_LEN)
+            .map_err(|_| InboxReceiptContextError::InvalidCorrelationId)?;
+        Ok(Self {
+            tenant_id,
+            consumer_group,
+            domain,
+            topic,
+            contract_id,
+            contract_version,
+            schema_hash,
+            trace,
+            correlation_id,
+        })
+    }
+
+    /// Tenant scope for RLS and the receipt primary key.
+    pub fn tenant_id(&self) -> vocab::TenantId {
+        self.tenant_id
+    }
+
+    /// Consumer group portion of the receipt primary key.
+    pub fn consumer_group(&self) -> &ConsumerGroup {
+        &self.consumer_group
+    }
+
+    /// Publishing domain associated with this receipt.
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// Topic associated with this receipt.
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Contract id associated with this receipt.
+    pub fn contract_id(&self) -> &str {
+        &self.contract_id
+    }
+
+    /// Contract version associated with this receipt.
+    pub fn contract_version(&self) -> &str {
+        &self.contract_version
+    }
+
+    /// Schema hash associated with this receipt.
+    pub fn schema_hash(&self) -> &str {
+        &self.schema_hash
+    }
+
+    /// Optional W3C trace header persisted for diagnostics.
+    pub fn trace(&self) -> Option<&str> {
+        self.trace.as_deref()
+    }
+
+    /// Optional correlation id persisted for diagnostics.
+    pub fn correlation_id(&self) -> Option<&str> {
+        self.correlation_id.as_deref()
+    }
+}
+
+/// Receipt context validation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum InboxReceiptContextError {
+    /// Domain is empty.
+    #[error("inbox receipt domain is empty")]
+    EmptyDomain,
+    /// Topic is empty.
+    #[error("inbox receipt topic is empty")]
+    EmptyTopic,
+    /// Contract id is empty.
+    #[error("inbox receipt contract id is empty")]
+    EmptyContractId,
+    /// Contract version is not `v{{N}}`.
+    #[error("inbox receipt contract version is invalid")]
+    InvalidContractVersion,
+    /// Schema hash is not `sha256:<64 lowercase hex>`.
+    #[error("inbox receipt schema hash is invalid")]
+    InvalidSchemaHash,
+    /// Trace metadata is empty or too long.
+    #[error("inbox receipt trace is invalid")]
+    InvalidTrace,
+    /// Correlation metadata is empty or too long.
+    #[error("inbox receipt correlation id is invalid")]
+    InvalidCorrelationId,
+}
+
+/// Typed tenant/group scope for inbox backlog sampling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxBacklogScope {
+    tenant_id: vocab::TenantId,
+    consumer_group: ConsumerGroup,
+}
+
+impl InboxBacklogScope {
+    /// Build a typed backlog sampling scope.
+    pub fn new(tenant_id: vocab::TenantId, consumer_group: ConsumerGroup) -> Self {
+        Self {
+            tenant_id,
+            consumer_group,
+        }
+    }
+
+    /// Tenant scope for RLS and backlog filtering.
+    pub fn tenant_id(&self) -> vocab::TenantId {
+        self.tenant_id
+    }
+
+    /// Consumer group to sample.
+    pub fn consumer_group(&self) -> &ConsumerGroup {
+        &self.consumer_group
+    }
+}
+
+fn non_empty(raw: String) -> Option<String> {
+    if raw.is_empty() { None } else { Some(raw) }
+}
+
+fn validate_optional_metadata(raw: &Option<String>, max_len: usize) -> Result<(), ()> {
+    match raw.as_deref() {
+        Some(value) if value.is_empty() || value.len() > max_len => Err(()),
+        _ => Ok(()),
+    }
+}
+
+fn is_contract_version(raw: &str) -> bool {
+    raw.strip_prefix('v')
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn is_schema_hash(raw: &str) -> bool {
+    let Some(hex) = raw.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 /// Persisted inbox row status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,25 +394,45 @@ pub trait InboxStore {
     ///
     /// **`Duplicate` 路径**：传入的 `lease` **不会**写入后端——claim-or-reclaim 是单一原子操作，token 必须
     /// 在调用前铸出；若返回 `Duplicate`，调用方可丢弃该 token。
-    async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError>;
+    async fn try_claim(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<SeenState, EngineError>;
 
     /// 续租：刷新 `lease` 标记的 claimed 行到期点。`Held` 仍持有 / `Lost` 已被重捞（hard-fence 信号）。
     ///
     /// 对 absent / 他人持有 / 已 done 的行返回 `Lost`（无匹配 CAS）。
-    async fn extend(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError>;
+    async fn extend(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError>;
 
     /// claimed→done（CAS）：仅当 `lease` 仍匹配时标记永久去重。`Held` 提交成功 / `Lost` 租约已失（勿 Ack）。
     ///
     /// 对 absent / 已被重捞的行返回 `Lost`（hard-fence：消费方降级 Requeue、不移除 broker 投递）。
-    async fn commit(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError>;
+    async fn commit(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError>;
 
     /// claimed→absent（CAS）：仅当 `lease` 仍匹配时释放 claim，使后续重放可重新得到 `Fresh`。
     ///
     /// 令牌不符（已被重捞）为幂等 no-op（`Ok(())`，不误删他人 claim）；对 absent key 同样 no-op。
-    async fn release(&self, key: &IdemKey, lease: &LeaseToken) -> Result<(), EngineError>;
+    async fn release(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<(), EngineError>;
 }
 
-/// Inbox backlog sampler scoped to the consumer group bound by the store handle.
+/// Inbox backlog sampler scoped by an explicit tenant/group scope.
 ///
 /// Implementations count only stale `claimed` rows that can block replay visibility for this group.
 /// Active claims and terminal `done` rows are excluded. When clear, implementations return
@@ -225,8 +441,9 @@ pub trait InboxStore {
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费；与 InboxStore/OutboxBacklog 同范式。
 pub trait InboxBacklog {
-    /// Sample stale claimed inbox rows for the handle's bound consumer group.
-    async fn sample_backlog(&self) -> Result<BacklogSample, EngineError>;
+    /// Sample stale claimed inbox rows for the provided tenant/group scope.
+    async fn sample_backlog(&self, scope: &InboxBacklogScope)
+    -> Result<BacklogSample, EngineError>;
 }
 
 #[cfg(test)]

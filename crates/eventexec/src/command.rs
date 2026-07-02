@@ -201,8 +201,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use consistency::HandleResult;
-    use consistency::InboxStore;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
+    use consistency::{InboxReceiptContext, InboxStore};
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
@@ -436,6 +436,7 @@ mod tests {
     impl InboxStore for FakeStore {
         async fn try_claim(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<SeenState, consistency::error::EngineError> {
@@ -446,6 +447,7 @@ mod tests {
         }
         async fn extend(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, consistency::error::EngineError> {
@@ -454,6 +456,7 @@ mod tests {
         }
         async fn commit(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, consistency::error::EngineError> {
@@ -462,6 +465,7 @@ mod tests {
         }
         async fn release(
             &self,
+            _ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<(), consistency::error::EngineError> {

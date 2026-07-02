@@ -1117,6 +1117,7 @@ fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
         | "xtask/src/defergate.rs"
         | "xtask/src/doc_contracts.rs"
         | "xtask/src/event_transport_guard.rs"
+        | "xtask/src/inbox_cutover_guard.rs"
         | "xtask/src/layers.rs"
         | "xtask/src/layerdeps.rs"
         | "xtask/src/migrations.rs"

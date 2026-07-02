@@ -3,7 +3,7 @@
 //! `Disposition`/`HandleResult`/`PermanentError`/`Entry`/`Topic` 是 **纯态机类型**（sync，穷尽闭值集）；
 //! `OutboxRelay`/`OutboxSource` 是 L2 OutboxFact 引擎策略 trait（native AFIT：把已持久化 entry 中继到
 //! broker / 扫描待发）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
-//! inbox_dedup / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
+//! inbox_receipts / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
 //! adapters，consistency 只冻类型 + 策略接缝。
 //! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
 //!
@@ -467,7 +467,7 @@ pub trait OutboxSource {
 /// 由 sweeper 背景 worker（`eventexec::sweeper_loop`）周期驱动：删除一张 durable 表中**已终结**且
 /// 超过保留期的行，返回删除条数，防表无界增长。「已终结」由各 adapter impl 自行定义谓词——
 /// - `outbox`：`status='published'`（已成功投递；dlx 行保留供运维巡检，不删）；
-/// - `inbox_dedup`：`status='done'`（永久去重记录）；
+/// - `inbox_receipts`：`status='done'`（永久去重记录）；
 /// - `dead_letter`：全部行（死信均终结，按 `last_attempt_at` 老化清理）。
 ///
 /// 删除 SQL（含表名 + 终结谓词 + 时间列）在 adapter，本 crate 只冻接缝；时间谓词在 adapter 端用

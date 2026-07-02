@@ -95,11 +95,11 @@ outbox 是 tenant-scoped 表：`tenant_id uuid NOT NULL` 与 metadata `tenantId`
 开放 outbox 全表 UPDATE/DELETE，只能调用迁移安装的固定 `SECURITY DEFINER` 函数；函数 owner 为 NOLOGIN
 BYPASSRLS 维护角色，函数签名是运行期唯一全域 outbox DML 通道。
 
-inbox_receipts 是 `inbox_dedup` 后继的 tenant-scoped mutable receipt 表：主键为
+inbox_receipts 是 tenant-scoped mutable receipt 表：主键为
 `(tenant_id, event_id, consumer_group)`，并持久化 contract/schema header、trace/correlation 与
-lease/commit 状态；它同样受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。#1626
-只落地目标 schema、RLS、grant 与 catalog guard；运行期 `InboxStore` context fanout、sweeper/backlog 切流和
-`inbox_dedup` 退役由 #1650 推进。两阶段之间不得引入 dual write 或长期兼容 shim。
+lease/commit 状态；它同样受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。#1650
+已将运行期 `InboxStore` context fanout、sweeper 与 durable consumer 切到该表；pre-GA 不保留
+dual write、兼容 shim 或回填路径。
 
 saga_journal / projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围；它们依赖
 seq 全局顺序、owner checkpoint / consumer group 隔离与上层 envelope tenant authority，不承载 outbox
@@ -164,8 +164,8 @@ backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过�
 为以下同批 issue 提供稳定底座：
 
 - **#1581 / #1626 / #1650**：outbox tenant 注入已落地（`tenant_id` + RLS + 固定 SECURITY DEFINER
-  维护函数）；#1626 落地 `inbox_receipts` 目标 schema/RLS，runtime 切流与 `inbox_dedup` 退役由 #1650
-  单列跟踪。
+  维护函数）；#1626 落地 `inbox_receipts` 目标 schema/RLS，#1650 完成 runtime 切流与旧全局 receipt
+  storage 退役。
 - **#1582**：tenant repo conformance 已纳入真实 postgres repos（config seed + role / audit / dead_letter 等），完整 CAS / rollback / co-tx 扩展仍按后续 conformance 范围推进。
 - **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
 

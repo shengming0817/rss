@@ -12,13 +12,16 @@ use std::time::Duration;
 
 use futures::StreamExt;
 
-use consistency::HandleResult;
-use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
+use consistency::idempotency::{ConsumerGroup, IdemKey, LeaseOutcome, LeaseToken, SeenState};
+use consistency::{HandleResult, InboxReceiptContext, InboxReceiptContextError};
 use diport::dead_letter_store::{
     DeadLetterRecord, DeadLetterStore as _, DeadLetterStoreError, DeadLetterSummary,
     DynDeadLetterStore,
 };
-use diport::{Acker as _, EnvelopeHeaderError, Message, MessageStream, WritableDeadLetterSource};
+use diport::{
+    Acker as _, EnvelopeHeader, EnvelopeHeaderError, Message, MessageStream,
+    WritableDeadLetterSource,
+};
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
 
@@ -150,7 +153,7 @@ impl ConsumerMeta {
         )
     }
 
-    fn verify_envelope_header(&self, msg: &Message) -> Result<(), EnvelopeHeaderError> {
+    fn verify_envelope_header(&self, msg: &Message) -> Result<EnvelopeHeader, EnvelopeHeaderError> {
         let header = msg.try_header()?;
         if self
             .expected_schema_version
@@ -166,8 +169,35 @@ impl ConsumerMeta {
         {
             return Err(EnvelopeHeaderError::SchemaHashMismatch);
         }
-        Ok(())
+        Ok(header)
     }
+
+    fn receipt_context(
+        &self,
+        tenant_id: vocab::TenantId,
+        header: &EnvelopeHeader,
+    ) -> Result<InboxReceiptContext, ReceiptContextBuildError> {
+        let consumer_group = ConsumerGroup::parse(self.consumer_group())
+            .map_err(|_| ReceiptContextBuildError::ConsumerGroup)?;
+        InboxReceiptContext::new(
+            tenant_id,
+            consumer_group,
+            self.domain(),
+            self.topic(),
+            self.contract_id(),
+            header.schema_version().as_str(),
+            header.schema_hash().as_str(),
+            header.trace().map(str::to_string),
+            header.correlation().map(str::to_string),
+        )
+        .map_err(ReceiptContextBuildError::Receipt)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiptContextBuildError {
+    ConsumerGroup,
+    Receipt(InboxReceiptContextError),
 }
 
 // ── run_consumer（消费驱动入口）─────────────────────────────────────────────
@@ -288,16 +318,35 @@ async fn consume_one<S, H>(
         }
     };
 
-    if let Err(error) = meta.verify_envelope_header(&msg) {
-        reject_invalid_envelope_header(meta, &msg, acker, &error).await;
-        return;
-    }
+    let header = match meta.verify_envelope_header(&msg) {
+        Ok(header) => header,
+        Err(error) => {
+            reject_invalid_envelope_header(meta, &msg, acker, &error).await;
+            return;
+        }
+    };
+
+    let tenant = match meta.verify_tenant_authority(&msg) {
+        Ok(tenant) => tenant,
+        Err(error) => {
+            reject_invalid_tenant_authority(meta, &msg, acker, error).await;
+            return;
+        }
+    };
+
+    let receipt_context = match meta.receipt_context(tenant, &header) {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            reject_invalid_receipt_context(meta, &msg, acker, error).await;
+            return;
+        }
+    };
 
     // 本次 claim 的租约令牌（消费方铸，uuid v4 内置于 mint）：try_claim 在 claimed 行 stamp，extend/commit/release 凭它 CAS。
     let lease = LeaseToken::mint();
 
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs::dispatch_one 范式）。
-    match idempotency.try_claim(&key, &lease).await {
+    match idempotency.try_claim(&receipt_context, &key, &lease).await {
         // 后端故障：结构化 warn，不 commit；disposition 按 EngineErrorKind 分流（见 try_claim_err_action）。
         Err(e) => {
             log_try_claim_failed(&msg, &e);
@@ -327,6 +376,7 @@ async fn consume_one<S, H>(
                 meta,
                 handler,
                 msg,
+                &receipt_context,
                 &key,
                 &lease,
                 acker,
@@ -369,6 +419,7 @@ async fn handle_fresh<S, H>(
     meta: &ConsumerMeta,
     handler: &H,
     msg: Message,
+    ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
@@ -389,10 +440,10 @@ async fn handle_fresh<S, H>(
         biased;
         // handler 先完成：终态已在 loop 内结算；renewal future 被 drop（停止续租）。
         // `.instrument(consume_span)`：handler 全程在消费 span 内，其内部 span 挂回 producer trace（#1224）。
-        () = run_handler_loop(idempotency, dlx, meta, handler, msg, key, lease, acker)
+        () = run_handler_loop(idempotency, dlx, meta, handler, msg, ctx, key, lease, acker)
             .instrument(consume_span) => {}
         // 续租侧判租约丢失：handler future 被 drop（cancel 执行上下文），hard-fence 结算 Requeue、不 commit。
-        () = renewal_loop(idempotency, meta, key, lease, lease_cfg, &message_id) => {
+        () = renewal_loop(idempotency, meta, ctx, key, lease, lease_cfg, &message_id) => {
             log_lease_lost(meta, &message_id);
             emit_lease_lost(meta.domain());
             settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
@@ -431,6 +482,7 @@ fn build_consume_span(
 async fn renewal_loop<S>(
     idempotency: &Arc<S>,
     meta: &ConsumerMeta,
+    ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     lease_cfg: LeaseConfig,
@@ -440,7 +492,7 @@ async fn renewal_loop<S>(
 {
     loop {
         tokio::time::sleep(lease_cfg.renew_interval()).await;
-        match idempotency.extend(key, lease).await {
+        match idempotency.extend(ctx, key, lease).await {
             // 续租成功：继续持有租约。
             Ok(LeaseOutcome::Held) => {}
             // 租约丢失：返回 → select hard-fence 分支取消 handler。
@@ -467,6 +519,7 @@ async fn run_handler_loop<S, H>(
     meta: &ConsumerMeta,
     handler: &H,
     msg: Message,
+    ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
@@ -483,11 +536,12 @@ async fn run_handler_loop<S, H>(
             consistency::outbox::Disposition::Ack => {
                 // 仅 commit（幂等 done 标记，CAS 守租约）成功才 broker Ack；commit 失败 / 租约丢失 → Requeue
                 // （不移除投递，待 broker 重投后幂等去重收口），守「ack only after durable commit」（review #265 F1/C1）。
-                let action = if commit_key(idempotency, meta, key, lease, msg.id.as_str()).await {
-                    diport::AckAction::Ack
-                } else {
-                    diport::AckAction::Requeue
-                };
+                let action =
+                    if commit_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
+                        diport::AckAction::Ack
+                    } else {
+                        diport::AckAction::Requeue
+                    };
                 settle(acker, action, meta.domain(), msg.id.as_str()).await;
                 return;
             }
@@ -495,6 +549,7 @@ async fn run_handler_loop<S, H>(
                 dead_letter(
                     dlx,
                     idempotency,
+                    ctx,
                     key,
                     lease,
                     meta,
@@ -524,6 +579,7 @@ async fn run_handler_loop<S, H>(
     dead_letter(
         dlx,
         idempotency,
+        ctx,
         key,
         lease,
         meta,
@@ -547,6 +603,7 @@ async fn run_handler_loop<S, H>(
 async fn commit_key<S>(
     idempotency: &Arc<S>,
     meta: &ConsumerMeta,
+    ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     message_id: &str,
@@ -554,7 +611,7 @@ async fn commit_key<S>(
 where
     S: consistency::InboxStore + Send + Sync + 'static,
 {
-    match idempotency.commit(key, lease).await {
+    match idempotency.commit(ctx, key, lease).await {
         Ok(LeaseOutcome::Held) => true,
         // leaseLost hard-fence：commit 期租约已被重捞 → 不 Ack、降级 Requeue（stale holder 不双写 done）。
         Ok(LeaseOutcome::Lost) => {
@@ -576,6 +633,7 @@ where
 async fn release_key<S>(
     idempotency: &Arc<S>,
     meta: &ConsumerMeta,
+    ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     message_id: &str,
@@ -583,7 +641,7 @@ async fn release_key<S>(
 where
     S: consistency::InboxStore + Send + Sync + 'static,
 {
-    match idempotency.release(key, lease).await {
+    match idempotency.release(ctx, key, lease).await {
         Ok(()) => true,
         Err(e) => {
             emit_release_failed(meta.domain());
@@ -618,6 +676,7 @@ where
 async fn dead_letter<S>(
     dlx: &DynDeadLetterStore<'static>,
     idempotency: &Arc<S>,
+    ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     meta: &ConsumerMeta,
@@ -628,30 +687,13 @@ async fn dead_letter<S>(
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
 {
-    let tenant = match meta.verify_tenant_authority(msg) {
-        Ok(tenant) => tenant,
-        Err(err) => {
-            record_dead_letter_skip(meta, err.skip_reason());
-            log_dead_letter_tenant_authority_failed(meta, msg.id.as_str(), err);
-            release_key(idempotency, meta, key, lease, msg.id.as_str()).await;
-            settle(
-                acker,
-                diport::AckAction::Reject,
-                meta.domain(),
-                msg.id.as_str(),
-            )
-            .await;
-            return;
-        }
-    };
-
     // T007.5：结构化 error，五字段全部出现（domain/contract_id/topic/num_attempts/error_summary）；
     // message_id 额外提供关联维度（DLX 表无该列，log 是唯一关联路径）。
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs 范式）。
     log_dead_lettered(meta, num_attempts, error_summary, msg.id.as_str());
 
     let record = DeadLetterRecord::new(
-        tenant,
+        ctx.tenant_id(),
         msg.id.as_str(),
         meta.domain(),
         meta.contract_id(),
@@ -670,7 +712,7 @@ async fn dead_letter<S>(
         Ok(()) => {
             // dlx 写成功 → commit（标记 done）。仅 commit 成功才 broker Ack；commit 失败 → Requeue
             // （DLX 已落但 done 标记未持久，重投经幂等 Duplicate 收口，守「ack only after durable commit」F1/C1）。
-            let action = if commit_key(idempotency, meta, key, lease, msg.id.as_str()).await {
+            let action = if commit_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
                 diport::AckAction::Ack
             } else {
                 diport::AckAction::Requeue
@@ -681,7 +723,7 @@ async fn dead_letter<S>(
             // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 try_claim 回 Fresh、
             // 重新尝试 DLX，避免静默丢失（消息进 done + 死信未落 DB = 不可恢复审计盲点）。
             log_dlx_write_failed(meta, &e);
-            let action = if release_key(idempotency, meta, key, lease, msg.id.as_str()).await {
+            let action = if release_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
                 // broker Requeue：DLX 未落，原投递重投等待再次尝试。
                 diport::AckAction::Requeue
             } else {
@@ -766,6 +808,41 @@ async fn reject_invalid_envelope_header(
     .await;
 }
 
+async fn reject_invalid_tenant_authority(
+    meta: &ConsumerMeta,
+    msg: &Message,
+    acker: Option<&diport::DynAcker<'static>>,
+    error: TenantAuthorityError,
+) {
+    record_dead_letter_skip(meta, error.skip_reason());
+    log_dead_letter_tenant_authority_failed(meta, msg.id.as_str(), error);
+    settle(
+        acker,
+        diport::AckAction::Reject,
+        meta.domain(),
+        msg.id.as_str(),
+    )
+    .await;
+}
+
+async fn reject_invalid_receipt_context(
+    meta: &ConsumerMeta,
+    msg: &Message,
+    acker: Option<&diport::DynAcker<'static>>,
+    error: ReceiptContextBuildError,
+) {
+    let reason = receipt_context_error_reason(error);
+    record_dead_letter_skip(meta, reason);
+    log_invalid_receipt_context(meta, msg, reason);
+    settle(
+        acker,
+        diport::AckAction::Reject,
+        meta.domain(),
+        msg.id.as_str(),
+    )
+    .await;
+}
+
 fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str {
     match error {
         EnvelopeHeaderError::MissingTenantId => "envelope_missing_tenant_id",
@@ -776,6 +853,34 @@ fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str {
         EnvelopeHeaderError::InvalidSchemaHash => "envelope_invalid_schema_hash",
         EnvelopeHeaderError::SchemaVersionMismatch => "envelope_schema_version_mismatch",
         EnvelopeHeaderError::SchemaHashMismatch => "envelope_schema_hash_mismatch",
+    }
+}
+
+fn receipt_context_error_reason(error: ReceiptContextBuildError) -> &'static str {
+    match error {
+        ReceiptContextBuildError::ConsumerGroup => "inbox_receipt_invalid_consumer_group",
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyDomain) => {
+            "inbox_receipt_empty_domain"
+        }
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyTopic) => {
+            "inbox_receipt_empty_topic"
+        }
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyContractId) => {
+            "inbox_receipt_empty_contract_id"
+        }
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidContractVersion) => {
+            "inbox_receipt_invalid_contract_version"
+        }
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidSchemaHash) => {
+            "inbox_receipt_invalid_schema_hash"
+        }
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidTrace) => {
+            "inbox_receipt_invalid_trace"
+        }
+        ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidCorrelationId) => {
+            "inbox_receipt_invalid_correlation_id"
+        }
+        ReceiptContextBuildError::Receipt(_) => "inbox_receipt_invalid_context",
     }
 }
 
@@ -840,6 +945,17 @@ fn log_invalid_envelope_header(
         reason,
         error = %error,
         "consumer: standard envelope header invalid, rejected before handler"
+    );
+}
+
+fn log_invalid_receipt_context(meta: &ConsumerMeta, msg: &Message, reason: &'static str) {
+    tracing::warn!(
+        message_id = msg.id.as_str(),
+        domain = meta.domain(),
+        contract_id = meta.contract_id(),
+        topic = meta.topic(),
+        reason,
+        "consumer: inbox receipt context invalid, rejected before claim"
     );
 }
 
@@ -1001,8 +1117,8 @@ mod tests {
     use std::time::Duration;
 
     use consistency::HandleResult;
-    use consistency::InboxStore;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
+    use consistency::{InboxReceiptContext, InboxReceiptContextError, InboxStore};
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
@@ -1014,7 +1130,8 @@ mod tests {
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
-        ConsumerMeta, LeaseConfig, record_dead_letter_skip, run_consumer, run_consumer_ackable,
+        ConsumerMeta, LeaseConfig, ReceiptContextBuildError, receipt_context_error_reason,
+        record_dead_letter_skip, run_consumer, run_consumer_ackable,
     };
     use crate::MAX_REDELIVERY;
     use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding};
@@ -1187,6 +1304,7 @@ mod tests {
         extend_lost_after: Option<u32>,
         /// extend 前 N 次返 `Err`（瞬态后端故障，模拟续租抖动）；之后按 `extend_lost_after` 判定。
         extend_errs_before: u32,
+        captured_contexts: Mutex<Vec<InboxReceiptContext>>,
     }
 
     impl FakeInboxStore {
@@ -1202,6 +1320,7 @@ mod tests {
                 release_fails: false,
                 extend_lost_after: None,
                 extend_errs_before: 0,
+                captured_contexts: Mutex::new(Vec::new()),
             })
         }
 
@@ -1247,6 +1366,7 @@ mod tests {
                 release_fails: false,
                 extend_lost_after: None,
                 extend_errs_before: 0,
+                captured_contexts: Mutex::new(Vec::new()),
             })
         }
 
@@ -1263,6 +1383,7 @@ mod tests {
                 release_fails: false,
                 extend_lost_after: Some(n),
                 extend_errs_before: 0,
+                captured_contexts: Mutex::new(Vec::new()),
             })
         }
 
@@ -1279,6 +1400,7 @@ mod tests {
                 release_fails: false,
                 extend_lost_after: None,
                 extend_errs_before: n,
+                captured_contexts: Mutex::new(Vec::new()),
             })
         }
 
@@ -1309,20 +1431,37 @@ mod tests {
                 release_fails: true,
                 extend_lost_after: None,
                 extend_errs_before: 0,
+                captured_contexts: Mutex::new(Vec::new()),
             })
         }
 
         fn extend_count(&self) -> u32 {
             self.extend_count.load(Ordering::Acquire)
         }
+
+        fn capture_context(&self, ctx: &InboxReceiptContext) {
+            self.captured_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(ctx.clone());
+        }
+
+        fn captured_contexts(&self) -> Vec<InboxReceiptContext> {
+            self.captured_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
     }
 
     impl InboxStore for FakeInboxStore {
         async fn try_claim(
             &self,
+            ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<SeenState, consistency::error::EngineError> {
+            self.capture_context(ctx);
             self.claim_count.fetch_add(1, Ordering::Release);
             match self.check_result {
                 CheckResult::Fresh => Ok(SeenState::Fresh),
@@ -1333,9 +1472,11 @@ mod tests {
 
         async fn extend(
             &self,
+            ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            self.capture_context(ctx);
             let n = self.extend_count.fetch_add(1, Ordering::Release) + 1;
             // 前 extend_errs_before 次返 Err（瞬态续租故障：不误判丢租，续命重试）。
             if n <= self.extend_errs_before {
@@ -1352,9 +1493,11 @@ mod tests {
 
         async fn commit(
             &self,
+            ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            self.capture_context(ctx);
             self.commit_count.fetch_add(1, Ordering::Release);
             if self.commit_fails {
                 return Err(consistency::error::EngineError::new(
@@ -1370,9 +1513,11 @@ mod tests {
 
         async fn release(
             &self,
+            ctx: &InboxReceiptContext,
             _key: &IdemKey,
             _lease: &LeaseToken,
         ) -> Result<(), consistency::error::EngineError> {
+            self.capture_context(ctx);
             self.release_count.fetch_add(1, Ordering::Release);
             if self.release_fails {
                 return Err(consistency::error::EngineError::new(
@@ -1655,6 +1800,21 @@ mod tests {
         );
         assert_eq!(idem.commit_count(), 1, "commit 应调 1 次");
         assert_eq!(dlx_store.write_count(), 0, "无 dlx 写");
+        let contexts = idem.captured_contexts();
+        assert_eq!(
+            contexts.len(),
+            2,
+            "Ack happy path 应向 try_claim 和 commit 传入 receipt context"
+        );
+        for ctx in contexts {
+            assert_eq!(ctx.tenant_id(), tenant());
+            assert_eq!(ctx.consumer_group().as_str(), "identity.session.consumer");
+            assert_eq!(ctx.domain(), "identity");
+            assert_eq!(ctx.topic(), "session.created");
+            assert_eq!(ctx.contract_id(), "contract-session");
+            assert_eq!(ctx.contract_version(), "v1");
+            assert_eq!(ctx.schema_hash(), SCHEMA_HASH);
+        }
     }
 
     // ── TC2：handler 恒 Requeue ──────────────────────────────────────────────
@@ -1917,6 +2077,47 @@ mod tests {
     }
 
     #[test]
+    fn receipt_context_error_reasons_are_closed_labels() {
+        let cases = [
+            (
+                ReceiptContextBuildError::ConsumerGroup,
+                "inbox_receipt_invalid_consumer_group",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyDomain),
+                "inbox_receipt_empty_domain",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyTopic),
+                "inbox_receipt_empty_topic",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyContractId),
+                "inbox_receipt_empty_contract_id",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidContractVersion),
+                "inbox_receipt_invalid_contract_version",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidSchemaHash),
+                "inbox_receipt_invalid_schema_hash",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidTrace),
+                "inbox_receipt_invalid_trace",
+            ),
+            (
+                ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidCorrelationId),
+                "inbox_receipt_invalid_correlation_id",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(receipt_context_error_reason(error), expected);
+        }
+    }
+
+    #[test]
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     // reason: table-driven test fixtures use known-valid authority inputs; failures should panic loudly.
     fn tc3c_invalid_authority_tokens_skip_app_dlx_and_settle_reject() {
@@ -2001,8 +2202,13 @@ mod tests {
 
             assert_eq!(
                 handler_count.load(Ordering::Relaxed),
-                1,
-                "{message_id}: handler 应调 1 次"
+                0,
+                "{message_id}: invalid authority 应在 handler 前拒绝"
+            );
+            assert_eq!(
+                idem.claim_count(),
+                0,
+                "{message_id}: invalid authority 不得 try_claim"
             );
             assert_eq!(
                 dlx_store.write_count(),
@@ -2016,8 +2222,8 @@ mod tests {
             );
             assert_eq!(
                 idem.release_count(),
-                1,
-                "{message_id}: invalid authority 应 release"
+                0,
+                "{message_id}: invalid authority 发生在 claim 前，无需 release"
             );
             assert_eq!(acker.settled_actions(), vec![AckAction::Reject]);
             let rendered = handle.render();

@@ -30,8 +30,7 @@ const RUNTIME_REQUIRED: &[&str] = &[
     "bridge_subscriptions_with_specs(bindings, generated::event::SUBSCRIPTIONS)",
     "subscribers: Vec<BridgedSubscription>",
     "fn wire_consumer_resource_bundle(",
-    "let group = subscription.group().clone();",
-    "let inbox = pg.infra().inbox(group);",
+    "let inbox = pg.infra().inbox();",
     "let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());",
     "let dlx = DynDeadLetterStore::new_box(",
     ".dead_letter(security.dlx_payload_protector.clone()),",
@@ -495,7 +494,7 @@ mod tests {
             r#"
             fn wire_consumer_resource_bundle(redis: RedisRuntimeDeps) {
                 let group = subscription.group().clone();
-                let inbox = redis.infra().inbox(group);
+                let inbox = redis.infra().inbox(ttl);
             }
             "#,
         );
@@ -514,7 +513,7 @@ mod tests {
             fn wire_consumer_resource_bundle(redis: RedisRuntimeDeps) {
                 let group = subscription.group().clone();
                 let infra = redis.infra();
-                let inbox = infra.inbox(group);
+                let inbox = infra.inbox(ttl);
             }
             "#,
         );
@@ -537,7 +536,7 @@ mod tests {
             fn accepts(subscribers: Vec<BridgedSubscription>) {}
             fn wire_consumer_resource_bundle() {
                 let group = subscription.group().clone();
-                let inbox = pg.infra().inbox(group);
+                let inbox = pg.infra().inbox();
                 let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
                 let dlx = DynDeadLetterStore::new_box(
                     pg.infra()
@@ -595,7 +594,7 @@ mod tests {
             fn wire(pg: PgRuntimeDeps) {
                 spawn_it();
                 let infra = pg.infra();
-                infra.inbox(group);
+                infra.inbox();
             }
             "#,
         );
@@ -613,7 +612,7 @@ mod tests {
             Path::new("assemblies/runtime/src/other.rs"),
             r#"
             // spawn_consumer();
-            const NOTE: &str = "pg.infra().inbox(group)";
+            const NOTE: &str = "pg.infra().inbox()";
             "#,
         );
         assert!(findings.is_empty());
@@ -640,7 +639,7 @@ mod tests {
             Path::new("crates/contractreg/src/lib.rs"),
             Path::new("crates/syshealth/src/lib.rs"),
         ] {
-            let findings = scan_domain_content(path, "let _ = pg.infra().inbox(group);");
+            let findings = scan_domain_content(path, "let _ = pg.infra().inbox();");
             assert_eq!(findings.len(), 1, "{path:?}");
             assert_eq!(findings[0].rule, Rule::DomainConsumerBundleBypass);
         }

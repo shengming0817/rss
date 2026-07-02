@@ -86,7 +86,7 @@ mod integration_tests;
 #[cfg(all(test, feature = "integration"))]
 mod test_pg;
 
-pub use inbox::{INBOX_DEDUP_RETENTION_SECONDS, PgInboxStore, PgInboxSweeper};
+pub use inbox::{INBOX_RECEIPT_RETENTION_SECONDS, PgInboxStore, PgInboxSweeper};
 pub use pool::{LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PoolReadiness};
 // `pg_readiness_sampling_loop` 降 `pub(crate)`（经 `PgRuntimeDeps::spawn_readiness_sampler` 收口，#1423），
 // 不再 re-export；类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / bundle 返回类型）。

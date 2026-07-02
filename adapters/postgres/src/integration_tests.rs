@@ -11,7 +11,8 @@
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use consistency::{
-    ConsumerGroup, IdemKey, InboxBacklog, InboxStore, LeaseToken, OutboxPayload, SeenState,
+    ConsumerGroup, IdemKey, InboxBacklog, InboxBacklogScope, InboxReceiptContext, InboxStore,
+    LeaseToken, OutboxPayload, SeenState,
 };
 use diport::ManagedResource;
 use futures::future::BoxFuture;
@@ -29,6 +30,27 @@ use crate::test_pg::{
 #[allow(clippy::unwrap_used)]
 fn test_tenant() -> vocab::TenantId {
     vocab::TenantId::parse(COTX_TENANT_A).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn test_inbox_ctx(group: &str) -> InboxReceiptContext {
+    InboxReceiptContext::new(
+        test_tenant(),
+        ConsumerGroup::parse(group).unwrap(),
+        "identity",
+        "identity.session-created",
+        "identity.session-created",
+        "v1",
+        TEST_SCHEMA_HASH,
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn test_inbox_scope(group: &str) -> InboxBacklogScope {
+    InboxBacklogScope::new(test_tenant(), ConsumerGroup::parse(group).unwrap())
 }
 
 #[allow(clippy::unwrap_used)]
@@ -574,7 +596,7 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
     Ok(())
 }
 
-/// inbox_dedup claim-or-skip + 多组隔离集成验证（#1118）。
+/// inbox_receipts claim-or-skip + 多组/租户隔离集成验证（#1118/#1650）。
 ///
 /// 唯一 event_id 法——每次运行生成新 UUID key，跨轮次无需清理旧数据，且可重复安全运行。
 /// 验证三个语义断言：
@@ -585,20 +607,22 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path —— uuid v4 生成不失败、测试专用固定组名非空、IdemKey 非空 parse 不失败；
 // 函数级 item-level carve-out（error-handling.md §Carve-out）。
-async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
+async fn inbox_receipts_claims_then_duplicates_and_scopes_by_group() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
     // 唯一 event_id：每次生成新 UUID，跨轮次不冲突，无需 DELETE 清理。
     let evt = format!("test-evt-{}", uuid::Uuid::new_v4());
 
-    let s_a = store.inbox(ConsumerGroup::parse("test-grp-a").unwrap());
+    let inbox = store.inbox();
+    let ctx_a = test_inbox_ctx("test-grp-a");
+    let ctx_b = test_inbox_ctx("test-grp-b");
     let key = IdemKey::parse(&evt).unwrap();
 
     // 断言 1：同组同 key 首见 → Fresh。
     let lease_a = LeaseToken::mint();
     assert_eq!(
-        s_a.try_claim(&key, &lease_a).await?,
+        inbox.try_claim(&ctx_a, &key, &lease_a).await?,
         SeenState::Fresh,
         "首次 claim 应返回 Fresh"
     );
@@ -606,16 +630,15 @@ async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
     // 断言 2：同组同 key 再见 → Duplicate（claimed_at 仍在 TTL 内，DO UPDATE WHERE false）。
     let lease_a2 = LeaseToken::mint();
     assert_eq!(
-        s_a.try_claim(&key, &lease_a2).await?,
+        inbox.try_claim(&ctx_a, &key, &lease_a2).await?,
         SeenState::Duplicate,
         "同 key 再见应返回 Duplicate"
     );
 
     // 断言 3：不同消费者组同 key → Fresh（PK = (event_id, consumer_group)，组间去重独立）。
-    let s_b = store.inbox(ConsumerGroup::parse("test-grp-b").unwrap());
     let lease_b = LeaseToken::mint();
     assert_eq!(
-        s_b.try_claim(&key, &lease_b).await?,
+        inbox.try_claim(&ctx_b, &key, &lease_b).await?,
         SeenState::Fresh,
         "不同组同 key 应返回 Fresh（group drift 隔离）"
     );
@@ -626,9 +649,8 @@ async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
 
 /// inbox_receipts target schema catalog lock (#1626).
 ///
-/// This is Phase 1 evidence for replacing `inbox_dedup`: the final tenant-scoped
-/// mutable receipt table must exist with its target columns, tenant-first primary
-/// key, indexes, and DB-level CHECK constraints before runtime is cut over.
+/// The tenant-scoped mutable receipt table must exist with its target columns,
+/// tenant-first primary key, indexes, and DB-level CHECK constraints.
 #[tokio::test(flavor = "multi_thread")]
 async fn inbox_receipts_schema_catalog_after_migrations() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -1534,11 +1556,11 @@ async fn conf_try_claim(
     lease_alias: String,
 ) -> Result<eventconf::InboxSeen, String> {
     let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
-    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let ctx = test_inbox_ctx(&group);
     let lease = conf_lease_for(leases, lease_alias);
     store
-        .inbox(group)
-        .try_claim(&key, &lease)
+        .inbox()
+        .try_claim(&ctx, &key, &lease)
         .await
         .map(|seen| match seen {
             SeenState::Fresh => eventconf::InboxSeen::Fresh,
@@ -1556,11 +1578,11 @@ async fn conf_extend(
     lease_alias: String,
 ) -> Result<eventconf::LeaseOutcome, String> {
     let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
-    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let ctx = test_inbox_ctx(&group);
     let lease = conf_lease_for(leases, lease_alias);
     store
-        .inbox(group)
-        .extend(&key, &lease)
+        .inbox()
+        .extend(&ctx, &key, &lease)
         .await
         .map(|outcome| match outcome {
             consistency::LeaseOutcome::Held => eventconf::LeaseOutcome::Held,
@@ -1578,11 +1600,11 @@ async fn conf_commit(
     lease_alias: String,
 ) -> Result<eventconf::LeaseOutcome, String> {
     let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
-    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let ctx = test_inbox_ctx(&group);
     let lease = conf_lease_for(leases, lease_alias);
     store
-        .inbox(group)
-        .commit(&key, &lease)
+        .inbox()
+        .commit(&ctx, &key, &lease)
         .await
         .map(|outcome| match outcome {
             consistency::LeaseOutcome::Held => eventconf::LeaseOutcome::Held,
@@ -1600,22 +1622,24 @@ async fn conf_release(
     lease_alias: String,
 ) -> Result<(), String> {
     let key = IdemKey::parse(&key).map_err(|e| format!("{e:?}"))?;
-    let group = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let ctx = test_inbox_ctx(&group);
     let lease = conf_lease_for(leases, lease_alias);
     store
-        .inbox(group)
-        .release(&key, &lease)
+        .inbox()
+        .release(&ctx, &key, &lease)
         .await
         .map_err(|e| format!("{e:?}"))
 }
 
 async fn conf_backdate_claim(store: &PgStore, key: String, group: String) -> Result<(), String> {
+    let ctx = test_inbox_ctx(&group);
     sqlx::query(
-        "UPDATE inbox_dedup \
+        "UPDATE inbox_receipts \
          SET claimed_at = now() - make_interval(secs => $1) \
-         WHERE event_id = $2 AND consumer_group = $3",
+         WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
     )
     .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 10)
+    .bind(ctx.tenant_id().to_string())
     .bind(&key)
     .bind(&group)
     .execute(&store.pool)
@@ -1868,9 +1892,11 @@ async fn conf_inbox_status(
     event_id: &str,
     group: &str,
 ) -> Result<Option<String>, String> {
+    let ctx = test_inbox_ctx(group);
     sqlx::query_as::<_, (String,)>(
-        "SELECT status FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+        "SELECT status FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
     )
+    .bind(ctx.tenant_id().to_string())
     .bind(event_id)
     .bind(group)
     .fetch_optional(&store.pool)
@@ -1921,15 +1947,15 @@ async fn conf_duplicate_delivery(
     group: String,
 ) -> Result<eventconf::ConsumerObservation, String> {
     let key = IdemKey::parse(&event_id).map_err(|e| format!("{e:?}"))?;
-    let group_id = ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?;
+    let ctx = test_inbox_ctx(&group);
     let lease = LeaseToken::mint();
-    let inbox = store.inbox(group_id);
+    let inbox = store.inbox();
     inbox
-        .try_claim(&key, &lease)
+        .try_claim(&ctx, &key, &lease)
         .await
         .map_err(|e| format!("{e:?}"))?;
     inbox
-        .commit(&key, &lease)
+        .commit(&ctx, &key, &lease)
         .await
         .map_err(|e| format!("{e:?}"))?;
 
@@ -1937,7 +1963,7 @@ async fn conf_duplicate_delivery(
     let (stream, acker) = conf_delivery_stream(&event_id);
     run_consumer_ackable(
         stream,
-        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        Arc::new(store.inbox()),
         DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
         conf_consumer_meta(&group),
         conf_ack_handler(Arc::clone(&calls)),
@@ -1970,7 +1996,7 @@ async fn conf_poison_delivery(
     let (stream, acker) = conf_delivery_stream(&event_id);
     run_consumer_ackable(
         stream,
-        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        Arc::new(store.inbox()),
         DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
         conf_consumer_meta(&group),
         conf_requeue_handler(Arc::clone(&calls)),
@@ -2005,7 +2031,7 @@ async fn conf_dlx_failure(
     let captured = Arc::new(Mutex::new(None));
     run_consumer_ackable(
         stream,
-        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        Arc::new(store.inbox()),
         DynDeadLetterStore::new_box(FailingDlx::new(Arc::clone(&captured))),
         conf_consumer_meta(&group),
         conf_requeue_handler(Arc::clone(&calls)),
@@ -2043,7 +2069,7 @@ async fn conf_malformed_delivery(
     let (stream, acker) = conf_delivery_stream("");
     run_consumer_ackable(
         stream,
-        Arc::new(store.inbox(ConsumerGroup::parse(&group).map_err(|e| format!("{e:?}"))?)),
+        Arc::new(store.inbox()),
         DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
         conf_consumer_meta(&group),
         conf_ack_handler(Arc::clone(&calls)),
@@ -2714,7 +2740,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
     Ok(())
 }
 
-// ── #1210 inbox_dedup 保留期清理：done 超期被删；claimed + 保留期内 done 存活（anti-vacuity）。──
+// ── #1210 inbox_receipts 保留期清理：done 超期被删；claimed + 保留期内 done 存活（anti-vacuity）。──
 // sweep 是**全表** DELETE（无 group 过滤），故全局只断言「≥1」+ per-row event_id-scoped 精确断言（跨轮/并发稳健，同 t8）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -2724,15 +2750,21 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let grp = unique_domain("inbox-sweep-grp");
-    let inbox = store.inbox(ConsumerGroup::parse(&grp).unwrap());
+    let inbox = store.inbox();
+    let ctx = test_inbox_ctx(&grp);
 
-    // 回拨 claimed_at 过期的 helper（2h 前）。
+    // 回拨 receipt 时间锚（2h 前）：done 用 committed_at，claimed 用 claimed_at。
     async fn backdate(store: &PgStore, event_id: &str, grp: &str) -> TestResult {
+        let ctx = test_inbox_ctx(grp);
         sqlx::query(
-            "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
-             WHERE event_id = $2 AND consumer_group = $3",
+            "UPDATE inbox_receipts \
+             SET claimed_at = now() - make_interval(secs => $1), \
+                 committed_at = CASE WHEN status = 'done' THEN now() - make_interval(secs => $1) ELSE committed_at END, \
+                 updated_at = now() - make_interval(secs => $1) \
+             WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
         )
         .bind(7200i64)
+        .bind(ctx.tenant_id().to_string())
         .bind(event_id)
         .bind(grp)
         .execute(&store.pool)
@@ -2745,11 +2777,11 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
     let k_old = IdemKey::parse(&key_old).unwrap();
     let lease_old = LeaseToken::mint();
     assert_eq!(
-        inbox.try_claim(&k_old, &lease_old).await.unwrap(),
+        inbox.try_claim(&ctx, &k_old, &lease_old).await.unwrap(),
         SeenState::Fresh
     );
     assert_eq!(
-        inbox.commit(&k_old, &lease_old).await.unwrap(),
+        inbox.commit(&ctx, &k_old, &lease_old).await.unwrap(),
         LeaseOutcome::Held
     );
     backdate(&store, &key_old, &grp).await?;
@@ -2759,11 +2791,14 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
     let k_recent = IdemKey::parse(&key_recent).unwrap();
     let lease_recent = LeaseToken::mint();
     assert_eq!(
-        inbox.try_claim(&k_recent, &lease_recent).await.unwrap(),
+        inbox
+            .try_claim(&ctx, &k_recent, &lease_recent)
+            .await
+            .unwrap(),
         SeenState::Fresh
     );
     assert_eq!(
-        inbox.commit(&k_recent, &lease_recent).await.unwrap(),
+        inbox.commit(&ctx, &k_recent, &lease_recent).await.unwrap(),
         LeaseOutcome::Held
     );
 
@@ -2772,7 +2807,10 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
     let k_claimed = IdemKey::parse(&key_claimed).unwrap();
     let lease_claimed = LeaseToken::mint();
     assert_eq!(
-        inbox.try_claim(&k_claimed, &lease_claimed).await.unwrap(),
+        inbox
+            .try_claim(&ctx, &k_claimed, &lease_claimed)
+            .await
+            .unwrap(),
         SeenState::Fresh
     );
     backdate(&store, &key_claimed, &grp).await?;
@@ -2786,8 +2824,9 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
         let grp = grp.clone();
         async move {
             let row: (i64,) = sqlx::query_as(
-                "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+                "SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
             )
+            .bind(test_tenant().to_string())
             .bind(event_id)
             .bind(grp)
             .fetch_one(&pool)
@@ -2816,15 +2855,20 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     store.run_migrations().await?;
     let group_a = unique_domain("inbox-backlog-a");
     let group_b = unique_domain("inbox-backlog-b");
-    let inbox_a = store.inbox(ConsumerGroup::parse(&group_a).unwrap());
-    let inbox_b = store.inbox(ConsumerGroup::parse(&group_b).unwrap());
+    let inbox = store.inbox();
+    let ctx_a = test_inbox_ctx(&group_a);
+    let ctx_b = test_inbox_ctx(&group_b);
+    let scope_a = test_inbox_scope(&group_a);
+    let scope_b = test_inbox_scope(&group_b);
 
     async fn backdate_claim(store: &PgStore, event_id: &str, group: &str) -> TestResult {
+        let ctx = test_inbox_ctx(group);
         sqlx::query(
-            "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
-             WHERE event_id = $2 AND consumer_group = $3",
+            "UPDATE inbox_receipts SET claimed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+             WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
         )
         .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 30)
+        .bind(ctx.tenant_id().to_string())
         .bind(event_id)
         .bind(group)
         .execute(&store.pool)
@@ -2833,7 +2877,7 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     }
 
     assert_eq!(
-        inbox_a.sample_backlog().await?,
+        inbox.sample_backlog(&scope_a).await?,
         consistency::BacklogSample::empty(),
         "无行时 inbox backlog 应为规范零值"
     );
@@ -2842,7 +2886,10 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     let active = IdemKey::parse(&active_key).unwrap();
     let active_lease = LeaseToken::mint();
     assert_eq!(
-        inbox_a.try_claim(&active, &active_lease).await.unwrap(),
+        inbox
+            .try_claim(&ctx_a, &active, &active_lease)
+            .await
+            .unwrap(),
         SeenState::Fresh
     );
 
@@ -2850,11 +2897,11 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     let done = IdemKey::parse(&done_key).unwrap();
     let done_lease = LeaseToken::mint();
     assert_eq!(
-        inbox_a.try_claim(&done, &done_lease).await.unwrap(),
+        inbox.try_claim(&ctx_a, &done, &done_lease).await.unwrap(),
         SeenState::Fresh
     );
     assert_eq!(
-        inbox_a.commit(&done, &done_lease).await.unwrap(),
+        inbox.commit(&ctx_a, &done, &done_lease).await.unwrap(),
         consistency::LeaseOutcome::Held
     );
     backdate_claim(&store, &done_key, &group_a).await?;
@@ -2863,8 +2910,8 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     let other_group = IdemKey::parse(&other_group_key).unwrap();
     let other_group_lease = LeaseToken::mint();
     assert_eq!(
-        inbox_b
-            .try_claim(&other_group, &other_group_lease)
+        inbox
+            .try_claim(&ctx_b, &other_group, &other_group_lease)
             .await
             .unwrap(),
         SeenState::Fresh
@@ -2872,12 +2919,12 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     backdate_claim(&store, &other_group_key, &group_b).await?;
 
     assert_eq!(
-        inbox_a.sample_backlog().await?,
+        inbox.sample_backlog(&scope_a).await?,
         consistency::BacklogSample::empty(),
         "active、done 和其它 group 的 stale claim 都不应计入当前 group"
     );
     assert_eq!(
-        inbox_b.sample_backlog().await?.depth(),
+        inbox.sample_backlog(&scope_b).await?.depth(),
         1,
         "其它 group 自身应能看到自己的 stale claim"
     );
@@ -2886,12 +2933,12 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     let stale = IdemKey::parse(&stale_key).unwrap();
     let stale_lease = LeaseToken::mint();
     assert_eq!(
-        inbox_a.try_claim(&stale, &stale_lease).await.unwrap(),
+        inbox.try_claim(&ctx_a, &stale, &stale_lease).await.unwrap(),
         SeenState::Fresh
     );
     backdate_claim(&store, &stale_key, &group_a).await?;
 
-    let sample = inbox_a.sample_backlog().await?;
+    let sample = inbox.sample_backlog(&scope_a).await?;
     assert_eq!(sample.depth(), 1, "仅当前 group 的 stale claimed 行计数");
     assert!(
         sample.oldest_age_seconds() >= crate::inbox::INBOX_LEASE_TTL_SECONDS as u64,
@@ -2916,23 +2963,25 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
     let mut old_done_keys = Vec::new();
 
     for group in &groups {
-        let inbox = store.inbox(ConsumerGroup::parse(group).unwrap());
+        let inbox = store.inbox();
+        let ctx = test_inbox_ctx(group);
         let event_id = unique_event_id("inbox-sweep-global-done");
         let key = IdemKey::parse(&event_id).unwrap();
         let lease = LeaseToken::mint();
         assert_eq!(
-            inbox.try_claim(&key, &lease).await.unwrap(),
+            inbox.try_claim(&ctx, &key, &lease).await.unwrap(),
             SeenState::Fresh
         );
         assert_eq!(
-            inbox.commit(&key, &lease).await.unwrap(),
+            inbox.commit(&ctx, &key, &lease).await.unwrap(),
             consistency::LeaseOutcome::Held
         );
         sqlx::query(
-            "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
-             WHERE event_id = $2 AND consumer_group = $3",
+            "UPDATE inbox_receipts SET committed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+             WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
         )
         .bind(7200i64)
+        .bind(ctx.tenant_id().to_string())
         .bind(&event_id)
         .bind(group)
         .execute(&store.pool)
@@ -2941,20 +2990,22 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
     }
 
     let claimed_event = unique_event_id("inbox-sweep-global-claimed");
-    let inbox = store.inbox(ConsumerGroup::parse(&groups[0]).unwrap());
+    let inbox = store.inbox();
+    let claimed_ctx = test_inbox_ctx(&groups[0]);
     let claimed_key = IdemKey::parse(&claimed_event).unwrap();
     assert_eq!(
         inbox
-            .try_claim(&claimed_key, &LeaseToken::mint())
+            .try_claim(&claimed_ctx, &claimed_key, &LeaseToken::mint())
             .await
             .unwrap(),
         SeenState::Fresh
     );
     sqlx::query(
-        "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
-         WHERE event_id = $2 AND consumer_group = $3",
+        "UPDATE inbox_receipts SET claimed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+         WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
     )
     .bind(7200i64)
+    .bind(claimed_ctx.tenant_id().to_string())
     .bind(&claimed_event)
     .bind(&groups[0])
     .execute(&store.pool)
@@ -2964,9 +3015,11 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
     assert!(deleted >= 2, "至少删除两个 group 的 old done 行");
 
     for (event_id, group) in old_done_keys {
+        let ctx = test_inbox_ctx(&group);
         let row: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+            "SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
         )
+        .bind(ctx.tenant_id().to_string())
         .bind(event_id)
         .bind(group)
         .fetch_one(&store.pool)
@@ -2975,8 +3028,9 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
     }
 
     let claimed_row: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+        "SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
     )
+    .bind(claimed_ctx.tenant_id().to_string())
     .bind(&claimed_event)
     .bind(&groups[0])
     .fetch_one(&store.pool)
@@ -2998,23 +3052,25 @@ async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let group = unique_domain("inbox-sweep-invalid-retain");
-    let inbox = store.inbox(ConsumerGroup::parse(&group).unwrap());
+    let inbox = store.inbox();
+    let ctx = test_inbox_ctx(&group);
     let event_id = unique_event_id("inbox-sweep-invalid-retain-done");
     let key = IdemKey::parse(&event_id).unwrap();
     let lease = LeaseToken::mint();
     assert_eq!(
-        inbox.try_claim(&key, &lease).await.unwrap(),
+        inbox.try_claim(&ctx, &key, &lease).await.unwrap(),
         SeenState::Fresh
     );
     assert_eq!(
-        inbox.commit(&key, &lease).await.unwrap(),
+        inbox.commit(&ctx, &key, &lease).await.unwrap(),
         consistency::LeaseOutcome::Held
     );
     sqlx::query(
-        "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
-         WHERE event_id = $2 AND consumer_group = $3",
+        "UPDATE inbox_receipts SET committed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+         WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
     )
     .bind(7200i64)
+    .bind(ctx.tenant_id().to_string())
     .bind(&event_id)
     .bind(&group)
     .execute(&store.pool)
@@ -3033,14 +3089,77 @@ async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
     assert_eq!(err.kind(), consistency::EngineErrorKind::Invariant);
 
     let row: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+        "SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
     )
+    .bind(ctx.tenant_id().to_string())
     .bind(&event_id)
     .bind(&group)
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(row.0, 1, "fail-closed 后 old done 行必须保留");
 
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// `rss_app` 直调固定 SECURITY DEFINER 函数也必须被 DB 侧保留期下限挡住。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_inbox_sweeper_rss_app_direct_call_rejects_retain_below_floor() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let group = unique_domain("inbox-sweep-sql-retain-floor");
+    let inbox = store.inbox();
+    let ctx = test_inbox_ctx(&group);
+    let event_id = unique_event_id("inbox-sweep-sql-retain-floor-done");
+    let key = IdemKey::parse(&event_id).unwrap();
+    let lease = LeaseToken::mint();
+    assert_eq!(
+        inbox.try_claim(&ctx, &key, &lease).await.unwrap(),
+        SeenState::Fresh
+    );
+    assert_eq!(
+        inbox.commit(&ctx, &key, &lease).await.unwrap(),
+        consistency::LeaseOutcome::Held
+    );
+    sqlx::query(
+        "UPDATE inbox_receipts SET committed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+         WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
+    )
+    .bind(7200i64)
+    .bind(ctx.tenant_id().to_string())
+    .bind(&event_id)
+    .bind(&group)
+    .execute(&store.pool)
+    .await?;
+
+    let invalid_retain = crate::outbox::max_redelivery_window_secs();
+    let result = sqlx::query("SELECT rss_sweep_inbox_receipts($1)")
+        .bind(invalid_retain)
+        .execute(&app.pool)
+        .await;
+    let Err(err) = result else {
+        return Err("rss_app direct inbox sweep must reject retain at redelivery floor".into());
+    };
+    assert!(
+        err.to_string()
+            .contains("rss_sweep_inbox_receipts retain seconds"),
+        "unexpected rss_app direct sweep error: {err}"
+    );
+
+    let row: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+    )
+    .bind(ctx.tenant_id().to_string())
+    .bind(&event_id)
+    .bind(&group)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0, 1, "DB guard 拒绝后 old done row 必须保留");
+
+    app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }

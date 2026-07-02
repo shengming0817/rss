@@ -65,9 +65,9 @@ async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscri
 /// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
 /// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造，**不**直接 raw-new——把 in-mem 构造收束到
 /// 已校验的拓扑决策（review #274 F6/C6：本 AMQP journey 原直接 `InMemClaimer::new` 旁路了 resolve 决策绑定）。
-fn demo_claimer(group: ConsumerGroup) -> anyhow::Result<InMemClaimer> {
+fn demo_claimer() -> anyhow::Result<InMemClaimer> {
     match resolve(Topology::Demo, IdempotencyConfig::default())? {
-        ResolvedIdempotency::Demo => Ok(InMemClaimer::new(group)),
+        ResolvedIdempotency::Demo => Ok(InMemClaimer::new()),
         other => Err(anyhow!(
             "demo journey 须解析为 Demo 幂等决策，实得 {other:?}"
         )),
@@ -96,7 +96,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let group =
         ConsumerGroup::parse("audit.consumer-alo").map_err(|_| anyhow!("consumer group parse"))?;
     // 决策绑定（F6/C6）：经 resolve(Topology::Demo) 决策臂构造 in-mem claimer，不直接 raw-new。
-    let claimer = Arc::new(demo_claimer(group.clone())?);
+    let claimer = Arc::new(demo_claimer()?);
     let consumed = Arc::new(Mutex::new(Vec::<String>::new()));
     let consumed_for_handler = consumed.clone();
     let handler = move |message: Message| -> BoxFuture<'static, HandleResult> {
@@ -121,11 +121,19 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let drive = async {
         // 发布单条消息。
         publisher
-            .publish(PublishRequest::new(
-                topic.clone(),
-                MessageId::new(EVENT_ID),
-                b"alo-payload".to_vec(),
-            ))
+            .publish(
+                PublishRequest::new(
+                    topic.clone(),
+                    MessageId::new(EVENT_ID),
+                    b"alo-payload".to_vec(),
+                )
+                .with_metadata(common::signed_metadata(
+                    TOPIC.split('.').next().unwrap_or(TOPIC),
+                    TOPIC,
+                    TOPIC,
+                    EVENT_ID,
+                )?),
+            )
             .await?;
         // 等首条被 handler 消费（broker 投递 + run_consumer_ackable 驱动）。
         tokio::time::timeout(Duration::from_secs(10), async {

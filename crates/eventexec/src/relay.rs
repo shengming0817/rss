@@ -42,7 +42,7 @@ pub const OUTBOX_SAMPLER_PROBE: &str = "outbox_sampler";
 
 // worker 名常量（≥3 处使用抽 const）
 const RELAY_WORKER_NAME: &str = "outbox-relay";
-/// outbox 保留期 sweeper 的 readyz worker 名（per-target sweeper 默认名；组合根 #1208 可对 inbox_dedup /
+/// outbox 保留期 sweeper 的 readyz worker 名（per-target sweeper 默认名；组合根 #1208 可对 inbox_receipts /
 /// dead_letter 传各自名，#327 review F2）。`pub`：[`SweeperWorker::adopt`] 的 `name` 参数由组合根/测试传入。
 pub const SWEEPER_WORKER_NAME: &str = "outbox-sweeper";
 const SAMPLER_WORKER_NAME: &str = "outbox-sampler";
@@ -373,10 +373,10 @@ fn log_polled(domain: &str, polled: usize) {
 /// [`SweeperConfig`] funnel 已校验（`sweep_interval`≠0、`retain_seconds`≠0，SWEEPER-CONFIG-01）。
 /// 取消/错误处理与 `relay_loop` 同骨架。
 ///
-/// 泛型 `S: RetentionSweeper` ⇒ 可驱动任一 durable 表的保留清理（outbox / inbox_dedup / dead_letter）；
+/// 泛型 `S: RetentionSweeper` ⇒ 可驱动任一 durable 表的保留清理（outbox / inbox_receipts / dead_letter）；
 /// 各表的终结谓词 + 时间列由对应 adapter impl 决定，本 loop 只负责 tick 调度与健康/取消骨架。
 ///
-/// `target`（低基数 `&'static str`，如 `outbox` / `inbox_dedup` / `dead_letter`）= 本 loop 驱动的清理目标——
+/// `target`（低基数 `&'static str`，如 `outbox` / `inbox_receipts` / `dead_letter`）= 本 loop 驱动的清理目标——
 /// 泛型 store 自身无表身份，故由 spawn 端显式传入并写入每轮成功/失败日志，使多表 sweeper 的日志可归因（#327
 /// review F2）。worker 身份见 [`SweeperWorker::adopt`] 的 `name` 参数（per-target readyz 命名）。
 pub async fn sweeper_loop<S>(
@@ -664,7 +664,7 @@ adopt_worker!(
 
 /// 保留期 sweeper 后台 worker（结构与 [`RelayWorker`] 同构，但 **readyz name 运行期携带**）。
 ///
-/// 同一泛化 `sweeper_loop` 可服务多张 durable 表（outbox / inbox_dedup / dead_letter），故 worker 身份不再是
+/// 同一泛化 `sweeper_loop` 可服务多张 durable 表（outbox / inbox_receipts / dead_letter），故 worker 身份不再是
 /// 编译期常量——由 [`SweeperWorker::adopt`] 的 `name` 参数（per-target，如 [`SWEEPER_WORKER_NAME`]）决定，使
 /// readyz 聚合能区分各表 sweeper（#327 review F2）。adopt 式：先在具体类型处 `tokio::spawn(sweeper_loop::<S>(..))` 再 `adopt`。
 pub struct SweeperWorker {

@@ -39,8 +39,9 @@ pub use idempotency::{
     ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, LeaseOutcome, LeaseToken, SeenState,
 };
 pub use inbox::{
-    InboxBacklog, InboxClaim, InboxLeaseFreshness, InboxState, InboxStatus, InboxStatusError,
-    InboxStore,
+    INBOX_RECEIPT_CORRELATION_MAX_LEN, INBOX_RECEIPT_TRACE_MAX_LEN, InboxBacklog,
+    InboxBacklogScope, InboxClaim, InboxLeaseFreshness, InboxReceiptContext,
+    InboxReceiptContextError, InboxState, InboxStatus, InboxStatusError, InboxStore,
 };
 pub use outbox::{
     BacklogMetricSample, BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog,

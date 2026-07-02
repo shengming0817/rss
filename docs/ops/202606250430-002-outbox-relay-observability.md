@@ -43,7 +43,11 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
   `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
-  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch`。
+  `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch` /
+  `inbox_receipt_invalid_consumer_group` / `inbox_receipt_empty_domain` / `inbox_receipt_empty_topic` /
+  `inbox_receipt_empty_contract_id` / `inbox_receipt_invalid_contract_version` /
+  `inbox_receipt_invalid_schema_hash` / `inbox_receipt_invalid_trace` /
+  `inbox_receipt_invalid_correlation_id` / `inbox_receipt_invalid_context`。
 - `outbox_relay_envelope_validation_failure_total.reason`：闭合于 postgres relay 的 envelope validation reason，
   与 consumer envelope reason 同一字符串集合；该 metric 只描述本地 header gate，broker publish failure
   仍看 `outbox_publish_total` / `outbox_dlx_total`。
@@ -126,7 +130,7 @@ funnel，未校验 config 类型层不可表达）：
 | `sample_interval` | [1s, 60s] | 0 → 采样聚合查询热轮询；>60s → 5min SLO 窗口采样不足 |
 | `domains` | 1..=64 + canonical | 空 → relay 空转；过多/非法 → metrics label 基数失控 |
 | `sweep_interval` | ≥1s | 0 → DELETE 热轮询 |
-| `retain_seconds` | ≠0（per-table 下限见下） | 0 → 删除 just-published 行；inbox_dedup 低于重投窗口 → 迟到重投误判 Fresh 重复执行 |
+| `retain_seconds` | ≠0（per-table 下限见下） | 0 → 删除 just-published 行；inbox_receipts 低于重投窗口 → 迟到重投误判 Fresh 重复执行 |
 
 ## 保留期清理（三张 durable 表，#1210）
 
@@ -136,14 +140,14 @@ funnel，未校验 config 类型层不可表达）：
 | 表 | 终结谓词（删除目标） | 时间列 | 默认保留期 | 误配风险 |
 |----|---------------------|--------|-----------|----------|
 | `outbox` | `status='published'`（dlx 保留供巡检） | `created_at` | 组合根配置（无硬下限） | retain=0 → 删 just-published 行 |
-| `inbox_dedup` | `status='done'`（claimed 行不删） | `claimed_at` | **7 天**（`INBOX_DEDUP_RETENTION_SECONDS`） | **必须严格大于** outbox 最坏重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律）——低于/等于即迟到重投被误判 Fresh 重复执行；编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-DEDUP-RETENTION-FLOOR-01，单源谓词 `retention_meets_redelivery_floor`） |
+| `inbox_receipts` | `status='done'`（claimed 行不删） | `committed_at` | **7 天**（`INBOX_RECEIPT_RETENTION_SECONDS`） | **必须严格大于** outbox 最坏重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律）——低于/等于即迟到重投被误判 Fresh 重复执行；编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-RECEIPT-RETENTION-FLOOR-01，单源谓词 `retention_meets_redelivery_floor`） |
 | `dead_letter` | 全部行（死信均终结） | `last_attempt_at` | **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向） | 过短 → 合规审计物料过早灭失（清理前冷存储导出见 #1536） |
 
 - 删除时间谓词均用 DB `now()`（不注入 Clock，多实例无跨进程偏移）；sweeper 日志带 `target_table` 区分清理目标（per-target readyz 名见 `SweeperWorker::adopt`）。
 - #1429 已接 runtime `outbox` published-row sweeper（`RSS_OUTBOX_RETAIN_SECONDS`，默认 7 天）+ sampler +
-  per-domain relay；#1434 已接 runtime `inbox_dedup` sweeper（PG inbox consumer bundle 同源）；#1535 接入
+  per-domain relay；#1650 已接 runtime `inbox_receipts` sweeper（PG inbox consumer bundle 同源）；#1535 接入
   runtime `dead_letter` sweeper（`RSS_DEAD_LETTER_RETAIN_SECONDS`，默认 30 天）。
-- 无界 DELETE → post-GA 批量分页 / 分区见 #1539；inbox_dedup/dead_letter 多租户分租清理见 #1537；sweeper 删除条数 metrics 见 #1538。
+- 无界 DELETE → post-GA 批量分页 / 分区见 #1539；inbox_receipts/dead_letter 多租户分租清理见 #1537；sweeper 删除条数 metrics 见 #1538。
 
 ## Session expiry sweeper（#1233）
 
@@ -168,7 +172,7 @@ runtime durable event transport 现在把 outbox relay / sampler / sweeper 与 c
 - sweeper：`outbox_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
   `RSS_OUTBOX_RETAIN_SECONDS` 的 `published` outbox 行。
 - consumer bundle：`event_consumer`（或按 topic 后缀区分）readyz probe，按 subscriber binding 接入
-  PG `inbox_dedup`、DLX store、AckableSubscriber 与 ConsumerWorker；`inbox_sweeper` readyz probe 按同一
-  sweep interval 清理超 `INBOX_DEDUP_RETENTION_SECONDS` 的 done 去重行。
+  PG `inbox_receipts`、DLX store、AckableSubscriber 与 ConsumerWorker；`inbox_sweeper` readyz probe 按同一
+  sweep interval 清理超 `INBOX_RECEIPT_RETENTION_SECONDS` 的 done 去重行。
 - dead-letter sweeper：`dead_letter_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
   `RSS_DEAD_LETTER_RETAIN_SECONDS` 的 dead_letter 行。

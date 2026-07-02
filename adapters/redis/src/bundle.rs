@@ -7,7 +7,7 @@
 use core::time::Duration;
 use std::sync::Arc;
 
-use consistency::{ConsumerGroup, IdemKey, InboxStore, LeaseOutcome, LeaseToken, SeenState};
+use consistency::{IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState};
 use deadpool_redis::Pool;
 use diport::{DynCasStore, DynLockStore, DynManagedResource, ManagedResource, ShutdownError};
 
@@ -100,17 +100,12 @@ pub struct RedisInfraDeps {
 }
 
 impl RedisInfraDeps {
-    /// 幂等 claimer 句柄。`group` 是幂等去重 PK 第二维度；`ttl` 由 Redis 服务端 `PX` 管过期。
-    pub fn inbox(
-        &self,
-        group: ConsumerGroup,
-        ttl: Duration,
-    ) -> Result<RedisInboxStore, InvalidClaimTtl> {
+    /// 幂等 claimer 句柄。tenant/group scope 来自每次调用的 [`InboxReceiptContext`]；`ttl` 由 Redis 服务端 `PX` 管过期。
+    pub fn inbox(&self, ttl: Duration) -> Result<RedisInboxStore, InvalidClaimTtl> {
         RedisRuntimeDeps::validate_ttl(ttl)?;
         Ok(RedisInboxStore {
             store: Arc::clone(&self.store),
             ttl,
-            group,
         })
     }
 
@@ -136,7 +131,6 @@ impl RedisInfraDeps {
 pub struct RedisInboxStore {
     store: Arc<RedisStore>,
     ttl: Duration,
-    group: ConsumerGroup,
 }
 
 impl RedisInboxStore {
@@ -150,34 +144,38 @@ impl RedisInboxStore {
 impl InboxStore for RedisInboxStore {
     async fn try_claim(
         &self,
+        ctx: &InboxReceiptContext,
         key: &IdemKey,
         lease: &LeaseToken,
     ) -> Result<SeenState, consistency::EngineError> {
-        claimer::try_claim_impl(self.store.pool(), self.ttl, &self.group, key, lease).await
+        claimer::try_claim_impl(self.store.pool(), self.ttl, ctx, key, lease).await
     }
 
     async fn extend(
         &self,
+        ctx: &InboxReceiptContext,
         key: &IdemKey,
         lease: &LeaseToken,
     ) -> Result<LeaseOutcome, consistency::EngineError> {
-        claimer::extend_impl(self.store.pool(), self.ttl, &self.group, key, lease).await
+        claimer::extend_impl(self.store.pool(), self.ttl, ctx, key, lease).await
     }
 
     async fn commit(
         &self,
+        ctx: &InboxReceiptContext,
         key: &IdemKey,
         lease: &LeaseToken,
     ) -> Result<LeaseOutcome, consistency::EngineError> {
-        claimer::commit_impl(self.store.pool(), &self.group, key, lease).await
+        claimer::commit_impl(self.store.pool(), ctx, key, lease).await
     }
 
     async fn release(
         &self,
+        ctx: &InboxReceiptContext,
         key: &IdemKey,
         lease: &LeaseToken,
     ) -> Result<(), consistency::EngineError> {
-        claimer::release_impl(self.store.pool(), &self.group, key, lease).await
+        claimer::release_impl(self.store.pool(), ctx, key, lease).await
     }
 }
 
@@ -230,11 +228,6 @@ mod tests {
             .expect("lazy pool build")
     }
 
-    #[allow(clippy::expect_used)]
-    fn group() -> ConsumerGroup {
-        ConsumerGroup::parse("bundle-test").expect("non-empty group")
-    }
-
     fn deps() -> RedisRuntimeDeps {
         RedisRuntimeDeps::setup(lazy_pool())
     }
@@ -258,7 +251,7 @@ mod tests {
         let d = deps();
         let store = d
             .infra()
-            .inbox(group(), Duration::from_millis(50))
+            .inbox(Duration::from_millis(50))
             .expect("valid ttl");
         assert!(Arc::ptr_eq(&store.store, &d.store));
     }
@@ -275,7 +268,7 @@ mod tests {
     async fn lease_ttl_propagates() {
         let idem = deps()
             .infra()
-            .inbox(group(), Duration::from_millis(123))
+            .inbox(Duration::from_millis(123))
             .expect("valid ttl");
         assert_eq!(idem.lease_ttl(), Duration::from_millis(123));
     }

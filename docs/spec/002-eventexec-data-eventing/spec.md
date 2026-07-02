@@ -65,7 +65,7 @@
 
 ### User Story 3 - 消费幂等去重（idempotency / inbox，L0 + replaydeps）(Priority: P1)
 
-消费方在执行副作用前以稳定 key（EventId / DispatchId）做 claim-or-skip：首见 `Fresh` 则执行，已见 `Duplicate` 则幂等短路。runtime durable event consumer 通过 PG `inbox_dedup` resource bundle 接入，不再经 Redis claimer。
+消费方在执行副作用前以稳定 key（EventId / DispatchId）做 claim-or-skip：首见 `Fresh` 则执行，已见 `Duplicate` 则幂等短路。runtime durable event consumer 通过 PG `inbox_receipts` resource bundle 接入，不再经 Redis claimer。
 
 **Why this priority**: at-least-once 投递必然有重投；没有消费幂等，relay/saga/projection/command 的重投会产生重复副作用。是所有消费链的正确性前提。
 
@@ -237,7 +237,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **Projection Event**：投影输入载体（outbox entry / saga journal event 共同实现）——topic + lsn + payload。
 - **Reconcile Request / Outcome**：收敛单元——目标 entity（None=resync 全量）/ 收敛结果（settled / requeue_after）+ fencing epoch。
 - **Command Dispatch**：命令载体——DispatchId（幂等 key）+ 命令 topic + Request payload；与 outbox entry 同表。
-- **Topology Resolver 配置**：拓扑选型输入——transport（demo bus / amqp）、runtime consumer inbox（postgres `inbox_dedup`）、replay/其它 runtime 原语（in-mem / redis 等）、saga-projection（mem / postgres journal+checkpoint+tx + locker）。
+- **Topology Resolver 配置**：拓扑选型输入——transport（demo bus / amqp）、runtime consumer inbox（postgres `inbox_receipts`）、replay/其它 runtime 原语（in-mem / redis 等）、saga-projection（mem / postgres journal+checkpoint+tx + locker）。
 
 ## Success Criteria *(mandatory)*
 
@@ -258,9 +258,9 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 
 - G0/#997 已冻结全部 trait/type 签名；本 feature 默认不改公共接缝，只填 body。#1627 例外使用 pre-GA breaking window 收口 saga durable model：旧 `diport` saga journal 类型删除，不保留源码兼容。
 - **租户隔离立场**：当前 per-domain 队列/凭据隔离粒度为 domain，不分 tenant；outbox 持久化 `tenant_id`
-  并按 `(tenant_id, domain, partition_key)` 执行有序投递 gate，避免跨租户 liveness coupling。inbox_dedup
-  去重仍以 `(event_id, consumer_group)` 为键，跨租户正确性依赖 EventId 全局唯一（UUID）+ tenantAuthority
-  envelope 验签 + 上层 RLS；如需 per-tenant broker 队列或 inbox 索引隔离再单列 Epic 跟踪。
+  并按 `(tenant_id, domain, partition_key)` 执行有序投递 gate，避免跨租户 liveness coupling。inbox_receipts
+  以 `(tenant_id, event_id, consumer_group)` 为 receipt key，claim 前必须完成 envelope schema 与 tenantAuthority
+  验签，并由 `InboxReceiptContext` 固定 domain/topic/contract/schema 维度。
 - `consistency` 引擎策略 trait 为 native AFIT + 泛型静态分发（不引 dynosaur/async-trait）；`diport` DI port 为 dynosaur dyn（ADR-003）。二者分工不变。
 - demo 拓扑（in-mem，adapters/memory）已实现并保留为单进程/测试/样例路径；durable 拓扑按机制组合 postgres/amqp/redis，其中 runtime event consumer 使用 postgres inbox + amqp，不再经 Redis claimer。
 - G1 追踪弹（identity→in-mem→audit）已绿，作为 #1100 durable 替换的起点与回归基线。

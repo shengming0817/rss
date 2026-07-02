@@ -95,6 +95,8 @@ enum InternalCheck {
     ConsistencyFixtures,
     /// runtime event transport consumer 禁回 Redis claimer（EVENT-TRANSPORT-PG-INBOX-01）。
     EventTransportGuard,
+    /// inbox receipt runtime cutover 旧 token 回流守卫（INBOX-RECEIPTS-CUTOVER-01）。
+    InboxCutoverGuard,
     /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
     ArchRules,
     CodegenCheck,
@@ -139,6 +141,7 @@ impl InternalCheck {
             Self::DocContracts => "xtask/src/doc_contracts.rs",
             Self::ConsistencyFixtures => "xtask/src/consistency_fixtures.rs",
             Self::EventTransportGuard => "xtask/src/event_transport_guard.rs",
+            Self::InboxCutoverGuard => "xtask/src/inbox_cutover_guard.rs",
             Self::ArchRules => "xtask/src/archrules.rs",
             Self::CodegenCheck => "xtask/src/codegen.rs",
             Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
@@ -298,6 +301,15 @@ fn step_event_transport_guard() -> Step {
         label: "event-transport-guard",
         args: &[],
         kind: StepKind::Internal(InternalCheck::EventTransportGuard),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_inbox_cutover_guard() -> Step {
+    Step {
+        label: "inbox-cutover-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::InboxCutoverGuard),
         env: &[],
         needs_compile: false,
     }
@@ -804,6 +816,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_doc_contracts(),
         step_consistency_fixtures(),
         step_event_transport_guard(),
+        step_inbox_cutover_guard(),
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
@@ -841,6 +854,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_doc_contracts(),
         step_consistency_fixtures(),
         step_event_transport_guard(),
+        step_inbox_cutover_guard(),
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
@@ -1084,6 +1098,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::EventTransportGuard => {
             run_check(&crate::event_transport_guard::EventTransportGuard)
         }
+        InternalCheck::InboxCutoverGuard => {
+            run_check(&crate::inbox_cutover_guard::InboxCutoverGuard)
+        }
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
@@ -1189,6 +1206,7 @@ mod tests {
                 "doc-contracts",
                 "consistency-fixtures",
                 "event-transport-guard",
+                "inbox-cutover-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1233,6 +1251,7 @@ mod tests {
                 "doc-contracts",
                 "consistency-fixtures",
                 "event-transport-guard",
+                "inbox-cutover-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1253,9 +1272,9 @@ mod tests {
     }
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
-    /// doc-contracts / consistency-fixtures / event-transport-guard / archrules / codegen /
-    /// pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel / pg-tenant-tx-guard /
-    /// tenancy-closeout / migrations-serial / command-symmetry / defer-gate）在两种模式恒在。
+    /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
+    /// archrules / codegen / pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel /
+    /// pg-tenant-tx-guard / tenancy-closeout / migrations-serial / command-symmetry / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -1276,6 +1295,7 @@ mod tests {
                     "doc-contracts",
                     "consistency-fixtures",
                     "event-transport-guard",
+                    "inbox-cutover-guard",
                     "archrules",
                     "codegen-check",
                     "pdp-allow-guard",
@@ -1428,6 +1448,7 @@ mod tests {
                 "doc-contracts",
                 "consistency-fixtures",
                 "event-transport-guard",
+                "inbox-cutover-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1524,6 +1545,7 @@ mod tests {
             "doc-contracts",
             "consistency-fixtures",
             "event-transport-guard",
+            "inbox-cutover-guard",
             "archrules",
             "codegen-check",
             "pdp-allow-guard",

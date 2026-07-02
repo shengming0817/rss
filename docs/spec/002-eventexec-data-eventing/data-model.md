@@ -44,18 +44,23 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 - 状态机：`pending → publishing → published`；`publishing →(永久/预算耗尽)→ dlx`；`publishing →(瞬态)→ pending(+retry_after)`。
 - CAS：status 转移以 `lease_token` 比对（防并发双发）。
 
-### inbox_dedup（P5）
+### inbox_receipts（P5）
 | 列 | 类型 | 说明 |
 |----|------|------|
+| tenant_id | uuid | tenant scope（RLS / receipt key） |
 | event_id | text | 去重 key |
 | consumer_group | text | 消费者组（稳定，漂移则去重失效） |
+| domain/topic | text | envelope routing identity |
+| contract_id / contract_version / schema_hash | text | envelope schema identity |
+| trace_id / correlation_id | text NULL | bounded observability context |
 | status | text | claimed/done |
 | lease_token | uuid NULL | claim fencing |
 | claimed_at | timestamptz | |
+| committed_at | timestamptz NULL | done receipt time |
 
-- PK: `(event_id, consumer_group)`。claim = INSERT ON CONFLICT DO NOTHING → 首见 Fresh，冲突 Duplicate。
-- 保留期清理（#1210）：`PgInboxSweeper` 删 `status='done' AND claimed_at ≤ now()-retain` 的去重记录（`claimed` 行不删）；默认 **7 天**（`INBOX_DEDUP_RETENTION_SECONDS`），**必须严格大于**最大重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律——低于/等于即迟到重投误判 Fresh 重复执行），编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-DEDUP-RETENTION-FLOOR-01）。清理索引 `(status, claimed_at)`（migration 0020）。完整三表保留期契约见 `docs/ops/…-outbox-relay-observability.md §保留期清理`。
-- runtime durable event consumer 以 PostgreSQL `inbox_dedup` 为单一幂等 claimer；Redis 不再作为 event consumer 去重后端。EventId 全局唯一（UUID）保证跨租户不冲突；key 不加 tenant 段属显式决策（见 spec.md §Assumptions 租户隔离立场）。
+- PK: `(tenant_id, event_id, consumer_group)`。claim = tenant-scoped INSERT，stale reclaim 仅在 domain/topic/contract/schema identity 一致时更新 lease；identity mismatch 返回 invariant。
+- 保留期清理（#1210/#1650）：`PgInboxSweeper` 经 `rss_sweep_inbox_receipts(retain_seconds)` 删 `status='done' AND committed_at ≤ now()-retain` 的去重记录（`claimed` 行不删）；默认 **7 天**（`INBOX_RECEIPT_RETENTION_SECONDS`），**必须严格大于**最大重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律——低于/等于即迟到重投误判 Fresh 重复执行），编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-RECEIPT-RETENTION-FLOOR-01）。清理索引 `(status, committed_at)`。完整三表保留期契约见 `docs/ops/…-outbox-relay-observability.md §保留期清理`。
+- runtime durable event consumer 以 PostgreSQL `inbox_receipts` 为单一幂等 claimer；Redis 不再作为 event consumer 去重后端。claim 前必须已解析 `IdemKey`、验证 schema header 与 tenantAuthority，并构造 `InboxReceiptContext`。
 
 ### dead_letter（P7）
 | 列 | 类型 | 说明 |
@@ -85,7 +90,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
   （consumer/saga dead_letter → 新 outbox id）与 `DlqRedriveRequest`（outbox dlx → 原 outbox 行恢复
   pending）。replay/redrive 均必须携带 `OperatorDlqCapability`；replay 的 dead_letter id 先经 typed
   `DeadLetterId` UUID parse，非法输入不进入 SQL cast。replay/redrive 必须先用同一 `KeyProvider` 解密，
-  plaintext row/shape 必须失败；consumer replay 不删除原死信、不重置 `inbox_dedup done`。
+  plaintext row/shape 必须失败；consumer replay 不删除原死信、不重置 `inbox_receipts done`。
 - 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认/最小 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——`rss_app` 无直接 DELETE，仅可调用 NOLOGIN maintenance owner 承载的 `rss_sweep_dead_letter(bigint)` 固定函数；清理前冷存储导出（合规归档）见 #1536。
 
 ### saga_journal（P9）

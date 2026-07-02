@@ -638,11 +638,11 @@ impl PgInfraDeps {
 
     /// consumer inbox 幂等去重 store（runtime consumer resource bundle 使用）。
     ///
-    /// `inbox_dedup` key 为 `(event_id, consumer_group)`，不是 identity 域资源；因此归 framework/global
-    /// infra 句柄，避免组合根为通用 consumer 借用某个业务域句柄。
+    /// `inbox_receipts` key 为 `(tenant_id, event_id, consumer_group)`，不是 identity 域资源；因此归
+    /// framework/global infra 句柄，避免组合根为通用 consumer 借用某个业务域句柄。
     #[must_use]
-    pub fn inbox(&self, group: consistency::ConsumerGroup) -> PgInboxStore {
-        self.store.inbox(group)
+    pub fn inbox(&self) -> PgInboxStore {
+        self.store.inbox()
     }
 
     /// dead-letter store（DLX 终态）。同时 impl `consistency::RetentionSweeper`——组合根可经此句柄取死信
@@ -659,9 +659,9 @@ impl PgInfraDeps {
         self.store.dlq(payload_protector)
     }
 
-    /// inbox_dedup 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
+    /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
     ///
-    /// impl `consistency::RetentionSweeper`——删除超 `INBOX_DEDUP_RETENTION_SECONDS`（默认 7 天）的 `done`
+    /// impl `consistency::RetentionSweeper`——删除超 `INBOX_RECEIPT_RETENTION_SECONDS`（默认 7 天）的 `done`
     /// 去重记录。全域语义 ⇒ 归 framework/global infra 句柄（非 per-domain `PgDomainDeps`）。
     #[must_use]
     pub fn inbox_sweeper(&self) -> PgInboxSweeper {
@@ -925,13 +925,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)] // reason: ConsumerGroup::parse const literal 仅字符非法时失败（item-level carve-out）。
     async fn infra_accessors_construct() {
         // PgInfraDeps：framework/global 基建能力（F1 补齐）——纯 pool clone，无 I/O。
         let infra = deps().infra();
-        let group = consistency::ConsumerGroup::parse("runtime.consumer").expect("valid group");
         let _ = infra.emitter(Box::new(EpochClock));
-        let _ = infra.inbox(group);
+        let _ = infra.inbox();
         let _ = infra.outbox_maintenance();
         let _ = infra.dead_letter(payload_protector());
         let _ = infra.dlq(payload_protector());

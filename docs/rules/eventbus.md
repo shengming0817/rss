@@ -265,7 +265,7 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
 - 当前只提供内部 Rust API：`eventexec::DlqStore` + `PgInfraDeps::dlq()`。CLI / HTTP 管控面不在本轮。
 - Consumer `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
   `IdemKey`，由同一 `KeyProvider` 解密原 payload 后插入一条新的 outbox 行；不得删除原 `dead_letter`，
-  不得重置 `inbox_dedup done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
+  不得重置 `inbox_receipts done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
   并写入 outbox `contract_version` / `schema_hash` 物理列；缺失或非法 fail-closed。Outbox relay DLX redrive 同样必须传
   `OperatorDlqCapability`，只恢复原 outbox 行为 `pending`；outbox DLX payload 副本保留在 `dead_letter`
   用于审计，不参与 redrive。Saga `dead_letter` 只作审计与诊断，不支持 replay 成 outbox；生产 saga DLQ

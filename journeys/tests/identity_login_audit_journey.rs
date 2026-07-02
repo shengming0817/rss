@@ -50,8 +50,8 @@ use common::{
     signed_metadata, tenant_authority,
 };
 use consistency::{
-    EngineError, Entry, HandleResult, IdemKey, InboxStore, LeaseOutcome, LeaseToken, OutboxPayload,
-    PermanentError, PermanentErrorKind, SeenState,
+    EngineError, Entry, HandleResult, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
+    LeaseToken, OutboxPayload, PermanentError, PermanentErrorKind, SeenState,
 };
 use diport::{
     DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
@@ -87,9 +87,9 @@ async fn wait_until(mut pred: impl FnMut() -> bool) -> Result<()> {
 /// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
 /// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造，**不**直接 raw-new——把 in-mem 构造收束到
 /// 已校验的拓扑决策（review #274 F6/C6：原 journey 直接 `InMemClaimer::new` 旁路了 resolve 决策绑定）。
-fn demo_claimer(group: consistency::ConsumerGroup) -> Result<InMemClaimer> {
+fn demo_claimer() -> Result<InMemClaimer> {
     match resolve(Topology::Demo, IdempotencyConfig::default())? {
-        ResolvedIdempotency::Demo => Ok(InMemClaimer::new(group)),
+        ResolvedIdempotency::Demo => Ok(InMemClaimer::new()),
         other => anyhow::bail!("demo journey 须解析为 Demo 幂等决策，实得 {other:?}"),
     }
 }
@@ -120,22 +120,42 @@ impl<S> RecordingClaimer<S> {
 }
 
 impl<S: InboxStore + Send + Sync> InboxStore for RecordingClaimer<S> {
-    async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
-        let state = self.inner.try_claim(key, lease).await?;
+    async fn try_claim(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<SeenState, EngineError> {
+        let state = self.inner.try_claim(ctx, key, lease).await?;
         self.claim_count.fetch_add(1, Ordering::SeqCst);
         if matches!(state, SeenState::Duplicate) {
             self.duplicate_count.fetch_add(1, Ordering::SeqCst);
         }
         Ok(state)
     }
-    async fn extend(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError> {
-        self.inner.extend(key, lease).await
+    async fn extend(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        self.inner.extend(ctx, key, lease).await
     }
-    async fn commit(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError> {
-        self.inner.commit(key, lease).await
+    async fn commit(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        self.inner.commit(ctx, key, lease).await
     }
-    async fn release(&self, key: &IdemKey, lease: &LeaseToken) -> Result<(), EngineError> {
-        self.inner.release(key, lease).await
+    async fn release(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<(), EngineError> {
+        self.inner.release(ctx, key, lease).await
     }
 }
 
@@ -263,7 +283,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
-    let claimer = Arc::new(demo_claimer(group)?);
+    let claimer = Arc::new(demo_claimer()?);
     let health = wire_demo_consumer(
         &bus,
         claimer,
@@ -378,7 +398,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let mut stack = ShutdownStack::new(CancellationToken::new());
     // F5：RecordingClaimer 包决策绑定的 demo claimer，暴露 try_claim/duplicate 计数供可观测等待（去固定 sleep）。
     let consumer_group = group.clone();
-    let recording = Arc::new(RecordingClaimer::new(demo_claimer(group)?));
+    let recording = Arc::new(RecordingClaimer::new(demo_claimer()?));
     let claim_count = recording.claim_count();
     let duplicate_count = recording.duplicate_count();
     wire_demo_consumer(
@@ -483,7 +503,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
-    let claimer = Arc::new(demo_claimer(group)?);
+    let claimer = Arc::new(demo_claimer()?);
     wire_demo_consumer(
         &bus,
         claimer,
@@ -548,7 +568,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
-    let claimer = Arc::new(demo_claimer(group)?);
+    let claimer = Arc::new(demo_claimer()?);
     wire_demo_consumer(
         &bus,
         claimer,
