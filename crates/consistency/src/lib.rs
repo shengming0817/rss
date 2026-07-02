@@ -49,7 +49,10 @@ pub use outbox::{
     PermanentErrorKind, RetentionSweeper, Topic, TopicError,
 };
 pub use projection::{
-    Lsn, PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrder, SerialInOrderGuarantor,
+    Lsn, PartitionSerialDelivery, ProjectionBatchLimit, ProjectionBatchLimitError,
+    ProjectionCheckpoint, ProjectionCheckpointError, ProjectionDeadLetter,
+    ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventRecord, ProjectionEventSource,
+    Projector, SerialInOrder, SerialInOrderGuarantor,
 };
 pub use reconcile::{
     ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,
@@ -70,7 +73,8 @@ mod static_dispatch_smoke {
     use super::inbox::{InboxBacklog, InboxStore};
     use super::outbox::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use super::projection::{
-        PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrderGuarantor,
+        PartitionSerialDelivery, ProjectionEvent, ProjectionEventSource, Projector,
+        SerialInOrderGuarantor,
     };
     use super::reconcile::Reconciler;
     use super::saga::SagaStep;
@@ -98,6 +102,8 @@ mod static_dispatch_smoke {
     fn _drives_projector<P: Projector>(_p: &P) {}
     #[allow(dead_code)] // reason: 同上，证 ProjectionEvent sync trait 可泛型消费。
     fn _drives_projection_event<E: ProjectionEvent>(_e: &E) {}
+    #[allow(dead_code)] // reason: 同上，证 ProjectionEventSource 可泛型静态分发且非 dyn 注入。
+    fn _drives_projection_source<S: ProjectionEventSource>(_s: &S) {}
     #[allow(dead_code)] // reason: 同上，证串行有序 witness bound 可泛型消费（projection harness attach 门禁形）。
     fn _drives_guarantor<G: SerialInOrderGuarantor>(_g: G) {}
     #[allow(dead_code)] // reason: 同上，证 PartitionSerialDelivery 契约 trait 可泛型消费（witness 铸造侧）。

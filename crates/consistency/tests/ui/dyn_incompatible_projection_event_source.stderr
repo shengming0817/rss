@@ -1,0 +1,12 @@
+error[E0038]: the trait `ProjectionEventSource` is not dyn compatible
+ --> tests/ui/dyn_incompatible_projection_event_source.rs:6:26
+  |
+6 |     let _source: Box<dyn ProjectionEventSource>;
+  |                          ^^^^^^^^^^^^^^^^^^^^^ `ProjectionEventSource` is not dyn compatible
+  |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+ --> src/projection.rs
+  |
+  |     async fn read_from(
+  |              ^^^^^^^^^ the trait is not dyn compatible because method `read_from` is `async`

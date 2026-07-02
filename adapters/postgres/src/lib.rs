@@ -69,8 +69,9 @@ pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use policy_repo::PgPolicyRepo;
 // NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
-// sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径 read_from + PgProjectionRecord 公开。
-pub use projection_events::{PgProjectionEvents, PgProjectionRecord, ProjectionEventsError};
+// sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径返回 consistency
+// engine-owned ProjectionEventRecord，不公开 adapter DTO。
+pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
 pub use refresh_token_store::PgRefreshTokenStore;
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;

@@ -6,7 +6,10 @@ fn native_afit_ports_are_not_dyn_compatible() {
     t.compile_fail("tests/ui/dyn_incompatible_inbox_store.rs");
     t.compile_fail("tests/ui/dyn_incompatible_inbox_backlog.rs");
     t.compile_fail("tests/ui/dyn_incompatible_retention_sweeper.rs");
+    t.compile_fail("tests/ui/dyn_incompatible_projection_event_source.rs");
+    t.compile_fail("tests/ui/projection_serial_witness_non_serial_fail.rs");
     t.compile_fail("tests/ui/dyn_incompatible_reconciler.rs");
+    t.pass("tests/ui/projection_event_source_serial_pass.rs");
 }
 
 #[test]

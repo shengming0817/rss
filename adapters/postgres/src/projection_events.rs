@@ -16,17 +16,21 @@
 //!
 //! **全局表**：无 tenant_id / 无 RLS，对标 outbox/saga_journal/checkpoint。
 //!
-//! **固有方法（非注入 port）**：事件源由 adapter 直接持有，harness 不注入源（方案 B）。
+//! **事件源接缝**：adapter 实现 `consistency::ProjectionEventSource`，返回 engine-owned
+//! `ProjectionEventRecord`；harness 当前仍不注入源（方案 B）。
 //!
 //! **时间戳**：`occurred_at`/`created_at` 用 DB DEFAULT `now()`（不注入 Clock，
 //! 对标 saga_journal/checkpoint）。
 //!
-//! **错误 PII 边界**：sqlx 错误不进 Display——经 [`ProjectionEventsError::new`] 包成
-//! source（error-handling.md §Message 与 PII）。
+//! **错误 PII 边界**：append 路径 sqlx 错误不进 Display——经 [`ProjectionEventsError::new`] 包成
+//! source；read source 路径只返回 [`EngineError`] 分类（error-handling.md §Message 与 PII）。
 //!
 //! ref: adapters/postgres/src/saga_journal.rs（append-only adapter 范式）。
 
-use consistency::{Lsn, PartitionSerialDelivery, ProjectionEvent, Topic};
+use consistency::{
+    EngineError, EngineErrorKind, Lsn, PartitionSerialDelivery, ProjectionBatchLimit,
+    ProjectionEventRecord, ProjectionEventSource, Topic,
+};
 use diport::RedactedSource;
 use sqlx::PgPool;
 
@@ -112,18 +116,19 @@ impl PgProjectionEvents {
 
     /// 读 `id > after` 的事件，按 id 升序，最多 `limit` 条（replay / tail 喂 harness）。
     ///
-    /// sqlx 错误不进 Display——经 [`ProjectionEventsError::new`] 包成 source（PII 边界）。
-    /// `event_type` 解析失败升 Invariant 错误（我们写入的数据不该含无效 topic）。
+    /// sqlx 错误映射为 [`EngineErrorKind::Transient`]；`event_type` / id 解析失败映射为
+    /// [`EngineErrorKind::Invariant`]（我们写入的数据不该含无效 topic / id）。
     ///
-    /// **批大小指引**：推荐小批（如 200–1000 条）分批驱动；超大 `limit` 会导致 DB 单次查询压力过大，
-    /// harness 应以小批 tail 循环调用（内存 + 延迟权衡）。
+    /// `ProjectionBatchLimit` 在调用边界保证非零且不超过 1000；harness 应以小批 tail 循环调用
+    /// （内存 + 延迟权衡）。
     pub async fn read_from(
         &self,
         after: Lsn,
-        limit: u32,
-    ) -> Result<Vec<PgProjectionRecord>, ProjectionEventsError> {
-        let after_i64 = i64::try_from(after.get()).map_err(ProjectionEventsError::new)?;
-        let limit_i64 = i64::from(limit);
+        limit: ProjectionBatchLimit,
+    ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
+        let after_i64 =
+            i64::try_from(after.get()).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+        let limit_i64 = i64::from(limit.get());
 
         let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
             r#"
@@ -138,59 +143,18 @@ impl PgProjectionEvents {
         .bind(limit_i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(ProjectionEventsError::new)?;
+        .map_err(|_| EngineError::new(EngineErrorKind::Transient))?;
 
         rows.into_iter()
             .map(|(id, event_type_str, payload)| {
-                let lsn_u64 = u64::try_from(id).map_err(ProjectionEventsError::new)?;
+                let lsn_u64 =
+                    u64::try_from(id).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                 let lsn = Lsn::new(lsn_u64);
-                let topic = Topic::parse(&event_type_str).map_err(|_| {
-                    ProjectionEventsError::new(InvariantError(
-                        "invalid event_type in projection_events",
-                    ))
-                })?;
-                Ok(PgProjectionRecord {
-                    lsn,
-                    topic,
-                    payload,
-                })
+                let topic = Topic::parse(&event_type_str)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                Ok(ProjectionEventRecord::new(lsn, topic, payload))
             })
             .collect()
-    }
-}
-
-/// 从 DB 读出的一条投影事件记录，impl [`consistency::ProjectionEvent`]。
-///
-/// `payload` 经手写 `Debug` 脱敏（渲 `<redacted>`），对标 [`diport::JournalEntry`] PII 边界。
-/// 字段私有——外部经 trait 方法（`topic`/`lsn`/`payload`）读取，不可伪造。
-pub struct PgProjectionRecord {
-    lsn: Lsn,
-    topic: Topic,
-    payload: Vec<u8>,
-}
-
-// PII 边界：payload 可能含 PII，不进 Debug；lsn / topic 安全可见（对标 JournalEntry.output 脱敏范式）。
-impl std::fmt::Debug for PgProjectionRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PgProjectionRecord")
-            .field("lsn", &self.lsn)
-            .field("topic", &self.topic)
-            .field("payload", &"<redacted>")
-            .finish()
-    }
-}
-
-impl ProjectionEvent for PgProjectionRecord {
-    fn topic(&self) -> &Topic {
-        &self.topic
-    }
-
-    fn lsn(&self) -> Lsn {
-        self.lsn
-    }
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
     }
 }
 
@@ -200,6 +164,16 @@ impl ProjectionEvent for PgProjectionRecord {
 /// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionEvents；
 /// 去掉 impl 或 read_from 改为非顺序查询即编译失败（smoke 测试 anti-vacuity）。
 impl PartitionSerialDelivery for PgProjectionEvents {}
+
+impl ProjectionEventSource for PgProjectionEvents {
+    async fn read_from(
+        &self,
+        after: Lsn,
+        limit: ProjectionBatchLimit,
+    ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
+        PgProjectionEvents::read_from(self, after, limit).await
+    }
+}
 
 // ── 错误 ──────────────────────────────────────────────────────────────────────
 
@@ -228,38 +202,30 @@ impl ProjectionEventsError {
     }
 }
 
-// ── internal error helper ─────────────────────────────────────────────────────
-
-/// Invariant parse 失败（`event_type` 无法从 DB 值解析为合法 Topic）——我们写入的数据不该
-/// 含无效值；进 [`ProjectionEventsError::new`] source，不 unwrap。
-#[derive(Debug)]
-struct InvariantError(&'static str);
-
-impl std::fmt::Display for InvariantError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl std::error::Error for InvariantError {}
-
 // ── 单测 ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod smoke {
-    //! 编译期类型证明：`PgProjectionRecord: ProjectionEvent`（via trait bound）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-13 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ProjectionEvent on PgProjectionRecord；
-    //! 去掉 impl 即编译失败（anti-vacuity）。
+    //! 编译期类型证明：projection event record 归 consistency，`PgProjectionEvents` 只实现事件源。
 
     use core::marker::PhantomData;
 
-    use consistency::{PartitionSerialDelivery, ProjectionEvent};
+    use consistency::{
+        PartitionSerialDelivery, ProjectionEvent, ProjectionEventRecord, ProjectionEventSource,
+    };
 
     fn assert_projection_event<T: ProjectionEvent>(_: PhantomData<T>) {}
 
     #[test]
-    fn pg_projection_record_impl_frozen() {
-        assert_projection_event(PhantomData::<super::PgProjectionRecord>);
+    fn projection_event_record_impl_frozen() {
+        assert_projection_event(PhantomData::<ProjectionEventRecord>);
+    }
+
+    fn assert_projection_event_source<T: ProjectionEventSource>() {}
+
+    #[test]
+    fn pg_projection_events_source_impl_frozen() {
+        assert_projection_event_source::<super::PgProjectionEvents>();
     }
 
     /// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionEvents；
@@ -316,7 +282,7 @@ mod smoke {
 /// （`integration` feature 门控；需真实 postgres）。
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
-    use consistency::{Lsn, ProjectionEvent, Topic};
+    use consistency::{Lsn, ProjectionBatchLimit, ProjectionEventSource, Topic};
 
     use super::NewProjectionEvent;
 
@@ -377,7 +343,9 @@ mod integration_tests {
         );
 
         // read_from(0) → 3 条，按 id 升序。
-        let all = pe.read_from(Lsn::new(0), 10).await?;
+        let limit = ProjectionBatchLimit::new(10)?;
+
+        let all = ProjectionEventSource::read_from(&pe, Lsn::new(0), limit).await?;
         assert_eq!(all.len(), 3, "应有 3 条事件");
         assert_eq!(all[0].lsn().get(), lsn1.get(), "第1条 lsn 不符");
         assert_eq!(all[1].lsn().get(), lsn2.get(), "第2条 lsn 不符");
@@ -406,7 +374,7 @@ mod integration_tests {
         assert_eq!(all[2].payload(), b"payload3", "payload[2] 往返");
 
         // read_from(lsn2) → 仅 lsn3。
-        let tail = pe.read_from(Lsn::new(lsn2.get()), 10).await?;
+        let tail = ProjectionEventSource::read_from(&pe, Lsn::new(lsn2.get()), limit).await?;
         assert_eq!(tail.len(), 1, "lsn2 之后仅有 1 条");
         assert_eq!(tail[0].lsn().get(), lsn3.get(), "tail 中仅 lsn3");
 
