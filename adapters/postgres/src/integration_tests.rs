@@ -1822,6 +1822,22 @@ fn conf_consumer_meta(group: &str) -> ConsumerMeta {
     .with_expected_schema("v1", TEST_SCHEMA_HASH)
 }
 
+#[allow(clippy::unwrap_used)]
+fn conf_consumer_ctx(group: &str) -> InboxReceiptContext {
+    InboxReceiptContext::new(
+        test_tenant(),
+        ConsumerGroup::parse(group).unwrap(),
+        "eventing-conf-consumer-domain",
+        "eventing.conf.consumer",
+        "eventing-conf-consumer-contract",
+        "v1",
+        TEST_SCHEMA_HASH,
+        None,
+        None,
+    )
+    .unwrap()
+}
+
 fn conf_expected_dlx() -> eventconf::DlxFields {
     eventconf::DlxFields {
         source_kind: "consumer".to_string(),
@@ -1947,7 +1963,7 @@ async fn conf_duplicate_delivery(
     group: String,
 ) -> Result<eventconf::ConsumerObservation, String> {
     let key = IdemKey::parse(&event_id).map_err(|e| format!("{e:?}"))?;
-    let ctx = test_inbox_ctx(&group);
+    let ctx = conf_consumer_ctx(&group);
     let lease = LeaseToken::mint();
     let inbox = store.inbox();
     inbox

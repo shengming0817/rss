@@ -593,11 +593,36 @@ mod tests {
 
     #[cfg(feature = "integration")]
     mod integration {
+        use std::sync::Arc;
+
         use consistency::{
-            IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState,
+            EngineErrorKind, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken,
+            SeenState,
         };
+        use sqlx::Row;
+        use tokio::sync::Barrier;
 
         type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct ReceiptSnapshot {
+            tenant_id: String,
+            event_id: String,
+            consumer_group: String,
+            domain: String,
+            topic: String,
+            contract_id: String,
+            contract_version: String,
+            schema_hash: String,
+            trace: Option<String>,
+            correlation_id: Option<String>,
+            status: String,
+            lease_token: String,
+            receive_count: i32,
+            claimed_at: String,
+            committed_at: Option<String>,
+            updated_at: String,
+        }
 
         #[allow(clippy::unwrap_used)]
         // reason: 测试 setup — 已知非空 raw，item-level carve-out（error-handling.md §Carve-out）。
@@ -627,11 +652,85 @@ mod tests {
             .unwrap()
         }
 
+        #[allow(clippy::unwrap_used)]
+        // reason: 测试 fixture 使用固定合法 receipt metadata，构造失败即测试配置错误。
+        fn ctx_with_schema(group: &str, schema_hash: &str) -> InboxReceiptContext {
+            InboxReceiptContext::new(
+                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+                consistency::ConsumerGroup::parse(group).unwrap(),
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                "v1",
+                schema_hash,
+                None,
+                None,
+            )
+            .unwrap()
+        }
+
         /// 铸出 per-run 唯一 inbox key（`{prefix}-{uuid v4}`）——集成测试可复用长存外部 PG，固定
         /// event_id 一旦被 `commit` 标成永久 `done`，下一轮同 key 首次 claim 会退化成 `Duplicate`；
         /// 经此 funnel 让每次运行用全新 key，杜绝跨运行持久状态污染（亦消除散落的 `format!(uuid)` 重复）。
         fn uk(prefix: &str) -> IdemKey {
             k(&format!("{prefix}-{}", uuid::Uuid::new_v4()))
+        }
+
+        async fn receipt_snapshot(
+            store: &crate::PgStore,
+            ctx: &InboxReceiptContext,
+            key: &IdemKey,
+        ) -> Result<ReceiptSnapshot, sqlx::Error> {
+            let row = sqlx::query(
+                "SELECT tenant_id::text AS tenant_id, event_id, consumer_group, \
+                        domain, topic, contract_id, contract_version, schema_hash, \
+                        trace, correlation_id, status, lease_token::text AS lease_token, \
+                        receive_count, claimed_at::text AS claimed_at, \
+                        committed_at::text AS committed_at, updated_at::text AS updated_at \
+                 FROM inbox_receipts \
+                 WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+            )
+            .bind(ctx.tenant_id().to_string())
+            .bind(key.as_str())
+            .bind(ctx.consumer_group().as_str())
+            .fetch_one(&store.pool)
+            .await?;
+
+            Ok(ReceiptSnapshot {
+                tenant_id: row.try_get("tenant_id")?,
+                event_id: row.try_get("event_id")?,
+                consumer_group: row.try_get("consumer_group")?,
+                domain: row.try_get("domain")?,
+                topic: row.try_get("topic")?,
+                contract_id: row.try_get("contract_id")?,
+                contract_version: row.try_get("contract_version")?,
+                schema_hash: row.try_get("schema_hash")?,
+                trace: row.try_get("trace")?,
+                correlation_id: row.try_get("correlation_id")?,
+                status: row.try_get("status")?,
+                lease_token: row.try_get("lease_token")?,
+                receive_count: row.try_get("receive_count")?,
+                claimed_at: row.try_get("claimed_at")?,
+                committed_at: row.try_get("committed_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        }
+
+        async fn receipt_count(
+            store: &crate::PgStore,
+            ctx: &InboxReceiptContext,
+            key: &IdemKey,
+        ) -> Result<i64, sqlx::Error> {
+            sqlx::query_as::<_, (i64,)>(
+                "SELECT count(*)::bigint FROM inbox_receipts \
+                 WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+            )
+            .bind(ctx.tenant_id().to_string())
+            .bind(key.as_str())
+            .bind(ctx.consumer_group().as_str())
+            .fetch_one(&store.pool)
+            .await
+            .map(|(count,)| count)
         }
 
         /// claim → commit → try_claim = Duplicate（done 永久去重，PG 往返）。
@@ -657,6 +756,280 @@ mod tests {
             assert_eq!(
                 inbox.try_claim(&ctx, &key, &lease()).await.unwrap(),
                 SeenState::Duplicate
+            );
+            Ok(())
+        }
+
+        /// active / done Duplicate 均不得改写现有 receipt 行。
+        #[tokio::test(flavor = "multi_thread")]
+        #[allow(clippy::unwrap_used)]
+        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        async fn duplicate_paths_preserve_receipt_row() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox();
+            let ctx = ctx("duplicate-preserve-grp");
+
+            let active_key = uk("pg-active-duplicate-preserve");
+            let active_lease = lease();
+            assert_eq!(
+                inbox
+                    .try_claim(&ctx, &active_key, &active_lease)
+                    .await
+                    .unwrap(),
+                SeenState::Fresh
+            );
+            let active_before = receipt_snapshot(&store, &ctx, &active_key).await?;
+            assert_eq!(
+                inbox.try_claim(&ctx, &active_key, &lease()).await.unwrap(),
+                SeenState::Duplicate
+            );
+            let active_after = receipt_snapshot(&store, &ctx, &active_key).await?;
+            assert_eq!(
+                active_after, active_before,
+                "active Duplicate must not rewrite the existing receipt row"
+            );
+
+            let done_key = uk("pg-done-duplicate-preserve");
+            let done_lease = lease();
+            assert_eq!(
+                inbox.try_claim(&ctx, &done_key, &done_lease).await.unwrap(),
+                SeenState::Fresh
+            );
+            assert_eq!(
+                inbox.commit(&ctx, &done_key, &done_lease).await.unwrap(),
+                LeaseOutcome::Held
+            );
+            let done_before = receipt_snapshot(&store, &ctx, &done_key).await?;
+            assert_eq!(
+                inbox.try_claim(&ctx, &done_key, &lease()).await.unwrap(),
+                SeenState::Duplicate
+            );
+            let done_after = receipt_snapshot(&store, &ctx, &done_key).await?;
+            assert_eq!(
+                done_after, done_before,
+                "done Duplicate must not rewrite terminal receipt row"
+            );
+            Ok(())
+        }
+
+        /// anti-vacuity: receipt 快照必须看见 identity 与租约时间锚变化，否则“不改写”断言会真空通过。
+        #[tokio::test(flavor = "multi_thread")]
+        #[allow(clippy::unwrap_used)]
+        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        async fn receipt_snapshot_detects_receipt_semantic_columns() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox();
+            let ctx = ctx("snapshot-anti-vacuity-grp");
+            let key = uk("pg-snapshot-anti-vacuity");
+            let lease = lease();
+
+            assert_eq!(
+                inbox.try_claim(&ctx, &key, &lease).await.unwrap(),
+                SeenState::Fresh
+            );
+            let before = receipt_snapshot(&store, &ctx, &key).await?;
+            sqlx::query(
+                "UPDATE inbox_receipts \
+                 SET domain = 'identity-renamed', \
+                     topic = 'identity.session-renamed', \
+                     contract_id = 'identity.session-renamed', \
+                     contract_version = 'v2', \
+                     schema_hash = 'sha256:1111111111111111111111111111111111111111111111111111111111111111', \
+                     trace = 'trace-anti-vacuity', \
+                     correlation_id = 'corr-anti-vacuity', \
+                     claimed_at = claimed_at - interval '1 second', \
+                     updated_at = updated_at + interval '1 second' \
+                 WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+            )
+            .bind(ctx.tenant_id().to_string())
+            .bind(key.as_str())
+            .bind(ctx.consumer_group().as_str())
+            .execute(&store.pool)
+            .await?;
+            let after = receipt_snapshot(&store, &ctx, &key).await?;
+
+            assert_ne!(
+                after, before,
+                "receipt snapshot must include identity columns and lease timestamp anchors"
+            );
+            Ok(())
+        }
+
+        /// 同一 receipt key 首次并发 claim：Postgres PK + ON CONFLICT 必须只产生一个 Fresh。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn concurrent_try_claim_same_receipt_single_fresh_winner() -> TestResult {
+            const CLAIMERS: usize = 8;
+
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let store = Arc::new(store);
+            let ctx = Arc::new(ctx("concurrent-claim-grp"));
+            let key = Arc::new(uk("pg-concurrent-claim"));
+            let barrier = Arc::new(Barrier::new(CLAIMERS));
+            let mut tasks = Vec::with_capacity(CLAIMERS);
+
+            for _ in 0..CLAIMERS {
+                let store = Arc::clone(&store);
+                let ctx = Arc::clone(&ctx);
+                let key = Arc::clone(&key);
+                let barrier = Arc::clone(&barrier);
+                tasks.push(tokio::spawn(async move {
+                    let lease = lease();
+                    barrier.wait().await;
+                    let seen = store.inbox().try_claim(&ctx, &key, &lease).await?;
+                    Ok::<_, consistency::EngineError>((seen, lease))
+                }));
+            }
+
+            let mut fresh = Vec::new();
+            let mut duplicates = 0usize;
+            for task in tasks {
+                let (seen, lease) = task.await??;
+                match seen {
+                    SeenState::Fresh => fresh.push(lease),
+                    SeenState::Duplicate => duplicates += 1,
+                    _ => return Err(format!("unexpected SeenState: {seen:?}").into()),
+                }
+            }
+
+            assert_eq!(fresh.len(), 1, "only one concurrent claimer may win Fresh");
+            assert_eq!(
+                duplicates,
+                CLAIMERS - 1,
+                "all losing concurrent claimers must observe Duplicate"
+            );
+            assert_eq!(receipt_count(&store, &ctx, &key).await?, 1);
+            let row = receipt_snapshot(&store, &ctx, &key).await?;
+            assert_eq!(row.status, "claimed");
+            assert_eq!(row.lease_token, fresh[0].as_str());
+            assert_eq!(row.receive_count, 1);
+            assert!(row.committed_at.is_none());
+            Ok(())
+        }
+
+        /// 同一 stale receipt 并发重捞：只能一个新 lease 接管，旧 lease commit 必须 Lost。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        #[allow(clippy::unwrap_used)]
+        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        async fn concurrent_stale_reclaim_single_fresh_winner() -> TestResult {
+            const CLAIMERS: usize = 8;
+
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let store = Arc::new(store);
+            let ctx = Arc::new(ctx("concurrent-stale-reclaim-grp"));
+            let key = Arc::new(uk("pg-concurrent-stale-reclaim"));
+            let stale_lease = lease();
+            assert_eq!(
+                store
+                    .inbox()
+                    .try_claim(&ctx, &key, &stale_lease)
+                    .await
+                    .unwrap(),
+                SeenState::Fresh
+            );
+
+            sqlx::query(
+                "UPDATE inbox_receipts \
+                 SET claimed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+                 WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
+            )
+            .bind(super::super::INBOX_LEASE_TTL_SECONDS + 1)
+            .bind(ctx.tenant_id().to_string())
+            .bind(key.as_str())
+            .bind(ctx.consumer_group().as_str())
+            .execute(&store.pool)
+            .await?;
+
+            let barrier = Arc::new(Barrier::new(CLAIMERS));
+            let mut tasks = Vec::with_capacity(CLAIMERS);
+            for _ in 0..CLAIMERS {
+                let store = Arc::clone(&store);
+                let ctx = Arc::clone(&ctx);
+                let key = Arc::clone(&key);
+                let barrier = Arc::clone(&barrier);
+                tasks.push(tokio::spawn(async move {
+                    let lease = lease();
+                    barrier.wait().await;
+                    let seen = store.inbox().try_claim(&ctx, &key, &lease).await?;
+                    Ok::<_, consistency::EngineError>((seen, lease))
+                }));
+            }
+
+            let mut fresh = Vec::new();
+            let mut duplicates = 0usize;
+            for task in tasks {
+                let (seen, lease) = task.await??;
+                match seen {
+                    SeenState::Fresh => fresh.push(lease),
+                    SeenState::Duplicate => duplicates += 1,
+                    _ => return Err(format!("unexpected SeenState: {seen:?}").into()),
+                }
+            }
+
+            assert_eq!(fresh.len(), 1, "only one stale reclaim may win Fresh");
+            assert_eq!(
+                duplicates,
+                CLAIMERS - 1,
+                "all losing stale reclaimers must observe Duplicate"
+            );
+            let winner = &fresh[0];
+            let row = receipt_snapshot(&store, &ctx, &key).await?;
+            assert_eq!(row.status, "claimed");
+            assert_eq!(row.lease_token, winner.as_str());
+            assert_eq!(row.receive_count, 2);
+            assert!(row.committed_at.is_none());
+            assert_eq!(
+                store
+                    .inbox()
+                    .commit(&ctx, &key, &stale_lease)
+                    .await
+                    .unwrap(),
+                LeaseOutcome::Lost
+            );
+            assert_eq!(
+                store.inbox().commit(&ctx, &key, winner).await.unwrap(),
+                LeaseOutcome::Held
+            );
+            Ok(())
+        }
+
+        /// 同 PK 但 receipt identity 不一致时，不能静默 Duplicate；必须暴露 Invariant。
+        #[tokio::test(flavor = "multi_thread")]
+        #[allow(clippy::unwrap_used)]
+        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        async fn try_claim_identity_mismatch_returns_invariant() -> TestResult {
+            let (_pg, store) = crate::test_pg::connect_pg().await?;
+            store.run_migrations().await?;
+            let inbox = store.inbox();
+            let key = uk("pg-identity-mismatch");
+            let group = "identity-mismatch-grp";
+            let original = ctx(group);
+            let mismatched = ctx_with_schema(
+                group,
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            );
+            let original_lease = lease();
+
+            assert_eq!(
+                inbox
+                    .try_claim(&original, &key, &original_lease)
+                    .await
+                    .unwrap(),
+                SeenState::Fresh
+            );
+            let before = receipt_snapshot(&store, &original, &key).await?;
+            let err = inbox
+                .try_claim(&mismatched, &key, &lease())
+                .await
+                .expect_err("schema identity mismatch must fail closed");
+            assert_eq!(err.kind(), EngineErrorKind::Invariant);
+            let after = receipt_snapshot(&store, &original, &key).await?;
+            assert_eq!(
+                after, before,
+                "identity mismatch must not rewrite the existing receipt"
             );
             Ok(())
         }

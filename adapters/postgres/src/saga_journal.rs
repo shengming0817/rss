@@ -186,7 +186,7 @@ mod smoke {
 /// 集成测试：`PgSagaJournal` append → read 往返（`integration` feature 门控；需真实 postgres）。
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
-    use consistency::{SagaId, SagaJournalRecord, SagaJournalStatus, StepName};
+    use consistency::{SagaId, SagaJournalAppendRecord, SagaJournalStatus, StepName};
     use diport::{ManagedResource, SagaJournal};
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -233,7 +233,7 @@ mod integration_tests {
                 SagaJournalStatus::Failed => {
                     SagaJournalAppendRecord::failed(i as u64, step_name, "compensation failed")
                 }
-                _ => SagaJournalRecord::replayed(i as u64, step_name, *status),
+                _ => return Err(format!("unexpected saga status in fixture: {status:?}").into()),
             };
             journal.append(&saga_id, entry).await?;
         }
