@@ -42,6 +42,70 @@ const REGISTRY_FILES: &[&str] = &[
     "lints/README.md",
 ];
 
+const AUTHZ_PARITY_ADR_PATH: &str =
+    "docs/architecture/202607021958-014-authz-open-source-parity-boundary.md";
+
+const AUTHZ_PARITY_DOCS: &[&str] = &[
+    AUTHZ_PARITY_ADR_PATH,
+    "docs/rules/tenancy.md",
+    "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+    "docs/spec/005-tenancy-abac-dataperm-closeout/research.md",
+    "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
+    "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
+];
+
+const AUTHZ_PARITY_FRAMEWORKS: &[&str] = &[
+    "OPA",
+    "Cedar",
+    "SpiceDB",
+    "OpenFGA",
+    "Casbin",
+    "PostgreSQL RLS",
+    "RSS",
+];
+
+const AUTHZ_PARITY_DIMENSIONS: &[&str] = &[
+    "policy model",
+    "decision evaluation",
+    "relationship/attribute source",
+    "tenant isolation",
+    "row/field obligation",
+    "auditability",
+    "governance gate",
+    "operational tradeoff",
+    "rss position",
+];
+
+const AUTHZ_PARITY_REQUIRED_CLAIMS: &[&str] = &[
+    "same security objective carried by RSS typed/in-process mechanisms",
+    "no external PDP process",
+    "no Rego runtime",
+    "no Cedar/Casbin DSL runtime",
+    "no SpiceDB/OpenFGA tuple graph service",
+    "RLS does not replace RouteAuthorizer",
+    "ABAC is not the tenant boundary",
+];
+
+const AUTHZ_PARITY_RSS_ROW_REQUIRED_ANCHORS: &[&str] = &[
+    "credential verification",
+    "RouteAuthorizer",
+    "service-token tenant binding",
+    "SET LOCAL rss.tenant_id",
+    "FORCE RLS",
+    "non-bypass serving role",
+    "RowVisibility",
+    "ResourceProjection",
+];
+
+const AUTHZ_PARITY_FORBIDDEN_CLAIMS: &[&str] = &[
+    "full parity",
+    "drop-in replacement",
+    "OPA/Rego compatible",
+    "tenant isolation is ABAC policy",
+    "RLS alone solves tenancy",
+    "FieldMask equals encryption",
+];
+
 const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
     RequiredAnchor {
         rule: Rule::DocAnchor,
@@ -169,6 +233,7 @@ pub(crate) enum Rule {
     DylintRegistry,
     ProjectionAnchor,
     DocAnchor,
+    AuthzParityBoundary,
     StaleCloseoutWording,
 }
 
@@ -221,14 +286,16 @@ impl GovernanceCheck for TenancyCloseout {
         findings.extend(check_required_lint_registry(&root)?);
         findings.extend(check_audit_projection_wiring(&root)?);
         findings.extend(check_required_anchors(&root)?);
+        findings.extend(check_authz_parity_boundary(&root)?);
         findings.extend(check_stale_closeout_wording(&root)?);
 
         Ok((
             format!(
-                "{} verify/ci gates, {} dylints, {} doc anchors, {} projection fields checked",
+                "{} verify/ci gates, {} dylints, {} doc anchors, {} authz parity frameworks, {} projection fields checked",
                 VERIFY_CI_REQUIRED_GATES.len(),
                 TENANCY_DYLINTS.len(),
                 REQUIRED_ANCHORS.len(),
+                AUTHZ_PARITY_FRAMEWORKS.len(),
                 AUDIT_PROJECTION_FIELDS.len()
             ),
             findings,
@@ -589,6 +656,231 @@ fn scan_required_anchor(anchor: &RequiredAnchor, content: &str) -> Vec<Finding> 
     }
 }
 
+fn check_authz_parity_boundary(root: &Path) -> Result<Vec<Finding>> {
+    let mut findings = Vec::new();
+    let adr = read_required(root, AUTHZ_PARITY_ADR_PATH)?;
+    findings.extend(scan_authz_parity_adr(&adr));
+
+    for path in AUTHZ_PARITY_DOCS {
+        let content = read_required(root, path)?;
+        findings.extend(scan_authz_forbidden_claims(path, &content));
+    }
+
+    findings.extend(scan_authz_required_reference(
+        "docs/rules/tenancy.md",
+        &read_required(root, "docs/rules/tenancy.md")?,
+    ));
+    findings.extend(scan_authz_required_reference(
+        "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+        &read_required(
+            root,
+            "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+        )?,
+    ));
+
+    Ok(findings)
+}
+
+fn scan_authz_parity_adr(content: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let matrix = find_authz_parity_matrix(content);
+
+    findings.extend(scan_authz_parity_matrix_rows(matrix.as_ref()));
+    findings.extend(scan_authz_parity_matrix_headers(matrix.as_ref()));
+    findings.extend(scan_authz_parity_rss_row(matrix.as_ref()));
+
+    for claim in AUTHZ_PARITY_REQUIRED_CLAIMS {
+        if !content.contains(claim) {
+            findings.push(finding(
+                Rule::AuthzParityBoundary,
+                format!("{AUTHZ_PARITY_ADR_PATH}:claim:{claim}"),
+                "authz parity ADR must state the in-scope boundary and explicit deviations",
+            ));
+        }
+    }
+
+    findings
+}
+
+#[derive(Debug, Clone)]
+struct MarkdownTable {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+fn find_authz_parity_matrix(content: &str) -> Option<MarkdownTable> {
+    parse_markdown_tables(content).into_iter().find(|table| {
+        table
+            .headers
+            .first()
+            .is_some_and(|header| same_cell(header, "framework"))
+    })
+}
+
+fn scan_authz_parity_matrix_rows(matrix: Option<&MarkdownTable>) -> Vec<Finding> {
+    AUTHZ_PARITY_FRAMEWORKS
+        .iter()
+        .filter(|framework| {
+            !matrix.is_some_and(|table| {
+                table
+                    .rows
+                    .iter()
+                    .any(|row| row.first().is_some_and(|cell| same_cell(cell, framework)))
+            })
+        })
+        .map(|framework| {
+            finding(
+                Rule::AuthzParityBoundary,
+                format!("{AUTHZ_PARITY_ADR_PATH}:matrix-row:{framework}"),
+                "authz parity matrix must keep a structured row for each comparison target",
+            )
+        })
+        .collect()
+}
+
+fn scan_authz_parity_matrix_headers(matrix: Option<&MarkdownTable>) -> Vec<Finding> {
+    AUTHZ_PARITY_DIMENSIONS
+        .iter()
+        .filter(|dimension| {
+            !matrix.is_some_and(|table| {
+                table
+                    .headers
+                    .iter()
+                    .any(|header| same_cell(header, dimension))
+            })
+        })
+        .map(|dimension| {
+            finding(
+                Rule::AuthzParityBoundary,
+                format!("{AUTHZ_PARITY_ADR_PATH}:matrix-header:{dimension}"),
+                "authz parity matrix header must keep every required comparison dimension",
+            )
+        })
+        .collect()
+}
+
+fn scan_authz_parity_rss_row(matrix: Option<&MarkdownTable>) -> Vec<Finding> {
+    let Some(rss_row) = matrix.and_then(|table| {
+        table
+            .rows
+            .iter()
+            .find(|row| row.first().is_some_and(|cell| same_cell(cell, "RSS")))
+    }) else {
+        return Vec::new();
+    };
+    let row_text = rss_row.join(" ");
+    AUTHZ_PARITY_RSS_ROW_REQUIRED_ANCHORS
+        .iter()
+        .filter(|anchor| !row_text.contains(**anchor))
+        .map(|anchor| {
+            finding(
+                Rule::AuthzParityBoundary,
+                format!("{AUTHZ_PARITY_ADR_PATH}:rss-boundary:{anchor}"),
+                "authz parity RSS matrix row must keep the concrete RSS tenant/AuthZ safety boundary",
+            )
+        })
+        .collect()
+}
+
+fn parse_markdown_tables(content: &str) -> Vec<MarkdownTable> {
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut tables = Vec::new();
+    let mut idx = 0;
+    while idx + 1 < lines.len() {
+        if !is_markdown_table_row(lines[idx]) || !is_markdown_separator_row(lines[idx + 1]) {
+            idx += 1;
+            continue;
+        }
+
+        let headers = split_markdown_table_row(lines[idx]);
+        let mut rows = Vec::new();
+        idx += 2;
+        while idx < lines.len() && is_markdown_table_row(lines[idx]) {
+            rows.push(split_markdown_table_row(lines[idx]));
+            idx += 1;
+        }
+        tables.push(MarkdownTable { headers, rows });
+    }
+    tables
+}
+
+fn is_markdown_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|')
+}
+
+fn is_markdown_separator_row(line: &str) -> bool {
+    is_markdown_table_row(line)
+        && split_markdown_table_row(line).iter().all(|cell| {
+            let trimmed = cell.trim();
+            trimmed.contains('-') && trimmed.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+        })
+}
+
+fn split_markdown_table_row(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| compact_ws(cell.trim()))
+        .collect()
+}
+
+fn same_cell(actual: &str, expected: &str) -> bool {
+    compact_ws(&actual.to_ascii_lowercase()) == compact_ws(&expected.to_ascii_lowercase())
+}
+
+fn scan_authz_required_reference(path: &str, content: &str) -> Vec<Finding> {
+    if content.contains(AUTHZ_PARITY_ADR_PATH) {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::AuthzParityBoundary,
+            format!("{path}:{AUTHZ_PARITY_ADR_PATH}"),
+            "tenancy and PDP ADR docs must link to the authz parity boundary ADR",
+        )]
+    }
+}
+
+fn scan_authz_forbidden_claims(path: &str, content: &str) -> Vec<Finding> {
+    AUTHZ_PARITY_FORBIDDEN_CLAIMS
+        .iter()
+        .map(|claim| (*claim, normalize_claim_text(claim)))
+        .flat_map(|claim| {
+            content
+                .lines()
+                .enumerate()
+                .filter(move |(_, line)| normalize_claim_text(line).contains(&claim.1))
+                .map(move |(idx, _)| {
+                    finding(
+                        Rule::StaleCloseoutWording,
+                        format!("{path}:{}", idx + 1),
+                        format!(
+                            "authz parity docs must avoid misleading product/API compatibility claim: {}",
+                            claim.0
+                        ),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn normalize_claim_text(content: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_space = true;
+    for ch in content.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                normalized.push(lower);
+            }
+            previous_space = false;
+        } else if !previous_space {
+            normalized.push(' ');
+            previous_space = true;
+        }
+    }
+    normalized.trim().to_string()
+}
+
 fn check_stale_closeout_wording(root: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     for pattern in STALE_CLOSEOUT_PATTERNS {
@@ -862,6 +1154,126 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
     }
 
     #[test]
+    fn authz_parity_adr_requires_matrix_dimensions_and_claims() {
+        let findings = scan_authz_parity_adr("OPA\nCedar\nSpiceDB\nOpenFGA\nCasbin\nRSS\n");
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::AuthzParityBoundary
+                    && finding.subject.contains("PostgreSQL RLS")
+            }),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::AuthzParityBoundary
+                    && finding.subject.contains("policy model")
+            }),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::AuthzParityBoundary
+                    && finding.subject.contains(
+                        "same security objective carried by RSS typed/in-process mechanisms",
+                    )
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn authz_parity_adr_requires_structured_matrix_rows() {
+        let content = format!(
+            "{}\n{}\n{}\n",
+            AUTHZ_PARITY_FRAMEWORKS.join("\n"),
+            AUTHZ_PARITY_DIMENSIONS.join("\n"),
+            AUTHZ_PARITY_REQUIRED_CLAIMS.join("\n"),
+        );
+        let findings = scan_authz_parity_adr(&content);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.contains("matrix-row:OPA")),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.contains("matrix-header:policy model")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn authz_parity_adr_requires_rss_row_security_boundaries() {
+        let matrix_without_service_token_binding = r#"
+same security objective carried by RSS typed/in-process mechanisms
+no external PDP process
+no Rego runtime
+no Cedar/Casbin DSL runtime
+no SpiceDB/OpenFGA tuple graph service
+RLS does not replace RouteAuthorizer
+ABAC is not the tenant boundary
+
+| framework | policy model | decision evaluation | relationship/attribute source | tenant isolation | row/field obligation | auditability | governance gate | operational tradeoff | rss position |
+|-----------|--------------|---------------------|-------------------------------|------------------|----------------------|--------------|-----------------|----------------------|--------------|
+| OPA | Rego | sidecar | data | context | structured data | decision log | tests | infra | ref |
+| Cedar | PARC | embedded | entities | context | diagnostics | response | schema | DSL | ref |
+| SpiceDB | graph | check | tuples | namespace | caveats | tokens | schema | service | ref |
+| OpenFGA | model | check | tuples | store | conditions | history | validation | service | ref |
+| Casbin | PERM | enforcer | adapter | domain | boolean | logs | syntax | matcher | ref |
+| PostgreSQL RLS | SQL policy | database | rows | FORCE RLS | rows only | database audit | schema-rls | data only | ref |
+| RSS | typed permission | RouteAuthorizer and diport::Pdp | verified principal | typed TenantId, SET LOCAL rss.tenant_id, FORCE RLS, non-bypass serving role | RowVisibility and ResourceProjection | durable audit | codegen and xtask | typed local boundary | reference implementation |
+"#;
+        let findings = scan_authz_parity_adr(matrix_without_service_token_binding);
+        assert!(
+            findings.iter().any(|finding| {
+                finding
+                    .subject
+                    .contains("rss-boundary:service-token tenant binding")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn authz_parity_docs_must_link_boundary_adr() {
+        let findings = scan_authz_required_reference("docs/rules/tenancy.md", "RouteAuthorizer");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::AuthzParityBoundary);
+    }
+
+    #[test]
+    fn authz_parity_forbidden_claims_are_reported() {
+        let findings = scan_authz_forbidden_claims(
+            "docs/architecture/adr.md",
+            "This is an OPA/Rego compatible drop-in replacement.",
+        );
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::StaleCloseoutWording),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn authz_parity_forbidden_claim_variants_are_reported() {
+        let findings = scan_authz_forbidden_claims(
+            "docs/architecture/adr.md",
+            "Full parity. OPA Rego compatible. RLS-alone solves Tenancy.",
+        );
+        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::StaleCloseoutWording),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn green_fixture_has_no_findings() {
         assert!(scan_plan_membership("ci", VERIFY_CI_REQUIRED_GATES).is_empty());
 
@@ -902,5 +1314,30 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
             detail: "stale",
         };
         assert!(scan_forbidden_pattern(&pattern, "final status").is_empty());
+
+        let authz_adr_fixture = format!(
+            r#"{}
+
+| framework | policy model | decision evaluation | relationship/attribute source | tenant isolation | row/field obligation | auditability | governance gate | operational tradeoff | rss position |
+|-----------|--------------|---------------------|-------------------------------|------------------|----------------------|--------------|-----------------|----------------------|--------------|
+| OPA | Rego | sidecar/server | input/data | context convention | structured result | decision log | policy tests | extra infra | reference |
+| Cedar | PARC | embedded authorizer | entities | context convention | diagnostics | response | schema | policy runtime | reference |
+| SpiceDB | relationship graph | graph check | tuples | namespace convention | caveats | tracing | schema | graph service | reference |
+| OpenFGA | authorization model | API check | tuples | store convention | conditions | history | model validation | service dependency | reference |
+| Casbin | PERM | enforcer | adapter | domain convention | boolean | logs | model syntax | matcher DSL | reference |
+| PostgreSQL RLS | SQL policy | database | rows | FORCE RLS and SET LOCAL rss.tenant_id | row filtering | database audit | schema-rls | data boundary only | reference |
+| RSS | typed permission | RouteAuthorizer and credential verification via diport::Pdp | verified principal and route metadata | typed TenantId, service-token tenant binding, SET LOCAL rss.tenant_id, FORCE RLS, non-bypass serving role | RowVisibility and ResourceProjection | durable audit | codegen and xtask | typed local boundary | reference implementation |
+"#,
+            AUTHZ_PARITY_REQUIRED_CLAIMS.join("\n"),
+        );
+        assert!(scan_authz_parity_adr(&authz_adr_fixture).is_empty());
+        assert!(
+            scan_authz_required_reference("docs/rules/tenancy.md", AUTHZ_PARITY_ADR_PATH)
+                .is_empty()
+        );
+        assert!(
+            scan_authz_forbidden_claims("docs/architecture/adr.md", "explicit deviation")
+                .is_empty()
+        );
     }
 }

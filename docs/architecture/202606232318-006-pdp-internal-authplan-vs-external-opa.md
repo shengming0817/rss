@@ -12,6 +12,9 @@
 > `verify_jwt` / `verify_service_token` verify→mint bridge 已落地；`rss_pdp_impl_adapter_only`
 > 已注册为 dylint gate。下文把 `Pdp` port / verified newtype 描述为 future 的段落保留为
 > 2026-06-23 历史裁决背景，不再代表当前 AuthZ closeout 状态。是否引外置 OPA 的切换判据仍有效。
+> 开源授权对标边界由
+> `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md` 统一解释：RSS 追求安全目标等价，
+> 不承诺外部 PDP 产品、API 或策略语言运行时兼容。
 
 ---
 

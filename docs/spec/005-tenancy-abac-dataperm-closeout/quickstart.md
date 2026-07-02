@@ -12,14 +12,30 @@ cargo test --workspace
 ## Focused Checks
 
 ```bash
+cargo test -p xtask tenancy_closeout
+cargo xtask tenancy-closeout
+cargo xtask doc-contracts
+cargo xtask archrules verify
+cargo xtask defer-gate
 cargo xtask schema-rls
 cargo xtask setlocal-funnel
 cargo xtask pg-tenant-tx-guard
-cargo xtask tenancy-closeout
-cargo test -p xtask tenancy_closeout
 cargo test -p postgres --features integration
 cargo test -p identity
 cargo test -p authn
+```
+
+## Docs / Governance Only PBIs
+
+For documentation boundary PBIs such as #1587, use the no-compile governance lane unless Rust behavior changes:
+
+```bash
+cargo test -p xtask tenancy_closeout
+cargo xtask tenancy-closeout
+cargo xtask doc-contracts
+cargo xtask archrules verify
+cargo xtask defer-gate
+cargo xtask verify --fast
 ```
 
 ## Security Scenarios To Re-run Per PR
@@ -32,3 +48,5 @@ cargo test -p authn
 - `RowScope::All` cannot be issued without durable audit success.
 - Active routes without AuthZ mode are rejected.
 - Sensitive read fields remain masked by default.
+- Open-source AuthZ parity remains documented as RSS typed/in-process safety-objective equivalence in
+  `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`.

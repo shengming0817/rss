@@ -8,7 +8,7 @@
 
 **Organization**: Each user story maps to one or more PR-sized PBI work items. Every PBI is independently trackable in Azure Boards.
 
-**Tracking**: Feature #1576; child PBI #1577, #1579, #1580, #1581, #1582, #1583, #1584, #1585, #1586.
+**Tracking**: Feature #1576; child PBI #1577, #1579, #1580, #1581, #1582, #1583, #1584, #1585, #1586, #1587.
 
 ## Phase 1: Setup (Shared Infrastructure)
 
@@ -114,6 +114,19 @@
 - [x] T035 [P] [US6] Update docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md with final verification commands
 - [x] T036 [US6] Run cargo fmt, cargo xtask verify, and cargo test --workspace for the feature closeout PR
 
+---
+
+## Phase 9: User Story 6 - Open-source AuthZ Parity Boundary (Priority: P2)
+
+**Goal**: Make #1587's open-source parity boundary auditable without adding an external PDP process or policy-language runtime.
+
+**Independent Test**: `cargo xtask tenancy-closeout` fails if ADR-014, the required comparison targets/dimensions, the `tenancy.md` link, or the ADR-006 link disappear.
+
+- [x] T037 [US6] Add ADR-014 open-source AuthZ parity matrix under `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`
+- [x] T038 [US6] Link ADR-014 from `docs/rules/tenancy.md` and ADR-006, locking `diport::Pdp` vs `RouteAuthorizer` terminology
+- [x] T039 [US6] Extend `xtask/src/tenancy_closeout.rs` with required ADR/matrix anchors and misleading-claim checks
+- [x] T040 [US6] Record the #1587 research/verification path in this spec artifact
+
 ## Dependencies
 
 ```text
@@ -135,3 +148,4 @@ US2 -> US6
 1. MVP: complete PR1-PR4 to close tenant runtime isolation and outbox tenant ordering risk.
 2. Data-permission upgrade: complete PR5-PR8 for RowScope, ABAC route wiring, and FieldMask projection.
 3. Closeout: complete PR9 with documentation, ADR references, and reverse self-checks.
+4. Parity boundary: complete #1587 with ADR-014 plus `tenancy-closeout` guard coverage.

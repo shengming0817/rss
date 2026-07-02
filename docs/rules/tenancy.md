@@ -250,6 +250,25 @@ role binding 命中，普通 user/device/service 不享有该兜底。
 派生的 `RowScope` 决定；写端点没有 RowScope 维度，必须依赖 typed tenant 参数和 FORCE
 RLS 维护 tenant 边界。
 
+## Open-source AuthZ parity boundary
+
+开源授权对标边界单源见
+`docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`。RSS 只承诺同一安全目标由
+typed / in-process 机制承载，不承诺第三方产品、API 或策略语言兼容。
+
+术语固定如下：
+
+- `diport::Pdp` 是 credential verification / claims port，负责验签、校验 claims 并产出已验证身份材料。
+- `httpserve::RouteAuthorizer` 是 route authorization 决策入口，负责 contract-derived permission / resource /
+  self-scoped gate。
+- tenant isolation 是 typed `TenantId` + service-token tenant binding + `SET LOCAL rss.tenant_id` funnel +
+  FORCE RLS + non-bypass serving role 的组合边界。
+- `RowVisibility` / `ResourceProjection` 是 RSS sealed obligation；OPA、Cedar、Casbin、SpiceDB、OpenFGA 或
+  PostgreSQL RLS 的对标能力不得被描述成这些类型的运行时兼容层。
+
+边界不变：RLS does not replace RouteAuthorizer；ABAC is not the tenant boundary。租户 durable policy 可影响
+coarse route allow / deny，但不能扩大 tenant rows、跨租户可见性或字段明文投影。
+
 ## Durable ABAC policy store
 
 ABAC policy store 是 tenant-scoped durable PG store：每条 policy 必须带 `tenant_id`，
@@ -334,6 +353,9 @@ HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必
 - 字段级数据权限必须从 contract projection fields 派生到 generated spec，经
   `RouteAuthorizationDecision::AllowWithProjection` 传入 `ResourceProjection`，并由 audit read
   response rendering 消费；缺 projection 时敏感字段默认 mask。
+- open-source AuthZ parity boundary 必须在
+  `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md` 记录，且本规则文件与
+  ADR-006 必须引用该 ADR。
 - tenant/AuthZ/projection dylint 注册清单必须在根 `Cargo.toml`、`lints/Cargo.toml`、
   `docs/rules/architecture.md` 和 `lints/README.md` 中一致。
 - governed closeout docs 不得把 #1577-#1585 已完成的 tenant/RLS/AuthZ/projection 项继续描述成

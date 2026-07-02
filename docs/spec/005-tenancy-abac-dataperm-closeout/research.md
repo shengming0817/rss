@@ -40,3 +40,16 @@
 **Decision**: Column-level masking belongs in sealed projection/resource view types, not ad hoc serde/handler conditionals.
 
 **Rationale**: Field visibility is not row visibility. A sealed projection creates a single consumer path for PDP masking obligations.
+
+## Decision 7: Define open-source AuthZ parity as safety-objective equivalence
+
+**Decision**: RSS documents OPA, Cedar, SpiceDB/OpenFGA, Casbin, and PostgreSQL RLS as comparison targets, while keeping the runtime boundary in RSS typed / in-process mechanisms. The boundary source is
+`docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`.
+
+**Rationale**: GoCell #1337 and RSS both avoid a separate OPA/SpiceDB/OpenFGA process for this slice. A parity matrix is still needed so reviewers can see which security objectives are carried by `RouteAuthorizer`, `diport::Pdp`, typed tenant/RLS gates, audited RowScope, and sealed `ResourceProjection`, and which capabilities remain separate tracked gaps.
+
+**Alternatives considered**:
+
+- Adopt a third-party PDP runtime now. Rejected because #1587 is a boundary/documentation PBI and ADR-006 keeps the external PDP switch behind explicit trigger criteria.
+- Treat ABAC as the tenant data boundary. Rejected because tenant isolation remains typed tenant + RLS + serving-role governance, and policy failures must not widen row visibility.
+- Treat RLS as route authorization. Rejected because route permission/resource decisions remain the responsibility of `RouteAuthorizer`.
