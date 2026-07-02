@@ -1,7 +1,10 @@
 //! PostgreSQL DLQ inspection/replay adapter (#1214).
 
 use diport::key_provider::{KeyProviderError, KeyProviderErrorKind};
-use diport::{DeadLetterSource, KEY_TENANT_ID};
+use diport::{
+    DeadLetterSource, EnvelopeSchemaHash, EnvelopeSchemaVersion, KEY_SCHEMA_HASH,
+    KEY_SCHEMA_VERSION, KEY_TENANT_ID,
+};
 use eventexec::{
     DlqEntryKind, DlqEntrySummary, DlqError, DlqListQuery, DlqListResult, DlqRedriveOutcome,
     DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqStore,
@@ -12,6 +15,8 @@ use crate::cotx::PgTenantPool;
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 use crate::outbox::{STATUS_DLX, STATUS_PENDING};
 
+const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
+const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
 #[cfg(test)]
 const LIST_DEAD_LETTER_BIND_COUNT: u32 = 9;
 const LIST_DEAD_LETTER_SQL: &str = r#"
@@ -97,15 +102,26 @@ impl DlqStore for PgDlqStore {
                         .await
                         .map_err(db_error("replay.fetch_dead_letter"))?;
 
-                        let Some((source, message_id, domain, contract_id, original_entry, key_ref, topic, consumer_group, metadata)) =
-                            row
+                        let Some((
+                            source,
+                            message_id,
+                            domain,
+                            contract_id,
+                            original_entry,
+                            key_ref,
+                            topic,
+                            consumer_group,
+                            metadata,
+                        )) = row
                         else {
                             return Err(DlqError::NotFound);
                         };
 
                         match parse_source(&source)? {
-                            DeadLetterSource::Consumer | DeadLetterSource::Saga => {}
-                            DeadLetterSource::Legacy | DeadLetterSource::OutboxRelay => {
+                            DeadLetterSource::Consumer => {}
+                            DeadLetterSource::Legacy
+                            | DeadLetterSource::OutboxRelay
+                            | DeadLetterSource::Saga => {
                                 return Err(DlqError::NotReplayable);
                             }
                         }
@@ -133,6 +149,7 @@ impl DlqStore for PgDlqStore {
                                     err,
                                 )
                             })?;
+                        let (contract_version, schema_hash) = replay_schema_columns(&metadata)?;
                         let metadata = replay_metadata(
                             metadata,
                             request.tenant(),
@@ -142,8 +159,11 @@ impl DlqStore for PgDlqStore {
 
                         let result = sqlx::query(
                             r#"
-                            INSERT INTO outbox (event_id, tenant_id, domain, topic, contract_id, payload, metadata, status)
-                            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8)
+                            INSERT INTO outbox (
+                                event_id, tenant_id, domain, topic, contract_id,
+                                contract_version, schema_hash, payload, metadata, status
+                            )
+                            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
                             ON CONFLICT (event_id) DO NOTHING
                             "#,
                         )
@@ -152,6 +172,8 @@ impl DlqStore for PgDlqStore {
                         .bind(domain)
                         .bind(topic)
                         .bind(contract_id)
+                        .bind(contract_version)
+                        .bind(schema_hash)
                         .bind(payload)
                         .bind(metadata.to_string())
                         .bind(STATUS_PENDING)
@@ -290,9 +312,19 @@ impl PgDlqStore {
                                    o.contract_id,
                                    o.topic,
                                    octet_length(o.payload)::bigint,
+                                   COALESCE(dl.metadata ->> $8, dl.error_summary, $9),
                                    o.retry_count,
                                    EXTRACT(EPOCH FROM o.updated_at)::bigint
                             FROM outbox o
+                            LEFT JOIN LATERAL (
+                                SELECT dl.error_summary, dl.metadata
+                                FROM dead_letter dl
+                                WHERE dl.tenant_id = o.tenant_id
+                                  AND dl.message_id = o.event_id
+                                  AND dl.source_kind = $10
+                                ORDER BY dl.last_attempt_at DESC, dl.id DESC
+                                LIMIT 1
+                            ) dl ON true
                             WHERE o.status = $1
                               AND o.tenant_id = $2::uuid
                               AND ($3::text IS NULL OR o.domain = $3)
@@ -310,7 +342,7 @@ impl PgDlqStore {
                                     )
                               )
                             ORDER BY o.updated_at DESC, o.event_id ASC
-                            LIMIT $8
+                            LIMIT $11
                             "#,
                         )
                         .bind(STATUS_DLX)
@@ -320,6 +352,9 @@ impl PgDlqStore {
                         .bind(DlqEntryKind::OutboxDlx.cursor_part())
                         .bind(cursor_kind)
                         .bind(cursor_id)
+                        .bind(KEY_RELAY_FAILURE_REASON)
+                        .bind(OUTBOX_RELAY_DLX_FALLBACK_SUMMARY)
+                        .bind(DeadLetterSource::OutboxRelay.as_str())
                         .bind(limit)
                         .fetch_all(&mut *conn)
                         .await
@@ -360,7 +395,7 @@ type ReplayDeadLetterRow = (
     Option<String>,
     serde_json::Value,
 );
-type OutboxRow = (String, String, String, String, i64, i32, i64);
+type OutboxRow = (String, String, String, String, i64, String, i32, i64);
 
 trait DeadLetterRowExt {
     fn into_summary(
@@ -413,7 +448,7 @@ trait OutboxRowExt {
 
 impl OutboxRowExt for OutboxRow {
     fn into_summary(self, tenant: vocab::TenantId) -> Result<DlqEntrySummary, DlqError> {
-        let (event_id, domain, contract_id, topic, payload_len, attempts, ts) = self;
+        let (event_id, domain, contract_id, topic, payload_len, summary, attempts, ts) = self;
         Ok(DlqEntrySummary::new(
             DlqEntryKind::OutboxDlx,
             event_id.clone(),
@@ -425,7 +460,7 @@ impl OutboxRowExt for OutboxRow {
             topic,
             None,
             u64_from_i64(payload_len)?,
-            "outbox relay dlx",
+            summary,
             u32::try_from(attempts).map_err(|_| DlqError::Store)?,
             ts,
         ))
@@ -455,6 +490,26 @@ fn replay_metadata(
         serde_json::Value::String(original_message_id.to_string()),
     );
     serde_json::Value::Object(map)
+}
+
+fn replay_schema_columns(metadata: &serde_json::Value) -> Result<(String, String), DlqError> {
+    let Some(obj) = metadata.as_object() else {
+        return Err(DlqError::InvalidSchemaHeaders);
+    };
+    let Some(version) = obj
+        .get(KEY_SCHEMA_VERSION)
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Err(DlqError::InvalidSchemaHeaders);
+    };
+    let Some(hash) = obj.get(KEY_SCHEMA_HASH).and_then(serde_json::Value::as_str) else {
+        return Err(DlqError::InvalidSchemaHeaders);
+    };
+    let version = EnvelopeSchemaVersion::parse(version.to_string())
+        .map_err(|_| DlqError::InvalidSchemaHeaders)?;
+    let hash =
+        EnvelopeSchemaHash::parse(hash.to_string()).map_err(|_| DlqError::InvalidSchemaHeaders)?;
+    Ok((version.as_str().to_string(), hash.as_str().to_string()))
 }
 
 fn parse_source(raw: &str) -> Result<DeadLetterSource, DlqError> {
@@ -529,6 +584,50 @@ mod tests {
     }
 
     #[test]
+    fn replay_schema_columns_round_trips_valid_headers() -> Result<(), DlqError> {
+        let metadata = serde_json::json!({
+            "schemaVersion": "v1",
+            "schemaHash": "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516"
+        });
+        let columns = replay_schema_columns(&metadata)?;
+        assert_eq!(
+            columns,
+            (
+                "v1".to_string(),
+                "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516"
+                    .to_string()
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_schema_columns_rejects_missing_or_invalid_headers_as_schema_headers() {
+        for metadata in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({ "schemaHash": "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516" }),
+            serde_json::json!({ "schemaVersion": "v1" }),
+            serde_json::json!({
+                "schemaVersion": "1",
+                "schemaHash": "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516"
+            }),
+            serde_json::json!({
+                "schemaVersion": "v1",
+                "schemaHash": "sha256:999D2B098E6C89DE6D1841416099942CAD21279843456DFC287B1FCAA67A7516"
+            }),
+        ] {
+            assert!(
+                matches!(
+                    replay_schema_columns(&metadata),
+                    Err(DlqError::InvalidSchemaHeaders)
+                ),
+                "metadata should be invalid replay schema headers: {metadata}"
+            );
+        }
+    }
+
+    #[test]
     fn list_dead_letter_sql_placeholders_match_bind_count() {
         assert_eq!(
             max_pg_placeholder(LIST_DEAD_LETTER_SQL),
@@ -548,11 +647,13 @@ mod tests {
             "contract-session".to_string(),
             "session.created".to_string(),
             9,
+            "envelope_invalid_schema_hash".to_string(),
             10,
             1_700_000_000,
         );
         let summary = row.into_summary(tenant).expect("summary");
         assert_eq!(summary.kind(), DlqEntryKind::OutboxDlx);
+        assert_eq!(summary.error_summary(), "envelope_invalid_schema_hash");
         assert_eq!(summary.payload_len(), 9);
         assert!(!format!("{summary:?}").contains("payload:"));
     }

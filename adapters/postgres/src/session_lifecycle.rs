@@ -75,7 +75,8 @@ impl SessionLifecycle for PgSessionLifecycle {
         // 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at 由
         // `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1）；trace / correlation 经 sealed
         // setter（源待 #1296）、principal 待 #1296——业务侧均不可伪造（同 PgEmitter）。
-        let (contract, env_tenant, subject_id, actor, partition_key) = envelope.into_parts();
+        let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
+            envelope.into_parts();
         let tenant = session.tenant();
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
@@ -89,7 +90,8 @@ impl SessionLifecycle for PgSessionLifecycle {
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )
-        .with_partition_key_opt(partition_key);
+        .with_partition_key_opt(partition_key)
+        .with_causation_id_opt(causation_id);
         self.pool
             .co_tx_with_outbox(
                 tenant,

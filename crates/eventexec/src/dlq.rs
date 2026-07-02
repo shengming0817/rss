@@ -458,6 +458,8 @@ pub enum DlqError {
     NotReplayable,
     #[error("dlq entry payload is invalid")]
     InvalidPayload,
+    #[error("dlq entry schema headers are invalid")]
+    InvalidSchemaHeaders,
     #[error("dlq payload key provider is unavailable")]
     PayloadKeyUnavailable,
     #[error("dlq payload key provider rejected configuration or authorization")]

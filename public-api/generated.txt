@@ -97,7 +97,7 @@ pub fn generated::command::CommandEmit::emit<R: serde_core::ser::Serialize + cor
 pub trait generated::command::CommandRegister
 pub type generated::command::CommandRegister::Outcome
 pub type generated::command::CommandRegister::Output
-pub fn generated::command::CommandRegister::register<R, H, Fut>(&mut self, &'static str, &'static str, H) -> Self::Output where R: for<'de> serde_core::de::Deserialize<'de> + core::marker::Send + 'static, H: core::ops::function::Fn(R) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = Self::Outcome> + core::marker::Send + 'static
+pub fn generated::command::CommandRegister::register<R, H, Fut>(&mut self, vocab::contract::binding::ContractBinding, &'static str, H) -> Self::Output where R: for<'de> serde_core::de::Deserialize<'de> + core::marker::Send + 'static, H: core::ops::function::Fn(R) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = Self::Outcome> + core::marker::Send + 'static
 pub mod generated::event
 pub mod generated::event::_seed_v1
 pub mod generated::event::_seed_v1::error
@@ -628,6 +628,8 @@ pub generated::event::SubscriptionSpec::contract_id: &'static str
 pub generated::event::SubscriptionSpec::group: &'static str
 pub generated::event::SubscriptionSpec::partition_key: &'static str
 pub generated::event::SubscriptionSpec::readiness: &'static str
+pub generated::event::SubscriptionSpec::schema_hash: &'static str
+pub generated::event::SubscriptionSpec::schema_version: &'static str
 pub generated::event::SubscriptionSpec::topic: &'static str
 impl core::clone::Clone for generated::event::SubscriptionSpec
 pub fn generated::event::SubscriptionSpec::clone(&self) -> generated::event::SubscriptionSpec
@@ -1034,6 +1036,9 @@ impl<T> typenum::type_operators::Same for generated::http::audit_v1::AuditListEn
 pub type generated::http::audit_v1::AuditListEntriesResponse::Output = T
 pub const generated::http::audit_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::CONTRACT_ID: &str
+pub const generated::http::audit_v1::PATH: &str
+pub const generated::http::audit_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1
 pub mod generated::http::identity_v1::login
 pub mod generated::http::identity_v1::login::error
@@ -1214,6 +1219,7 @@ pub type generated::http::identity_v1::login::IdentityLoginResponse::Output = T
 pub const generated::http::identity_v1::login::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::login::CONTRACT_ID: &str
 pub const generated::http::identity_v1::login::PATH: &str
+pub const generated::http::identity_v1::login::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::login::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::logout
 pub mod generated::http::identity_v1::logout::error
@@ -1389,6 +1395,7 @@ pub type generated::http::identity_v1::logout::IdentityLogoutResponse::Output = 
 pub const generated::http::identity_v1::logout::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::logout::CONTRACT_ID: &str
 pub const generated::http::identity_v1::logout::PATH: &str
+pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::logout::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::password_change
 pub mod generated::http::identity_v1::password_change::error
@@ -1565,6 +1572,7 @@ pub type generated::http::identity_v1::password_change::IdentityPasswordChangeRe
 pub const generated::http::identity_v1::password_change::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::password_change::CONTRACT_ID: &str
 pub const generated::http::identity_v1::password_change::PATH: &str
+pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::password_change::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::profile
 pub mod generated::http::identity_v1::profile::error
@@ -1817,6 +1825,7 @@ pub type generated::http::identity_v1::profile::IdentityProfileResponse::Output 
 pub const generated::http::identity_v1::profile::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::profile::CONTRACT_ID: &str
 pub const generated::http::identity_v1::profile::PATH: &str
+pub const generated::http::identity_v1::profile::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::profile::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::refresh
 pub mod generated::http::identity_v1::refresh::error
@@ -1994,6 +2003,7 @@ pub type generated::http::identity_v1::refresh::IdentityRefreshResponse::Output 
 pub const generated::http::identity_v1::refresh::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::refresh::CONTRACT_ID: &str
 pub const generated::http::identity_v1::refresh::PATH: &str
+pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::refresh::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_assign
 pub mod generated::http::identity_v1::roles_assign::error
@@ -2169,6 +2179,7 @@ pub type generated::http::identity_v1::roles_assign::IdentityRolesAssignResponse
 pub const generated::http::identity_v1::roles_assign::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_assign::CONTRACT_ID: &str
 pub const generated::http::identity_v1::roles_assign::PATH: &str
+pub const generated::http::identity_v1::roles_assign::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_assign::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_list
 pub mod generated::http::identity_v1::roles_list::defaults
@@ -2352,6 +2363,7 @@ pub type generated::http::identity_v1::roles_list::IdentityRolesListResponse::Ou
 pub const generated::http::identity_v1::roles_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_list::CONTRACT_ID: &str
 pub const generated::http::identity_v1::roles_list::PATH: &str
+pub const generated::http::identity_v1::roles_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_revoke
 pub mod generated::http::identity_v1::roles_revoke::error
@@ -2528,6 +2540,7 @@ pub type generated::http::identity_v1::roles_revoke::IdentityRolesRevokeResponse
 pub const generated::http::identity_v1::roles_revoke::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_revoke::CONTRACT_ID: &str
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
+pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v1
 pub mod generated::http::settings_v1::error
@@ -2707,6 +2720,7 @@ pub type generated::http::settings_v1::SettingsConfigPublishResponse::Output = T
 pub const generated::http::settings_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v1::CONTRACT_ID: &str
 pub const generated::http::settings_v1::PATH: &str
+pub const generated::http::settings_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v1::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v2
 pub mod generated::http::settings_v2::error
@@ -2886,6 +2900,7 @@ pub type generated::http::settings_v2::SettingsSecretPublishResponse::Output = T
 pub const generated::http::settings_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v2::CONTRACT_ID: &str
 pub const generated::http::settings_v2::PATH: &str
+pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v2::SPEC: generated::http::HttpSpec
 pub enum generated::http::HttpAuthMode
 pub generated::http::HttpAuthMode::Bootstrap
@@ -3063,6 +3078,50 @@ impl<T> core::convert::From<T> for generated::http::HttpHeaderSpec
 pub fn generated::http::HttpHeaderSpec::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::http::HttpHeaderSpec
 pub type generated::http::HttpHeaderSpec::Output = T
+pub struct generated::http::HttpProjectionFieldSpec
+pub generated::http::HttpProjectionFieldSpec::field: vocab::projection::ProjectionField
+pub generated::http::HttpProjectionFieldSpec::obligation_key: &'static str
+pub generated::http::HttpProjectionFieldSpec::permission: &'static str
+impl core::clone::Clone for generated::http::HttpProjectionFieldSpec
+pub fn generated::http::HttpProjectionFieldSpec::clone(&self) -> generated::http::HttpProjectionFieldSpec
+impl core::cmp::Eq for generated::http::HttpProjectionFieldSpec
+impl core::cmp::PartialEq for generated::http::HttpProjectionFieldSpec
+pub fn generated::http::HttpProjectionFieldSpec::eq(&self, &generated::http::HttpProjectionFieldSpec) -> bool
+impl core::fmt::Debug for generated::http::HttpProjectionFieldSpec
+pub fn generated::http::HttpProjectionFieldSpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::HttpProjectionFieldSpec
+impl core::marker::StructuralPartialEq for generated::http::HttpProjectionFieldSpec
+impl core::marker::Freeze for generated::http::HttpProjectionFieldSpec
+impl core::marker::Send for generated::http::HttpProjectionFieldSpec
+impl core::marker::Sync for generated::http::HttpProjectionFieldSpec
+impl core::marker::Unpin for generated::http::HttpProjectionFieldSpec
+impl core::marker::UnsafeUnpin for generated::http::HttpProjectionFieldSpec
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpProjectionFieldSpec
+impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpProjectionFieldSpec
+impl<T, U> core::convert::Into<U> for generated::http::HttpProjectionFieldSpec where U: core::convert::From<T>
+pub fn generated::http::HttpProjectionFieldSpec::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::HttpProjectionFieldSpec where U: core::convert::Into<T>
+pub type generated::http::HttpProjectionFieldSpec::Error = core::convert::Infallible
+pub fn generated::http::HttpProjectionFieldSpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::HttpProjectionFieldSpec where U: core::convert::TryFrom<T>
+pub type generated::http::HttpProjectionFieldSpec::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::HttpProjectionFieldSpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::HttpProjectionFieldSpec where T: core::clone::Clone
+pub type generated::http::HttpProjectionFieldSpec::Owned = T
+pub fn generated::http::HttpProjectionFieldSpec::clone_into(&self, &mut T)
+pub fn generated::http::HttpProjectionFieldSpec::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::HttpProjectionFieldSpec where T: 'static + ?core::marker::Sized
+pub fn generated::http::HttpProjectionFieldSpec::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::HttpProjectionFieldSpec where T: ?core::marker::Sized
+pub fn generated::http::HttpProjectionFieldSpec::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::HttpProjectionFieldSpec where T: ?core::marker::Sized
+pub fn generated::http::HttpProjectionFieldSpec::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::HttpProjectionFieldSpec where T: core::clone::Clone
+pub unsafe fn generated::http::HttpProjectionFieldSpec::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::HttpProjectionFieldSpec
+pub fn generated::http::HttpProjectionFieldSpec::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::HttpProjectionFieldSpec
+pub type generated::http::HttpProjectionFieldSpec::Output = T
 pub struct generated::http::HttpSpec
 pub generated::http::HttpSpec::auth: generated::http::HttpAuthSpec
 pub generated::http::HttpSpec::contract: vocab::contract::binding::ContractBinding
@@ -3070,6 +3129,7 @@ pub generated::http::HttpSpec::contract_id: &'static str
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]
 pub generated::http::HttpSpec::method: &'static str
 pub generated::http::HttpSpec::path: &'static str
+pub generated::http::HttpSpec::projection_fields: &'static [generated::http::HttpProjectionFieldSpec]
 pub generated::http::HttpSpec::resource: core::option::Option<&'static str>
 pub generated::http::HttpSpec::self_scoped: bool
 impl core::clone::Clone for generated::http::HttpSpec

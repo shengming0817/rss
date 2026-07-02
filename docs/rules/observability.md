@@ -254,14 +254,15 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 
 trace、correlation、principal、occurred_at、schemaVersion、schemaHash 等 reserved envelope 字段由 **adapter 在受控构造点经
 sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；schema 字段来自 generated
-`vocab::ContractBinding`；同 crate 时间编码
+`vocab::ContractBinding`，并同源落 outbox `contract_version` / `schema_hash` 物理列；同 crate 时间编码
 单源）。`consistency::Entry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
 在 `diport`，`consistency` 不可依赖之）。注入源现状（#1296 分链）：
 
 - `occurred_at`：✅ 取注入 `Clock`（构造期必填，见下）。
 - `schemaVersion` / `schemaHash`：✅ 取 generated `CONTRACT`（`version()` / `schema_hash()`）并在
-  `OutboxMetadata::new(occurred_at, tenant, contract)` 构造期写入。缺失或非法时
-  `diport::EnvelopeHeader::try_from_metadata` fail-closed；`trace` / `correlation` 仍 fail-open。
+  `OutboxMetadata::new(occurred_at, tenant, contract)` 构造期写入 metadata，同时写入 outbox
+  `contract_version` / `schema_hash` 物理列。relay 以物理列覆盖 metadata header；缺失或非法时
+  DB `NOT NULL` / CHECK 与 `diport::EnvelopeHeader::try_from_metadata` fail-closed；`trace` / `correlation` 仍 fail-open。
 - `correlation`：✅ **源已接线**（#1160）——`diagctx` ambient 诊断信道（httpserve correlation middleware
   解析 `X-Correlation-ID` → `diagctx::scope` 绑定；三条 outbox emit 构造点经 `diagctx::correlation()`
   **fail-open** 读回 → `OutboxMetadata::with_correlation`）。按 ADR-002 §D1-bis 走独立可读诊断信道，**非**
@@ -272,19 +273,21 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
   从当前 tracing span 导出 traceparent、`OutboxMetadata::with_trace`（#1193 sealed setter）写入 metadata 保留键；
   relay→broker header 透传（同 correlation #1160）；consumer 侧 `tracewire::restore_parent()` 还原 remote parent，
   使 handler span 与 producer 同 `trace_id`。**fail-open**：无 otel 层 / 未采样 / 畸形 traceparent ⇒ 省略 / no-op，绝不阻投递。
-- `subjectId` / `principal` / `actor`：**persisted-only**。producer 必须传 `diport::EnvelopeSubjectId`
+- `subjectId` / `principal` / `actor` / `causation_id`：**persisted-only**。producer 必须传 `diport::EnvelopeSubjectId`
   与 `diport::OutboxActor`；adapter 只把最小 opaque subject / actor 写入 outbox metadata，用于审计、dead-letter
   和运维追溯。完整 `Principal`、email、姓名、token 等 PII 不得进入 metadata；这些字段也永不进入 AMQP header /
-  MQTT user property，不能作为 broker-visible auth source。
+  MQTT user property，不能作为 broker-visible auth source。`causation_id` 经 `diport::EnvelopeCausationId`
+  可选传入，只落 outbox `causation_id` 列，不写 metadata、日志、metrics 或 broker header。
 
 **统一 delivery envelope（#1160）**：envelope metadata 经统一类型 `diport::EnvelopeMetadata`
 （`string→string`，broker header 通用形态）；只有 transport-safe view 从 **producer→broker→consumer 全程保真**。relay 经
-`acquire_lease` 的 `UPDATE…RETURNING metadata::text` 读 `outbox.metadata` 列（**不**扩 `consistency::Entry`、
-**不**动 `poll_pending`），`hydrate_envelope_metadata` 重建后携入 `PublishRequest`；adapter publisher 映射进
+`acquire_lease` 的 `UPDATE…RETURNING metadata::text, contract_version, schema_hash` 读 outbox 行（**不**扩 `consistency::Entry`、
+**不**动 `poll_pending`），`hydrate_envelope_metadata` 重建后由物理列覆盖 `schemaVersion` / `schemaHash`，
+再携入 `PublishRequest`；adapter publisher 映射进
 broker header（AMQP `with_timestamp`(occurred_at) + transport-safe `FieldTable` headers / MQTT v5
 transport-safe `user_properties` / memory 直传）。broker-visible metadata 只能来自
 `EnvelopeMetadata::iter_transport_headers()` allowlist：`trace`、`correlation`、`occurredAt`、`tenantId`、
-`tenantAuthority`、`schemaVersion`、`schemaHash`。`subjectId` / `principal` / `actor` 与业务 free-form metadata 只可经
+`tenantAuthority`、`schemaVersion`、`schemaHash`。`subjectId` / `principal` / `actor` / `causation_id` 与业务 free-form metadata 只可经
 `iter_persisted_metadata()` 留在持久化 / dead-letter 边界，不回填 broker header。subscriber 反向只读 broker
 传来的 transport-safe 元数据，handler 经 `msg.metadata.get(..)` 消费。
 ref: Debezium Outbox Event Router（行 id + 附加列 → emitted header）、CloudEvents binary content-mode。
@@ -298,7 +301,8 @@ issuer/audience、TTL、topic、contract、message id 与 tenant 绑定；缺失
 不信任 metadata `tenantId`、不写 app DLX，释放 claim 后 broker `Reject`，并记录
 `consumer_dlx_skip_total{reason=tenant_authority_*}`。不保留 unsigned metadata tenant 兼容路径。
 
-envelope 的**契约归属**（`domain` + `contract_id` 路由列，`schemaVersion` + `schemaHash` header）由
+envelope 的**契约归属**（`domain` + `contract_id` 路由列，`contract_version` + `schema_hash` 物理列，
+发布时映射为 `schemaVersion` + `schemaHash` header）由
 **typed `vocab::ContractBinding`** 承载（#1193/#1618）：四字段同源一份 `contract.toml` + declared schema bundle，
 经 `cargo xtask codegen` 派生为 `generated::{event,http,command}::*::CONTRACT`（golden 字节锁）；
 producer 经 `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 传入。domain + contract_id +
@@ -322,7 +326,8 @@ aggregate 路由键，不需要把 tenant id 再拼进 key；跨租同 business 
 
 - **producer 不可漏接** `occurred_at` / `schemaVersion` / `schemaHash` / subject / actor：`occurred_at`
   与 schema 字段由 metadata funnel 的构造器
-  `OutboxMetadata::new(occurred_at, tenant, contract)` **必填位置参**承载；subject / actor 由
+  `OutboxMetadata::new(occurred_at, tenant, contract)` **必填位置参**承载，schema 字段同源写 outbox
+  `contract_version` / `schema_hash` 物理列；subject / actor 由
   `OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor)` 必填。新增 outbox producer 缺任一项即编译错误。
 - **业务不可伪造** reserved key（producer + wire 两侧）：
   - producer 侧（落库）：业务 free-form 写入路径（`OutboxMetadata::try_insert`）对 reserved key 集

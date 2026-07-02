@@ -57,13 +57,15 @@ AMQP header / MQTT user property 中的 `tenantId` 不是授权凭据；消费�
 broker-visible delivery envelope header 的标准字段为：
 
 - `tenantId`：canonical `vocab::TenantId`，缺失或非 canonical 时消费侧 typed header fail-closed。
-- `schemaVersion`：契约版本（`v{N}`），由 generated `CONTRACT.version()` 在 outbox metadata 构造期盖章。
-- `schemaHash`：声明 schema bundle 摘要（`sha256:<64 lowercase hex>`），由 generated `CONTRACT.schema_hash()` 在 outbox metadata 构造期盖章。
+- `schemaVersion`：契约版本（`v{N}`），由 generated `CONTRACT.version()` 同源写入 outbox
+  `contract_version` 物理列；relay 以该列覆盖 metadata header 后发布。
+- `schemaHash`：声明 schema bundle 摘要（`sha256:<64 lowercase hex>`），由 generated
+  `CONTRACT.schema_hash()` 同源写入 outbox `schema_hash` 物理列；relay 以该列覆盖 metadata header 后发布。
 - `occurredAt`：事件发生 unix 秒，producer 注入 `Clock` 后写入；缺失或非法只影响观测时间，不参与 relay 查询谓词。
 - `trace` / `correlation`：观测字段，缺失或畸形 fail-open，不阻断投递。
 - `tenantAuthority`：relay 签发的租户权威 token；消费侧写 app DLX 前必须验签。
 
-`subjectId` / `actor` / `principal` 与业务 free-form metadata 是 persisted-only，不进 AMQP header / MQTT
+`subjectId` / `actor` / `principal` / `causation_id` 与业务 free-form metadata 是 persisted-only，不进 AMQP header / MQTT
 user property。业务写入口 `EnvelopeMetadata::try_insert` 对所有 reserved key fail-closed；adapter 只在
 outbox relay/subscriber rehydrate 的受控路径调用 `insert_wire_pair`。
 
@@ -261,14 +263,16 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   `(last_attempt_epoch_secs DESC, kind, id)` keyset cursor，调用方必须用它稳定续页，不能用 offset 或假设一次
   `Vec` 即完整队列。
 - 当前只提供内部 Rust API：`eventexec::DlqStore` + `PgInfraDeps::dlq()`。CLI / HTTP 管控面不在本轮。
-- Consumer/saga `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
+- Consumer `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
   `IdemKey`，由同一 `KeyProvider` 解密原 payload 后插入一条新的 outbox 行；不得删除原 `dead_letter`，
-  不得重置 `inbox_dedup done`，不得直接 broker replay。Outbox relay DLX redrive 同样必须传
+  不得重置 `inbox_dedup done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
+  并写入 outbox `contract_version` / `schema_hash` 物理列；缺失或非法 fail-closed。Outbox relay DLX redrive 同样必须传
   `OperatorDlqCapability`，只恢复原 outbox 行为 `pending`；outbox DLX payload 副本保留在 `dead_letter`
-  用于审计，不参与 redrive。`OperatorDlqCapability::issue_for_authorized_operator()` 只能在 admin/PDP 边界
-  签发，调用点由 dylint `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；replay decrypt
-  只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与 `Forbidden/NotFound`
-  保留为 operator 可区分的依赖/配置错误。
+  用于审计，不参与 redrive。Saga `dead_letter` 只作审计与诊断，不支持 replay 成 outbox；生产 saga DLQ
+  当前没有 contract schema source，强行 replay 会绕过 schema 列权威性。`OperatorDlqCapability::issue_for_authorized_operator()`
+  只能在 admin/PDP 边界签发，调用点由 dylint `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；
+  replay decrypt 只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与
+  `Forbidden/NotFound` 保留为 operator 可区分的依赖/配置错误。
 - PG outbox relay claim **与** consumer inbox claim 均写入 lease/fencing token；所有状态回写（commit / extend /
   release）以 lease 做 CAS。inbox lease 带 TTL，过期可重捞（crash-recovery），长 handler 经 `extend` 续租（#1213）。
 - crash-after-claim 后消息最多延迟 `INBOX_LEASE_TTL_SECONDS`（当前 60s）才被 TTL 重捞重跑（此前是永久静默丢失）；该上界当前不可按消费者配置，低延迟工作流需关注。
@@ -286,7 +290,7 @@ producer 与 consumer **双侧**都收口到 codegen typed API。五层 funnel�
 业务/组合根
   → generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)
       // per-command wrapper（codegen 生成）；bake CONTRACT/TOPIC + 锁 typed Request
-      // CONTRACT 必填（落 reserved schemaVersion/schemaHash + domain/contract_id 路由列）
+      // CONTRACT 必填（落 domain/contract_id 路由列 + contract_version/schema_hash 物理列）
       // tenant 必填（typed RLS scope，落 reserved tenantId envelope）
       // subject_id + actor 必填（typed envelope identity，persisted-only，不进 broker header）
       // idempotency_key 可选（Some→稳定 DispatchId / None→随机）
@@ -313,7 +317,7 @@ funneling 而无需依赖 runtime——组合根 bridge impl 是唯一衔接点�
 subject_id + actor + idempotency_key（后者经组合根 bridge mint DispatchId：`Some`→`from_idempotency_key`、
 `None`→随机）。`tenant` 是 `vocab::TenantId` typed scope，由 runtime 写入 reserved `tenantId`
 envelope；`contract` 是 generated `vocab::ContractBinding`，由 runtime 写入 reserved
-`schemaVersion` / `schemaHash` envelope；`subject_id` 是 `diport::EnvelopeSubjectId`，`actor` 是
+`schemaVersion` / `schemaHash` metadata 并同源落 outbox `contract_version` / `schema_hash` 列；`subject_id` 是 `diport::EnvelopeSubjectId`，`actor` 是
 `diport::OutboxActor`。`subject_id` / `actor` 由 runtime
 写入 persisted metadata，broker header / MQTT user property 不可见；组合根 bridge 只透传，不从 payload 重新派生。
 command-topic `Entry::new` 是设计上的构造收口点，但 `Entry::new` 仍 public（类型层未 sealed，见 funnel

@@ -64,7 +64,8 @@ impl OutboxEmitter for PgEmitter {
         // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接
         // 编译期不可表达）；trace / correlation 经 sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
         // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（observability.md §Outbox Envelope）。
-        let (contract, tenant, subject_id, actor, partition_key) = envelope.into_parts();
+        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+            envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
@@ -72,7 +73,8 @@ impl OutboxEmitter for PgEmitter {
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )
-        .with_partition_key_opt(partition_key);
+        .with_partition_key_opt(partition_key)
+        .with_causation_id_opt(causation_id);
         // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut TxCapability` ⇒ 必从 live transaction 铸造）。
         // 与
         // `PgStore::run_global_transaction` 同形（PgEmitter 经 share-pool 注入持 pool、非 PgStore 方法，故此处

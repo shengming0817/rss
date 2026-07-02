@@ -109,6 +109,31 @@ impl std::fmt::Debug for OpaqueActorId {
     }
 }
 
+/// outbox envelope 的 causation id（opaque persisted-only）。
+///
+/// 该字段仅用于 durable outbox 追因链落库，不进入 broker header / 日志 / metrics。约束与其它 envelope
+/// opaque id 一致：非空、最大 256 bytes，`Debug` 固定脱敏。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct EnvelopeCausationId(String);
+
+impl EnvelopeCausationId {
+    /// 从已审查的 opaque causation id 构造。
+    pub fn from_opaque(raw: impl Into<String>) -> Result<Self, EnvelopeIdentityError> {
+        parse_opaque_id(raw.into()).map(Self)
+    }
+
+    /// 借出底层字符串。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for EnvelopeCausationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EnvelopeCausationId(<redacted>)")
+    }
+}
+
 fn parse_opaque_id(raw: String) -> Result<String, EnvelopeIdentityError> {
     if raw.is_empty() {
         return Err(EnvelopeIdentityError::Empty);
@@ -191,7 +216,8 @@ impl std::fmt::Debug for OutboxActor {
 /// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain / contract_id /
 /// version / schema_hash 同源契约归属，#1193/#1618——business 不再裸 string 分别 author，杜绝 envelope header 漂移）、`tenant` 是
 /// typed 租户 scope（adapter 盖章进 reserved `tenantId`）、`subject_id` 是
-/// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`partition_key` 是可选有序投递
+/// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`causation_id` 是可选 opaque
+/// 追因链锚点（persisted-only，不进 broker header / 日志 / metrics）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`
 /// 取注入 `Clock`，#1129；trace 已接线 #1224（`tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397）。
@@ -205,7 +231,7 @@ impl std::fmt::Debug for OutboxActor {
 /// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Debug` 仅输出公开契约元数据（`contract` 的 domain / contract_id / version / schema_hash）；
 /// `subject_id` 固定渲染为 `<redacted>`；`partition_key` 只渲染 presence（Some/None），其值经 `PartitionKey`
 /// 脱敏 Debug 收口为 `<redacted>`（可能凭据级，如 tenant-scoped 含 sessionId，F3 #1211 review）。防主体标识 /
-/// 分区键经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
+/// causation id / 分区键经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
 #[derive(Clone)]
 pub struct OutboxEnvelopeParts {
     /// 契约绑定（domain + contract_id + version + schema_hash 同源；`generated::…::CONTRACT`）。
@@ -216,6 +242,8 @@ pub struct OutboxEnvelopeParts {
     subject_id: EnvelopeSubjectId,
     /// 最小化 actor view（persisted-only；不进 broker header）。
     actor: OutboxActor,
+    /// 可选 opaque causation id（persisted-only；不进 broker header / 日志 / metrics）。
+    causation_id: Option<EnvelopeCausationId>,
     /// 可选有序投递分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。
     partition_key: Option<consistency::PartitionKey>,
 }
@@ -235,8 +263,19 @@ impl OutboxEnvelopeParts {
             tenant,
             subject_id,
             actor,
+            causation_id: None,
             partition_key: None,
         }
+    }
+
+    /// 设置可选 causation id（builder，persisted-only）。
+    ///
+    /// `EnvelopeCausationId` 构造器已拒空并限制 256 bytes；adapter 仅把值落入 outbox `causation_id`
+    /// 物理列，不传播到 broker header、日志或 metrics。
+    #[must_use]
+    pub fn with_causation_id(mut self, causation_id: EnvelopeCausationId) -> Self {
+        self.causation_id = Some(causation_id);
+        self
     }
 
     /// 设置有序投递分区键（builder，#1211）。
@@ -276,7 +315,12 @@ impl OutboxEnvelopeParts {
         &self.actor
     }
 
-    /// 拆出 `(contract, tenant, subject_id, actor, partition_key)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
+    /// 借出可选 causation id（persisted-only；只读检视——生产组装走 [`OutboxEnvelopeParts::into_parts`]）。
+    pub fn causation_id(&self) -> Option<&EnvelopeCausationId> {
+        self.causation_id.as_ref()
+    }
+
+    /// 拆出 `(contract, tenant, subject_id, actor, partition_key, causation_id)` 供 adapter 组装 provider envelope（消费式，避免 borrow/move 冲突）。
     ///
     /// `partition_key` 为 `None` 时 adapter 写 `NULL`（无序并行）；`Some(key)` 时写非空字符串（串行有序）。
     pub fn into_parts(
@@ -287,6 +331,7 @@ impl OutboxEnvelopeParts {
         EnvelopeSubjectId,
         OutboxActor,
         Option<consistency::PartitionKey>,
+        Option<EnvelopeCausationId>,
     ) {
         (
             self.contract,
@@ -294,6 +339,7 @@ impl OutboxEnvelopeParts {
             self.subject_id,
             self.actor,
             self.partition_key,
+            self.causation_id,
         )
     }
 }
@@ -306,6 +352,7 @@ impl std::fmt::Debug for OutboxEnvelopeParts {
             .field("tenant", &self.tenant)
             .field("subject_id", &"<redacted>")
             .field("actor", &self.actor)
+            .field("causation_id", &self.causation_id)
             // partition_key 可能凭据级（推荐 tenant-scoped 含 sessionId）：仅渲染 presence（Some/None），
             // 值经 `PartitionKey` 的脱敏 Debug 收口为 `<redacted>`，不泄漏明文（F3，#1211 review）。
             .field("partition_key", &self.partition_key)
@@ -335,7 +382,9 @@ pub trait OutboxEmitterLocal {
 mod pii_debug {
     //! `OutboxEnvelopeParts.subject_id` Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
-    use super::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+    use super::{
+        EnvelopeCausationId, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts,
+    };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -418,6 +467,30 @@ mod pii_debug {
             "未设 partition_key 时应渲染 None: {dbg_none}"
         );
     }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn outbox_envelope_parts_debug_redacts_causation_id_value() {
+        let parts = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            tenant(),
+            subject("subj"),
+            actor(),
+        )
+        .with_causation_id(
+            EnvelopeCausationId::from_opaque("SECRET-CAUSATION").expect("opaque causation"),
+        );
+        let dbg = format!("{parts:?}");
+        assert!(
+            dbg.contains("causation_id"),
+            "causation_id presence 应可见: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "causation_id 值应脱敏: {dbg}");
+        assert!(
+            !dbg.contains("SECRET-CAUSATION"),
+            "causation_id 不得泄漏至 Debug: {dbg}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -426,7 +499,10 @@ mod partition_key_tests {
 
     use consistency::PartitionKey;
 
-    use super::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
+    use super::{
+        EnvelopeCausationId, EnvelopeIdentityError, EnvelopeSubjectId, OpaqueActorId, OutboxActor,
+        OutboxEnvelopeParts,
+    };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -463,7 +539,7 @@ mod partition_key_tests {
             actor(),
         )
         .with_partition_key(key);
-        let (_contract, got_tenant, got_subject, got_actor, pk) = parts.into_parts();
+        let (_contract, got_tenant, got_subject, got_actor, pk, causation_id) = parts.into_parts();
         assert_eq!(got_tenant.to_string(), TENANT);
         assert_eq!(got_subject.as_str(), "subj");
         assert_eq!(got_actor.kind(), vocab::PrincipalKind::Admin);
@@ -471,6 +547,7 @@ mod partition_key_tests {
         assert_eq!(got_actor.scope(), vocab::RowScope::Tenant);
         assert!(pk.is_some(), "with_partition_key 后 into_parts 应透出 Some");
         assert_eq!(pk.unwrap().as_str(), "aggregate-123");
+        assert!(causation_id.is_none(), "未设 causation_id 时应透出 None");
     }
 
     #[test]
@@ -481,9 +558,48 @@ mod partition_key_tests {
             subject("subj"),
             actor(),
         );
-        let (_contract, got_tenant, _subject, _actor, pk) = parts.into_parts();
+        let (_contract, got_tenant, _subject, _actor, pk, causation_id) = parts.into_parts();
         assert_eq!(got_tenant.to_string(), TENANT);
         assert!(pk.is_none(), "未设 partition_key 时 into_parts 应透出 None");
+        assert!(
+            causation_id.is_none(),
+            "未设 causation_id 时 into_parts 应透出 None"
+        );
+    }
+
+    #[test]
+    fn causation_id_parse_rejects_empty_and_too_long() {
+        assert_eq!(
+            EnvelopeCausationId::from_opaque(""),
+            Err(EnvelopeIdentityError::Empty)
+        );
+        assert_eq!(
+            EnvelopeCausationId::from_opaque("x".repeat(257)),
+            Err(EnvelopeIdentityError::TooLong)
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn causation_id_roundtrips_through_into_parts() {
+        let cause = EnvelopeCausationId::from_opaque("evt-root-1").expect("opaque causation");
+        let parts = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            tenant(),
+            subject("subj"),
+            actor(),
+        )
+        .with_causation_id(cause);
+        assert_eq!(
+            parts.causation_id().map(EnvelopeCausationId::as_str),
+            Some("evt-root-1")
+        );
+        let (_contract, _tenant, _subject, _actor, pk, causation_id) = parts.into_parts();
+        assert!(pk.is_none(), "未设 partition_key 时应透出 None");
+        assert_eq!(
+            causation_id.as_ref().map(EnvelopeCausationId::as_str),
+            Some("evt-root-1")
+        );
     }
 }
 

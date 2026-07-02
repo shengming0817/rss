@@ -27,7 +27,8 @@ impl PgRoleBindingLifecycle {
     }
 
     fn envelope(&self, envelope: OutboxEnvelopeParts) -> (TenantId, OutboxEnvelope) {
-        let (contract, tenant, subject_id, actor, partition_key) = envelope.into_parts();
+        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+            envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
@@ -35,7 +36,8 @@ impl PgRoleBindingLifecycle {
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )
-        .with_partition_key_opt(partition_key);
+        .with_partition_key_opt(partition_key)
+        .with_causation_id_opt(causation_id);
         (tenant, env)
     }
 }

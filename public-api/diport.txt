@@ -1237,6 +1237,59 @@ impl<TraitVariantBlanketType: diport::dead_letter_store::DeadLetterStore> diport
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>
 pub async fn TraitVariantBlanketType::write_dead_letter(&self, diport::dead_letter_store::DeadLetterRecord) -> core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>
 pub mod diport::envelope
+pub enum diport::envelope::EnvelopeHeaderError
+pub diport::envelope::EnvelopeHeaderError::InvalidSchemaHash
+pub diport::envelope::EnvelopeHeaderError::InvalidSchemaVersion
+pub diport::envelope::EnvelopeHeaderError::InvalidTenantId
+pub diport::envelope::EnvelopeHeaderError::MissingSchemaHash
+pub diport::envelope::EnvelopeHeaderError::MissingSchemaVersion
+pub diport::envelope::EnvelopeHeaderError::MissingTenantId
+pub diport::envelope::EnvelopeHeaderError::SchemaHashMismatch
+pub diport::envelope::EnvelopeHeaderError::SchemaVersionMismatch
+impl core::clone::Clone for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::clone(&self) -> diport::envelope::EnvelopeHeaderError
+impl core::cmp::Eq for diport::envelope::EnvelopeHeaderError
+impl core::cmp::PartialEq for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::eq(&self, &diport::envelope::EnvelopeHeaderError) -> bool
+impl core::error::Error for diport::envelope::EnvelopeHeaderError
+impl core::fmt::Debug for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeHeaderError
+impl core::marker::Freeze for diport::envelope::EnvelopeHeaderError
+impl core::marker::Send for diport::envelope::EnvelopeHeaderError
+impl core::marker::Sync for diport::envelope::EnvelopeHeaderError
+impl core::marker::Unpin for diport::envelope::EnvelopeHeaderError
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeHeaderError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeHeaderError
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeHeaderError
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeHeaderError where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeHeaderError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeHeaderError where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeHeaderError::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeHeaderError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeHeaderError where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeHeaderError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeHeaderError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeHeaderError where T: core::clone::Clone
+pub type diport::envelope::EnvelopeHeaderError::Owned = T
+pub fn diport::envelope::EnvelopeHeaderError::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeHeaderError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::envelope::EnvelopeHeaderError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::envelope::EnvelopeHeaderError where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeHeaderError where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeHeaderError where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeHeaderError where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeHeaderError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeHeaderError
+pub type diport::envelope::EnvelopeHeaderError::Output = T
 pub enum diport::envelope::MetadataError
 pub diport::envelope::MetadataError::ReservedKey
 impl core::clone::Clone for diport::envelope::MetadataError
@@ -1283,6 +1336,57 @@ impl<T> core::convert::From<T> for diport::envelope::MetadataError
 pub fn diport::envelope::MetadataError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::envelope::MetadataError
 pub type diport::envelope::MetadataError::Output = T
+pub struct diport::envelope::EnvelopeHeader
+impl diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::correlation(&self) -> core::option::Option<&str>
+pub fn diport::envelope::EnvelopeHeader::new(vocab::tenant::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
+pub fn diport::envelope::EnvelopeHeader::occurred_at_secs(&self) -> core::option::Option<i64>
+pub fn diport::envelope::EnvelopeHeader::partition_key(&self) -> core::option::Option<&consistency::outbox::PartitionKey>
+pub fn diport::envelope::EnvelopeHeader::schema_hash(&self) -> &diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeHeader::schema_version(&self) -> &diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeHeader::tenant_authority(&self) -> core::option::Option<&str>
+pub fn diport::envelope::EnvelopeHeader::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn diport::envelope::EnvelopeHeader::trace(&self) -> core::option::Option<&str>
+pub fn diport::envelope::EnvelopeHeader::try_from_metadata(&diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::clone(&self) -> diport::envelope::EnvelopeHeader
+impl core::cmp::Eq for diport::envelope::EnvelopeHeader
+impl core::cmp::PartialEq for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::eq(&self, &diport::envelope::EnvelopeHeader) -> bool
+impl core::fmt::Debug for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeHeader
+impl core::marker::Freeze for diport::envelope::EnvelopeHeader
+impl core::marker::Send for diport::envelope::EnvelopeHeader
+impl core::marker::Sync for diport::envelope::EnvelopeHeader
+impl core::marker::Unpin for diport::envelope::EnvelopeHeader
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeHeader
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeHeader
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeHeader
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeHeader where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeHeader::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeHeader where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeHeader::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeHeader::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeHeader where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeHeader::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeHeader::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeHeader where T: core::clone::Clone
+pub type diport::envelope::EnvelopeHeader::Owned = T
+pub fn diport::envelope::EnvelopeHeader::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeHeader::to_owned(&self) -> T
+impl<T> core::any::Any for diport::envelope::EnvelopeHeader where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeader::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeHeader where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeader::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeHeader where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeader::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeHeader where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeHeader::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeHeader
+pub type diport::envelope::EnvelopeHeader::Output = T
 pub struct diport::envelope::EnvelopeMetadata(_)
 impl diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::empty() -> Self
@@ -1294,6 +1398,8 @@ pub fn diport::envelope::EnvelopeMetadata::iter_persisted_metadata(&self) -> imp
 pub fn diport::envelope::EnvelopeMetadata::iter_transport_headers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
 pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
+pub fn diport::envelope::EnvelopeMetadata::schema_hash(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaHash>
+pub fn diport::envelope::EnvelopeMetadata::schema_version(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaVersion>
 pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<vocab::tenant::TenantId>
 pub fn diport::envelope::EnvelopeMetadata::try_insert(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<(), diport::envelope::MetadataError>
 impl core::clone::Clone for diport::envelope::EnvelopeMetadata
@@ -1337,15 +1443,162 @@ impl<T> core::convert::From<T> for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeMetadata
 pub type diport::envelope::EnvelopeMetadata::Output = T
+pub struct diport::envelope::EnvelopeSchemaHash(_)
+impl diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::as_str(&self) -> &str
+pub fn diport::envelope::EnvelopeSchemaHash::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::clone(&self) -> diport::envelope::EnvelopeSchemaHash
+impl core::cmp::Eq for diport::envelope::EnvelopeSchemaHash
+impl core::cmp::PartialEq for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::eq(&self, &diport::envelope::EnvelopeSchemaHash) -> bool
+impl core::fmt::Debug for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Freeze for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Send for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Sync for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Unpin for diport::envelope::EnvelopeSchemaHash
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeSchemaHash
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeSchemaHash
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeSchemaHash
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeSchemaHash where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeSchemaHash::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeSchemaHash where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeSchemaHash::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeSchemaHash::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeSchemaHash where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeSchemaHash::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeSchemaHash::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeSchemaHash where T: core::clone::Clone
+pub type diport::envelope::EnvelopeSchemaHash::Owned = T
+pub fn diport::envelope::EnvelopeSchemaHash::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeSchemaHash::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::envelope::EnvelopeSchemaHash where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::envelope::EnvelopeSchemaHash where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeSchemaHash where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeSchemaHash where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeSchemaHash where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeSchemaHash::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeSchemaHash
+pub type diport::envelope::EnvelopeSchemaHash::Output = T
+pub struct diport::envelope::EnvelopeSchemaVersion(_)
+impl diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::as_str(&self) -> &str
+pub fn diport::envelope::EnvelopeSchemaVersion::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::clone(&self) -> diport::envelope::EnvelopeSchemaVersion
+impl core::cmp::Eq for diport::envelope::EnvelopeSchemaVersion
+impl core::cmp::PartialEq for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::eq(&self, &diport::envelope::EnvelopeSchemaVersion) -> bool
+impl core::fmt::Debug for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Freeze for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Send for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Sync for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Unpin for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeSchemaVersion
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeSchemaVersion
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeSchemaVersion
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeSchemaVersion where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeSchemaVersion::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeSchemaVersion where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeSchemaVersion::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeSchemaVersion::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeSchemaVersion where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeSchemaVersion::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeSchemaVersion::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeSchemaVersion where T: core::clone::Clone
+pub type diport::envelope::EnvelopeSchemaVersion::Owned = T
+pub fn diport::envelope::EnvelopeSchemaVersion::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeSchemaVersion::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::envelope::EnvelopeSchemaVersion where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::envelope::EnvelopeSchemaVersion where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeSchemaVersion where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeSchemaVersion where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeSchemaVersion where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeSchemaVersion::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeSchemaVersion
+pub type diport::envelope::EnvelopeSchemaVersion::Output = T
+pub struct diport::envelope::MessageEnvelope
+impl diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::header(&self) -> &diport::envelope::EnvelopeHeader
+pub fn diport::envelope::MessageEnvelope::into_payload(self) -> alloc::vec::Vec<u8>
+pub fn diport::envelope::MessageEnvelope::metadata(&self) -> &diport::envelope::EnvelopeMetadata
+pub fn diport::envelope::MessageEnvelope::new(diport::envelope::EnvelopeHeader, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::envelope::MessageEnvelope::payload(&self) -> &[u8]
+pub fn diport::envelope::MessageEnvelope::try_from_metadata(alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::clone(&self) -> diport::envelope::MessageEnvelope
+impl core::cmp::Eq for diport::envelope::MessageEnvelope
+impl core::cmp::PartialEq for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::eq(&self, &diport::envelope::MessageEnvelope) -> bool
+impl core::fmt::Debug for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::envelope::MessageEnvelope
+impl core::marker::Freeze for diport::envelope::MessageEnvelope
+impl core::marker::Send for diport::envelope::MessageEnvelope
+impl core::marker::Sync for diport::envelope::MessageEnvelope
+impl core::marker::Unpin for diport::envelope::MessageEnvelope
+impl core::marker::UnsafeUnpin for diport::envelope::MessageEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::MessageEnvelope
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::MessageEnvelope
+impl<T, U> core::convert::Into<U> for diport::envelope::MessageEnvelope where U: core::convert::From<T>
+pub fn diport::envelope::MessageEnvelope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::MessageEnvelope where U: core::convert::Into<T>
+pub type diport::envelope::MessageEnvelope::Error = core::convert::Infallible
+pub fn diport::envelope::MessageEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::MessageEnvelope where U: core::convert::TryFrom<T>
+pub type diport::envelope::MessageEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::MessageEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::MessageEnvelope where T: core::clone::Clone
+pub type diport::envelope::MessageEnvelope::Owned = T
+pub fn diport::envelope::MessageEnvelope::clone_into(&self, &mut T)
+pub fn diport::envelope::MessageEnvelope::to_owned(&self) -> T
+impl<T> core::any::Any for diport::envelope::MessageEnvelope where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::MessageEnvelope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::MessageEnvelope where T: ?core::marker::Sized
+pub fn diport::envelope::MessageEnvelope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::MessageEnvelope where T: ?core::marker::Sized
+pub fn diport::envelope::MessageEnvelope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::MessageEnvelope where T: core::clone::Clone
+pub unsafe fn diport::envelope::MessageEnvelope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::MessageEnvelope
+pub type diport::envelope::MessageEnvelope::Output = T
 pub const diport::envelope::KEY_ACTOR: &str
 pub const diport::envelope::KEY_CORRELATION: &str
 pub const diport::envelope::KEY_OCCURRED_AT: &str
 pub const diport::envelope::KEY_PRINCIPAL: &str
+pub const diport::envelope::KEY_SCHEMA_HASH: &str
+pub const diport::envelope::KEY_SCHEMA_VERSION: &str
 pub const diport::envelope::KEY_SUBJECT_ID: &str
 pub const diport::envelope::KEY_TENANT_AUTHORITY: &str
 pub const diport::envelope::KEY_TENANT_ID: &str
 pub const diport::envelope::KEY_TRACE: &str
-pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 8]
+pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 10]
 pub mod diport::fenced_writer
 #[non_exhaustive] pub enum diport::fenced_writer::WriteOutcome
 pub diport::fenced_writer::WriteOutcome::Committed
@@ -2792,6 +3045,51 @@ impl<T> core::borrow::Borrow<T> for diport::DynOutboxEmitter<'dynosaur_struct> w
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for diport::DynOutboxEmitter<'dynosaur_struct> where T: ?core::marker::Sized
 pub fn diport::DynOutboxEmitter<'dynosaur_struct>::borrow_mut(&mut self) -> &mut T
+pub struct diport::outbox_emitter::EnvelopeCausationId(_)
+impl diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::as_str(&self) -> &str
+pub fn diport::outbox_emitter::EnvelopeCausationId::from_opaque(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::outbox_emitter::EnvelopeIdentityError>
+impl core::clone::Clone for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::clone(&self) -> diport::outbox_emitter::EnvelopeCausationId
+impl core::cmp::Eq for diport::outbox_emitter::EnvelopeCausationId
+impl core::cmp::PartialEq for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::eq(&self, &diport::outbox_emitter::EnvelopeCausationId) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Freeze for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Send for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Sync for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Unpin for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeCausationId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeCausationId
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeCausationId
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::EnvelopeCausationId where U: core::convert::From<T>
+pub fn diport::outbox_emitter::EnvelopeCausationId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::EnvelopeCausationId where U: core::convert::Into<T>
+pub type diport::outbox_emitter::EnvelopeCausationId::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::EnvelopeCausationId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::EnvelopeCausationId where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::EnvelopeCausationId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::EnvelopeCausationId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::EnvelopeCausationId where T: core::clone::Clone
+pub type diport::outbox_emitter::EnvelopeCausationId::Owned = T
+pub fn diport::outbox_emitter::EnvelopeCausationId::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::EnvelopeCausationId::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::EnvelopeCausationId where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeCausationId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::EnvelopeCausationId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeCausationId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::EnvelopeCausationId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeCausationId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::EnvelopeCausationId where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::EnvelopeCausationId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeCausationId
+pub type diport::outbox_emitter::EnvelopeCausationId::Output = T
 pub struct diport::outbox_emitter::EnvelopeSubjectId(_)
 impl diport::outbox_emitter::EnvelopeSubjectId
 pub fn diport::outbox_emitter::EnvelopeSubjectId::as_str(&self) -> &str
@@ -2968,11 +3266,13 @@ pub type diport::outbox_emitter::OutboxEmitError::Output = T
 pub struct diport::outbox_emitter::OutboxEnvelopeParts
 impl diport::outbox_emitter::OutboxEnvelopeParts
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::actor(&self) -> &diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::causation_id(&self) -> core::option::Option<&diport::outbox_emitter::EnvelopeCausationId>
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::contract(&self) -> &vocab::contract::binding::ContractBinding
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>)
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>, core::option::Option<diport::outbox_emitter::EnvelopeCausationId>)
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &diport::outbox_emitter::EnvelopeSubjectId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_causation_id(self, diport::outbox_emitter::EnvelopeCausationId) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_partition_key(self, consistency::outbox::PartitionKey) -> Self
 impl core::clone::Clone for diport::outbox_emitter::OutboxEnvelopeParts
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::clone(&self) -> diport::outbox_emitter::OutboxEnvelopeParts
@@ -3417,6 +3717,8 @@ pub fn diport::publisher::PublishRequest::metadata(&self) -> &diport::envelope::
 pub fn diport::publisher::PublishRequest::new(diport::publisher::Topic, diport::subscriber::MessageId, alloc::vec::Vec<u8>) -> Self
 pub fn diport::publisher::PublishRequest::payload(&self) -> &[u8]
 pub fn diport::publisher::PublishRequest::topic(&self) -> &diport::publisher::Topic
+pub fn diport::publisher::PublishRequest::try_envelope(&self) -> core::result::Result<diport::envelope::MessageEnvelope, diport::envelope::EnvelopeHeaderError>
+pub fn diport::publisher::PublishRequest::try_header(&self) -> core::result::Result<diport::envelope::EnvelopeHeader, diport::envelope::EnvelopeHeaderError>
 pub fn diport::publisher::PublishRequest::with_metadata(self, diport::envelope::EnvelopeMetadata) -> Self
 impl core::clone::Clone for diport::publisher::PublishRequest
 pub fn diport::publisher::PublishRequest::clone(&self) -> diport::publisher::PublishRequest
@@ -4698,6 +5000,8 @@ pub diport::subscriber::Message::payload: diport::RedactedBytes
 impl diport::subscriber::Message
 pub fn diport::subscriber::Message::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>) -> Self
 pub fn diport::subscriber::Message::new_with_metadata(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::subscriber::Message::try_envelope(&self) -> core::result::Result<diport::envelope::MessageEnvelope, diport::envelope::EnvelopeHeaderError>
+pub fn diport::subscriber::Message::try_header(&self) -> core::result::Result<diport::envelope::EnvelopeHeader, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::subscriber::Message
 pub fn diport::subscriber::Message::clone(&self) -> diport::subscriber::Message
 impl core::fmt::Debug for diport::subscriber::Message
@@ -5147,6 +5451,59 @@ impl<T> core::convert::From<T> for diport::dead_letter_store::DeadLetterSource
 pub fn diport::dead_letter_store::DeadLetterSource::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::dead_letter_store::DeadLetterSource
 pub type diport::dead_letter_store::DeadLetterSource::Output = T
+pub enum diport::EnvelopeHeaderError
+pub diport::EnvelopeHeaderError::InvalidSchemaHash
+pub diport::EnvelopeHeaderError::InvalidSchemaVersion
+pub diport::EnvelopeHeaderError::InvalidTenantId
+pub diport::EnvelopeHeaderError::MissingSchemaHash
+pub diport::EnvelopeHeaderError::MissingSchemaVersion
+pub diport::EnvelopeHeaderError::MissingTenantId
+pub diport::EnvelopeHeaderError::SchemaHashMismatch
+pub diport::EnvelopeHeaderError::SchemaVersionMismatch
+impl core::clone::Clone for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::clone(&self) -> diport::envelope::EnvelopeHeaderError
+impl core::cmp::Eq for diport::envelope::EnvelopeHeaderError
+impl core::cmp::PartialEq for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::eq(&self, &diport::envelope::EnvelopeHeaderError) -> bool
+impl core::error::Error for diport::envelope::EnvelopeHeaderError
+impl core::fmt::Debug for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeHeaderError
+impl core::marker::Freeze for diport::envelope::EnvelopeHeaderError
+impl core::marker::Send for diport::envelope::EnvelopeHeaderError
+impl core::marker::Sync for diport::envelope::EnvelopeHeaderError
+impl core::marker::Unpin for diport::envelope::EnvelopeHeaderError
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeHeaderError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeHeaderError
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeHeaderError
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeHeaderError where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeHeaderError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeHeaderError where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeHeaderError::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeHeaderError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeHeaderError where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeHeaderError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeHeaderError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeHeaderError where T: core::clone::Clone
+pub type diport::envelope::EnvelopeHeaderError::Owned = T
+pub fn diport::envelope::EnvelopeHeaderError::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeHeaderError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::envelope::EnvelopeHeaderError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::envelope::EnvelopeHeaderError where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeHeaderError where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeHeaderError where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeaderError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeHeaderError where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeHeaderError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeHeaderError
+pub fn diport::envelope::EnvelopeHeaderError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeHeaderError
+pub type diport::envelope::EnvelopeHeaderError::Output = T
 pub enum diport::EnvelopeIdentityError
 pub diport::EnvelopeIdentityError::Empty
 pub diport::EnvelopeIdentityError::TooLong
@@ -7344,6 +7701,102 @@ impl<T> core::convert::From<T> for diport::key_provider::EncryptOutput
 pub fn diport::key_provider::EncryptOutput::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::key_provider::EncryptOutput
 pub type diport::key_provider::EncryptOutput::Output = T
+pub struct diport::EnvelopeCausationId(_)
+impl diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::as_str(&self) -> &str
+pub fn diport::outbox_emitter::EnvelopeCausationId::from_opaque(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::outbox_emitter::EnvelopeIdentityError>
+impl core::clone::Clone for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::clone(&self) -> diport::outbox_emitter::EnvelopeCausationId
+impl core::cmp::Eq for diport::outbox_emitter::EnvelopeCausationId
+impl core::cmp::PartialEq for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::eq(&self, &diport::outbox_emitter::EnvelopeCausationId) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Freeze for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Send for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Sync for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::Unpin for diport::outbox_emitter::EnvelopeCausationId
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeCausationId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeCausationId
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeCausationId
+impl<T, U> core::convert::Into<U> for diport::outbox_emitter::EnvelopeCausationId where U: core::convert::From<T>
+pub fn diport::outbox_emitter::EnvelopeCausationId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::outbox_emitter::EnvelopeCausationId where U: core::convert::Into<T>
+pub type diport::outbox_emitter::EnvelopeCausationId::Error = core::convert::Infallible
+pub fn diport::outbox_emitter::EnvelopeCausationId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::outbox_emitter::EnvelopeCausationId where U: core::convert::TryFrom<T>
+pub type diport::outbox_emitter::EnvelopeCausationId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::outbox_emitter::EnvelopeCausationId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::outbox_emitter::EnvelopeCausationId where T: core::clone::Clone
+pub type diport::outbox_emitter::EnvelopeCausationId::Owned = T
+pub fn diport::outbox_emitter::EnvelopeCausationId::clone_into(&self, &mut T)
+pub fn diport::outbox_emitter::EnvelopeCausationId::to_owned(&self) -> T
+impl<T> core::any::Any for diport::outbox_emitter::EnvelopeCausationId where T: 'static + ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeCausationId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::outbox_emitter::EnvelopeCausationId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeCausationId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::outbox_emitter::EnvelopeCausationId where T: ?core::marker::Sized
+pub fn diport::outbox_emitter::EnvelopeCausationId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::outbox_emitter::EnvelopeCausationId where T: core::clone::Clone
+pub unsafe fn diport::outbox_emitter::EnvelopeCausationId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeCausationId
+pub fn diport::outbox_emitter::EnvelopeCausationId::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeCausationId
+pub type diport::outbox_emitter::EnvelopeCausationId::Output = T
+pub struct diport::EnvelopeHeader
+impl diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::correlation(&self) -> core::option::Option<&str>
+pub fn diport::envelope::EnvelopeHeader::new(vocab::tenant::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
+pub fn diport::envelope::EnvelopeHeader::occurred_at_secs(&self) -> core::option::Option<i64>
+pub fn diport::envelope::EnvelopeHeader::partition_key(&self) -> core::option::Option<&consistency::outbox::PartitionKey>
+pub fn diport::envelope::EnvelopeHeader::schema_hash(&self) -> &diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeHeader::schema_version(&self) -> &diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeHeader::tenant_authority(&self) -> core::option::Option<&str>
+pub fn diport::envelope::EnvelopeHeader::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn diport::envelope::EnvelopeHeader::trace(&self) -> core::option::Option<&str>
+pub fn diport::envelope::EnvelopeHeader::try_from_metadata(&diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::clone(&self) -> diport::envelope::EnvelopeHeader
+impl core::cmp::Eq for diport::envelope::EnvelopeHeader
+impl core::cmp::PartialEq for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::eq(&self, &diport::envelope::EnvelopeHeader) -> bool
+impl core::fmt::Debug for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeHeader
+impl core::marker::Freeze for diport::envelope::EnvelopeHeader
+impl core::marker::Send for diport::envelope::EnvelopeHeader
+impl core::marker::Sync for diport::envelope::EnvelopeHeader
+impl core::marker::Unpin for diport::envelope::EnvelopeHeader
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeHeader
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeHeader
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeHeader
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeHeader where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeHeader::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeHeader where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeHeader::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeHeader::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeHeader where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeHeader::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeHeader::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeHeader where T: core::clone::Clone
+pub type diport::envelope::EnvelopeHeader::Owned = T
+pub fn diport::envelope::EnvelopeHeader::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeHeader::to_owned(&self) -> T
+impl<T> core::any::Any for diport::envelope::EnvelopeHeader where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeader::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeHeader where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeader::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeHeader where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeHeader::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeHeader where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeHeader::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeHeader
+pub fn diport::envelope::EnvelopeHeader::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeHeader
+pub type diport::envelope::EnvelopeHeader::Output = T
 pub struct diport::EnvelopeMetadata(_)
 impl diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::empty() -> Self
@@ -7355,6 +7808,8 @@ pub fn diport::envelope::EnvelopeMetadata::iter_persisted_metadata(&self) -> imp
 pub fn diport::envelope::EnvelopeMetadata::iter_transport_headers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
 pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
+pub fn diport::envelope::EnvelopeMetadata::schema_hash(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaHash>
+pub fn diport::envelope::EnvelopeMetadata::schema_version(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaVersion>
 pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<vocab::tenant::TenantId>
 pub fn diport::envelope::EnvelopeMetadata::try_insert(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<(), diport::envelope::MetadataError>
 impl core::clone::Clone for diport::envelope::EnvelopeMetadata
@@ -7398,6 +7853,104 @@ impl<T> core::convert::From<T> for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeMetadata
 pub type diport::envelope::EnvelopeMetadata::Output = T
+pub struct diport::EnvelopeSchemaHash(_)
+impl diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::as_str(&self) -> &str
+pub fn diport::envelope::EnvelopeSchemaHash::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::clone(&self) -> diport::envelope::EnvelopeSchemaHash
+impl core::cmp::Eq for diport::envelope::EnvelopeSchemaHash
+impl core::cmp::PartialEq for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::eq(&self, &diport::envelope::EnvelopeSchemaHash) -> bool
+impl core::fmt::Debug for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Freeze for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Send for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Sync for diport::envelope::EnvelopeSchemaHash
+impl core::marker::Unpin for diport::envelope::EnvelopeSchemaHash
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeSchemaHash
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeSchemaHash
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeSchemaHash
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeSchemaHash where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeSchemaHash::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeSchemaHash where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeSchemaHash::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeSchemaHash::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeSchemaHash where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeSchemaHash::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeSchemaHash::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeSchemaHash where T: core::clone::Clone
+pub type diport::envelope::EnvelopeSchemaHash::Owned = T
+pub fn diport::envelope::EnvelopeSchemaHash::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeSchemaHash::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::envelope::EnvelopeSchemaHash where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::envelope::EnvelopeSchemaHash where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeSchemaHash where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeSchemaHash where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaHash::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeSchemaHash where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeSchemaHash::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeSchemaHash
+pub fn diport::envelope::EnvelopeSchemaHash::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeSchemaHash
+pub type diport::envelope::EnvelopeSchemaHash::Output = T
+pub struct diport::EnvelopeSchemaVersion(_)
+impl diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::as_str(&self) -> &str
+pub fn diport::envelope::EnvelopeSchemaVersion::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::clone(&self) -> diport::envelope::EnvelopeSchemaVersion
+impl core::cmp::Eq for diport::envelope::EnvelopeSchemaVersion
+impl core::cmp::PartialEq for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::eq(&self, &diport::envelope::EnvelopeSchemaVersion) -> bool
+impl core::fmt::Debug for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Freeze for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Send for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Sync for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::Unpin for diport::envelope::EnvelopeSchemaVersion
+impl core::marker::UnsafeUnpin for diport::envelope::EnvelopeSchemaVersion
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::EnvelopeSchemaVersion
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::EnvelopeSchemaVersion
+impl<T, U> core::convert::Into<U> for diport::envelope::EnvelopeSchemaVersion where U: core::convert::From<T>
+pub fn diport::envelope::EnvelopeSchemaVersion::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::EnvelopeSchemaVersion where U: core::convert::Into<T>
+pub type diport::envelope::EnvelopeSchemaVersion::Error = core::convert::Infallible
+pub fn diport::envelope::EnvelopeSchemaVersion::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::EnvelopeSchemaVersion where U: core::convert::TryFrom<T>
+pub type diport::envelope::EnvelopeSchemaVersion::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::EnvelopeSchemaVersion::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::EnvelopeSchemaVersion where T: core::clone::Clone
+pub type diport::envelope::EnvelopeSchemaVersion::Owned = T
+pub fn diport::envelope::EnvelopeSchemaVersion::clone_into(&self, &mut T)
+pub fn diport::envelope::EnvelopeSchemaVersion::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::envelope::EnvelopeSchemaVersion where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::envelope::EnvelopeSchemaVersion where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::EnvelopeSchemaVersion where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::EnvelopeSchemaVersion where T: ?core::marker::Sized
+pub fn diport::envelope::EnvelopeSchemaVersion::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::EnvelopeSchemaVersion where T: core::clone::Clone
+pub unsafe fn diport::envelope::EnvelopeSchemaVersion::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::EnvelopeSchemaVersion
+pub fn diport::envelope::EnvelopeSchemaVersion::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::EnvelopeSchemaVersion
+pub type diport::envelope::EnvelopeSchemaVersion::Output = T
 pub struct diport::EnvelopeSubjectId(_)
 impl diport::outbox_emitter::EnvelopeSubjectId
 pub fn diport::outbox_emitter::EnvelopeSubjectId::as_str(&self) -> &str
@@ -8028,6 +8581,8 @@ pub diport::Message::payload: diport::RedactedBytes
 impl diport::subscriber::Message
 pub fn diport::subscriber::Message::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>) -> Self
 pub fn diport::subscriber::Message::new_with_metadata(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::subscriber::Message::try_envelope(&self) -> core::result::Result<diport::envelope::MessageEnvelope, diport::envelope::EnvelopeHeaderError>
+pub fn diport::subscriber::Message::try_header(&self) -> core::result::Result<diport::envelope::EnvelopeHeader, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::subscriber::Message
 pub fn diport::subscriber::Message::clone(&self) -> diport::subscriber::Message
 impl core::fmt::Debug for diport::subscriber::Message
@@ -8063,6 +8618,53 @@ impl<T> core::convert::From<T> for diport::subscriber::Message
 pub fn diport::subscriber::Message::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::subscriber::Message
 pub type diport::subscriber::Message::Output = T
+pub struct diport::MessageEnvelope
+impl diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::header(&self) -> &diport::envelope::EnvelopeHeader
+pub fn diport::envelope::MessageEnvelope::into_payload(self) -> alloc::vec::Vec<u8>
+pub fn diport::envelope::MessageEnvelope::metadata(&self) -> &diport::envelope::EnvelopeMetadata
+pub fn diport::envelope::MessageEnvelope::new(diport::envelope::EnvelopeHeader, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::envelope::MessageEnvelope::payload(&self) -> &[u8]
+pub fn diport::envelope::MessageEnvelope::try_from_metadata(alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
+impl core::clone::Clone for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::clone(&self) -> diport::envelope::MessageEnvelope
+impl core::cmp::Eq for diport::envelope::MessageEnvelope
+impl core::cmp::PartialEq for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::eq(&self, &diport::envelope::MessageEnvelope) -> bool
+impl core::fmt::Debug for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::envelope::MessageEnvelope
+impl core::marker::Freeze for diport::envelope::MessageEnvelope
+impl core::marker::Send for diport::envelope::MessageEnvelope
+impl core::marker::Sync for diport::envelope::MessageEnvelope
+impl core::marker::Unpin for diport::envelope::MessageEnvelope
+impl core::marker::UnsafeUnpin for diport::envelope::MessageEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::MessageEnvelope
+impl core::panic::unwind_safe::UnwindSafe for diport::envelope::MessageEnvelope
+impl<T, U> core::convert::Into<U> for diport::envelope::MessageEnvelope where U: core::convert::From<T>
+pub fn diport::envelope::MessageEnvelope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::envelope::MessageEnvelope where U: core::convert::Into<T>
+pub type diport::envelope::MessageEnvelope::Error = core::convert::Infallible
+pub fn diport::envelope::MessageEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::envelope::MessageEnvelope where U: core::convert::TryFrom<T>
+pub type diport::envelope::MessageEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::envelope::MessageEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::envelope::MessageEnvelope where T: core::clone::Clone
+pub type diport::envelope::MessageEnvelope::Owned = T
+pub fn diport::envelope::MessageEnvelope::clone_into(&self, &mut T)
+pub fn diport::envelope::MessageEnvelope::to_owned(&self) -> T
+impl<T> core::any::Any for diport::envelope::MessageEnvelope where T: 'static + ?core::marker::Sized
+pub fn diport::envelope::MessageEnvelope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::envelope::MessageEnvelope where T: ?core::marker::Sized
+pub fn diport::envelope::MessageEnvelope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::envelope::MessageEnvelope where T: ?core::marker::Sized
+pub fn diport::envelope::MessageEnvelope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::envelope::MessageEnvelope where T: core::clone::Clone
+pub unsafe fn diport::envelope::MessageEnvelope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::envelope::MessageEnvelope
+pub fn diport::envelope::MessageEnvelope::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::envelope::MessageEnvelope
+pub type diport::envelope::MessageEnvelope::Output = T
 pub struct diport::MessageId(_)
 impl diport::subscriber::MessageId
 pub fn diport::subscriber::MessageId::as_str(&self) -> &str
@@ -8314,11 +8916,13 @@ pub type diport::outbox_emitter::OutboxEmitError::Output = T
 pub struct diport::OutboxEnvelopeParts
 impl diport::outbox_emitter::OutboxEnvelopeParts
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::actor(&self) -> &diport::outbox_emitter::OutboxActor
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::causation_id(&self) -> core::option::Option<&diport::outbox_emitter::EnvelopeCausationId>
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::contract(&self) -> &vocab::contract::binding::ContractBinding
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>)
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>, core::option::Option<diport::outbox_emitter::EnvelopeCausationId>)
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &diport::outbox_emitter::EnvelopeSubjectId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_causation_id(self, diport::outbox_emitter::EnvelopeCausationId) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_partition_key(self, consistency::outbox::PartitionKey) -> Self
 impl core::clone::Clone for diport::outbox_emitter::OutboxEnvelopeParts
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::clone(&self) -> diport::outbox_emitter::OutboxEnvelopeParts
@@ -8363,6 +8967,8 @@ pub fn diport::publisher::PublishRequest::metadata(&self) -> &diport::envelope::
 pub fn diport::publisher::PublishRequest::new(diport::publisher::Topic, diport::subscriber::MessageId, alloc::vec::Vec<u8>) -> Self
 pub fn diport::publisher::PublishRequest::payload(&self) -> &[u8]
 pub fn diport::publisher::PublishRequest::topic(&self) -> &diport::publisher::Topic
+pub fn diport::publisher::PublishRequest::try_envelope(&self) -> core::result::Result<diport::envelope::MessageEnvelope, diport::envelope::EnvelopeHeaderError>
+pub fn diport::publisher::PublishRequest::try_header(&self) -> core::result::Result<diport::envelope::EnvelopeHeader, diport::envelope::EnvelopeHeaderError>
 pub fn diport::publisher::PublishRequest::with_metadata(self, diport::envelope::EnvelopeMetadata) -> Self
 impl core::clone::Clone for diport::publisher::PublishRequest
 pub fn diport::publisher::PublishRequest::clone(&self) -> diport::publisher::PublishRequest
@@ -9256,11 +9862,13 @@ pub const diport::KEY_ACTOR: &str
 pub const diport::KEY_CORRELATION: &str
 pub const diport::KEY_OCCURRED_AT: &str
 pub const diport::KEY_PRINCIPAL: &str
+pub const diport::KEY_SCHEMA_HASH: &str
+pub const diport::KEY_SCHEMA_VERSION: &str
 pub const diport::KEY_SUBJECT_ID: &str
 pub const diport::KEY_TENANT_AUTHORITY: &str
 pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
-pub const diport::RESERVED_METADATA_KEYS: [&str; 8]
+pub const diport::RESERVED_METADATA_KEYS: [&str; 10]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
 pub const diport::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::AckableSubscriber: core::marker::Send

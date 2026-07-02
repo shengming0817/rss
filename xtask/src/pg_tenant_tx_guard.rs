@@ -196,7 +196,6 @@ pub(crate) fn scan_guard(
     for expected in [
         "config-legacy-plaintext-startup-probe",
         "config-value-maintenance",
-        "outbox-dlx-dead-letter-settlement",
     ] {
         if !allowed_exceptions.contains(expected) {
             findings.push(finding(
@@ -434,6 +433,13 @@ fn raw_access_patterns(content: &str) -> Vec<String> {
         }
     }
 
+    for name in local_raw_transaction_vars(content) {
+        for method in ["execute", "fetch_optional", "fetch_one", "fetch_all"] {
+            patterns.insert(format!(".{method}(&mut {name}"));
+            patterns.insert(format!(".{method}(&mut *{name}"));
+        }
+    }
+
     patterns.into_iter().collect()
 }
 
@@ -456,6 +462,28 @@ fn local_pgpool_vars(content: &str) -> BTreeSet<String> {
             || after_name.contains("pgpooloptions::new")
             || after_name.contains(".pool.clone()")
         {
+            out.push(name.to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn local_raw_transaction_vars(content: &str) -> BTreeSet<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.trim_start();
+        let Some(idx) = line.find("let ") else {
+            continue;
+        };
+        let mut rest = line[idx + "let ".len()..].trim_start();
+        if let Some(after_mut) = rest.strip_prefix("mut ") {
+            rest = after_mut.trim_start();
+        }
+        let (name, after_name) = split_token(rest);
+        if name.is_empty() {
+            continue;
+        }
+        if after_name.contains(".begin().await") {
             out.push(name.to_string());
         }
     }
@@ -531,14 +559,6 @@ fn allowed_site_exception(
         && window.contains("fetch_one(&self.store.pool")
     {
         return Some("config-value-maintenance");
-    }
-    if rel == "outbox.rs"
-        && tables == ["dead_letter"]
-        && window.contains("rss_outbox_mark_dlx")
-        && window.contains("set_local_tenant")
-        && window.contains("insert into dead_letter")
-    {
-        return Some("outbox-dlx-dead-letter-settlement");
     }
     None
 }
@@ -1065,6 +1085,45 @@ mod tests {
     }
 
     #[test]
+    fn red_outbox_dlx_real_settlement_shape_is_reported() {
+        let padding = "let _padding = 1;\n".repeat(220);
+        let outbox = format!(
+            "async fn settle_dlx(pool: &sqlx::PgPool) {{\n\
+             let mut tx = pool.begin().await?;\n\
+             let row = sqlx::query_as(\"SELECT tenant_id, domain FROM rss_outbox_mark_dlx($1, $2, $3::uuid)\")\n\
+             .fetch_optional(&mut *tx).await?;\n\
+             {padding}\n\
+             sqlx::query(\"INSERT INTO dead_letter (tenant_id, message_id) VALUES ($1::uuid, $2)\")\n\
+             .execute(&mut *tx).await?;\n\
+             tx.commit().await?;\n\
+             }}"
+        );
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                ("outbox.rs", outbox.as_str()),
+                (
+                    "migrator.rs",
+                    "fn legacy_config_plaintext_count(){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.pool).await; }",
+                ),
+                (
+                    "config_repo.rs",
+                    "async fn select_maintenance_rows(&self){ sqlx::query(\"SELECT tenant_id::text, config_key, version, value, value_enc, key_id FROM config_entries WHERE protection_scheme = $1 ORDER BY tenant_id::text, config_key, version LIMIT $2\").fetch_all(&self.store.pool).await; }\n\
+                     async fn backfill_row(&self){ sqlx::query(\"UPDATE config_entries SET value = NULL, protection_scheme = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 0\").execute(&self.store.pool).await; }\n\
+                     async fn rewrap_row(&self){ sqlx::query(\"UPDATE config_entries SET value_enc = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 1\").execute(&self.store.pool).await; }\n\
+                     async fn remaining_plaintext(&self){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.store.pool).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::RawTenantTableAccess && f.subject.starts_with("outbox.rs:")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn green_scoped_tenant_and_global_tables_pass() {
         let (_, findings) = scan_guard(
             &migrations(),
@@ -1076,10 +1135,6 @@ mod tests {
                 (
                     "config_repo.rs",
                     "async fn f(){ self.pool.write(tenant, |conn| Box::pin(async move { sqlx::query(\"UPDATE credentials SET id=id\").execute(&mut *conn).await.map_err(storage) }), storage); }",
-                ),
-                (
-                    "outbox.rs",
-                    "async fn settle_dlx(pool: &PgPool){ let mut tx = pool.begin().await; sqlx::query(\"SELECT * FROM rss_outbox_mark_dlx($1, $2, $3)\").fetch_optional(&mut *tx).await; set_local_tenant(&mut tx, tenant).await; sqlx::query(\"INSERT INTO dead_letter VALUES (1)\").execute(&mut *tx).await; }",
                 ),
                 (
                     "migrator.rs",

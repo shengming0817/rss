@@ -3046,7 +3046,8 @@ async fn dead_letter_tenant_conformance() -> TestResult {
 async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     use diport::{
         DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterSummary, EnvelopeMetadata,
-        KEY_CORRELATION, KEY_TENANT_ID, WritableDeadLetterSource,
+        KEY_CORRELATION, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID,
+        WritableDeadLetterSource,
     };
     use eventexec::{
         DeadLetterId, DlqCursor, DlqError, DlqListQuery, DlqReplayOutcome, DlqReplayRequest,
@@ -3062,6 +3063,8 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let message_id = unique_event_id("consumer-msg");
     let mut metadata = EnvelopeMetadata::empty();
     metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
+    metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+    metadata.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
     metadata.insert_wire_pair(KEY_CORRELATION, "corr-dlq-replay");
 
     dl.write_dead_letter(DeadLetterRecord::new(
@@ -3139,6 +3142,33 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         .execute(&store.pool)
         .await?;
 
+    sqlx::query("UPDATE dead_letter SET metadata = metadata - $1 WHERE id = $2::uuid")
+        .bind(KEY_SCHEMA_HASH)
+        .bind(&dead_letter_id)
+        .execute(&store.pool)
+        .await?;
+    let missing_schema_hash = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&dead_letter_id)?,
+            IdemKey::parse(&unique_event_id("replay-missing-schema")).unwrap(),
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(missing_schema_hash, Err(DlqError::InvalidSchemaHeaders)),
+        "missing schema replay header must not be reported as an invalid payload"
+    );
+    sqlx::query(
+        "UPDATE dead_letter \
+         SET metadata = jsonb_set(metadata, '{schemaHash}', to_jsonb($1::text), true) \
+         WHERE id = $2::uuid",
+    )
+    .bind(TEST_SCHEMA_HASH)
+    .bind(&dead_letter_id)
+    .execute(&store.pool)
+    .await?;
+
     let outcome = dlq
         .replay_dead_letter(DlqReplayRequest::new(
             tenant,
@@ -3149,10 +3179,21 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         .await?;
     assert_eq!(outcome, DlqReplayOutcome::Inserted);
 
-    let row: (String, String, Vec<u8>, String, String, String) = sqlx::query_as(
+    let row: (
+        String,
+        String,
+        String,
+        String,
+        Vec<u8>,
+        String,
+        String,
+        String,
+    ) = sqlx::query_as(
         r#"
         SELECT domain,
                contract_id,
+               contract_version,
+               schema_hash,
                payload,
                metadata ->> 'tenantId',
                metadata ->> 'deadLetterId',
@@ -3166,10 +3207,12 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     .await?;
     assert_eq!(row.0, domain);
     assert_eq!(row.1, "contract-dlq");
-    assert_eq!(row.2, b"consumer-payload".to_vec());
-    assert_eq!(row.3, COTX_TENANT_A);
-    assert_eq!(row.4, dead_letter_id);
-    assert_eq!(row.5, message_id);
+    assert_eq!(row.2, "v1");
+    assert_eq!(row.3, TEST_SCHEMA_HASH);
+    assert_eq!(row.4, b"consumer-payload".to_vec());
+    assert_eq!(row.5, COTX_TENANT_A);
+    assert_eq!(row.6, dead_letter_id);
+    assert_eq!(row.7, message_id);
 
     let duplicate = dlq
         .replay_dead_letter(DlqReplayRequest::new(
@@ -3229,8 +3272,20 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
             saga_replay_id.clone(),
             cap,
         ))
-        .await?;
-    assert_eq!(saga_replay, DlqReplayOutcome::Inserted);
+        .await;
+    assert!(
+        matches!(saga_replay, Err(DlqError::NotReplayable)),
+        "saga dead_letter replay must be explicitly unsupported"
+    );
+    let saga_outbox_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+            .bind(saga_replay_id.as_str())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        saga_outbox_count.0, 0,
+        "not-replayable saga dead_letter must not write outbox"
+    );
 
     let invalid_payload_id = unique_event_id("invalid-payload-dl");
     let invalid_entry = serde_json::json!({"ciphertext": true});
@@ -3402,6 +3457,18 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(row.2, event_id);
     assert_eq!(row.3, 1);
     assert_eq!(row.4["tenantId"], COTX_TENANT_A);
+    assert_eq!(row.4["schemaVersion"], "v1");
+    assert_eq!(row.4["schemaHash"], TEST_SCHEMA_HASH);
+
+    sqlx::query(
+        "UPDATE dead_letter \
+         SET metadata = jsonb_set(metadata, '{relayFailureReason}', to_jsonb($1::text), true) \
+         WHERE id = $2::uuid",
+    )
+    .bind("envelope_invalid_schema_hash")
+    .bind(&row.0)
+    .execute(&store.pool)
+    .await?;
 
     let dlq = app.dlq(test_dlx_payload_protector());
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
@@ -3431,6 +3498,11 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert_eq!(listed.data()[0].kind(), DlqEntryKind::OutboxDlx);
     assert_eq!(listed.data()[0].id(), event_id);
     assert_eq!(listed.data()[0].message_id(), event_id);
+    assert_eq!(
+        listed.data()[0].error_summary(),
+        "envelope_invalid_schema_hash",
+        "outbox DLQ list must expose the relay failure reason from dead_letter metadata"
+    );
 
     let event_key = IdemKey::parse(&event_id).unwrap();
     let wrong_tenant = dlq
@@ -3449,13 +3521,16 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
         .await?;
     assert_eq!(redriven, DlqRedriveOutcome::Redriven);
-    let status_after_redrive: (String, i32) =
-        sqlx::query_as("SELECT status, retry_count FROM outbox WHERE event_id = $1")
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
+    let status_after_redrive: (String, i32, String, String) = sqlx::query_as(
+        "SELECT status, retry_count, contract_version, schema_hash FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
     assert_eq!(status_after_redrive.0, STATUS_PENDING);
     assert_eq!(status_after_redrive.1, 0);
+    assert_eq!(status_after_redrive.2, "v1");
+    assert_eq!(status_after_redrive.3, TEST_SCHEMA_HASH);
 
     let listed_after_redrive = dlq
         .list_dlq(
@@ -3499,8 +3574,18 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 
     // A 取租约 → tokenA（行置 publishing）。
     let lease = crate::outbox::acquire_lease(&store.pool, &event_id).await?;
-    let (_rc, token_a, _tenant_id, _metadata_json, _domain, _contract_id, _topic, _now_epoch) =
-        lease.ok_or("acquire_lease should return a lease for pending row")?;
+    let (
+        _rc,
+        token_a,
+        _tenant_id,
+        _metadata_json,
+        _domain,
+        _contract_id,
+        _topic,
+        _contract_version,
+        _schema_hash,
+        _now_epoch,
+    ) = lease.ok_or("acquire_lease should return a lease for pending row")?;
 
     // 模拟 B 重新 acquire：覆盖 lease_token = tokenB，A 的 tokenA 变 stale。
     sqlx::query("UPDATE outbox SET lease_token = gen_random_uuid() WHERE event_id = $1")
@@ -3588,8 +3673,18 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         )
         .await?;
 
-    let row: (String, String, String, String, String, serde_json::Value) = sqlx::query_as(
-        "SELECT event_id, domain, topic, contract_id, status, metadata FROM outbox WHERE event_id = $1",
+    let row: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        serde_json::Value,
+    ) = sqlx::query_as(
+        "SELECT event_id, domain, topic, contract_id, contract_version, schema_hash, causation_id, status, metadata FROM outbox WHERE event_id = $1",
     )
     .bind(&event_id)
     .fetch_one(&store.pool)
@@ -3599,72 +3694,120 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     assert_eq!(row.2, SESSION_CREATED_TOPIC, "topic");
     // contract_id 列 = ContractBinding.contract_id()（#1193 typed 绑定经 adapter 落库的 drift-lock）。
     assert_eq!(row.3, "identity.session-created", "contract_id");
-    assert_eq!(row.4, "pending", "新 entry pending 待 relay");
+    assert_eq!(row.4, "v1", "contract_version 物理列");
+    assert_eq!(row.5, TEST_SCHEMA_HASH, "schema_hash 物理列");
+    assert_eq!(row.6, None, "默认 causation_id 为 NULL");
+    assert_eq!(row.7, "pending", "新 entry pending 待 relay");
     // metadata 含标准 header + opaque subjectId + actor + sealed 注入的 reserved occurred_at（#1129/#1618）；无完整 PII（FR-020 funnel）。
     assert_eq!(
-        row.5.get("subjectId").and_then(serde_json::Value::as_str),
+        row.8.get("subjectId").and_then(serde_json::Value::as_str),
         Some("subj-opaque-77"),
         "metadata 应含 opaque subjectId: {}",
-        row.5
+        row.8
     );
     assert_eq!(
-        row.5.get("occurredAt").and_then(serde_json::Value::as_i64),
+        row.8.get("occurredAt").and_then(serde_json::Value::as_i64),
         Some(expected_occurred_at()),
         "metadata 应含 sealed 注入的 occurred_at（unix 秒，来自注入 Clock）: {}",
-        row.5
+        row.8
     );
     assert_eq!(
-        row.5
+        row.8
             .get("schemaVersion")
             .and_then(serde_json::Value::as_str),
         Some("v1"),
         "metadata 应含 schemaVersion: {}",
-        row.5
+        row.8
     );
     assert_eq!(
-        row.5.get("schemaHash").and_then(serde_json::Value::as_str),
+        row.8.get("schemaHash").and_then(serde_json::Value::as_str),
         Some(TEST_SCHEMA_HASH),
         "metadata 应含 schemaHash: {}",
-        row.5
+        row.8
     );
-    let Some(actor) = row.5.get("actor") else {
+    let Some(actor) = row.8.get("actor") else {
         return Err(
-            std::io::Error::other(format!("metadata should include actor: {}", row.5)).into(),
+            std::io::Error::other(format!("metadata should include actor: {}", row.8)).into(),
         );
     };
     assert_eq!(
         actor.get("kind").and_then(serde_json::Value::as_str),
         Some("admin"),
         "metadata.actor.kind 应落库: {}",
-        row.5
+        row.8
     );
     assert_eq!(
         actor.get("id").and_then(serde_json::Value::as_str),
         Some("pg-integration-actor"),
         "metadata.actor.id 应落库: {}",
-        row.5
+        row.8
     );
     let tenant_text = tenant.to_string();
     assert_eq!(
         actor.get("tenantId").and_then(serde_json::Value::as_str),
         Some(tenant_text.as_str()),
         "metadata.actor.tenantId 应落库: {}",
-        row.5
+        row.8
     );
     assert_eq!(
         actor.get("scope").and_then(serde_json::Value::as_str),
         Some("tenant"),
         "metadata.actor.scope 应落库: {}",
-        row.5
+        row.8
     );
     // trace / correlation / principal 为后续 follow-up 空接缝，本 PR 不写。
     for reserved in ["trace", "correlation", "principal"] {
         assert!(
-            row.5.get(reserved).is_none(),
+            row.8.get(reserved).is_none(),
             "空接缝 reserved key {reserved} 本 PR 不应写入: {}",
-            row.5
+            row.8
         );
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// PgEmitter::emit 可选 causation_id 落物理列；metadata 不承载该值（persisted-only）。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn t10_pg_emitter_persists_nonempty_causation_id() -> TestResult {
+    use diport::{EnvelopeCausationId, OutboxEmitter, OutboxEnvelopeParts};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let event_id = unique_event_id("t10-causation");
+    let entry = Entry::new(
+        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+        IdemKey::parse(&event_id).unwrap(),
+        reviewed_payload(br#"{"sessionId":"s-cause"}"#),
+    );
+    let tenant = test_tenant();
+    crate::PgEmitter::new(&store, fixed_clock())
+        .emit(
+            entry,
+            OutboxEnvelopeParts::new(
+                session_contract(),
+                tenant,
+                subject_id("subj-cause"),
+                actor_for(tenant),
+            )
+            .with_causation_id(EnvelopeCausationId::from_opaque("upstream-event-1").unwrap()),
+        )
+        .await?;
+
+    let row: (Option<String>, String) =
+        sqlx::query_as("SELECT causation_id, metadata::text FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(row.0.as_deref(), Some("upstream-event-1"));
+    assert!(
+        !row.1.contains("upstream-event-1"),
+        "causation_id persisted-only，不应进入 metadata: {}",
+        row.1
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -3727,7 +3870,13 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
     crate::PgSessionLifecycle::new(&store, fixed_clock())
-        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .persist_session_and_emit(
+            session,
+            session_entry(&event_id),
+            session_envelope().with_causation_id(
+                diport::EnvelopeCausationId::from_opaque("session-upstream-event").unwrap(),
+            ),
+        )
         .await?;
 
     // session 行：恰 1，subject / tenant_id（tenant-correct）正确。
@@ -3750,11 +3899,20 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 1, "outbox 行应写入");
-    let status: (String,) = sqlx::query_as("SELECT status FROM outbox WHERE event_id = $1")
+    let outbox_cols: (String, String, String, Option<String>) = sqlx::query_as(
+        "SELECT status, contract_version, schema_hash, causation_id FROM outbox WHERE event_id = $1",
+    )
         .bind(&event_id)
         .fetch_one(&store.pool)
         .await?;
-    assert_eq!(status.0, "pending", "新 outbox entry pending 待 relay");
+    assert_eq!(outbox_cols.0, "pending", "新 outbox entry pending 待 relay");
+    assert_eq!(outbox_cols.1, "v1", "co-tx contract_version 物理列");
+    assert_eq!(outbox_cols.2, TEST_SCHEMA_HASH, "co-tx schema_hash 物理列");
+    assert_eq!(
+        outbox_cols.3.as_deref(),
+        Some("session-upstream-event"),
+        "session co-tx 应透传非空 causation_id"
+    );
 
     // co-tx 路径（第二装配点）同样经构造期 OutboxMetadata::new 从注入 Clock 注入 reserved occurred_at（#1129）。
     let meta: (String,) = sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
@@ -4273,12 +4431,16 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
     let forge_id = unique_event_id("t24-forge");
     let forge_env = make_test_env(&domain, "c");
     let forge_result = sqlx::query(
-        "INSERT INTO outbox (event_id, tenant_id, domain, topic, contract_id, payload, metadata, status, seq) \
-         VALUES ($1, $2::uuid, $3, 'test.event', 'c', $4, $5::jsonb, 'pending', $6)",
+        "INSERT INTO outbox (
+             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+             payload, metadata, status, seq
+         ) VALUES ($1, $2::uuid, $3, 'test.event', 'c', $4, $5, $6, $7::jsonb, 'pending', $8)",
     )
     .bind(&forge_id)
     .bind(forge_env.tenant().to_string())
     .bind(&domain)
+    .bind(forge_env.contract_version())
+    .bind(forge_env.schema_hash())
     .bind(b"p".as_slice())
     .bind(forge_env.metadata_json())
     .bind(fake_seq)
@@ -4696,6 +4858,241 @@ async fn migration_0031_rejects_outbox_rows_missing_tenant_metadata() -> TestRes
     Ok(())
 }
 
+async fn create_rss_app_role_for_migration_test(store: &PgStore) -> TestResult {
+    sqlx::raw_sql(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
+                CREATE ROLE rss_app NOLOGIN NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        GRANT USAGE ON SCHEMA public TO rss_app;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+async fn apply_outbox_legacy_prereqs_through_0031(store: &PgStore) -> TestResult {
+    create_rss_app_role_for_migration_test(store).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0031_harden_outbox_tenant_scope.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+/// 0036：已知 legacy contract 行按 0035 同源 map 回填物理列；legacy causation 为 NULL。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0036_backfills_known_legacy_contract_columns() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!("../migrations/0003_create_outbox.sql"))
+        .execute(&store.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0016_add_seq_and_partition_to_outbox.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    let event_id = unique_event_id("known-0036");
+    sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status) \
+         VALUES ($1, 'identity', 'identity.session-created', 'identity.session-created', $2, $3::jsonb, 'pending')",
+    )
+    .bind(&event_id)
+    .bind(b"payload".as_slice())
+    .bind(serde_json::json!({ "tenantId": COTX_TENANT_A }).to_string())
+    .execute(&store.pool)
+    .await?;
+
+    apply_outbox_legacy_prereqs_through_0031(&store).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0036_add_outbox_schema_columns.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    let row: (String, String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT contract_version, schema_hash, causation_id, metadata->>'schemaVersion', metadata->>'schemaHash' \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0, "v1");
+    assert_eq!(
+        row.1,
+        "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516"
+    );
+    assert_eq!(row.2, None, "legacy row causation_id 应为 NULL");
+    assert_eq!(row.3.as_deref(), Some(row.0.as_str()));
+    assert_eq!(row.4.as_deref(), Some(row.1.as_str()));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0036：未知 legacy contract 且缺 schema header 时 fail-fast，不写 `unknown` 兼容值。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0036_rejects_unknown_legacy_schema_headers() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!("../migrations/0003_create_outbox.sql"))
+        .execute(&store.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0016_add_seq_and_partition_to_outbox.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status) \
+         VALUES ($1, 'unknown', 'unknown.event', 'unknown.contract', $2, $3::jsonb, 'pending')",
+    )
+    .bind(unique_event_id("unknown-0036"))
+    .bind(b"payload".as_slice())
+    .bind(serde_json::json!({ "tenantId": COTX_TENANT_A }).to_string())
+    .execute(&store.pool)
+    .await?;
+
+    apply_outbox_legacy_prereqs_through_0031(&store).await?;
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0036_add_outbox_schema_columns.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let Err(err) = result else {
+        return Err("0036 must reject unknown legacy outbox schema headers".into());
+    };
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("outbox schema column backfill requires generated known contract map"),
+        "unexpected migration error: {rendered}"
+    );
+    assert!(
+        rendered.contains("bad_rows=1") && rendered.contains("domain=unknown"),
+        "unexpected migration error: {rendered}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0036：未知 legacy contract 即便带格式合法 schema headers 也 fail-fast；不信任 metadata 自证契约。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0036_rejects_unknown_legacy_even_with_valid_schema_headers() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!("../migrations/0003_create_outbox.sql"))
+        .execute(&store.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0016_add_seq_and_partition_to_outbox.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status) \
+         VALUES ($1, 'unknown', 'unknown.event', 'unknown.contract', $2, $3::jsonb, 'pending')",
+    )
+    .bind(unique_event_id("unknown-valid-0036"))
+    .bind(b"payload".as_slice())
+    .bind(
+        serde_json::json!({
+            "tenantId": COTX_TENANT_A,
+            "schemaVersion": "v1",
+            "schemaHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        })
+        .to_string(),
+    )
+    .execute(&store.pool)
+    .await?;
+
+    apply_outbox_legacy_prereqs_through_0031(&store).await?;
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0036_add_outbox_schema_columns.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let Err(err) = result else {
+        return Err(
+            "0036 must reject unknown legacy rows even with valid metadata schema headers".into(),
+        );
+    };
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("outbox schema column backfill requires generated known contract map"),
+        "unexpected migration error: {rendered}"
+    );
+    assert!(
+        rendered.contains("bad_rows=1") && rendered.contains("domain=unknown"),
+        "unexpected migration error: {rendered}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0036：已知 legacy contract 的 schema metadata 必须匹配 generated map，不能被历史 metadata 覆盖。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0036_rejects_known_contract_schema_metadata_mismatch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!("../migrations/0003_create_outbox.sql"))
+        .execute(&store.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0016_add_seq_and_partition_to_outbox.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO outbox (event_id, domain, topic, contract_id, payload, metadata, status) \
+         VALUES ($1, 'identity', 'identity.session-created', 'identity.session-created', $2, $3::jsonb, 'pending')",
+    )
+    .bind(unique_event_id("known-mismatch-0036"))
+    .bind(b"payload".as_slice())
+    .bind(
+        serde_json::json!({
+            "tenantId": COTX_TENANT_A,
+            "schemaVersion": "v2",
+            "schemaHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        })
+        .to_string(),
+    )
+    .execute(&store.pool)
+    .await?;
+
+    apply_outbox_legacy_prereqs_through_0031(&store).await?;
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0036_add_outbox_schema_columns.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let Err(err) = result else {
+        return Err(
+            "0036 must reject known contract metadata that mismatches generated map".into(),
+        );
+    };
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("outbox known contract schema headers mismatch generated map"),
+        "unexpected migration error: {rendered}"
+    );
+    assert!(
+        rendered.contains("bad_rows=1") && rendered.contains("identity.session-created"),
+        "unexpected migration error: {rendered}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 0031：tenant_id backfill 接受 typed TenantId 契约允许的 canonical UUIDv7。
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_0031_accepts_canonical_uuid_v7_tenant_metadata() -> TestResult {
@@ -4830,11 +5227,12 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         "unexpected negative sweep error: {negative_sweep_err}"
     );
 
-    let can_execute: (bool, bool, bool, bool, bool) = sqlx::query_as(
+    let can_execute: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
         SELECT has_function_privilege('rss_app', 'rss_outbox_poll_pending(text, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_acquire_lease(text)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_mark_dlx(text, int, uuid)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_redrive(text, uuid)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_sweep_outbox_published(bigint)', 'EXECUTE')
         "#,
@@ -4843,7 +5241,7 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     .await?;
     assert_eq!(
         can_execute,
-        (true, true, true, true, true),
+        (true, true, true, true, true, true),
         "rss_app should only receive the fixed outbox function surface"
     );
 
@@ -6785,7 +7183,9 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         tenant,
         config_entry("app.k", plain_value, 1),
         config_outbox_entry(&event_id),
-        config_envelope("app.k"),
+        config_envelope("app.k").with_causation_id(
+            diport::EnvelopeCausationId::from_opaque("config-upstream-event").unwrap(),
+        ),
     )
     .await?;
 
@@ -6807,11 +7207,23 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 1, "outbox 行应写入（co-tx 两行皆在）");
-    let outbox_shape: (Vec<u8>, String) =
-        sqlx::query_as("SELECT payload, metadata::text FROM outbox WHERE event_id = $1")
+    let outbox_shape: (Vec<u8>, String, String, String, Option<String>) =
+        sqlx::query_as(
+            "SELECT payload, metadata::text, contract_version, schema_hash, causation_id FROM outbox WHERE event_id = $1",
+        )
             .bind(&event_id)
             .fetch_one(&store.pool)
             .await?;
+    assert_eq!(outbox_shape.2, "v1", "config co-tx contract_version 物理列");
+    assert_eq!(
+        outbox_shape.3, TEST_SCHEMA_HASH,
+        "config co-tx schema_hash 物理列"
+    );
+    assert_eq!(
+        outbox_shape.4.as_deref(),
+        Some("config-upstream-event"),
+        "config co-tx 应透传非空 causation_id"
+    );
     assert!(
         !outbox_shape
             .0
@@ -7978,7 +8390,8 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
 use identity::ports::{
     AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Operator,
     POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyObligations,
-    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, Role, RolePage, RoleRepo,
+    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, Role, RoleBinding,
+    RoleBindingLifecycle, RolePage, RoleRepo,
 };
 
 use crate::{PgPolicyRepo, PgRoleBindingLifecycle, PgRoleRepo};
@@ -9111,6 +9524,64 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
             .fetch_one(&store.pool)
             .await?;
     assert_eq!(revoked_events.0, 1, "未命中 revoke 不追加 outbox");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let role = Role::hydrate(
+        "role-causation",
+        "Causation",
+        &["identity:role:assign".to_string()],
+    )?;
+    PgRoleRepo::new(&store).save(tenant, role).await?;
+
+    let event_id = unique_event_id("role-causation");
+    let role_assigned_contract = vocab::ContractBinding::from_static(
+        "identity",
+        "identity.role-assigned",
+        "v1",
+        "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
+    );
+    let entry = Entry::new(
+        Topic::parse("identity.role-assigned").unwrap(),
+        IdemKey::parse(&event_id).unwrap(),
+        reviewed_payload(br#"{"subject":"target-user","roleId":"role-causation"}"#),
+    );
+    let envelope = OutboxEnvelopeParts::new(
+        role_assigned_contract,
+        tenant,
+        subject_id("target-user"),
+        actor_for(tenant),
+    )
+    .with_causation_id(diport::EnvelopeCausationId::from_opaque("role-upstream-event").unwrap());
+    let binding = RoleBinding::hydrate("target-user", "role-causation", tenant)?;
+
+    PgRoleBindingLifecycle::new(&store, fixed_clock())
+        .assign_and_emit(binding, entry, envelope)
+        .await?;
+
+    let outbox: (Option<String>, String) =
+        sqlx::query_as("SELECT causation_id, metadata::text FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        outbox.0.as_deref(),
+        Some("role-upstream-event"),
+        "role binding co-tx 应透传非空 causation_id"
+    );
+    assert!(
+        !outbox.1.contains("role-upstream-event"),
+        "role binding causation_id persisted-only，不得进入 metadata: {}",
+        outbox.1
+    );
 
     store.shutdown().await?;
     Ok(())

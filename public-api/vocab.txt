@@ -121,7 +121,9 @@ pub struct vocab::contract::binding::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::ContractBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str, &'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::ContractBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::version(&self) -> &'static str
 impl core::clone::Clone for vocab::contract::binding::ContractBinding
 pub fn vocab::contract::binding::ContractBinding::clone(&self) -> vocab::contract::binding::ContractBinding
 impl core::cmp::Eq for vocab::contract::binding::ContractBinding
@@ -543,6 +545,59 @@ impl<T> core::clone::CloneToUninit for vocab::principal::PrincipalKind where T: 
 pub unsafe fn vocab::principal::PrincipalKind::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::principal::PrincipalKind
 pub fn vocab::principal::PrincipalKind::from(T) -> T
+pub mod vocab::projection
+#[non_exhaustive] pub enum vocab::projection::ProjectionField
+pub vocab::projection::ProjectionField::AuditActor
+pub vocab::projection::ProjectionField::AuditResourceId
+impl vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::from_obligation_key(&str) -> core::option::Option<Self>
+pub fn vocab::projection::ProjectionField::obligation_key(self) -> &'static str
+pub fn vocab::projection::ProjectionField::permission(self) -> &'static str
+impl core::clone::Clone for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::clone(&self) -> vocab::projection::ProjectionField
+impl core::cmp::Eq for vocab::projection::ProjectionField
+impl core::cmp::PartialEq for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::eq(&self, &vocab::projection::ProjectionField) -> bool
+impl core::fmt::Debug for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::projection::ProjectionField
+impl core::marker::StructuralPartialEq for vocab::projection::ProjectionField
+impl core::marker::Freeze for vocab::projection::ProjectionField
+impl core::marker::Send for vocab::projection::ProjectionField
+impl core::marker::Sync for vocab::projection::ProjectionField
+impl core::marker::Unpin for vocab::projection::ProjectionField
+impl core::marker::UnsafeUnpin for vocab::projection::ProjectionField
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::projection::ProjectionField
+impl core::panic::unwind_safe::UnwindSafe for vocab::projection::ProjectionField
+impl<T, U> core::convert::Into<U> for vocab::projection::ProjectionField where U: core::convert::From<T>
+pub fn vocab::projection::ProjectionField::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::projection::ProjectionField where U: core::convert::Into<T>
+pub type vocab::projection::ProjectionField::Error = core::convert::Infallible
+pub fn vocab::projection::ProjectionField::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::projection::ProjectionField where U: core::convert::TryFrom<T>
+pub type vocab::projection::ProjectionField::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::projection::ProjectionField::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::projection::ProjectionField where T: core::clone::Clone
+pub type vocab::projection::ProjectionField::Owned = T
+pub fn vocab::projection::ProjectionField::clone_into(&self, &mut T)
+pub fn vocab::projection::ProjectionField::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::projection::ProjectionField where T: 'static + ?core::marker::Sized
+pub fn vocab::projection::ProjectionField::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
+pub fn vocab::projection::ProjectionField::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
+pub fn vocab::projection::ProjectionField::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::projection::ProjectionField where T: core::clone::Clone
+pub unsafe fn vocab::projection::ProjectionField::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::from(T) -> T
+pub const vocab::projection::AUDIT_ACTOR_FIELD_OBLIGATION: &str
+pub const vocab::projection::AUDIT_FIELD_ACTOR_PERMISSION: &str
+pub const vocab::projection::AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str
+pub const vocab::projection::AUDIT_READ_PERMISSION: &str
+pub const vocab::projection::AUDIT_RESOURCE_ID_FIELD_OBLIGATION: &str
 pub mod vocab::query
 #[non_exhaustive] pub enum vocab::query::CursorError
 pub vocab::query::CursorError::Malformed
@@ -1261,6 +1316,53 @@ impl<T> core::clone::CloneToUninit for vocab::principal::PrincipalKind where T: 
 pub unsafe fn vocab::principal::PrincipalKind::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::principal::PrincipalKind
 pub fn vocab::principal::PrincipalKind::from(T) -> T
+#[non_exhaustive] pub enum vocab::ProjectionField
+pub vocab::ProjectionField::AuditActor
+pub vocab::ProjectionField::AuditResourceId
+impl vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::from_obligation_key(&str) -> core::option::Option<Self>
+pub fn vocab::projection::ProjectionField::obligation_key(self) -> &'static str
+pub fn vocab::projection::ProjectionField::permission(self) -> &'static str
+impl core::clone::Clone for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::clone(&self) -> vocab::projection::ProjectionField
+impl core::cmp::Eq for vocab::projection::ProjectionField
+impl core::cmp::PartialEq for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::eq(&self, &vocab::projection::ProjectionField) -> bool
+impl core::fmt::Debug for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::projection::ProjectionField
+impl core::marker::StructuralPartialEq for vocab::projection::ProjectionField
+impl core::marker::Freeze for vocab::projection::ProjectionField
+impl core::marker::Send for vocab::projection::ProjectionField
+impl core::marker::Sync for vocab::projection::ProjectionField
+impl core::marker::Unpin for vocab::projection::ProjectionField
+impl core::marker::UnsafeUnpin for vocab::projection::ProjectionField
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::projection::ProjectionField
+impl core::panic::unwind_safe::UnwindSafe for vocab::projection::ProjectionField
+impl<T, U> core::convert::Into<U> for vocab::projection::ProjectionField where U: core::convert::From<T>
+pub fn vocab::projection::ProjectionField::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::projection::ProjectionField where U: core::convert::Into<T>
+pub type vocab::projection::ProjectionField::Error = core::convert::Infallible
+pub fn vocab::projection::ProjectionField::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::projection::ProjectionField where U: core::convert::TryFrom<T>
+pub type vocab::projection::ProjectionField::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::projection::ProjectionField::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::projection::ProjectionField where T: core::clone::Clone
+pub type vocab::projection::ProjectionField::Owned = T
+pub fn vocab::projection::ProjectionField::clone_into(&self, &mut T)
+pub fn vocab::projection::ProjectionField::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::projection::ProjectionField where T: 'static + ?core::marker::Sized
+pub fn vocab::projection::ProjectionField::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
+pub fn vocab::projection::ProjectionField::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
+pub fn vocab::projection::ProjectionField::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::projection::ProjectionField where T: core::clone::Clone
+pub unsafe fn vocab::projection::ProjectionField::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::projection::ProjectionField
+pub fn vocab::projection::ProjectionField::from(T) -> T
 #[non_exhaustive] pub enum vocab::PublicDetail
 pub vocab::PublicDetail::Bool(&'static str, bool)
 pub vocab::PublicDetail::Duration(&'static str, core::time::Duration)
@@ -1483,7 +1585,9 @@ pub struct vocab::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::ContractBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str, &'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::ContractBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::version(&self) -> &'static str
 impl core::clone::Clone for vocab::contract::binding::ContractBinding
 pub fn vocab::contract::binding::ContractBinding::clone(&self) -> vocab::contract::binding::ContractBinding
 impl core::cmp::Eq for vocab::contract::binding::ContractBinding
@@ -1878,3 +1982,8 @@ impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::cl
 pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::from(T) -> T
+pub const vocab::AUDIT_ACTOR_FIELD_OBLIGATION: &str
+pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: &str
+pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str
+pub const vocab::AUDIT_READ_PERMISSION: &str
+pub const vocab::AUDIT_RESOURCE_ID_FIELD_OBLIGATION: &str
