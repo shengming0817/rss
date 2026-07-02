@@ -58,7 +58,11 @@ pub use reconcile::{
     ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,
     Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
 };
-pub use saga::{CompensationOutcome, SagaOutcome, SagaStep, StepName, StepNameError};
+pub use saga::{
+    CompensationOutcome, SagaDefinition, SagaDurableStatus, SagaId, SagaJournalAppendRecord,
+    SagaJournalRecord, SagaJournalStatus, SagaModelError, SagaOutcome, SagaReplayDecision,
+    SagaStep, StepName, StepNameError,
+};
 pub use tx_retry::{
     TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError, TxRetryReport,
     run_tx_retry,

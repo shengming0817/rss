@@ -227,7 +227,82 @@ impl<T> core::convert::From<T> for generated::event::identity_v1::role_assigned:
 pub fn generated::event::identity_v1::role_assigned::error::ConversionError::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::event::identity_v1::role_assigned::error::ConversionError
 pub type generated::event::identity_v1::role_assigned::error::ConversionError::Output = T
+pub enum generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Admin
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Anonymous
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Device
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Service
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::SuperAdmin
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::User
+impl core::clone::Clone for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::clone(&self) -> generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::cmp::Eq for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::cmp::Ord for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::cmp(&self, &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::eq(&self, &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind) -> bool
+impl core::cmp::PartialOrd for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::partial_cmp(&self, &generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Error = generated::event::identity_v1::role_assigned::error::ConversionError
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::try_from(&alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::role_assigned::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Error = generated::event::identity_v1::role_assigned::error::ConversionError
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::try_from(&str) -> core::result::Result<Self, generated::event::identity_v1::role_assigned::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Error = generated::event::identity_v1::role_assigned::error::ConversionError
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::try_from(alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::role_assigned::error::ConversionError>
+impl core::fmt::Debug for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::marker::StructuralPartialEq for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::str::traits::FromStr for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Err = generated::event::identity_v1::role_assigned::error::ConversionError
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::from_str(&str) -> core::result::Result<Self, generated::event::identity_v1::role_assigned::error::ConversionError>
+impl serde_core::ser::Serialize for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::marker::Send for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::marker::Sync for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::marker::Unpin for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+impl<T, U> core::convert::Into<U> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where U: core::convert::From<T>
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where U: core::convert::Into<T>
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Error = core::convert::Infallible
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where U: core::convert::TryFrom<T>
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: core::clone::Clone
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Owned = T
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::clone_into(&self, &mut T)
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::to_owned(&self) -> T
+impl<T> alloc::string::ToString for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: 'static + ?core::marker::Sized
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: ?core::marker::Sized
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: ?core::marker::Sized
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: core::clone::Clone
+pub unsafe fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub fn generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
+pub type generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind::Output = T
 pub struct generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload
+pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::actor_kind: generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayloadActorKind
 pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::assigned_by: uuid::Uuid
 pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::occurred_at: i64
 pub generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload::role_id: alloc::string::String
@@ -318,7 +393,82 @@ impl<T> core::convert::From<T> for generated::event::identity_v1::role_revoked::
 pub fn generated::event::identity_v1::role_revoked::error::ConversionError::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::event::identity_v1::role_revoked::error::ConversionError
 pub type generated::event::identity_v1::role_revoked::error::ConversionError::Output = T
+pub enum generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Admin
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Anonymous
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Device
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Service
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::SuperAdmin
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::User
+impl core::clone::Clone for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::clone(&self) -> generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::cmp::Eq for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::cmp::Ord for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::cmp(&self, &generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::eq(&self, &generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind) -> bool
+impl core::cmp::PartialOrd for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::partial_cmp(&self, &generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Error = generated::event::identity_v1::role_revoked::error::ConversionError
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::try_from(&alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::role_revoked::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Error = generated::event::identity_v1::role_revoked::error::ConversionError
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::try_from(&str) -> core::result::Result<Self, generated::event::identity_v1::role_revoked::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Error = generated::event::identity_v1::role_revoked::error::ConversionError
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::try_from(alloc::string::String) -> core::result::Result<Self, generated::event::identity_v1::role_revoked::error::ConversionError>
+impl core::fmt::Debug for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::marker::StructuralPartialEq for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::str::traits::FromStr for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Err = generated::event::identity_v1::role_revoked::error::ConversionError
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::from_str(&str) -> core::result::Result<Self, generated::event::identity_v1::role_revoked::error::ConversionError>
+impl serde_core::ser::Serialize for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::marker::Send for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::marker::Sync for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::marker::Unpin for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::marker::UnsafeUnpin for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+impl<T, U> core::convert::Into<U> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where U: core::convert::From<T>
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where U: core::convert::Into<T>
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Error = core::convert::Infallible
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where U: core::convert::TryFrom<T>
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: core::clone::Clone
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Owned = T
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::clone_into(&self, &mut T)
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::to_owned(&self) -> T
+impl<T> alloc::string::ToString for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: 'static + ?core::marker::Sized
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: ?core::marker::Sized
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: ?core::marker::Sized
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: core::clone::Clone
+pub unsafe fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub fn generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
+pub type generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind::Output = T
 pub struct generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload
+pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::actor_kind: generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayloadActorKind
 pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::occurred_at: i64
 pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::revoked_by: uuid::Uuid
 pub generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload::role_id: alloc::string::String

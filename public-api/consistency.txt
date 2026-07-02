@@ -2205,6 +2205,159 @@ impl<T> core::clone::CloneToUninit for consistency::saga::CompensationOutcome wh
 pub unsafe fn consistency::saga::CompensationOutcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::CompensationOutcome
 pub fn consistency::saga::CompensationOutcome::from(T) -> T
+#[non_exhaustive] pub enum consistency::saga::SagaDurableStatus
+pub consistency::saga::SagaDurableStatus::Compensated
+pub consistency::saga::SagaDurableStatus::Compensating
+pub consistency::saga::SagaDurableStatus::Failed
+pub consistency::saga::SagaDurableStatus::Failed::failed_step: consistency::saga::StepName
+pub consistency::saga::SagaDurableStatus::NotStarted
+pub consistency::saga::SagaDurableStatus::Running
+pub consistency::saga::SagaDurableStatus::Succeeded
+impl consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::is_running(&self) -> bool
+pub fn consistency::saga::SagaDurableStatus::is_terminal(&self) -> bool
+impl core::clone::Clone for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::clone(&self) -> consistency::saga::SagaDurableStatus
+impl core::cmp::Eq for consistency::saga::SagaDurableStatus
+impl core::cmp::PartialEq for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::eq(&self, &consistency::saga::SagaDurableStatus) -> bool
+impl core::fmt::Debug for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDurableStatus
+impl core::marker::Freeze for consistency::saga::SagaDurableStatus
+impl core::marker::Send for consistency::saga::SagaDurableStatus
+impl core::marker::Sync for consistency::saga::SagaDurableStatus
+impl core::marker::Unpin for consistency::saga::SagaDurableStatus
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDurableStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDurableStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDurableStatus
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaDurableStatus where U: core::convert::From<T>
+pub fn consistency::saga::SagaDurableStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaDurableStatus where U: core::convert::Into<T>
+pub type consistency::saga::SagaDurableStatus::Error = core::convert::Infallible
+pub fn consistency::saga::SagaDurableStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaDurableStatus where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaDurableStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaDurableStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaDurableStatus where T: core::clone::Clone
+pub type consistency::saga::SagaDurableStatus::Owned = T
+pub fn consistency::saga::SagaDurableStatus::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaDurableStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaDurableStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaDurableStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaDurableStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDurableStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaDurableStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDurableStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaDurableStatus where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaDurableStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::saga::SagaJournalStatus
+pub consistency::saga::SagaJournalStatus::Compensated
+pub consistency::saga::SagaJournalStatus::Compensating
+pub consistency::saga::SagaJournalStatus::Completed
+pub consistency::saga::SagaJournalStatus::Executing
+pub consistency::saga::SagaJournalStatus::Failed
+impl consistency::saga::SagaJournalStatus
+pub const consistency::saga::SagaJournalStatus::ALL: [Self; 5]
+pub fn consistency::saga::SagaJournalStatus::as_str(&self) -> &'static str
+pub fn consistency::saga::SagaJournalStatus::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::clone(&self) -> consistency::saga::SagaJournalStatus
+impl core::cmp::Eq for consistency::saga::SagaJournalStatus
+impl core::cmp::PartialEq for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::eq(&self, &consistency::saga::SagaJournalStatus) -> bool
+impl core::fmt::Debug for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::saga::SagaJournalStatus
+impl core::marker::StructuralPartialEq for consistency::saga::SagaJournalStatus
+impl core::marker::Freeze for consistency::saga::SagaJournalStatus
+impl core::marker::Send for consistency::saga::SagaJournalStatus
+impl core::marker::Sync for consistency::saga::SagaJournalStatus
+impl core::marker::Unpin for consistency::saga::SagaJournalStatus
+impl core::marker::UnsafeUnpin for consistency::saga::SagaJournalStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalStatus
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaJournalStatus where U: core::convert::From<T>
+pub fn consistency::saga::SagaJournalStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaJournalStatus where U: core::convert::Into<T>
+pub type consistency::saga::SagaJournalStatus::Error = core::convert::Infallible
+pub fn consistency::saga::SagaJournalStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaJournalStatus where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaJournalStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaJournalStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaJournalStatus where T: core::clone::Clone
+pub type consistency::saga::SagaJournalStatus::Owned = T
+pub fn consistency::saga::SagaJournalStatus::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaJournalStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaJournalStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaJournalStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaJournalStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaJournalStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaJournalStatus where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaJournalStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::saga::SagaModelError
+pub consistency::saga::SagaModelError::DuplicateSeq
+pub consistency::saga::SagaModelError::DuplicateSeq::seq: u64
+pub consistency::saga::SagaModelError::DuplicateStepName
+pub consistency::saga::SagaModelError::DuplicateStepName::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::EmptyDefinition
+pub consistency::saga::SagaModelError::IllegalTransition
+pub consistency::saga::SagaModelError::IllegalTransition::status: consistency::saga::SagaJournalStatus
+pub consistency::saga::SagaModelError::IllegalTransition::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::InvalidStepName
+pub consistency::saga::SagaModelError::InvalidStepName::raw: alloc::string::String
+pub consistency::saga::SagaModelError::NonPrefixCompleted
+pub consistency::saga::SagaModelError::NonPrefixCompleted::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::UnknownStep
+pub consistency::saga::SagaModelError::UnknownStep::step_name: consistency::saga::StepName
+impl core::clone::Clone for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::clone(&self) -> consistency::saga::SagaModelError
+impl core::cmp::Eq for consistency::saga::SagaModelError
+impl core::cmp::PartialEq for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::eq(&self, &consistency::saga::SagaModelError) -> bool
+impl core::error::Error for consistency::saga::SagaModelError
+impl core::fmt::Debug for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaModelError
+impl core::marker::Freeze for consistency::saga::SagaModelError
+impl core::marker::Send for consistency::saga::SagaModelError
+impl core::marker::Sync for consistency::saga::SagaModelError
+impl core::marker::Unpin for consistency::saga::SagaModelError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaModelError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaModelError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaModelError
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaModelError where U: core::convert::From<T>
+pub fn consistency::saga::SagaModelError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaModelError where U: core::convert::Into<T>
+pub type consistency::saga::SagaModelError::Error = core::convert::Infallible
+pub fn consistency::saga::SagaModelError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaModelError where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaModelError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaModelError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaModelError where T: core::clone::Clone
+pub type consistency::saga::SagaModelError::Owned = T
+pub fn consistency::saga::SagaModelError::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaModelError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::saga::SagaModelError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::saga::SagaModelError where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaModelError where T: ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaModelError where T: ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaModelError where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaModelError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::from(T) -> T
 #[non_exhaustive] pub enum consistency::saga::SagaOutcome
 pub consistency::saga::SagaOutcome::Completed
 pub consistency::saga::SagaOutcome::Failed
@@ -2246,6 +2399,54 @@ impl<T> core::clone::CloneToUninit for consistency::saga::SagaOutcome where T: c
 pub unsafe fn consistency::saga::SagaOutcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::SagaOutcome
 pub fn consistency::saga::SagaOutcome::from(T) -> T
+#[non_exhaustive] pub enum consistency::saga::SagaReplayDecision
+pub consistency::saga::SagaReplayDecision::Compensating
+pub consistency::saga::SagaReplayDecision::Compensating::failed_step: core::option::Option<consistency::saga::StepName>
+pub consistency::saga::SagaReplayDecision::Compensating::next_seq: u64
+pub consistency::saga::SagaReplayDecision::Compensating::pending: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::saga::SagaReplayDecision::Forward
+pub consistency::saga::SagaReplayDecision::Forward::completed: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::saga::SagaReplayDecision::Forward::next_seq: u64
+pub consistency::saga::SagaReplayDecision::Forward::start: usize
+pub consistency::saga::SagaReplayDecision::Terminal
+pub consistency::saga::SagaReplayDecision::Terminal::status: consistency::saga::SagaDurableStatus
+impl core::clone::Clone for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::clone(&self) -> consistency::saga::SagaReplayDecision
+impl core::cmp::Eq for consistency::saga::SagaReplayDecision
+impl core::cmp::PartialEq for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::eq(&self, &consistency::saga::SagaReplayDecision) -> bool
+impl core::fmt::Debug for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaReplayDecision
+impl core::marker::Freeze for consistency::saga::SagaReplayDecision
+impl core::marker::Send for consistency::saga::SagaReplayDecision
+impl core::marker::Sync for consistency::saga::SagaReplayDecision
+impl core::marker::Unpin for consistency::saga::SagaReplayDecision
+impl core::marker::UnsafeUnpin for consistency::saga::SagaReplayDecision
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaReplayDecision
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaReplayDecision
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaReplayDecision where U: core::convert::From<T>
+pub fn consistency::saga::SagaReplayDecision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaReplayDecision where U: core::convert::Into<T>
+pub type consistency::saga::SagaReplayDecision::Error = core::convert::Infallible
+pub fn consistency::saga::SagaReplayDecision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaReplayDecision where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaReplayDecision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaReplayDecision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaReplayDecision where T: core::clone::Clone
+pub type consistency::saga::SagaReplayDecision::Owned = T
+pub fn consistency::saga::SagaReplayDecision::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaReplayDecision::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaReplayDecision where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaReplayDecision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaReplayDecision where T: ?core::marker::Sized
+pub fn consistency::saga::SagaReplayDecision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaReplayDecision where T: ?core::marker::Sized
+pub fn consistency::saga::SagaReplayDecision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaReplayDecision where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaReplayDecision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::from(T) -> T
 #[non_exhaustive] pub enum consistency::saga::StepNameError
 pub consistency::saga::StepNameError::Empty
 pub consistency::saga::StepNameError::NotIdent
@@ -2279,6 +2480,185 @@ impl<T> core::borrow::BorrowMut<T> for consistency::saga::StepNameError where T:
 pub fn consistency::saga::StepNameError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::saga::StepNameError
 pub fn consistency::saga::StepNameError::from(T) -> T
+pub struct consistency::saga::SagaDefinition
+impl consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::from_step_names<'a>(impl core::iter::traits::collect::IntoIterator<Item = &'a str>) -> core::result::Result<Self, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::new(alloc::vec::Vec<consistency::saga::StepName>) -> core::result::Result<Self, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::replay(&self, &[consistency::saga::SagaJournalRecord]) -> core::result::Result<consistency::saga::SagaReplayDecision, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::step_index(&self, &consistency::saga::StepName) -> core::option::Option<usize>
+pub fn consistency::saga::SagaDefinition::steps(&self) -> &[consistency::saga::StepName]
+impl core::clone::Clone for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::clone(&self) -> consistency::saga::SagaDefinition
+impl core::cmp::Eq for consistency::saga::SagaDefinition
+impl core::cmp::PartialEq for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::eq(&self, &consistency::saga::SagaDefinition) -> bool
+impl core::fmt::Debug for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDefinition
+impl core::marker::Freeze for consistency::saga::SagaDefinition
+impl core::marker::Send for consistency::saga::SagaDefinition
+impl core::marker::Sync for consistency::saga::SagaDefinition
+impl core::marker::Unpin for consistency::saga::SagaDefinition
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinition
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinition
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinition
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaDefinition where U: core::convert::From<T>
+pub fn consistency::saga::SagaDefinition::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaDefinition where U: core::convert::Into<T>
+pub type consistency::saga::SagaDefinition::Error = core::convert::Infallible
+pub fn consistency::saga::SagaDefinition::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaDefinition where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaDefinition::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaDefinition::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaDefinition where T: core::clone::Clone
+pub type consistency::saga::SagaDefinition::Owned = T
+pub fn consistency::saga::SagaDefinition::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaDefinition::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaDefinition where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaDefinition::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaDefinition where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDefinition::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaDefinition where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDefinition::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaDefinition where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaDefinition::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::from(T) -> T
+pub struct consistency::saga::SagaId(_)
+impl consistency::saga::SagaId
+pub fn consistency::saga::SagaId::as_uuid(&self) -> uuid::Uuid
+pub fn consistency::saga::SagaId::new(uuid::Uuid) -> Self
+impl core::clone::Clone for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::clone(&self) -> consistency::saga::SagaId
+impl core::cmp::Eq for consistency::saga::SagaId
+impl core::cmp::PartialEq for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::eq(&self, &consistency::saga::SagaId) -> bool
+impl core::fmt::Debug for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for consistency::saga::SagaId
+impl core::marker::StructuralPartialEq for consistency::saga::SagaId
+impl core::marker::Freeze for consistency::saga::SagaId
+impl core::marker::Send for consistency::saga::SagaId
+impl core::marker::Sync for consistency::saga::SagaId
+impl core::marker::Unpin for consistency::saga::SagaId
+impl core::marker::UnsafeUnpin for consistency::saga::SagaId
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaId
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaId
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaId where U: core::convert::From<T>
+pub fn consistency::saga::SagaId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaId where U: core::convert::Into<T>
+pub type consistency::saga::SagaId::Error = core::convert::Infallible
+pub fn consistency::saga::SagaId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaId where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaId where T: core::clone::Clone
+pub type consistency::saga::SagaId::Owned = T
+pub fn consistency::saga::SagaId::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaId::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaId where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaId where T: ?core::marker::Sized
+pub fn consistency::saga::SagaId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaId where T: ?core::marker::Sized
+pub fn consistency::saga::SagaId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaId where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::from(T) -> T
+pub struct consistency::saga::SagaJournalAppendRecord
+impl consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::compensated(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::compensating(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::completed(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::error_summary(&self) -> core::option::Option<&'static str>
+pub fn consistency::saga::SagaJournalAppendRecord::executing(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::failed(u64, consistency::saga::StepName, &'static str) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::seq(&self) -> u64
+pub fn consistency::saga::SagaJournalAppendRecord::status(&self) -> consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalAppendRecord::step_name(&self) -> &consistency::saga::StepName
+impl core::clone::Clone for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::clone(&self) -> consistency::saga::SagaJournalAppendRecord
+impl core::cmp::Eq for consistency::saga::SagaJournalAppendRecord
+impl core::cmp::PartialEq for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::eq(&self, &consistency::saga::SagaJournalAppendRecord) -> bool
+impl core::fmt::Debug for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Freeze for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Send for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Sync for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Unpin for consistency::saga::SagaJournalAppendRecord
+impl core::marker::UnsafeUnpin for consistency::saga::SagaJournalAppendRecord
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalAppendRecord
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalAppendRecord
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaJournalAppendRecord where U: core::convert::From<T>
+pub fn consistency::saga::SagaJournalAppendRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaJournalAppendRecord where U: core::convert::Into<T>
+pub type consistency::saga::SagaJournalAppendRecord::Error = core::convert::Infallible
+pub fn consistency::saga::SagaJournalAppendRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaJournalAppendRecord where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaJournalAppendRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaJournalAppendRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaJournalAppendRecord where T: core::clone::Clone
+pub type consistency::saga::SagaJournalAppendRecord::Owned = T
+pub fn consistency::saga::SagaJournalAppendRecord::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaJournalAppendRecord::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaJournalAppendRecord where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaJournalAppendRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaJournalAppendRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalAppendRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaJournalAppendRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalAppendRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaJournalAppendRecord where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaJournalAppendRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::from(T) -> T
+pub struct consistency::saga::SagaJournalRecord
+impl consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::replayed(u64, consistency::saga::StepName, consistency::saga::SagaJournalStatus) -> Self
+pub fn consistency::saga::SagaJournalRecord::seq(&self) -> u64
+pub fn consistency::saga::SagaJournalRecord::status(&self) -> consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalRecord::step_name(&self) -> &consistency::saga::StepName
+impl core::clone::Clone for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::clone(&self) -> consistency::saga::SagaJournalRecord
+impl core::cmp::Eq for consistency::saga::SagaJournalRecord
+impl core::cmp::PartialEq for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::eq(&self, &consistency::saga::SagaJournalRecord) -> bool
+impl core::fmt::Debug for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaJournalRecord
+impl core::marker::Freeze for consistency::saga::SagaJournalRecord
+impl core::marker::Send for consistency::saga::SagaJournalRecord
+impl core::marker::Sync for consistency::saga::SagaJournalRecord
+impl core::marker::Unpin for consistency::saga::SagaJournalRecord
+impl core::marker::UnsafeUnpin for consistency::saga::SagaJournalRecord
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalRecord
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalRecord
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaJournalRecord where U: core::convert::From<T>
+pub fn consistency::saga::SagaJournalRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaJournalRecord where U: core::convert::Into<T>
+pub type consistency::saga::SagaJournalRecord::Error = core::convert::Infallible
+pub fn consistency::saga::SagaJournalRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaJournalRecord where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaJournalRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaJournalRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaJournalRecord where T: core::clone::Clone
+pub type consistency::saga::SagaJournalRecord::Owned = T
+pub fn consistency::saga::SagaJournalRecord::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaJournalRecord::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaJournalRecord where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaJournalRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaJournalRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaJournalRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaJournalRecord where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaJournalRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::from(T) -> T
 pub struct consistency::saga::StepName(_)
 impl consistency::saga::StepName
 pub fn consistency::saga::StepName::as_str(&self) -> &str
@@ -3389,6 +3769,159 @@ impl<T> core::clone::CloneToUninit for consistency::reconcile::ReconcileResultLa
 pub unsafe fn consistency::reconcile::ReconcileResultLabel::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::reconcile::ReconcileResultLabel
 pub fn consistency::reconcile::ReconcileResultLabel::from(T) -> T
+#[non_exhaustive] pub enum consistency::SagaDurableStatus
+pub consistency::SagaDurableStatus::Compensated
+pub consistency::SagaDurableStatus::Compensating
+pub consistency::SagaDurableStatus::Failed
+pub consistency::SagaDurableStatus::Failed::failed_step: consistency::saga::StepName
+pub consistency::SagaDurableStatus::NotStarted
+pub consistency::SagaDurableStatus::Running
+pub consistency::SagaDurableStatus::Succeeded
+impl consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::is_running(&self) -> bool
+pub fn consistency::saga::SagaDurableStatus::is_terminal(&self) -> bool
+impl core::clone::Clone for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::clone(&self) -> consistency::saga::SagaDurableStatus
+impl core::cmp::Eq for consistency::saga::SagaDurableStatus
+impl core::cmp::PartialEq for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::eq(&self, &consistency::saga::SagaDurableStatus) -> bool
+impl core::fmt::Debug for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDurableStatus
+impl core::marker::Freeze for consistency::saga::SagaDurableStatus
+impl core::marker::Send for consistency::saga::SagaDurableStatus
+impl core::marker::Sync for consistency::saga::SagaDurableStatus
+impl core::marker::Unpin for consistency::saga::SagaDurableStatus
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDurableStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDurableStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDurableStatus
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaDurableStatus where U: core::convert::From<T>
+pub fn consistency::saga::SagaDurableStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaDurableStatus where U: core::convert::Into<T>
+pub type consistency::saga::SagaDurableStatus::Error = core::convert::Infallible
+pub fn consistency::saga::SagaDurableStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaDurableStatus where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaDurableStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaDurableStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaDurableStatus where T: core::clone::Clone
+pub type consistency::saga::SagaDurableStatus::Owned = T
+pub fn consistency::saga::SagaDurableStatus::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaDurableStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaDurableStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaDurableStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaDurableStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDurableStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaDurableStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDurableStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaDurableStatus where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaDurableStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaDurableStatus
+pub fn consistency::saga::SagaDurableStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::SagaJournalStatus
+pub consistency::SagaJournalStatus::Compensated
+pub consistency::SagaJournalStatus::Compensating
+pub consistency::SagaJournalStatus::Completed
+pub consistency::SagaJournalStatus::Executing
+pub consistency::SagaJournalStatus::Failed
+impl consistency::saga::SagaJournalStatus
+pub const consistency::saga::SagaJournalStatus::ALL: [Self; 5]
+pub fn consistency::saga::SagaJournalStatus::as_str(&self) -> &'static str
+pub fn consistency::saga::SagaJournalStatus::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::clone(&self) -> consistency::saga::SagaJournalStatus
+impl core::cmp::Eq for consistency::saga::SagaJournalStatus
+impl core::cmp::PartialEq for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::eq(&self, &consistency::saga::SagaJournalStatus) -> bool
+impl core::fmt::Debug for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::saga::SagaJournalStatus
+impl core::marker::StructuralPartialEq for consistency::saga::SagaJournalStatus
+impl core::marker::Freeze for consistency::saga::SagaJournalStatus
+impl core::marker::Send for consistency::saga::SagaJournalStatus
+impl core::marker::Sync for consistency::saga::SagaJournalStatus
+impl core::marker::Unpin for consistency::saga::SagaJournalStatus
+impl core::marker::UnsafeUnpin for consistency::saga::SagaJournalStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalStatus
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaJournalStatus where U: core::convert::From<T>
+pub fn consistency::saga::SagaJournalStatus::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaJournalStatus where U: core::convert::Into<T>
+pub type consistency::saga::SagaJournalStatus::Error = core::convert::Infallible
+pub fn consistency::saga::SagaJournalStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaJournalStatus where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaJournalStatus::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaJournalStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaJournalStatus where T: core::clone::Clone
+pub type consistency::saga::SagaJournalStatus::Owned = T
+pub fn consistency::saga::SagaJournalStatus::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaJournalStatus::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaJournalStatus where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaJournalStatus::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaJournalStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalStatus::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaJournalStatus where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalStatus::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaJournalStatus where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaJournalStatus::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalStatus::from(T) -> T
+#[non_exhaustive] pub enum consistency::SagaModelError
+pub consistency::SagaModelError::DuplicateSeq
+pub consistency::SagaModelError::DuplicateSeq::seq: u64
+pub consistency::SagaModelError::DuplicateStepName
+pub consistency::SagaModelError::DuplicateStepName::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::EmptyDefinition
+pub consistency::SagaModelError::IllegalTransition
+pub consistency::SagaModelError::IllegalTransition::status: consistency::saga::SagaJournalStatus
+pub consistency::SagaModelError::IllegalTransition::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::InvalidStepName
+pub consistency::SagaModelError::InvalidStepName::raw: alloc::string::String
+pub consistency::SagaModelError::NonPrefixCompleted
+pub consistency::SagaModelError::NonPrefixCompleted::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::UnknownStep
+pub consistency::SagaModelError::UnknownStep::step_name: consistency::saga::StepName
+impl core::clone::Clone for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::clone(&self) -> consistency::saga::SagaModelError
+impl core::cmp::Eq for consistency::saga::SagaModelError
+impl core::cmp::PartialEq for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::eq(&self, &consistency::saga::SagaModelError) -> bool
+impl core::error::Error for consistency::saga::SagaModelError
+impl core::fmt::Debug for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaModelError
+impl core::marker::Freeze for consistency::saga::SagaModelError
+impl core::marker::Send for consistency::saga::SagaModelError
+impl core::marker::Sync for consistency::saga::SagaModelError
+impl core::marker::Unpin for consistency::saga::SagaModelError
+impl core::marker::UnsafeUnpin for consistency::saga::SagaModelError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaModelError
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaModelError
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaModelError where U: core::convert::From<T>
+pub fn consistency::saga::SagaModelError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaModelError where U: core::convert::Into<T>
+pub type consistency::saga::SagaModelError::Error = core::convert::Infallible
+pub fn consistency::saga::SagaModelError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaModelError where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaModelError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaModelError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaModelError where T: core::clone::Clone
+pub type consistency::saga::SagaModelError::Owned = T
+pub fn consistency::saga::SagaModelError::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaModelError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for consistency::saga::SagaModelError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::saga::SagaModelError where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaModelError where T: ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaModelError where T: ?core::marker::Sized
+pub fn consistency::saga::SagaModelError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaModelError where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaModelError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaModelError
+pub fn consistency::saga::SagaModelError::from(T) -> T
 #[non_exhaustive] pub enum consistency::SagaOutcome
 pub consistency::SagaOutcome::Completed
 pub consistency::SagaOutcome::Failed
@@ -3430,6 +3963,54 @@ impl<T> core::clone::CloneToUninit for consistency::saga::SagaOutcome where T: c
 pub unsafe fn consistency::saga::SagaOutcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::SagaOutcome
 pub fn consistency::saga::SagaOutcome::from(T) -> T
+#[non_exhaustive] pub enum consistency::SagaReplayDecision
+pub consistency::SagaReplayDecision::Compensating
+pub consistency::SagaReplayDecision::Compensating::failed_step: core::option::Option<consistency::saga::StepName>
+pub consistency::SagaReplayDecision::Compensating::next_seq: u64
+pub consistency::SagaReplayDecision::Compensating::pending: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::SagaReplayDecision::Forward
+pub consistency::SagaReplayDecision::Forward::completed: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::SagaReplayDecision::Forward::next_seq: u64
+pub consistency::SagaReplayDecision::Forward::start: usize
+pub consistency::SagaReplayDecision::Terminal
+pub consistency::SagaReplayDecision::Terminal::status: consistency::saga::SagaDurableStatus
+impl core::clone::Clone for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::clone(&self) -> consistency::saga::SagaReplayDecision
+impl core::cmp::Eq for consistency::saga::SagaReplayDecision
+impl core::cmp::PartialEq for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::eq(&self, &consistency::saga::SagaReplayDecision) -> bool
+impl core::fmt::Debug for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaReplayDecision
+impl core::marker::Freeze for consistency::saga::SagaReplayDecision
+impl core::marker::Send for consistency::saga::SagaReplayDecision
+impl core::marker::Sync for consistency::saga::SagaReplayDecision
+impl core::marker::Unpin for consistency::saga::SagaReplayDecision
+impl core::marker::UnsafeUnpin for consistency::saga::SagaReplayDecision
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaReplayDecision
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaReplayDecision
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaReplayDecision where U: core::convert::From<T>
+pub fn consistency::saga::SagaReplayDecision::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaReplayDecision where U: core::convert::Into<T>
+pub type consistency::saga::SagaReplayDecision::Error = core::convert::Infallible
+pub fn consistency::saga::SagaReplayDecision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaReplayDecision where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaReplayDecision::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaReplayDecision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaReplayDecision where T: core::clone::Clone
+pub type consistency::saga::SagaReplayDecision::Owned = T
+pub fn consistency::saga::SagaReplayDecision::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaReplayDecision::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaReplayDecision where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaReplayDecision::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaReplayDecision where T: ?core::marker::Sized
+pub fn consistency::saga::SagaReplayDecision::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaReplayDecision where T: ?core::marker::Sized
+pub fn consistency::saga::SagaReplayDecision::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaReplayDecision where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaReplayDecision::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaReplayDecision
+pub fn consistency::saga::SagaReplayDecision::from(T) -> T
 #[non_exhaustive] pub enum consistency::SeenState
 pub consistency::SeenState::Duplicate
 pub consistency::SeenState::Fresh
@@ -4847,6 +5428,185 @@ impl<T> core::clone::CloneToUninit for consistency::reconcile::Request where T: 
 pub unsafe fn consistency::reconcile::Request::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::reconcile::Request
 pub fn consistency::reconcile::Request::from(T) -> T
+pub struct consistency::SagaDefinition
+impl consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::from_step_names<'a>(impl core::iter::traits::collect::IntoIterator<Item = &'a str>) -> core::result::Result<Self, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::new(alloc::vec::Vec<consistency::saga::StepName>) -> core::result::Result<Self, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::replay(&self, &[consistency::saga::SagaJournalRecord]) -> core::result::Result<consistency::saga::SagaReplayDecision, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::step_index(&self, &consistency::saga::StepName) -> core::option::Option<usize>
+pub fn consistency::saga::SagaDefinition::steps(&self) -> &[consistency::saga::StepName]
+impl core::clone::Clone for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::clone(&self) -> consistency::saga::SagaDefinition
+impl core::cmp::Eq for consistency::saga::SagaDefinition
+impl core::cmp::PartialEq for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::eq(&self, &consistency::saga::SagaDefinition) -> bool
+impl core::fmt::Debug for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaDefinition
+impl core::marker::Freeze for consistency::saga::SagaDefinition
+impl core::marker::Send for consistency::saga::SagaDefinition
+impl core::marker::Sync for consistency::saga::SagaDefinition
+impl core::marker::Unpin for consistency::saga::SagaDefinition
+impl core::marker::UnsafeUnpin for consistency::saga::SagaDefinition
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaDefinition
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinition
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaDefinition where U: core::convert::From<T>
+pub fn consistency::saga::SagaDefinition::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaDefinition where U: core::convert::Into<T>
+pub type consistency::saga::SagaDefinition::Error = core::convert::Infallible
+pub fn consistency::saga::SagaDefinition::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaDefinition where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaDefinition::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaDefinition::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaDefinition where T: core::clone::Clone
+pub type consistency::saga::SagaDefinition::Owned = T
+pub fn consistency::saga::SagaDefinition::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaDefinition::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaDefinition where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaDefinition::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaDefinition where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDefinition::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaDefinition where T: ?core::marker::Sized
+pub fn consistency::saga::SagaDefinition::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaDefinition where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaDefinition::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaDefinition
+pub fn consistency::saga::SagaDefinition::from(T) -> T
+pub struct consistency::SagaId(_)
+impl consistency::saga::SagaId
+pub fn consistency::saga::SagaId::as_uuid(&self) -> uuid::Uuid
+pub fn consistency::saga::SagaId::new(uuid::Uuid) -> Self
+impl core::clone::Clone for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::clone(&self) -> consistency::saga::SagaId
+impl core::cmp::Eq for consistency::saga::SagaId
+impl core::cmp::PartialEq for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::eq(&self, &consistency::saga::SagaId) -> bool
+impl core::fmt::Debug for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for consistency::saga::SagaId
+impl core::marker::StructuralPartialEq for consistency::saga::SagaId
+impl core::marker::Freeze for consistency::saga::SagaId
+impl core::marker::Send for consistency::saga::SagaId
+impl core::marker::Sync for consistency::saga::SagaId
+impl core::marker::Unpin for consistency::saga::SagaId
+impl core::marker::UnsafeUnpin for consistency::saga::SagaId
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaId
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaId
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaId where U: core::convert::From<T>
+pub fn consistency::saga::SagaId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaId where U: core::convert::Into<T>
+pub type consistency::saga::SagaId::Error = core::convert::Infallible
+pub fn consistency::saga::SagaId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaId where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaId where T: core::clone::Clone
+pub type consistency::saga::SagaId::Owned = T
+pub fn consistency::saga::SagaId::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaId::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaId where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaId where T: ?core::marker::Sized
+pub fn consistency::saga::SagaId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaId where T: ?core::marker::Sized
+pub fn consistency::saga::SagaId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaId where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaId
+pub fn consistency::saga::SagaId::from(T) -> T
+pub struct consistency::SagaJournalAppendRecord
+impl consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::compensated(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::compensating(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::completed(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::error_summary(&self) -> core::option::Option<&'static str>
+pub fn consistency::saga::SagaJournalAppendRecord::executing(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::failed(u64, consistency::saga::StepName, &'static str) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::seq(&self) -> u64
+pub fn consistency::saga::SagaJournalAppendRecord::status(&self) -> consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalAppendRecord::step_name(&self) -> &consistency::saga::StepName
+impl core::clone::Clone for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::clone(&self) -> consistency::saga::SagaJournalAppendRecord
+impl core::cmp::Eq for consistency::saga::SagaJournalAppendRecord
+impl core::cmp::PartialEq for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::eq(&self, &consistency::saga::SagaJournalAppendRecord) -> bool
+impl core::fmt::Debug for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Freeze for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Send for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Sync for consistency::saga::SagaJournalAppendRecord
+impl core::marker::Unpin for consistency::saga::SagaJournalAppendRecord
+impl core::marker::UnsafeUnpin for consistency::saga::SagaJournalAppendRecord
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalAppendRecord
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalAppendRecord
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaJournalAppendRecord where U: core::convert::From<T>
+pub fn consistency::saga::SagaJournalAppendRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaJournalAppendRecord where U: core::convert::Into<T>
+pub type consistency::saga::SagaJournalAppendRecord::Error = core::convert::Infallible
+pub fn consistency::saga::SagaJournalAppendRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaJournalAppendRecord where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaJournalAppendRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaJournalAppendRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaJournalAppendRecord where T: core::clone::Clone
+pub type consistency::saga::SagaJournalAppendRecord::Owned = T
+pub fn consistency::saga::SagaJournalAppendRecord::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaJournalAppendRecord::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaJournalAppendRecord where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaJournalAppendRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaJournalAppendRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalAppendRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaJournalAppendRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalAppendRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaJournalAppendRecord where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaJournalAppendRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaJournalAppendRecord
+pub fn consistency::saga::SagaJournalAppendRecord::from(T) -> T
+pub struct consistency::SagaJournalRecord
+impl consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::replayed(u64, consistency::saga::StepName, consistency::saga::SagaJournalStatus) -> Self
+pub fn consistency::saga::SagaJournalRecord::seq(&self) -> u64
+pub fn consistency::saga::SagaJournalRecord::status(&self) -> consistency::saga::SagaJournalStatus
+pub fn consistency::saga::SagaJournalRecord::step_name(&self) -> &consistency::saga::StepName
+impl core::clone::Clone for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::clone(&self) -> consistency::saga::SagaJournalRecord
+impl core::cmp::Eq for consistency::saga::SagaJournalRecord
+impl core::cmp::PartialEq for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::eq(&self, &consistency::saga::SagaJournalRecord) -> bool
+impl core::fmt::Debug for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaJournalRecord
+impl core::marker::Freeze for consistency::saga::SagaJournalRecord
+impl core::marker::Send for consistency::saga::SagaJournalRecord
+impl core::marker::Sync for consistency::saga::SagaJournalRecord
+impl core::marker::Unpin for consistency::saga::SagaJournalRecord
+impl core::marker::UnsafeUnpin for consistency::saga::SagaJournalRecord
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalRecord
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalRecord
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaJournalRecord where U: core::convert::From<T>
+pub fn consistency::saga::SagaJournalRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaJournalRecord where U: core::convert::Into<T>
+pub type consistency::saga::SagaJournalRecord::Error = core::convert::Infallible
+pub fn consistency::saga::SagaJournalRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaJournalRecord where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaJournalRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaJournalRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaJournalRecord where T: core::clone::Clone
+pub type consistency::saga::SagaJournalRecord::Owned = T
+pub fn consistency::saga::SagaJournalRecord::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaJournalRecord::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaJournalRecord where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaJournalRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaJournalRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaJournalRecord where T: ?core::marker::Sized
+pub fn consistency::saga::SagaJournalRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaJournalRecord where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaJournalRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaJournalRecord
+pub fn consistency::saga::SagaJournalRecord::from(T) -> T
 pub struct consistency::SerialInOrder(_)
 impl consistency::projection::SerialInOrder
 pub fn consistency::projection::SerialInOrder::from_source<S: consistency::projection::PartitionSerialDelivery>(&S) -> Self

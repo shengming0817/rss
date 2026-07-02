@@ -2,7 +2,8 @@
 //!
 //! 两个 step 抽象的关系（reviewer 常问）：
 //! - [`SagaAction`]（本模块，object-safe `BoxFuture`）= **erased 运行时动作栈**——执行器
-//!   ([`SagaExecutorImpl`]) 驱动 `Vec<Box<dyn SagaAction>>`，前向 `do_it` / 逆序 `undo_it`。
+//!   ([`SagaExecutorImpl`]) 驱动 [`SagaActionFactory`] 产出的 `Vec<Box<dyn SagaAction>>`，前向
+//!   `do_it` / 逆序 `undo_it`。
 //! - `consistency::saga::SagaStep`（native AFIT，`execute`/`compensate`）= **typed authoring / codegen
 //!   目标** trait。P9 执行器**不**消费它（待 codegen 把 typed step wrap 成 `SagaAction`）。
 //!
@@ -13,22 +14,25 @@
 //! 须补 `WorkerHealth` + probe，参考 `relay.rs`（见 issue #1247）。
 //!
 //! ref: oxidecomputer/steno src/saga_action_generic.rs@main（`Action::do_it`/`undo_it`/`name` + 逆序补偿）。
+//! ref: oxidecomputer/steno src/saga_log.rs@main（journal event replay 到 load status）。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use consistency::{Lsn, StepName};
+use consistency::{
+    Lsn, SagaDefinition, SagaDurableStatus, SagaJournalAppendRecord, SagaJournalRecord,
+    SagaModelError, SagaReplayDecision, StepName,
+};
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, EnvelopeMetadata, JournalEntry, JournalStatus, OwnerCheckpointStore,
-    SagaJournal, SaveOutcome, WritableDeadLetterSource,
+    DeadLetterSummary, EnvelopeMetadata, OwnerCheckpointStore, SagaJournal, SaveOutcome,
+    WritableDeadLetterSource,
 };
 
-/// saga 实例标识（uuid newtype）。下沉 `diport`（journal/checkpoint 端口签名引用），本模块 re-export
-/// 供域 / 组合根经 `eventexec::SagaId` 命名（层序：diport 不依赖 eventexec）。
-pub use diport::SagaId;
+/// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
+/// `eventexec::SagaId` 命名。
+pub use consistency::SagaId;
 
 // ── 冻结接缝类型（do/undo 动作 + 结论 + 命令 + 执行状态）─────────────────────────
 
@@ -59,14 +63,14 @@ impl SagaActionCtx {
     }
 }
 
-/// saga 动作（erased 运行时接口；用户 / codegen 实现，执行器以 `Vec<Box<dyn SagaAction>>` 驱动）。
+/// saga 动作（erased 运行时接口；用户 / codegen 实现，执行器经 [`SagaActionFactory`] 驱动）。
 ///
 /// 对标 steno `Action`：`do_it` 前向（返回输出字节），`undo_it` 补偿（幂等，逆序调用）。
 pub trait SagaAction: std::fmt::Debug + Send + Sync {
     /// step 名（须为合法 Rust 标识符；执行器据此落 journal + resume 时由 factory 重物化）。
     fn name(&self) -> &str;
 
-    /// 前向执行；`Ok(output)` 完成（output 入 journal + 末步 output 即 saga 结果）。
+    /// 前向执行；`Ok(output)` 完成（output 仅作为 run 路径末步结果，不进入 durable journal）。
     fn do_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>>;
 
     /// 补偿（撤销 `do_it` 副作用）；仅对**已完成**步逆序调用。
@@ -117,6 +121,8 @@ pub enum SagaExecStatus {
     Running,
     /// 终态（成功 / 已补偿 / dead-letter）。
     Done,
+    /// durable journal 或 factory definition 与模型不一致，需运维介入。
+    Degraded,
 }
 
 /// saga 动作错误（`#[non_exhaustive]`；执行器对各变体同样处理——任一 `do_it` 错 → 补偿，任一 `undo_it`
@@ -142,19 +148,12 @@ pub enum SagaActionError {
 
 /// Saga 执行器接缝：驱动 [`SagaAction`] 栈（前向执行 + 失败逆序补偿）。对标 steno SEC。
 pub trait SagaExecutor: Send + Sync {
-    /// 执行 saga：顺序 `do_it`，失败逆序 `undo_it`。
-    ///
-    /// `run` 接收调用方构造的 action 序；[`resume`](SagaExecutor::resume) 经注入的
-    /// [`SagaActionFactory`] 重物化（不依赖调用方提供 action 序）。
+    /// 执行 saga：经注入的 [`SagaActionFactory`] 构造 action 序，顺序 `do_it`，失败逆序 `undo_it`。
     ///
     /// **WARNING**: 多副本并发 `run` 同一 `saga_id` 的互斥由调用方负责；P9 不提供
     /// multi-replica guard，P11 leader-elect 落地后由 executor 保证。journal `(saga_id,seq)` PK
     /// + checkpoint CAS 只防数据竞争，不防重复副作用执行。
-    fn run(
-        &self,
-        saga_id: SagaId,
-        actions: Vec<Box<dyn SagaAction>>,
-    ) -> BoxFuture<'static, SagaOutcome>;
+    fn run(&self, saga_id: SagaId) -> BoxFuture<'static, SagaOutcome>;
 
     /// 从 journal 恢复（crash recovery；经注入 [`SagaActionFactory`] 重物化 action 序续跑 / 续补偿）。
     ///
@@ -168,7 +167,7 @@ pub trait SagaTailer: Send + Sync {
     /// 查 saga 当前粗粒度状态（`None` = 未知 saga）。
     ///
     /// 当前 journal-driven 实现**不产出** [`SagaExecStatus::Ready`]（保留给 registry-aware tailer）；
-    /// 只返回 `None` / `Running` / `Done`。
+    /// 只返回 `None` / `Running` / `Done` / `Degraded`。
     fn status(&self, saga_id: SagaId) -> BoxFuture<'static, Option<SagaExecStatus>>;
 }
 
@@ -185,6 +184,8 @@ pub trait SagaActionFactory: Send + Sync {
 /// 补偿失败安全摘要（`&'static str` const literal；进 journal `Failed` 行 + DLX 摘要 + tracing，不携 runtime
 /// 数据，INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 const SAGA_COMPENSATION_FAILED: &str = "saga compensation step failed";
+const SAGA_COMPENSATION_COMPLETION_LOST: &str =
+    "saga compensation completion journal append failed";
 
 /// resume 未知 saga（空 journal）占位 failed_node。
 const UNKNOWN_SAGA: &str = "<unknown-saga>";
@@ -246,18 +247,28 @@ where
     C: OwnerCheckpointStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
 {
-    fn run(
-        &self,
-        saga_id: SagaId,
-        actions: Vec<Box<dyn SagaAction>>,
-    ) -> BoxFuture<'static, SagaOutcome> {
+    fn run(&self, saga_id: SagaId) -> BoxFuture<'static, SagaOutcome> {
         let journal = self.journal.clone();
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
         let tenant = self.tenant;
         let owner = self.owner.clone();
         let contract_id = self.contract_id.clone();
+        let factory = self.factory.clone();
         Box::pin(async move {
+            let actions = factory.build();
+            if let Err(err) = definition_from_actions(&actions) {
+                let failed_node = model_error_node(&err);
+                tracing::error!(
+                    saga_id = %saga_id.as_uuid(),
+                    failed_node = %failed_node,
+                    "saga: action definition invalid"
+                );
+                return SagaOutcome::Failed {
+                    failed_node,
+                    error: SagaActionError::SerializeFailed,
+                };
+            }
             let ctx = ExecCtx {
                 journal: &*journal,
                 checkpoint: &*checkpoint,
@@ -305,7 +316,11 @@ where
 {
     fn status(&self, saga_id: SagaId) -> BoxFuture<'static, Option<SagaExecStatus>> {
         let journal = self.journal.clone();
-        Box::pin(async move { status_of(&*journal, saga_id).await })
+        let factory = self.factory.clone();
+        Box::pin(async move {
+            let actions = factory.build();
+            status_of(&*journal, saga_id, &actions).await
+        })
     }
 }
 
@@ -348,11 +363,11 @@ where
     /// append 一条 journal，返回是否成功（失败记结构化日志）。
     ///
     /// F1：journal 写是执行状态机**一等边**，不再 best-effort 吞错——前向路径据返回值 fail-closed
-    /// （`Executing` 写失败 ⇒ 不执行副作用；`Completed` 写失败 ⇒ 补偿含本步在内的栈）。补偿路径忽略返回
-    /// （已在失败态，journal `Failed` 行 + dead-letter 是 durable 兜底）。
-    async fn append(&self, entry: JournalEntry) -> bool {
-        let seq = entry.seq;
-        let status = entry.status.as_str();
+    /// （`Executing` 写失败 ⇒ 不执行副作用；`Completed` 写失败 ⇒ 补偿含本步在内的栈）。补偿路径同样
+    /// fail-closed：任一 journal 边界写失败即停止后续 undo / DLX 外部副作用。
+    async fn append(&self, entry: SagaJournalAppendRecord) -> bool {
+        let seq = entry.seq();
+        let status = entry.status().as_str();
         if self.journal.append(&self.saga_id, entry).await.is_err() {
             tracing::error!(saga_id = %self.saga_id.as_uuid(), seq, status, "saga: journal append failed");
             return false;
@@ -424,7 +439,7 @@ where
             };
             // F1：Executing append fail-closed —— 写失败则**不执行副作用**（无 journal 无法 durable 恢复）。
             if !self
-                .append(JournalEntry::executing(cursor.seq, step.clone()))
+                .append(SagaJournalAppendRecord::executing(cursor.seq, step.clone()))
                 .await
             {
                 return SagaOutcome::Failed {
@@ -445,7 +460,7 @@ where
             // 副作用已发生：先入已完成栈（含本步），再写 Completed；写失败 ⇒ 补偿含本步在内的栈（F1）。
             cursor.completed.push((i, step.clone()));
             let completed_ok = self
-                .append(JournalEntry::completed(cursor.seq, step, output.clone()))
+                .append(SagaJournalAppendRecord::completed(cursor.seq, step))
                 .await;
             cursor.seq += 1;
             if !completed_ok {
@@ -481,32 +496,87 @@ where
         &self,
         actions: &[Box<dyn SagaAction>],
         completed: &[(usize, StepName)],
+        seq: u64,
+        failed_node: &str,
+        original_error: SagaActionError,
+    ) -> SagaOutcome {
+        let mut pending = completed.to_vec();
+        pending.reverse();
+        self.compensate_pending(actions, &pending, seq, failed_node, original_error)
+            .await
+    }
+
+    /// 按传入顺序补偿 pending step；`pending` 必须已是 reverse compensation order。
+    async fn compensate_pending(
+        &self,
+        actions: &[Box<dyn SagaAction>],
+        pending: &[(usize, StepName)],
         mut seq: u64,
         failed_node: &str,
         original_error: SagaActionError,
     ) -> SagaOutcome {
-        for (i, step) in completed.iter().rev() {
+        for (i, step) in pending {
             let action = actions[*i].as_ref();
-            self.append(JournalEntry::compensating(seq, step.clone()))
-                .await;
+            if !self
+                .append(SagaJournalAppendRecord::compensating(seq, step.clone()))
+                .await
+            {
+                return SagaOutcome::Failed {
+                    failed_node: failed_node.to_string(),
+                    error: SagaActionError::ActionFailed,
+                };
+            }
             seq += 1;
             let ctx = SagaActionCtx::new(self.saga_id.as_uuid(), action.name());
             match action.undo_it(ctx).await {
                 Ok(()) => {
-                    self.append(JournalEntry::compensated(seq, step.clone()))
-                        .await;
+                    if !self
+                        .append(SagaJournalAppendRecord::compensated(seq, step.clone()))
+                        .await
+                    {
+                        if self
+                            .append(SagaJournalAppendRecord::failed(
+                                seq,
+                                step.clone(),
+                                SAGA_COMPENSATION_COMPLETION_LOST,
+                            ))
+                            .await
+                        {
+                            self.dead_letter_compensation_failure(
+                                action.name(),
+                                failed_node,
+                                SAGA_COMPENSATION_COMPLETION_LOST,
+                            )
+                            .await;
+                        }
+                        return SagaOutcome::Failed {
+                            failed_node: action.name().to_string(),
+                            error: SagaActionError::ActionFailed,
+                        };
+                    }
                     seq += 1;
                 }
                 Err(undo_err) => {
-                    self.append(JournalEntry::failed(
-                        seq,
-                        step.clone(),
-                        SAGA_COMPENSATION_FAILED,
-                    ))
-                    .await;
+                    if !self
+                        .append(SagaJournalAppendRecord::failed(
+                            seq,
+                            step.clone(),
+                            SAGA_COMPENSATION_FAILED,
+                        ))
+                        .await
+                    {
+                        return SagaOutcome::Failed {
+                            failed_node: action.name().to_string(),
+                            error: undo_err,
+                        };
+                    }
                     // F5：DLX 携 saga_id + 原始前向失败步（failed_node）+ 补偿失败步，诊断闭环。
-                    self.dead_letter_compensation_failure(action.name(), failed_node)
-                        .await;
+                    self.dead_letter_compensation_failure(
+                        action.name(),
+                        failed_node,
+                        SAGA_COMPENSATION_FAILED,
+                    )
+                    .await;
                     return SagaOutcome::Failed {
                         failed_node: action.name().to_string(),
                         error: undo_err,
@@ -524,8 +594,13 @@ where
     /// （domain / contract_id 取 saga owner，SC-006）。DLX 写失败：记日志，journal `Failed` 行是 durable 审计。
     /// tracing 宏收口到 [`ExecCtx::error_compensation_failed`] / [`ExecCtx::error_dlx_write_failed`]，
     /// 控制本函数认知复杂度 ≤15（同 consumer.rs 日志 helper 范式）。
-    async fn dead_letter_compensation_failure(&self, comp_step: &str, forward_step: &str) {
-        self.error_compensation_failed(comp_step, forward_step);
+    async fn dead_letter_compensation_failure(
+        &self,
+        comp_step: &str,
+        forward_step: &str,
+        error_summary: &'static str,
+    ) {
+        self.error_compensation_failed(comp_step, forward_step, error_summary);
         // F5：DLX 记录 topic = saga_id（诊断闭环）；original_payload = 失败步标识 JSON（uuid + step 名均为
         // identifier，非 PII；Debug 仍按 DeadLetterRecord 脱敏，运维经 DLX store 查询取用）。
         let payload = format!(
@@ -541,7 +616,7 @@ where
             self.saga_id.as_uuid().to_string(),
             None,
             payload,
-            DeadLetterSummary::new(SAGA_COMPENSATION_FAILED),
+            DeadLetterSummary::new(error_summary),
             1,
             WritableDeadLetterSource::Saga,
             EnvelopeMetadata::empty(),
@@ -552,12 +627,17 @@ where
     }
 
     /// 补偿失败结构化 error 日志（saga_id / step_name / failed_forward_step / error_summary，T009.6 / SC-006）。
-    fn error_compensation_failed(&self, comp_step: &str, forward_step: &str) {
+    fn error_compensation_failed(
+        &self,
+        comp_step: &str,
+        forward_step: &str,
+        error_summary: &'static str,
+    ) {
         tracing::error!(
             saga_id = %self.saga_id.as_uuid(),
             step_name = comp_step,
             failed_forward_step = forward_step,
-            error_summary = SAGA_COMPENSATION_FAILED,
+            error_summary,
             "saga: compensation failed, writing dead-letter (manual intervention required)"
         );
     }
@@ -578,205 +658,227 @@ where
 
     /// resume：读 journal 重建状态，续前向 / 续补偿 / 终态直返。
     async fn resume(&self, actions: &[Box<dyn SagaAction>]) -> SagaOutcome {
+        let entries = match self.read_resume_entries().await {
+            Ok(Some(entries)) => entries,
+            Ok(None) => return unknown_saga_outcome(),
+            Err(outcome) => return outcome,
+        };
+
+        let definition = match self.definition_for_resume(actions) {
+            Ok(definition) => definition,
+            Err(outcome) => return outcome,
+        };
+
+        match definition.replay(&entries) {
+            Ok(decision) => self.apply_replay_decision(actions, decision).await,
+            Err(err) => self.replay_error_outcome(&err),
+        }
+    }
+
+    async fn read_resume_entries(&self) -> Result<Option<Vec<SagaJournalRecord>>, SagaOutcome> {
         let entries = match self.journal.read(&self.saga_id).await {
             Ok(e) => e,
             Err(_) => {
                 self.error_resume_read_failed();
-                return SagaOutcome::Failed {
-                    failed_node: UNKNOWN_SAGA.to_string(),
-                    error: SagaActionError::ActionFailed,
-                };
+                return Err(unknown_saga_outcome());
             }
         };
         if entries.is_empty() {
-            return SagaOutcome::Failed {
-                failed_node: UNKNOWN_SAGA.to_string(),
-                error: SagaActionError::ActionFailed,
-            };
+            return Ok(None);
         }
-        // F7：resume 一致性校验——action 名须唯一、journal 每个 step 须匹配某 action；违规 fail-fast，
-        // 不静默跳过异常 journal（防重复名被 HashMap 覆盖 / 未知 step 被丢弃）。
-        if let Some(bad) = validate_resume_actions(&entries, actions) {
-            tracing::error!(saga_id = %self.saga_id.as_uuid(), step_name = %bad, "saga: resume action/journal step mismatch");
-            return SagaOutcome::Failed {
-                failed_node: bad,
+        Ok(Some(entries))
+    }
+
+    fn definition_for_resume(
+        &self,
+        actions: &[Box<dyn SagaAction>],
+    ) -> Result<SagaDefinition, SagaOutcome> {
+        definition_from_actions(actions).map_err(|err| {
+            let failed_node = model_error_node(&err);
+            tracing::error!(saga_id = %self.saga_id.as_uuid(), failed_node = %failed_node, "saga: resume action definition invalid");
+            SagaOutcome::Failed {
+                failed_node,
                 error: SagaActionError::SerializeFailed,
-            };
-        }
-        match rebuild_resume_state(&entries, actions) {
-            ResumeState::Forward { start, cursor } => {
-                self.run_forward(actions, start, cursor).await
             }
-            ResumeState::Compensating { seq, pending } => {
-                self.compensate(
+        })
+    }
+
+    async fn apply_replay_decision(
+        &self,
+        actions: &[Box<dyn SagaAction>],
+        decision: SagaReplayDecision,
+    ) -> SagaOutcome {
+        match decision {
+            SagaReplayDecision::Forward {
+                start,
+                next_seq,
+                completed,
+            } => {
+                self.run_forward(
+                    actions,
+                    start,
+                    Cursor {
+                        seq: next_seq,
+                        completed,
+                        last_output: None,
+                    },
+                )
+                .await
+            }
+            SagaReplayDecision::Compensating {
+                next_seq,
+                pending,
+                failed_step,
+            } => {
+                let failed_node = failed_step.as_ref().map_or(UNKNOWN_SAGA, StepName::as_str);
+                self.compensate_pending(
                     actions,
                     &pending,
-                    seq,
-                    UNKNOWN_SAGA,
+                    next_seq,
+                    failed_node,
                     SagaActionError::ActionFailed,
                 )
                 .await
             }
-            ResumeState::Terminal(outcome) => outcome,
+            SagaReplayDecision::Terminal { status } => outcome_from_terminal_status(status),
+            _ => SagaOutcome::Failed {
+                failed_node: UNKNOWN_SAGA.to_string(),
+                error: SagaActionError::SerializeFailed,
+            },
+        }
+    }
+
+    fn replay_error_outcome(&self, err: &SagaModelError) -> SagaOutcome {
+        let failed_node = model_error_node(err);
+        tracing::error!(saga_id = %self.saga_id.as_uuid(), failed_node = %failed_node, "saga: resume journal replay failed");
+        SagaOutcome::Failed {
+            failed_node,
+            error: SagaActionError::SerializeFailed,
         }
     }
 }
 
-// ── resume 重建（pure）────────────────────────────────────────────────────────
+// ── resume/status 重建（pure model adapter）───────────────────────────────────
 
-/// resume 重建状态。
-enum ResumeState {
-    /// 续前向：从 `start` 续跑，`cursor` 预填已完成前缀。
-    Forward { start: usize, cursor: Cursor },
-    /// 续补偿：`pending`（逆序待补偿的已完成步）从 `seq` 续。
-    Compensating {
-        seq: u64,
-        pending: Vec<(usize, StepName)>,
-    },
-    /// 终态（已 dead-letter / 全成 / 全补偿）。
-    Terminal(SagaOutcome),
+fn unknown_saga_outcome() -> SagaOutcome {
+    SagaOutcome::Failed {
+        failed_node: UNKNOWN_SAGA.to_string(),
+        error: SagaActionError::ActionFailed,
+    }
 }
 
-/// F7：resume 一致性校验——action 名须唯一、journal 每个 step 名须匹配某 action。返回首个违规标识
-/// （重复 action 名 / journal 未知 step），`None` = 通过。防 resume 静默跳过异常 journal（HashMap 覆盖
-/// 重复名 / `filter` 丢弃未知 step）。
-fn validate_resume_actions(
-    entries: &[JournalEntry],
+fn definition_from_actions(
     actions: &[Box<dyn SagaAction>],
-) -> Option<String> {
-    let mut names = std::collections::HashSet::new();
-    for a in actions {
-        if !names.insert(a.name()) {
-            return Some(a.name().to_string());
-        }
-    }
-    entries
-        .iter()
-        .find(|e| !names.contains(e.step_name.as_str()))
-        .map(|e| e.step_name.as_str().to_string())
+) -> Result<SagaDefinition, SagaModelError> {
+    SagaDefinition::from_step_names(actions.iter().map(|a| a.name()))
 }
 
-/// 据 journal 条目 + action 序重建 resume 状态。entries 按 seq 序；step 名匹配 action index。
-fn rebuild_resume_state(entries: &[JournalEntry], actions: &[Box<dyn SagaAction>]) -> ResumeState {
-    let latest = latest_status_by_index(entries, actions);
-    let next_seq = entries.iter().map(|e| e.seq).max().map_or(0, |m| m + 1);
+fn model_error_node(err: &SagaModelError) -> String {
+    match err {
+        SagaModelError::InvalidStepName { raw } => raw.clone(),
+        SagaModelError::DuplicateStepName { step_name }
+        | SagaModelError::UnknownStep { step_name }
+        | SagaModelError::IllegalTransition { step_name, .. }
+        | SagaModelError::NonPrefixCompleted { step_name } => step_name.as_str().to_string(),
+        SagaModelError::EmptyDefinition | SagaModelError::DuplicateSeq { .. } => {
+            UNKNOWN_SAGA.to_string()
+        }
+        _ => UNKNOWN_SAGA.to_string(),
+    }
+}
 
-    // 已 dead-letter（某步补偿失败）→ 终态 Failed。
-    if let Some(idx) = latest
-        .iter()
-        .find(|(_, s)| **s == JournalStatus::Failed)
-        .map(|(i, _)| *i)
-    {
-        return ResumeState::Terminal(SagaOutcome::Failed {
-            failed_node: actions[idx].name().to_string(),
+fn outcome_from_terminal_status(status: SagaDurableStatus) -> SagaOutcome {
+    match status {
+        SagaDurableStatus::Succeeded => SagaOutcome::Succeeded { output: Vec::new() },
+        SagaDurableStatus::Failed { failed_step } => SagaOutcome::Failed {
+            failed_node: failed_step.as_str().to_string(),
             error: SagaActionError::ActionFailed,
-        });
-    }
-
-    // 补偿已开始 → 续补偿 pending（latest ∈ {Completed, Compensating} 逆序）。
-    let compensating = latest
-        .values()
-        .any(|s| matches!(s, JournalStatus::Compensating | JournalStatus::Compensated));
-    if compensating {
-        let pending = pending_compensations(&latest, actions);
-        return ResumeState::Compensating {
-            seq: next_seq,
-            pending,
-        };
-    }
-
-    // 纯前向。
-    let completed = completed_in_order(&latest, actions);
-    if completed.len() == actions.len() {
-        return ResumeState::Terminal(SagaOutcome::Succeeded { output: Vec::new() });
-    }
-    ResumeState::Forward {
-        start: completed.len(),
-        cursor: Cursor {
-            seq: next_seq,
-            completed,
-            last_output: None,
+        },
+        SagaDurableStatus::Compensated => SagaOutcome::Failed {
+            failed_node: UNKNOWN_SAGA.to_string(),
+            error: SagaActionError::ActionFailed,
+        },
+        SagaDurableStatus::NotStarted
+        | SagaDurableStatus::Running
+        | SagaDurableStatus::Compensating => SagaOutcome::Failed {
+            failed_node: UNKNOWN_SAGA.to_string(),
+            error: SagaActionError::SerializeFailed,
+        },
+        _ => SagaOutcome::Failed {
+            failed_node: UNKNOWN_SAGA.to_string(),
+            error: SagaActionError::SerializeFailed,
         },
     }
 }
 
-/// 每个 action index 的最新 journal 状态（entries 按 seq 序，后覆前 = latest）。无匹配 action 的陈旧
-/// step 名跳过。
-fn latest_status_by_index(
-    entries: &[JournalEntry],
+/// SagaTailer 粗粒度状态（按 factory action definition + durable reducer 判断）。
+async fn status_of<J: SagaJournal>(
+    journal: &J,
+    saga_id: SagaId,
     actions: &[Box<dyn SagaAction>],
-) -> HashMap<usize, JournalStatus> {
-    let index_of: HashMap<&str, usize> = actions
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (a.name(), i))
-        .collect();
-    let mut latest = HashMap::new();
-    for e in entries {
-        if let Some(&i) = index_of.get(e.step_name.as_str()) {
-            latest.insert(i, e.status);
-        }
+) -> Option<SagaExecStatus> {
+    let entries = match read_status_entries(journal, saga_id).await {
+        Ok(entries) => entries,
+        Err(status) => return Some(status),
+    };
+    if entries.is_empty() {
+        return None;
     }
-    latest
+    let Some(definition) = build_status_definition(saga_id, actions) else {
+        return Some(SagaExecStatus::Degraded);
+    };
+    Some(status_from_replay(saga_id, definition.replay(&entries)))
 }
 
-/// latest == Completed 的 index（升序，附 StepName）—— 续前向预填的已完成前缀。
-fn completed_in_order(
-    latest: &HashMap<usize, JournalStatus>,
-    actions: &[Box<dyn SagaAction>],
-) -> Vec<(usize, StepName)> {
-    actions
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| latest.get(i) == Some(&JournalStatus::Completed))
-        .filter_map(|(i, a)| StepName::parse(a.name()).ok().map(|s| (i, s)))
-        .collect()
-}
-
-/// latest ∈ {Completed, Compensating} 的 index（逆序，附 StepName）—— 续补偿待撤销集。
-fn pending_compensations(
-    latest: &HashMap<usize, JournalStatus>,
-    actions: &[Box<dyn SagaAction>],
-) -> Vec<(usize, StepName)> {
-    let mut pending: Vec<(usize, StepName)> = actions
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| {
-            matches!(
-                latest.get(i),
-                Some(JournalStatus::Completed | JournalStatus::Compensating)
-            )
-        })
-        .filter_map(|(i, a)| StepName::parse(a.name()).ok().map(|s| (i, s)))
-        .collect();
-    pending.reverse();
-    pending
-}
-
-/// SagaTailer 粗粒度状态（无 action 序，按 step 名聚合最新状态）。
-async fn status_of<J: SagaJournal>(journal: &J, saga_id: SagaId) -> Option<SagaExecStatus> {
-    let entries = journal
+async fn read_status_entries<J: SagaJournal>(
+    journal: &J,
+    saga_id: SagaId,
+) -> Result<Vec<SagaJournalRecord>, SagaExecStatus> {
+    journal
         .read(&saga_id)
         .await
         .inspect_err(
             |_| tracing::warn!(saga_id = %saga_id.as_uuid(), "saga: status journal read failed"),
         )
-        .ok()?;
-    if entries.is_empty() {
-        return None;
+        .map_err(|_| SagaExecStatus::Degraded)
+}
+
+fn build_status_definition(
+    saga_id: SagaId,
+    actions: &[Box<dyn SagaAction>],
+) -> Option<SagaDefinition> {
+    match definition_from_actions(actions) {
+        Ok(definition) => Some(definition),
+        Err(err) => {
+            warn_status_model_error(saga_id, &err, "saga: status action definition invalid");
+            None
+        }
     }
-    let mut latest: HashMap<&str, JournalStatus> = HashMap::new();
-    for e in &entries {
-        latest.insert(e.step_name.as_str(), e.status);
+}
+
+fn status_from_replay(
+    saga_id: SagaId,
+    replay: Result<SagaReplayDecision, SagaModelError>,
+) -> SagaExecStatus {
+    match replay {
+        Ok(SagaReplayDecision::Forward { .. } | SagaReplayDecision::Compensating { .. }) => {
+            SagaExecStatus::Running
+        }
+        Ok(SagaReplayDecision::Terminal { .. }) | Ok(_) => SagaExecStatus::Done,
+        Err(err) => {
+            warn_status_model_error(saga_id, &err, "saga: status journal replay failed");
+            SagaExecStatus::Degraded
+        }
     }
-    let in_flight = latest
-        .values()
-        .any(|s| matches!(s, JournalStatus::Executing | JournalStatus::Compensating));
-    Some(if in_flight {
-        SagaExecStatus::Running
-    } else {
-        SagaExecStatus::Done
-    })
+}
+
+fn warn_status_model_error(saga_id: SagaId, err: &SagaModelError, message: &'static str) {
+    let failed_node = model_error_node(err);
+    tracing::warn!(
+        saga_id = %saga_id.as_uuid(),
+        failed_node = %failed_node,
+        "{message}"
+    );
 }
 
 #[cfg(test)]

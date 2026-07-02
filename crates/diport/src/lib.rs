@@ -177,9 +177,7 @@ pub use revocation_store::{
     CertScope, CertSerial, CertSerialError, DynRevocationStore, RevocationStore,
     RevocationStoreError,
 };
-pub use saga_journal::{
-    DynSagaJournal, JournalEntry, JournalStatus, SagaId, SagaJournal, SagaJournalError,
-};
+pub use saga_journal::{DynSagaJournal, SagaJournal, SagaJournalError};
 pub use secret_resolver::{
     DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
 };

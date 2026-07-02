@@ -14,7 +14,9 @@
 
 ## 背景与读者
 
-本 feature 是 GoCell→Rust 迁移 Epic #991 W 阶段对 `consistency` 引擎 + `eventexec` 运行时 + 持久化 adapters 的 body 兑现。G0 阶段（#997）已**冻结全部 trait/type 签名**；本 feature 只在冻结签名内填实现，不改公共接缝。
+本 feature 是 GoCell→Rust 迁移 Epic #991 W 阶段对 `consistency` 引擎 + `eventexec` 运行时 + 持久化 adapters 的 body 兑现。G0 阶段（#997）已**冻结全部 trait/type 签名**；默认只在冻结签名内填实现。
+
+#1627 使用 pre-GA breaking window 收口 saga durable model：删除 `diport` 自有 `SagaId` / `JournalStatus` / `JournalEntry`，统一改用 `consistency::saga::{SagaId, SagaJournalStatus, SagaJournalRecord}`；旧类型不保留 alias/shim。`saga_journal` 仍不改 DB schema，journal 不持久化 step output。
 
 「用户」= 两类框架消费者：
 
@@ -221,7 +223,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-015**: reconcile Loop MUST 仅经 `Builder`（必填 sealed Tenancy + Trigger）构造，缺 Tenancy MUST 编译错；level-triggered 触发、`Request::default()`=resync 全量、瞬态错误 per-entity 指数退避。
 - **FR-016**: 多副本 reconcile MUST 仅 leader dispatch，丢 lease MUST cancel 在途 reconcile；跨副本正确性 MUST 靠单调 epoch FencedWriter（CAS，旧 epoch 写拒）+ 消费幂等，不靠 lease 本身。旧 epoch 写被 FencedWriter 拒绝时 MUST 产生可观测日志（`tracing::warn!`，带 key / epoch_attempted / current_epoch），便于运维发现脑裂。
 - **FR-017**: 命令分发 MUST 经 codegen triple funnel（业务→`<cmd>::emit_async` wrapper→runtime `command::emit_async`→`outbox::Entry::new`），MUST 禁裸调 runtime emit；DispatchId + claimer 两阶段幂等；producer/consumer/wiring 同源 key。
-- **FR-018**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0/#997 冻结签名内兑现 body，不改公共接缝；破坏式 wire 变更走 pre-GA 窗口原地改 + 扇出闭环。
+- **FR-018**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0/#997 冻结签名内兑现 body，不改公共接缝；破坏式 wire/API 变更走 pre-GA 窗口原地改 + 扇出闭环。#1627 的 saga durable model 收口是 intentional breaking API：`diport` 旧 saga journal 类型删除，消费方迁移到 `consistency::saga`。
 - **FR-019**: 各一致性等级 MUST 配对应治理/测试：L0 表驱动、L1 事务完整性、L2 outbox 原子性+consumer 幂等、L3 replay+投影重建、L4 状态机+超时+fencing；新增治理机制 MUST ≥ Medium（严禁 Soft）。
 - **FR-020**: outbox/event envelope 的 reserved key（trace/correlation/subjectId/principal/actor/occurredAt/tenantId/tenantAuthority）MUST 由受控构造注入，业务 MUST 不可经 metadata 伪造；broker 凭据 / PII MUST 不进 wire 与默认日志。`subjectId` 与 `actor` MUST 使用 typed opaque/newtype 入口写入 persisted metadata，MUST NOT 进入 AMQP header / MQTT user property；完整 `Principal` 或含 email/姓名/phone/token 等 PII 不得序列化进 envelope。
 
@@ -230,7 +232,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **Outbox Entry**：已持久化的待发事件——topic + idem_key（EventId）+ 已编码 payload（`OutboxPayload`）+ envelope（transport-safe trace/correlation/tenant authority + persisted-only subject/actor）+ 投递状态（pending/publishing/published/dlx）+ retry 计数 + retry_after + lease/fencing token。
 - **Idempotency / Inbox Record**：消费侧去重记录——idem key + consumer group + lease/done 状态 + 命名空间（per-domain）。
 - **Dead Letter Record**：永久失败或预算耗尽的 entry——原始 entry 引用 + 错误摘要 + 尝试次数 + 首末尝试时间。
-- **Saga Journal Entry**：saga 执行轨迹——saga id + step name + 状态（executing/completed/compensating/compensated/failed）+ output + 错误 + 时间。
+- **Saga Journal Entry**：saga 执行轨迹——saga id + seq + step name + 状态（executing/completed/compensating/compensated/failed）+ 补偿失败安全摘要 + 时间；不持久化 step output。tailer 对 replay / definition drift 返回 `Degraded`，不得把损坏 journal 伪装成 `Done`。
 - **Checkpoint**：断点位点——owner + checkpoint id + offset(Lsn) + 版本（CAS）；saga 与 projection 共享存储。
 - **Projection Event**：投影输入载体（outbox entry / saga journal event 共同实现）——topic + lsn + payload。
 - **Reconcile Request / Outcome**：收敛单元——目标 entity（None=resync 全量）/ 收敛结果（settled / requeue_after）+ fencing epoch。
@@ -254,7 +256,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 
 ## Assumptions
 
-- G0/#997 已冻结全部 trait/type 签名；本 feature 不改公共接缝，只填 body（破坏式 wire 变更走 pre-GA 窗口原地改 active 版本 + 扇出闭环，至 2026-12-31）。
+- G0/#997 已冻结全部 trait/type 签名；本 feature 默认不改公共接缝，只填 body。#1627 例外使用 pre-GA breaking window 收口 saga durable model：旧 `diport` saga journal 类型删除，不保留源码兼容。
 - **租户隔离立场**：当前 per-domain 队列/凭据隔离粒度为 domain，不分 tenant；outbox 持久化 `tenant_id`
   并按 `(tenant_id, domain, partition_key)` 执行有序投递 gate，避免跨租户 liveness coupling。inbox_dedup
   去重仍以 `(event_id, consumer_group)` 为键，跨租户正确性依赖 EventId 全局唯一（UUID）+ tenantAuthority

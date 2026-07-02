@@ -244,9 +244,13 @@ pub type authn::JwtIssueError::Output = T
 #[non_exhaustive] pub enum authn::MtlsIdentityError
 pub authn::MtlsIdentityError::EmptyAllowSet
 pub authn::MtlsIdentityError::EmptyPath
+pub authn::MtlsIdentityError::EmptyTrustDomainAllowSet
 pub authn::MtlsIdentityError::InvalidSpiffeId
+pub authn::MtlsIdentityError::InvalidTrustDomain
 pub authn::MtlsIdentityError::NonCanonicalSpiffeId
+pub authn::MtlsIdentityError::NonCanonicalTrustDomain
 pub authn::MtlsIdentityError::PeerNotAllowed
+pub authn::MtlsIdentityError::ServerTrustDomainNotAllowed
 impl core::cmp::Eq for authn::MtlsIdentityError
 impl core::cmp::PartialEq for authn::MtlsIdentityError
 pub fn authn::MtlsIdentityError::eq(&self, &authn::MtlsIdentityError) -> bool
@@ -576,6 +580,176 @@ impl<T> tracing::instrument::Instrument for authn::MtlsAllowSet
 impl<T> tracing::instrument::WithSubscriber for authn::MtlsAllowSet
 impl<T> typenum::type_operators::Same for authn::MtlsAllowSet
 pub type authn::MtlsAllowSet::Output = T
+pub struct authn::MtlsTrustDomain
+impl authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::as_str(&self) -> &str
+pub fn authn::MtlsTrustDomain::parse(&str) -> core::result::Result<Self, authn::MtlsIdentityError>
+impl core::clone::Clone for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::clone(&self) -> authn::MtlsTrustDomain
+impl core::cmp::Eq for authn::MtlsTrustDomain
+impl core::cmp::Ord for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::cmp(&self, &authn::MtlsTrustDomain) -> core::cmp::Ordering
+impl core::cmp::PartialEq for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::eq(&self, &authn::MtlsTrustDomain) -> bool
+impl core::cmp::PartialOrd for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::partial_cmp(&self, &authn::MtlsTrustDomain) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&str> for authn::MtlsTrustDomain
+pub type authn::MtlsTrustDomain::Error = authn::MtlsIdentityError
+pub fn authn::MtlsTrustDomain::try_from(&str) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for authn::MtlsTrustDomain
+impl core::str::traits::FromStr for authn::MtlsTrustDomain
+pub type authn::MtlsTrustDomain::Err = authn::MtlsIdentityError
+pub fn authn::MtlsTrustDomain::from_str(&str) -> core::result::Result<Self, Self::Err>
+impl core::marker::Freeze for authn::MtlsTrustDomain
+impl core::marker::Send for authn::MtlsTrustDomain
+impl core::marker::Sync for authn::MtlsTrustDomain
+impl core::marker::Unpin for authn::MtlsTrustDomain
+impl core::marker::UnsafeUnpin for authn::MtlsTrustDomain
+impl core::panic::unwind_safe::RefUnwindSafe for authn::MtlsTrustDomain
+impl core::panic::unwind_safe::UnwindSafe for authn::MtlsTrustDomain
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MtlsTrustDomain where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MtlsTrustDomain where T: 'a
+impl<L> tonic::service::layered::LayerExt<L> for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
+impl<Q, K> equivalent::Comparable<K> for authn::MtlsTrustDomain where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for authn::MtlsTrustDomain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for authn::MtlsTrustDomain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for authn::MtlsTrustDomain where U: core::convert::From<T>
+pub fn authn::MtlsTrustDomain::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::MtlsTrustDomain where U: core::convert::Into<T>
+pub type authn::MtlsTrustDomain::Error = core::convert::Infallible
+pub fn authn::MtlsTrustDomain::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::MtlsTrustDomain where U: core::convert::TryFrom<T>
+pub type authn::MtlsTrustDomain::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::MtlsTrustDomain::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for authn::MtlsTrustDomain where T: core::clone::Clone
+pub type authn::MtlsTrustDomain::Owned = T
+pub fn authn::MtlsTrustDomain::clone_into(&self, &mut T)
+pub fn authn::MtlsTrustDomain::to_owned(&self) -> T
+impl<T> alloc::string::ToString for authn::MtlsTrustDomain where T: core::fmt::Display + ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for authn::MtlsTrustDomain where T: 'static + ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::MtlsTrustDomain where T: ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::MtlsTrustDomain where T: ?core::marker::Sized
+pub fn authn::MtlsTrustDomain::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for authn::MtlsTrustDomain where T: core::clone::Clone
+pub unsafe fn authn::MtlsTrustDomain::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::from(T) -> T
+impl<T> tonic::request::IntoRequest<T> for authn::MtlsTrustDomain
+pub fn authn::MtlsTrustDomain::into_request(self) -> tonic::request::Request<T>
+impl<T> tracing::instrument::Instrument for authn::MtlsTrustDomain
+impl<T> tracing::instrument::WithSubscriber for authn::MtlsTrustDomain
+impl<T> typenum::type_operators::Same for authn::MtlsTrustDomain
+pub type authn::MtlsTrustDomain::Output = T
+pub struct authn::MtlsTrustDomainAllowSet
+impl authn::MtlsTrustDomainAllowSet
+pub fn authn::MtlsTrustDomainAllowSet::allows(&self, &authn::MtlsTrustDomain) -> bool
+pub fn authn::MtlsTrustDomainAllowSet::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = &authn::MtlsTrustDomain>
+pub fn authn::MtlsTrustDomainAllowSet::new<I, S>(I) -> core::result::Result<Self, authn::MtlsIdentityError> where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::AsRef<str>
+impl core::clone::Clone for authn::MtlsTrustDomainAllowSet
+pub fn authn::MtlsTrustDomainAllowSet::clone(&self) -> authn::MtlsTrustDomainAllowSet
+impl core::fmt::Debug for authn::MtlsTrustDomainAllowSet
+pub fn authn::MtlsTrustDomainAllowSet::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::MtlsTrustDomainAllowSet
+impl core::marker::Send for authn::MtlsTrustDomainAllowSet
+impl core::marker::Sync for authn::MtlsTrustDomainAllowSet
+impl core::marker::Unpin for authn::MtlsTrustDomainAllowSet
+impl core::marker::UnsafeUnpin for authn::MtlsTrustDomainAllowSet
+impl core::panic::unwind_safe::RefUnwindSafe for authn::MtlsTrustDomainAllowSet
+impl core::panic::unwind_safe::UnwindSafe for authn::MtlsTrustDomainAllowSet
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MtlsTrustDomainAllowSet where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MtlsTrustDomainAllowSet where T: 'a
+impl<L> tonic::service::layered::LayerExt<L> for authn::MtlsTrustDomainAllowSet
+pub fn authn::MtlsTrustDomainAllowSet::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
+impl<T, U> core::convert::Into<U> for authn::MtlsTrustDomainAllowSet where U: core::convert::From<T>
+pub fn authn::MtlsTrustDomainAllowSet::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::MtlsTrustDomainAllowSet where U: core::convert::Into<T>
+pub type authn::MtlsTrustDomainAllowSet::Error = core::convert::Infallible
+pub fn authn::MtlsTrustDomainAllowSet::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::MtlsTrustDomainAllowSet where U: core::convert::TryFrom<T>
+pub type authn::MtlsTrustDomainAllowSet::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::MtlsTrustDomainAllowSet::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for authn::MtlsTrustDomainAllowSet where T: core::clone::Clone
+pub type authn::MtlsTrustDomainAllowSet::Owned = T
+pub fn authn::MtlsTrustDomainAllowSet::clone_into(&self, &mut T)
+pub fn authn::MtlsTrustDomainAllowSet::to_owned(&self) -> T
+impl<T> core::any::Any for authn::MtlsTrustDomainAllowSet where T: 'static + ?core::marker::Sized
+pub fn authn::MtlsTrustDomainAllowSet::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::MtlsTrustDomainAllowSet where T: ?core::marker::Sized
+pub fn authn::MtlsTrustDomainAllowSet::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::MtlsTrustDomainAllowSet where T: ?core::marker::Sized
+pub fn authn::MtlsTrustDomainAllowSet::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for authn::MtlsTrustDomainAllowSet where T: core::clone::Clone
+pub unsafe fn authn::MtlsTrustDomainAllowSet::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for authn::MtlsTrustDomainAllowSet
+pub fn authn::MtlsTrustDomainAllowSet::from(T) -> T
+impl<T> tonic::request::IntoRequest<T> for authn::MtlsTrustDomainAllowSet
+pub fn authn::MtlsTrustDomainAllowSet::into_request(self) -> tonic::request::Request<T>
+impl<T> tracing::instrument::Instrument for authn::MtlsTrustDomainAllowSet
+impl<T> tracing::instrument::WithSubscriber for authn::MtlsTrustDomainAllowSet
+impl<T> typenum::type_operators::Same for authn::MtlsTrustDomainAllowSet
+pub type authn::MtlsTrustDomainAllowSet::Output = T
+pub struct authn::OutboundMtlsPolicy
+impl authn::OutboundMtlsPolicy
+pub fn authn::OutboundMtlsPolicy::local_identity(&self) -> &authn::SpiffeId
+pub fn authn::OutboundMtlsPolicy::new(authn::SpiffeId, authn::MtlsAllowSet, authn::MtlsTrustDomainAllowSet) -> core::result::Result<Self, authn::MtlsIdentityError>
+pub fn authn::OutboundMtlsPolicy::server_allow_set(&self) -> &authn::MtlsAllowSet
+pub fn authn::OutboundMtlsPolicy::trust_domains(&self) -> &authn::MtlsTrustDomainAllowSet
+impl core::clone::Clone for authn::OutboundMtlsPolicy
+pub fn authn::OutboundMtlsPolicy::clone(&self) -> authn::OutboundMtlsPolicy
+impl core::fmt::Debug for authn::OutboundMtlsPolicy
+pub fn authn::OutboundMtlsPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::OutboundMtlsPolicy
+impl core::marker::Send for authn::OutboundMtlsPolicy
+impl core::marker::Sync for authn::OutboundMtlsPolicy
+impl core::marker::Unpin for authn::OutboundMtlsPolicy
+impl core::marker::UnsafeUnpin for authn::OutboundMtlsPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for authn::OutboundMtlsPolicy
+impl core::panic::unwind_safe::UnwindSafe for authn::OutboundMtlsPolicy
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::OutboundMtlsPolicy where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::OutboundMtlsPolicy where T: 'a
+impl<L> tonic::service::layered::LayerExt<L> for authn::OutboundMtlsPolicy
+pub fn authn::OutboundMtlsPolicy::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
+impl<T, U> core::convert::Into<U> for authn::OutboundMtlsPolicy where U: core::convert::From<T>
+pub fn authn::OutboundMtlsPolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::OutboundMtlsPolicy where U: core::convert::Into<T>
+pub type authn::OutboundMtlsPolicy::Error = core::convert::Infallible
+pub fn authn::OutboundMtlsPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::OutboundMtlsPolicy where U: core::convert::TryFrom<T>
+pub type authn::OutboundMtlsPolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::OutboundMtlsPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for authn::OutboundMtlsPolicy where T: core::clone::Clone
+pub type authn::OutboundMtlsPolicy::Owned = T
+pub fn authn::OutboundMtlsPolicy::clone_into(&self, &mut T)
+pub fn authn::OutboundMtlsPolicy::to_owned(&self) -> T
+impl<T> core::any::Any for authn::OutboundMtlsPolicy where T: 'static + ?core::marker::Sized
+pub fn authn::OutboundMtlsPolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::OutboundMtlsPolicy where T: ?core::marker::Sized
+pub fn authn::OutboundMtlsPolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::OutboundMtlsPolicy where T: ?core::marker::Sized
+pub fn authn::OutboundMtlsPolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for authn::OutboundMtlsPolicy where T: core::clone::Clone
+pub unsafe fn authn::OutboundMtlsPolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for authn::OutboundMtlsPolicy
+pub fn authn::OutboundMtlsPolicy::from(T) -> T
+impl<T> tonic::request::IntoRequest<T> for authn::OutboundMtlsPolicy
+pub fn authn::OutboundMtlsPolicy::into_request(self) -> tonic::request::Request<T>
+impl<T> tracing::instrument::Instrument for authn::OutboundMtlsPolicy
+impl<T> tracing::instrument::WithSubscriber for authn::OutboundMtlsPolicy
+impl<T> typenum::type_operators::Same for authn::OutboundMtlsPolicy
+pub type authn::OutboundMtlsPolicy::Output = T
 pub struct authn::Principal
 impl authn::Principal
 pub fn authn::Principal::audit_subject(&self) -> &str
@@ -742,6 +916,7 @@ pub struct authn::SpiffeId
 impl authn::SpiffeId
 pub fn authn::SpiffeId::as_str(&self) -> &str
 pub fn authn::SpiffeId::parse(&str) -> core::result::Result<Self, authn::MtlsIdentityError>
+pub fn authn::SpiffeId::trust_domain(&self) -> authn::MtlsTrustDomain
 impl core::clone::Clone for authn::SpiffeId
 pub fn authn::SpiffeId::clone(&self) -> authn::SpiffeId
 impl core::cmp::Eq for authn::SpiffeId

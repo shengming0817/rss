@@ -95,12 +95,12 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | seq | bigint | append 序（journal 顺序） |
 | step_name | text | |
 | status | text | executing/completed/compensating/compensated/failed |
-| output | bytea NULL | step 输出 |
-| error_summary | text NULL | |
+| error_summary | text NULL | 补偿失败安全摘要（静态 summary；read/resume 路径不回传） |
 | occurred_at | timestamptz | |
 
-- PK: `(saga_id, seq)`。append-only。resume = 读 max(seq) 重建栈。
-- 补偿：失败时按 seq 逆序对 completed step 调 compensate。
+- PK: `(saga_id, seq)`。append-only。resume = 读 `seq/step_name/status` 后由 `consistency::saga` replay reducer 重建状态。
+- durable journal 不持久化 step output；末步 output 只在 `run` 内存路径作为即时结果返回。
+- 补偿：失败时按 definition reverse order 对 completed step 调 compensate。
 
 ### checkpoint（P9，saga+projection 共享）
 | 列 | 类型 | 说明 |

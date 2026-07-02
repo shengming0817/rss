@@ -17,7 +17,7 @@
 diport 的 DI port 契约 DTO 中，**字节 payload 字段**（`Vec<u8>` —— 事件体 / 签名 / CSR / nonce / 状态快照 / 密钥物料）此前各自**手写
 `impl Debug`** 把字节渲染成 `<redacted>`，散落在 ~9 个 DTO（`Signature` / `SignRequest.message` / `Message.payload` /
 `PublishRequest.payload` / `CasStoreRequest.{expected,new_value}` / `CasStoreOutcome::Conflict.current` / `FencedWriteRequest.data` /
-`DeadLetterRecord.original_payload` / `JournalEntry.output`）。
+`DeadLetterRecord.original_payload` 等；saga journal record 不再承载 step output）。
 
 **问题（#1155，源 PR #209 review F6）**：「未来新增 diport DTO 含字节 payload 必须脱敏」对**将来**类型**无前向机器守卫**——
 开发者新增一个 `pub struct { f: Vec<u8> }` + `#[derive(Debug)]` 不会被任何 lint / 治理测试拦住。既有 `rss_redact_debug_required`

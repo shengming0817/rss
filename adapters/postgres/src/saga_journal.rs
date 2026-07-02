@@ -6,8 +6,8 @@
 //! **append 幂等**：`INSERT ... ON CONFLICT (saga_id, seq) DO NOTHING`——崩溃后重 append
 //! 同 `(saga_id, seq)` 行安全 no-op。
 //!
-//! **read 路径**：只回传 `seq`/`step_name`/`status`，不 SELECT `output`/`error_summary`
-//! （resume 不需要，PII 不下传；见 `diport::saga_journal` 模块 doc）。
+//! **read 路径**：只回传 `seq`/`step_name`/`status`，不 SELECT `error_summary`
+//! （resume 不需要 runtime summary；见 `diport::saga_journal` 模块 doc）。
 //!
 //! **时间戳**：`occurred_at` 用 DB DEFAULT `now()`（不注入 Clock，时间源保持 DB 端单一，
 //! 与 outbox/inbox 同范式）。
@@ -15,7 +15,10 @@
 //! **错误 PII 边界**：sqlx 错误不进 Display——经 [`diport::SagaJournalError::new`] 包成
 //! source（error-handling.md §Message 与 PII）。
 
-use diport::{JournalEntry, JournalStatus, SagaId, SagaJournal, SagaJournalError};
+use consistency::{
+    SagaId, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName,
+};
+use diport::{SagaJournal, SagaJournalError};
 use sqlx::PgPool;
 
 use crate::PgStore;
@@ -43,9 +46,13 @@ impl SagaJournal for PgSagaJournal {
     /// 追加一条 journal 记录（幂等：同 `(saga_id, seq)` 重 append → no-op）。
     ///
     /// `occurred_at` 走 DB DEFAULT `now()`；`error_summary` 落库供运维巡检（const literal，安全）。
-    /// `output`（step 输出字节，可含 PII）**不持久化**——DB 列已删除（零信任，PII 边界）。
+    /// step output **不持久化**——DB 无 output 列（零信任，PII 边界）。
     /// sqlx 错误不进 Display——经 [`SagaJournalError::new`] 包成 source（PII 边界）。
-    async fn append(&self, saga_id: &SagaId, entry: JournalEntry) -> Result<(), SagaJournalError> {
+    async fn append(
+        &self,
+        saga_id: &SagaId,
+        entry: SagaJournalAppendRecord,
+    ) -> Result<(), SagaJournalError> {
         // uuid 经 `.to_string()` 作 text 传入 postgres，server-side 隐式转 uuid 列类型（不给 sqlx 加 uuid feature）。
         let saga_id_str = saga_id.as_uuid().to_string();
         sqlx::query(
@@ -56,10 +63,10 @@ impl SagaJournal for PgSagaJournal {
             "#,
         )
         .bind(&saga_id_str)
-        .bind(i64::try_from(entry.seq).map_err(SagaJournalError::new)?)
-        .bind(entry.step_name.as_str())
-        .bind(entry.status.as_str())
-        .bind(entry.error_summary)
+        .bind(i64::try_from(entry.seq()).map_err(SagaJournalError::new)?)
+        .bind(entry.step_name().as_str())
+        .bind(entry.status().as_str())
+        .bind(entry.error_summary())
         .execute(&self.pool)
         .await
         .map_err(SagaJournalError::new)?;
@@ -69,10 +76,10 @@ impl SagaJournal for PgSagaJournal {
 
     /// 读某 saga 全部 journal 条目，按 `seq` 升序（resume 重建栈用）。
     ///
-    /// 回传条目的 `output`/`error_summary` 恒 `None`——resume 不需要，PII 不下传
+    /// 回传条目的 `error_summary` 恒 `None`——resume 不需要 runtime summary
     /// （见 `diport::saga_journal` 模块 doc）。parse/convert 失败（我们写入的数据不该无效）
     /// → [`SagaJournalError`]（Invariant 类型错误，不 unwrap）。
-    async fn read(&self, saga_id: &SagaId) -> Result<Vec<JournalEntry>, SagaJournalError> {
+    async fn read(&self, saga_id: &SagaId) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
         let saga_id_str = saga_id.as_uuid().to_string();
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
             r#"
@@ -90,19 +97,13 @@ impl SagaJournal for PgSagaJournal {
         rows.into_iter()
             .map(|(seq_i64, step_str, status_str)| {
                 let seq = u64::try_from(seq_i64).map_err(SagaJournalError::new)?;
-                let step_name = consistency::StepName::parse(&step_str).map_err(|_| {
+                let step_name = StepName::parse(&step_str).map_err(|_| {
                     SagaJournalError::new(InvariantError("invalid step_name in saga_journal"))
                 })?;
-                let status = JournalStatus::parse(&status_str).ok_or_else(|| {
+                let status = SagaJournalStatus::parse(&status_str).ok_or_else(|| {
                     SagaJournalError::new(InvariantError("invalid status in saga_journal"))
                 })?;
-                Ok(JournalEntry {
-                    seq,
-                    step_name,
-                    status,
-                    output: None,
-                    error_summary: None,
-                })
+                Ok(SagaJournalRecord::replayed(seq, step_name, status))
             })
             .collect()
     }
@@ -150,7 +151,7 @@ mod smoke {
     }
 
     // F8 anti-vacuity：解析 0006 migration 的 `CHECK (status IN (...))` 子句，断言与
-    // `JournalStatus::ALL.map(|s| s.as_str())` 集合同源（两处任一漂移即红）。
+    // `SagaJournalStatus::ALL.map(|s| s.as_str())` 集合同源（两处任一漂移即红）。
     // 集合相等比较隐式覆盖「五常量互异」——migration 五值互异，若两常量重复则集合不等而失败。
     #[test]
     #[allow(clippy::expect_used)]
@@ -170,7 +171,9 @@ mod smoke {
             .collect();
         migration_values.sort_unstable();
 
-        let mut port_values: Vec<&str> = diport::JournalStatus::ALL.map(|s| s.as_str()).to_vec();
+        let mut port_values: Vec<&str> = consistency::SagaJournalStatus::ALL
+            .map(|s| s.as_str())
+            .to_vec();
         port_values.sort_unstable();
 
         assert_eq!(
@@ -183,7 +186,8 @@ mod smoke {
 /// 集成测试：`PgSagaJournal` append → read 往返（`integration` feature 门控；需真实 postgres）。
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
-    use diport::{JournalEntry, ManagedResource, SagaId, SagaJournal};
+    use consistency::{SagaId, SagaJournalRecord, SagaJournalStatus, StepName};
+    use diport::{ManagedResource, SagaJournal};
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -194,9 +198,6 @@ mod integration_tests {
     #[allow(clippy::unwrap_used)]
     // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out（error-handling.md §Carve-out）。
     async fn saga_journal_append_read_roundtrip() -> TestResult {
-        use consistency::StepName;
-        use diport::JournalStatus;
-
         let (_pg, store) = crate::test_pg::connect_pg().await?;
         store.run_migrations().await?;
 
@@ -205,23 +206,34 @@ mod integration_tests {
 
         // 7 步覆盖全部 5 个 migration-CHECK status 值（含 Failed）。
         let steps = [
-            ("reserve_funds", JournalStatus::Executing),
-            ("reserve_funds", JournalStatus::Completed),
-            ("charge_card", JournalStatus::Executing),
-            ("charge_card", JournalStatus::Completed),
-            ("charge_card", JournalStatus::Compensating),
-            ("charge_card", JournalStatus::Compensated),
-            ("charge_card", JournalStatus::Failed),
+            ("reserve_funds", SagaJournalStatus::Executing),
+            ("reserve_funds", SagaJournalStatus::Completed),
+            ("charge_card", SagaJournalStatus::Executing),
+            ("charge_card", SagaJournalStatus::Completed),
+            ("charge_card", SagaJournalStatus::Compensating),
+            ("charge_card", SagaJournalStatus::Compensated),
+            ("charge_card", SagaJournalStatus::Failed),
         ];
 
         for (i, (step, status)) in steps.iter().enumerate() {
             let step_name = StepName::parse(step).unwrap();
-            let entry = JournalEntry {
-                seq: i as u64,
-                step_name,
-                status: *status,
-                output: None,
-                error_summary: None,
+            let entry = match *status {
+                SagaJournalStatus::Executing => {
+                    SagaJournalAppendRecord::executing(i as u64, step_name)
+                }
+                SagaJournalStatus::Completed => {
+                    SagaJournalAppendRecord::completed(i as u64, step_name)
+                }
+                SagaJournalStatus::Compensating => {
+                    SagaJournalAppendRecord::compensating(i as u64, step_name)
+                }
+                SagaJournalStatus::Compensated => {
+                    SagaJournalAppendRecord::compensated(i as u64, step_name)
+                }
+                SagaJournalStatus::Failed => {
+                    SagaJournalAppendRecord::failed(i as u64, step_name, "compensation failed")
+                }
+                _ => SagaJournalRecord::replayed(i as u64, step_name, *status),
             };
             journal.append(&saga_id, entry).await?;
         }
@@ -230,33 +242,23 @@ mod integration_tests {
         let entries = journal.read(&saga_id).await?;
         assert_eq!(entries.len(), 7, "should have 7 entries");
         for (i, (expected_step, expected_status)) in steps.iter().enumerate() {
-            assert_eq!(entries[i].seq, i as u64, "seq mismatch at {i}");
+            assert_eq!(entries[i].seq(), i as u64, "seq mismatch at {i}");
             assert_eq!(
-                entries[i].step_name.as_str(),
+                entries[i].step_name().as_str(),
                 *expected_step,
                 "step_name mismatch at {i}"
             );
             assert_eq!(
-                entries[i].status, *expected_status,
+                entries[i].status(),
+                *expected_status,
                 "status mismatch at {i}"
             );
-            // read 路径回传 output/error_summary 恒 None。
-            assert!(entries[i].output.is_none(), "output must be None from read");
-            assert!(
-                entries[i].error_summary.is_none(),
-                "error_summary must be None from read"
-            );
+            // read record 类型不暴露 runtime-only error_summary；resume 只消费 seq/step/status。
         }
 
         // 重 append 同 (saga_id, seq=0) → no-op（幂等）。
         let step_name = StepName::parse("reserve_funds").unwrap();
-        let dup_entry = JournalEntry {
-            seq: 0,
-            step_name,
-            status: JournalStatus::Executing,
-            output: None,
-            error_summary: None,
-        };
+        let dup_entry = SagaJournalAppendRecord::executing(0, step_name);
         journal.append(&saga_id, dup_entry).await?; // must not error
         let entries2 = journal.read(&saga_id).await?;
         assert_eq!(entries2.len(), 7, "re-append must be no-op (idempotent)");

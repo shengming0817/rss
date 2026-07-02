@@ -20,20 +20,20 @@ use std::time::{Duration, SystemTime};
 
 use consistency::{
     ConsumerGroup, EngineError, Entry, IdemKey, InboxStore, LeaseOutcome,
-    LeaseToken as IdemLeaseToken, Lsn, SeenState,
+    LeaseToken as IdemLeaseToken, Lsn, SagaId, SagaJournalAppendRecord, SagaJournalRecord,
+    SeenState,
 };
 
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreKey, CasStoreOutcome,
     CasStoreRequest, Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError,
     CheckpointVersion, Clock, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
-    FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError, JournalEntry,
-    LeaderElector, LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome,
-    LockStore, LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
+    FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError, LeaderElector,
+    LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore,
+    LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
     OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
-    PublisherError, SagaId, SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate,
-    SecretMaterial, SecretResolver, SecretResolverError, Subscriber, SubscriberError, Topic,
-    WriteOutcome,
+    PublisherError, SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate, SecretMaterial,
+    SecretResolver, SecretResolverError, Subscriber, SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -933,14 +933,14 @@ impl LockStore for MemLockStore {
 // ── MemSagaJournal：saga 执行日志 in-mem 替身 ────────────────────────────────────
 
 /// in-mem saga journal（impl [`diport::SagaJournal`]）：按 `(saga_id, seq)` 主键幂等 append，
-/// `read` 返回按 `seq` 升序排列的条目（`output`/`error_summary` 恒 `None`，符合 port 契约）。
+/// `read` 返回按 `seq` 升序排列的条目（`error_summary` 恒 `None`，符合 port 契约）。
 ///
 /// 对标 oxidecomputer/steno `SagaLog`（append-only journal，crash-replay 幂等）。
 /// 生产替身走 postgres adapter（`ON CONFLICT (saga_id,seq) DO NOTHING`）；本 crate 仅测试/demo 用。
 #[derive(Clone, Default)]
 pub struct MemSagaJournal {
     // (saga_id_bytes, entry) — saga_id 以 uuid::Uuid 字节存储，entry 携带 seq/step_name/status。
-    inner: Arc<Mutex<Vec<(uuid::Uuid, JournalEntry)>>>,
+    inner: Arc<Mutex<Vec<(uuid::Uuid, SagaJournalAppendRecord)>>>,
 }
 
 impl MemSagaJournal {
@@ -951,34 +951,32 @@ impl MemSagaJournal {
 }
 
 impl SagaJournal for MemSagaJournal {
-    async fn append(&self, saga_id: &SagaId, entry: JournalEntry) -> Result<(), SagaJournalError> {
+    async fn append(
+        &self,
+        saga_id: &SagaId,
+        entry: SagaJournalAppendRecord,
+    ) -> Result<(), SagaJournalError> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // 幂等：同 (saga_id, seq) 已存在则 no-op（对标 postgres ON CONFLICT DO NOTHING）。
         let id = saga_id.as_uuid();
-        let seq = entry.seq;
-        let already_exists = g.iter().any(|(sid, e)| *sid == id && e.seq == seq);
+        let seq = entry.seq();
+        let already_exists = g.iter().any(|(sid, e)| *sid == id && e.seq() == seq);
         if !already_exists {
             g.push((id, entry));
         }
         Ok(())
     }
 
-    async fn read(&self, saga_id: &SagaId) -> Result<Vec<JournalEntry>, SagaJournalError> {
+    async fn read(&self, saga_id: &SagaId) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = saga_id.as_uuid();
-        // 过滤本 saga、按 seq 升序（resume 据此重建执行栈）；strip output/error_summary（port 契约）。
-        let mut entries: Vec<JournalEntry> = g
+        // 过滤本 saga、按 seq 升序（resume 据此重建执行栈）；strip error_summary（port 契约）。
+        let mut entries: Vec<SagaJournalRecord> = g
             .iter()
             .filter(|(sid, _)| *sid == id)
-            .map(|(_, e)| JournalEntry {
-                seq: e.seq,
-                step_name: e.step_name.clone(),
-                status: e.status,
-                output: None,
-                error_summary: None,
-            })
+            .map(|(_, e)| SagaJournalRecord::replayed(e.seq(), e.step_name().clone(), e.status()))
             .collect();
-        entries.sort_by_key(|e| e.seq);
+        entries.sort_by_key(SagaJournalRecord::seq);
         Ok(entries)
     }
 
@@ -2396,51 +2394,72 @@ mod tests {
 
     // ── MemSagaJournal 测试 ───────────────────────────────────────────────────
 
-    /// append 幂等 + read 按 seq 升序 + output 恒 None（port 契约）。
+    /// append 幂等 + read 按 seq 升序。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     // reason: 测试用 canonical literal 构造 StepName/SagaId，item-level carve-out（error-handling.md §Carve-out）。
     async fn mem_saga_journal_append_idempotent_and_read_order() {
-        use diport::{JournalEntry, SagaId};
+        use consistency::{SagaId, SagaJournalStatus};
         use uuid::Uuid;
 
         let journal = MemSagaJournal::new();
         let saga_id = SagaId::new(Uuid::from_u128(1));
-        let step0 = consistency::StepName::parse("step0").unwrap();
-        let step1 = consistency::StepName::parse("step1").unwrap();
-        let step2 = consistency::StepName::parse("step2").unwrap();
+        let steps = [
+            consistency::StepName::parse("step0").unwrap(),
+            consistency::StepName::parse("step1").unwrap(),
+            consistency::StepName::parse("step2").unwrap(),
+            consistency::StepName::parse("step3").unwrap(),
+            consistency::StepName::parse("step4").unwrap(),
+        ];
 
-        // append seq 0, 1, 2（seq 2 携带 output 字节，read 应剥离）。
-        journal
-            .append(&saga_id, JournalEntry::executing(0, step0.clone()))
-            .await
-            .unwrap();
-        journal
-            .append(&saga_id, JournalEntry::executing(1, step1.clone()))
-            .await
-            .unwrap();
+        // append 全 status 集合（Failed 携带 error_summary，read 应剥离）。
+        for (seq, (status, step)) in SagaJournalStatus::ALL
+            .into_iter()
+            .zip(steps.iter().cloned())
+            .enumerate()
+        {
+            let record = match status {
+                SagaJournalStatus::Executing => {
+                    SagaJournalAppendRecord::executing(seq as u64, step)
+                }
+                SagaJournalStatus::Completed => {
+                    SagaJournalAppendRecord::completed(seq as u64, step)
+                }
+                SagaJournalStatus::Compensating => {
+                    SagaJournalAppendRecord::compensating(seq as u64, step)
+                }
+                SagaJournalStatus::Compensated => {
+                    SagaJournalAppendRecord::compensated(seq as u64, step)
+                }
+                SagaJournalStatus::Failed => {
+                    SagaJournalAppendRecord::failed(seq as u64, step, "compensation failed")
+                }
+                _ => unreachable!("SagaJournalStatus::ALL contains only known statuses"),
+            };
+            journal.append(&saga_id, record).await.unwrap();
+        }
+
+        // 重复 append (saga_id, seq=0) → no-op（幂等）。
         journal
             .append(
                 &saga_id,
-                JournalEntry::completed(2, step2.clone(), b"output_data".to_vec()),
+                SagaJournalAppendRecord::executing(0, steps[0].clone()),
             )
             .await
             .unwrap();
 
-        // 重复 append (saga_id, seq=0) → no-op（幂等）。
-        journal
-            .append(&saga_id, JournalEntry::executing(0, step0.clone()))
-            .await
-            .unwrap();
-
         let entries = journal.read(&saga_id).await.unwrap();
-        assert_eq!(entries.len(), 3, "重复 append 后应仍为 3 条");
-        assert_eq!(entries[0].seq, 0);
-        assert_eq!(entries[1].seq, 1);
-        assert_eq!(entries[2].seq, 2);
-        // read 路径 output 恒 None（port 契约：resume 只需 seq/step_name/status）。
-        assert!(entries[2].output.is_none(), "read 回传 output 须为 None");
-        assert!(entries[2].error_summary.is_none());
+        assert_eq!(
+            entries.len(),
+            SagaJournalStatus::ALL.len(),
+            "重复 append 后条数不变"
+        );
+        for (idx, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.seq(), idx as u64);
+            assert_eq!(entry.step_name(), &steps[idx]);
+            assert_eq!(entry.status(), SagaJournalStatus::ALL[idx]);
+            // read record 类型不暴露 runtime-only error_summary；resume 只需 seq/step_name/status。
+        }
     }
 
     // ── MemCheckpointStore 测试 ───────────────────────────────────────────────

@@ -4284,56 +4284,6 @@ pub async fn TraitVariantBlanketType::is_revoked(&self, diport::revocation_store
 pub async fn TraitVariantBlanketType::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 pub mod diport::saga_journal
-#[non_exhaustive] pub enum diport::saga_journal::JournalStatus
-pub diport::saga_journal::JournalStatus::Compensated
-pub diport::saga_journal::JournalStatus::Compensating
-pub diport::saga_journal::JournalStatus::Completed
-pub diport::saga_journal::JournalStatus::Executing
-pub diport::saga_journal::JournalStatus::Failed
-impl diport::saga_journal::JournalStatus
-pub const diport::saga_journal::JournalStatus::ALL: [diport::saga_journal::JournalStatus; 5]
-pub fn diport::saga_journal::JournalStatus::as_str(&self) -> &'static str
-pub fn diport::saga_journal::JournalStatus::parse(&str) -> core::option::Option<Self>
-impl core::clone::Clone for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::clone(&self) -> diport::saga_journal::JournalStatus
-impl core::cmp::Eq for diport::saga_journal::JournalStatus
-impl core::cmp::PartialEq for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::eq(&self, &diport::saga_journal::JournalStatus) -> bool
-impl core::fmt::Debug for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for diport::saga_journal::JournalStatus
-impl core::marker::StructuralPartialEq for diport::saga_journal::JournalStatus
-impl core::marker::Freeze for diport::saga_journal::JournalStatus
-impl core::marker::Send for diport::saga_journal::JournalStatus
-impl core::marker::Sync for diport::saga_journal::JournalStatus
-impl core::marker::Unpin for diport::saga_journal::JournalStatus
-impl core::marker::UnsafeUnpin for diport::saga_journal::JournalStatus
-impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_journal::JournalStatus
-impl core::panic::unwind_safe::UnwindSafe for diport::saga_journal::JournalStatus
-impl<T, U> core::convert::Into<U> for diport::saga_journal::JournalStatus where U: core::convert::From<T>
-pub fn diport::saga_journal::JournalStatus::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for diport::saga_journal::JournalStatus where U: core::convert::Into<T>
-pub type diport::saga_journal::JournalStatus::Error = core::convert::Infallible
-pub fn diport::saga_journal::JournalStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for diport::saga_journal::JournalStatus where U: core::convert::TryFrom<T>
-pub type diport::saga_journal::JournalStatus::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn diport::saga_journal::JournalStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for diport::saga_journal::JournalStatus where T: core::clone::Clone
-pub type diport::saga_journal::JournalStatus::Owned = T
-pub fn diport::saga_journal::JournalStatus::clone_into(&self, &mut T)
-pub fn diport::saga_journal::JournalStatus::to_owned(&self) -> T
-impl<T> core::any::Any for diport::saga_journal::JournalStatus where T: 'static + ?core::marker::Sized
-pub fn diport::saga_journal::JournalStatus::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for diport::saga_journal::JournalStatus where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalStatus::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for diport::saga_journal::JournalStatus where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalStatus::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for diport::saga_journal::JournalStatus where T: core::clone::Clone
-pub unsafe fn diport::saga_journal::JournalStatus::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::from(T) -> T
-impl<T> typenum::type_operators::Same for diport::saga_journal::JournalStatus
-pub type diport::saga_journal::JournalStatus::Output = T
 #[repr(transparent)] pub struct diport::saga_journal::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynSagaJournal<'dynosaur_struct>
 pub const fn diport::DynSagaJournal<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::saga_journal::SagaJournal + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
@@ -4343,20 +4293,20 @@ pub fn diport::DynSagaJournal<'dynosaur_struct>::new_arc(impl diport::saga_journ
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_box(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_rc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaJournal<'dynosaur_struct>>
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSagaJournal<'dynosaur_struct>
@@ -4372,99 +4322,6 @@ impl<T> core::borrow::Borrow<T> for diport::DynSagaJournal<'dynosaur_struct> whe
 pub fn diport::DynSagaJournal<'dynosaur_struct>::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for diport::DynSagaJournal<'dynosaur_struct> where T: ?core::marker::Sized
 pub fn diport::DynSagaJournal<'dynosaur_struct>::borrow_mut(&mut self) -> &mut T
-pub struct diport::saga_journal::JournalEntry
-pub diport::saga_journal::JournalEntry::error_summary: core::option::Option<&'static str>
-pub diport::saga_journal::JournalEntry::output: core::option::Option<diport::RedactedBytes>
-pub diport::saga_journal::JournalEntry::seq: u64
-pub diport::saga_journal::JournalEntry::status: diport::saga_journal::JournalStatus
-pub diport::saga_journal::JournalEntry::step_name: consistency::saga::StepName
-impl diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::compensated(u64, consistency::saga::StepName) -> Self
-pub fn diport::saga_journal::JournalEntry::compensating(u64, consistency::saga::StepName) -> Self
-pub fn diport::saga_journal::JournalEntry::completed(u64, consistency::saga::StepName, alloc::vec::Vec<u8>) -> Self
-pub fn diport::saga_journal::JournalEntry::executing(u64, consistency::saga::StepName) -> Self
-pub fn diport::saga_journal::JournalEntry::failed(u64, consistency::saga::StepName, &'static str) -> Self
-impl core::clone::Clone for diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::clone(&self) -> diport::saga_journal::JournalEntry
-impl core::fmt::Debug for diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for diport::saga_journal::JournalEntry
-impl core::marker::Send for diport::saga_journal::JournalEntry
-impl core::marker::Sync for diport::saga_journal::JournalEntry
-impl core::marker::Unpin for diport::saga_journal::JournalEntry
-impl core::marker::UnsafeUnpin for diport::saga_journal::JournalEntry
-impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_journal::JournalEntry
-impl core::panic::unwind_safe::UnwindSafe for diport::saga_journal::JournalEntry
-impl<T, U> core::convert::Into<U> for diport::saga_journal::JournalEntry where U: core::convert::From<T>
-pub fn diport::saga_journal::JournalEntry::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for diport::saga_journal::JournalEntry where U: core::convert::Into<T>
-pub type diport::saga_journal::JournalEntry::Error = core::convert::Infallible
-pub fn diport::saga_journal::JournalEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for diport::saga_journal::JournalEntry where U: core::convert::TryFrom<T>
-pub type diport::saga_journal::JournalEntry::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn diport::saga_journal::JournalEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for diport::saga_journal::JournalEntry where T: core::clone::Clone
-pub type diport::saga_journal::JournalEntry::Owned = T
-pub fn diport::saga_journal::JournalEntry::clone_into(&self, &mut T)
-pub fn diport::saga_journal::JournalEntry::to_owned(&self) -> T
-impl<T> core::any::Any for diport::saga_journal::JournalEntry where T: 'static + ?core::marker::Sized
-pub fn diport::saga_journal::JournalEntry::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for diport::saga_journal::JournalEntry where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalEntry::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for diport::saga_journal::JournalEntry where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalEntry::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for diport::saga_journal::JournalEntry where T: core::clone::Clone
-pub unsafe fn diport::saga_journal::JournalEntry::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::from(T) -> T
-impl<T> typenum::type_operators::Same for diport::saga_journal::JournalEntry
-pub type diport::saga_journal::JournalEntry::Output = T
-pub struct diport::saga_journal::SagaId(_)
-impl diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::as_uuid(&self) -> uuid::Uuid
-pub fn diport::saga_journal::SagaId::new(uuid::Uuid) -> Self
-impl core::clone::Clone for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::clone(&self) -> diport::saga_journal::SagaId
-impl core::cmp::Eq for diport::saga_journal::SagaId
-impl core::cmp::PartialEq for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::eq(&self, &diport::saga_journal::SagaId) -> bool
-impl core::fmt::Debug for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for diport::saga_journal::SagaId
-impl core::marker::StructuralPartialEq for diport::saga_journal::SagaId
-impl core::marker::Freeze for diport::saga_journal::SagaId
-impl core::marker::Send for diport::saga_journal::SagaId
-impl core::marker::Sync for diport::saga_journal::SagaId
-impl core::marker::Unpin for diport::saga_journal::SagaId
-impl core::marker::UnsafeUnpin for diport::saga_journal::SagaId
-impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_journal::SagaId
-impl core::panic::unwind_safe::UnwindSafe for diport::saga_journal::SagaId
-impl<T, U> core::convert::Into<U> for diport::saga_journal::SagaId where U: core::convert::From<T>
-pub fn diport::saga_journal::SagaId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for diport::saga_journal::SagaId where U: core::convert::Into<T>
-pub type diport::saga_journal::SagaId::Error = core::convert::Infallible
-pub fn diport::saga_journal::SagaId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for diport::saga_journal::SagaId where U: core::convert::TryFrom<T>
-pub type diport::saga_journal::SagaId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn diport::saga_journal::SagaId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for diport::saga_journal::SagaId where T: core::clone::Clone
-pub type diport::saga_journal::SagaId::Owned = T
-pub fn diport::saga_journal::SagaId::clone_into(&self, &mut T)
-pub fn diport::saga_journal::SagaId::to_owned(&self) -> T
-impl<T> core::any::Any for diport::saga_journal::SagaId where T: 'static + ?core::marker::Sized
-pub fn diport::saga_journal::SagaId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for diport::saga_journal::SagaId where T: ?core::marker::Sized
-pub fn diport::saga_journal::SagaId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for diport::saga_journal::SagaId where T: ?core::marker::Sized
-pub fn diport::saga_journal::SagaId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for diport::saga_journal::SagaId where T: core::clone::Clone
-pub unsafe fn diport::saga_journal::SagaId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::from(T) -> T
-impl<T> typenum::type_operators::Same for diport::saga_journal::SagaId
-pub type diport::saga_journal::SagaId::Output = T
 pub struct diport::saga_journal::SagaJournalError
 impl diport::saga_journal::SagaJournalError
 pub fn diport::saga_journal::SagaJournalError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -4502,32 +4359,32 @@ pub fn diport::saga_journal::SagaJournalError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::saga_journal::SagaJournalError
 pub type diport::saga_journal::SagaJournalError::Output = T
 pub trait diport::saga_journal::SagaJournal: core::marker::Send
-pub fn diport::saga_journal::SagaJournal::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::saga_journal::SagaJournal::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::saga_journal::SagaJournal::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::saga_journal::SagaJournal::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::saga_journal::SagaJournal::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub trait diport::saga_journal::SagaJournalLocal
-pub async fn diport::saga_journal::SagaJournalLocal::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
-pub async fn diport::saga_journal::SagaJournalLocal::read(&self, &diport::saga_journal::SagaId) -> core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>
+pub async fn diport::saga_journal::SagaJournalLocal::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
+pub async fn diport::saga_journal::SagaJournalLocal::read(&self, &consistency::saga::SagaId) -> core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>
 pub async fn diport::saga_journal::SagaJournalLocal::shutdown(&self) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
 impl<TraitVariantBlanketType: diport::saga_journal::SagaJournal> diport::saga_journal::SagaJournalLocal for TraitVariantBlanketType
-pub async fn TraitVariantBlanketType::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
-pub async fn TraitVariantBlanketType::read(&self, &diport::saga_journal::SagaId) -> core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>
+pub async fn TraitVariantBlanketType::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
+pub async fn TraitVariantBlanketType::read(&self, &consistency::saga::SagaId) -> core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
 pub mod diport::secret_resolver
 #[non_exhaustive] pub enum diport::secret_resolver::SecretResolverError
@@ -5551,56 +5408,6 @@ impl<T> core::convert::From<T> for diport::outbox_emitter::EnvelopeIdentityError
 pub fn diport::outbox_emitter::EnvelopeIdentityError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::outbox_emitter::EnvelopeIdentityError
 pub type diport::outbox_emitter::EnvelopeIdentityError::Output = T
-#[non_exhaustive] pub enum diport::JournalStatus
-pub diport::JournalStatus::Compensated
-pub diport::JournalStatus::Compensating
-pub diport::JournalStatus::Completed
-pub diport::JournalStatus::Executing
-pub diport::JournalStatus::Failed
-impl diport::saga_journal::JournalStatus
-pub const diport::saga_journal::JournalStatus::ALL: [diport::saga_journal::JournalStatus; 5]
-pub fn diport::saga_journal::JournalStatus::as_str(&self) -> &'static str
-pub fn diport::saga_journal::JournalStatus::parse(&str) -> core::option::Option<Self>
-impl core::clone::Clone for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::clone(&self) -> diport::saga_journal::JournalStatus
-impl core::cmp::Eq for diport::saga_journal::JournalStatus
-impl core::cmp::PartialEq for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::eq(&self, &diport::saga_journal::JournalStatus) -> bool
-impl core::fmt::Debug for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for diport::saga_journal::JournalStatus
-impl core::marker::StructuralPartialEq for diport::saga_journal::JournalStatus
-impl core::marker::Freeze for diport::saga_journal::JournalStatus
-impl core::marker::Send for diport::saga_journal::JournalStatus
-impl core::marker::Sync for diport::saga_journal::JournalStatus
-impl core::marker::Unpin for diport::saga_journal::JournalStatus
-impl core::marker::UnsafeUnpin for diport::saga_journal::JournalStatus
-impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_journal::JournalStatus
-impl core::panic::unwind_safe::UnwindSafe for diport::saga_journal::JournalStatus
-impl<T, U> core::convert::Into<U> for diport::saga_journal::JournalStatus where U: core::convert::From<T>
-pub fn diport::saga_journal::JournalStatus::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for diport::saga_journal::JournalStatus where U: core::convert::Into<T>
-pub type diport::saga_journal::JournalStatus::Error = core::convert::Infallible
-pub fn diport::saga_journal::JournalStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for diport::saga_journal::JournalStatus where U: core::convert::TryFrom<T>
-pub type diport::saga_journal::JournalStatus::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn diport::saga_journal::JournalStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for diport::saga_journal::JournalStatus where T: core::clone::Clone
-pub type diport::saga_journal::JournalStatus::Owned = T
-pub fn diport::saga_journal::JournalStatus::clone_into(&self, &mut T)
-pub fn diport::saga_journal::JournalStatus::to_owned(&self) -> T
-impl<T> core::any::Any for diport::saga_journal::JournalStatus where T: 'static + ?core::marker::Sized
-pub fn diport::saga_journal::JournalStatus::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for diport::saga_journal::JournalStatus where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalStatus::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for diport::saga_journal::JournalStatus where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalStatus::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for diport::saga_journal::JournalStatus where T: core::clone::Clone
-pub unsafe fn diport::saga_journal::JournalStatus::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for diport::saga_journal::JournalStatus
-pub fn diport::saga_journal::JournalStatus::from(T) -> T
-impl<T> typenum::type_operators::Same for diport::saga_journal::JournalStatus
-pub type diport::saga_journal::JournalStatus::Output = T
 #[non_exhaustive] pub enum diport::KeyParseError
 pub diport::KeyParseError::Empty
 pub diport::KeyParseError::Malformed
@@ -7534,20 +7341,20 @@ pub fn diport::DynSagaJournal<'dynosaur_struct>::new_arc(impl diport::saga_journ
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_box(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_rc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaJournal<'dynosaur_struct>>
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSagaJournal<'dynosaur_struct>
@@ -8116,53 +7923,6 @@ impl<T> core::convert::From<T> for diport::fenced_writer::FencedWriterError
 pub fn diport::fenced_writer::FencedWriterError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::fenced_writer::FencedWriterError
 pub type diport::fenced_writer::FencedWriterError::Output = T
-pub struct diport::JournalEntry
-pub diport::JournalEntry::error_summary: core::option::Option<&'static str>
-pub diport::JournalEntry::output: core::option::Option<diport::RedactedBytes>
-pub diport::JournalEntry::seq: u64
-pub diport::JournalEntry::status: diport::saga_journal::JournalStatus
-pub diport::JournalEntry::step_name: consistency::saga::StepName
-impl diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::compensated(u64, consistency::saga::StepName) -> Self
-pub fn diport::saga_journal::JournalEntry::compensating(u64, consistency::saga::StepName) -> Self
-pub fn diport::saga_journal::JournalEntry::completed(u64, consistency::saga::StepName, alloc::vec::Vec<u8>) -> Self
-pub fn diport::saga_journal::JournalEntry::executing(u64, consistency::saga::StepName) -> Self
-pub fn diport::saga_journal::JournalEntry::failed(u64, consistency::saga::StepName, &'static str) -> Self
-impl core::clone::Clone for diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::clone(&self) -> diport::saga_journal::JournalEntry
-impl core::fmt::Debug for diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for diport::saga_journal::JournalEntry
-impl core::marker::Send for diport::saga_journal::JournalEntry
-impl core::marker::Sync for diport::saga_journal::JournalEntry
-impl core::marker::Unpin for diport::saga_journal::JournalEntry
-impl core::marker::UnsafeUnpin for diport::saga_journal::JournalEntry
-impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_journal::JournalEntry
-impl core::panic::unwind_safe::UnwindSafe for diport::saga_journal::JournalEntry
-impl<T, U> core::convert::Into<U> for diport::saga_journal::JournalEntry where U: core::convert::From<T>
-pub fn diport::saga_journal::JournalEntry::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for diport::saga_journal::JournalEntry where U: core::convert::Into<T>
-pub type diport::saga_journal::JournalEntry::Error = core::convert::Infallible
-pub fn diport::saga_journal::JournalEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for diport::saga_journal::JournalEntry where U: core::convert::TryFrom<T>
-pub type diport::saga_journal::JournalEntry::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn diport::saga_journal::JournalEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for diport::saga_journal::JournalEntry where T: core::clone::Clone
-pub type diport::saga_journal::JournalEntry::Owned = T
-pub fn diport::saga_journal::JournalEntry::clone_into(&self, &mut T)
-pub fn diport::saga_journal::JournalEntry::to_owned(&self) -> T
-impl<T> core::any::Any for diport::saga_journal::JournalEntry where T: 'static + ?core::marker::Sized
-pub fn diport::saga_journal::JournalEntry::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for diport::saga_journal::JournalEntry where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalEntry::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for diport::saga_journal::JournalEntry where T: ?core::marker::Sized
-pub fn diport::saga_journal::JournalEntry::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for diport::saga_journal::JournalEntry where T: core::clone::Clone
-pub unsafe fn diport::saga_journal::JournalEntry::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for diport::saga_journal::JournalEntry
-pub fn diport::saga_journal::JournalEntry::from(T) -> T
-impl<T> typenum::type_operators::Same for diport::saga_journal::JournalEntry
-pub type diport::saga_journal::JournalEntry::Output = T
 pub struct diport::KeyId(_)
 impl diport::signer::KeyId
 pub fn diport::signer::KeyId::as_str(&self) -> &str
@@ -9297,52 +9057,6 @@ impl<T> core::convert::From<T> for diport::revocation_store::RevocationStoreErro
 pub fn diport::revocation_store::RevocationStoreError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::revocation_store::RevocationStoreError
 pub type diport::revocation_store::RevocationStoreError::Output = T
-pub struct diport::SagaId(_)
-impl diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::as_uuid(&self) -> uuid::Uuid
-pub fn diport::saga_journal::SagaId::new(uuid::Uuid) -> Self
-impl core::clone::Clone for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::clone(&self) -> diport::saga_journal::SagaId
-impl core::cmp::Eq for diport::saga_journal::SagaId
-impl core::cmp::PartialEq for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::eq(&self, &diport::saga_journal::SagaId) -> bool
-impl core::fmt::Debug for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for diport::saga_journal::SagaId
-impl core::marker::StructuralPartialEq for diport::saga_journal::SagaId
-impl core::marker::Freeze for diport::saga_journal::SagaId
-impl core::marker::Send for diport::saga_journal::SagaId
-impl core::marker::Sync for diport::saga_journal::SagaId
-impl core::marker::Unpin for diport::saga_journal::SagaId
-impl core::marker::UnsafeUnpin for diport::saga_journal::SagaId
-impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_journal::SagaId
-impl core::panic::unwind_safe::UnwindSafe for diport::saga_journal::SagaId
-impl<T, U> core::convert::Into<U> for diport::saga_journal::SagaId where U: core::convert::From<T>
-pub fn diport::saga_journal::SagaId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for diport::saga_journal::SagaId where U: core::convert::Into<T>
-pub type diport::saga_journal::SagaId::Error = core::convert::Infallible
-pub fn diport::saga_journal::SagaId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for diport::saga_journal::SagaId where U: core::convert::TryFrom<T>
-pub type diport::saga_journal::SagaId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn diport::saga_journal::SagaId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for diport::saga_journal::SagaId where T: core::clone::Clone
-pub type diport::saga_journal::SagaId::Owned = T
-pub fn diport::saga_journal::SagaId::clone_into(&self, &mut T)
-pub fn diport::saga_journal::SagaId::to_owned(&self) -> T
-impl<T> core::any::Any for diport::saga_journal::SagaId where T: 'static + ?core::marker::Sized
-pub fn diport::saga_journal::SagaId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for diport::saga_journal::SagaId where T: ?core::marker::Sized
-pub fn diport::saga_journal::SagaId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for diport::saga_journal::SagaId where T: ?core::marker::Sized
-pub fn diport::saga_journal::SagaId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for diport::saga_journal::SagaId where T: core::clone::Clone
-pub unsafe fn diport::saga_journal::SagaId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for diport::saga_journal::SagaId
-pub fn diport::saga_journal::SagaId::from(T) -> T
-impl<T> typenum::type_operators::Same for diport::saga_journal::SagaId
-pub type diport::saga_journal::SagaId::Output = T
 pub struct diport::SagaJournalError
 impl diport::saga_journal::SagaJournalError
 pub fn diport::saga_journal::SagaJournalError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -10166,24 +9880,24 @@ pub fn diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::r
 pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub trait diport::SagaJournal: core::marker::Send
-pub fn diport::SagaJournal::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::SagaJournal::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::SagaJournal::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::SagaJournal::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::SagaJournal::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &diport::saga_journal::SagaId, diport::saga_journal::JournalEntry) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &diport::saga_journal::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_journal::JournalEntry>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub trait diport::SecretResolver: core::marker::Send
 pub fn diport::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send
