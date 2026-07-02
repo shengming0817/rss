@@ -298,8 +298,8 @@ where
 }
 
 /// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
-/// co-tx 写（[`co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）共享，
-/// 保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
+/// co-tx 写（[`PgTenantPool::co_tx_with_outbox`]）与 plain 写（`config_repo` 的 tenant-scoped save/delete，#1249 F3）
+/// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
 /// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
@@ -400,13 +400,17 @@ async fn begin_tenant_scoped_write<'p, E>(
 /// ```ignore
 /// // 调用方在 `business_write` 闭包内执行业务写（HRTB + BoxFuture 绕过异步闭包借用规则）；
 /// // sqlx 错误经 `map_storage` 收口为域错误 E（绕开 `E: From<sqlx::Error>` 跨 crate 约束）。
-/// co_tx_with_outbox(
-///     &pool, tenant, &outbox_entry, &env,
-///     move |tx| Box::pin(async move { cas_insert(tx.conn(), tenant, &entry).await }),
-///     |e| ConfigRepoError::Storage(Box::new(e)),
-/// ).await
+/// PgTenantPool::new(&store)
+///     .co_tx_with_outbox(
+///         tenant,
+///         &outbox_entry,
+///         &env,
+///         move |tx| Box::pin(async move { cas_insert(tx.conn(), tenant, &entry).await }),
+///         |e| ConfigRepoError::Storage(Box::new(e)),
+///     )
+///     .await
 /// ```
-pub(crate) async fn co_tx_with_outbox<F, E>(
+async fn co_tx_with_outbox<F, E>(
     pool: &PgPool,
     tenant: TenantId,
     entry: &Entry,

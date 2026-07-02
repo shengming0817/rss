@@ -25,6 +25,9 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 pub(crate) enum Rule {
     RawTenantTableAccess,
     RawTenantPoolField,
+    RawOutboxInsert,
+    OutboxAppendBypass,
+    TxCapabilityMintOutsideFunnel,
     TenantTablesAbsent,
     ProdFilesAbsent,
     SqlSitesAbsent,
@@ -159,10 +162,40 @@ pub(crate) fn scan_guard(
         let helper_tables = tenant_pgconnection_helpers(&expanded, &tenant_tables);
         let (raw_hits, site_exceptions) =
             raw_tenant_accesses(rel, &expanded, &tenant_tables, &helper_tables);
+        let raw_outbox_insert_hits = raw_outbox_insert_sites(rel, &expanded);
+        let outbox_append_bypass_hits = outbox_append_bypass_sites(rel, &expanded);
+        let tx_capability_mint_hits = tx_capability_mint_sites(rel, &expanded);
         allowed_exceptions.extend(site_exceptions);
         let raw_pool_field_hits = raw_tenant_pool_fields(&expanded);
         raw_sites += raw_hits.len();
         raw_sites += raw_pool_field_hits.len();
+        raw_sites += raw_outbox_insert_hits.len();
+        raw_sites += outbox_append_bypass_hits.len();
+        raw_sites += tx_capability_mint_hits.len();
+        for hit in &raw_outbox_insert_hits {
+            findings.push(finding(
+                Rule::RawOutboxInsert,
+                site_subject(rel, hit.line),
+                "outbox rows must be created through outbox.rs TxCapability append funnel",
+            ));
+        }
+        for hit in &outbox_append_bypass_hits {
+            findings.push(finding(
+                Rule::OutboxAppendBypass,
+                site_subject(rel, hit.line),
+                format!(
+                    "outbox producer opens a raw transaction near {:?}; use PgTenantPool write/co-tx funnel",
+                    hit.pattern
+                ),
+            ));
+        }
+        for hit in &tx_capability_mint_hits {
+            findings.push(finding(
+                Rule::TxCapabilityMintOutsideFunnel,
+                site_subject(rel, hit.line),
+                "TxCapability minting is restricted to transaction funnel modules",
+            ));
+        }
         if !tenant_hits.is_empty()
             && !raw_pool_field_hits.is_empty()
             && !is_raw_pool_field_exception(rel)
@@ -293,6 +326,55 @@ struct RawTenantAccess {
 struct RawPoolFieldAccess {
     pattern: &'static str,
     line: usize,
+}
+
+#[derive(Debug)]
+struct RawOutboxAccess {
+    pattern: &'static str,
+    line: usize,
+}
+
+fn raw_outbox_insert_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
+    if rel == "outbox.rs" {
+        return Vec::new();
+    }
+    content
+        .match_indices("insert into outbox")
+        .map(|(idx, _)| RawOutboxAccess {
+            pattern: "INSERT INTO outbox",
+            line: line_number(content, idx),
+        })
+        .collect()
+}
+
+fn outbox_append_bypass_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
+    if matches!(rel, "cotx.rs" | "outbox.rs" | "tx.rs") || !content.contains("append_outbox(") {
+        return Vec::new();
+    }
+    ["pool.begin().await", "run_global_transaction"]
+        .into_iter()
+        .flat_map(|pattern| {
+            content
+                .match_indices(pattern)
+                .map(move |(idx, _)| RawOutboxAccess {
+                    pattern,
+                    line: line_number(content, idx),
+                })
+        })
+        .collect()
+}
+
+fn tx_capability_mint_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
+    if matches!(rel, "cotx.rs" | "tx.rs") {
+        return Vec::new();
+    }
+    content
+        .match_indices("txcapability::from_transaction")
+        .map(|(idx, _)| RawOutboxAccess {
+            pattern: "TxCapability::from_transaction",
+            line: line_number(content, idx),
+        })
+        .collect()
 }
 
 fn raw_tenant_accesses(
@@ -571,7 +653,6 @@ fn is_raw_pool_field_exception(rel: &str) -> bool {
             | "checkpoint.rs"
             | "dead_letter.rs"
             | "dlq.rs"
-            | "emitter.rs"
             | "inbox.rs"
             | "outbox.rs"
             | "projection_events.rs"
@@ -815,6 +896,92 @@ mod tests {
             ]),
         );
         assert!(findings.iter().any(|f| f.rule == Rule::RawTenantPoolField));
+    }
+
+    #[test]
+    fn red_outbox_insert_outside_outbox_funnel() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "dlq.rs",
+                    "async fn replay(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::RawOutboxInsert),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_outbox_producer_opening_raw_transaction_for_append() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "emitter.rs",
+                    "async fn emit(){ let tx = self.pool.begin().await; append_outbox(&mut tx, &entry, &env).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::OutboxAppendBypass),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_outbox_producer_run_global_transaction_for_append() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "role_binding_lifecycle.rs",
+                    "async fn bind(){ store.run_global_transaction(|cap| append_outbox(cap, &entry, &env)); }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::OutboxAppendBypass),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_tx_capability_mint_outside_funnel() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "emitter.rs",
+                    "async fn emit(){ let mut cap = TxCapability::from_transaction(&mut tx); append_outbox(&mut cap, &entry, &env).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::TxCapabilityMintOutsideFunnel),
+            "{findings:?}"
+        );
     }
 
     #[test]

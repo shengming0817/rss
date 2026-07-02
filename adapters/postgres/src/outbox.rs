@@ -519,6 +519,24 @@ impl OutboxEnvelope {
 
 // ── append_outbox ─────────────────────────────────────────────────────────────
 
+/// DLQ replay 重新创建 outbox 行的受控输入。
+///
+/// replay 的原始 dead_letter 行只保存 wire 侧字符串字段，无法重建 generated `ContractBinding`；
+/// 但 #1622 已要求 replay fail-closed 解析 schema header 后写入物理列。该结构把 replay 专用写入仍收口到
+/// `outbox.rs` + [`TxCapability`]，避免在 operator 路径散落第二份 `INSERT INTO outbox`。
+pub(crate) struct ReplayedOutboxAppend {
+    pub(crate) event_id: String,
+    pub(crate) tenant: vocab::TenantId,
+    pub(crate) domain: String,
+    pub(crate) topic: String,
+    pub(crate) contract_id: String,
+    pub(crate) contract_version: String,
+    pub(crate) schema_hash: String,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) metadata_json: String,
+    pub(crate) causation_id: Option<String>,
+}
+
 /// 在事务内向 outbox 双写一条 entry（L1 原子性硬约束）。
 ///
 /// **`pub(crate)`，收 `&mut TxCapability`**——类型系统保证只能经 postgres adapter 从 live
@@ -563,6 +581,39 @@ pub(crate) async fn append_outbox(
     .execute(tx.conn())
     .await?;
     Ok(())
+}
+
+/// 在事务内 replay 一条 dead-letter 消息为新的 outbox 行。
+///
+/// 与 [`append_outbox`] 共用同一文件内 SQL 写面；返回插入行数供 caller 区分 `Inserted` / `AlreadyExists`。
+pub(crate) async fn append_replayed_outbox(
+    tx: &mut TxCapability<'_>,
+    replay: ReplayedOutboxAppend,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO outbox (
+            event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+            payload, metadata, status, partition_key, causation_id
+        )
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NULL, $11)
+        ON CONFLICT (event_id) DO NOTHING
+        "#,
+    )
+    .bind(replay.event_id)
+    .bind(replay.tenant.to_string())
+    .bind(replay.domain)
+    .bind(replay.topic)
+    .bind(replay.contract_id)
+    .bind(replay.contract_version)
+    .bind(replay.schema_hash)
+    .bind(replay.payload)
+    .bind(replay.metadata_json)
+    .bind(STATUS_PENDING)
+    .bind(replay.causation_id)
+    .execute(tx.conn())
+    .await?;
+    Ok(result.rows_affected())
 }
 
 // ── PgOutbox ──────────────────────────────────────────────────────────────────

@@ -16,37 +16,33 @@
 
 use consistency::Entry;
 use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
-use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::cotx::{TxCapability, set_local_tenant};
+use crate::cotx::PgTenantPool;
 use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
-
-type PgTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
 ///
-/// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，与 [`crate::PgOutbox`] 同形）clone 构造；
-/// 不持 `PgStore`（避免 ManagedResource 所有权耦合）。
+/// 经 [`PgTenantPool`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
 ///
 /// **时间源**：`clock` 是注入的 [`Clock`]（必填构造器位置参，缺失即编译错误——rust-standards §工程护栏），
 /// 仅用于 envelope `occurred_at`。与 [`crate::PgOutbox`] 刻意用 SQL `now()` 的 lease/retry 谓词（多实例需单一、
 /// 无跨进程偏移的时间源）**不同**：那是 relay 端时间，本 emitter 的 `occurred_at` 是 producer 端事件发生时刻，
 /// 故注入 `Clock`（#1129）。
 pub struct PgEmitter {
-    pool: PgPool,
+    pool: PgTenantPool,
     clock: Box<dyn Clock>,
 }
 
 impl PgEmitter {
-    /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    /// 由 [`PgStore`] 构造 tenant-scoped pool wrapper + 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     /// `clock` 为 `Box<dyn Clock>`（与全项目 clock 注入约定及 `diport::Clock` rustdoc 一致；adapter 独占其
     /// 时钟、不跨线程共享，无需 `Arc`）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::emitter`] 收口（provider-agnostic 基建，非单域）。
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
         Self {
-            pool: store.pool.clone(),
+            pool: PgTenantPool::new(store),
             clock,
         }
     }
@@ -75,94 +71,19 @@ impl OutboxEmitter for PgEmitter {
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
-        // durable 写入事务内执行（`append_outbox` 类型层强制 `&mut TxCapability` ⇒ 必从 live transaction 铸造）。
-        // 与
-        // `PgStore::run_global_transaction` 同形（PgEmitter 经 share-pool 注入持 pool、非 PgStore 方法，故此处
-        // 自持事务）。co-tx（session 写 + append 同事务）走 [`crate::PgSessionLifecycle`]，非本 emit-only 路径。
-        let tx = self.pool.begin().await.map_err(OutboxEmitError::new)?;
-        emit_in_tx(tx, &entry, &env).await
-    }
-}
-
-/// outbox 写入事务体（与 emit 分离以控制认知复杂度）。
-// reason: DB 事务的 set-tenant / append / commit / rollback 分支必须保持就地线性控制流；
-// 拆成无 DB 单测可覆盖的 helper 会把关键错误路径移出 integration-only 覆盖面。
-#[allow(clippy::cognitive_complexity)]
-async fn emit_in_tx(
-    tx: PgTx<'_>,
-    entry: &Entry,
-    env: &OutboxEnvelope,
-) -> Result<(), OutboxEmitError> {
-    let tx = set_tenant_in_tx(tx, entry, env).await?;
-    let tx = append_entry_in_tx(tx, entry, env).await?;
-    commit_emit_tx(tx, entry, env).await
-}
-
-async fn set_tenant_in_tx<'a>(
-    mut tx: PgTx<'a>,
-    entry: &Entry,
-    env: &OutboxEnvelope,
-) -> Result<PgTx<'a>, OutboxEmitError> {
-    if let Err(e) = set_local_tenant(&mut tx, env.tenant()).await {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            topic = entry.topic().as_str(),
-            error = %secure::redact_error(&e),
-            "outbox emit: set tenant failed"
-        );
-        rollback_warn(tx).await;
-        return Err(OutboxEmitError::new(e));
-    }
-    Ok(tx)
-}
-
-async fn append_entry_in_tx<'a>(
-    mut tx: PgTx<'a>,
-    entry: &Entry,
-    env: &OutboxEnvelope,
-) -> Result<PgTx<'a>, OutboxEmitError> {
-    let mut tx_cap = TxCapability::from_transaction(&mut tx);
-    if let Err(e) = append_outbox(&mut tx_cap, entry, env).await {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            topic = entry.topic().as_str(),
-            error = %secure::redact_error(&e),
-            "outbox emit: append failed"
-        );
-        rollback_warn(tx).await;
-        return Err(OutboxEmitError::new(e));
-    }
-    Ok(tx)
-}
-
-async fn commit_emit_tx(
-    tx: PgTx<'_>,
-    entry: &Entry,
-    env: &OutboxEnvelope,
-) -> Result<(), OutboxEmitError> {
-    tx.commit().await.map_err(|e| {
-        tracing::warn!(
-            target: "postgres",
-            event_id = entry.idem_key().as_str(),
-            domain = env.domain(),
-            error = %secure::redact_error(&e),
-            "outbox emit: commit failed"
-        );
-        OutboxEmitError::new(e)
-    })
-}
-
-/// rollback 并在失败时记 warn（不覆盖调用方原错误）。
-async fn rollback_warn(tx: PgTx<'_>) {
-    if let Err(rb) = tx.rollback().await {
-        tracing::warn!(
-            target: "postgres",
-            error = %secure::redact_error(&rb),
-            "outbox emit: rollback failed after append error"
-        );
+        // durable 写入事务内执行；事务打开、SET LOCAL、commit_unknown 与 rollback 统一由 PgTenantPool::write 承载。
+        self.pool
+            .write(
+                env.tenant(),
+                move |tx| {
+                    Box::pin(async move {
+                        append_outbox(tx, &entry, &env)
+                            .await
+                            .map_err(OutboxEmitError::new)
+                    })
+                },
+                OutboxEmitError::new,
+            )
+            .await
     }
 }

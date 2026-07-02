@@ -13,7 +13,7 @@ use eventexec::{
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
-use crate::outbox::{STATUS_DLX, STATUS_PENDING};
+use crate::outbox::{ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox};
 
 const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
@@ -157,31 +157,25 @@ impl DlqStore for PgDlqStore {
                             &message_id,
                         );
 
-                        let result = sqlx::query(
-                            r#"
-                            INSERT INTO outbox (
-                                event_id, tenant_id, domain, topic, contract_id,
-                                contract_version, schema_hash, payload, metadata, status
-                            )
-                            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-                            ON CONFLICT (event_id) DO NOTHING
-                            "#,
+                        let rows = append_replayed_outbox(
+                            conn,
+                            ReplayedOutboxAppend {
+                                event_id: request.replay_id().as_str().to_string(),
+                                tenant: request.tenant(),
+                                domain,
+                                topic,
+                                contract_id,
+                                contract_version,
+                                schema_hash,
+                                payload,
+                                metadata_json: metadata.to_string(),
+                                causation_id: None,
+                            },
                         )
-                        .bind(request.replay_id().as_str())
-                        .bind(request.tenant().to_string())
-                        .bind(domain)
-                        .bind(topic)
-                        .bind(contract_id)
-                        .bind(contract_version)
-                        .bind(schema_hash)
-                        .bind(payload)
-                        .bind(metadata.to_string())
-                        .bind(STATUS_PENDING)
-                        .execute(conn.conn())
                         .await
                         .map_err(db_error("replay.insert_outbox"))?;
 
-                        if result.rows_affected() == 1 {
+                        if rows == 1 {
                             Ok(DlqReplayOutcome::Inserted)
                         } else {
                             Ok(DlqReplayOutcome::AlreadyExists)

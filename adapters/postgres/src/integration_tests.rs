@@ -5816,7 +5816,7 @@ async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
 use settings::ports::{ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey};
 
 use crate::config_repo::{arm_config_retry_failpoint, config_retry_failpoint_hits};
-use crate::cotx::co_tx_with_outbox;
+use crate::cotx::PgTenantPool;
 use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
@@ -7325,34 +7325,35 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
         OutboxMetadata::new(0, test_tenant(), test_contract())
             .with_subject_id(subject_id("app.rollback")),
     );
+    let tenant_pool = PgTenantPool::new(&store);
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
-    let result = co_tx_with_outbox(
-        &store.pool,
-        tenant,
-        &entry,
-        &env,
-        move |conn| {
-            Box::pin(async move {
-                sqlx::query(
-                    "INSERT INTO config_entries (
-                         tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
-                     ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
-                )
-                .bind(CONFIG_TENANT)
-                .bind("app.rollback")
-                .bind(1_i64)
-                .bind(&b"ciphertext"[..])
-                .bind("settings-config:1")
-                .execute(conn.conn())
-                .await
-                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
-            })
-        },
-        |e| ConfigRepoError::Storage(Box::new(e)),
-    )
-    .await;
+    let result = tenant_pool
+        .co_tx_with_outbox(
+            tenant,
+            &entry,
+            &env,
+            move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO config_entries (
+                             tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+                         ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
+                    )
+                    .bind(CONFIG_TENANT)
+                    .bind("app.rollback")
+                    .bind(1_i64)
+                    .bind(&b"ciphertext"[..])
+                    .bind("settings-config:1")
+                    .execute(conn.conn())
+                    .await
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
+                })
+            },
+            |e| ConfigRepoError::Storage(Box::new(e)),
+        )
+        .await;
     assert!(matches!(result, Err(ConfigRepoError::VersionConflict)));
 
     // both-or-neither：config 行回滚（不落库）+ outbox 行不落库。
@@ -7436,6 +7437,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     let ok_event = unique_event_id("cfg-tc7b-ok");
     let rollback_event = unique_event_id("cfg-tc7b-rollback");
     let conflict_event = unique_event_id("cfg-tc7b-conflict");
+    let tenant_pool = PgTenantPool::new(&store);
 
     repo.save(tenant, config_entry("app.cotx-conflict", "v1", 1))
         .await?;
@@ -7477,32 +7479,32 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                     OutboxMetadata::new(0, test_tenant(), test_contract())
                         .with_subject_id(subject_id("app.cotx-rollback")),
                 );
-                co_tx_with_outbox(
-                    &store.pool,
-                    tenant,
-                    &entry,
-                    &env,
-                    move |conn| {
-                        Box::pin(async move {
-                            sqlx::query(
-                                "INSERT INTO config_entries (
-                                     tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
-                                 ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
-                            )
-                            .bind(CONFIG_TENANT)
-                            .bind("app.cotx-rollback")
-                            .bind(1_i64)
-                            .bind(&b"ciphertext"[..])
-                            .bind("settings-config:1")
-                            .execute(conn.conn())
-                            .await
-                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                            Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
-                        })
-                    },
-                    |e| ConfigRepoError::Storage(Box::new(e)),
-                )
-                .await
+                tenant_pool
+                    .co_tx_with_outbox(
+                        tenant,
+                        &entry,
+                        &env,
+                        move |conn| {
+                            Box::pin(async move {
+                                sqlx::query(
+                                    "INSERT INTO config_entries (
+                                         tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+                                     ) VALUES ($1::uuid, $2, $3, NULL, 1, $4, $5)",
+                                )
+                                .bind(CONFIG_TENANT)
+                                .bind("app.cotx-rollback")
+                                .bind(1_i64)
+                                .bind(&b"ciphertext"[..])
+                                .bind("settings-config:1")
+                                .execute(conn.conn())
+                                .await
+                                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                                Err::<(), ConfigRepoError>(ConfigRepoError::VersionConflict)
+                            })
+                        },
+                        |e| ConfigRepoError::Storage(Box::new(e)),
+                    )
+                    .await
             },
             business_exists: || async {
                 let cnt: (i64,) =
