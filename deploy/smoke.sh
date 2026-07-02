@@ -14,9 +14,18 @@ export RSS_ADMIN_HOST_PORT="${RSS_ADMIN_HOST_PORT:-18082}"
 export RSS_HEALTH_HOST_PORT="${RSS_HEALTH_HOST_PORT:-18083}"
 HEALTH_URL="http://localhost:${RSS_HEALTH_HOST_PORT}/health/v1"
 READY_TIMEOUT="${READY_TIMEOUT:-120}" # 秒：含镜像构建后首启 + 迁移。
+read_env_file_value() {
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "${SCRIPT_DIR}/.env.example"
+}
+s3_canary_interval="$(read_env_file_value RSS_S3_CANARY_INTERVAL_SECS)"
+s3_canary_timeout="$(read_env_file_value RSS_S3_CANARY_TIMEOUT_SECS)"
+[[ "$s3_canary_interval" =~ ^[0-9]+$ ]] || s3_canary_interval=60
+[[ "$s3_canary_timeout" =~ ^[0-9]+$ ]] || s3_canary_timeout=5
+S3_DOWN_TIMEOUT="${S3_DOWN_TIMEOUT:-$((s3_canary_interval + s3_canary_timeout + 15))}"
 # reason: 唯一临时文件——同机并行跑（CI 多 job / 多终端）不互相覆盖 readyz 响应。
 READYZ_TMP="$(mktemp)"
 vault_paused=0
+minio_stopped=0
 
 log() { printf '\033[1;34m[smoke]\033[0m %s\n' "$*"; }
 fail() {
@@ -31,6 +40,9 @@ cleanup() {
             docker unpause "$vault_cid" >/dev/null 2>&1 || true
         fi
     fi
+    if [[ $minio_stopped -eq 1 && "${KEEP_UP:-0}" = "1" ]]; then
+        $COMPOSE start minio >/dev/null 2>&1 || true
+    fi
     rm -f "$READYZ_TMP"
     if [[ "${KEEP_UP:-0}" = "1" ]]; then
         log "KEEP_UP=1：保留栈，跳过 teardown（手动 'docker compose -f ${SCRIPT_DIR}/docker-compose.yml down -v' 清理）"
@@ -41,7 +53,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "构建并拉起演示栈（postgres + redis + rabbitmq + vault + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
+log "构建并拉起演示栈（postgres + redis + minio + rabbitmq + vault + server；host health port=${RSS_HEALTH_HOST_PORT}）…"
 $COMPOSE up --build -d
 
 # ── 闭环 1：/readyz 轮询至 200（PG healthy + 迁移完 + 池就绪）────────────────────────────────────
@@ -65,6 +77,8 @@ grep -q '"name":"redis_ready"' "$READYZ_TMP" || fail "readyz body 缺 redis_read
 log "redis_ready probe 暴露 ✓"
 grep -q '"name":"keyprovider_ready"' "$READYZ_TMP" || fail "readyz body 缺 keyprovider_ready probe"
 log "keyprovider_ready probe 暴露 ✓"
+grep -q '"name":"s3_object_store_ready"' "$READYZ_TMP" || fail "readyz body 缺 s3_object_store_ready probe"
+log "s3_object_store_ready probe 暴露 ✓"
 
 # ── 闭环 2：/healthz liveness 恒 200 ──────────────────────────────────────────────────────────────
 curl -fsS "${HEALTH_URL}/healthz" >/dev/null || fail "/healthz 非 200"
@@ -120,7 +134,37 @@ done
 [[ $vault_restored -eq 1 ]] || fail "Vault 恢复后 /readyz 未回到 200（last=$(cat "$READYZ_TMP")）"
 log "Vault 恢复 → readyz 200 ✓"
 
-# ── 闭环 6：Redis down → readyz 503 ────────────────────────────────────────────────────────────
+# ── 闭环 6：MinIO down → readyz 503 → 恢复 200 ─────────────────────────────────────────────────
+log "停止 minio，验证 s3_object_store_ready 触发 readyz 503…"
+$COMPOSE stop minio >/dev/null
+minio_stopped=1
+deadline=$((SECONDS + S3_DOWN_TIMEOUT))
+s3_down=0
+while [[ $SECONDS -lt $deadline ]]; do
+    code="$(curl -sS -o "$READYZ_TMP" -w '%{http_code}' "${HEALTH_URL}/readyz" || true)"
+    if [[ "$code" = "503" ]] && grep -q '"name":"s3_object_store_ready"' "$READYZ_TMP"; then
+        s3_down=1
+        break
+    fi
+    sleep 1
+done
+[[ $s3_down -eq 1 ]] || fail "MinIO down 后 /readyz 未返回 503（last=$(cat "$READYZ_TMP")）"
+log "MinIO down → s3_object_store_ready 503 ✓"
+$COMPOSE start minio >/dev/null
+minio_stopped=0
+deadline=$((SECONDS + READY_TIMEOUT))
+s3_restored=0
+while [[ $SECONDS -lt $deadline ]]; do
+    if curl -fsS "${HEALTH_URL}/readyz" >"$READYZ_TMP" 2>/dev/null; then
+        s3_restored=1
+        break
+    fi
+    sleep 2
+done
+[[ $s3_restored -eq 1 ]] || fail "MinIO 恢复后 /readyz 未回到 200（last=$(cat "$READYZ_TMP")）"
+log "MinIO 恢复 → readyz 200 ✓"
+
+# ── 闭环 7：Redis down → readyz 503 ────────────────────────────────────────────────────────────
 log "停止 redis，验证 readyz 降为 503…"
 $COMPOSE stop redis >/dev/null
 deadline=$((SECONDS + 20))

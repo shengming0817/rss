@@ -375,6 +375,15 @@ async fn event_transport_durable_e2e() -> Result<()> {
         _ => None,
     })
     .await?;
+    let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
+        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
+        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
+        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
+        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
+        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
+        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
+        _ => None,
+    })?;
     let vault = build_vault_runtime_deps(|name| match name {
         "RSS_VAULT_ADDR" => Some("https://vault.example:8200".to_string()),
         "RSS_VAULT_TOKEN" => Some("s.testtoken".to_string()),
@@ -384,6 +393,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let deps = SharedRuntimeDeps {
         pg: pg.clone(),
         redis,
+        s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
     };

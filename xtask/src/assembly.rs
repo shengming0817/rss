@@ -24,6 +24,7 @@ const PDP_PORT: &str = "diport::Pdp";
 const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 const LOCK_STORE_PORT: &str = "diport::LockStore";
 const CAS_STORE_PORT: &str = "diport::CasStore";
+const OBJECT_STORE_PORT: &str = "diport::ObjectStore";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -126,6 +127,8 @@ pub(crate) enum DiportPort {
     Lock,
     #[serde(rename = "diport::CasStore")]
     Cas,
+    #[serde(rename = "diport::ObjectStore")]
+    ObjectStore,
 }
 
 impl DiportPort {
@@ -140,6 +143,7 @@ impl DiportPort {
             Self::RateLimiter => RATE_LIMITER_PORT,
             Self::Lock => LOCK_STORE_PORT,
             Self::Cas => CAS_STORE_PORT,
+            Self::ObjectStore => OBJECT_STORE_PORT,
         }
     }
 }
@@ -585,6 +589,12 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             durability: ProviderDurability::Persistent,
             required_features: &["backend"],
             provider_crate: "oidc",
+        }),
+        "s3::S3Store" => Some(ProviderSpec {
+            port: DiportPort::ObjectStore,
+            durability: ProviderDurability::Persistent,
+            required_features: &["backend"],
+            provider_crate: "s3",
         }),
         _ => None,
     }
@@ -1445,6 +1455,39 @@ name = "runtime"
 
 [dependencies]
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn active_s3_object_store_with_dependency_and_required_feature_is_allowed() -> anyhow::Result<()>
+    {
+        let root = unique_tmp("assembly-active-s3-object-store");
+        write_assembly(
+            &root,
+            r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::ObjectStore"
+provider = "s3::S3Store"
+providerCrate = "s3"
+requiredFeatures = ["backend"]
+consumer = "runtime"
+lifecycle = "active"
+durability = "persistent"
+purpose = "runtime-s3-readiness-canary"
+"#,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+s3 = { path = "../../adapters/s3", features = ["backend"] }
 "#,
         )?;
 

@@ -379,9 +379,19 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         _ => None,
     })
     .await?;
+    let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
+        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
+        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
+        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
+        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
+        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
+        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
+        _ => None,
+    })?;
     let deps = SharedRuntimeDeps {
         pg,
         redis,
+        s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
     };
@@ -606,9 +616,19 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         _ => None,
     })
     .await?;
+    let s3 = runtime::build_s3_runtime_deps_from(|name| match name {
+        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
+        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
+        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
+        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
+        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
+        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
+        _ => None,
+    })?;
     let deps = SharedRuntimeDeps {
         pg,
         redis,
+        s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
     };

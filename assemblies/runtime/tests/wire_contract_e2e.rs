@@ -23,7 +23,7 @@ use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
 use runtime::{
     CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME, SharedRuntimeDeps,
-    build_redis_runtime_deps, wire_settings,
+    build_redis_runtime_deps, build_s3_runtime_deps_from, wire_settings,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
@@ -181,10 +181,20 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         _ => None,
     })
     .await?;
+    let s3 = build_s3_runtime_deps_from(|name| match name {
+        "RSS_S3_ENDPOINT_URL" => Some("http://127.0.0.1:1".to_string()),
+        "RSS_S3_ALLOW_PLAINTEXT" => Some("true".to_string()),
+        "RSS_S3_BUCKET" => Some("rss-test-bucket".to_string()),
+        "RSS_S3_ACCESS_KEY_ID" => Some("access-key".to_string()),
+        "RSS_S3_SECRET_ACCESS_KEY" => Some("secret-key".to_string()),
+        "RSS_S3_FORCE_PATH_STYLE" => Some("true".to_string()),
+        _ => None,
+    })?;
 
     let deps = SharedRuntimeDeps {
         pg,
         redis,
+        s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
     };

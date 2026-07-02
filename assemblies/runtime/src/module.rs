@@ -27,6 +27,7 @@
 use diport::KeyName;
 use postgres::PgRuntimeDeps;
 use redis::RedisRuntimeDeps;
+use s3::S3RuntimeDeps;
 use vault::VaultRuntimeDeps;
 
 /// 共享基础设施依赖，流入每个域的 `wire_X`（parameter object，[`bootstrap::DomainModuleResult`] 的入向配对）。
@@ -50,6 +51,10 @@ pub struct SharedRuntimeDeps {
     /// 不暴露 `deadpool_redis::Pool`，保持 REDIS-BUNDLE-FUNNEL-01：pool guard、distlock、CAS、idempotency
     /// 均经 `RedisRuntimeDeps::infra()` / `runtime_resources()` 派发。
     pub redis: RedisRuntimeDeps,
+
+    /// 共享 S3 object-store capability bundle。runtime canary 与后续对象消费方只能经此 bundle 取得
+    /// `S3Store`，endpoint/TLS/credentials 仍由组合根启动期 fail-fast 构造。
+    pub s3: S3RuntimeDeps,
 
     /// 共享 vault capability bundle（#1498）；settings 域经 `vault.for_domain::<caps::Settings>().secret_resolver()`
     /// / `key_provider()` 投影受控 Vault 句柄，拿不到 signer 或裸 `reqwest::Client`（VAULT-BUNDLE-RESOLVER-02）。

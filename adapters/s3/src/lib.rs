@@ -8,13 +8,17 @@
 //! feature-on（`--features backend`）：持有 `aws_sdk_s3::Client` + 目标 bucket；client 由组合根 / 测试注入
 //! （endpoint / region / 凭据 / 连接器在构造侧决定）——adapter **不**内建 HTTPS 连接器（`default-https-client`
 //! 关，避开 aws-lc-rs / ring 的 license 收口，见 Cargo.toml；与 redis/amqp adapter 的 TLS 收口同范式）。
-//! 测试用 `aws-smithy-mocks` 注入 canned 响应（确定性，无 live 后端、不拉 TLS）；live MinIO 集成 = follow-up。
+//! 测试用 `aws-smithy-mocks` 注入 canned 响应（确定性，无 live 后端、不拉 TLS）；live MinIO 集成测试显式
+//! 注入 HTTP/TLS connector。
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints；只 import diport trait + aws-sdk，不 invoke dynosaur 宏）。
 
 #[cfg(feature = "backend")]
 mod store;
 
-use diport::{ManagedResource, ShutdownError};
+#[cfg(feature = "backend")]
+use std::sync::Arc;
+
+use diport::{DynManagedResource, ManagedResource, ShutdownError};
 
 /// S3 对象存储 adapter（sealed-marker）。
 ///
@@ -56,6 +60,52 @@ impl ManagedResource for S3Store {
         // reason: aws-sdk-s3 Client 无显式 close（无连接池句柄需释放——连接器在构造侧持有，随 drop 回收），
         // 关闭无需显式动作。
         Ok(())
+    }
+}
+
+/// 组合根级 S3 能力包：私有持 `Arc<S3Store>`，派发真实对象存储句柄并产出 shutdown resource。
+#[cfg(feature = "backend")]
+#[derive(Clone)]
+pub struct S3RuntimeDeps {
+    store: Arc<S3Store>,
+}
+
+#[cfg(feature = "backend")]
+impl S3RuntimeDeps {
+    /// 由组合根注入已构造的 [`S3Store`]。endpoint/credentials/TLS provider 均不在 adapter 内解析。
+    #[must_use]
+    pub fn new(store: S3Store) -> Self {
+        Self {
+            store: Arc::new(store),
+        }
+    }
+
+    /// 派发真实 object-store 句柄。返回 concrete `Arc<S3Store>`，避免 `Arc<DynObjectStore>` 的 Send/Sync 限制。
+    #[must_use]
+    pub fn object_store(&self) -> Arc<S3Store> {
+        Arc::clone(&self.store)
+    }
+
+    /// 单源 managed-resource/rollback 派生：当前仅 S3 store guard。
+    #[must_use]
+    pub fn runtime_resources(&self) -> Vec<Box<DynManagedResource<'static>>> {
+        vec![DynManagedResource::new_box(S3StoreGuard(Arc::clone(
+            &self.store,
+        )))]
+    }
+}
+
+#[cfg(feature = "backend")]
+struct S3StoreGuard(Arc<S3Store>);
+
+#[cfg(feature = "backend")]
+impl ManagedResource for S3StoreGuard {
+    fn name(&self) -> &str {
+        ManagedResource::name(&*self.0)
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        ManagedResource::shutdown(&*self.0).await
     }
 }
 
@@ -116,7 +166,7 @@ mod backend_tests {
     //! 对象存储行为矩阵（aws-smithy-mocks canned 响应，确定性、无 live 后端）：
     //! put 成功 / get→Some / get NoSuchKey→None / get 其它错误→Err / delete 幂等成功 / 构造期 fail-fast /
     //! 生命周期 name+shutdown。
-    use super::S3Store;
+    use super::{S3RuntimeDeps, S3Store};
     use aws_sdk_s3::operation::delete_object::DeleteObjectOutput;
     use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
@@ -257,5 +307,23 @@ mod backend_tests {
         assert_eq!(ManagedResource::name(&store), "s3");
         assert!(ManagedResource::shutdown(&store).await.is_ok());
         assert!(ObjectStore::shutdown(&store).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn runtime_deps_single_sources_store_and_resource_guard() {
+        let rule = mock!(aws_sdk_s3::Client::put_object)
+            .then_output(|| PutObjectOutput::builder().build());
+        let deps = S3RuntimeDeps::new(store_with(mock_client!(aws_sdk_s3, &[&rule])));
+        let store = deps.object_store();
+        assert!(
+            store
+                .put_object(ObjectKey::new("runtime-deps"), b"ok".to_vec())
+                .await
+                .is_ok()
+        );
+
+        let resources = deps.runtime_resources();
+        assert_eq!(resources.len(), 1, "s3 bundle emits one store guard");
+        assert_eq!(resources[0].name(), "s3");
     }
 }

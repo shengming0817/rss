@@ -43,5 +43,5 @@ pub use redaction::{
 pub use refresh::{OpaqueToken, digest};
 pub use securederive::Redact;
 pub use transport_endpoint::{
-    AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, TransportEndpointError,
+    AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint, TransportEndpointError,
 };

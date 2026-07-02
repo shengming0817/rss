@@ -14,7 +14,7 @@ pub enum PlaintextEndpointPolicy {
     AllowDevContainer,
 }
 
-/// AMQP/Redis transport endpoint 构造失败。
+/// AMQP/Redis/S3 transport endpoint 构造失败。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransportEndpointError {
@@ -39,6 +39,14 @@ pub enum TransportEndpointError {
     AmqpHostRequired,
     #[error("amqp endpoint must include an explicit vhost path")]
     AmqpVhostRequired,
+    #[error("{kind} endpoint must include an explicit host")]
+    HostRequired { kind: &'static str },
+    #[error("{kind} endpoint must not include URL userinfo")]
+    UserInfoUnsupported { kind: &'static str },
+    #[error("{kind} endpoint must not include URL query")]
+    QueryUnsupported { kind: &'static str },
+    #[error("{kind} endpoint must not include URL fragment")]
+    FragmentUnsupported { kind: &'static str },
 }
 
 /// 已校验 AMQP endpoint。默认生产路径只接受 `amqps://`。
@@ -52,7 +60,7 @@ impl AmqpEndpoint {
     ) -> Result<Self, TransportEndpointError> {
         let endpoint = endpoint.into();
         let parsed = Url::parse(&endpoint).map_err(|_| TransportEndpointError::InvalidUrl)?;
-        validate_endpoint_url(&parsed, "amqp", "amqps", policy)?;
+        validate_endpoint_url(&parsed, "amqp", "amqp", "amqps", policy)?;
         validate_amqp_endpoint_url(&parsed)?;
         Ok(Self(endpoint))
     }
@@ -93,7 +101,7 @@ impl RedisEndpoint {
         if parsed.fragment().is_some() {
             return Err(TransportEndpointError::RedisFragmentUnsupported);
         }
-        validate_endpoint_url(&parsed, "redis", "rediss", policy)?;
+        validate_endpoint_url(&parsed, "redis", "redis", "rediss", policy)?;
         Ok(Self(endpoint))
     }
 
@@ -119,8 +127,54 @@ impl std::fmt::Display for RedisEndpoint {
     }
 }
 
+/// 已校验 S3 endpoint。默认生产路径只接受 `https://`；明文 `http://` 仅允许显式 dev/test opt-in。
+#[derive(Clone, PartialEq, Eq)]
+pub struct S3Endpoint(String);
+
+impl S3Endpoint {
+    pub fn parse(
+        endpoint: impl Into<String>,
+        policy: PlaintextEndpointPolicy,
+    ) -> Result<Self, TransportEndpointError> {
+        let endpoint = endpoint.into();
+        let parsed = Url::parse(&endpoint).map_err(|_| TransportEndpointError::InvalidUrl)?;
+        validate_s3_endpoint_url(&parsed)?;
+        validate_endpoint_url(&parsed, "s3", "http", "https", policy)?;
+        Ok(Self(endpoint))
+    }
+
+    /// 暴露原始 URL 给 AWS SDK。不要记录该值。
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn is_plaintext(&self) -> bool {
+        self.0
+            .get(..("http://".len()))
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+    }
+
+    fn render_redacted(&self) -> String {
+        render_redacted_url(&self.0)
+    }
+}
+
+impl std::fmt::Debug for S3Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "S3Endpoint({})", self.render_redacted())
+    }
+}
+
+impl std::fmt::Display for S3Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render_redacted())
+    }
+}
+
 fn validate_endpoint_url(
     parsed: &Url,
+    kind: &'static str,
     plaintext_scheme: &'static str,
     secure_scheme: &'static str,
     policy: PlaintextEndpointPolicy,
@@ -129,31 +183,25 @@ fn validate_endpoint_url(
         scheme if scheme == secure_scheme => Ok(()),
         scheme if scheme == plaintext_scheme => match policy {
             PlaintextEndpointPolicy::Deny => Err(TransportEndpointError::InsecureScheme {
-                kind: plaintext_scheme,
+                kind,
                 secure_scheme,
             }),
             PlaintextEndpointPolicy::AllowLoopback => {
                 if is_loopback_host(parsed) {
                     Ok(())
                 } else {
-                    Err(TransportEndpointError::PlaintextNotLoopback {
-                        kind: plaintext_scheme,
-                    })
+                    Err(TransportEndpointError::PlaintextNotLoopback { kind })
                 }
             }
             PlaintextEndpointPolicy::AllowDevContainer => {
                 if is_dev_container_host(parsed, plaintext_scheme) {
                     Ok(())
                 } else {
-                    Err(TransportEndpointError::PlaintextNotDevContainer {
-                        kind: plaintext_scheme,
-                    })
+                    Err(TransportEndpointError::PlaintextNotDevContainer { kind })
                 }
             }
         },
-        _ => Err(TransportEndpointError::UnsupportedScheme {
-            kind: plaintext_scheme,
-        }),
+        _ => Err(TransportEndpointError::UnsupportedScheme { kind }),
     }
 }
 
@@ -163,6 +211,22 @@ fn validate_amqp_endpoint_url(parsed: &Url) -> Result<(), TransportEndpointError
     }
     if parsed.path().is_empty() || parsed.path() == "/" {
         return Err(TransportEndpointError::AmqpVhostRequired);
+    }
+    Ok(())
+}
+
+fn validate_s3_endpoint_url(parsed: &Url) -> Result<(), TransportEndpointError> {
+    if parsed.host().is_none() {
+        return Err(TransportEndpointError::HostRequired { kind: "s3" });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(TransportEndpointError::UserInfoUnsupported { kind: "s3" });
+    }
+    if parsed.query().is_some() {
+        return Err(TransportEndpointError::QueryUnsupported { kind: "s3" });
+    }
+    if parsed.fragment().is_some() {
+        return Err(TransportEndpointError::FragmentUnsupported { kind: "s3" });
     }
     Ok(())
 }
@@ -186,6 +250,7 @@ fn is_dev_container_host(parsed: &Url, plaintext_scheme: &str) -> bool {
     match (plaintext_scheme, parsed.host()) {
         ("amqp", Some(Host::Domain(host))) => host.eq_ignore_ascii_case("rabbitmq"),
         ("redis", Some(Host::Domain(host))) => host.eq_ignore_ascii_case("redis"),
+        ("http", Some(Host::Domain(host))) => host.eq_ignore_ascii_case("minio"),
         _ => false,
     }
 }
@@ -197,7 +262,7 @@ fn render_redacted_url(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint};
+    use super::{AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint};
 
     #[test]
     fn amqp_endpoint_requires_amqps_by_default() {
@@ -346,6 +411,89 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn s3_endpoint_requires_https_by_default() {
+        assert!(
+            S3Endpoint::parse(
+                "https://s3.us-east-1.amazonaws.com",
+                PlaintextEndpointPolicy::Deny
+            )
+            .is_ok()
+        );
+        let result = S3Endpoint::parse("http://127.0.0.1:9000", PlaintextEndpointPolicy::Deny);
+        let err = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(err.contains("https://"), "{result:?}");
+    }
+
+    #[test]
+    fn s3_endpoint_plaintext_detection_is_case_insensitive() {
+        let result = S3Endpoint::parse(
+            "HTTP://127.0.0.1:9000",
+            PlaintextEndpointPolicy::AllowLoopback,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        if let Ok(endpoint) = result {
+            assert!(endpoint.is_plaintext());
+        }
+    }
+
+    #[test]
+    fn s3_plaintext_opt_in_is_loopback_only() {
+        assert!(
+            S3Endpoint::parse(
+                "http://127.0.0.1:9000",
+                PlaintextEndpointPolicy::AllowLoopback,
+            )
+            .is_ok()
+        );
+        assert!(
+            S3Endpoint::parse(
+                "http://minio.internal:9000",
+                PlaintextEndpointPolicy::AllowLoopback,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn s3_plaintext_dev_container_policy_is_explicit() {
+        assert!(
+            S3Endpoint::parse(
+                "http://minio:9000",
+                PlaintextEndpointPolicy::AllowDevContainer,
+            )
+            .is_ok()
+        );
+        assert!(
+            S3Endpoint::parse("http://minio:9000", PlaintextEndpointPolicy::AllowLoopback).is_err()
+        );
+        assert!(
+            S3Endpoint::parse(
+                "http://object-store.internal:9000",
+                PlaintextEndpointPolicy::AllowDevContainer,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn s3_endpoint_rejects_userinfo_query_and_fragment() {
+        for endpoint in [
+            "https://user:pass@s3.us-east-1.amazonaws.com",
+            "https://s3.us-east-1.amazonaws.com?token=secret",
+            "https://s3.us-east-1.amazonaws.com#frag",
+        ] {
+            assert!(
+                S3Endpoint::parse(endpoint, PlaintextEndpointPolicy::Deny).is_err(),
+                "{endpoint} must fail closed"
+            );
+        }
     }
 
     #[test]

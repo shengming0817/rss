@@ -179,12 +179,12 @@ lapin = { version = "4", default-features = false, features = ["default-runtime"
 # 连 optional 树也校验）⇒ 本 PR 仅明文 `mqtt://`（local mosquitto 集成测试够用）；生产 mqtts/mTLS
 # （依赖 softca）= follow-up。对标 gocell mqtt adapter@paho.mqtt.rust。ref: bytebeamio/rumqtt rumqttc/examples/asyncpubsub.rs@main
 rumqttc = { version = "0.25", default-features = false }
-# 对象存储 provider（adapters/s3，#1011）：AWS 官方 SDK，对标 gocell s3.ObjectUploader@aws-sdk-go-v2。
-# default-features=false 关默认 HTTPS client（default-https-client 会拉 aws-lc-rs / ring，二者 license
-# 均不在 deny.toml allow-list，cargo-deny 连 optional 树也校验——同 lapin 上文的 TLS 收口理由）。adapter
-# 只持有 Client（组合根 / 集成测试注入 endpoint + 连接器）；plaintext MinIO 集成测试用裸 http 连接器，生产
-# HTTPS/TLS provider license 甄别 = follow-up（见 PR body）。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
+# 对象存储 provider（adapters/s3，#1011/#1164）：AWS 官方 SDK，对标 gocell s3.ObjectUploader@aws-sdk-go-v2。
+# default-features=false 关默认 HTTPS client；生产 HTTPS connector 由 runtime 组合根显式注入 rustls+ring
+# `aws-smithy-http-client`，明文 HTTP 仅 loopback MinIO/test opt-in。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio"] }
+# AWS SDK HTTP client（runtime S3 生产接线）：只启 rustls-ring；禁 default aws-lc / native-tls / openssl 漂移。
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 # Vault Transit 签名 HTTP 客户端（adapters/vault，#1011）：TLS-agnostic —— default-features=false 不绑 crypto
 # provider（不进 ring/aws-lc-rs/openssl/rustls，deny 全绿；http 即可达本地 dev Vault）。production HTTPS 的
 # TLS provider（rustls+ring，对齐 sqlx）由组合根 Join 阶段经 reqwest tls feature 选定后注入预配置 Client

@@ -587,11 +587,19 @@ dependencies = [
  "http-body 0.4.6",
  "http-body 1.0.1",
  "hyper 0.14.32",
+ "hyper 1.10.1",
+ "hyper-rustls",
+ "hyper-util",
  "indexmap 2.14.0",
  "pin-project-lite",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
+ "tower",
  "tracing",
 ]
 
@@ -2668,6 +2676,7 @@ dependencies = [
  "hyper 1.10.1",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -4641,6 +4650,8 @@ dependencies = [
  "anyhow",
  "audit",
  "authn",
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
  "axum",
  "base64",
  "bootstrap",
@@ -4669,6 +4680,7 @@ dependencies = [
  "reqwest",
  "runctx",
  "rustls",
+ "s3",
  "secure",
  "serde",
  "serde_json",
@@ -4683,6 +4695,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "vault",
  "vocab",
  "wiremock",
@@ -4805,6 +4818,7 @@ name = "s3"
 version = "0.0.0"
 dependencies = [
  "aws-sdk-s3",
+ "aws-smithy-http-client",
  "aws-smithy-mocks",
  "diport",
  "futures",
@@ -4812,6 +4826,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

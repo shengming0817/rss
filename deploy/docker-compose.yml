@@ -1,4 +1,4 @@
-# RSS 演示栈（#1134 验收 harness）：postgres + redis + rabbitmq + vault + server，闭环验 `docker run → /readyz 200`。
+# RSS 演示栈（#1134 验收 harness）：postgres + redis + minio + rabbitmq + vault + server，闭环验 `docker run → /readyz 200`。
 #
 # 用途：本地证明镜像「能起进程 + 连 PG + 跑迁移 + readyz 就绪 + 非 root + 只读 rootfs 兼容」。
 # 非生产编排（Vault 使用 dev TLS + in-memory storage；生产用 k8s + 私有 CA TLS + 真 OIDC/Vault，见 docs/ops/202606271438-003-container-image.md）。
@@ -9,6 +9,8 @@
 #
 # compose 演示栈共享 .env.example 作配置单源：postgres 读 POSTGRES_*，server 读 RSS_*，
 # redis/rabbitmq 用服务默认值；各自忽略不认的变量 ⇒ demo 口令两边自动一致（无需手抄两遍）。
+
+x-minio-image: &minio-image minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
 
 services:
   postgres:
@@ -47,6 +49,35 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+
+  minio:
+    image: *minio-image # 演示用固定 release+digest；生产用托管 S3 或启 TLS 的对象存储。
+    env_file: [.env.example]
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: *minio-image # 复用 server 镜像内置 mc，避免演示栈额外拉 minio/mc。
+    env_file: [.env.example]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        mc alias set local "$${RSS_S3_ENDPOINT_URL}" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${RSS_S3_BUCKET}"
+        mc stat "local/$${RSS_S3_BUCKET}" >/dev/null
 
   vault:
     image: hashicorp/vault:1.17 # 演示用 dev-tls；生产钉 digest 并使用正式 Vault 集群。
@@ -106,6 +137,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       vault-init:
@@ -132,3 +165,4 @@ services:
 
 volumes:
   vault-tls:
+  minio-data:

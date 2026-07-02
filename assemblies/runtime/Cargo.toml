@@ -47,6 +47,8 @@ postgres = { path = "../../adapters/postgres" }
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
 # Redis adapter（package=redis-adapter，import 名 redis；RedisRuntimeDeps + distlock/CAS/inbox）。
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
+# S3 object-store adapter（backend 真 AWS SDK Client；runtime 组合根显式注入 rustls+ring HTTP client）。
+s3 = { path = "../../adapters/s3", features = ["backend"] }
 eventexec = { path = "../../crates/eventexec" }
 generated = { path = "../../generated" }
 deadpool-redis = { workspace = true }
@@ -56,6 +58,8 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 # rustls-tls-webpki-roots = reqwest 经 `__rustls-ring` 选 ring crypto provider（**禁** aws-lc-rs，与 deny.toml openssl/aws-lc ban
 # 一致）+ webpki-roots（打包 Mozilla 根，CDLA-Permissive-2.0 已在 deny allow-list）；对齐 sqlx/redis/otel 的 ring 口径。
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+aws-sdk-s3 = { workspace = true }
+aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
@@ -66,6 +70,7 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 # 从配置（env）解 ES256 SEC1 公钥（base64url）。
 base64 = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 # 运行时入口（#1320）：tokio 多线程运行时（#[tokio::main]）+ net（PgStore/serve）+ signal（SIGTERM/SIGINT 优雅关停）
 # + time（ShutdownStack 超时）+ macros（测试）+ rt-multi-thread。
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }

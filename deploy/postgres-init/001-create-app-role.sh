@@ -34,5 +34,6 @@ SELECT format(
 )\gexec
 
 SELECT format('GRANT CONNECT ON DATABASE %I TO %I', :'db_name', :'app_user')\gexec
-SELECT format('GRANT rss_app TO %I', :'app_user')\gexec
+SELECT format('GRANT rss_app TO %I', :'app_user')
+WHERE :'app_user' <> 'rss_app'\gexec
 EOSQL

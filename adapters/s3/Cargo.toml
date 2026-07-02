@@ -25,13 +25,16 @@ futures = { workspace = true, optional = true }
 [features]
 default = []
 backend = ["dep:aws-sdk-s3", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures"]
+integration = ["backend"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
-# dev-only 经 test-util 传递引入 hyper（MIT）作 mock http client 载体，但**不拉 TLS crypto**
-# （ring/aws-lc-rs/openssl/rustls 均不进树，deny licenses/bans 全绿）。live MinIO 集成 = follow-up（见 PR body）。
+# dev-only 经 test-util 传递引入 hyper 作 mock http client 载体；live MinIO ignored test 另经
+# aws-smithy-http-client 显式构造 rustls-ring / plaintext connector。production adapter lib 仍不内建 TLS。
 aws-smithy-mocks = { workspace = true }
+aws-smithy-http-client = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 # test-util 仅测试启用（with_test_defaults_v2 + mock http client 由 mock_client! 注入）；不进 production lib
-# 依赖面（production lib 仍 crypto-free / 无 hyper）。
+# 依赖面（production lib 仍不持 HTTP connector / hyper）。
 aws-sdk-s3 = { workspace = true, features = ["test-util"] }

@@ -104,3 +104,15 @@ consumer = "distributed"
 lifecycle = "draft"
 durability = "persistent"
 purpose = "distributed-state-cas-redis-alternative"
+
+# S3 object-store provider（#1164）：runtime canary 对真实 bucket 执行 put/get/delete/get-miss，
+# readiness 失败即摘流；adapter 经 backend feature 启 AWS SDK 真身。
+[[diportProviders]]
+port = "diport::ObjectStore"
+provider = "s3::S3Store"
+providerCrate = "s3"
+requiredFeatures = ["backend"]
+consumer = "runtime"
+lifecycle = "active"
+durability = "persistent"
+purpose = "runtime-s3-readiness-canary"
