@@ -8,30 +8,48 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
+ENV_FILE="${SCRIPT_DIR}/.env.example"
 export RSS_PRIMARY_HOST_PORT="${RSS_PRIMARY_HOST_PORT:-18080}"
 export RSS_INTERNAL_HOST_PORT="${RSS_INTERNAL_HOST_PORT:-18081}"
 export RSS_ADMIN_HOST_PORT="${RSS_ADMIN_HOST_PORT:-18082}"
 export RSS_HEALTH_HOST_PORT="${RSS_HEALTH_HOST_PORT:-18083}"
 HEALTH_URL="http://localhost:${RSS_HEALTH_HOST_PORT}/health/v1"
 READY_TIMEOUT="${READY_TIMEOUT:-120}" # 秒：含镜像构建后首启 + 迁移。
+log() { printf '\033[1;34m[smoke]\033[0m %s\n' "$*"; }
+fail() {
+    printf '\033[1;31m[smoke] FAIL:\033[0m %s\n' "$*" >&2
+    exit 1
+}
 read_env_file_value() {
-    awk -F= -v key="$1" '$1 == key { print $2; exit }' "${SCRIPT_DIR}/.env.example"
+    awk -F= -v key="$1" '$1 == key { print $2; exit }' "$ENV_FILE"
+}
+require_spiffe_fixture_or_skip() {
+    local missing=()
+    local key
+    for key in \
+        SPIFFE_ENDPOINT_SOCKET \
+        RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS \
+        RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID
+    do
+        [[ -n "$(read_env_file_value "$key")" ]] || missing+=("$key")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "SKIP：docker-smoke 需要 SPIRE/SPIFFE fixture 才能满足强制 domain transport 启动门（backlog #1649）"
+        log "缺少 ${ENV_FILE} 配置：${missing[*]}"
+        log "跳过 compose readyz 200 验收，避免把 pre-SPIFFE demo 栈误判为可运行生产闭环"
+        exit 0
+    fi
 }
 s3_canary_interval="$(read_env_file_value RSS_S3_CANARY_INTERVAL_SECS)"
 s3_canary_timeout="$(read_env_file_value RSS_S3_CANARY_TIMEOUT_SECS)"
 [[ "$s3_canary_interval" =~ ^[0-9]+$ ]] || s3_canary_interval=60
 [[ "$s3_canary_timeout" =~ ^[0-9]+$ ]] || s3_canary_timeout=5
 S3_DOWN_TIMEOUT="${S3_DOWN_TIMEOUT:-$((s3_canary_interval + s3_canary_timeout + 15))}"
+require_spiffe_fixture_or_skip
 # reason: 唯一临时文件——同机并行跑（CI 多 job / 多终端）不互相覆盖 readyz 响应。
 READYZ_TMP="$(mktemp)"
 vault_paused=0
 minio_stopped=0
-
-log() { printf '\033[1;34m[smoke]\033[0m %s\n' "$*"; }
-fail() {
-    printf '\033[1;31m[smoke] FAIL:\033[0m %s\n' "$*" >&2
-    exit 1
-}
 
 cleanup() {
     if [[ $vault_paused -eq 1 ]]; then
@@ -79,6 +97,8 @@ grep -q '"name":"keyprovider_ready"' "$READYZ_TMP" || fail "readyz body 缺 keyp
 log "keyprovider_ready probe 暴露 ✓"
 grep -q '"name":"s3_object_store_ready"' "$READYZ_TMP" || fail "readyz body 缺 s3_object_store_ready probe"
 log "s3_object_store_ready probe 暴露 ✓"
+grep -q '"name":"domain_transport_ready"' "$READYZ_TMP" || fail "readyz body 缺 domain_transport_ready probe"
+log "domain_transport_ready probe 暴露 ✓"
 
 # ── 闭环 2：/healthz liveness 恒 200 ──────────────────────────────────────────────────────────────
 curl -fsS "${HEALTH_URL}/healthz" >/dev/null || fail "/healthz 非 200"

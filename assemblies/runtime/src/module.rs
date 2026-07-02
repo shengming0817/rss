@@ -24,6 +24,8 @@
 //!
 //! ref: oxidecomputer/omicron nexus/src/context.rs@8eb92537bd12598dfd2c861f897a88962fabf684
 
+use std::sync::Arc;
+
 use diport::KeyName;
 use postgres::PgRuntimeDeps;
 use redis::RedisRuntimeDeps;
@@ -64,6 +66,11 @@ pub struct SharedRuntimeDeps {
     /// settings `ConfigValue` 加密使用的 Vault Transit key name。组合根启动期从
     /// `RSS_SETTINGS_CONFIG_VALUE_KEY_NAME` fail-fast 解析，wire_settings 只消费 typed 值。
     pub settings_config_value_key_name: KeyName,
+
+    /// 共享 outbound domain transport dispatch seam。组合根构造真实 provider 并注入 typed trait
+    /// object，后续域/运行时消费者只能经 `distributed::DomainTransport` 发起跨域同步调用；底层 HTTP
+    /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult.resources` 托管。
+    pub domain_transport: Arc<dyn distributed::DomainTransport>,
 }
 
 #[cfg(test)]

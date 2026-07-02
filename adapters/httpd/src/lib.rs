@@ -31,10 +31,12 @@
 //! ref: tokio-rs/axum axum/src/serve/mod.rs@v0.8.9（`axum::serve(TcpListener, make_service).with_graceful_shutdown`）
 //! ref: 内部对标 adapters/grpc/src/lib.rs（`GrpcServer` = ManagedResource + CancellationToken funnel）
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -42,6 +44,11 @@ use axum::Router;
 use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::serve::{IncomingStream, Listener, ListenerExt};
 use diport::{ManagedResource, ShutdownError};
+use distributed::{
+    DomainMethod, DomainRequest, DomainResponse, DomainTransport, DomainTransportError,
+    DomainTransportErrorKind,
+};
+use reqwest::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -49,6 +56,10 @@ use tokio::task::JoinHandle;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
+
+const DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DOMAIN_HTTP_READINESS_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// HTTP 传输 adapter：持有 bind 成功的 listener 地址、graceful-shutdown 的 [`CancellationToken`]
 /// 与 serve 任务句柄。每 listener（Primary / Health / …）一个实例，经组合根 `ShutdownStack` 托管。
@@ -81,6 +92,452 @@ pub enum HttpServeError {
     /// rustls server configuration could not be built from SPIFFE material.
     #[error("http mtls rustls config invalid")]
     Rustls(#[source] spiffe_rustls::Error),
+}
+
+/// One remote domain HTTP endpoint plus its SPIFFE/mTLS authorization policy.
+#[derive(Clone, Debug)]
+pub struct DomainHttpTargetConfig {
+    domain: String,
+    endpoint: reqwest::Url,
+    policy: authn::OutboundMtlsPolicy,
+}
+
+impl DomainHttpTargetConfig {
+    /// Build one target config. Endpoint must be an HTTPS base URL without inline credentials.
+    pub fn new(
+        domain: impl AsRef<str>,
+        endpoint: impl AsRef<str>,
+        policy: authn::OutboundMtlsPolicy,
+    ) -> Result<Self, DomainHttpTransportBuildError> {
+        let domain = canonical_domain_key(domain.as_ref())?;
+        let endpoint = parse_target_endpoint(endpoint.as_ref())?;
+        Ok(Self {
+            domain,
+            endpoint,
+            policy,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct DomainHttpTarget {
+    endpoint: reqwest::Url,
+    client: reqwest::Client,
+}
+
+/// Outbound synchronous cross-domain HTTP transport backed by SPIFFE/mTLS.
+///
+/// The transport accepts only [`distributed::TransportHeaders`] from callers, which are already a
+/// diagnostic-header allowlist. It never accepts caller-provided credential or tenant headers.
+pub struct DomainHttpTransport {
+    targets: BTreeMap<String, DomainHttpTarget>,
+    mtls_source: Option<spiffe::X509Source>,
+}
+
+/// Current readiness state for outbound domain HTTP transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DomainHttpReadiness {
+    Ready,
+    MtlsSourceUnavailable,
+    PeerEndpointUnresolved,
+    PeerEndpointUnavailable,
+}
+
+impl DomainHttpReadiness {
+    /// True only when local mTLS material and all configured peer TCP endpoints are available.
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    /// Stable readyz detail. Must stay static and avoid embedding endpoint values.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::MtlsSourceUnavailable => "mtls-source-unavailable",
+            Self::PeerEndpointUnresolved => "peer-endpoint-unresolved",
+            Self::PeerEndpointUnavailable => "peer-endpoint-unavailable",
+        }
+    }
+}
+
+impl DomainHttpTransport {
+    /// Build all remote domain targets from one SPIRE X.509 source. `endpoint=None` uses
+    /// `SPIFFE_ENDPOINT_SOCKET`.
+    pub async fn from_spire(
+        targets: Vec<DomainHttpTargetConfig>,
+        endpoint: Option<&str>,
+    ) -> Result<Self, DomainHttpTransportBuildError> {
+        Self::from_spire_with_initial_sync_timeout(targets, endpoint, Duration::from_secs(5)).await
+    }
+
+    async fn from_spire_with_initial_sync_timeout(
+        targets: Vec<DomainHttpTargetConfig>,
+        endpoint: Option<&str>,
+        initial_sync_timeout: Duration,
+    ) -> Result<Self, DomainHttpTransportBuildError> {
+        if targets.is_empty() {
+            return Err(DomainHttpTransportBuildError::EmptyTargets);
+        }
+        let source = x509_source(endpoint, initial_sync_timeout).await?;
+        let mut mapped = BTreeMap::new();
+        for target in targets {
+            let client = mtls_reqwest_client(&source, &target.policy)?;
+            mapped.insert(
+                target.domain,
+                DomainHttpTarget {
+                    endpoint: target.endpoint,
+                    client,
+                },
+            );
+        }
+        Ok(Self {
+            targets: mapped,
+            mtls_source: Some(source),
+        })
+    }
+
+    #[cfg(test)]
+    fn from_targets(
+        targets: BTreeMap<String, DomainHttpTarget>,
+    ) -> Result<Self, DomainHttpTransportBuildError> {
+        if targets.is_empty() {
+            return Err(DomainHttpTransportBuildError::EmptyTargets);
+        }
+        Ok(Self {
+            targets,
+            mtls_source: None,
+        })
+    }
+
+    /// Readiness snapshot for local mTLS material and configured peer TCP endpoints.
+    ///
+    /// Production transports hold an `X509Source`; test-only transports do not. Runtime registers
+    /// this as `domain_transport_ready`.
+    pub fn readiness(&self) -> DomainHttpReadiness {
+        if self
+            .mtls_source
+            .as_ref()
+            .is_some_and(|source| source.svid().is_err())
+        {
+            return DomainHttpReadiness::MtlsSourceUnavailable;
+        }
+        for target in self.targets.values() {
+            let state = peer_endpoint_readiness(&target.endpoint);
+            if !state.is_ready() {
+                return state;
+            }
+        }
+        DomainHttpReadiness::Ready
+    }
+
+    /// Boolean compatibility view of [`DomainHttpTransport::readiness`].
+    pub fn is_ready(&self) -> bool {
+        self.readiness().is_ready()
+    }
+}
+
+/// Shared outbound domain HTTP transport handle.
+///
+/// Runtime needs the same concrete transport as both a callable [`DomainTransport`] dependency and
+/// a shutdown [`ManagedResource`]. This wrapper keeps those two views pointed at one `Arc`, so the
+/// dispatch seam and the `X509Source` lifecycle cannot drift.
+#[derive(Clone)]
+pub struct SharedDomainHttpTransport {
+    inner: Arc<DomainHttpTransport>,
+}
+
+impl SharedDomainHttpTransport {
+    /// Wrap a constructed domain HTTP transport in a shared handle.
+    pub fn new(inner: DomainHttpTransport) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    /// Readiness snapshot of the underlying transport.
+    pub fn readiness(&self) -> DomainHttpReadiness {
+        self.inner.readiness()
+    }
+
+    /// Boolean compatibility view of [`SharedDomainHttpTransport::readiness`].
+    pub fn is_ready(&self) -> bool {
+        self.readiness().is_ready()
+    }
+}
+
+impl DomainTransport for DomainHttpTransport {
+    fn dispatch(
+        &self,
+        request: DomainRequest,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<DomainResponse, DomainTransportError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let domain = request.contract().domain().to_uppercase();
+            let target = self
+                .targets
+                .get(&domain)
+                .ok_or_else(|| DomainTransportError::new(DomainTransportErrorKind::Dispatch))?;
+            let url = request_url(&target.endpoint, request.path())?;
+            let method = reqwest_method(request.method());
+            let mut builder = target.client.request(method, url);
+            for (name, value) in request.headers().as_slice() {
+                let header_name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|e| {
+                    DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                })?;
+                let header_value = HeaderValue::from_str(value).map_err(|e| {
+                    DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                })?;
+                builder = builder.header(header_name, header_value);
+            }
+            let response = builder
+                .body(request.body().to_vec())
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        DomainTransportError::with_source(DomainTransportErrorKind::Timeout, &e)
+                    } else {
+                        DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                    }
+                })?;
+            let status = response.status().as_u16();
+            let headers = response_headers(response.headers())?;
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| {
+                    DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                })?
+                .to_vec();
+            Ok(DomainResponse::new(status, headers, body))
+        })
+    }
+}
+
+impl DomainTransport for SharedDomainHttpTransport {
+    fn dispatch(
+        &self,
+        request: DomainRequest,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<DomainResponse, DomainTransportError>> + Send + '_>,
+    > {
+        self.inner.dispatch(request)
+    }
+}
+
+impl ManagedResource for DomainHttpTransport {
+    fn name(&self) -> &str {
+        "domain-http-transport"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        if let Some(source) = &self.mtls_source {
+            source
+                .shutdown_configured()
+                .await
+                .map_err(ShutdownError::new)?;
+        }
+        Ok(())
+    }
+}
+
+impl ManagedResource for SharedDomainHttpTransport {
+    fn name(&self) -> &str {
+        ManagedResource::name(self.inner.as_ref())
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        ManagedResource::shutdown(self.inner.as_ref()).await
+    }
+}
+
+/// Outbound domain HTTP transport construction failure (startup fail-fast).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DomainHttpTransportBuildError {
+    /// No remote targets were configured.
+    #[error("domain http transport requires at least one target")]
+    EmptyTargets,
+    /// Domain key was empty or non-canonical.
+    #[error("domain http transport domain is invalid")]
+    InvalidDomain,
+    /// Endpoint URL was syntactically invalid.
+    #[error("domain http transport endpoint url is invalid")]
+    InvalidEndpoint(#[source] url::ParseError),
+    /// Endpoint must be HTTPS.
+    #[error("domain http transport endpoint must use https")]
+    InsecureEndpoint,
+    /// Endpoint must not carry inline credentials, query, or fragment material.
+    #[error("domain http transport endpoint must not include credentials, query, or fragment")]
+    EndpointContainsCredentials,
+    /// SPIFFE Workload API X.509 source could not be initialized or read.
+    #[error("domain http transport spiffe source unavailable")]
+    SpiffeSource(#[source] spiffe::X509SourceError),
+    /// Current workload SVID does not match the configured local SPIFFE ID.
+    #[error("domain http transport local spiffe id does not match current svid")]
+    LocalSvidMismatch,
+    /// SPIFFE/rustls client configuration failed.
+    #[error("domain http transport rustls config invalid")]
+    Rustls(#[source] spiffe_rustls::Error),
+    /// Trust-domain conversion failed before rustls config construction.
+    #[error("domain http transport trust domain invalid")]
+    TrustDomain(#[source] spiffe::SpiffeIdError),
+    /// reqwest client could not be built from the preconfigured rustls backend.
+    #[error("domain http transport client invalid")]
+    Client(#[source] reqwest::Error),
+}
+
+fn canonical_domain_key(raw: &str) -> Result<String, DomainHttpTransportBuildError> {
+    if raw.is_empty() || raw.trim() != raw || raw.chars().any(char::is_control) {
+        return Err(DomainHttpTransportBuildError::InvalidDomain);
+    }
+    Ok(raw.to_uppercase())
+}
+
+fn parse_target_endpoint(raw: &str) -> Result<reqwest::Url, DomainHttpTransportBuildError> {
+    let url = reqwest::Url::parse(raw).map_err(DomainHttpTransportBuildError::InvalidEndpoint)?;
+    if url.scheme() != "https" {
+        return Err(DomainHttpTransportBuildError::InsecureEndpoint);
+    }
+    if url.host_str().is_none() {
+        return Err(DomainHttpTransportBuildError::InvalidDomain);
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(DomainHttpTransportBuildError::EndpointContainsCredentials);
+    }
+    Ok(url)
+}
+
+async fn x509_source(
+    endpoint: Option<&str>,
+    initial_sync_timeout: Duration,
+) -> Result<spiffe::X509Source, DomainHttpTransportBuildError> {
+    let mut builder = spiffe::X509Source::builder().initial_sync_timeout(initial_sync_timeout);
+    if let Some(endpoint) = endpoint {
+        builder = builder.endpoint(endpoint);
+    }
+    builder
+        .build()
+        .await
+        .map_err(DomainHttpTransportBuildError::SpiffeSource)
+}
+
+fn mtls_reqwest_client(
+    source: &spiffe::X509Source,
+    policy: &authn::OutboundMtlsPolicy,
+) -> Result<reqwest::Client, DomainHttpTransportBuildError> {
+    ensure_local_svid(source, policy.local_identity())?;
+    let allowed_server_ids: Vec<String> = policy
+        .server_allow_set()
+        .iter()
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    let mut allowed_trust_domains = BTreeSet::new();
+    for domain in policy.trust_domains().iter() {
+        allowed_trust_domains.insert(
+            spiffe::TrustDomain::new(domain.as_str())
+                .map_err(DomainHttpTransportBuildError::TrustDomain)?,
+        );
+    }
+    let config = spiffe_rustls::mtls_client(source.clone())
+        .authorize(
+            spiffe_rustls::authorizer::exact(allowed_server_ids)
+                .map_err(DomainHttpTransportBuildError::Rustls)?,
+        )
+        .trust_domain_policy(spiffe_rustls::AllowList(allowed_trust_domains))
+        .with_alpn_protocols([b"http/1.1"])
+        .build()
+        .map_err(DomainHttpTransportBuildError::Rustls)?;
+    domain_http_client_builder()
+        .https_only(true)
+        .use_preconfigured_tls(config)
+        .build()
+        .map_err(DomainHttpTransportBuildError::Client)
+}
+
+fn domain_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT)
+        .timeout(DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT)
+}
+
+fn peer_endpoint_readiness(endpoint: &reqwest::Url) -> DomainHttpReadiness {
+    let Ok(addrs) = endpoint.socket_addrs(|| endpoint.port_or_known_default()) else {
+        return DomainHttpReadiness::PeerEndpointUnresolved;
+    };
+    if addrs.is_empty() {
+        return DomainHttpReadiness::PeerEndpointUnresolved;
+    }
+    if addrs.iter().any(|addr| {
+        StdTcpStream::connect_timeout(addr, DOMAIN_HTTP_READINESS_CONNECT_TIMEOUT).is_ok()
+    }) {
+        DomainHttpReadiness::Ready
+    } else {
+        DomainHttpReadiness::PeerEndpointUnavailable
+    }
+}
+
+fn ensure_local_svid(
+    source: &spiffe::X509Source,
+    expected: &authn::SpiffeId,
+) -> Result<(), DomainHttpTransportBuildError> {
+    let current = source
+        .svid()
+        .map_err(DomainHttpTransportBuildError::SpiffeSource)?;
+    if current.spiffe_id().to_string() != expected.as_str() {
+        return Err(DomainHttpTransportBuildError::LocalSvidMismatch);
+    }
+    Ok(())
+}
+
+fn request_url(endpoint: &reqwest::Url, path: &str) -> Result<reqwest::Url, DomainTransportError> {
+    let url = endpoint.clone();
+    let base = endpoint.path().trim_end_matches('/');
+    let suffix = path.trim_start_matches('/');
+    let joined = if suffix.is_empty() {
+        if base.is_empty() { "/" } else { base }
+    } else if base.is_empty() {
+        return Ok(set_url_path(url, &format!("/{suffix}")));
+    } else {
+        return Ok(set_url_path(url, &format!("{base}/{suffix}")));
+    };
+    Ok(set_url_path(url, joined))
+}
+
+fn set_url_path(mut url: reqwest::Url, path: &str) -> reqwest::Url {
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
+fn reqwest_method(method: DomainMethod) -> reqwest::Method {
+    match method {
+        DomainMethod::Get => reqwest::Method::GET,
+        DomainMethod::Post => reqwest::Method::POST,
+        DomainMethod::Put => reqwest::Method::PUT,
+        DomainMethod::Patch => reqwest::Method::PATCH,
+        DomainMethod::Delete => reqwest::Method::DELETE,
+    }
+}
+
+fn response_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Vec<(String, String)>, DomainTransportError> {
+    let mut mapped = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        let value = value.to_str().map_err(|e| {
+            DomainTransportError::with_source(DomainTransportErrorKind::InvalidResponse, &e)
+        })?;
+        mapped.push((name.as_str().to_owned(), value.to_owned()));
+    }
+    Ok(mapped)
 }
 
 /// mTLS acceptor backed by SPIRE Workload API X.509-SVID rotation.
@@ -535,6 +992,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
     use axum::routing::get;
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName,
@@ -564,6 +1024,84 @@ mod tests {
                 ),
             )
             .into_make_service_with_connect_info::<std::net::SocketAddr>()
+    }
+
+    fn make_domain_transport_svc() -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
+        Router::new()
+            .route("/rpc/echo", axum::routing::post(domain_transport_echo))
+            .into_make_service_with_connect_info::<std::net::SocketAddr>()
+    }
+
+    async fn domain_transport_echo(headers: HeaderMap, body: Bytes) -> axum::response::Response {
+        let correlation_id = headers
+            .get("x-correlation-id")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let auth_present = headers.contains_key("authorization");
+        let tenant_present = headers.contains_key("x-tenant-id");
+        let body = format!(
+            "{}|auth={auth_present}|tenant={tenant_present}",
+            String::from_utf8_lossy(&body)
+        );
+        let mut response = (StatusCode::CREATED, body).into_response();
+        response.headers_mut().insert(
+            "x-seen-correlation-id",
+            HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        response
+            .headers_mut()
+            .insert("x-domain-transport", HeaderValue::from_static("ok"));
+        response
+    }
+
+    #[allow(clippy::expect_used)]
+    fn outbound_policy() -> authn::OutboundMtlsPolicy {
+        let local = authn::SpiffeId::parse("spiffe://example.org/ns/rss/sa/runtime")
+            .expect("local spiffe id");
+        let servers = authn::MtlsAllowSet::new(["spiffe://example.org/ns/rss/sa/identity"])
+            .expect("server allow-set");
+        let trust_domains =
+            authn::MtlsTrustDomainAllowSet::new(["example.org"]).expect("trust domains");
+        authn::OutboundMtlsPolicy::new(local, servers, trust_domains).expect("outbound policy")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn domain_request(domain: &'static str) -> DomainRequest {
+        const HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        DomainRequest::new(
+            vocab::ContractBinding::from_static(domain, "identity.login", "v1", HASH),
+            DomainMethod::Post,
+            "/echo",
+            distributed::TransportHeaders::try_new(vec![(
+                "x-correlation-id".to_owned(),
+                "corr-1500".to_owned(),
+            )])
+            .expect("diagnostic header"),
+            b"payload".to_vec(),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_domain_transport(endpoint: reqwest::Url) -> DomainHttpTransport {
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "IDENTITY".to_owned(),
+            DomainHttpTarget {
+                endpoint,
+                client: reqwest::Client::new(),
+            },
+        );
+        DomainHttpTransport::from_targets(targets).expect("domain transport")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn unused_loopback_endpoint() -> reqwest::Url {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+        let addr = listener.local_addr().expect("unused port addr");
+        drop(listener);
+        reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("loopback url")
     }
 
     /// 绑 `127.0.0.1:0` ephemeral → 真 socket 上发 HTTP/1.1 GET，读回状态行（raw，无 reqwest dep）。
@@ -791,6 +1329,133 @@ mod tests {
         // 阶段 1 广播：cancel token → drain；阶段 2：shutdown await task 收敛。
         token.cancel();
         assert!(server.shutdown().await.is_ok(), "funnel shutdown 收敛");
+    }
+
+    #[test]
+    fn domain_transport_requires_at_least_one_target() {
+        let result = DomainHttpTransport::from_targets(BTreeMap::new());
+        assert!(matches!(
+            result,
+            Err(DomainHttpTransportBuildError::EmptyTargets)
+        ));
+    }
+
+    #[test]
+    fn domain_http_client_defaults_are_bounded() {
+        assert!(DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT > Duration::ZERO);
+        assert!(DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT > DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn shared_domain_transport_exposes_dispatch_and_lifecycle_views() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+        let server = HttpServer::serve("domain-transport-ready-peer", addr, make_svc())
+            .await
+            .expect("serve readiness peer");
+        let endpoint =
+            reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
+        let shared = SharedDomainHttpTransport::new(test_domain_transport(endpoint));
+
+        assert_eq!(ManagedResource::name(&shared), "domain-http-transport");
+        assert!(shared.is_ready());
+        ManagedResource::shutdown(&server)
+            .await
+            .expect("shutdown readiness peer");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_readiness_fails_when_peer_endpoint_is_down() {
+        let endpoint = unused_loopback_endpoint();
+        let shared = SharedDomainHttpTransport::new(test_domain_transport(endpoint));
+        let readiness = shared.readiness();
+
+        assert_eq!(
+            readiness,
+            DomainHttpReadiness::PeerEndpointUnavailable,
+            "domain transport readiness detail should identify peer TCP failure"
+        );
+        assert!(
+            !readiness.is_ready(),
+            "domain transport readiness must include remote endpoint TCP reachability"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_target_requires_https_endpoint() {
+        let err = DomainHttpTargetConfig::new(
+            "identity",
+            "http://identity.internal/rpc",
+            outbound_policy(),
+        )
+        .expect_err("production endpoint must be HTTPS");
+        assert!(matches!(
+            err,
+            DomainHttpTransportBuildError::InsecureEndpoint
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_dispatches_request_response_and_diagnostic_headers_only() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+        let server = HttpServer::serve("domain-transport-echo", addr, make_domain_transport_svc())
+            .await
+            .expect("serve echo");
+        let endpoint =
+            reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
+        let transport = SharedDomainHttpTransport::new(test_domain_transport(endpoint));
+
+        let response = transport
+            .dispatch(domain_request("identity"))
+            .await
+            .expect("dispatch");
+        assert_eq!(response.status_code(), 201);
+        assert_eq!(response.body(), b"payload|auth=false|tenant=false");
+        assert!(
+            response
+                .headers()
+                .iter()
+                .any(|(name, value)| name == "x-seen-correlation-id" && value == "corr-1500"),
+            "diagnostic header was forwarded and observed by target"
+        );
+
+        assert!(server.shutdown().await.is_ok(), "echo shutdown 收敛");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_missing_target_fails_dispatch() {
+        let endpoint = reqwest::Url::parse("http://127.0.0.1:9/rpc").expect("url");
+        let transport = test_domain_transport(endpoint);
+        let err = transport
+            .dispatch(domain_request("audit"))
+            .await
+            .expect_err("unconfigured target domain fails before network dispatch");
+        assert_eq!(err.kind(), DomainTransportErrorKind::Dispatch);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_invalid_spiffe_endpoint_fails_fast() {
+        let target = DomainHttpTargetConfig::new(
+            "identity",
+            "https://identity.internal/rpc",
+            outbound_policy(),
+        )
+        .expect("target config");
+        let result = DomainHttpTransport::from_spire_with_initial_sync_timeout(
+            vec![target],
+            Some("tcp://not-an-ip:1"),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(DomainHttpTransportBuildError::SpiffeSource(_))),
+            "invalid SPIFFE endpoint must fail before runtime starts"
+        );
     }
 
     #[tokio::test]

@@ -30,7 +30,7 @@ pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -88,6 +88,21 @@ const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
 const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
 const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
+/// Comma-separated remote domains that must have outbound domain transport configured.
+const DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV: &str = "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS";
+/// Shared remote domain transport endpoint fallback (`durable-shared` only).
+const DOMAIN_TRANSPORT_SHARED_URL_ENV: &str = "RSS_DOMAIN_TRANSPORT_URL";
+/// Local workload SPIFFE ID expected from the outbound SPIRE source.
+const DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV: &str = "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID";
+const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
+const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
+    "DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET";
+/// Explicit migration ticket required for non-loopback Internal service-token listeners.
+const INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV: &str =
+    "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET";
+/// Unix timestamp after which the transitional Internal service-token listener must fail startup.
+const INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV: &str =
+    "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX";
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -760,6 +775,217 @@ fn legacy_config_plaintext_policy() -> anyhow::Result<LegacyConfigPlaintextPolic
 /// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
 pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
+}
+
+fn domain_transport_required_domains_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Vec<String>> {
+    let raw = get(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV}")
+    })?;
+    let mut domains = Vec::new();
+    for part in raw.split(',') {
+        let domain = part.trim();
+        anyhow::ensure!(
+            !domain.is_empty(),
+            "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} must not contain empty entries"
+        );
+        anyhow::ensure!(
+            !domain.chars().any(char::is_control) && !domain.chars().any(char::is_whitespace),
+            "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} entries must not contain whitespace or control characters"
+        );
+        domains.push(domain.to_uppercase());
+    }
+    anyhow::ensure!(
+        !domains.is_empty(),
+        "{DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV} must list at least one domain"
+    );
+    domains.sort();
+    domains.dedup();
+    Ok(domains)
+}
+
+fn domain_transport_url_env(domain: &str) -> String {
+    format!(
+        "RSS_{}_{}",
+        domain.to_ascii_uppercase(),
+        DOMAIN_TRANSPORT_URL_ENV_SUFFIX
+    )
+}
+
+fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
+    format!(
+        "RSS_{}_{}",
+        domain.to_ascii_uppercase(),
+        DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX
+    )
+}
+
+fn domain_transport_config_from(
+    required_domains: &[String],
+    get: &impl Fn(&str) -> Option<String>,
+) -> bootstrap::DomainTransportConfig {
+    let mut per_domain = BTreeMap::new();
+    for domain in required_domains {
+        let env = domain_transport_url_env(domain);
+        if let Some(url) = get(&env) {
+            per_domain.insert(domain.clone(), bootstrap::DomainTransportUrl::new(url));
+        }
+    }
+    let shared = get(DOMAIN_TRANSPORT_SHARED_URL_ENV).map(bootstrap::DomainTransportUrl::new);
+    bootstrap::DomainTransportConfig::new(per_domain, shared)
+}
+
+fn outbound_mtls_policy_for_domain_from(
+    domain: &str,
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<authn::OutboundMtlsPolicy> {
+    let local_raw = get(DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV}")
+    })?;
+    let local = authn::SpiffeId::parse(local_raw.trim())
+        .map_err(|e| anyhow::anyhow!("{DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV} invalid: {e}"))?;
+    let allow_env = domain_transport_mtls_allow_set_env(domain);
+    let raw_allow_set =
+        get(&allow_env).ok_or_else(|| anyhow::anyhow!("missing required env var: {allow_env}"))?;
+    let server_allow_set = mtls_allow_set_from_csv_for_env(&raw_allow_set, &allow_env)?;
+    let trust_domain_names = server_allow_set
+        .iter()
+        .map(|id| id.trust_domain().as_str().to_owned())
+        .collect::<Vec<_>>();
+    let trust_domains = authn::MtlsTrustDomainAllowSet::new(trust_domain_names)
+        .map_err(|e| anyhow::anyhow!("{allow_env} trust domains invalid: {e}"))?;
+    authn::OutboundMtlsPolicy::new(local, server_allow_set, trust_domains)
+        .map_err(|e| anyhow::anyhow!("{allow_env} outbound mTLS policy invalid: {e}"))
+}
+
+fn build_domain_transport_targets_from(
+    topology: bootstrap::Topology,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Vec<httpd::DomainHttpTargetConfig>> {
+    let required_domains = domain_transport_required_domains_from(&get)?;
+    let cfg = domain_transport_config_from(&required_domains, &get);
+    let required_refs = required_domains
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let resolved = bootstrap::domaintransport::resolve(topology, cfg, &required_refs)
+        .context("resolve domain transport topology")?;
+    let bootstrap::ResolvedDomainTransport::Remote { per_domain } = resolved else {
+        return Ok(Vec::new());
+    };
+    let mut targets = Vec::with_capacity(per_domain.len());
+    for (domain, url) in per_domain {
+        let policy = outbound_mtls_policy_for_domain_from(&domain, &get)?;
+        targets.push(
+            httpd::DomainHttpTargetConfig::new(&domain, url.expose(), policy)
+                .with_context(|| format!("build outbound domain transport target {domain}"))?,
+        );
+    }
+    Ok(targets)
+}
+
+trait RuntimeDomainTransport:
+    distributed::DomainTransport + ManagedResource + Clone + Send + Sync + 'static
+{
+    fn readiness(&self) -> httpd::DomainHttpReadiness;
+}
+
+impl RuntimeDomainTransport for httpd::SharedDomainHttpTransport {
+    fn readiness(&self) -> httpd::DomainHttpReadiness {
+        httpd::SharedDomainHttpTransport::readiness(self)
+    }
+}
+
+struct DomainTransportRuntime<T> {
+    transport: T,
+}
+
+impl<T> DomainTransportRuntime<T>
+where
+    T: RuntimeDomainTransport,
+{
+    fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    fn dispatch_handle(&self) -> Arc<dyn distributed::DomainTransport> {
+        Arc::new(distributed::InstrumentedDomainTransport::new(
+            self.transport.clone(),
+            distributed::TransportMode::Remote,
+            Box::new(SystemClock),
+        ))
+    }
+
+    fn module_result(&self) -> anyhow::Result<DomainModuleResult> {
+        let probe_name = ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME)
+            .context("parse domain_transport_ready probe name")?;
+        Ok(DomainModuleResult {
+            probes: vec![(
+                probe_name,
+                Box::new(DomainTransportReadyProbe::new(self.transport.clone())),
+            )],
+            resources: vec![DynManagedResource::new_box(self.transport.clone())],
+            workers: Vec::new(),
+        })
+    }
+}
+
+pub const DOMAIN_TRANSPORT_READY_PROBE_NAME: &str = "domain_transport_ready";
+
+struct DomainTransportReadyProbe<T> {
+    transport: T,
+    name: ProbeName,
+}
+
+impl<T> DomainTransportReadyProbe<T>
+where
+    T: RuntimeDomainTransport,
+{
+    #[allow(clippy::expect_used)]
+    fn new(transport: T) -> Self {
+        let name =
+            ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME).expect("valid probe name const");
+        Self { transport, name }
+    }
+}
+
+impl<T> bootstrap::HealthProbe for DomainTransportReadyProbe<T>
+where
+    T: RuntimeDomainTransport,
+{
+    fn check(&self) -> HealthCheck {
+        let readiness = self.transport.readiness();
+        let status = if readiness.is_ready() {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Unhealthy
+        };
+        HealthCheck::new(self.name.clone(), status, readiness.detail())
+    }
+}
+
+async fn wire_domain_transport_from(
+    topology: bootstrap::Topology,
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<DomainTransportRuntime<httpd::SharedDomainHttpTransport>> {
+    let targets = build_domain_transport_targets_from(topology, &get)?;
+    anyhow::ensure!(
+        !targets.is_empty(),
+        "outbound domain transport must resolve remote targets"
+    );
+    let endpoint = get(SPIFFE_ENDPOINT_SOCKET_ENV);
+    let transport = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref())
+        .await
+        .with_context(|| {
+            format!(
+                "build outbound domain transport mTLS client ({} optional override)",
+                SPIFFE_ENDPOINT_SOCKET_ENV
+            )
+        })?;
+    Ok(DomainTransportRuntime::new(
+        httpd::SharedDomainHttpTransport::new(transport),
+    ))
 }
 
 // ── Session expiry sweeper helper ─────────────────────────────────────────────────────────────
@@ -2763,6 +2989,18 @@ fn listener_addr_from(
     listener: ListenerKind,
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<SocketAddr> {
+    // reason: composition-root startup policy compares operator-provided migration expiry with the
+    // process clock. Domain logic still receives clocks by DI; this is env guard evaluation.
+    #[allow(clippy::disallowed_methods)]
+    let now = SystemTime::now();
+    listener_addr_from_at(listener, get, now)
+}
+
+fn listener_addr_from_at(
+    listener: ListenerKind,
+    get: impl Fn(&str) -> Option<String>,
+    now: SystemTime,
+) -> anyhow::Result<SocketAddr> {
     let var = listener_addr_env(listener)?;
     let raw = get(var)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {var} (listener has routes)"))?;
@@ -2771,7 +3009,7 @@ fn listener_addr_from(
         .with_context(|| format!("{var} must be a valid host:port SocketAddr: {raw}"))?;
     let scheme = auth_scheme_from(listener, &get)
         .context("resolve listener auth scheme for plaintext policy")?;
-    enforce_listener_plaintext_policy(listener, scheme, addr, &get)?;
+    enforce_listener_plaintext_policy(listener, scheme, addr, &get, now)?;
     Ok(addr)
 }
 
@@ -2780,11 +3018,12 @@ fn enforce_listener_plaintext_policy(
     scheme: AuthScheme,
     addr: SocketAddr,
     get: impl Fn(&str) -> Option<String>,
+    now: SystemTime,
 ) -> anyhow::Result<()> {
     if scheme == AuthScheme::Mtls {
         return Ok(());
     }
-    let policy = plaintext_endpoint_policy_from(get, LISTENER_ALLOW_PLAINTEXT_ENV)?;
+    let policy = plaintext_endpoint_policy_from(&get, LISTENER_ALLOW_PLAINTEXT_ENV)?;
     match policy {
         PlaintextEndpointPolicy::Deny => anyhow::bail!(
             "{LISTENER_ALLOW_PLAINTEXT_ENV} must explicitly allow plaintext listener {listener:?} at {addr}"
@@ -2794,16 +3033,62 @@ fn enforce_listener_plaintext_policy(
                 addr.ip().is_loopback(),
                 "{LISTENER_ALLOW_PLAINTEXT_ENV}=true only allows loopback plaintext listener binds"
             );
-            Ok(())
         }
         PlaintextEndpointPolicy::AllowDevContainer => {
             anyhow::ensure!(
                 addr.ip().is_loopback() || addr.ip().is_unspecified(),
                 "{LISTENER_ALLOW_PLAINTEXT_ENV}=dev-container only allows loopback or wildcard demo listener binds"
             );
-            Ok(())
         }
     }
+    enforce_internal_service_token_migration_guard(listener, scheme, addr, &get, now)
+}
+
+fn enforce_internal_service_token_migration_guard(
+    listener: ListenerKind,
+    scheme: AuthScheme,
+    addr: SocketAddr,
+    get: impl Fn(&str) -> Option<String>,
+    now: SystemTime,
+) -> anyhow::Result<()> {
+    if listener != ListenerKind::Internal || scheme != AuthScheme::ServiceToken {
+        return Ok(());
+    }
+    if addr.ip().is_loopback() {
+        return Ok(());
+    }
+    let ticket = get(INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV}")
+    })?;
+    anyhow::ensure!(
+        !ticket.trim().is_empty(),
+        "{INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV} must not be empty"
+    );
+    let raw_expires =
+        get(INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV).ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing required env var: {INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV}"
+            )
+        })?;
+    let expires_at = service_token_migration_expiry(raw_expires.trim())?;
+    anyhow::ensure!(
+        expires_at > now,
+        "{INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV} has expired"
+    );
+    Ok(())
+}
+
+fn service_token_migration_expiry(raw: &str) -> anyhow::Result<SystemTime> {
+    let seconds = raw.parse::<u64>().with_context(|| {
+        format!("{INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV} must be unix seconds")
+    })?;
+    SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV} is out of range"
+            )
+        })
 }
 
 /// 从 `std::env` 解析 listener bind 地址（薄壳，委托 [`listener_addr_from`]）。
@@ -2936,17 +3221,17 @@ where
 }
 
 fn mtls_allow_set_from_csv(raw: &str) -> anyhow::Result<authn::MtlsAllowSet> {
+    mtls_allow_set_from_csv_for_env(raw, INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV)
+}
+
+fn mtls_allow_set_from_csv_for_env(raw: &str, env: &str) -> anyhow::Result<authn::MtlsAllowSet> {
     let mut ids = Vec::new();
     for part in raw.split(',') {
         let trimmed = part.trim();
-        anyhow::ensure!(
-            !trimmed.is_empty(),
-            "{INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV} must not contain empty entries"
-        );
+        anyhow::ensure!(!trimmed.is_empty(), "{env} must not contain empty entries");
         ids.push(trimmed.to_owned());
     }
-    authn::MtlsAllowSet::new(ids)
-        .map_err(|e| anyhow::anyhow!("{INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV} invalid: {e}"))
+    authn::MtlsAllowSet::new(ids).map_err(|e| anyhow::anyhow!("{env} invalid: {e}"))
 }
 
 fn mtls_allow_set_from_env(
@@ -2968,7 +3253,12 @@ async fn mtls_config_from_env(listener: ListenerKind) -> anyhow::Result<httpd::M
     let endpoint = std::env::var(SPIFFE_ENDPOINT_SOCKET_ENV).ok();
     httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref())
         .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| {
+            format!(
+                "build Internal listener mTLS config ({} optional override)",
+                SPIFFE_ENDPOINT_SOCKET_ENV
+            )
+        })
 }
 
 /// 聚合 `ShutdownStack::shutdown` 的 per-listener 失败：空 = 干净退出 `Ok`；非空 = 记录每条 + 非零退出 `Err`
@@ -3116,6 +3406,17 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         build_s3_runtime_deps_from(|name| std::env::var(name).ok()).context("setup s3 deps")?;
     let s3_canary_config =
         build_s3_canary_config_from(|name| std::env::var(name).ok()).context("s3 canary config")?;
+    let event_cfg = build_event_transport_config().context("event transport config")?;
+    if event_cfg.topology == bootstrap::Topology::Demo {
+        anyhow::bail!(
+            "RSS_TOPOLOGY=demo is not supported in the production runtime; \
+             use durable-shared or durable-isolated"
+        );
+    }
+    let domain_transport =
+        wire_domain_transport_from(event_cfg.topology, |name| std::env::var(name).ok())
+            .await
+            .context("wire outbound domain transport")?;
 
     // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
     let deps = SharedRuntimeDeps {
@@ -3124,6 +3425,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         s3,
         vault,
         settings_config_value_key_name,
+        domain_transport: domain_transport.dispatch_handle(),
     };
 
     // Prometheus 指标导出（#1253）：装进程级 `metrics` global recorder（counter!/gauge! 发射点经此写入）+ 持 render 句柄。
@@ -3181,14 +3483,12 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         .context("register redis_ready probe")?;
 
     // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
-    // Demo 拓扑 fail-fast（生产不走 in-memory 路径；TOPO-INMEM-SEAL-01 组合根层保证）。
-    let event_cfg = build_event_transport_config().context("event transport config")?;
-    if event_cfg.topology == bootstrap::Topology::Demo {
-        anyhow::bail!(
-            "RSS_TOPOLOGY=demo is not supported in the production runtime; \
-             use durable-shared or durable-isolated"
-        );
-    }
+    // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
+    module.merge(
+        domain_transport
+            .module_result()
+            .context("wire outbound domain transport module")?,
+    );
     let distributed = wire_distributed(&deps).context("wire distributed")?;
     let event_subscribers =
         event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
@@ -4767,6 +5067,170 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_required_domains_must_be_non_empty() {
+        let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |_| None)
+            .expect_err("missing required domains must fail");
+        assert!(
+            err.to_string()
+                .contains(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV),
+            "error should name env var: {err}"
+        );
+
+        let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |name| {
+            (name == DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV).then(String::new)
+        })
+        .expect_err("empty required domain entry must fail");
+        assert!(
+            err.to_string()
+                .contains(DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV),
+            "error should name env var: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_per_domain_allow_set_is_required() {
+        let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |name| {
+            match name {
+                DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV => Some("identity".to_string()),
+                "RSS_IDENTITY_DOMAIN_TRANSPORT_URL" => {
+                    Some("https://identity.internal/rpc".to_string())
+                }
+                DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
+                    Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
+                }
+                _ => None,
+            }
+        })
+        .expect_err("remote target requires exact server SPIFFE allow-set");
+        assert!(
+            err.to_string()
+                .contains("RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET"),
+            "error should name per-domain allow-set env: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_isolated_topology_forbids_shared_fallback() {
+        let err =
+            build_domain_transport_targets_from(bootstrap::Topology::DurableIsolated, |name| {
+                match name {
+                    DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV => Some("identity".to_string()),
+                    DOMAIN_TRANSPORT_SHARED_URL_ENV => {
+                        Some("https://gateway.internal/rpc".to_string())
+                    }
+                    _ => None,
+                }
+            })
+            .expect_err("isolated topology must not use shared domain transport fallback");
+        assert!(
+            format!("{err:#}").contains(DOMAIN_TRANSPORT_SHARED_URL_ENV),
+            "error should name shared fallback env: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_targets_build_typed_outbound_mtls_policy() {
+        let targets =
+            build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |name| {
+                match name {
+                    DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV => Some("identity".to_string()),
+                    DOMAIN_TRANSPORT_SHARED_URL_ENV => {
+                        Some("https://gateway.internal/rpc".to_string())
+                    }
+                    DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
+                        Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
+                    }
+                    "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET" => {
+                        Some("spiffe://example.org/ns/rss/sa/identity".to_string())
+                    }
+                    _ => None,
+                }
+            })
+            .expect("valid domain transport target config");
+        assert_eq!(targets.len(), 1);
+    }
+
+    #[derive(Clone)]
+    struct NoopRuntimeDomainTransport {
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl distributed::DomainTransport for NoopRuntimeDomainTransport {
+        fn dispatch(
+            &self,
+            _request: distributed::DomainRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            distributed::DomainResponse,
+                            distributed::DomainTransportError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                Ok(distributed::DomainResponse::new(
+                    204,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            })
+        }
+    }
+
+    impl ManagedResource for NoopRuntimeDomainTransport {
+        fn name(&self) -> &str {
+            "domain-http-transport"
+        }
+
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            Ok(())
+        }
+    }
+
+    impl RuntimeDomainTransport for NoopRuntimeDomainTransport {
+        fn readiness(&self) -> httpd::DomainHttpReadiness {
+            if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+                httpd::DomainHttpReadiness::Ready
+            } else {
+                httpd::DomainHttpReadiness::MtlsSourceUnavailable
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_runtime_exports_dispatch_resource_and_readyz() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let runtime = DomainTransportRuntime::new(NoopRuntimeDomainTransport {
+            ready: Arc::clone(&ready),
+        });
+        let _dispatch = runtime.dispatch_handle();
+        let module = runtime
+            .module_result()
+            .expect("domain transport module result");
+
+        assert_eq!(module.resources.len(), 1);
+        assert_eq!(module.resources[0].name(), "domain-http-transport");
+        assert_eq!(module.probes.len(), 1);
+        let healthy = module.probes[0].1.check();
+        assert_eq!(healthy.name().as_str(), DOMAIN_TRANSPORT_READY_PROBE_NAME);
+        assert_eq!(healthy.status(), HealthStatus::Healthy);
+        assert_eq!(healthy.detail(), "ready");
+
+        ready.store(false, std::sync::atomic::Ordering::Release);
+        let unhealthy = module.probes[0].1.check();
+        assert_eq!(unhealthy.status(), HealthStatus::Unhealthy);
+        assert_eq!(unhealthy.detail(), "mtls-source-unavailable");
+    }
+
+    #[test]
     fn provider_from_b64_empty_keys_fails_fast() {
         // 无任何 key → VerifierConfigBuilder::build fail-fast（无 key 的 provider 是配置错误）。
         assert!(
@@ -5860,6 +6324,88 @@ mod tests {
             format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
             "error must identify plaintext opt-in env: {err:#}"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_service_token_non_loopback_requires_migration_ticket() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let err = listener_addr_from_at(
+            ListenerKind::Internal,
+            |name| match name {
+                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
+                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
+                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+                _ => None,
+            },
+            now,
+        )
+        .expect_err("wildcard Internal service-token listener needs a migration ticket");
+        assert!(
+            format!("{err:#}").contains(INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV),
+            "error should name migration ticket env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_service_token_migration_ticket_must_not_be_expired() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let err = listener_addr_from_at(
+            ListenerKind::Internal,
+            |name| match name {
+                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
+                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
+                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+                INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV => Some("SEC-1500".to_string()),
+                INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV => Some("1000".to_string()),
+                _ => None,
+            },
+            now,
+        )
+        .expect_err("expired migration ticket must fail startup");
+        assert!(
+            format!("{err:#}").contains(INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV),
+            "error should name migration expiry env: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_service_token_non_loopback_accepts_unexpired_migration_ticket() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let addr = listener_addr_from_at(
+            ListenerKind::Internal,
+            |name| match name {
+                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
+                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
+                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+                INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV => Some("SEC-1500".to_string()),
+                INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV => Some("3000".to_string()),
+                _ => None,
+            },
+            now,
+        )
+        .expect("unexpired migration ticket allows explicit transition");
+        assert!(addr.ip().is_unspecified());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_service_token_loopback_does_not_require_migration_ticket() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let addr = listener_addr_from_at(
+            ListenerKind::Internal,
+            |name| match name {
+                "RSS_INTERNAL_LISTEN_ADDR" => Some("127.0.0.1:8081".to_string()),
+                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
+                LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+                _ => None,
+            },
+            now,
+        )
+        .expect("loopback service-token listener remains a local test migration path");
+        assert!(addr.ip().is_loopback());
     }
 
     // ── shutdown 失败聚合（report_shutdown_failures）────────────────────────────────────

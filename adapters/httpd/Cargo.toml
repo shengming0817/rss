@@ -20,7 +20,10 @@ workspace = true
 [dependencies]
 diport = { path = "../../crates/diport" }
 authn = { path = "../../crates/authn" }
+distributed = { path = "../../crates/distributed" }
 axum = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
+rustls = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -30,9 +33,10 @@ spiffe-rustls = { workspace = true }
 spiffe-rustls-tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tower = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 # bind 127.0.0.1:0 → 真 socket serve + raw TcpStream HTTP/1.1 GET 断言 200 + shutdown 收敛（hermetic，无外部 dep）。
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net"] }
-rustls = { workspace = true }
 rcgen = { workspace = true }
+vocab = { path = "../../crates/vocab" }

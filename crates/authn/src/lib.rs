@@ -43,7 +43,10 @@ const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requ
 mod mint;
 pub use mint::{JwtAlg, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
 mod mtls;
-pub use mtls::{MtlsAllowSet, MtlsIdentityError, SpiffeId, VerifiedMtlsPeer, verify_mtls_peer};
+pub use mtls::{
+    MtlsAllowSet, MtlsIdentityError, MtlsTrustDomain, MtlsTrustDomainAllowSet, OutboundMtlsPolicy,
+    SpiffeId, VerifiedMtlsPeer, verify_mtls_peer,
+};
 
 // kind claim 字符串常量（单源：验签侧 `derive_from_claims` 读、mint 侧 `kind_claim` 写，同一组常量防漂移）。
 const KIND_USER: &str = "user";

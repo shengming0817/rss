@@ -36,6 +36,34 @@ const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
 
+struct NoopDomainTransport;
+
+impl distributed::DomainTransport for NoopDomainTransport {
+    fn dispatch(
+        &self,
+        _request: distributed::DomainRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Ok(distributed::DomainResponse::new(
+                204,
+                Vec::new(),
+                Vec::new(),
+            ))
+        })
+    }
+}
+
+fn noop_domain_transport() -> std::sync::Arc<dyn distributed::DomainTransport> {
+    std::sync::Arc::new(NoopDomainTransport)
+}
+
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations）。
 async fn connect_pg()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
@@ -197,6 +225,7 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        domain_transport: noop_domain_transport(),
     };
 
     // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回 (SettingsDomain, DomainModuleResult)；

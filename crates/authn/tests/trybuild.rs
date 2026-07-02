@@ -17,4 +17,5 @@ fn ui() {
     t.compile_fail("tests/ui/external_cannot_construct_fail.rs");
     t.compile_fail("tests/ui/external_cannot_construct_mtls_peer_fail.rs");
     t.compile_fail("tests/ui/external_cannot_seal_mtls_peer_fail.rs");
+    t.compile_fail("tests/ui/external_cannot_construct_outbound_mtls_policy_fail.rs");
 }

@@ -56,6 +56,34 @@ const JWT_EXP_FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01T00:00:00Z.
 const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
 const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
 
+struct NoopDomainTransport;
+
+impl distributed::DomainTransport for NoopDomainTransport {
+    fn dispatch(
+        &self,
+        _request: distributed::DomainRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Ok(distributed::DomainResponse::new(
+                204,
+                Vec::new(),
+                Vec::new(),
+            ))
+        })
+    }
+}
+
+fn noop_domain_transport() -> Arc<dyn distributed::DomainTransport> {
+    Arc::new(NoopDomainTransport)
+}
+
 // ── vault Transit mock helpers（mirror refresh_mint_e2e.rs） ────────────────────────────────────
 
 /// 测试 P-256 私钥（静态，dev-only；mock vault 用此 key 签）。
@@ -394,6 +422,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        domain_transport: noop_domain_transport(),
     };
 
     // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
@@ -631,6 +660,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        domain_transport: noop_domain_transport(),
     };
     let identity_domain = wire_identity_with(
         &deps,

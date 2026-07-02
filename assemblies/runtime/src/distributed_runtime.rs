@@ -11,7 +11,9 @@ use std::time::Duration;
 use consistency::{
     BacklogMetricSample, EngineError, EngineErrorKind, OutboxBacklog, RetentionSweeper,
 };
-use distributed::{CasKey, CasOutcome, CasRequest, DistError, FencingToken, LockGrant, LockKey};
+use distributed::{
+    CasKey, CasOutcome, CasRequest, DistError, DomainTransport, FencingToken, LockGrant, LockKey,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time;
@@ -29,6 +31,7 @@ const OUTBOX_MAINTENANCE_RENEW_INTERVAL: Duration = Duration::from_millis(5);
 pub struct DistributedRuntimeDeps {
     locker: Arc<Mutex<distributed::Locker>>,
     state_cas: Arc<Mutex<distributed::StateCas>>,
+    domain_transport: Arc<dyn DomainTransport>,
 }
 
 impl DistributedRuntimeDeps {
@@ -40,6 +43,12 @@ impl DistributedRuntimeDeps {
             state_cas: Arc::clone(&self.state_cas),
             cas_state: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Shared outbound domain transport dispatch seam.
+    #[must_use]
+    pub fn domain_transport(&self) -> Arc<dyn DomainTransport> {
+        Arc::clone(&self.domain_transport)
     }
 }
 
@@ -56,6 +65,7 @@ pub fn wire_distributed(deps: &SharedRuntimeDeps) -> anyhow::Result<DistributedR
         state_cas: Arc::new(Mutex::new(distributed::StateCas::new(
             deps.pg.infra().cas_store(),
         ))),
+        domain_transport: Arc::clone(&deps.domain_transport),
     })
 }
 
@@ -304,6 +314,33 @@ mod tests {
     type CasMap = HashMap<String, (Vec<u8>, vocab::Epoch)>;
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+    struct NoopDomainTransport;
+
+    impl distributed::DomainTransport for NoopDomainTransport {
+        fn dispatch(
+            &self,
+            _request: distributed::DomainRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            distributed::DomainResponse,
+                            distributed::DomainTransportError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                Ok(distributed::DomainResponse::new(
+                    204,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            })
+        }
+    }
+
     #[allow(clippy::expect_used)]
     // reason: runtime wrapper tests use fixed known-valid tenant/contract fixtures.
     fn backlog_metric_sample(depth: u64, oldest_age_seconds: u64) -> BacklogMetricSample {
@@ -341,6 +378,7 @@ mod tests {
                 state_cas: Arc::new(Mutex::new(distributed::StateCas::new(
                     diport::DynCasStore::new_box(self.clone()),
                 ))),
+                domain_transport: Arc::new(NoopDomainTransport),
             }
         }
 
@@ -510,6 +548,15 @@ mod tests {
             self.completed.store(true, Ordering::SeqCst);
             Ok(vec![backlog_metric_sample(13, 17)])
         }
+    }
+
+    #[test]
+    fn distributed_runtime_deps_exposes_domain_transport_handle() {
+        let deps = FakeDistributedStore::default().deps();
+        let first = deps.domain_transport();
+        let second = deps.domain_transport();
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[tokio::test]

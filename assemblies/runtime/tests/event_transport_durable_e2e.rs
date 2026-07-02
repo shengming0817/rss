@@ -65,6 +65,34 @@ const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+struct NoopDomainTransport;
+
+impl distributed::DomainTransport for NoopDomainTransport {
+    fn dispatch(
+        &self,
+        _request: distributed::DomainRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Ok(distributed::DomainResponse::new(
+                204,
+                Vec::new(),
+                Vec::new(),
+            ))
+        })
+    }
+}
+
+fn noop_domain_transport() -> Arc<dyn distributed::DomainTransport> {
+    Arc::new(NoopDomainTransport)
+}
+
 fn amqp_endpoint(url: &str) -> Result<secure::AmqpEndpoint> {
     Ok(secure::AmqpEndpoint::parse(
         url,
@@ -498,6 +526,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         s3,
         vault,
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
+        domain_transport: noop_domain_transport(),
     };
     let distributed = wire_distributed(&deps)?;
     let event_runtime = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
