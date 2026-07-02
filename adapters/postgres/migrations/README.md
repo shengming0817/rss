@@ -2,7 +2,7 @@
 
 `adapters/postgres/migrations/` 是 postgres adapter 的迁移单源，由 `PgStore::run_migrations`
 经 `sqlx::migrate!("./migrations")`（编译期 `include_str!` 内嵌）应用。eventexec durable 拓扑
-（outbox / inbox_dedup / dead_letter / saga_journal / checkpoint / projection_events）的表由 P4–P10
+（outbox / inbox_dedup / inbox_receipts / dead_letter / saga_journal / checkpoint / projection_events）的表由 P4–P10
 各自的迁移按需新增；`0001_init_schema.sql` 是基线占位（不建表）。
 
 ## 命名
@@ -89,6 +89,11 @@ tenant-isolation policy。
 
 `0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
 tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
+
+`0038` 新增 `inbox_receipts` tenant 表作为 `inbox_dedup` runtime 切流的目标 receipt schema：tenant-first
+主键、contract/schema header、trace/correlation、lease CAS 状态与 `FORCE RLS` 同迁移落地。该表是可变
+claim/commit 状态，不是 append-only ledger，因此授予 `rss_app` SELECT/INSERT/UPDATE/DELETE；运行期从
+`inbox_dedup` 切到 `inbox_receipts` 由 #1650 单独推进，#1626 不引入 dual write 或兼容 shim。
 
 ## Append-only 表（REVOKE 强制）
 

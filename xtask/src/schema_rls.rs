@@ -491,6 +491,31 @@ CREATE POLICY tenant_isolation ON dead_letter
     }
 
     #[test]
+    fn green_inbox_receipts_target_schema_has_rls() {
+        let sql = r#"
+CREATE TABLE inbox_receipts (
+    tenant_id        uuid        NOT NULL,
+    event_id         text        NOT NULL,
+    consumer_group   text        NOT NULL,
+    contract_version text        NOT NULL,
+    schema_hash      text        NOT NULL,
+    PRIMARY KEY (tenant_id, event_id, consumer_group)
+);
+ALTER TABLE inbox_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inbox_receipts FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON inbox_receipts
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "inbox_receipts 应被识别为 tenant 表");
+        assert!(
+            findings.is_empty(),
+            "inbox_receipts 目标 RLS 三件套不应有 findings: {findings:?}"
+        );
+    }
+
+    #[test]
     fn red_alter_add_tenant_column_missing_rls() {
         let sql = r#"
 CREATE TABLE dead_letter (id bigserial PRIMARY KEY);
@@ -649,6 +674,31 @@ CREATE POLICY p ON sessions USING (true);
         );
         assert_eq!(findings[0].rule, Rule::PolicyWeak, "应报 PolicyWeak");
         assert_eq!(findings[0].subject, "sessions");
+    }
+
+    #[test]
+    fn red_inbox_receipts_policy_must_use_nullif_tenant_predicate() {
+        let sql = r#"
+CREATE TABLE inbox_receipts (
+    tenant_id uuid NOT NULL,
+    event_id text NOT NULL,
+    consumer_group text NOT NULL
+);
+ALTER TABLE inbox_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inbox_receipts FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON inbox_receipts
+    USING (tenant_id = current_setting('rss.tenant_id', true)::uuid)
+    WITH CHECK (tenant_id = current_setting('rss.tenant_id', true)::uuid);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(count, 1, "inbox_receipts 应被识别为 tenant 表");
+        assert_eq!(
+            findings.len(),
+            1,
+            "旧裸谓词不得通过 inbox_receipts RLS guard: {findings:?}"
+        );
+        assert_eq!(findings[0].rule, Rule::PolicyWeak);
+        assert_eq!(findings[0].subject, "inbox_receipts");
     }
 
     // ---- strip_sql_comments 单元测试 ----

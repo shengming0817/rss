@@ -624,6 +624,344 @@ async fn inbox_dedup_claims_then_duplicates_and_group_drift() -> TestResult {
     Ok(())
 }
 
+/// inbox_receipts target schema catalog lock (#1626).
+///
+/// This is Phase 1 evidence for replacing `inbox_dedup`: the final tenant-scoped
+/// mutable receipt table must exist with its target columns, tenant-first primary
+/// key, indexes, and DB-level CHECK constraints before runtime is cut over.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbox_receipts_schema_catalog_after_migrations() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let columns: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'inbox_receipts' \
+         ORDER BY ordinal_position",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        columns,
+        vec![
+            (
+                "tenant_id".to_string(),
+                "uuid".to_string(),
+                "NO".to_string()
+            ),
+            ("event_id".to_string(), "text".to_string(), "NO".to_string()),
+            (
+                "consumer_group".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            ("domain".to_string(), "text".to_string(), "NO".to_string()),
+            ("topic".to_string(), "text".to_string(), "NO".to_string()),
+            (
+                "contract_id".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "contract_version".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "schema_hash".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            ("trace".to_string(), "text".to_string(), "YES".to_string()),
+            (
+                "correlation_id".to_string(),
+                "text".to_string(),
+                "YES".to_string()
+            ),
+            ("status".to_string(), "text".to_string(), "NO".to_string()),
+            (
+                "lease_token".to_string(),
+                "uuid".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "receive_count".to_string(),
+                "integer".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "claimed_at".to_string(),
+                "timestamp with time zone".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "committed_at".to_string(),
+                "timestamp with time zone".to_string(),
+                "YES".to_string()
+            ),
+            (
+                "updated_at".to_string(),
+                "timestamp with time zone".to_string(),
+                "NO".to_string()
+            ),
+        ],
+        "inbox_receipts columns must match the target runtime replacement shape"
+    );
+
+    let pk_columns: (String,) = sqlx::query_as(
+        "SELECT string_agg(a.attname, ',' ORDER BY k.ord) \
+         FROM pg_constraint c \
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+         WHERE c.conrelid = 'inbox_receipts'::regclass AND c.contype = 'p'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        pk_columns.0, "tenant_id,event_id,consumer_group",
+        "inbox_receipts primary key must be tenant-first"
+    );
+
+    let indexes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname, lower(indexdef) \
+         FROM pg_indexes \
+         WHERE schemaname = 'public' AND tablename = 'inbox_receipts' \
+         ORDER BY indexname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let index_text = indexes
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for needle in [
+        "idx_inbox_receipts_stale_claims",
+        "tenant_id, consumer_group, claimed_at",
+        "where (status = 'claimed'::text)",
+        "idx_inbox_receipts_done_retention",
+        "status, committed_at",
+        "where (status = 'done'::text)",
+        "idx_inbox_receipts_contract_schema",
+        "tenant_id, domain, contract_id, contract_version, schema_hash",
+    ] {
+        assert!(
+            index_text.contains(needle),
+            "missing inbox_receipts index shape `{needle}` in:\n{index_text}"
+        );
+    }
+
+    let constraints: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname, pg_get_constraintdef(oid) \
+         FROM pg_constraint \
+         WHERE conrelid = 'inbox_receipts'::regclass \
+         ORDER BY conname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let constraint_text = constraints
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for name in [
+        "inbox_receipts_contract_version_valid",
+        "inbox_receipts_schema_hash_valid",
+        "inbox_receipts_status_valid",
+        "inbox_receipts_trace_valid",
+        "inbox_receipts_correlation_id_valid",
+        "inbox_receipts_receive_count_positive",
+        "inbox_receipts_commit_timestamp_matches_status",
+    ] {
+        assert!(
+            constraint_text.contains(name),
+            "missing inbox_receipts constraint `{name}` in:\n{constraint_text}"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// inbox_receipts RLS/grant lock (#1626).
+///
+/// The table is mutable claim state, so rss_app needs DML privileges, but every
+/// row must still be scoped by FORCE RLS and the standard tenant isolation policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbox_receipts_rls_grants_and_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let (rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, \
+                has_table_privilege('rss_app', 'inbox_receipts', 'SELECT'), \
+                has_table_privilege('rss_app', 'inbox_receipts', 'INSERT'), \
+                has_table_privilege('rss_app', 'inbox_receipts', 'UPDATE'), \
+                has_table_privilege('rss_app', 'inbox_receipts', 'DELETE') \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'inbox_receipts'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(rls_enabled, "inbox_receipts must ENABLE RLS");
+    assert!(rls_forced, "inbox_receipts must FORCE RLS");
+    assert!(can_select, "rss_app must SELECT inbox_receipts");
+    assert!(can_insert, "rss_app must INSERT inbox_receipts");
+    assert!(can_update, "rss_app must UPDATE inbox_receipts");
+    assert!(
+        can_delete,
+        "rss_app must DELETE inbox_receipts for release/sweep mutable state paths"
+    );
+
+    let (qual, with_check): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT qual, with_check \
+         FROM pg_policies \
+         WHERE schemaname = 'public' \
+           AND tablename = 'inbox_receipts' \
+           AND policyname = 'tenant_isolation'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    for body in [qual.as_deref(), with_check.as_deref()] {
+        let body = body.ok_or_else(|| {
+            std::io::Error::other("tenant_isolation policy must define both USING and WITH CHECK")
+        })?;
+        assert!(
+            body.to_lowercase().contains("nullif(current_setting"),
+            "tenant_isolation policy must use NULLIF(current_setting(...)): {body}"
+        );
+        assert!(
+            body.contains("rss.tenant_id"),
+            "tenant_isolation policy must reference rss.tenant_id: {body}"
+        );
+    }
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let event_id = format!("receipt-{}", uuid::Uuid::new_v4());
+    let group = format!("receipt-group-{}", uuid::Uuid::new_v4());
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO inbox_receipts \
+             (tenant_id, event_id, consumer_group, domain, topic, contract_id, \
+              contract_version, schema_hash, trace, correlation_id, status, lease_token, receive_count) \
+             VALUES \
+             ($1::uuid, $2, $3, 'identity', 'identity.session-created', \
+              'identity.session-created', 'v1', $4, '00-00000000000000000000000000000000-0000000000000000-00', \
+              'corr-receipt', 'claimed', gen_random_uuid(), 1)",
+        )
+        .bind(&tenant_a)
+        .bind(&event_id)
+        .bind(&group)
+        .bind(TEST_SCHEMA_HASH)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM inbox_receipts WHERE event_id = $1 AND consumer_group = $2",
+        )
+        .bind(&event_id)
+        .bind(&group)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(cnt.0, 1, "tenant A scope must see tenant A receipt");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM inbox_receipts WHERE event_id = $1 AND consumer_group = $2",
+        )
+        .bind(&event_id)
+        .bind(&group)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(cnt.0, 0, "tenant B scope must not see tenant A receipt");
+
+        let denied = sqlx::query(
+            "INSERT INTO inbox_receipts \
+             (tenant_id, event_id, consumer_group, domain, topic, contract_id, \
+              contract_version, schema_hash, status, lease_token, receive_count) \
+             VALUES \
+             ($1::uuid, 'receipt-denied', 'receipt-denied-group', 'identity', \
+              'identity.session-created', 'identity.session-created', 'v1', $2, \
+              'claimed', gen_random_uuid(), 1)",
+        )
+        .bind(&tenant_a)
+        .bind(TEST_SCHEMA_HASH)
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            denied.is_err(),
+            "tenant B scope must not insert a tenant A receipt"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM inbox_receipts WHERE event_id = $1 AND consumer_group = $2",
+        )
+        .bind(&event_id)
+        .bind(&group)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "missing rss.tenant_id must fail closed for inbox_receipts"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 在独立事务内读 `rss_tx_probe` 行数（committed 数据跨池连接可见）。
 async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
     store
@@ -2683,11 +3021,15 @@ async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
     .await?;
 
     let invalid_retain = crate::outbox::max_redelivery_window_secs() as u64;
-    let err = store
-        .inbox_sweeper()
-        .sweep(invalid_retain)
-        .await
-        .expect_err("retain_seconds 等于 redelivery floor 应 fail-closed");
+    let err = match store.inbox_sweeper().sweep(invalid_retain).await {
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "retain_seconds 等于 redelivery floor 应 fail-closed",
+            )
+            .into());
+        }
+        Err(err) => err,
+    };
     assert_eq!(err.kind(), consistency::EngineErrorKind::Invariant);
 
     let row: (i64,) = sqlx::query_as(

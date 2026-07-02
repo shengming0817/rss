@@ -79,8 +79,8 @@ Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SEC
 NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前向迁移升级）；缺失即门红。
 
 app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
-（sessions / config_entries / roles / secret_refs / credentials / refresh_tokens / abac_policies；audit_entries 仅
-SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
+（sessions / config_entries / roles / secret_refs / credentials / refresh_tokens / abac_policies /
+inbox_receipts；audit_entries 仅 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
 不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
 bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving pool 必须以 `rss_app`
 连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非 `rss_app` serving role。
@@ -94,6 +94,12 @@ outbox 是 tenant-scoped 表：`tenant_id uuid NOT NULL` 与 metadata `tenantId`
 进入 dlx 的队头不得阻塞 tenant B 的同 key 投递。跨租 relay / retention / backlog 维护不得给 `rss_app`
 开放 outbox 全表 UPDATE/DELETE，只能调用迁移安装的固定 `SECURITY DEFINER` 函数；函数 owner 为 NOLOGIN
 BYPASSRLS 维护角色，函数签名是运行期唯一全域 outbox DML 通道。
+
+inbox_receipts 是 `inbox_dedup` 后继的 tenant-scoped mutable receipt 表：主键为
+`(tenant_id, event_id, consumer_group)`，并持久化 contract/schema header、trace/correlation 与
+lease/commit 状态；它同样受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。#1626
+只落地目标 schema、RLS、grant 与 catalog guard；运行期 `InboxStore` context fanout、sweeper/backlog 切流和
+`inbox_dedup` 退役由 #1650 推进。两阶段之间不得引入 dual write 或长期兼容 shim。
 
 saga_journal / projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围；它们依赖
 seq 全局顺序、owner checkpoint / consumer group 隔离与上层 envelope tenant authority，不承载 outbox
@@ -157,7 +163,9 @@ backstop probe：启动验证通过后标记 `Healthy`（→ 200）；未通过�
 （Hard）与 xtask setlocal-funnel / pg-tenant-tx-guard 守卫（Medium）及启动能力门控（Medium），
 为以下同批 issue 提供稳定底座：
 
-- **#1581**：outbox tenant 注入已落地（`tenant_id` + RLS + 固定 SECURITY DEFINER 维护函数）；inbox tenant 维度仍单列跟踪。
+- **#1581 / #1626 / #1650**：outbox tenant 注入已落地（`tenant_id` + RLS + 固定 SECURITY DEFINER
+  维护函数）；#1626 落地 `inbox_receipts` 目标 schema/RLS，runtime 切流与 `inbox_dedup` 退役由 #1650
+  单列跟踪。
 - **#1582**：tenant repo conformance 已纳入真实 postgres repos（config seed + role / audit / dead_letter 等），完整 CAS / rollback / co-tx 扩展仍按后续 conformance 范围推进。
 - **#1436 / #1580**：PG tx funnel / raw-pool guard（`TxManager` 旁路保护）。
 
