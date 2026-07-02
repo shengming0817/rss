@@ -66,6 +66,7 @@ use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
+use crate::consumer_tx::{ConsumerTxHandlerFn, run_consumer_ackable_tx};
 use crate::relay::WorkerHealth;
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
@@ -379,6 +380,46 @@ where
                 tracing::error!(
                     error = %err,
                     "consumer: subscribe_ackable failed; worker exiting"
+                );
+            }
+        }
+    });
+    ConsumerWorker::adopt(name, handle, health, token)
+}
+
+/// spawn at-least-once ConsumerTx worker，并在 worker 线程内订阅 ackable stream。
+#[allow(clippy::too_many_arguments)]
+// reason: 与 spawn_consumer_ackable_subscriber 同形；handler 换成 ConsumerTxHandlerFn，参数均为 worker
+// 生命周期和消费语义必要输入。
+pub fn spawn_consumer_ackable_tx_subscriber<S>(
+    name: String,
+    subscriber: Box<DynAckableSubscriber<'static>>,
+    topic: Topic,
+    idempotency: Arc<S>,
+    dlx: Box<DynDeadLetterStore<'static>>,
+    meta: ConsumerMeta,
+    handler: ConsumerTxHandlerFn,
+    lease_cfg: LeaseConfig,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+) -> ConsumerWorker
+where
+    S: InboxStore + Send + Sync + 'static,
+{
+    let token_run = token.clone();
+    let health_run = Arc::clone(&health);
+    let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
+    let handle = spawn_consumer_thread(&name, health.clone(), move || async move {
+        match subscriber.subscribe_ackable(topic, token_run.clone()).await {
+            Ok(stream) => {
+                health_run.mark_healthy();
+                run_consumer_ackable_tx(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+            }
+            Err(err) => {
+                health_run.mark_subscriber_unavailable();
+                tracing::error!(
+                    error = %err,
+                    "consumer-tx: subscribe_ackable failed; worker exiting"
                 );
             }
         }

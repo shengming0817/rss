@@ -32,7 +32,7 @@ use consistency::{
 use sqlx::{PgPool, Row};
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, TxCapability};
 
 /// inbox 租约过期阈值（秒）；claimed 行超此阈值未续租即可被 TTL 重捞（镜 outbox `LEASE_TTL_SECONDS`，#1213）。
 ///
@@ -225,7 +225,7 @@ struct ReceiptFields {
 }
 
 impl ReceiptFields {
-    fn from_context(ctx: &InboxReceiptContext) -> Self {
+    pub(crate) fn from_context(ctx: &InboxReceiptContext) -> Self {
         let tenant = ctx.tenant_id();
         Self {
             tenant,
@@ -258,6 +258,60 @@ fn inbox_db_error(operation: &'static str, error: sqlx::Error) -> EngineError {
         "inbox: db error"
     );
     EngineError::new(EngineErrorKind::Transient)
+}
+
+/// Mark a claimed inbox receipt as done inside an existing tenant-scoped transaction.
+///
+/// This is the ConsumerTx commit leg: callers must execute business writes and outbox appends on
+/// the same [`TxCapability`] before calling this helper, then commit the surrounding transaction.
+pub(crate) async fn commit_in_tx(
+    tx: &mut TxCapability<'_>,
+    ctx: &InboxReceiptContext,
+    key: &IdemKey,
+    lease: &LeaseToken,
+) -> Result<LeaseOutcome, EngineError> {
+    let fields = ReceiptFields::from_context(ctx);
+    commit_fields_in_tx(
+        tx,
+        &fields,
+        key.as_str(),
+        lease.as_str(),
+        "inbox_commit_in_tx",
+    )
+    .await
+}
+
+async fn commit_fields_in_tx(
+    tx: &mut TxCapability<'_>,
+    fields: &ReceiptFields,
+    key: &str,
+    lease: &str,
+    operation: &'static str,
+) -> Result<LeaseOutcome, EngineError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE inbox_receipts
+        SET status = 'done', committed_at = now(), updated_at = now()
+        WHERE tenant_id = $1::uuid
+          AND event_id = $2
+          AND consumer_group = $3
+          AND lease_token = $4::uuid
+          AND status = 'claimed'
+        "#,
+    )
+    .bind(&fields.tenant_id)
+    .bind(key)
+    .bind(&fields.consumer_group)
+    .bind(lease)
+    .execute(tx.conn())
+    .await
+    .map_err(|e| inbox_db_error(operation, e))?;
+
+    Ok(if result.rows_affected() == 1 {
+        LeaseOutcome::Held
+    } else {
+        LeaseOutcome::Lost
+    })
 }
 
 impl InboxStore for PgInboxStore {
@@ -438,30 +492,7 @@ impl InboxStore for PgInboxStore {
                     let key = key.clone();
                     let lease = lease.clone();
                     Box::pin(async move {
-                        let result = sqlx::query(
-                            r#"
-                            UPDATE inbox_receipts
-                            SET status = 'done', committed_at = now(), updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND event_id = $2
-                              AND consumer_group = $3
-                              AND lease_token = $4::uuid
-                              AND status = 'claimed'
-                            "#,
-                        )
-                        .bind(&fields.tenant_id)
-                        .bind(&key)
-                        .bind(&fields.consumer_group)
-                        .bind(&lease)
-                        .execute(tx.conn())
-                        .await
-                        .map_err(|e| inbox_db_error("inbox_commit", e))?;
-
-                        Ok(if result.rows_affected() == 1 {
-                            LeaseOutcome::Held
-                        } else {
-                            LeaseOutcome::Lost
-                        })
+                        commit_fields_in_tx(tx, &fields, &key, &lease, "inbox_commit").await
                     })
                 },
                 |e| inbox_db_error("inbox_commit_tx", e),

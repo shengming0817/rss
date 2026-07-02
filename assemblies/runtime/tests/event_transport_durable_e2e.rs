@@ -5,8 +5,8 @@
 //! 仅一次（20s timeout）。
 //!
 //! 断言 B（PG inbox 幂等去重，tracer 正向见证）：重投同一 event_id（duplicate）+ 一条新 event_id（tracer，
-//! 同 payload → Fresh → append）。FIFO 单 consumer：tracer 被 audit（len→2）证明其之前的 duplicate 已被
-//! 真实消费+settle；稳定 len==2（original + tracer）证明 duplicate 命中 Duplicate 去重（升到 3 即去重失效）。
+//! 同 payload → Fresh → append）。FIFO 单 consumer：tracer 被 audit（PG count→2）证明其之前的 duplicate
+//! 已被真实消费+settle；稳定 count==2（original + tracer）证明 duplicate 命中 Duplicate 去重（升到 3 即去重失效）。
 //!
 //! `#![cfg(feature = "integration")]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
@@ -228,26 +228,9 @@ impl diport::Publisher for NoopPublisher {
 // ── CapturingVerifier（自 journeys/tests/common/mod.rs 复制）──────────────────────────────
 
 /// 审计链 HMAC 测试 verifier：捕获每次 `sign` 调用的 message，确定性折叠产出 32B 标签（链一致）。
-/// `audited().len()` 含 append + verify 全部 sign 调用次数。
 #[derive(Clone, Default)]
 struct CapturingVerifier {
     messages: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl CapturingVerifier {
-    fn audited(&self) -> Vec<Vec<u8>> {
-        self.messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-    }
 }
 
 impl MacVerifier for CapturingVerifier {
@@ -372,6 +355,24 @@ async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> R
     Ok(count)
 }
 
+async fn wait_inbox_done(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if inbox_done_count(pool, event_id, group)
+                .await
+                .is_ok_and(|count| count == 1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("timeout 20s 内 event {event_id} 未被 consumer group {group} 消费")
+    })
+}
+
 async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) -> Result<String> {
     let (event_id,): (String,) = sqlx::query_as(
         r#"
@@ -389,13 +390,38 @@ async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) 
     Ok(event_id)
 }
 
+async fn audit_login_count(pool: &sqlx::PgPool, tenant: TenantId, session_id: &str) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let (count,): (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*)
+        FROM audit_entries
+        WHERE tenant_id = $1::uuid
+          AND action = 'identity:login'
+          AND resource_kind = 'session'
+          AND resource_id = $2
+          AND outcome = 'success'
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(session_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(count)
+}
+
 // ── e2e 测试主体 ───────────────────────────────────────────────────────────────────────────
 
 /// durable e2e：`wire_event_transport` 真容器贯通验收（#1251 task 6）。
 ///
 /// - 断言 A：login → PgOutbox(pending) → relay → AMQP → consumer → PG inbox(Fresh) → audit append（至少一次）。
 /// - 断言 B：重投同一 event_id（duplicate）+ tracer（新 event_id）→ tracer 被消费正向见证 duplicate 已消费；
-///   稳定 audit len==2 + `inbox_receipts` done 行证明 duplicate 命中 PG inbox Duplicate 去重。
+///   稳定 PG audit count==2 + `inbox_receipts` done 行证明 duplicate 命中 PG inbox Duplicate 去重。
 ///
 /// 需 docker：`cargo test -p runtime --features integration event_transport_durable -- --nocapture`
 /// 或 `cargo nextest run -p runtime --features integration`。无 docker 时只需通过
@@ -418,7 +444,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 3：域装配（identity + settings + audit）────────────────────────────────────────
 
-    let (audit_domain_inst, audit) = audit_domain();
+    let (audit_domain_inst, _audit) = audit_domain();
 
     // identity 域：with_seed_credential 注入 in-mem 凭据 + PgSessionLifecycle durable co-tx。
     let refresh_identity = identity::seed_refresh_service(
@@ -463,14 +489,58 @@ async fn event_transport_durable_e2e() -> Result<()> {
             config_value_protections()?,
         )
         .into_parts();
-    let settings_service = Arc::new(SettingsService::with_postgres(
+    let subscriber_settings_service = Arc::new(SettingsService::with_postgres(
         settings_configs,
         settings_writer,
         empty_flag_store(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
-    let settings_domain =
-        SettingsDomain::new(Arc::clone(&settings_service), Arc::from(settings_secrets));
+    let settings_domain = SettingsDomain::new(
+        Arc::clone(&subscriber_settings_service),
+        Arc::from(settings_secrets),
+    );
+    let (publisher_settings_configs, publisher_settings_writer, _publisher_settings_secrets) =
+        settings_pg
+            .settings_bundle(
+                Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+                config_value_protections()?,
+            )
+            .into_parts();
+    let publisher_settings_service = Arc::new(SettingsService::with_postgres(
+        publisher_settings_configs,
+        publisher_settings_writer,
+        empty_flag_store(),
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+    ));
+
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let settings_key = "app.runtime-e2e";
+    let settings_actor = OutboxActor::scoped(
+        vocab::PrincipalKind::Admin,
+        OpaqueActorId::from_opaque("settings-event-transport-e2e")?,
+        tenant,
+        vocab::ScopedTenant::Tenant,
+    );
+    publisher_settings_service
+        .publish_config(
+            tenant,
+            settings_actor.clone(),
+            SettingsConfigPublishRequest {
+                key: settings_key.to_string(),
+                value: "disabled".to_string(),
+            },
+        )
+        .await?;
+    let initial_settings_event_id =
+        latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
+    assert_eq!(
+        subscriber_settings_service
+            .get_value(tenant, settings_key)
+            .await?
+            .as_deref(),
+        Some("disabled"),
+        "subscriber settings cache must start with the old value before the ConsumerTx refresh"
+    );
 
     // ── 步骤 4：compose + drain subscribers（generated event topology 对应的订阅绑定）────────────
 
@@ -557,14 +627,22 @@ async fn event_transport_durable_e2e() -> Result<()> {
         domain_transport: noop_domain_transport(),
     };
     let distributed = wire_distributed(&deps)?;
-    let event_runtime = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
+    let event_runtime = wire_event_transport(
+        &pg,
+        distributed,
+        subscribers,
+        cfg,
+        Arc::clone(&subscriber_settings_service),
+    )
+    .await?;
     assert!(
         event_runtime.module.resources.is_empty(),
         "event transport workers must drain through DomainModuleResult::workers"
     );
+    let expected_worker_count = generated::event::SUBSCRIPTIONS.len() + 6;
     assert_eq!(
         event_runtime.module.workers.len(),
-        9,
+        expected_worker_count,
         "identity/settings relays + generated consumers + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
     );
     let probe_names: Vec<&str> = event_runtime
@@ -600,15 +678,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 8a：settings active event 走生产 relay + AMQP consumer bridge ───────────────────
 
-    let tenant = TenantId::parse(CANON_TENANT)?;
-    let settings_key = "app.runtime-e2e";
-    let settings_actor = OutboxActor::scoped(
-        vocab::PrincipalKind::Admin,
-        OpaqueActorId::from_opaque("settings-event-transport-e2e")?,
-        tenant,
-        vocab::ScopedTenant::Tenant,
-    );
-    settings_service
+    wait_inbox_done(
+        &assertion_pool,
+        &initial_settings_event_id,
+        &settings_consumer_group,
+    )
+    .await?;
+    publisher_settings_service
         .publish_config(
             tenant,
             settings_actor,
@@ -620,34 +696,19 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .await?;
     let settings_event_id =
         latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if inbox_done_count(
-                &assertion_pool,
-                &settings_event_id,
-                &settings_consumer_group,
-            )
-            .await
-            .is_ok_and(|count| count == 1)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "timeout 20s 内 settings config-version-changed 未被 settings subscriber 消费"
-        )
-    })?;
+    wait_inbox_done(
+        &assertion_pool,
+        &settings_event_id,
+        &settings_consumer_group,
+    )
+    .await?;
     assert_eq!(
-        settings_service
+        subscriber_settings_service
             .get_value(tenant, settings_key)
             .await?
             .as_deref(),
         Some("enabled"),
-        "settings subscriber path must leave the published config readable"
+        "settings ConsumerTx must refresh the subscriber service cache from the old value"
     );
 
     // ── 步骤 8：生产侧登录（PgSessionLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
@@ -727,7 +788,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // relay（后台 OS 线程）会在下次 2s 轮询时拾起 pending entry → AMQP publish → consumer → PG inbox
     // Fresh → audit append。20s timeout 覆盖 2s relay 间隔 + AMQP 投递 + consumer 处理延迟。
     tokio::time::timeout(Duration::from_secs(20), async {
-        while audit.is_empty() {
+        loop {
+            if audit_login_count(&assertion_pool, tenant, &session_id)
+                .await
+                .is_ok_and(|count| count >= 1)
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -736,10 +803,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
         anyhow::anyhow!("timeout 20s 内 audit 未收到 session-created 事件（至少一次断言 A 失败）")
     })?;
 
-    // 新鲜 audit repo 单事件 append 恰触发 1 次 MacVerifier::sign（verify_integrity 读路径未在此触发）；
-    // 故 len()==1 == 恰一次审计 append（对齐 journeys identity_login_audit_journey）。
     assert_eq!(
-        audit.audited().len(),
+        audit_login_count(&assertion_pool, tenant, &session_id).await?,
         1,
         "断言 A：login → outbox → relay → AMQP → consumer → audit，仅 append 一次"
     );
@@ -784,9 +849,15 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )
     .await?;
 
-    // 正向见证：等 audit 至少再 append 一次（len>=2）——证明重投流被 consumer 真实消费（消除假阴性）。
+    // 正向见证：等 audit 至少再 append 一次（count>=2）——证明重投流被 consumer 真实消费（消除假阴性）。
     tokio::time::timeout(Duration::from_secs(20), async {
-        while audit.audited().len() < 2 {
+        loop {
+            if audit_login_count(&assertion_pool, tenant, &session_id)
+                .await
+                .is_ok_and(|count| count >= 2)
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -797,7 +868,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // 去重生效 → 稳定 len==2；去重失效 → duplicate 也 append、升到 3。再观察 2s：升到 3 即 fail-fast。
     let leaked_dup = tokio::time::timeout(Duration::from_secs(2), async {
-        while audit.audited().len() < 3 {
+        loop {
+            if audit_login_count(&assertion_pool, tenant, &session_id)
+                .await
+                .is_ok_and(|count| count >= 3)
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -807,7 +884,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "断言 B 失败：duplicate 被重复 append（audit len 升到 3），PG inbox 幂等去重未生效"
     );
     assert_eq!(
-        audit.audited().len(),
+        audit_login_count(&assertion_pool, tenant, &session_id).await?,
         2,
         "断言 B：original + tracer 各 append 一次，duplicate 命中 PG inbox Duplicate 被去重（共 2）"
     );

@@ -2524,7 +2524,8 @@ fn wire_session_sweeper(pg: &PgRuntimeDeps) -> anyhow::Result<DomainModuleResult
 ///   wiring 只拿 `PgDomainDeps<caps::Settings>`，拿不到 identity repo 或裸 pool。
 ///
 /// [`SettingsDomain`] 持构造好的 config 服务 + secret 仓储端口，经 `Domain::init` 挂 config-publish /
-/// secret-publish 路由（service 经 route 闭包捕获、**绝不**经 result 出向，WIRING-DEPS-NO-HANDOFF-01）；
+/// secret-publish 路由；同一 config service 也交给 event transport 的 settings ConsumerTx handler，用于刷新同一
+/// 进程内 cache 后再提交 inbox。
 /// `configs_ready` 探针经 [`DomainModuleResult`] 出向（探针包 `PgDbReadiness` = adapter 类型，须在组合根构造、
 /// 不能放域 crate `Domain::init`）。组合根 `compose(&[&settings_domain, ..])` 装配路由 + `merge(module)` 聚合探针。
 ///
@@ -3446,6 +3447,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let (settings_domain, settings_module) = wire_settings(&deps).await.context("wire settings")?;
 
     // settings/identity/audit domain 实例注册（声明 routes/subscribers/probes）。
+    let settings_config_service = settings_domain.config_service();
     let mut registry = bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])
         .context("compose domains")?;
 
@@ -3493,10 +3495,15 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let event_subscribers =
         event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
             .context("bridge generated event subscriptions")?;
-    let event_runtime =
-        event_transport::wire_event_transport(&pg, distributed, event_subscribers, event_cfg)
-            .await
-            .context("wire event transport")?;
+    let event_runtime = event_transport::wire_event_transport(
+        &pg,
+        distributed,
+        event_subscribers,
+        event_cfg,
+        settings_config_service,
+    )
+    .await
+    .context("wire event transport")?;
     let event_infra_guards = event_runtime.infra_guards;
     module.merge(event_runtime.module);
 

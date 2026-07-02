@@ -100,8 +100,11 @@ sealed 单 pod 原语 funnel。权威语义见 `bootstrap::sagaprojectiondeps` �
 
 ## ConsumerBase
 
-所有 consumer 使用 `ConsumerBase`。它负责 Claim / Commit / Release、幂等、
-退避重试和 DLX。业务 handler 只返回 `outbox::HandleResult`。
+所有 consumer 使用 `ConsumerBase` 的 preflight / claim / lease / broker-settle 语义。非 durable helper
+可由 handler 返回 `outbox::HandleResult` 后再由 ConsumerBase commit receipt；**durable PG runtime 必须使用
+ConsumerTx**：Fresh claim 后在同一 tenant-scoped PG transaction 内完成业务写、outgoing outbox append
+（当前订阅无 outgoing 时允许空 append 集）和 `inbox_receipts` mark processed，commit 成功后才 broker Ack。
+旧 non-tx ackable spawn 不是 durable runtime 受支持路径。
 
 ```rust
 async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
@@ -123,6 +126,29 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 （`&'static str` const，PII-safe）随结果流到 ConsumerBase 的 DLX funnel 落日志（#1125），不再在 HandleResult
 边界静默丢弃；更丰富的 per-delivery 扩展信息仍走 `DeliveryOutcome`，不污染业务结果。
 
+### Durable ConsumerTx
+
+durable PG consumer 的 Fresh 成功路径固定为：
+
+`verify envelope + tenantAuthority -> try_claim -> lease renewal race -> ConsumerTx handler -> PG commit -> broker Ack`。
+
+ConsumerTx handler 由 postgres adapter 构造，runtime 只按 generated subscription 选择 handler；外部 crate
+无法构造或逃逸 `TxCapability`。handler 在同一事务内先做业务写 / outbox append，再用同一个
+`TxCapability` 执行 inbox `done` CAS；`LeaseOutcome::Lost`、SQL/commit unknown、handler transient failure
+均不得 broker Ack。Duplicate delivery 不进入 tx handler，直接 Ack。
+ConsumerTx outcome 使用 typed constructor 收口：`handler_transient` 可在当前投递内 bounded retry，但耗尽后仍只
+broker `Requeue`，不写 app DLX、不提交 inbox `done`、不 `Ack`；`commit_unknown` / `LeaseLost` 立即 broker
+`Requeue`；只有永久 `Reject` 可写 app DLX、提交 inbox `done` 后 broker `Ack`。
+
+durable runtime 对 generated subscription fail closed：新增订阅如果没有 ConsumerTx kind mapping，测试与启动都失败。
+生产代码禁止回退到 `adapt_subscriber_handler` + old non-tx ackable spawn。payload decode / wire DTO 归属域
+crate（域可依赖 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter
+维护第二套 event schema。
+
+`settings.config-version-changed` 的 ConsumerTx 成功路径必须先刷新同一 `SettingsService` cache，再提交 inbox
+`done`；refresh transient 不提交 inbox、走 `Requeue`，permanent payload 错误走 `Reject`。否则 inbox done
+后的重复投递会被 Duplicate 直接 Ack，无法修复 stale cache。
+
 ### 租约续租 + leaseLost hard-fence（#1213）
 
 claim 是**带 TTL 的租约**：`InboxStore::try_claim(key, lease)` 由消费方经 `LeaseToken::mint()` 铸 uuid v4 token 传入，
@@ -131,8 +157,9 @@ claimed 行 stamp 该 token；**过期未续租**的 claim 可被新 token 重�
 （`LeaseConfig::from_ttl`，组合根由后端 claim TTL 派生注入）周期调 `extend(key, lease)` 续租，与 handler 执行
 **同任务并发 race**（消费驱动 future `!Send`、跑专用线程，**不** `tokio::spawn`）。续租 `LeaseOutcome::Lost`
 （claim 已被他人重捞）即 **cancel handler 执行上下文 + 终态降级 `Requeue`、不 commit**（**leaseLost hard-fence**，
-对标 gocell ConsumerBase runWithRenewal）。`commit(key, lease)` 自身 CAS 守租约：返 `Lost` 同样降级 `Requeue`
-（覆盖「续租未及时探测、commit 时租约已失」的竞态窗口）。token CAS 是唯一正确围栏——时间窗口判定有 TOCTOU 竞态。
+对标 gocell ConsumerBase runWithRenewal）。`commit(key, lease)` 自身 CAS 守租约：返 `Lost` 同样立即
+broker `Requeue`，不得进入当前 claim 的 handler 重试预算，也不得写 app DLX（覆盖「续租未及时探测、commit
+时租约已失」的竞态窗口）。token CAS 是唯一正确围栏——时间窗口判定有 TOCTOU 竞态。
 
 **并发安全要求**：在 claim TTL 到期与原消费者续租循环探测到 `Lost` 之间（窗口 ≤ `lease_ttl/3`），
 同一消息可被第二个消费者重捞并启动 handler，形成并发双执行窗口。commit-side CAS 保证幂等键
@@ -242,8 +269,9 @@ event consumer 运行时接线分两段：
   `wire_event_transport` 不接受 raw `SubscriberBinding`。
 
 `BridgedSubscription` 字段私有，topic / consumer group / consumer / readiness 等只能来自 generated
-topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `spawn_consumer_ackable*` 或
-`spawn_consumer` / `pg.infra().inbox(...)`；`EVENT-TRANSPORT-PG-INBOX-01` 由 `cargo xtask verify` 中的
+topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `spawn_consumer_ackable*`、
+`spawn_consumer` / `pg.infra().inbox(...)`，durable runtime 还必须经 `spawn_consumer_ackable_tx_subscriber`
+和 `consumer_tx_handler_for_subscription` 接线；`EVENT-TRANSPORT-PG-INBOX-01` 由 `cargo xtask verify` 中的
 `event-transport-guard` 作 Medium 扫描补强。主路径 bridge-only 构造是类型/API 层约束；旁路扫描不声称 Hard。
 
 ## DLX 与幂等

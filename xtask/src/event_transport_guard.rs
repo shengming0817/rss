@@ -22,6 +22,8 @@ const RUNTIME_FORBIDDEN: &[&str] = &[
     "replaydeps::IdempotencyConfig",
     "redis idempotency",
     "Redis 幂等",
+    "adapt_subscriber_handler",
+    "spawn_consumer_ackable_subscriber(",
 ];
 const RUNTIME_REDIS_INBOX_FRAGMENT: &str = "redis.infra().inbox(";
 const RUNTIME_REQUIRED: &[&str] = &[
@@ -34,7 +36,10 @@ const RUNTIME_REQUIRED: &[&str] = &[
     "let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());",
     "let dlx = DynDeadLetterStore::new_box(",
     ".dead_letter(security.dlx_payload_protector.clone()),",
-    "spawn_consumer_ackable_subscriber(",
+    "fn consumer_tx_handler_for_subscription(",
+    "fn consumer_tx_kind_for_subscription(",
+    "generated subscription has no ConsumerTx handler mapping",
+    "spawn_consumer_ackable_tx_subscriber(",
     "wire_inbox_sweeper(pg, timing, module)?;",
 ];
 const DOMAIN_FORBIDDEN: &[&str] = &[
@@ -51,6 +56,7 @@ const BYPASS_FORBIDDEN: &[&str] = &[
     "spawn_consumer(",
     "spawn_consumer_ackable(",
     "spawn_consumer_ackable_subscriber(",
+    "spawn_consumer_ackable_tx_subscriber(",
     "pg.infra().inbox(",
 ];
 const BYPASS_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies", "bins"];
@@ -90,7 +96,7 @@ impl GovernanceCheck for EventTransportGuard {
         findings.extend(scan_production_bypasses(&root)?);
         Ok((
             format!(
-                "{TARGET} 经 generated topology bridge + PG inbox consumer bundle 接线，生产 src 无散装 consumer bundle"
+                "{TARGET} 经 generated topology bridge + ConsumerTx PG inbox bundle 接线，生产 src 无散装 consumer bundle"
             ),
             findings,
         ))
@@ -104,7 +110,9 @@ fn scan_runtime_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             findings.push(finding(
                 Rule::RedisConsumerClaimer,
                 path.display().to_string(),
-                format!("禁止 runtime event consumer 重新接入 Redis claimer: `{forbidden}`"),
+                format!(
+                    "禁止 runtime event consumer 重新接入旧 claimer/handler 路径: `{forbidden}`"
+                ),
             ));
         }
     }
@@ -444,6 +452,7 @@ fn forbidden_spawn_fragment(ident: &str) -> Option<&'static str> {
         "spawn_consumer" => Some("spawn_consumer("),
         "spawn_consumer_ackable" => Some("spawn_consumer_ackable("),
         "spawn_consumer_ackable_subscriber" => Some("spawn_consumer_ackable_subscriber("),
+        "spawn_consumer_ackable_tx_subscriber" => Some("spawn_consumer_ackable_tx_subscriber("),
         _ => None,
     }
 }
@@ -542,9 +551,14 @@ mod tests {
                     pg.infra()
                         .dead_letter(security.dlx_payload_protector.clone()),
                 );
-                spawn_consumer_ackable_subscriber();
+                let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
+                spawn_consumer_ackable_tx_subscriber();
                 wire_inbox_sweeper(pg, timing, module)?;
             }
+            fn consumer_tx_handler_for_subscription() {
+                anyhow::bail!("generated subscription has no ConsumerTx handler mapping");
+            }
+            fn consumer_tx_kind_for_subscription() {}
             "#,
         );
         assert!(findings.is_empty());
@@ -585,11 +599,24 @@ mod tests {
     }
 
     #[test]
+    fn scan_bypass_content_rejects_tx_spawn_direct_and_qualified() {
+        for content in [
+            "fn wire() { spawn_consumer_ackable_tx_subscriber(); }",
+            "fn wire() { eventexec::spawn_consumer_ackable_tx_subscriber(); }",
+        ] {
+            let findings =
+                scan_bypass_content(Path::new("assemblies/runtime/src/other.rs"), content);
+            assert_eq!(findings.len(), 1, "{content}");
+            assert_eq!(findings[0].rule, Rule::ProductionConsumerBundleBypass);
+        }
+    }
+
+    #[test]
     fn scan_bypass_content_rejects_import_alias_and_split_infra_receiver() {
         let findings = scan_bypass_content(
             Path::new("assemblies/runtime/src/other.rs"),
             r#"
-            use eventexec::{spawn_consumer_ackable_subscriber as spawn_it};
+            use eventexec::{spawn_consumer_ackable_tx_subscriber as spawn_it};
 
             fn wire(pg: PgRuntimeDeps) {
                 spawn_it();

@@ -24,6 +24,7 @@ mod bundle;
 mod cas_store;
 mod checkpoint;
 mod config_repo;
+mod consumer_tx;
 mod cotx;
 mod credential_repo;
 mod dead_letter;
@@ -61,6 +62,7 @@ pub use config_repo::{
     ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
     ConfigValueProtections, PgConfigRepo, PgConfigValueMaintenance,
 };
+pub use consumer_tx::{PgAuditConsumerTx, PgSettingsConsumerTx};
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use dead_letter_payload::DlxPayloadProtector;

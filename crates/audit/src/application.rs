@@ -78,6 +78,44 @@ const AUDIT_ENTRIES_SUBPATH: &str = "/entries";
 const RESOURCE_KIND_AUDIT_ENTRIES: &str = "audit_entries";
 const ACTION_AUDIT_LIST_CROSS_TENANT: &str = "audit:list-cross-tenant";
 
+/// Audit consumer event variants that can be converted into [`AuditRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditEventKind {
+    /// `identity.session-created`.
+    SessionCreated,
+    /// `identity.role-assigned`.
+    RoleAssigned,
+    /// `identity.role-revoked`.
+    RoleRevoked,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuditEventRecordError {
+    #[error("audit event payload decode failed")]
+    Decode(#[source] serde_json::Error),
+    #[error("audit event tenant parse failed")]
+    Tenant(#[source] vocab::TenantIdError),
+    #[error("audit event action parse failed")]
+    Action(#[source] vocab::ActionError),
+    #[error("audit event session parse failed")]
+    Session(#[source] ids::IdParseError),
+}
+
+/// Decode a generated identity event payload into the audit domain record shape.
+///
+/// This is the single generated-wire decode path for durable audit consumers; adapters keep only
+/// storage transaction capability and call this domain helper.
+pub fn audit_record_from_event_message(
+    kind: AuditEventKind,
+    message: &Message,
+) -> Result<AuditRecord, AuditEventRecordError> {
+    match kind {
+        AuditEventKind::SessionCreated => session_created_record_from_message(message),
+        AuditEventKind::RoleAssigned => role_assigned_record_from_message(message),
+        AuditEventKind::RoleRevoked => role_revoked_record_from_message(message),
+    }
+}
+
 /// 分页上限（上限 500 由 [`vocab::Limit`] 类型 funnel 兜底；下限 ≥1 由 wire 类型 `NonZeroU32` 反序列化层
 /// 保证；默认值 50 由 schema default 经 serde 派生）。
 const MAX_LIMIT: u32 = 500;
@@ -126,6 +164,67 @@ where
 /// i64 unix 秒 → `SystemTime`（负值收口为 epoch）。
 fn from_unix_secs(secs: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
+}
+
+fn session_created_record_from_message(
+    message: &Message,
+) -> Result<AuditRecord, AuditEventRecordError> {
+    let payload: IdentitySessionCreatedPayload = serde_json::from_slice(message.payload.as_bytes())
+        .map_err(AuditEventRecordError::Decode)?;
+    let tenant =
+        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let action = vocab::Action::parse(ACTION_LOGIN).map_err(AuditEventRecordError::Action)?;
+    let session =
+        ids::SessionId::parse(&payload.session_id).map_err(AuditEventRecordError::Session)?;
+    Ok(AuditRecord {
+        tenant,
+        actor: ids::UserId::new(payload.subject),
+        actor_kind: vocab::PrincipalKind::User,
+        action,
+        resource: ResourceRef::new(RESOURCE_KIND_SESSION, session.as_uuid().to_string()),
+        outcome: AuditOutcome::Success,
+        recorded_at: from_unix_secs(payload.occurred_at),
+    })
+}
+
+fn role_assigned_record_from_message(
+    message: &Message,
+) -> Result<AuditRecord, AuditEventRecordError> {
+    let payload: IdentityRoleAssignedPayload = serde_json::from_slice(message.payload.as_bytes())
+        .map_err(AuditEventRecordError::Decode)?;
+    let tenant =
+        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let action = vocab::Action::parse(ACTION_ROLE_ASSIGN).map_err(AuditEventRecordError::Action)?;
+    let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
+    Ok(AuditRecord {
+        tenant,
+        actor: ids::UserId::new(payload.assigned_by),
+        actor_kind: assigned_actor_kind(payload.actor_kind),
+        action,
+        resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
+        outcome: AuditOutcome::Success,
+        recorded_at: from_unix_secs(payload.occurred_at),
+    })
+}
+
+fn role_revoked_record_from_message(
+    message: &Message,
+) -> Result<AuditRecord, AuditEventRecordError> {
+    let payload: IdentityRoleRevokedPayload = serde_json::from_slice(message.payload.as_bytes())
+        .map_err(AuditEventRecordError::Decode)?;
+    let tenant =
+        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let action = vocab::Action::parse(ACTION_ROLE_REVOKE).map_err(AuditEventRecordError::Action)?;
+    let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
+    Ok(AuditRecord {
+        tenant,
+        actor: ids::UserId::new(payload.revoked_by),
+        actor_kind: revoked_actor_kind(payload.actor_kind),
+        action,
+        resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
+        outcome: AuditOutcome::Success,
+        recorded_at: from_unix_secs(payload.occurred_at),
+    })
 }
 
 /// `SystemTime` → i64 unix 秒（epoch 前 / 溢出收口为 0 / i64::MAX）。
@@ -488,66 +587,11 @@ impl SubscriberHandler for SessionCreatedAuditHandler {
     fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
         let repo = self.repo.clone();
         Box::pin(async move {
-            // 审计管道失败不可静默（合规/运维盲点）：各失败路径结构化记录后再冒泡（Err→驱动侧 Nack）。
-            // source 错误不进 Display（PII 边界），但 message_id 进日志便于关联。
-            let msg_id = message.id.clone();
-            let payload: IdentitySessionCreatedPayload =
-                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
-                    // serde_json::Error Display 含 payload 值片段（PII 边界）；用 classify() 取无 PII 的错误类别。
-                    tracing::error!(
-                        message_id = msg_id.as_str(),
-                        category = ?e.classify(),
-                        "audit handler: session-created payload decode failed"
-                    );
-                    // 永久：malformed payload 重投无意义（F2/C2）。
-                    SubscriberHandlerError::permanent(e)
+            let msg_id = message.id.as_str().to_string();
+            let record = audit_record_from_event_message(AuditEventKind::SessionCreated, &message)
+                .map_err(|e| {
+                    reject_audit_event_record_error(&msg_id, "identity.session-created", e)
                 })?;
-            // tenant fail-closed：非 canonical UUID 即拒（tenancy.md），不静默落空租户。
-            let tenant = vocab::TenantId::parse(&payload.tenant_id).map_err(|e| {
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    error = %e,
-                    "audit handler: non-canonical tenant, refusing to audit"
-                );
-                // 永久：非 canonical 租户重投无意义（F2/C2）。
-                SubscriberHandlerError::permanent(e)
-            })?;
-            // actor：subject 是 typed `uuid::Uuid`（generated `format:uuid`，#1277 F1）——非 UUID 在 payload
-            // decode 即 fail-closed（上方 `from_slice`，由 `rejects_non_canonical_subject` 守），此处直接
-            // `UserId::new`（无 parse、无失败分支；审计链 actor 是 typed id，不裸 String）。
-            let actor = ids::UserId::new(payload.subject);
-            let action = vocab::Action::parse(ACTION_LOGIN).map_err(|e| {
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    error = %e,
-                    "audit handler: invalid audit action literal"
-                );
-                // 永久：action literal 非法是编程错误，重投无意义（F2/C2）。
-                SubscriberHandlerError::permanent(e)
-            })?;
-            // session_id fail-closed：非 canonical UUID 即拒（审计 resource id 是 typed `ids::SessionId`，
-            // 不裸 String；canonical 化后写入，与 tenant/actor 同纪律，F3）。超长输入由 UUID 定长隐式排除。
-            let session = ids::SessionId::parse(&payload.session_id).map_err(|e| {
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    error = %e,
-                    "audit handler: non-canonical session_id, refusing to audit"
-                );
-                // 永久：非 canonical session_id 重投无意义（F2/C2）。
-                SubscriberHandlerError::permanent(e)
-            })?;
-            let record = AuditRecord {
-                tenant,
-                actor,
-                // reason: identity.session-created 仅在人类用户成功登录时触发（设备 / service principal
-                // 使用独立事件；登录失败不创建 session，无事件发布），故 actor_kind 恒为 User。
-                actor_kind: vocab::PrincipalKind::User,
-                action,
-                resource: ResourceRef::new(RESOURCE_KIND_SESSION, session.as_uuid().to_string()),
-                // reason: session-created 事件仅成功登录才发布——失败路径无 session，无 event；outcome 恒 Success。
-                outcome: AuditOutcome::Success,
-                recorded_at: from_unix_secs(payload.occurred_at),
-            };
             repo.append(record).await.map_err(|e| {
                 tracing::error!(
                     message_id = msg_id.as_str(),
@@ -562,35 +606,18 @@ impl SubscriberHandler for SessionCreatedAuditHandler {
     }
 }
 
-fn parse_event_tenant(
+fn reject_audit_event_record_error(
     message_id: &str,
     event_name: &'static str,
-    raw: &str,
-) -> Result<vocab::TenantId, SubscriberHandlerError> {
-    vocab::TenantId::parse(raw).map_err(|e| {
-        tracing::error!(
-            message_id,
-            event_name,
-            error = %e,
-            "audit handler: non-canonical tenant, refusing to audit"
-        );
-        SubscriberHandlerError::permanent(e)
-    })
-}
-
-fn parse_audit_action(
-    message_id: &str,
-    action_raw: &'static str,
-) -> Result<vocab::Action, SubscriberHandlerError> {
-    vocab::Action::parse(action_raw).map_err(|e| {
-        tracing::error!(
-            message_id,
-            action = action_raw,
-            error = %e,
-            "audit handler: invalid audit action literal"
-        );
-        SubscriberHandlerError::permanent(e)
-    })
+    error: AuditEventRecordError,
+) -> SubscriberHandlerError {
+    tracing::error!(
+        message_id,
+        event_name,
+        error = %error,
+        "audit handler: event payload rejected"
+    );
+    SubscriberHandlerError::permanent(error)
 }
 
 fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &str) -> String {
@@ -651,27 +678,10 @@ impl SubscriberHandler for RoleAssignedAuditHandler {
         let repo = self.repo.clone();
         Box::pin(async move {
             let msg_id = message.id.as_str().to_string();
-            let payload: IdentityRoleAssignedPayload =
-                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
-                    tracing::error!(
-                        message_id = msg_id.as_str(),
-                        category = ?e.classify(),
-                        "audit handler: role-assigned payload decode failed"
-                    );
-                    SubscriberHandlerError::permanent(e)
+            let record = audit_record_from_event_message(AuditEventKind::RoleAssigned, &message)
+                .map_err(|e| {
+                    reject_audit_event_record_error(&msg_id, "identity.role-assigned", e)
                 })?;
-            let tenant = parse_event_tenant(&msg_id, "identity.role-assigned", &payload.tenant_id)?;
-            let action = parse_audit_action(&msg_id, ACTION_ROLE_ASSIGN)?;
-            let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
-            let record = AuditRecord {
-                tenant,
-                actor: ids::UserId::new(payload.assigned_by),
-                actor_kind: assigned_actor_kind(payload.actor_kind),
-                action,
-                resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
-                outcome: AuditOutcome::Success,
-                recorded_at: from_unix_secs(payload.occurred_at),
-            };
             append_audit_record(repo, &msg_id, "identity.role-assigned", record).await
         })
     }
@@ -692,27 +702,10 @@ impl SubscriberHandler for RoleRevokedAuditHandler {
         let repo = self.repo.clone();
         Box::pin(async move {
             let msg_id = message.id.as_str().to_string();
-            let payload: IdentityRoleRevokedPayload =
-                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
-                    tracing::error!(
-                        message_id = msg_id.as_str(),
-                        category = ?e.classify(),
-                        "audit handler: role-revoked payload decode failed"
-                    );
-                    SubscriberHandlerError::permanent(e)
+            let record = audit_record_from_event_message(AuditEventKind::RoleRevoked, &message)
+                .map_err(|e| {
+                    reject_audit_event_record_error(&msg_id, "identity.role-revoked", e)
                 })?;
-            let tenant = parse_event_tenant(&msg_id, "identity.role-revoked", &payload.tenant_id)?;
-            let action = parse_audit_action(&msg_id, ACTION_ROLE_REVOKE)?;
-            let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
-            let record = AuditRecord {
-                tenant,
-                actor: ids::UserId::new(payload.revoked_by),
-                actor_kind: revoked_actor_kind(payload.actor_kind),
-                action,
-                resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
-                outcome: AuditOutcome::Success,
-                recorded_at: from_unix_secs(payload.occurred_at),
-            };
             append_audit_record(repo, &msg_id, "identity.role-revoked", record).await
         })
     }

@@ -25,9 +25,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use base64::Engine as _;
-use bootstrap::{
-    DomainModuleResult, SubscriberBinding, SubscriberHandler, WorkerSpec, adapt_subscriber_handler,
-};
+use bootstrap::{DomainModuleResult, SubscriberBinding, SubscriberHandler, WorkerSpec};
 use consistency::{ConsumerGroup, RetentionSweeper};
 use crypto::RustCryptoMacVerifier;
 use diport::{
@@ -35,14 +33,15 @@ use diport::{
     ShutdownError, Topic,
 };
 use eventexec::{
-    ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE,
-    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, SWEEPER_WORKER_NAME, SweeperConfig,
-    SweeperWorker, TenantAuthority, WorkerHealth, backlog_sampler_loop,
-    spawn_consumer_ackable_subscriber, spawn_relay, sweeper_loop,
+    ConsumerMeta, ConsumerTxHandlerFn, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics,
+    OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig,
+    SWEEPER_WORKER_NAME, SweeperConfig, SweeperWorker, TenantAuthority, WorkerHealth,
+    backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
 use generated::event::SubscriptionSpec;
 use postgres::{DlxPayloadProtector, PgRuntimeDeps, caps};
 use primitives::{HealthCheck, MacKey, ProbeName};
+use settings::SettingsService;
 use vault::VaultKeyProvider;
 
 use crate::distributed_runtime::{
@@ -211,6 +210,10 @@ struct EventSecurity {
 pub struct BridgedSubscription {
     spec: SubscriptionSpec,
     group: ConsumerGroup,
+    #[allow(dead_code)]
+    // reason: bridge still consumes bootstrap subscriber registrations to prove generated topology
+    // and domain declarations are aligned. Durable runtime execution uses ConsumerTx registry
+    // instead of this legacy handler.
     handler: Box<dyn SubscriberHandler>,
 }
 
@@ -250,10 +253,6 @@ impl BridgedSubscription {
             self.consumer().replace('.', "_"),
             self.group().as_str().replace('.', "_")
         )
-    }
-
-    fn into_handler(self) -> Box<dyn SubscriberHandler> {
-        self.handler
     }
 }
 
@@ -425,6 +424,7 @@ pub async fn wire_event_transport(
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
+    settings_service: Arc<SettingsService>,
 ) -> anyhow::Result<EventRuntime> {
     let required = required_domains(&subscribers);
     let required_refs: Vec<&str> = required.iter().map(String::as_str).collect();
@@ -449,7 +449,16 @@ pub async fn wire_event_transport(
         }
         EventDecision::Durable { per_domain } => {
             let security = security.context("durable event security config missing")?;
-            wire_durable(pg, distributed, subscribers, per_domain, timing, security).await
+            wire_durable(
+                pg,
+                distributed,
+                subscribers,
+                per_domain,
+                timing,
+                security,
+                settings_service,
+            )
+            .await
         }
     }
 }
@@ -586,6 +595,7 @@ async fn wire_durable(
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
     timing: RelayTiming,
     security: EventSecurity,
+    settings_service: Arc<SettingsService>,
 ) -> anyhow::Result<EventRuntime> {
     // saga/projection 投影重建 defer → 见 #1251 follow-up issue（executor body 仍 todo!()，#1121/#1122）
 
@@ -630,7 +640,15 @@ async fn wire_durable(
     wire_outbox_maintenance(pg, distributed, &security, &timing, &mut module)?;
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
-    wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &security, &timing, &mut module)?;
+    wire_consumer_resource_bundle(
+        pg,
+        subscribers,
+        &amqp_map,
+        &security,
+        &timing,
+        &settings_service,
+        &mut module,
+    )?;
 
     Ok(EventRuntime {
         infra_guards,
@@ -859,6 +877,7 @@ fn wire_consumer_resource_bundle(
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     security: &EventSecurity,
     timing: &RelayTiming,
+    settings_service: &Arc<SettingsService>,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
@@ -885,16 +904,16 @@ fn wire_consumer_resource_bundle(
                 .dead_letter(security.dlx_payload_protector.clone()),
         );
         let worker_name = format!("event-consumer:{consumer}:{topic_name}");
-        let handler = adapt_subscriber_handler(subscription.into_handler());
+        let handler = consumer_tx_handler_for_subscription(pg, &subscription, settings_service)?;
         tracing::info!(
             consumer,
             contract_id,
             topic = topic_name,
-            "durable event transport: pg inbox consumer worker registered"
+            "durable event transport: pg consumer-tx worker registered"
         );
         let health = Arc::clone(&consumer_health);
         let worker: WorkerSpec = Box::new(move |token| {
-            DynManagedResource::new_box(spawn_consumer_ackable_subscriber(
+            DynManagedResource::new_box(spawn_consumer_ackable_tx_subscriber(
                 worker_name,
                 subscriber,
                 topic,
@@ -912,6 +931,107 @@ fn wire_consumer_resource_bundle(
     }
     wire_inbox_sweeper(pg, timing, module)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerTxKind {
+    AuditSessionCreated,
+    AuditRoleAssigned,
+    AuditRoleRevoked,
+    SettingsConfigVersionChanged,
+}
+
+fn consumer_tx_kind_for_subscription(subscription: &BridgedSubscription) -> Option<ConsumerTxKind> {
+    consumer_tx_kind_for_parts(
+        subscription.consumer(),
+        subscription.contract_id(),
+        subscription.topic(),
+        subscription.group().as_str(),
+    )
+}
+
+#[cfg(test)]
+fn consumer_tx_kind_for_spec(spec: &SubscriptionSpec) -> Option<ConsumerTxKind> {
+    consumer_tx_kind_for_parts(spec.consumer, spec.contract_id, spec.topic, spec.group)
+}
+
+fn consumer_tx_kind_for_parts(
+    consumer: &str,
+    contract_id: &str,
+    topic: &str,
+    group: &str,
+) -> Option<ConsumerTxKind> {
+    match (consumer, contract_id, topic, group) {
+        (
+            "audit",
+            generated::event::identity_v1::session_created::CONTRACT_ID,
+            generated::event::identity_v1::session_created::TOPIC,
+            "audit.session-created",
+        ) => Some(ConsumerTxKind::AuditSessionCreated),
+        (
+            "audit",
+            generated::event::identity_v1::role_assigned::CONTRACT_ID,
+            generated::event::identity_v1::role_assigned::TOPIC,
+            "audit.role-assigned",
+        ) => Some(ConsumerTxKind::AuditRoleAssigned),
+        (
+            "audit",
+            generated::event::identity_v1::role_revoked::CONTRACT_ID,
+            generated::event::identity_v1::role_revoked::TOPIC,
+            "audit.role-revoked",
+        ) => Some(ConsumerTxKind::AuditRoleRevoked),
+        (
+            "settings",
+            generated::event::settings_v1::CONTRACT_ID,
+            generated::event::settings_v1::TOPIC,
+            "settings.config-version-changed",
+        ) => Some(ConsumerTxKind::SettingsConfigVersionChanged),
+        _ => None,
+    }
+}
+
+fn consumer_tx_handler_for_subscription(
+    pg: &PgRuntimeDeps,
+    subscription: &BridgedSubscription,
+    settings_service: &Arc<SettingsService>,
+) -> anyhow::Result<ConsumerTxHandlerFn> {
+    match consumer_tx_kind_for_subscription(subscription) {
+        Some(ConsumerTxKind::AuditSessionCreated) => {
+            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+                .context("audit session-created consumer tx chain key")?;
+            Ok(pg
+                .for_domain::<caps::Audit>()
+                .session_created_consumer_tx(hasher)
+                .into_handler())
+        }
+        Some(ConsumerTxKind::AuditRoleAssigned) => {
+            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+                .context("audit role-assigned consumer tx chain key")?;
+            Ok(pg
+                .for_domain::<caps::Audit>()
+                .role_assigned_consumer_tx(hasher)
+                .into_handler())
+        }
+        Some(ConsumerTxKind::AuditRoleRevoked) => {
+            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+                .context("audit role-revoked consumer tx chain key")?;
+            Ok(pg
+                .for_domain::<caps::Audit>()
+                .role_revoked_consumer_tx(hasher)
+                .into_handler())
+        }
+        Some(ConsumerTxKind::SettingsConfigVersionChanged) => Ok(pg
+            .for_domain::<caps::Settings>()
+            .config_version_changed_consumer_tx(Arc::clone(settings_service))
+            .into_handler()),
+        None => anyhow::bail!(
+            "generated subscription has no ConsumerTx handler mapping: contract={} topic={} consumer={} group={}",
+            subscription.contract_id(),
+            subscription.topic(),
+            subscription.consumer(),
+            subscription.group().as_str()
+        ),
+    }
 }
 
 fn wire_inbox_sweeper(
@@ -1342,6 +1462,25 @@ mod tests {
                 "identity.session-created",
                 "identity.session-created"
             )
+        );
+    }
+
+    #[test]
+    fn generated_subscriptions_all_have_consumer_tx_kind_mapping() {
+        let missing: Vec<String> = generated::event::SUBSCRIPTIONS
+            .iter()
+            .filter(|spec| consumer_tx_kind_for_spec(spec).is_none())
+            .map(|spec| {
+                format!(
+                    "{}:{}:{}:{}",
+                    spec.contract_id, spec.topic, spec.consumer, spec.group
+                )
+            })
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "generated subscriptions missing ConsumerTx mapping: {missing:?}"
         );
     }
 

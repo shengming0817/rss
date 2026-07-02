@@ -25,6 +25,9 @@ use std::time::SystemTime;
 use dynosaur::dynosaur;
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造仍经受控 funnel）。
+pub use crate::application::{
+    AuditEventKind, AuditEventRecordError, audit_record_from_event_message,
+};
 pub use crate::domain::{
     AuditChainHasher, AuditEntry, AuditError, AuditOutcome, EntryHash, ResourceRef,
     actor_kind_from_db, actor_kind_to_db,

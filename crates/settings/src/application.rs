@@ -29,8 +29,14 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHandlerError};
-use consistency::{ConsumerGroup, Entry, IdemKey, OutboxPayload, Topic};
+use bootstrap::{
+    Domain, KernelError, Registry, SubscriberErrorDisposition, SubscriberHandler,
+    SubscriberHandlerError,
+};
+use consistency::{
+    ConsumerGroup, EngineError, EngineErrorKind, Entry, HandleResult, IdemKey, OutboxPayload,
+    PermanentError, PermanentErrorKind, Topic,
+};
 use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
     CONTRACT, SUBSCRIPTIONS as VERSION_CHANGED_SUBSCRIPTIONS, SettingsConfigChangeKind,
@@ -169,6 +175,56 @@ pub(crate) fn wire_version(version: u64) -> i64 {
 /// `FlagStore` trait 保持 `pub(crate)`；外部组合根经 [`crate::empty_flag_store`] 构造此 box，
 /// 再传给 [`SettingsService::with_postgres`]——无需在外部 crate 命名 `FlagStore` trait。
 pub struct FlagStoreBox(pub(crate) Box<dyn FlagStore>);
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigVersionChangedEventError {
+    #[error("config-version-changed payload decode failed")]
+    Decode(#[source] serde_json::Error),
+    #[error("config-version-changed tenant parse failed")]
+    Tenant(#[source] vocab::TenantIdError),
+    #[error("config-version-changed key parse failed")]
+    Key(#[source] SettingsError),
+    #[error("config-version-changed version is negative")]
+    NegativeVersion,
+}
+
+/// Parsed `settings.config-version-changed` payload in domain-ready form.
+pub struct ConfigVersionChangedEvent {
+    tenant: TenantId,
+    key: SettingKey,
+    version: u64,
+}
+
+impl ConfigVersionChangedEvent {
+    #[must_use]
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+/// Decode the generated settings event payload into domain-ready typed values.
+pub fn config_version_changed_event_from_message(
+    message: &Message,
+) -> Result<ConfigVersionChangedEvent, ConfigVersionChangedEventError> {
+    let payload: SettingsConfigVersionChangedPayload =
+        serde_json::from_slice(message.payload.as_bytes())
+            .map_err(ConfigVersionChangedEventError::Decode)?;
+    let tenant =
+        TenantId::parse(&payload.tenant_id).map_err(ConfigVersionChangedEventError::Tenant)?;
+    let key = SettingKey::parse(&payload.key).map_err(ConfigVersionChangedEventError::Key)?;
+    let version = u64::try_from(payload.version)
+        .map_err(|_| ConfigVersionChangedEventError::NegativeVersion)?;
+    Ok(ConfigVersionChangedEvent {
+        tenant,
+        key,
+        version,
+    })
+}
 
 /// settings 应用服务。必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）。
 ///
@@ -435,6 +491,24 @@ impl SettingsService {
         Ok(evaluate_flag(&state, &EvalContext::new(&owned)) == FlagDecision::Enabled)
     }
 
+    pub async fn apply_config_version_changed_event(
+        &self,
+        event: ConfigVersionChangedEvent,
+    ) -> Result<(), SubscriberHandlerError> {
+        self.apply_config_version_changed(event.tenant, event.key, event.version)
+            .await
+    }
+
+    pub async fn handle_config_version_changed_event(
+        &self,
+        event: ConfigVersionChangedEvent,
+    ) -> HandleResult {
+        match self.apply_config_version_changed_event(event).await {
+            Ok(()) => HandleResult::ack(),
+            Err(error) => subscriber_error_to_handle_result(error),
+        }
+    }
+
     async fn apply_config_version_changed(
         &self,
         tenant: TenantId,
@@ -487,6 +561,17 @@ impl SettingsService {
             })?;
         self.cache.upsert(entry);
         Ok(())
+    }
+}
+
+fn subscriber_error_to_handle_result(error: SubscriberHandlerError) -> HandleResult {
+    match error.disposition() {
+        SubscriberErrorDisposition::Transient => {
+            HandleResult::requeue(EngineError::new(EngineErrorKind::Transient))
+        }
+        SubscriberErrorDisposition::Permanent => {
+            HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
+        }
     }
 }
 
@@ -683,50 +768,23 @@ impl SubscriberHandler for ConfigVersionChangedSubscriber {
         let service = self.service.clone();
         Box::pin(async move {
             let msg_id = message.id.as_str().to_string();
-            let payload: SettingsConfigVersionChangedPayload =
-                serde_json::from_slice(message.payload.as_bytes()).map_err(|e| {
-                    tracing::error!(
-                        message_id = msg_id.as_str(),
-                        category = ?e.classify(),
-                        "settings subscriber: config-version-changed payload decode failed"
-                    );
-                    SubscriberHandlerError::permanent(e)
-                })?;
-            let tenant = TenantId::parse(&payload.tenant_id).map_err(|e| {
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    error = %e,
-                    "settings subscriber: non-canonical tenant in config-version-changed"
-                );
-                SubscriberHandlerError::permanent(e)
-            })?;
-            let key = SettingKey::parse(&payload.key).map_err(|e| {
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    tenant_id = %tenant,
-                    error = %e,
-                    "settings subscriber: invalid config key in config-version-changed"
-                );
-                SubscriberHandlerError::permanent(e)
-            })?;
-            let version = u64::try_from(payload.version).map_err(|_| {
-                let err = std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "config-version-changed version must be non-negative",
-                );
-                tracing::error!(
-                    message_id = msg_id.as_str(),
-                    tenant_id = %tenant,
-                    version = payload.version,
-                    "settings subscriber: invalid config version in config-version-changed"
-                );
-                SubscriberHandlerError::permanent(err)
-            })?;
-            service
-                .apply_config_version_changed(tenant, key, version)
-                .await
+            let event = config_version_changed_event_from_message(&message)
+                .map_err(|e| reject_config_version_changed_event_error(&msg_id, e))?;
+            service.apply_config_version_changed_event(event).await
         })
     }
+}
+
+fn reject_config_version_changed_event_error(
+    message_id: &str,
+    error: ConfigVersionChangedEventError,
+) -> SubscriberHandlerError {
+    tracing::error!(
+        message_id,
+        error = %error,
+        "settings subscriber: config-version-changed payload rejected"
+    );
+    SubscriberHandlerError::permanent(error)
 }
 
 /// settings 域 bootstrap 生命周期：挂载 config-publish / secret-publish 业务路由（Primary listener）。
@@ -753,6 +811,11 @@ impl SettingsDomain {
             config,
             secret_repo,
         }
+    }
+
+    #[must_use]
+    pub fn config_service(&self) -> Arc<SettingsService> {
+        Arc::clone(&self.config)
     }
 }
 
@@ -1198,6 +1261,30 @@ mod tests {
             .cache
             .find(tenant(), &key)
             .expect("subscriber refreshed cache");
+        assert_eq!(cached.value(), "enabled");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_version_changed_handle_result_refreshes_config_cache() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .await
+            .expect("publish config");
+        let key = SettingKey::parse("app.feature").expect("valid key");
+        service.cache.remove(tenant(), &key);
+
+        let message = Message::new("m-settings", version_changed_payload(TENANT));
+        let event = config_version_changed_event_from_message(&message).expect("parse event");
+        let result = service.handle_config_version_changed_event(event).await;
+
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
+        let cached = service
+            .cache
+            .find(tenant(), &key)
+            .expect("ConsumerTx refresh method refreshed cache");
         assert_eq!(cached.value(), "enabled");
     }
 

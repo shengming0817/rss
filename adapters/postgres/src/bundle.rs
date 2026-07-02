@@ -59,6 +59,7 @@ use eventexec::TenantAuthority;
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
+use crate::consumer_tx::PgAuditConsumerTx;
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections,
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
@@ -66,7 +67,8 @@ use crate::{
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
     PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgPolicyRepo, PgProjectionEvents,
     PgReadinessSampler, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal,
-    PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgStore, PgStoreGuard,
+    PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
+    PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -452,6 +454,15 @@ impl PgDomainDeps<caps::Settings> {
     ) -> PgOutbox {
         PgOutbox::new(&self.store, publisher, tenant_authority, payload_protector)
     }
+
+    /// ConsumerTx handler for `settings.config-version-changed`.
+    #[must_use]
+    pub fn config_version_changed_consumer_tx(
+        &self,
+        service: Arc<settings::SettingsService>,
+    ) -> PgSettingsConsumerTx {
+        PgSettingsConsumerTx::config_version_changed(&self.store, service)
+    }
 }
 
 /// settings 域 durable 接线包（PERSIST-003 / #1424）：read config 仓储 + write co-tx UoW + secret 坐标仓储，
@@ -586,6 +597,42 @@ impl PgDomainDeps<caps::Audit> {
     #[must_use]
     pub fn auth_audit_sink(&self) -> PgAuthAuditSink {
         PgAuthAuditSink::new(&self.store)
+    }
+
+    /// ConsumerTx handler for `identity.session-created` consumed by audit.
+    #[must_use]
+    pub fn session_created_consumer_tx<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> PgAuditConsumerTx<M>
+    where
+        M: primitives::MacVerifier + Send + Sync + 'static,
+    {
+        PgAuditConsumerTx::session_created(&self.store, hasher)
+    }
+
+    /// ConsumerTx handler for `identity.role-assigned` consumed by audit.
+    #[must_use]
+    pub fn role_assigned_consumer_tx<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> PgAuditConsumerTx<M>
+    where
+        M: primitives::MacVerifier + Send + Sync + 'static,
+    {
+        PgAuditConsumerTx::role_assigned(&self.store, hasher)
+    }
+
+    /// ConsumerTx handler for `identity.role-revoked` consumed by audit.
+    #[must_use]
+    pub fn role_revoked_consumer_tx<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> PgAuditConsumerTx<M>
+    where
+        M: primitives::MacVerifier + Send + Sync + 'static,
+    {
+        PgAuditConsumerTx::role_revoked(&self.store, hasher)
     }
 }
 

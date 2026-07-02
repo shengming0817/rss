@@ -100,12 +100,12 @@ fn storage(e: sqlx::Error) -> AuditError {
 }
 
 /// `TenantId` → SQL bind 参数（UUID string；与 `$N::uuid` server-side cast 配合，不加 sqlx uuid feature）。
-fn tenant_str(tenant: TenantId) -> String {
+pub(crate) fn tenant_str(tenant: TenantId) -> String {
     tenant.as_uuid().to_string()
 }
 
 /// per-tenant advisory lock key（i64；XOR UUID 高低 8 字节；均匀分布、确定性）。
-fn advisory_lock_key(tenant: TenantId) -> i64 {
+pub(crate) fn advisory_lock_key(tenant: TenantId) -> i64 {
     let b = *tenant.as_uuid().as_bytes();
     let hi = i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
     let lo = i64::from_be_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
@@ -298,7 +298,7 @@ async fn insert_entry(
 }
 
 /// append 事务体：SET LOCAL → advisory lock → tail → link → INSERT。
-async fn append_in_tx<M: MacVerifier>(
+pub(crate) async fn append_in_tx<M: MacVerifier>(
     tx: &mut PgConnection,
     tenant_uuid: &str,
     lock_key: i64,

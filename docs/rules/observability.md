@@ -186,7 +186,7 @@ at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker �
 | metric | 类型 | label | 语义 |
 |--------|------|-------|------|
 | `consumer_settle_total` | Counter | `domain`,`action`,`outcome` | 单条 broker 结算（action=ack/requeue/reject；outcome=ok/error） |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed 路径主动跳过 app DLX 写入（tenant authority 或 envelope header 校验失败） |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed preflight 路径主动跳过 app DLX 写入（malformed id / tenant authority / envelope header / inbox receipt context 校验失败） |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | app DLX store 写入结果（outcome=ok/error）；error 同时把 consumer health 标为 degraded |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release claim 也失败；consumer 必须 broker `Reject`，不能 `Ack` 或 `Requeue` |
 
@@ -196,7 +196,7 @@ label 闭值集纪律：
   `ok`/`error`（settle 调用是否成功）——crate 自有闭映射，无副本可漂移。
 - `reason` 闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 `&'static str` 常量调用点；新增 reason
   必须同步本表和 ops 契约，禁止把 handler error / tenant / payload 派生值写入 label。当前闭集：
-  `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
+  `malformed_id` / `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
   `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
   `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch` /

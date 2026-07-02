@@ -21,7 +21,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器（默认 ≤60s/轮） | 可投递 backlog：到期 pending + stale publishing；正常 in-flight publishing 排除 |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | `now()−min(created_at)`；**进程内已观测 scope 后续无 backlog ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`poll`(扫描相)/`publish`(逐条中继+adapter 内 settle 相) |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed path | 跳过 app DLX 写入的诊断计数；reason 为 tenant authority 或 envelope header 闭集 |
+| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；consumer broker `Reject`，避免 Requeue 后被 Duplicate→Ack 吞掉 |
 
@@ -40,7 +40,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   新进程尚未观测或 recorder 已清理的 scope 不补 series。
 - `consumer_dlx_skip_total.reason`：闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 literal 调用点；
   禁止携带 handler error、tenant、message id 或 payload 派生值。当前闭集：
-  `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
+  `malformed_id` / `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
   `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
   `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch` /
