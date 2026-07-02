@@ -6,4 +6,11 @@ fn native_afit_ports_are_not_dyn_compatible() {
     t.compile_fail("tests/ui/dyn_incompatible_inbox_store.rs");
     t.compile_fail("tests/ui/dyn_incompatible_inbox_backlog.rs");
     t.compile_fail("tests/ui/dyn_incompatible_retention_sweeper.rs");
+    t.compile_fail("tests/ui/dyn_incompatible_reconciler.rs");
+}
+
+#[test]
+fn reconcile_model_public_api_compiles() {
+    let t = trybuild::TestCases::new();
+    t.pass("tests/ui/reconcile_model_public_api_pass.rs");
 }

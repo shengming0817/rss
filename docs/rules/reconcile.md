@@ -15,6 +15,27 @@ reconcile 是 L4 desired-state 收敛控制环：周期观察一个域 crate **�
 reconcile **不是业务编排器**（那是 saga），**不是 CQRS 读模型构建器**（那是 projection
 harness）。三者正交，边界见下。
 
+## Desired / Actual / Diff / Converge 模型
+
+L4 模型边界冻结在 `consistency::reconcile` 的纯类型：`DesiredState<T>` / `ActualState<T>` /
+`ReconcileDiff<T>` / `DriftKind` / `ConvergeAction`。这些类型只表达域 reconciler 已经映射好的比较
+snapshot 与闭集分类；真实 observe / write / command emission 仍由消费域 reconciler 在
+`reconcile()` 内完成。
+
+- **desired**：域自己持久层中的 intended snapshot，表示实体应存在为何种纯比较值，或应缺失。
+- **actual**：域观察不可靠外部 / 设备边界后得到的 observed snapshot，表示实体当前存在为何种纯比较值，或缺失。
+- **diff**：`ReconcileDiff::between(desired, actual)` 得出的闭集 drift 分类：`converged` /
+  `missing_actual` / `unexpected_actual` / `changed`。
+- **converge**：`ConvergeAction` 纯下一步分类：`noop` / `create` / `update` / `delete`；它不是 adapter
+  action，不执行 I/O，也不绕过 fencing / 幂等。
+
+`T` 是域映射后的 provider-agnostic 比较值；泛型本身不尝试用 marker trait 证明该语义，域 reconciler
+负责在进入 `DesiredState::present` / `ActualState::present` 前完成映射。DB row、adapter handle、
+Vault/SoftCA/Redis/PG 类型、HTTP / Kubernetes / MQTT 类型、generated contract DTO、字段级 payload diff
+不属于 `consistency` 模型边界。机器可守部分是：`consistency` 不依赖 adapter / runtime / serde、snapshot
+字段私有且只能经 presence 构造入口进入、`Debug` 只输出 presence/drift/action 而不展开 `T`、metric label
+只来自上述闭集 `as_label()`。
+
 ## Reconciler 实现要点
 
 - 签名 `async fn reconcile(&self, ctx: &Context, req: Request) -> Result<Outcome, ReconcileError>`，
@@ -23,7 +44,8 @@ harness）。三者正交，边界见下。
   实体；ticker 每 interval 再发，早退的 sweep 下个 tick 被重驱动（level-triggered，不丢）。
 - transient error → Loop 退避重试（per-entity 指数退避）。
 - `PermanentError` / `is_permanent` 只是不可重试分类，**不**自动把重试改成放弃下一步逻辑。
-- `Outcome.requeue_after` 表达健康态稍后复检；result label 值集冻结，捕获的 panic（`catch_unwind`）映射 transient。
+- `Outcome.requeue_after` 表达健康态稍后复检；result label 值集冻结在
+  `ReconcileResultLabel::as_label()`，捕获的 panic（`catch_unwind`）映射 transient。
 
 ## Builder 强制
 

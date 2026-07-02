@@ -1,0 +1,12 @@
+error[E0038]: the trait `Reconciler` is not dyn compatible
+ --> tests/ui/dyn_incompatible_reconciler.rs:6:30
+  |
+6 |     let _reconciler: Box<dyn Reconciler>;
+  |                              ^^^^^^^^^^ `Reconciler` is not dyn compatible
+  |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+ --> src/reconcile.rs
+  |
+  |     async fn reconcile(&self, ctx: &Context, req: Request) -> Result<Outcome, ReconcileError>;
+  |              ^^^^^^^^^ the trait is not dyn compatible because method `reconcile` is `async`

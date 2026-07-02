@@ -105,8 +105,15 @@ access log 之前完成。
 
 ### Reconcile Metrics result Label
 
-`reconcile_total{result}` 的 result 值集必须闭合；新增或改名必须同步 schema、
-tests、dashboard、alert 与 emit site。
+`reconcile_total{result}` 的 result 值集闭合于 `consistency::ReconcileResultLabel::as_label()`：
+`settled` / `requeue_after` / `transient` / `permanent` / `invariant`。新增或改名必须同步 schema、
+tests、dashboard、alert 与 emit site；duration、entity id、tenant、error text、payload diff 或 adapter
+原因不得进入 `result` label。
+
+未来 `eventexec` 或其它 harness emit site 必须每个 reconcile attempt 恰好发射一次：
+success 分支经 `ReconcileResultLabel::from_outcome(&outcome)`，`Err(ReconcileError)` 分支经
+`ReconcileResultLabel::from_error(&error)`，`catch_unwind` panic 分支经 `ReconcileResultLabel::from_panic()`，
+随后统一调用 `.as_label()`；禁止手写 result 字符串或从 duration/error text/adapter reason 推导 label。
 
 ### HTTP Idempotency state Label
 

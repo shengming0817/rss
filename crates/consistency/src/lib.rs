@@ -52,7 +52,8 @@ pub use projection::{
     Lsn, PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrder, SerialInOrderGuarantor,
 };
 pub use reconcile::{
-    Context, EntityId, EntityIdError, Outcome, ReconcileError, Reconciler, Request,
+    ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,
+    Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
 };
 pub use saga::{CompensationOutcome, SagaOutcome, SagaStep, StepName, StepNameError};
 pub use tx_retry::{

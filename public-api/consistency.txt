@@ -635,6 +635,39 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::Disposition where T:
 pub unsafe fn consistency::outbox::Disposition::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::Disposition
 pub fn consistency::outbox::Disposition::from(T) -> T
+#[non_exhaustive] pub enum consistency::outbox::OutboxContractIdError
+pub consistency::outbox::OutboxContractIdError::Empty
+pub consistency::outbox::OutboxContractIdError::Format
+impl core::error::Error for consistency::outbox::OutboxContractIdError
+impl core::fmt::Debug for consistency::outbox::OutboxContractIdError
+pub fn consistency::outbox::OutboxContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::outbox::OutboxContractIdError
+pub fn consistency::outbox::OutboxContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for consistency::outbox::OutboxContractIdError
+impl core::marker::Send for consistency::outbox::OutboxContractIdError
+impl core::marker::Sync for consistency::outbox::OutboxContractIdError
+impl core::marker::Unpin for consistency::outbox::OutboxContractIdError
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxContractIdError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxContractIdError
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxContractIdError
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxContractIdError where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxContractIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxContractIdError where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxContractIdError::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxContractIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxContractIdError where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxContractIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxContractIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for consistency::outbox::OutboxContractIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::outbox::OutboxContractIdError where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxContractIdError where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxContractIdError where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for consistency::outbox::OutboxContractIdError
+pub fn consistency::outbox::OutboxContractIdError::from(T) -> T
 #[non_exhaustive] pub enum consistency::outbox::PartitionKeyError
 pub consistency::outbox::PartitionKeyError::Empty
 pub consistency::outbox::PartitionKeyError::TooLong
@@ -744,6 +777,48 @@ impl<T> core::borrow::BorrowMut<T> for consistency::outbox::TopicError where T: 
 pub fn consistency::outbox::TopicError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::outbox::TopicError
 pub fn consistency::outbox::TopicError::from(T) -> T
+pub struct consistency::outbox::BacklogMetricSample
+impl consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::new(consistency::outbox::OutboxMetricSubject, consistency::outbox::BacklogSample) -> Self
+pub fn consistency::outbox::BacklogMetricSample::sample(&self) -> consistency::outbox::BacklogSample
+pub fn consistency::outbox::BacklogMetricSample::subject(&self) -> &consistency::outbox::OutboxMetricSubject
+impl core::clone::Clone for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::clone(&self) -> consistency::outbox::BacklogMetricSample
+impl core::cmp::Eq for consistency::outbox::BacklogMetricSample
+impl core::cmp::PartialEq for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::eq(&self, &consistency::outbox::BacklogMetricSample) -> bool
+impl core::fmt::Debug for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::BacklogMetricSample
+impl core::marker::Freeze for consistency::outbox::BacklogMetricSample
+impl core::marker::Send for consistency::outbox::BacklogMetricSample
+impl core::marker::Sync for consistency::outbox::BacklogMetricSample
+impl core::marker::Unpin for consistency::outbox::BacklogMetricSample
+impl core::marker::UnsafeUnpin for consistency::outbox::BacklogMetricSample
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogMetricSample
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogMetricSample
+impl<T, U> core::convert::Into<U> for consistency::outbox::BacklogMetricSample where U: core::convert::From<T>
+pub fn consistency::outbox::BacklogMetricSample::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::BacklogMetricSample where U: core::convert::Into<T>
+pub type consistency::outbox::BacklogMetricSample::Error = core::convert::Infallible
+pub fn consistency::outbox::BacklogMetricSample::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::BacklogMetricSample where U: core::convert::TryFrom<T>
+pub type consistency::outbox::BacklogMetricSample::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::BacklogMetricSample::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::BacklogMetricSample where T: core::clone::Clone
+pub type consistency::outbox::BacklogMetricSample::Owned = T
+pub fn consistency::outbox::BacklogMetricSample::clone_into(&self, &mut T)
+pub fn consistency::outbox::BacklogMetricSample::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::BacklogMetricSample where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::BacklogMetricSample::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::BacklogMetricSample where T: ?core::marker::Sized
+pub fn consistency::outbox::BacklogMetricSample::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::BacklogMetricSample where T: ?core::marker::Sized
+pub fn consistency::outbox::BacklogMetricSample::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::BacklogMetricSample where T: core::clone::Clone
+pub unsafe fn consistency::outbox::BacklogMetricSample::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::from(T) -> T
 pub struct consistency::outbox::BacklogSample
 impl consistency::outbox::BacklogSample
 pub fn consistency::outbox::BacklogSample::depth(&self) -> u64
@@ -859,6 +934,91 @@ impl<T> core::borrow::BorrowMut<T> for consistency::outbox::HandleResult where T
 pub fn consistency::outbox::HandleResult::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::outbox::HandleResult
 pub fn consistency::outbox::HandleResult::from(T) -> T
+pub struct consistency::outbox::OutboxContractId(_)
+impl consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::as_str(&self) -> &str
+pub fn consistency::outbox::OutboxContractId::parse(&str) -> core::result::Result<Self, consistency::outbox::OutboxContractIdError>
+impl core::clone::Clone for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::clone(&self) -> consistency::outbox::OutboxContractId
+impl core::cmp::Eq for consistency::outbox::OutboxContractId
+impl core::cmp::PartialEq for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::eq(&self, &consistency::outbox::OutboxContractId) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxContractId
+impl core::marker::Freeze for consistency::outbox::OutboxContractId
+impl core::marker::Send for consistency::outbox::OutboxContractId
+impl core::marker::Sync for consistency::outbox::OutboxContractId
+impl core::marker::Unpin for consistency::outbox::OutboxContractId
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxContractId
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxContractId
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxContractId
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxContractId where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxContractId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxContractId where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxContractId::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxContractId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxContractId where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxContractId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxContractId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::OutboxContractId where T: core::clone::Clone
+pub type consistency::outbox::OutboxContractId::Owned = T
+pub fn consistency::outbox::OutboxContractId::clone_into(&self, &mut T)
+pub fn consistency::outbox::OutboxContractId::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::OutboxContractId where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxContractId where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxContractId where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::OutboxContractId where T: core::clone::Clone
+pub unsafe fn consistency::outbox::OutboxContractId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::from(T) -> T
+pub struct consistency::outbox::OutboxMetricSubject
+impl consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::contract_id(&self) -> &consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxMetricSubject::new(vocab::tenant::TenantId, consistency::outbox::OutboxContractId) -> Self
+pub fn consistency::outbox::OutboxMetricSubject::tenant_id(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::clone(&self) -> consistency::outbox::OutboxMetricSubject
+impl core::cmp::Eq for consistency::outbox::OutboxMetricSubject
+impl core::cmp::PartialEq for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::eq(&self, &consistency::outbox::OutboxMetricSubject) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxMetricSubject
+impl core::marker::Freeze for consistency::outbox::OutboxMetricSubject
+impl core::marker::Send for consistency::outbox::OutboxMetricSubject
+impl core::marker::Sync for consistency::outbox::OutboxMetricSubject
+impl core::marker::Unpin for consistency::outbox::OutboxMetricSubject
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxMetricSubject
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxMetricSubject
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxMetricSubject
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxMetricSubject where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxMetricSubject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxMetricSubject where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxMetricSubject::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxMetricSubject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxMetricSubject where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxMetricSubject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxMetricSubject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::OutboxMetricSubject where T: core::clone::Clone
+pub type consistency::outbox::OutboxMetricSubject::Owned = T
+pub fn consistency::outbox::OutboxMetricSubject::clone_into(&self, &mut T)
+pub fn consistency::outbox::OutboxMetricSubject::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::OutboxMetricSubject where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxMetricSubject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxMetricSubject where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxMetricSubject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxMetricSubject where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxMetricSubject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::OutboxMetricSubject where T: core::clone::Clone
+pub unsafe fn consistency::outbox::OutboxMetricSubject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::from(T) -> T
 pub struct consistency::outbox::OutboxPayload(_)
 impl consistency::outbox::OutboxPayload
 pub fn consistency::outbox::OutboxPayload::as_bytes(&self) -> &[u8]
@@ -944,6 +1104,47 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::PartitionKey where T
 pub unsafe fn consistency::outbox::PartitionKey::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::PartitionKey
 pub fn consistency::outbox::PartitionKey::from(T) -> T
+pub struct consistency::outbox::PendingEntry
+impl consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::entry(&self) -> &consistency::outbox::Entry
+pub fn consistency::outbox::PendingEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
+pub fn consistency::outbox::PendingEntry::new(consistency::outbox::Entry, consistency::outbox::OutboxMetricSubject) -> Self
+pub fn consistency::outbox::PendingEntry::payload(&self) -> &[u8]
+pub fn consistency::outbox::PendingEntry::subject(&self) -> &consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::PendingEntry::topic(&self) -> &consistency::outbox::Topic
+impl core::clone::Clone for consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::clone(&self) -> consistency::outbox::PendingEntry
+impl core::fmt::Debug for consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for consistency::outbox::PendingEntry
+impl core::marker::Send for consistency::outbox::PendingEntry
+impl core::marker::Sync for consistency::outbox::PendingEntry
+impl core::marker::Unpin for consistency::outbox::PendingEntry
+impl core::marker::UnsafeUnpin for consistency::outbox::PendingEntry
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PendingEntry
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PendingEntry
+impl<T, U> core::convert::Into<U> for consistency::outbox::PendingEntry where U: core::convert::From<T>
+pub fn consistency::outbox::PendingEntry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::PendingEntry where U: core::convert::Into<T>
+pub type consistency::outbox::PendingEntry::Error = core::convert::Infallible
+pub fn consistency::outbox::PendingEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::PendingEntry where U: core::convert::TryFrom<T>
+pub type consistency::outbox::PendingEntry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::PendingEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::PendingEntry where T: core::clone::Clone
+pub type consistency::outbox::PendingEntry::Owned = T
+pub fn consistency::outbox::PendingEntry::clone_into(&self, &mut T)
+pub fn consistency::outbox::PendingEntry::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::PendingEntry where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::PendingEntry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::PendingEntry where T: ?core::marker::Sized
+pub fn consistency::outbox::PendingEntry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::PendingEntry where T: ?core::marker::Sized
+pub fn consistency::outbox::PendingEntry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::PendingEntry where T: core::clone::Clone
+pub unsafe fn consistency::outbox::PendingEntry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::from(T) -> T
 pub struct consistency::outbox::PermanentError(_)
 impl consistency::outbox::PermanentError
 pub fn consistency::outbox::PermanentError::kind(&self) -> consistency::outbox::PermanentErrorKind
@@ -1022,11 +1223,11 @@ pub unsafe fn consistency::outbox::Topic::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::Topic
 pub fn consistency::outbox::Topic::from(T) -> T
 pub trait consistency::outbox::OutboxBacklog
-pub async fn consistency::outbox::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
+pub async fn consistency::outbox::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
 pub trait consistency::outbox::OutboxRelay
-pub async fn consistency::outbox::OutboxRelay::relay(&self, &consistency::outbox::Entry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
+pub async fn consistency::outbox::OutboxRelay::relay(&self, &consistency::outbox::PendingEntry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
 pub trait consistency::outbox::OutboxSource
-pub async fn consistency::outbox::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::Entry>, consistency::error::EngineError>
+pub async fn consistency::outbox::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::PendingEntry>, consistency::error::EngineError>
 pub trait consistency::outbox::RetentionSweeper
 pub async fn consistency::outbox::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub mod consistency::projection
@@ -1126,6 +1327,97 @@ pub async fn consistency::projection::Projector::apply<E: consistency::projectio
 pub trait consistency::projection::SerialInOrderGuarantor: consistency::projection::sealed::Sealed + core::marker::Copy
 impl consistency::projection::SerialInOrderGuarantor for consistency::projection::SerialInOrder
 pub mod consistency::reconcile
+#[non_exhaustive] pub enum consistency::reconcile::ConvergeAction
+pub consistency::reconcile::ConvergeAction::Create
+pub consistency::reconcile::ConvergeAction::Delete
+pub consistency::reconcile::ConvergeAction::Noop
+pub consistency::reconcile::ConvergeAction::Update
+impl consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::as_label(self) -> &'static str
+pub fn consistency::reconcile::ConvergeAction::for_drift(consistency::reconcile::DriftKind) -> Self
+impl core::clone::Clone for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::clone(&self) -> consistency::reconcile::ConvergeAction
+impl core::cmp::Eq for consistency::reconcile::ConvergeAction
+impl core::cmp::PartialEq for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::eq(&self, &consistency::reconcile::ConvergeAction) -> bool
+impl core::fmt::Debug for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::reconcile::ConvergeAction
+impl core::marker::StructuralPartialEq for consistency::reconcile::ConvergeAction
+impl core::marker::Freeze for consistency::reconcile::ConvergeAction
+impl core::marker::Send for consistency::reconcile::ConvergeAction
+impl core::marker::Sync for consistency::reconcile::ConvergeAction
+impl core::marker::Unpin for consistency::reconcile::ConvergeAction
+impl core::marker::UnsafeUnpin for consistency::reconcile::ConvergeAction
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ConvergeAction
+impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ConvergeAction
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ConvergeAction where U: core::convert::From<T>
+pub fn consistency::reconcile::ConvergeAction::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ConvergeAction where U: core::convert::Into<T>
+pub type consistency::reconcile::ConvergeAction::Error = core::convert::Infallible
+pub fn consistency::reconcile::ConvergeAction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ConvergeAction where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ConvergeAction::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ConvergeAction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ConvergeAction where T: core::clone::Clone
+pub type consistency::reconcile::ConvergeAction::Owned = T
+pub fn consistency::reconcile::ConvergeAction::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ConvergeAction::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ConvergeAction where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ConvergeAction::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ConvergeAction where T: ?core::marker::Sized
+pub fn consistency::reconcile::ConvergeAction::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ConvergeAction where T: ?core::marker::Sized
+pub fn consistency::reconcile::ConvergeAction::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ConvergeAction where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ConvergeAction::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::from(T) -> T
+#[non_exhaustive] pub enum consistency::reconcile::DriftKind
+pub consistency::reconcile::DriftKind::Changed
+pub consistency::reconcile::DriftKind::Converged
+pub consistency::reconcile::DriftKind::MissingActual
+pub consistency::reconcile::DriftKind::UnexpectedActual
+impl consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::clone(&self) -> consistency::reconcile::DriftKind
+impl core::cmp::Eq for consistency::reconcile::DriftKind
+impl core::cmp::PartialEq for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::eq(&self, &consistency::reconcile::DriftKind) -> bool
+impl core::fmt::Debug for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::reconcile::DriftKind
+impl core::marker::StructuralPartialEq for consistency::reconcile::DriftKind
+impl core::marker::Freeze for consistency::reconcile::DriftKind
+impl core::marker::Send for consistency::reconcile::DriftKind
+impl core::marker::Sync for consistency::reconcile::DriftKind
+impl core::marker::Unpin for consistency::reconcile::DriftKind
+impl core::marker::UnsafeUnpin for consistency::reconcile::DriftKind
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::DriftKind
+impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::DriftKind
+impl<T, U> core::convert::Into<U> for consistency::reconcile::DriftKind where U: core::convert::From<T>
+pub fn consistency::reconcile::DriftKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::DriftKind where U: core::convert::Into<T>
+pub type consistency::reconcile::DriftKind::Error = core::convert::Infallible
+pub fn consistency::reconcile::DriftKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::DriftKind where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::DriftKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::DriftKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::DriftKind where T: core::clone::Clone
+pub type consistency::reconcile::DriftKind::Owned = T
+pub fn consistency::reconcile::DriftKind::clone_into(&self, &mut T)
+pub fn consistency::reconcile::DriftKind::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::DriftKind where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::DriftKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::DriftKind where T: ?core::marker::Sized
+pub fn consistency::reconcile::DriftKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::DriftKind where T: ?core::marker::Sized
+pub fn consistency::reconcile::DriftKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::DriftKind where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::DriftKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::from(T) -> T
 #[non_exhaustive] pub enum consistency::reconcile::EntityIdError
 pub consistency::reconcile::EntityIdError::Empty
 pub consistency::reconcile::EntityIdError::NotCanonical
@@ -1159,6 +1451,97 @@ impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::EntityIdError whe
 pub fn consistency::reconcile::EntityIdError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::reconcile::EntityIdError
 pub fn consistency::reconcile::EntityIdError::from(T) -> T
+#[non_exhaustive] pub enum consistency::reconcile::ReconcileResultLabel
+pub consistency::reconcile::ReconcileResultLabel::Invariant
+pub consistency::reconcile::ReconcileResultLabel::Permanent
+pub consistency::reconcile::ReconcileResultLabel::RequeueAfter
+pub consistency::reconcile::ReconcileResultLabel::Settled
+pub consistency::reconcile::ReconcileResultLabel::Transient
+impl consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::as_label(self) -> &'static str
+pub fn consistency::reconcile::ReconcileResultLabel::from_error(&consistency::reconcile::ReconcileError) -> Self
+pub fn consistency::reconcile::ReconcileResultLabel::from_outcome(&consistency::reconcile::Outcome) -> Self
+pub fn consistency::reconcile::ReconcileResultLabel::from_panic() -> Self
+impl core::clone::Clone for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::clone(&self) -> consistency::reconcile::ReconcileResultLabel
+impl core::cmp::Eq for consistency::reconcile::ReconcileResultLabel
+impl core::cmp::PartialEq for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::eq(&self, &consistency::reconcile::ReconcileResultLabel) -> bool
+impl core::fmt::Debug for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::reconcile::ReconcileResultLabel
+impl core::marker::StructuralPartialEq for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Freeze for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Send for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Sync for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Unpin for consistency::reconcile::ReconcileResultLabel
+impl core::marker::UnsafeUnpin for consistency::reconcile::ReconcileResultLabel
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ReconcileResultLabel
+impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ReconcileResultLabel
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ReconcileResultLabel where U: core::convert::From<T>
+pub fn consistency::reconcile::ReconcileResultLabel::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ReconcileResultLabel where U: core::convert::Into<T>
+pub type consistency::reconcile::ReconcileResultLabel::Error = core::convert::Infallible
+pub fn consistency::reconcile::ReconcileResultLabel::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ReconcileResultLabel where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ReconcileResultLabel::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ReconcileResultLabel::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ReconcileResultLabel where T: core::clone::Clone
+pub type consistency::reconcile::ReconcileResultLabel::Owned = T
+pub fn consistency::reconcile::ReconcileResultLabel::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ReconcileResultLabel::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ReconcileResultLabel where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileResultLabel::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ReconcileResultLabel where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileResultLabel::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ReconcileResultLabel where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileResultLabel::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ReconcileResultLabel where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ReconcileResultLabel::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::from(T) -> T
+pub struct consistency::reconcile::ActualState<T>
+impl<T> consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::as_ref(&self) -> core::option::Option<&T>
+pub fn consistency::reconcile::ActualState<T>::missing() -> Self
+pub fn consistency::reconcile::ActualState<T>::present(T) -> Self
+impl<T: core::clone::Clone> core::clone::Clone for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::clone(&self) -> consistency::reconcile::ActualState<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for consistency::reconcile::ActualState<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::eq(&self, &consistency::reconcile::ActualState<T>) -> bool
+impl<T> core::fmt::Debug for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for consistency::reconcile::ActualState<T>
+impl<T> core::marker::Freeze for consistency::reconcile::ActualState<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for consistency::reconcile::ActualState<T> where T: core::marker::Send
+impl<T> core::marker::Sync for consistency::reconcile::ActualState<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for consistency::reconcile::ActualState<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for consistency::reconcile::ActualState<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ActualState<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ActualState<T> where T: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ActualState<T> where U: core::convert::From<T>
+pub fn consistency::reconcile::ActualState<T>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ActualState<T> where U: core::convert::Into<T>
+pub type consistency::reconcile::ActualState<T>::Error = core::convert::Infallible
+pub fn consistency::reconcile::ActualState<T>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ActualState<T> where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ActualState<T>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ActualState<T>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ActualState<T> where T: core::clone::Clone
+pub type consistency::reconcile::ActualState<T>::Owned = T
+pub fn consistency::reconcile::ActualState<T>::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ActualState<T>::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ActualState<T> where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ActualState<T>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ActualState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ActualState<T>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ActualState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ActualState<T>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ActualState<T> where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ActualState<T>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::from(T) -> T
 pub struct consistency::reconcile::Context
 impl consistency::reconcile::Context
 pub fn consistency::reconcile::Context::epoch(&self) -> core::option::Option<vocab::epoch::Epoch>
@@ -1196,6 +1579,48 @@ impl<T> core::clone::CloneToUninit for consistency::reconcile::Context where T: 
 pub unsafe fn consistency::reconcile::Context::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::reconcile::Context
 pub fn consistency::reconcile::Context::from(T) -> T
+pub struct consistency::reconcile::DesiredState<T>
+impl<T> consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::as_ref(&self) -> core::option::Option<&T>
+pub fn consistency::reconcile::DesiredState<T>::missing() -> Self
+pub fn consistency::reconcile::DesiredState<T>::present(T) -> Self
+impl<T: core::clone::Clone> core::clone::Clone for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::clone(&self) -> consistency::reconcile::DesiredState<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for consistency::reconcile::DesiredState<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::eq(&self, &consistency::reconcile::DesiredState<T>) -> bool
+impl<T> core::fmt::Debug for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for consistency::reconcile::DesiredState<T>
+impl<T> core::marker::Freeze for consistency::reconcile::DesiredState<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for consistency::reconcile::DesiredState<T> where T: core::marker::Send
+impl<T> core::marker::Sync for consistency::reconcile::DesiredState<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for consistency::reconcile::DesiredState<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for consistency::reconcile::DesiredState<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::DesiredState<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for consistency::reconcile::DesiredState<T> where T: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for consistency::reconcile::DesiredState<T> where U: core::convert::From<T>
+pub fn consistency::reconcile::DesiredState<T>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::DesiredState<T> where U: core::convert::Into<T>
+pub type consistency::reconcile::DesiredState<T>::Error = core::convert::Infallible
+pub fn consistency::reconcile::DesiredState<T>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::DesiredState<T> where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::DesiredState<T>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::DesiredState<T>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::DesiredState<T> where T: core::clone::Clone
+pub type consistency::reconcile::DesiredState<T>::Owned = T
+pub fn consistency::reconcile::DesiredState<T>::clone_into(&self, &mut T)
+pub fn consistency::reconcile::DesiredState<T>::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::DesiredState<T> where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::DesiredState<T>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::DesiredState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::DesiredState<T>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::DesiredState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::DesiredState<T>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::DesiredState<T> where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::DesiredState<T>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::from(T) -> T
 pub struct consistency::reconcile::EntityId(_)
 impl consistency::reconcile::EntityId
 pub fn consistency::reconcile::EntityId::as_str(&self) -> &str
@@ -1241,6 +1666,7 @@ impl<T> core::convert::From<T> for consistency::reconcile::EntityId
 pub fn consistency::reconcile::EntityId::from(T) -> T
 pub struct consistency::reconcile::Outcome
 impl consistency::reconcile::Outcome
+pub fn consistency::reconcile::Outcome::as_label(&self) -> &'static str
 pub fn consistency::reconcile::Outcome::requeue_after(core::time::Duration) -> Self
 pub fn consistency::reconcile::Outcome::requeue_interval(&self) -> core::option::Option<core::time::Duration>
 pub fn consistency::reconcile::Outcome::settled() -> Self
@@ -1282,6 +1708,51 @@ impl<T> core::clone::CloneToUninit for consistency::reconcile::Outcome where T: 
 pub unsafe fn consistency::reconcile::Outcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::reconcile::Outcome
 pub fn consistency::reconcile::Outcome::from(T) -> T
+pub struct consistency::reconcile::ReconcileDiff<T>
+impl<T: core::cmp::PartialEq> consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::between(consistency::reconcile::DesiredState<T>, consistency::reconcile::ActualState<T>) -> Self
+impl<T> consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::actual(&self) -> &consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::converge_action(&self) -> consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ReconcileDiff<T>::desired(&self) -> &consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::drift(&self) -> consistency::reconcile::DriftKind
+impl<T: core::clone::Clone> core::clone::Clone for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::clone(&self) -> consistency::reconcile::ReconcileDiff<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for consistency::reconcile::ReconcileDiff<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::eq(&self, &consistency::reconcile::ReconcileDiff<T>) -> bool
+impl<T> core::fmt::Debug for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for consistency::reconcile::ReconcileDiff<T>
+impl<T> core::marker::Freeze for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Send
+impl<T> core::marker::Sync for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for consistency::reconcile::ReconcileDiff<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ReconcileDiff<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ReconcileDiff<T> where T: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ReconcileDiff<T> where U: core::convert::From<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ReconcileDiff<T> where U: core::convert::Into<T>
+pub type consistency::reconcile::ReconcileDiff<T>::Error = core::convert::Infallible
+pub fn consistency::reconcile::ReconcileDiff<T>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ReconcileDiff<T> where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ReconcileDiff<T>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ReconcileDiff<T>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ReconcileDiff<T> where T: core::clone::Clone
+pub type consistency::reconcile::ReconcileDiff<T>::Owned = T
+pub fn consistency::reconcile::ReconcileDiff<T>::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ReconcileDiff<T>::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ReconcileDiff<T> where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileDiff<T>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ReconcileDiff<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileDiff<T>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ReconcileDiff<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileDiff<T>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ReconcileDiff<T> where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ReconcileDiff<T>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::from(T) -> T
 pub struct consistency::reconcile::ReconcileError
 impl consistency::reconcile::ReconcileError
 pub fn consistency::reconcile::ReconcileError::is_permanent(&self) -> bool
@@ -1824,6 +2295,52 @@ impl<T> core::borrow::BorrowMut<T> for consistency::idempotency::ConsumerGroupEr
 pub fn consistency::idempotency::ConsumerGroupError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::idempotency::ConsumerGroupError
 pub fn consistency::idempotency::ConsumerGroupError::from(T) -> T
+#[non_exhaustive] pub enum consistency::ConvergeAction
+pub consistency::ConvergeAction::Create
+pub consistency::ConvergeAction::Delete
+pub consistency::ConvergeAction::Noop
+pub consistency::ConvergeAction::Update
+impl consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::as_label(self) -> &'static str
+pub fn consistency::reconcile::ConvergeAction::for_drift(consistency::reconcile::DriftKind) -> Self
+impl core::clone::Clone for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::clone(&self) -> consistency::reconcile::ConvergeAction
+impl core::cmp::Eq for consistency::reconcile::ConvergeAction
+impl core::cmp::PartialEq for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::eq(&self, &consistency::reconcile::ConvergeAction) -> bool
+impl core::fmt::Debug for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::reconcile::ConvergeAction
+impl core::marker::StructuralPartialEq for consistency::reconcile::ConvergeAction
+impl core::marker::Freeze for consistency::reconcile::ConvergeAction
+impl core::marker::Send for consistency::reconcile::ConvergeAction
+impl core::marker::Sync for consistency::reconcile::ConvergeAction
+impl core::marker::Unpin for consistency::reconcile::ConvergeAction
+impl core::marker::UnsafeUnpin for consistency::reconcile::ConvergeAction
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ConvergeAction
+impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ConvergeAction
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ConvergeAction where U: core::convert::From<T>
+pub fn consistency::reconcile::ConvergeAction::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ConvergeAction where U: core::convert::Into<T>
+pub type consistency::reconcile::ConvergeAction::Error = core::convert::Infallible
+pub fn consistency::reconcile::ConvergeAction::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ConvergeAction where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ConvergeAction::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ConvergeAction::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ConvergeAction where T: core::clone::Clone
+pub type consistency::reconcile::ConvergeAction::Owned = T
+pub fn consistency::reconcile::ConvergeAction::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ConvergeAction::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ConvergeAction where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ConvergeAction::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ConvergeAction where T: ?core::marker::Sized
+pub fn consistency::reconcile::ConvergeAction::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ConvergeAction where T: ?core::marker::Sized
+pub fn consistency::reconcile::ConvergeAction::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ConvergeAction where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ConvergeAction::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ConvergeAction::from(T) -> T
 #[non_exhaustive] pub enum consistency::Disposition
 pub consistency::Disposition::Ack
 pub consistency::Disposition::Reject
@@ -1868,6 +2385,51 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::Disposition where T:
 pub unsafe fn consistency::outbox::Disposition::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::Disposition
 pub fn consistency::outbox::Disposition::from(T) -> T
+#[non_exhaustive] pub enum consistency::DriftKind
+pub consistency::DriftKind::Changed
+pub consistency::DriftKind::Converged
+pub consistency::DriftKind::MissingActual
+pub consistency::DriftKind::UnexpectedActual
+impl consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::clone(&self) -> consistency::reconcile::DriftKind
+impl core::cmp::Eq for consistency::reconcile::DriftKind
+impl core::cmp::PartialEq for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::eq(&self, &consistency::reconcile::DriftKind) -> bool
+impl core::fmt::Debug for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::reconcile::DriftKind
+impl core::marker::StructuralPartialEq for consistency::reconcile::DriftKind
+impl core::marker::Freeze for consistency::reconcile::DriftKind
+impl core::marker::Send for consistency::reconcile::DriftKind
+impl core::marker::Sync for consistency::reconcile::DriftKind
+impl core::marker::Unpin for consistency::reconcile::DriftKind
+impl core::marker::UnsafeUnpin for consistency::reconcile::DriftKind
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::DriftKind
+impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::DriftKind
+impl<T, U> core::convert::Into<U> for consistency::reconcile::DriftKind where U: core::convert::From<T>
+pub fn consistency::reconcile::DriftKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::DriftKind where U: core::convert::Into<T>
+pub type consistency::reconcile::DriftKind::Error = core::convert::Infallible
+pub fn consistency::reconcile::DriftKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::DriftKind where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::DriftKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::DriftKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::DriftKind where T: core::clone::Clone
+pub type consistency::reconcile::DriftKind::Owned = T
+pub fn consistency::reconcile::DriftKind::clone_into(&self, &mut T)
+pub fn consistency::reconcile::DriftKind::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::DriftKind where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::DriftKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::DriftKind where T: ?core::marker::Sized
+pub fn consistency::reconcile::DriftKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::DriftKind where T: ?core::marker::Sized
+pub fn consistency::reconcile::DriftKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::DriftKind where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::DriftKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::DriftKind
+pub fn consistency::reconcile::DriftKind::from(T) -> T
 #[non_exhaustive] pub enum consistency::EngineErrorKind
 pub consistency::EngineErrorKind::Invariant
 pub consistency::EngineErrorKind::Permanent
@@ -2199,6 +2761,39 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::LeaseOutcome wh
 pub unsafe fn consistency::idempotency::LeaseOutcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::LeaseOutcome
 pub fn consistency::idempotency::LeaseOutcome::from(T) -> T
+#[non_exhaustive] pub enum consistency::OutboxContractIdError
+pub consistency::OutboxContractIdError::Empty
+pub consistency::OutboxContractIdError::Format
+impl core::error::Error for consistency::outbox::OutboxContractIdError
+impl core::fmt::Debug for consistency::outbox::OutboxContractIdError
+pub fn consistency::outbox::OutboxContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::outbox::OutboxContractIdError
+pub fn consistency::outbox::OutboxContractIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for consistency::outbox::OutboxContractIdError
+impl core::marker::Send for consistency::outbox::OutboxContractIdError
+impl core::marker::Sync for consistency::outbox::OutboxContractIdError
+impl core::marker::Unpin for consistency::outbox::OutboxContractIdError
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxContractIdError
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxContractIdError
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxContractIdError
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxContractIdError where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxContractIdError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxContractIdError where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxContractIdError::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxContractIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxContractIdError where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxContractIdError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxContractIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for consistency::outbox::OutboxContractIdError where T: core::fmt::Display + ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for consistency::outbox::OutboxContractIdError where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxContractIdError where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxContractIdError where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractIdError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for consistency::outbox::OutboxContractIdError
+pub fn consistency::outbox::OutboxContractIdError::from(T) -> T
 #[non_exhaustive] pub enum consistency::PartitionKeyError
 pub consistency::PartitionKeyError::Empty
 pub consistency::PartitionKeyError::TooLong
@@ -2275,6 +2870,55 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::PermanentErrorKind w
 pub unsafe fn consistency::outbox::PermanentErrorKind::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::PermanentErrorKind
 pub fn consistency::outbox::PermanentErrorKind::from(T) -> T
+#[non_exhaustive] pub enum consistency::ReconcileResultLabel
+pub consistency::ReconcileResultLabel::Invariant
+pub consistency::ReconcileResultLabel::Permanent
+pub consistency::ReconcileResultLabel::RequeueAfter
+pub consistency::ReconcileResultLabel::Settled
+pub consistency::ReconcileResultLabel::Transient
+impl consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::as_label(self) -> &'static str
+pub fn consistency::reconcile::ReconcileResultLabel::from_error(&consistency::reconcile::ReconcileError) -> Self
+pub fn consistency::reconcile::ReconcileResultLabel::from_outcome(&consistency::reconcile::Outcome) -> Self
+pub fn consistency::reconcile::ReconcileResultLabel::from_panic() -> Self
+impl core::clone::Clone for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::clone(&self) -> consistency::reconcile::ReconcileResultLabel
+impl core::cmp::Eq for consistency::reconcile::ReconcileResultLabel
+impl core::cmp::PartialEq for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::eq(&self, &consistency::reconcile::ReconcileResultLabel) -> bool
+impl core::fmt::Debug for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::reconcile::ReconcileResultLabel
+impl core::marker::StructuralPartialEq for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Freeze for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Send for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Sync for consistency::reconcile::ReconcileResultLabel
+impl core::marker::Unpin for consistency::reconcile::ReconcileResultLabel
+impl core::marker::UnsafeUnpin for consistency::reconcile::ReconcileResultLabel
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ReconcileResultLabel
+impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ReconcileResultLabel
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ReconcileResultLabel where U: core::convert::From<T>
+pub fn consistency::reconcile::ReconcileResultLabel::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ReconcileResultLabel where U: core::convert::Into<T>
+pub type consistency::reconcile::ReconcileResultLabel::Error = core::convert::Infallible
+pub fn consistency::reconcile::ReconcileResultLabel::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ReconcileResultLabel where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ReconcileResultLabel::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ReconcileResultLabel::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ReconcileResultLabel where T: core::clone::Clone
+pub type consistency::reconcile::ReconcileResultLabel::Owned = T
+pub fn consistency::reconcile::ReconcileResultLabel::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ReconcileResultLabel::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ReconcileResultLabel where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileResultLabel::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ReconcileResultLabel where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileResultLabel::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ReconcileResultLabel where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileResultLabel::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ReconcileResultLabel where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ReconcileResultLabel::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ReconcileResultLabel
+pub fn consistency::reconcile::ReconcileResultLabel::from(T) -> T
 #[non_exhaustive] pub enum consistency::SagaOutcome
 pub consistency::SagaOutcome::Completed
 pub consistency::SagaOutcome::Failed
@@ -2560,6 +3204,90 @@ impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryPolicyError
 pub unsafe fn consistency::tx_retry::TxRetryPolicyError::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryPolicyError
 pub fn consistency::tx_retry::TxRetryPolicyError::from(T) -> T
+pub struct consistency::ActualState<T>
+impl<T> consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::as_ref(&self) -> core::option::Option<&T>
+pub fn consistency::reconcile::ActualState<T>::missing() -> Self
+pub fn consistency::reconcile::ActualState<T>::present(T) -> Self
+impl<T: core::clone::Clone> core::clone::Clone for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::clone(&self) -> consistency::reconcile::ActualState<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for consistency::reconcile::ActualState<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::eq(&self, &consistency::reconcile::ActualState<T>) -> bool
+impl<T> core::fmt::Debug for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for consistency::reconcile::ActualState<T>
+impl<T> core::marker::Freeze for consistency::reconcile::ActualState<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for consistency::reconcile::ActualState<T> where T: core::marker::Send
+impl<T> core::marker::Sync for consistency::reconcile::ActualState<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for consistency::reconcile::ActualState<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for consistency::reconcile::ActualState<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ActualState<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ActualState<T> where T: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ActualState<T> where U: core::convert::From<T>
+pub fn consistency::reconcile::ActualState<T>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ActualState<T> where U: core::convert::Into<T>
+pub type consistency::reconcile::ActualState<T>::Error = core::convert::Infallible
+pub fn consistency::reconcile::ActualState<T>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ActualState<T> where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ActualState<T>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ActualState<T>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ActualState<T> where T: core::clone::Clone
+pub type consistency::reconcile::ActualState<T>::Owned = T
+pub fn consistency::reconcile::ActualState<T>::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ActualState<T>::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ActualState<T> where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ActualState<T>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ActualState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ActualState<T>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ActualState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ActualState<T>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ActualState<T> where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ActualState<T>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ActualState<T>::from(T) -> T
+pub struct consistency::BacklogMetricSample
+impl consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::new(consistency::outbox::OutboxMetricSubject, consistency::outbox::BacklogSample) -> Self
+pub fn consistency::outbox::BacklogMetricSample::sample(&self) -> consistency::outbox::BacklogSample
+pub fn consistency::outbox::BacklogMetricSample::subject(&self) -> &consistency::outbox::OutboxMetricSubject
+impl core::clone::Clone for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::clone(&self) -> consistency::outbox::BacklogMetricSample
+impl core::cmp::Eq for consistency::outbox::BacklogMetricSample
+impl core::cmp::PartialEq for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::eq(&self, &consistency::outbox::BacklogMetricSample) -> bool
+impl core::fmt::Debug for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::BacklogMetricSample
+impl core::marker::Freeze for consistency::outbox::BacklogMetricSample
+impl core::marker::Send for consistency::outbox::BacklogMetricSample
+impl core::marker::Sync for consistency::outbox::BacklogMetricSample
+impl core::marker::Unpin for consistency::outbox::BacklogMetricSample
+impl core::marker::UnsafeUnpin for consistency::outbox::BacklogMetricSample
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogMetricSample
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogMetricSample
+impl<T, U> core::convert::Into<U> for consistency::outbox::BacklogMetricSample where U: core::convert::From<T>
+pub fn consistency::outbox::BacklogMetricSample::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::BacklogMetricSample where U: core::convert::Into<T>
+pub type consistency::outbox::BacklogMetricSample::Error = core::convert::Infallible
+pub fn consistency::outbox::BacklogMetricSample::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::BacklogMetricSample where U: core::convert::TryFrom<T>
+pub type consistency::outbox::BacklogMetricSample::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::BacklogMetricSample::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::BacklogMetricSample where T: core::clone::Clone
+pub type consistency::outbox::BacklogMetricSample::Owned = T
+pub fn consistency::outbox::BacklogMetricSample::clone_into(&self, &mut T)
+pub fn consistency::outbox::BacklogMetricSample::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::BacklogMetricSample where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::BacklogMetricSample::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::BacklogMetricSample where T: ?core::marker::Sized
+pub fn consistency::outbox::BacklogMetricSample::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::BacklogMetricSample where T: ?core::marker::Sized
+pub fn consistency::outbox::BacklogMetricSample::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::BacklogMetricSample where T: core::clone::Clone
+pub unsafe fn consistency::outbox::BacklogMetricSample::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::BacklogMetricSample
+pub fn consistency::outbox::BacklogMetricSample::from(T) -> T
 pub struct consistency::BacklogSample
 impl consistency::outbox::BacklogSample
 pub fn consistency::outbox::BacklogSample::depth(&self) -> u64
@@ -2684,6 +3412,48 @@ impl<T> core::clone::CloneToUninit for consistency::reconcile::Context where T: 
 pub unsafe fn consistency::reconcile::Context::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::reconcile::Context
 pub fn consistency::reconcile::Context::from(T) -> T
+pub struct consistency::DesiredState<T>
+impl<T> consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::as_ref(&self) -> core::option::Option<&T>
+pub fn consistency::reconcile::DesiredState<T>::missing() -> Self
+pub fn consistency::reconcile::DesiredState<T>::present(T) -> Self
+impl<T: core::clone::Clone> core::clone::Clone for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::clone(&self) -> consistency::reconcile::DesiredState<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for consistency::reconcile::DesiredState<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::eq(&self, &consistency::reconcile::DesiredState<T>) -> bool
+impl<T> core::fmt::Debug for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for consistency::reconcile::DesiredState<T>
+impl<T> core::marker::Freeze for consistency::reconcile::DesiredState<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for consistency::reconcile::DesiredState<T> where T: core::marker::Send
+impl<T> core::marker::Sync for consistency::reconcile::DesiredState<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for consistency::reconcile::DesiredState<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for consistency::reconcile::DesiredState<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::DesiredState<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for consistency::reconcile::DesiredState<T> where T: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for consistency::reconcile::DesiredState<T> where U: core::convert::From<T>
+pub fn consistency::reconcile::DesiredState<T>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::DesiredState<T> where U: core::convert::Into<T>
+pub type consistency::reconcile::DesiredState<T>::Error = core::convert::Infallible
+pub fn consistency::reconcile::DesiredState<T>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::DesiredState<T> where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::DesiredState<T>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::DesiredState<T>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::DesiredState<T> where T: core::clone::Clone
+pub type consistency::reconcile::DesiredState<T>::Owned = T
+pub fn consistency::reconcile::DesiredState<T>::clone_into(&self, &mut T)
+pub fn consistency::reconcile::DesiredState<T>::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::DesiredState<T> where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::DesiredState<T>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::DesiredState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::DesiredState<T>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::DesiredState<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::DesiredState<T>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::DesiredState<T> where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::DesiredState<T>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::DesiredState<T>::from(T) -> T
 pub struct consistency::EngineError
 impl consistency::error::EngineError
 pub fn consistency::error::EngineError::is_permanent(&self) -> bool
@@ -3011,6 +3781,91 @@ impl<T> core::clone::CloneToUninit for consistency::projection::Lsn where T: cor
 pub unsafe fn consistency::projection::Lsn::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::projection::Lsn
 pub fn consistency::projection::Lsn::from(T) -> T
+pub struct consistency::OutboxContractId(_)
+impl consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::as_str(&self) -> &str
+pub fn consistency::outbox::OutboxContractId::parse(&str) -> core::result::Result<Self, consistency::outbox::OutboxContractIdError>
+impl core::clone::Clone for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::clone(&self) -> consistency::outbox::OutboxContractId
+impl core::cmp::Eq for consistency::outbox::OutboxContractId
+impl core::cmp::PartialEq for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::eq(&self, &consistency::outbox::OutboxContractId) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxContractId
+impl core::marker::Freeze for consistency::outbox::OutboxContractId
+impl core::marker::Send for consistency::outbox::OutboxContractId
+impl core::marker::Sync for consistency::outbox::OutboxContractId
+impl core::marker::Unpin for consistency::outbox::OutboxContractId
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxContractId
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxContractId
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxContractId
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxContractId where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxContractId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxContractId where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxContractId::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxContractId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxContractId where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxContractId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxContractId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::OutboxContractId where T: core::clone::Clone
+pub type consistency::outbox::OutboxContractId::Owned = T
+pub fn consistency::outbox::OutboxContractId::clone_into(&self, &mut T)
+pub fn consistency::outbox::OutboxContractId::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::OutboxContractId where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxContractId where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxContractId where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxContractId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::OutboxContractId where T: core::clone::Clone
+pub unsafe fn consistency::outbox::OutboxContractId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxContractId::from(T) -> T
+pub struct consistency::OutboxMetricSubject
+impl consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::contract_id(&self) -> &consistency::outbox::OutboxContractId
+pub fn consistency::outbox::OutboxMetricSubject::new(vocab::tenant::TenantId, consistency::outbox::OutboxContractId) -> Self
+pub fn consistency::outbox::OutboxMetricSubject::tenant_id(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::clone(&self) -> consistency::outbox::OutboxMetricSubject
+impl core::cmp::Eq for consistency::outbox::OutboxMetricSubject
+impl core::cmp::PartialEq for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::eq(&self, &consistency::outbox::OutboxMetricSubject) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxMetricSubject
+impl core::marker::Freeze for consistency::outbox::OutboxMetricSubject
+impl core::marker::Send for consistency::outbox::OutboxMetricSubject
+impl core::marker::Sync for consistency::outbox::OutboxMetricSubject
+impl core::marker::Unpin for consistency::outbox::OutboxMetricSubject
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxMetricSubject
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxMetricSubject
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxMetricSubject
+impl<T, U> core::convert::Into<U> for consistency::outbox::OutboxMetricSubject where U: core::convert::From<T>
+pub fn consistency::outbox::OutboxMetricSubject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::OutboxMetricSubject where U: core::convert::Into<T>
+pub type consistency::outbox::OutboxMetricSubject::Error = core::convert::Infallible
+pub fn consistency::outbox::OutboxMetricSubject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::OutboxMetricSubject where U: core::convert::TryFrom<T>
+pub type consistency::outbox::OutboxMetricSubject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::OutboxMetricSubject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::OutboxMetricSubject where T: core::clone::Clone
+pub type consistency::outbox::OutboxMetricSubject::Owned = T
+pub fn consistency::outbox::OutboxMetricSubject::clone_into(&self, &mut T)
+pub fn consistency::outbox::OutboxMetricSubject::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::OutboxMetricSubject where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::OutboxMetricSubject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::OutboxMetricSubject where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxMetricSubject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::OutboxMetricSubject where T: ?core::marker::Sized
+pub fn consistency::outbox::OutboxMetricSubject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::OutboxMetricSubject where T: core::clone::Clone
+pub unsafe fn consistency::outbox::OutboxMetricSubject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::OutboxMetricSubject::from(T) -> T
 pub struct consistency::OutboxPayload(_)
 impl consistency::outbox::OutboxPayload
 pub fn consistency::outbox::OutboxPayload::as_bytes(&self) -> &[u8]
@@ -3055,6 +3910,7 @@ impl<T> core::convert::From<T> for consistency::outbox::OutboxPayload
 pub fn consistency::outbox::OutboxPayload::from(T) -> T
 pub struct consistency::Outcome
 impl consistency::reconcile::Outcome
+pub fn consistency::reconcile::Outcome::as_label(&self) -> &'static str
 pub fn consistency::reconcile::Outcome::requeue_after(core::time::Duration) -> Self
 pub fn consistency::reconcile::Outcome::requeue_interval(&self) -> core::option::Option<core::time::Duration>
 pub fn consistency::reconcile::Outcome::settled() -> Self
@@ -3139,6 +3995,47 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::PartitionKey where T
 pub unsafe fn consistency::outbox::PartitionKey::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::PartitionKey
 pub fn consistency::outbox::PartitionKey::from(T) -> T
+pub struct consistency::PendingEntry
+impl consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::entry(&self) -> &consistency::outbox::Entry
+pub fn consistency::outbox::PendingEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
+pub fn consistency::outbox::PendingEntry::new(consistency::outbox::Entry, consistency::outbox::OutboxMetricSubject) -> Self
+pub fn consistency::outbox::PendingEntry::payload(&self) -> &[u8]
+pub fn consistency::outbox::PendingEntry::subject(&self) -> &consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::PendingEntry::topic(&self) -> &consistency::outbox::Topic
+impl core::clone::Clone for consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::clone(&self) -> consistency::outbox::PendingEntry
+impl core::fmt::Debug for consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for consistency::outbox::PendingEntry
+impl core::marker::Send for consistency::outbox::PendingEntry
+impl core::marker::Sync for consistency::outbox::PendingEntry
+impl core::marker::Unpin for consistency::outbox::PendingEntry
+impl core::marker::UnsafeUnpin for consistency::outbox::PendingEntry
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PendingEntry
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PendingEntry
+impl<T, U> core::convert::Into<U> for consistency::outbox::PendingEntry where U: core::convert::From<T>
+pub fn consistency::outbox::PendingEntry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::outbox::PendingEntry where U: core::convert::Into<T>
+pub type consistency::outbox::PendingEntry::Error = core::convert::Infallible
+pub fn consistency::outbox::PendingEntry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::outbox::PendingEntry where U: core::convert::TryFrom<T>
+pub type consistency::outbox::PendingEntry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::outbox::PendingEntry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::outbox::PendingEntry where T: core::clone::Clone
+pub type consistency::outbox::PendingEntry::Owned = T
+pub fn consistency::outbox::PendingEntry::clone_into(&self, &mut T)
+pub fn consistency::outbox::PendingEntry::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::outbox::PendingEntry where T: 'static + ?core::marker::Sized
+pub fn consistency::outbox::PendingEntry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::outbox::PendingEntry where T: ?core::marker::Sized
+pub fn consistency::outbox::PendingEntry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::outbox::PendingEntry where T: ?core::marker::Sized
+pub fn consistency::outbox::PendingEntry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::outbox::PendingEntry where T: core::clone::Clone
+pub unsafe fn consistency::outbox::PendingEntry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::outbox::PendingEntry
+pub fn consistency::outbox::PendingEntry::from(T) -> T
 pub struct consistency::PermanentError(_)
 impl consistency::outbox::PermanentError
 pub fn consistency::outbox::PermanentError::kind(&self) -> consistency::outbox::PermanentErrorKind
@@ -3173,6 +4070,51 @@ impl<T> core::borrow::BorrowMut<T> for consistency::outbox::PermanentError where
 pub fn consistency::outbox::PermanentError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for consistency::outbox::PermanentError
 pub fn consistency::outbox::PermanentError::from(T) -> T
+pub struct consistency::ReconcileDiff<T>
+impl<T: core::cmp::PartialEq> consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::between(consistency::reconcile::DesiredState<T>, consistency::reconcile::ActualState<T>) -> Self
+impl<T> consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::actual(&self) -> &consistency::reconcile::ActualState<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::converge_action(&self) -> consistency::reconcile::ConvergeAction
+pub fn consistency::reconcile::ReconcileDiff<T>::desired(&self) -> &consistency::reconcile::DesiredState<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::drift(&self) -> consistency::reconcile::DriftKind
+impl<T: core::clone::Clone> core::clone::Clone for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::clone(&self) -> consistency::reconcile::ReconcileDiff<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for consistency::reconcile::ReconcileDiff<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::eq(&self, &consistency::reconcile::ReconcileDiff<T>) -> bool
+impl<T> core::fmt::Debug for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for consistency::reconcile::ReconcileDiff<T>
+impl<T> core::marker::Freeze for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Send
+impl<T> core::marker::Sync for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for consistency::reconcile::ReconcileDiff<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for consistency::reconcile::ReconcileDiff<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ReconcileDiff<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ReconcileDiff<T> where T: core::panic::unwind_safe::UnwindSafe
+impl<T, U> core::convert::Into<U> for consistency::reconcile::ReconcileDiff<T> where U: core::convert::From<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::reconcile::ReconcileDiff<T> where U: core::convert::Into<T>
+pub type consistency::reconcile::ReconcileDiff<T>::Error = core::convert::Infallible
+pub fn consistency::reconcile::ReconcileDiff<T>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::reconcile::ReconcileDiff<T> where U: core::convert::TryFrom<T>
+pub type consistency::reconcile::ReconcileDiff<T>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::reconcile::ReconcileDiff<T>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::reconcile::ReconcileDiff<T> where T: core::clone::Clone
+pub type consistency::reconcile::ReconcileDiff<T>::Owned = T
+pub fn consistency::reconcile::ReconcileDiff<T>::clone_into(&self, &mut T)
+pub fn consistency::reconcile::ReconcileDiff<T>::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::reconcile::ReconcileDiff<T> where T: 'static + ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileDiff<T>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::reconcile::ReconcileDiff<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileDiff<T>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::reconcile::ReconcileDiff<T> where T: ?core::marker::Sized
+pub fn consistency::reconcile::ReconcileDiff<T>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::reconcile::ReconcileDiff<T> where T: core::clone::Clone
+pub unsafe fn consistency::reconcile::ReconcileDiff<T>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::reconcile::ReconcileDiff<T>
+pub fn consistency::reconcile::ReconcileDiff<T>::from(T) -> T
 pub struct consistency::ReconcileError
 impl consistency::reconcile::ReconcileError
 pub fn consistency::reconcile::ReconcileError::is_permanent(&self) -> bool
@@ -3472,11 +4414,11 @@ pub async fn consistency::InboxStore::extend(&self, &consistency::idempotency::I
 pub async fn consistency::InboxStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
 pub async fn consistency::InboxStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
-pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
+pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
 pub trait consistency::OutboxRelay
-pub async fn consistency::OutboxRelay::relay(&self, &consistency::outbox::Entry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
+pub async fn consistency::OutboxRelay::relay(&self, &consistency::outbox::PendingEntry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
 pub trait consistency::OutboxSource
-pub async fn consistency::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::Entry>, consistency::error::EngineError>
+pub async fn consistency::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::PendingEntry>, consistency::error::EngineError>
 pub trait consistency::PartitionSerialDelivery
 pub trait consistency::ProjectionEvent
 pub fn consistency::ProjectionEvent::lsn(&self) -> consistency::projection::Lsn
