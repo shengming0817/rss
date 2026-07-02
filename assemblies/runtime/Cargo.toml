@@ -45,7 +45,7 @@ postgres = { path = "../../adapters/postgres" }
 # eventbus 真传输 topology-gated 接线（#1251/#1434）：durable transport = amqp publisher/subscriber
 # （backend=真 lapin，不拉 testkit）+ eventexec relay/consumer 执行体；consumer 幂等走 PG inbox。
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
-# Redis adapter（package=redis-adapter，import 名 redis；RedisRuntimeDeps + distlock/CAS/idempotency）。
+# Redis adapter（package=redis-adapter，import 名 redis；RedisRuntimeDeps + distlock/CAS/inbox）。
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 eventexec = { path = "../../crates/eventexec" }
 generated = { path = "../../generated" }

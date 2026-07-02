@@ -23,7 +23,7 @@ httpserve = { path = "../crates/httpserve" }
 settings = { path = "../crates/settings", features = ["seed-data"] }
 bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
-# run_consumer 幂等消费驱动的载体类型：HandleResult / IdempotencyStore / Entry / IdemKey / ConsumerGroup。
+# run_consumer 幂等消费驱动的载体类型：HandleResult / InboxStore / Entry / IdemKey / ConsumerGroup。
 consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport" }
 secure = { path = "../crates/secure" }

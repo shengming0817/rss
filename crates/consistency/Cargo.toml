@@ -19,3 +19,4 @@ uuid = { workspace = true, features = ["v4"] }   # LeaseToken::mint 内铸 uuid 
 
 [dev-dependencies]
 tokio = { workspace = true }
+trybuild = { workspace = true }

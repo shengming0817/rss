@@ -63,9 +63,9 @@ adapter bundle 是 §2.3 的一般化：任一 adapter（不止 postgres）经�
 不被域依赖（`域→adapter` 禁，DIP 方向不变，ADR-005 §2.4）。
 
 **落地（#1498，RW-W-hardening）**：§2.3 的 pg 范式（#1422/#1423）已一般化到 redis / amqp / vault——`RedisRuntimeDeps`（funnel +
-`RedisInfraDeps::idempotency`，REDIS-BUNDLE-FUNNEL-01/POOL-02）、`AmqpRuntimeDeps`（per-vhost = per-connection，`AmqpInfraDeps`
+`RedisInfraDeps::inbox`，REDIS-BUNDLE-FUNNEL-01/POOL-02）、`AmqpRuntimeDeps`（per-vhost = per-connection，`AmqpInfraDeps`
 派发 publisher/subscriber，AMQP-BUNDLE-CONN-01）、`VaultRuntimeDeps`（sealed `caps::Settings` + `VaultDomainDeps<Settings>::secret_resolver`，
-VAULT-BUNDLE-DOMAIN-01/RESOLVER-02）。各 provider 能力按真实能力面落 InfraDeps（provider-agnostic：redis idempotency / amqp
+VAULT-BUNDLE-DOMAIN-01/RESOLVER-02）。各 provider 能力按真实能力面落 InfraDeps（provider-agnostic：redis inbox claimer / amqp
 transport / vault signer）或 per-domain DomainDeps（域消费：vault resolver→settings）；不造空壳层。
 
 **层序修正（adapter 不依赖 bootstrap）**：`DomainModuleResult` 在服务层 `bootstrap`，adapter 不依赖它（pg adapter 亦然）。

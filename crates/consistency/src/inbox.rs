@@ -1,13 +1,15 @@
-//! Inbox semantic model for consumer-side idempotency.
+//! Inbox semantic model and engine ports for consumer-side idempotency.
 //!
-//! This module freezes the pure state machine behind durable inbox implementations. It deliberately
-//! does not own storage, clocks, broker settle, DLX, or runtime renewal loops; those stay in
-//! adapters and `eventexec`. The storage shape is absent row -> `claimed` -> `done`, while
-//! `absent` exists only as an engine state, not as a persisted status label.
+//! This module freezes the pure state machine and native AFIT engine ports behind durable inbox
+//! implementations. It deliberately does not own clocks, broker settle, DLX, or runtime renewal
+//! loops; those stay in adapters and `eventexec`. The storage shape is absent row -> `claimed` ->
+//! `done`, while `absent` exists only as an engine state, not as a persisted status label.
 //!
-//! ref: MassTransit/MassTransit src/Persistence/MassTransit.EntityFrameworkCoreIntegration/EntityFrameworkCoreIntegration/InboxState.cs@develop
+//! ref: MassTransit/MassTransit src/Persistence/MassTransit.EntityFrameworkCoreIntegration/EntityFrameworkCoreIntegration/InboxState.cs@62ab339afa3bac2e9b3fe1769d0d35d7e44778e9
 
-use crate::idempotency::{LeaseOutcome, LeaseToken, SeenState};
+use crate::error::EngineError;
+use crate::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
+use crate::outbox::BacklogSample;
 
 /// Persisted inbox row status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +168,65 @@ impl InboxState {
             state => state,
         }
     }
+}
+
+/// 消费方 inbox claim + lease CAS 策略（L0 引擎策略 trait，native AFIT）。
+///
+/// trait 内直接 `async fn`——**不** object-safe，故消费方用泛型 `<S: InboxStore>` 静态分发，
+/// 禁 `Box<dyn InboxStore>`。这是 consistency 引擎策略端口，**非** `diport` dyn port。
+///
+/// # 状态机（absent → claimed(token) → done）
+///
+/// - `try_claim`：absent / **TTL 过期的 claimed** → claimed(传入 token)（`Fresh`）；fresh-claimed / done →
+///   `Duplicate`。过期 claim 经 TTL 重捞（claimed 超 `lease_ttl` 未续租即可被新 token 接管），修
+///   crash-after-claim 时 key 永久 `Duplicate` 的丢消息风险（硬崩溃下 `release` 走不到，#1213）。
+/// - `extend`：claimed(token) 续租（刷新 lease 到期点）；token 匹配 → `Held`，不符 → `Lost`（已被重捞）。
+/// - `commit`：claimed(token)→done（CAS）；token 匹配 → `Held`（永久去重），不符 → `Lost`（**hard-fence**）。
+/// - `release`：claimed(token)→absent（CAS）；token 不符为 no-op（不误删他人 claim）。
+///
+/// 长 handler 由消费方后台按 `lease_ttl/3` 周期调 `extend` 续租；租约丢失（`Lost`）触发 cancel + hard-fence
+/// （#1213，对标 gocell ConsumerBase runWithRenewal + leaseLost）。
+#[allow(async_fn_in_trait)]
+// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
+pub trait InboxStore {
+    /// 铸 claim 并查询首见（claim-or-skip + TTL 重捞）。`lease` 由 [`LeaseToken::mint`] 铸出（uuid v4）。
+    ///
+    /// **写副作用（`Fresh` 路径）**：`try_claim` 在 `Fresh` 路径上执行 `INSERT ... ON CONFLICT` / `SET NX`
+    /// 原子操作，将 `lease` token stamp 到后端——**不是只读谓词**；方法名 `try_claim` 即点明 claim 写语义（#1354）。
+    ///
+    /// `Fresh` ⇒ 本消费者持有以 `lease` 标记的 claim，应执行副作用；`Duplicate` ⇒ 幂等短路（他人持有或已 done）。
+    ///
+    /// **`Duplicate` 路径**：传入的 `lease` **不会**写入后端——claim-or-reclaim 是单一原子操作，token 必须
+    /// 在调用前铸出；若返回 `Duplicate`，调用方可丢弃该 token。
+    async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError>;
+
+    /// 续租：刷新 `lease` 标记的 claimed 行到期点。`Held` 仍持有 / `Lost` 已被重捞（hard-fence 信号）。
+    ///
+    /// 对 absent / 他人持有 / 已 done 的行返回 `Lost`（无匹配 CAS）。
+    async fn extend(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError>;
+
+    /// claimed→done（CAS）：仅当 `lease` 仍匹配时标记永久去重。`Held` 提交成功 / `Lost` 租约已失（勿 Ack）。
+    ///
+    /// 对 absent / 已被重捞的行返回 `Lost`（hard-fence：消费方降级 Requeue、不移除 broker 投递）。
+    async fn commit(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError>;
+
+    /// claimed→absent（CAS）：仅当 `lease` 仍匹配时释放 claim，使后续重放可重新得到 `Fresh`。
+    ///
+    /// 令牌不符（已被重捞）为幂等 no-op（`Ok(())`，不误删他人 claim）；对 absent key 同样 no-op。
+    async fn release(&self, key: &IdemKey, lease: &LeaseToken) -> Result<(), EngineError>;
+}
+
+/// Inbox backlog sampler scoped to the consumer group bound by the store handle.
+///
+/// Implementations count only stale `claimed` rows that can block replay visibility for this group.
+/// Active claims and terminal `done` rows are excluded. When clear, implementations return
+/// [`BacklogSample::empty`] (`depth=0`, `oldest_age_seconds=0`). Native AFIT keeps this port generic
+/// and non-object-safe; do not add a `diport` dyn wrapper.
+#[allow(async_fn_in_trait)]
+// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费；与 InboxStore/OutboxBacklog 同范式。
+pub trait InboxBacklog {
+    /// Sample stale claimed inbox rows for the handle's bound consumer group.
+    async fn sample_backlog(&self) -> Result<BacklogSample, EngineError>;
 }
 
 #[cfg(test)]

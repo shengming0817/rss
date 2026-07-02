@@ -1,8 +1,9 @@
 //! Outbox 接缝（L1 原子写 + L2 OutboxFact 投递）—— 纯类型 disposition + relay/source/sweep 策略。
 //!
 //! `Disposition`/`HandleResult`/`PermanentError`/`Entry`/`Topic` 是 **纯态机类型**（sync，穷尽闭值集）；
-//! `OutboxRelay`/`OutboxSource`/`RetentionSweeper` 是 L2 OutboxFact 引擎策略 trait（native AFIT：把已持久化
-//! entry 中继到 broker / 扫描待发 / 清理已投递）。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
+//! `OutboxRelay`/`OutboxSource` 是 L2 OutboxFact 引擎策略 trait（native AFIT：把已持久化 entry 中继到
+//! broker / 扫描待发）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
+//! inbox_dedup / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
 //! adapters，consistency 只冻类型 + 策略接缝。
 //! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
 //!
@@ -380,12 +381,13 @@ pub trait RetentionSweeper {
     async fn sweep(&self, retain_seconds: u64) -> Result<u64, crate::error::EngineError>;
 }
 
-/// 单 domain 的 backlog 采样快照（纯标量值类型，sync 构造；不携 [`Entry`]）。
+/// 单采样对象的 backlog 快照（纯标量值类型，sync 构造；不携 [`Entry`]）。
 ///
-/// 供 outbox 可观测性采样器消费，发射 `outbox_pending_depth` / `outbox_oldest_pending_age_seconds`
-/// gauge（#1209）。engine 类型——**不** derive serde（ADR-004 C6）；私有字段 + accessor，仿 [`Entry`]。
+/// 供 outbox / inbox backlog 采样端口复用；具体统计集合由 [`OutboxBacklog`] /
+/// [`crate::inbox::InboxBacklog`] 各自定义。engine 类型——**不** derive serde（ADR-004 C6）；
+/// 私有字段 + accessor，仿 [`Entry`]。
 ///
-/// backlog **drain 后**（无 pending 行）规范零值是 [`BacklogSample::empty`]（depth=0, age=0）——
+/// backlog **drain/clear 后**（无可采样积压行）规范零值是 [`BacklogSample::empty`]（depth=0, age=0）——
 /// 采样器据此把 gauge 置 0（而非缺失），否则 Prometheus 无法区分「积压清空」与「采样器死亡」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BacklogSample {
@@ -394,7 +396,7 @@ pub struct BacklogSample {
 }
 
 impl BacklogSample {
-    /// 由 pending 深度 + 最老 pending 龄（秒）构造。
+    /// 由 backlog 深度 + 最老积压龄（秒）构造。
     pub fn new(depth: u64, oldest_age_seconds: u64) -> Self {
         Self {
             depth,
@@ -402,7 +404,7 @@ impl BacklogSample {
         }
     }
 
-    /// 空 backlog 规范零值（无 pending 行：depth=0, age=0）。
+    /// 空 backlog 规范零值（无可采样积压行：depth=0, age=0）。
     pub fn empty() -> Self {
         Self {
             depth: 0,
@@ -410,12 +412,12 @@ impl BacklogSample {
         }
     }
 
-    /// 当前 pending 深度（status=pending 且到期的行数）。
+    /// 当前 backlog 深度（采样集合内的积压行数）。
     pub fn depth(&self) -> u64 {
         self.depth
     }
 
-    /// 最老 pending 行的龄（秒，`now() − min(created_at)`）；无 pending ⇒ 0。
+    /// 最老积压行的龄（秒）；无可采样积压行 ⇒ 0。
     pub fn oldest_age_seconds(&self) -> u64 {
         self.oldest_age_seconds
     }

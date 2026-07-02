@@ -12,7 +12,7 @@ use consistency::{ConsumerGroup, IdemKey, SeenState};
 /// 不可能相等，故整环 key 空间互斥。
 ///
 /// **组维度**（review #216 F5）：claim key 在 namespace 后带 `ConsumerGroup` 段。group 是幂等去重 PK
-/// 第二维度（同一 key 在不同组各自首见），由 `RedisStore` 构造期绑定（对标 `PgInboxStore` 的
+/// 第二维度（同一 key 在不同组各自首见），由 `RedisInboxStore` 句柄绑定（对标 `PgInboxStore` 的
 /// `(event_id, consumer_group)` 双列 PK 与 `InMemClaimer` 的 `(group, key)` 集合）；**不**靠调用方把 group
 /// 拼进 opaque `IdemKey`（`IdemKey` 仅承载稳定 message/event id）。
 ///
@@ -143,7 +143,7 @@ mod backend {
             EngineError::new(kind)
         })?;
         let k = namespaced_key(group, key);
-        // F2：用 PX 毫秒精度（不截断）；TTL 已由 `RedisStore::new` 构造期保证 ≥ 1ms（不静默钳制）。
+        // F2：用 PX 毫秒精度（不截断）；TTL 已由 `RedisInboxStore` 构造期保证 ≥ 1ms（不静默钳制）。
         let ttl_millis = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         // SET key <lease_token> NX PX <ttl_millis>：token 作为值落库，后续 CAS 凭此比对。
         let set: Option<String> = deadpool_redis::redis::cmd("SET")

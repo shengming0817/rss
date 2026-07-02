@@ -123,7 +123,7 @@ async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
 
 ### 租约续租 + leaseLost hard-fence（#1213）
 
-claim 是**带 TTL 的租约**：`IdempotencyStore::try_claim(key, lease)` 由消费方经 `LeaseToken::mint()` 铸 uuid v4 token 传入，
+claim 是**带 TTL 的租约**：`InboxStore::try_claim(key, lease)` 由消费方经 `LeaseToken::mint()` 铸 uuid v4 token 传入，
 claimed 行 stamp 该 token；**过期未续租**的 claim 可被新 token 重捞（修 crash-after-claim 时 key 永久
 `Duplicate` 的丢消息——硬崩溃下 `release` 走不到）。长 handler 由 ConsumerBase 后台按 **`lease_ttl/3`**
 （`LeaseConfig::from_ttl`，组合根由后端 claim TTL 派生注入）周期调 `extend(key, lease)` 续租，与 handler 执行
@@ -321,7 +321,7 @@ command-topic `Entry::new` 是设计上的构造收口点，但 `Entry::new` 仍
 
 consumer 侧对称：`generated::command::<cmd>::register_handler`（generic over
 `CommandRegister` seam）→ runtime `eventexec::command::register_command_handler`，复用
-`eventexec::run_consumer` + `consistency::idempotency::IdempotencyStore` claimer 做两阶段
+`eventexec::run_consumer` + `consistency::InboxStore` claimer 做两阶段
 去重（同 DispatchId 再入 → `SeenState::Duplicate` → 拒绝）。
 
 **Guards**：wrapper 存在性由 codegen + golden（Hard，CODEGEN-DRIFT-01）守；DispatchId 不可

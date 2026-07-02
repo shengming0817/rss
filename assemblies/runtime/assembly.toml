@@ -11,7 +11,7 @@ durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
 
 # eventbus 真传输 topology-gated 接线（#1251）：durable 拓扑下注入真 amqp publisher/subscriber（lapin，
-# backend feature）。consistency-engine port（OutboxSource/Relay、IdempotencyStore）经 topology resolver
+# backend feature）。consistency-engine port（OutboxSource/Relay、InboxStore）经 topology resolver
 # 在代码中接线 + 编译期 feature 门控（type-system Hard），非 diport-infra port，不在此声明。
 # profile 仍为 demo：翻 production 受阻于上方 RevocationStore 尚为 draft/ephemeral（#1252/#1254）。
 # 生产化 checklist：① #1252 RevocationStore → persistent provider；② #1254 device 接线；③ 本文件 profile demo→production

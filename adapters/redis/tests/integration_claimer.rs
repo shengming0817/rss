@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState};
+use consistency::{ConsumerGroup, IdemKey, InboxStore, LeaseOutcome, LeaseToken, SeenState};
 use deadpool_redis::{Config, Runtime};
 use diport::{
     CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, LockAcquireOutcome, LockRenewOutcome,
     LockStore, LockStoreKey, ManagedResource,
 };
-use redis::{RedisIdempotencyStore, RedisRuntimeDeps};
+use redis::{RedisInboxStore, RedisRuntimeDeps};
 use testkit::FixtureError;
 use tokio::sync::Barrier;
 
@@ -56,13 +56,9 @@ fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
     Ok(RedisRuntimeDeps::setup(pool))
 }
 
-fn make_store(
-    url: &str,
-    ttl: Duration,
-    group: &str,
-) -> Result<RedisIdempotencyStore, FixtureError> {
+fn make_store(url: &str, ttl: Duration, group: &str) -> Result<RedisInboxStore, FixtureError> {
     let group = ConsumerGroup::parse(group)?;
-    Ok(make_deps(url)?.infra().idempotency(group, ttl)?)
+    Ok(make_deps(url)?.infra().inbox(group, ttl)?)
 }
 
 // ─── 既有基础行为（更新至新签名：try_claim/commit/release 均携带 lease token）────────────────

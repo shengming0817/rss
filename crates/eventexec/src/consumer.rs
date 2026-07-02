@@ -1,6 +1,6 @@
 //! ConsumerBase —— 幂等消费驱动（claim→handle→commit/dlx）。
 //!
-//! 单消息流程：`IdemKey::parse` → `idempotency.try_claim` → handler bounded 重投 →
+//! 单消息流程：`IdemKey::parse` → `InboxStore::try_claim` → handler bounded 重投 →
 //! `Ack` commit / `Reject` dlx / `Requeue` 预算耗尽后 dlx。
 //! DLX 路径对标 watermill PoisonQueue：原消息 ack 收口，死信另写持久化。
 //!
@@ -30,7 +30,7 @@ use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAut
 /// 消费侧租约续租配置：续租间隔 = 后端 claim lease TTL / 3（对标 gocell ConsumerBase `LeaseTTL/3`）。
 ///
 /// 组合根经 [`LeaseConfig::from_ttl`] 由**后端 claim TTL**（`PgInboxStore` 的 `INBOX_LEASE_TTL_SECONDS` /
-/// `RedisStore` 构造期 TTL）派生并注入 `run_consumer*` / `spawn_consumer*`——保证续租周期短于后端 TTL，
+/// `RedisInboxStore` 句柄 TTL）派生并注入 `run_consumer*` / `spawn_consumer*`——保证续租周期短于后端 TTL，
 /// 长 handler 的 claim 在过期重捞前被刷新（必填位置参，缺失即编译错误，不静默默认）。
 #[derive(Debug, Clone, Copy)]
 pub struct LeaseConfig {
@@ -45,7 +45,7 @@ impl LeaseConfig {
         }
     }
 
-    /// 续租间隔（后台每隔此时长调一次 [`consistency::IdempotencyStore::extend`]）。
+    /// 续租间隔（后台每隔此时长调一次 [`consistency::InboxStore::extend`]）。
     pub fn renew_interval(&self) -> Duration {
         self.renew_interval
     }
@@ -174,7 +174,7 @@ impl ConsumerMeta {
 
 /// 消费驱动：逐条 claim→handle→commit/dlx（bounded 重投，幂等去重）。
 ///
-/// consumer group 由 [`ConsumerMeta::consumer_group`] 承载并写入 DLX；`IdempotencyStore` 实现在构造时
+/// consumer group 由 [`ConsumerMeta::consumer_group`] 承载并写入 DLX；`InboxStore` 实现在构造时
 /// 已绑 group，try_claim/commit/release 以 `IdemKey` 为维度。
 /// 下游事件经 handler 自持 Publisher 发，不经本驱动中转（对齐 RSS DI port 隔离）。
 ///
@@ -202,7 +202,7 @@ pub async fn run_consumer<S, H>(
     handler: H,
     lease_cfg: LeaseConfig,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     while let Some(msg) = stream.next().await {
@@ -239,7 +239,7 @@ pub async fn run_consumer_ackable<S, H>(
     handler: H,
     lease_cfg: LeaseConfig,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     while let Some(d) = stream.next().await {
@@ -268,7 +268,7 @@ async fn consume_one<S, H>(
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     // parse 失败 → 结构化 warn + 丢弃（不 panic；key 漂移即等价新消费者，fail-closed）。
@@ -374,7 +374,7 @@ async fn handle_fresh<S, H>(
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     // owned message_id：run_handler_loop 取 msg 所有权，续租 / hard-fence 日志用 owned 串避免借用冲突。
@@ -423,7 +423,7 @@ fn build_consume_span(
     span
 }
 
-/// 续租循环（#1213）：每 `lease_cfg.renew_interval` 调 [`consistency::IdempotencyStore::extend`]。
+/// 续租循环（#1213）：每 `lease_cfg.renew_interval` 调 [`consistency::InboxStore::extend`]。
 ///
 /// `Held`→继续持有（**不返回**，由 `select!` 在 handler 完成时 drop）；`Lost`→**返回**（claim 被他人重捞，触发
 /// [`handle_fresh`] 的 hard-fence 分支取消 handler）；`Err`（瞬态后端故障）→结构化 warn + 续命（不误判丢租，
@@ -436,7 +436,7 @@ async fn renewal_loop<S>(
     lease_cfg: LeaseConfig,
     message_id: &str,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
 {
     loop {
         tokio::time::sleep(lease_cfg.renew_interval()).await;
@@ -471,7 +471,7 @@ async fn run_handler_loop<S, H>(
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     // requeue 路径记下最近一次 error kind 摘要，耗尽时随 DLX 落日志（#1125）。
@@ -552,7 +552,7 @@ async fn commit_key<S>(
     message_id: &str,
 ) -> bool
 where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
 {
     match idempotency.commit(key, lease).await {
         Ok(LeaseOutcome::Held) => true,
@@ -581,7 +581,7 @@ async fn release_key<S>(
     message_id: &str,
 ) -> bool
 where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
 {
     match idempotency.release(key, lease).await {
         Ok(()) => true,
@@ -626,7 +626,7 @@ async fn dead_letter<S>(
     error_summary: &'static str,
     acker: Option<&diport::DynAcker<'static>>,
 ) where
-    S: consistency::idempotency::IdempotencyStore + Send + Sync + 'static,
+    S: consistency::InboxStore + Send + Sync + 'static,
 {
     let tenant = match meta.verify_tenant_authority(msg) {
         Ok(tenant) => tenant,
@@ -1001,9 +1001,8 @@ mod tests {
     use std::time::Duration;
 
     use consistency::HandleResult;
-    use consistency::idempotency::{
-        IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
-    };
+    use consistency::InboxStore;
+    use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
@@ -1160,7 +1159,7 @@ mod tests {
         .with_expected_schema("v1", SCHEMA_HASH)
     }
 
-    // ── FakeIdempotencyStore ─────────────────────────────────────────────────
+    // ── FakeInboxStore ─────────────────────────────────────────────────
 
     /// 三态 fake store（Arc<Mutex> + Atomic，Send 友好，不跨 await 持锁——relay.rs FakeStore 范式）。
     /// 可配 try_claim 返 Fresh / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
@@ -1172,7 +1171,7 @@ mod tests {
         Err(consistency::error::EngineErrorKind),
     }
 
-    struct FakeIdempotencyStore {
+    struct FakeInboxStore {
         check_result: CheckResult,
         claim_count: AtomicU32,
         commit_count: AtomicU32,
@@ -1190,7 +1189,7 @@ mod tests {
         extend_errs_before: u32,
     }
 
-    impl FakeIdempotencyStore {
+    impl FakeInboxStore {
         fn with(check_result: CheckResult, commit_fails: bool) -> Arc<Self> {
             Arc::new(Self {
                 check_result,
@@ -1318,7 +1317,7 @@ mod tests {
         }
     }
 
-    impl IdempotencyStore for FakeIdempotencyStore {
+    impl InboxStore for FakeInboxStore {
         async fn try_claim(
             &self,
             _key: &IdemKey,
@@ -1634,7 +1633,7 @@ mod tests {
     /// TC1：handler 恒 Ack → handler 调 1 次、commit 1 次、无 dlx 写。
     #[tokio::test]
     async fn tc1_handler_ack_commit_once_no_dlx() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -1663,7 +1662,7 @@ mod tests {
     /// TC2：handler 恒 Requeue → handler 调 MAX_REDELIVERY 次、dlx 写 1 次（exhausted）、commit 1 次。
     #[tokio::test]
     async fn tc2_handler_requeue_exhausted_dlx() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -1719,7 +1718,7 @@ mod tests {
     /// TC3：handler 恒 Reject → handler 调 1 次、dlx 写 1 次（permanent rejection）、commit 1 次。
     #[tokio::test]
     async fn tc3_handler_reject_dlx_once() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -1755,7 +1754,7 @@ mod tests {
 
     #[tokio::test]
     async fn tc3_cross_domain_authority_uses_producer_domain_but_records_consumer_domain() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -1782,7 +1781,7 @@ mod tests {
 
     #[tokio::test]
     async fn tc3b_reject_missing_tenant_skips_app_dlx_and_settles_reject() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -1869,7 +1868,7 @@ mod tests {
         for (message_id, metadata, reason) in cases {
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
-            let idem = FakeIdempotencyStore::fresh();
+            let idem = FakeInboxStore::fresh();
             let dlx_store = FakeDeadLetterStore::new();
             let dlx = fake_dlx(dlx_store.clone());
             let handler_count = Arc::new(AtomicU32::new(0));
@@ -1978,7 +1977,7 @@ mod tests {
         for (message_id, metadata, reason) in cases {
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
-            let idem = FakeIdempotencyStore::fresh();
+            let idem = FakeInboxStore::fresh();
             let dlx_store = FakeDeadLetterStore::new();
             let dlx = fake_dlx(dlx_store.clone());
             let handler_count = Arc::new(AtomicU32::new(0));
@@ -2039,7 +2038,7 @@ mod tests {
     /// 证 error kind 真实随 HandleResult 流到 DLX（摘要非硬编码、随 kind 变化）。
     #[tokio::test]
     async fn tc9_reject_invariant_surfaces_kind_summary() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2070,7 +2069,7 @@ mod tests {
     /// TC4：try_claim 返 Duplicate → handler 0 次、commit 0 次、dlx 0 次。
     #[tokio::test]
     async fn tc4_duplicate_skips_handler_and_commit() {
-        let idem = FakeIdempotencyStore::duplicate();
+        let idem = FakeInboxStore::duplicate();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2095,7 +2094,7 @@ mod tests {
     /// TC6：try_claim 返 Err（瞬态后端故障）→ handler 0 次、commit 0 次、dlx 0 次（不做任何终态动作）。
     #[tokio::test]
     async fn tc6_check_err_skips_handler_and_commit() {
-        let idem = FakeIdempotencyStore::err();
+        let idem = FakeInboxStore::err();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2124,7 +2123,7 @@ mod tests {
     /// TC7：IdemKey parse 失败（空 id）→ handler 0 次、commit 0 次、dlx 0 次（fail-closed 丢弃）。
     #[tokio::test]
     async fn tc7_parse_failed_drops_message() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2155,7 +2154,7 @@ mod tests {
     /// 守住「静默丢失」修复语义：DLX 写失败后 release（而非 commit），使 broker 可重投重试 DLX。
     #[tokio::test]
     async fn tc8_dlx_write_fails_releases_key() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = AlwaysErrDeadLetterStore::new();
         let dlx = fake_dlx_always_err(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2291,7 +2290,7 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let idem = FakeIdempotencyStore::fresh();
+            let idem = FakeInboxStore::fresh();
             let dlx_store = FakeDeadLetterStore::new();
             let dlx = fake_dlx(dlx_store.clone());
             let handler_count = Arc::new(AtomicU32::new(0));
@@ -2366,7 +2365,7 @@ mod tests {
     /// ACK-1：handler 恒 Ack → settle=[Ack]，commit 1 次，dlx 0 次。
     #[tokio::test]
     async fn ack1_handler_ack_settles_ack() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2399,7 +2398,7 @@ mod tests {
     /// ACK-2：handler 恒 Reject + DLX 写成功 → settle=[Ack]，dlx 1 次，commit 1 次。
     #[tokio::test]
     async fn ack2_handler_reject_dlx_ok_settles_ack() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2432,7 +2431,7 @@ mod tests {
     /// ACK-3：handler 恒 Requeue（耗尽）+ DLX 写成功 → settle=[Ack]，dlx 1 次，commit 1 次。
     #[tokio::test]
     async fn ack3_handler_requeue_exhausted_dlx_ok_settles_ack() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2465,7 +2464,7 @@ mod tests {
     /// ACK-4：handler 恒 Reject + DLX 写失败 → settle=[Requeue]，release 1，commit 0。
     #[tokio::test]
     async fn ack4_handler_reject_dlx_fail_settles_requeue() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = AlwaysErrDeadLetterStore::new();
         let dlx = fake_dlx_always_err(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2506,7 +2505,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let idem = FakeIdempotencyStore::fresh_release_fails();
+        let idem = FakeInboxStore::fresh_release_fails();
         let dlx_store = AlwaysErrDeadLetterStore::new();
         let dlx = fake_dlx_always_err(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2545,7 +2544,7 @@ mod tests {
     /// ACK-5：幂等 try_claim 返 Err → settle=[Requeue]，handler 0，commit 0。
     #[tokio::test]
     async fn ack5_check_err_settles_requeue() {
-        let idem = FakeIdempotencyStore::err();
+        let idem = FakeInboxStore::err();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2575,7 +2574,7 @@ mod tests {
     /// DLX，区别于 `Transient` 的 Requeue——否则配置/协议错误下消息无限重投不收敛。
     #[tokio::test]
     async fn ack5b_permanent_check_err_settles_reject() {
-        let idem = FakeIdempotencyStore::err_permanent();
+        let idem = FakeInboxStore::err_permanent();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2603,7 +2602,7 @@ mod tests {
     /// ACK-6：try_claim 返 Duplicate → settle=[Ack]，handler 0，commit 0。
     #[tokio::test]
     async fn ack6_duplicate_settles_ack() {
-        let idem = FakeIdempotencyStore::duplicate();
+        let idem = FakeInboxStore::duplicate();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2631,7 +2630,7 @@ mod tests {
     /// ACK-7：空 id（parse 失败）→ settle=[Reject]，handler 0，commit 0。
     #[tokio::test]
     async fn ack7_parse_failed_settles_reject() {
-        let idem = FakeIdempotencyStore::fresh();
+        let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2663,7 +2662,7 @@ mod tests {
     /// 守「ack only after durable commit」——done 标记未持久不可移除 broker 投递。
     #[tokio::test]
     async fn ack_commit_fail_requeues_not_ack() {
-        let idem = FakeIdempotencyStore::fresh_commit_fails();
+        let idem = FakeInboxStore::fresh_commit_fails();
         let dlx = fake_dlx(FakeDeadLetterStore::new());
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("m-cf", b"payload")]);
@@ -2695,7 +2694,7 @@ mod tests {
     /// DLX 已落但 done 标记未持久 ⇒ 不 Ack，重投经幂等 Duplicate 收口。
     #[tokio::test]
     async fn reject_dlx_ok_commit_fail_requeues() {
-        let idem = FakeIdempotencyStore::fresh_commit_fails();
+        let idem = FakeInboxStore::fresh_commit_fails();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2736,7 +2735,7 @@ mod tests {
             .unwrap();
         metrics::with_local_recorder(&recorder, || {
             rt.block_on(async {
-                let idem = FakeIdempotencyStore::fresh();
+                let idem = FakeInboxStore::fresh();
                 let dlx = fake_dlx(FakeDeadLetterStore::new());
                 let handler_count = Arc::new(AtomicU32::new(0));
                 let (stream, _ackers) = delivery_stream_of(&[("m-metric", b"payload")]);
@@ -2816,7 +2815,7 @@ mod tests {
     /// LEASE-1：长 handler 执行期间后台续租（extend 被周期调用），handler 完成后正常 commit + settle Ack。
     #[tokio::test]
     async fn lease1_long_handler_renews_then_commits() {
-        let idem = FakeIdempotencyStore::fresh(); // extend 恒 Held
+        let idem = FakeInboxStore::fresh(); // extend 恒 Held
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let started = Arc::new(AtomicU32::new(0));
@@ -2853,7 +2852,7 @@ mod tests {
     /// 次（续租侧 leaseLost hard-fence）。
     #[tokio::test]
     async fn lease2_lost_during_handler_cancels_and_requeues() {
-        let idem = FakeIdempotencyStore::fresh_lease_lost_after(0); // 首次 extend 即 Lost
+        let idem = FakeInboxStore::fresh_lease_lost_after(0); // 首次 extend 即 Lost
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let started = Arc::new(AtomicU32::new(0));
@@ -2893,7 +2892,7 @@ mod tests {
     /// LEASE-3：handler Ack 但 commit 期租约已丢（commit→Lost）→ settle [Requeue] 不 Ack（commit 侧 hard-fence）。
     #[tokio::test]
     async fn lease3_commit_lost_downgrades_ack_to_requeue() {
-        let idem = FakeIdempotencyStore::fresh_commit_loses_lease();
+        let idem = FakeInboxStore::fresh_commit_loses_lease();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -2923,7 +2922,7 @@ mod tests {
     /// （续租 `Err` 臂续命语义，非 hard-fence）。
     #[tokio::test]
     async fn lease4_transient_extend_err_does_not_fence() {
-        let idem = FakeIdempotencyStore::fresh_extend_errs_then_held(2); // 前 2 次 extend Err，之后 Held
+        let idem = FakeInboxStore::fresh_extend_errs_then_held(2); // 前 2 次 extend Err，之后 Held
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let started = Arc::new(AtomicU32::new(0));
@@ -2966,7 +2965,7 @@ mod tests {
     /// （DLX 路径的 commit 侧 hard-fence；与 F1b 的 commit-Err 路径对偶）。
     #[tokio::test]
     async fn lease5_dlx_ok_commit_lost_requeues() {
-        let idem = FakeIdempotencyStore::fresh_commit_loses_lease();
+        let idem = FakeInboxStore::fresh_commit_loses_lease();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
@@ -3102,7 +3101,7 @@ mod tests {
                 .unwrap();
             rt.block_on(run_consumer(
                 Box::pin(futures::stream::iter(vec![msg])),
-                FakeIdempotencyStore::fresh(),
+                FakeInboxStore::fresh(),
                 fake_dlx(FakeDeadLetterStore::new()),
                 meta(),
                 handler,

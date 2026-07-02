@@ -32,7 +32,7 @@ force 中。**三个兄弟 issue 均被这三处缺口阻塞**，故 #1437 先�
 
 `outbox` / `inbox_dedup` / `saga_journal` / `projection_events` **无 `tenant_id` 列**，不在
 本 ADR 范围。其中 `inbox_dedup.event_id` 是全局唯一（UUID），跨租户无碰撞风险；
-`IdempotencyStore` 是 L0 引擎 trait，不引用任何域实体，使其携带 tenant 维度会把基础设施语义与
+`InboxStore` 是 L0 引擎 trait，不引用任何域实体，使其携带 tenant 维度会把基础设施语义与
 租户业务语义混入同一个 L0 层，违反分层约束。因此这些表的 tenant 硬化推迟到各自对应的
 domain-enroll issue（`outbox` → #1405），不属于本解锁器。
 
@@ -243,7 +243,7 @@ impl Probe for RlsReadyProbe {
   Medium 门，见 `.claude/rules/rss/ai-robust.md`）。
 - **同时为 `outbox` / `inbox_dedup` 加 `tenant_id` 列（在本 PR 一起落）**：范围蔓延——`outbox`
   加列需 L2 原子性测试、consumer 幂等验证、partition_key 语义变更，单独 #1405 更干净；
-  `IdempotencyStore` 加 tenant 维度会把 L0 引擎语义与业务租户混入基础设施层（分层违规）。
+  `InboxStore` 加 tenant 维度会把 L0 引擎语义与业务租户混入基础设施层（分层违规）。
 - **仅靠 `schema-rls` xtask 静态扫描，不做 startup 动态验证**：缺失运行期确认——迁移可能
   未被应用、GUC 可能未正确配置，静态扫描无法感知。两者纵深互补，均保留。
 - **用 `BYPASSRLS` 临时角色做开发便利**：与 `rss_app NOBYPASSRLS` 约定直接冲突（`tenancy.md`

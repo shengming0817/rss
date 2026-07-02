@@ -1,13 +1,13 @@
-//! redis capability bundle（#1498 / RW-W-hardening）：把 pool 构造 + idempotency/distlock/CAS 能力派发 +
+//! redis capability bundle（#1498 / RW-W-hardening）：把 pool 构造 + inbox/distlock/CAS 能力派发 +
 //! managed-resource/rollback 单源派生收口到单一 funnel，作 redis provider 的**唯一装配出口**。
 //!
-//! 泛化自 pg `PgRuntimeDeps`/`PgInfraDeps`（#1422/#1423，ADR-010 §2.2）。redis 的 `IdempotencyStore` /
+//! 泛化自 pg `PgRuntimeDeps`/`PgInfraDeps`（#1422/#1423，ADR-010 §2.2）。redis 的 `InboxStore` /
 //! `LockStore` / `CasStore` 均是 provider-agnostic infra，故落 [`RedisInfraDeps`]。
 
 use core::time::Duration;
 use std::sync::Arc;
 
-use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState};
+use consistency::{ConsumerGroup, IdemKey, InboxStore, LeaseOutcome, LeaseToken, SeenState};
 use deadpool_redis::Pool;
 use diport::{DynCasStore, DynLockStore, DynManagedResource, ManagedResource, ShutdownError};
 
@@ -101,13 +101,13 @@ pub struct RedisInfraDeps {
 
 impl RedisInfraDeps {
     /// 幂等 claimer 句柄。`group` 是幂等去重 PK 第二维度；`ttl` 由 Redis 服务端 `PX` 管过期。
-    pub fn idempotency(
+    pub fn inbox(
         &self,
         group: ConsumerGroup,
         ttl: Duration,
-    ) -> Result<RedisIdempotencyStore, InvalidClaimTtl> {
+    ) -> Result<RedisInboxStore, InvalidClaimTtl> {
         RedisRuntimeDeps::validate_ttl(ttl)?;
-        Ok(RedisIdempotencyStore {
+        Ok(RedisInboxStore {
             store: Arc::clone(&self.store),
             ttl,
             group,
@@ -131,15 +131,15 @@ impl RedisInfraDeps {
     }
 }
 
-/// Redis 幂等 claimer provider handle：能力配置随 handle 绑定，`RedisRuntimeDeps` 只承载 pool。
+/// Redis inbox claimer provider handle：能力配置随 handle 绑定，`RedisRuntimeDeps` 只承载 pool。
 #[derive(Clone)]
-pub struct RedisIdempotencyStore {
+pub struct RedisInboxStore {
     store: Arc<RedisStore>,
     ttl: Duration,
     group: ConsumerGroup,
 }
 
-impl RedisIdempotencyStore {
+impl RedisInboxStore {
     /// 供组合根派生续租周期，与后端 claim TTL 同源。
     #[must_use]
     pub fn lease_ttl(&self) -> Duration {
@@ -147,7 +147,7 @@ impl RedisIdempotencyStore {
     }
 }
 
-impl IdempotencyStore for RedisIdempotencyStore {
+impl InboxStore for RedisInboxStore {
     async fn try_claim(
         &self,
         key: &IdemKey,
@@ -254,11 +254,11 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn infra_idempotency_shares_store_arc() {
+    async fn infra_inbox_shares_store_arc() {
         let d = deps();
         let store = d
             .infra()
-            .idempotency(group(), Duration::from_millis(50))
+            .inbox(group(), Duration::from_millis(50))
             .expect("valid ttl");
         assert!(Arc::ptr_eq(&store.store, &d.store));
     }
@@ -275,7 +275,7 @@ mod tests {
     async fn lease_ttl_propagates() {
         let idem = deps()
             .infra()
-            .idempotency(group(), Duration::from_millis(123))
+            .inbox(group(), Duration::from_millis(123))
             .expect("valid ttl");
         assert_eq!(idem.lease_ttl(), Duration::from_millis(123));
     }

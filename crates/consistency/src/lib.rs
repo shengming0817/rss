@@ -2,7 +2,7 @@
 //!
 //! # 派发范式（ADR-003 §2 / ADR-004 C1）
 //!
-//! 本 crate 冻结的是**引擎策略 trait**（L0–L4 一致性等级）：`IdempotencyStore`/`OutboxRelay`/`SagaStep`/
+//! 本 crate 冻结的是**引擎策略 trait**（L0–L4 一致性等级）：`InboxStore`/`OutboxRelay`/`SagaStep`/
 //! `Reconciler`/`Projector` 一律 **native AFIT**（trait 内直接 `async fn`）+ **泛型静态分发**
 //! （消费方 `fn run<S: Trait>(s: &S)`，零开销、零 box）——**不引 dynosaur、不引 async-trait**。
 //! native AFIT trait 不 object-safe，故全 crate 禁 `Box<dyn Trait>`：消费方一律泛型 `<S: Trait>`。
@@ -36,10 +36,12 @@ pub mod tx_retry;
 
 pub use error::{EngineError, EngineErrorKind};
 pub use idempotency::{
-    ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, LeaseOutcome,
-    LeaseToken, SeenState,
+    ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, LeaseOutcome, LeaseToken, SeenState,
 };
-pub use inbox::{InboxClaim, InboxLeaseFreshness, InboxState, InboxStatus, InboxStatusError};
+pub use inbox::{
+    InboxBacklog, InboxClaim, InboxLeaseFreshness, InboxState, InboxStatus, InboxStatusError,
+    InboxStore,
+};
 pub use outbox::{
     BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog, OutboxPayload, OutboxRelay,
     OutboxSource, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,
@@ -63,7 +65,7 @@ mod static_dispatch_smoke {
     //! 可被泛型 `<S: Trait>` 单态消费（零 box、非 object-safe 路径成立）。**只编译不执行**——
     //! 方法体 todo!() 永不调用（无 `.await`），故无 panic 实际触发。
 
-    use super::idempotency::IdempotencyStore;
+    use super::inbox::{InboxBacklog, InboxStore};
     use super::outbox::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use super::projection::{
         PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrderGuarantor,
@@ -75,7 +77,9 @@ mod static_dispatch_smoke {
     // 函数体空：仅约束类型成立（编译期），不构造实例、不调 async（避免 todo!() panic）。
     #[allow(dead_code)]
     // reason: 冻结期 driver 函数只为证编译，不被调用（行为 PR 兑现调用方）。
-    fn _drives_idem<S: IdempotencyStore>(_s: &S) {}
+    fn _drives_inbox<S: InboxStore>(_s: &S) {}
+    #[allow(dead_code)] // reason: 同上，证 InboxBacklog 采样端口可泛型静态分发消费。
+    fn _drives_inbox_backlog<B: InboxBacklog>(_b: &B) {}
     #[allow(dead_code)] // reason: 同上。
     fn _drives_relay<R: OutboxRelay>(_r: &R) {}
     #[allow(dead_code)] // reason: 同上，证 OutboxSource 读侧端口可泛型静态分发消费。

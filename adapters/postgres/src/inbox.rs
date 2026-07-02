@@ -1,6 +1,6 @@
 //! postgres inbox_dedup adapter（消费幂等去重 + 租约 CAS，L2 一致性锚点，#1118 / #1213）。
 //!
-//! `PgInboxStore` 实现 [`consistency::IdempotencyStore`] 引擎策略 trait（native AFIT，泛型静态分发消费，
+//! `PgInboxStore` 实现 [`consistency::InboxStore`] 引擎策略 trait（native AFIT，泛型静态分发消费，
 //! 零 box，**非** diport DI port）。
 //!
 //! # 状态机：absent → claimed(lease_token) → done
@@ -26,8 +26,8 @@
 //! ref: serverlesstechnology/cqrs（postgres persistence 幂等消费，INSERT ON CONFLICT 范式）。
 
 use consistency::{
-    EngineError, EngineErrorKind, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
-    RetentionSweeper, SeenState,
+    BacklogSample, EngineError, EngineErrorKind, IdemKey, InboxBacklog, InboxStore, LeaseOutcome,
+    LeaseToken, RetentionSweeper, SeenState,
 };
 use sqlx::PgPool;
 
@@ -111,6 +111,40 @@ impl PgInboxStore {
     }
 }
 
+impl InboxBacklog for PgInboxStore {
+    /// 采样当前 consumer group 的 stale claimed 行。active claims / done 均排除；清空时返回规范零值。
+    async fn sample_backlog(&self) -> Result<BacklogSample, EngineError> {
+        sample_inbox_backlog(&self.pool, self.group.as_str()).await
+    }
+}
+
+async fn sample_inbox_backlog(pool: &PgPool, group: &str) -> Result<BacklogSample, EngineError> {
+    let (depth, oldest_age_seconds): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          count(*)::bigint,
+          COALESCE(EXTRACT(EPOCH FROM now() - MIN(claimed_at))::bigint, 0)
+        FROM inbox_dedup
+        WHERE consumer_group = $1
+          AND status = 'claimed'
+          AND claimed_at <= now() - make_interval(secs => $2)
+        "#,
+    )
+    .bind(group)
+    .bind(INBOX_LEASE_TTL_SECONDS)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(target: "postgres", operation = "inbox_sample_backlog", error = %secure::redact_error(&e), "inbox: sample_backlog db error");
+        EngineError::new(EngineErrorKind::Transient)
+    })?;
+
+    let depth = u64::try_from(depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    let oldest_age_seconds = u64::try_from(oldest_age_seconds.max(0))
+        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    Ok(BacklogSample::new(depth, oldest_age_seconds))
+}
+
 /// postgres `inbox_dedup` 保留期清理 sweeper（**全域**，与 consumer_group 无关，#1210）。
 ///
 /// 去重写路径 [`PgInboxStore`] 按 `consumer_group` 绑定，但保留清理是跨所有组的全表操作——故独立类型
@@ -167,7 +201,7 @@ impl RetentionSweeper for PgInboxSweeper {
     }
 }
 
-impl IdempotencyStore for PgInboxStore {
+impl InboxStore for PgInboxStore {
     /// claim-or-reclaim-or-skip：INSERT + CAS TTL 重捞。
     ///
     /// RETURNING 行存在 → `Fresh`（首次插入或 TTL 过期 claimed 行被新 token 接管）；
@@ -369,7 +403,7 @@ mod tests {
     #[cfg(feature = "integration")]
     mod integration {
         use consistency::{
-            ConsumerGroup, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
+            ConsumerGroup, IdemKey, InboxStore, LeaseOutcome, LeaseToken, SeenState,
         };
 
         type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;

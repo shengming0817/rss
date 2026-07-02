@@ -170,7 +170,7 @@ mod smoke {
     //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
-    //! IdempotencyStore on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
+    //! InboxStore/InboxBacklog on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
@@ -189,7 +189,8 @@ mod smoke {
     fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
-    fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
+    fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
+    fn assert_inbox_backlog<T: consistency::InboxBacklog>(_: PhantomData<T>) {}
     fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
     fn assert_retention_sweeper<T: consistency::RetentionSweeper>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
@@ -215,8 +216,9 @@ mod smoke {
         // `PgSessionLifecycle: SessionLifecycle` 完整 durable impl（非 edge proof）——co-tx 创建（#1083/#1192）
         // + find/revoke（#1278，0009 revoked 列）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
         assert_session_lifecycle(PhantomData::<super::PgSessionLifecycle>);
-        // `PgInboxStore: IdempotencyStore` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
-        assert_idempotency_store(PhantomData::<super::PgInboxStore>);
+        // `PgInboxStore: InboxStore + InboxBacklog` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
+        assert_inbox_store(PhantomData::<super::PgInboxStore>);
+        assert_inbox_backlog(PhantomData::<super::PgInboxStore>);
         assert_outbox_backlog(PhantomData::<super::PgOutboxMaintenance>);
         assert_retention_sweeper(PhantomData::<super::PgOutboxMaintenance>);
         // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。

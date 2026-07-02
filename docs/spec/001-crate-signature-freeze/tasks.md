@@ -57,7 +57,7 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 
 ### PR-2 引擎层（门: T010；同层 2 crate 并行）
 
-- [ ] T011 [P] [US1] 冻结 `consistency` 于 `crates/consistency/src/lib.rs`：outbox/saga/reconcile/projection/idempotency 纯态机 + trait（L0–L4），如 `IdempotencyStore`/`OutboxRelay`/`Reconciler`。**L0 引擎策略 → native AFIT + 泛型静态分发**（零开销，不引 dynosaur）；`Reconciler` 函数式接缝。ref: kube-rs kube-runtime/src/controller/mod.rs@main + watcher.rs@main（L0 native AFIT）。测试: build smoke + 泛型静态分发编译 + public-api baseline
+- [ ] T011 [P] [US1] 冻结 `consistency` 于 `crates/consistency/src/lib.rs`：outbox/saga/reconcile/projection/idempotency 纯态机 + trait（L0–L4），如 `InboxStore`/`OutboxRelay`/`Reconciler`。**L0 引擎策略 → native AFIT + 泛型静态分发**（零开销，不引 dynosaur）；`Reconciler` 函数式接缝。ref: kube-rs kube-runtime/src/controller/mod.rs@main + watcher.rs@main（L0 native AFIT）。测试: build smoke + 泛型静态分发编译 + public-api baseline
 - [ ] T012 [P] [US1] 冻结 `primitives` 于 `crates/primitives/src/lib.rs`：crypto/authplan/healthz/circuitbreaker 等纯计算/原语。`Clock`(构造器位参, 禁默认系统时钟) 与 `ManagedResource`(LIFO) 是 **DI port → 推荐迁 diport**（待决项#2#4，`ManagedResource` inter-ADR 暂遵 ADR-001）；primitives 仅留非 DI 纯计算接缝。ref: uber-go/fx lifecycle.go@master。测试: build smoke + public-api baseline
 - [ ] T013 [US1] PR-2 验收（门: T011–T012）：`cargo build -p consistency -p primitives` + clippy 绿；不依赖服务/域/adapters（deny 绿）；commit public-api baseline。**开 PR-2**
 

@@ -1,12 +1,12 @@
 //! redis adapter —— RSS workspace（W 阶段真身，#1009 幂等 claimer 切片）。
 //!
-//! 单一 `RedisStore` 实现：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-09）。
-//! - `backend` feature 开时增补 `impl consistency::IdempotencyStore`（`SET NX EX` claimer）。
+//! 单一 `RedisStore` 资源 + typed handles：
+//! - `RedisStore` 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-09）。
+//! - `backend` feature 开时暴露 `RedisInboxStore: consistency::InboxStore`（`SET NX PX` claimer）。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入任何 infra 依赖。
 //! feature-on（`--features backend`）：deadpool-redis Pool + TTL 构造，不注入 Clock（TTL 由 redis
-//! 服务端 EX 管过期，与 clippy disallowed-methods 的系统时钟禁令一致）。
+//! 服务端 PX 管过期，与 clippy disallowed-methods 的系统时钟禁令一致）。
 
 mod claimer;
 
@@ -19,7 +19,7 @@ mod lock;
 
 #[cfg(feature = "backend")]
 pub use bundle::{
-    RedisCasStore, RedisIdempotencyStore, RedisInfraDeps, RedisLockStore, RedisPingError,
+    RedisCasStore, RedisInboxStore, RedisInfraDeps, RedisLockStore, RedisPingError,
     RedisRuntimeDeps,
 };
 
@@ -86,7 +86,7 @@ mod smoke {
     }
 
     #[cfg(feature = "backend")]
-    fn assert_idempotency_store<T: consistency::IdempotencyStore>(_: PhantomData<T>) {}
+    fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
     #[cfg(feature = "backend")]
     fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     #[cfg(feature = "backend")]
@@ -94,8 +94,8 @@ mod smoke {
 
     #[cfg(feature = "backend")]
     #[test]
-    fn impls_idempotency_store() {
-        assert_idempotency_store(PhantomData::<super::RedisIdempotencyStore>);
+    fn impls_inbox_store() {
+        assert_inbox_store(PhantomData::<super::RedisInboxStore>);
         assert_cas_store(PhantomData::<super::RedisCasStore>);
         assert_lock_store(PhantomData::<super::RedisLockStore>);
     }

@@ -360,11 +360,6 @@ impl<T> core::clone::CloneToUninit for consistency::idempotency::LeaseToken wher
 pub unsafe fn consistency::idempotency::LeaseToken::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::idempotency::LeaseToken
 pub fn consistency::idempotency::LeaseToken::from(T) -> T
-pub trait consistency::idempotency::IdempotencyStore
-pub async fn consistency::idempotency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::idempotency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::idempotency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
-pub async fn consistency::idempotency::IdempotencyStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub mod consistency::inbox
 #[non_exhaustive] pub enum consistency::inbox::InboxLeaseFreshness
 pub consistency::inbox::InboxLeaseFreshness::Active
@@ -588,6 +583,13 @@ impl<T> core::clone::CloneToUninit for consistency::inbox::InboxClaim where T: c
 pub unsafe fn consistency::inbox::InboxClaim::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::from(T) -> T
+pub trait consistency::inbox::InboxBacklog
+pub async fn consistency::inbox::InboxBacklog::sample_backlog(&self) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
+pub trait consistency::inbox::InboxStore
+pub async fn consistency::inbox::InboxStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::inbox::InboxStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -3462,11 +3464,13 @@ impl<T> core::clone::CloneToUninit for consistency::tx_retry::TxRetryReport wher
 pub unsafe fn consistency::tx_retry::TxRetryReport::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::tx_retry::TxRetryReport
 pub fn consistency::tx_retry::TxRetryReport::from(T) -> T
-pub trait consistency::IdempotencyStore
-pub async fn consistency::IdempotencyStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::IdempotencyStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
-pub async fn consistency::IdempotencyStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
-pub async fn consistency::IdempotencyStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub trait consistency::InboxBacklog
+pub async fn consistency::InboxBacklog::sample_backlog(&self) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
+pub trait consistency::InboxStore
+pub async fn consistency::InboxStore::commit(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::InboxStore::extend(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
+pub async fn consistency::InboxStore::release(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::InboxStore::try_claim(&self, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
 pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::OutboxRelay

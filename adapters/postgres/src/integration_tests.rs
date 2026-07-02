@@ -10,7 +10,9 @@
 //! 库名校验由 `testkit::env_or_postgres` 单源执行，此处无需重复。
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
-use consistency::{ConsumerGroup, IdemKey, IdempotencyStore, LeaseToken, OutboxPayload, SeenState};
+use consistency::{
+    ConsumerGroup, IdemKey, InboxBacklog, InboxStore, LeaseToken, OutboxPayload, SeenState,
+};
 use diport::ManagedResource;
 use futures::future::BoxFuture;
 
@@ -2405,6 +2407,240 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
         1,
         "claimed 行（非 done）不应被 sweep 删"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// InboxBacklog：只统计当前 group 的 stale claimed；active claim / done / 其它 group 均不计，空时零值。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let group_a = unique_domain("inbox-backlog-a");
+    let group_b = unique_domain("inbox-backlog-b");
+    let inbox_a = store.inbox(ConsumerGroup::parse(&group_a).unwrap());
+    let inbox_b = store.inbox(ConsumerGroup::parse(&group_b).unwrap());
+
+    async fn backdate_claim(store: &PgStore, event_id: &str, group: &str) -> TestResult {
+        sqlx::query(
+            "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
+             WHERE event_id = $2 AND consumer_group = $3",
+        )
+        .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 30)
+        .bind(event_id)
+        .bind(group)
+        .execute(&store.pool)
+        .await?;
+        Ok(())
+    }
+
+    assert_eq!(
+        inbox_a.sample_backlog().await?,
+        consistency::BacklogSample::empty(),
+        "无行时 inbox backlog 应为规范零值"
+    );
+
+    let active_key = unique_event_id("inbox-backlog-active");
+    let active = IdemKey::parse(&active_key).unwrap();
+    let active_lease = LeaseToken::mint();
+    assert_eq!(
+        inbox_a.try_claim(&active, &active_lease).await.unwrap(),
+        SeenState::Fresh
+    );
+
+    let done_key = unique_event_id("inbox-backlog-done");
+    let done = IdemKey::parse(&done_key).unwrap();
+    let done_lease = LeaseToken::mint();
+    assert_eq!(
+        inbox_a.try_claim(&done, &done_lease).await.unwrap(),
+        SeenState::Fresh
+    );
+    assert_eq!(
+        inbox_a.commit(&done, &done_lease).await.unwrap(),
+        consistency::LeaseOutcome::Held
+    );
+    backdate_claim(&store, &done_key, &group_a).await?;
+
+    let other_group_key = unique_event_id("inbox-backlog-other-group");
+    let other_group = IdemKey::parse(&other_group_key).unwrap();
+    let other_group_lease = LeaseToken::mint();
+    assert_eq!(
+        inbox_b
+            .try_claim(&other_group, &other_group_lease)
+            .await
+            .unwrap(),
+        SeenState::Fresh
+    );
+    backdate_claim(&store, &other_group_key, &group_b).await?;
+
+    assert_eq!(
+        inbox_a.sample_backlog().await?,
+        consistency::BacklogSample::empty(),
+        "active、done 和其它 group 的 stale claim 都不应计入当前 group"
+    );
+    assert_eq!(
+        inbox_b.sample_backlog().await?.depth(),
+        1,
+        "其它 group 自身应能看到自己的 stale claim"
+    );
+
+    let stale_key = unique_event_id("inbox-backlog-stale");
+    let stale = IdemKey::parse(&stale_key).unwrap();
+    let stale_lease = LeaseToken::mint();
+    assert_eq!(
+        inbox_a.try_claim(&stale, &stale_lease).await.unwrap(),
+        SeenState::Fresh
+    );
+    backdate_claim(&store, &stale_key, &group_a).await?;
+
+    let sample = inbox_a.sample_backlog().await?;
+    assert_eq!(sample.depth(), 1, "仅当前 group 的 stale claimed 行计数");
+    assert!(
+        sample.oldest_age_seconds() >= crate::inbox::INBOX_LEASE_TTL_SECONDS as u64,
+        "oldest_age_seconds 应来自 stale claimed 的 claimed_at"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// Inbox sweeper 是全局维护端口：按表清理所有 consumer groups 的超期 done，而不是绑定单个 group。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let groups = [
+        unique_domain("inbox-sweep-global-a"),
+        unique_domain("inbox-sweep-global-b"),
+    ];
+    let mut old_done_keys = Vec::new();
+
+    for group in &groups {
+        let inbox = store.inbox(ConsumerGroup::parse(group).unwrap());
+        let event_id = unique_event_id("inbox-sweep-global-done");
+        let key = IdemKey::parse(&event_id).unwrap();
+        let lease = LeaseToken::mint();
+        assert_eq!(
+            inbox.try_claim(&key, &lease).await.unwrap(),
+            SeenState::Fresh
+        );
+        assert_eq!(
+            inbox.commit(&key, &lease).await.unwrap(),
+            consistency::LeaseOutcome::Held
+        );
+        sqlx::query(
+            "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
+             WHERE event_id = $2 AND consumer_group = $3",
+        )
+        .bind(7200i64)
+        .bind(&event_id)
+        .bind(group)
+        .execute(&store.pool)
+        .await?;
+        old_done_keys.push((event_id, group.clone()));
+    }
+
+    let claimed_event = unique_event_id("inbox-sweep-global-claimed");
+    let inbox = store.inbox(ConsumerGroup::parse(&groups[0]).unwrap());
+    let claimed_key = IdemKey::parse(&claimed_event).unwrap();
+    assert_eq!(
+        inbox
+            .try_claim(&claimed_key, &LeaseToken::mint())
+            .await
+            .unwrap(),
+        SeenState::Fresh
+    );
+    sqlx::query(
+        "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
+         WHERE event_id = $2 AND consumer_group = $3",
+    )
+    .bind(7200i64)
+    .bind(&claimed_event)
+    .bind(&groups[0])
+    .execute(&store.pool)
+    .await?;
+
+    let deleted = store.inbox_sweeper().sweep(3600).await?;
+    assert!(deleted >= 2, "至少删除两个 group 的 old done 行");
+
+    for (event_id, group) in old_done_keys {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+        )
+        .bind(event_id)
+        .bind(group)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(row.0, 0, "所有 group 的 old done 都应被全局 sweeper 清理");
+    }
+
+    let claimed_row: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+    )
+    .bind(&claimed_event)
+    .bind(&groups[0])
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        claimed_row.0, 1,
+        "stale claimed 行不应被 retention sweeper 删除"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 非法 retain_seconds 必须 fail-closed，且不触发删除。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let group = unique_domain("inbox-sweep-invalid-retain");
+    let inbox = store.inbox(ConsumerGroup::parse(&group).unwrap());
+    let event_id = unique_event_id("inbox-sweep-invalid-retain-done");
+    let key = IdemKey::parse(&event_id).unwrap();
+    let lease = LeaseToken::mint();
+    assert_eq!(
+        inbox.try_claim(&key, &lease).await.unwrap(),
+        SeenState::Fresh
+    );
+    assert_eq!(
+        inbox.commit(&key, &lease).await.unwrap(),
+        consistency::LeaseOutcome::Held
+    );
+    sqlx::query(
+        "UPDATE inbox_dedup SET claimed_at = now() - make_interval(secs => $1) \
+         WHERE event_id = $2 AND consumer_group = $3",
+    )
+    .bind(7200i64)
+    .bind(&event_id)
+    .bind(&group)
+    .execute(&store.pool)
+    .await?;
+
+    let invalid_retain = crate::outbox::max_redelivery_window_secs() as u64;
+    let err = store
+        .inbox_sweeper()
+        .sweep(invalid_retain)
+        .await
+        .expect_err("retain_seconds 等于 redelivery floor 应 fail-closed");
+    assert_eq!(err.kind(), consistency::EngineErrorKind::Invariant);
+
+    let row: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM inbox_dedup WHERE event_id = $1 AND consumer_group = $2",
+    )
+    .bind(&event_id)
+    .bind(&group)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(row.0, 1, "fail-closed 后 old done 行必须保留");
 
     store.shutdown().await?;
     Ok(())

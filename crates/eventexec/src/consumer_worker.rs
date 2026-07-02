@@ -56,7 +56,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use consistency::idempotency::IdempotencyStore;
+use consistency::InboxStore;
 use consistency::{HandleResult, OutboxRelay, OutboxSource};
 use diport::{
     AckableSubscriber, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeliveryStream,
@@ -260,7 +260,7 @@ pub fn spawn_consumer<S, H>(
     health: Arc<WorkerHealth>,
 ) -> ConsumerWorker
 where
-    S: IdempotencyStore + Send + Sync + 'static,
+    S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
@@ -329,7 +329,7 @@ pub fn spawn_consumer_ackable<S, H>(
     health: Arc<WorkerHealth>,
 ) -> ConsumerWorker
 where
-    S: IdempotencyStore + Send + Sync + 'static,
+    S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
@@ -362,7 +362,7 @@ pub fn spawn_consumer_ackable_subscriber<S, H>(
     health: Arc<WorkerHealth>,
 ) -> ConsumerWorker
 where
-    S: IdempotencyStore + Send + Sync + 'static,
+    S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let token_run = token.clone();
@@ -409,8 +409,8 @@ mod tests {
 
     use super::{
         Arc, BoxFuture, CancellationToken, ConsumerMeta, ConsumerWorker, DeliveryStream,
-        DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, IdempotencyStore, LeaseConfig,
-        Message, MessageStream, Mutex, WorkerHealth, health_reporting_dlx, spawn_consumer,
+        DynDeadLetterStore, EVENT_CONSUMER_PROBE, HandleResult, InboxStore, LeaseConfig, Message,
+        MessageStream, Mutex, WorkerHealth, health_reporting_dlx, spawn_consumer,
         spawn_consumer_ackable, spawn_consumer_ackable_subscriber, spawn_relay,
     };
     use crate::TenantAuthority;
@@ -527,7 +527,7 @@ mod tests {
             self.commits.load(Ordering::Acquire)
         }
     }
-    impl IdempotencyStore for FreshStore {
+    impl InboxStore for FreshStore {
         async fn try_claim(
             &self,
             _key: &IdemKey,

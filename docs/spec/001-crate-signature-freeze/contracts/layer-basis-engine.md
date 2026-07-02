@@ -33,7 +33,7 @@ impl UserId { pub fn new(_raw: uuid::Uuid) -> Self { todo!() } }
 
 | crate | 冻结接缝 | 派发范式 | 门 |
 |---|---|---|---|
-| **consistency** | outbox / saga / reconcile / projection / idempotency 的**纯态机 + trait**（L0–L4），如 `IdempotencyStore`、`OutboxRelay`、`Reconciler` | **L0 引擎策略：native AFIT + 泛型 `<S: Trait>`**（零开销，不引 dynosaur）；若某 store 需 provider-可换 dyn 注入 → 该 port 归 diport | — |
+| **consistency** | outbox / inbox / saga / reconcile / projection / idempotency 的**纯态机 + trait**（L0–L4），如 `InboxStore`、`OutboxRelay`、`Reconciler` | **L0 引擎策略：native AFIT + 泛型 `<S: Trait>`**（零开销，不引 dynosaur）；`InboxStore`/`InboxBacklog`/`RetentionSweeper` 不迁入 diport | — |
 | **primitives** | crypto / authplan / healthz / circuitbreaker（纯计算/原语） | native/sync | — |
 | **primitives::lifecycle / Clock**（**归属待 diport 拍板**） | `Clock`、`ManagedResource` | `Clock` 构造器位参、禁默认系统时钟；ADR-003 §2/§4.3 列 Clock 为 DI port → **推荐迁 diport**（dynosaur）。`ManagedResource` 见 ADR-001（inter-ADR 冲突，data-model 待决项#4） | ADR-001 / 待决项#2#4 |
 

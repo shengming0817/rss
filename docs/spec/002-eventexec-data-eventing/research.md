@@ -5,7 +5,7 @@
 ## 已定决策（追溯 ADR / rules，非本 feature 重开）
 
 ### D1. 引擎策略 trait = native AFIT + 泛型静态分发
-- **Decision**: `IdempotencyStore`/`OutboxRelay`/`SagaStep`/`Reconciler`/`Projector` 一律 trait 内 `async fn` + 消费方 `fn run<S: Trait>(s:&S)`，非 object-safe，禁 `Box<dyn>`。
+- **Decision**: `InboxStore`/`OutboxRelay`/`SagaStep`/`Reconciler`/`Projector` 一律 trait 内 `async fn` + 消费方 `fn run<S: Trait>(s:&S)`，非 object-safe，禁 `Box<dyn>`。
 - **Rationale**: 零开销零 box；引擎是热路径策略接缝，不需 provider 运行时替换。
 - **Alternatives**: async-trait（堆分配 BoxFuture）/ dynosaur（dyn）——均拒，留给 DI port。
 - **ref**: ADR-004 C1；consistency/src/lib.rs:1-26。

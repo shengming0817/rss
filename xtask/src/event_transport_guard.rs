@@ -16,13 +16,14 @@ use crate::workspace_root;
 
 const TARGET: &str = "assemblies/runtime/src/event_transport.rs";
 const RUNTIME_FORBIDDEN: &[&str] = &[
-    "RedisIdempotencyStore",
+    "RedisInboxStore",
     "RSS_REDIS_CLAIM_TTL_MS",
     "redis_claim_ttl",
     "replaydeps::IdempotencyConfig",
     "redis idempotency",
     "Redis 幂等",
 ];
+const RUNTIME_REDIS_INBOX_FRAGMENT: &str = "redis.infra().inbox(";
 const RUNTIME_REQUIRED: &[&str] = &[
     "pub struct BridgedSubscription",
     "pub fn bridge_generated_subscriptions(",
@@ -39,7 +40,7 @@ const RUNTIME_REQUIRED: &[&str] = &[
 ];
 const DOMAIN_FORBIDDEN: &[&str] = &[
     "PgInboxStore",
-    "RedisIdempotencyStore",
+    "RedisInboxStore",
     "ConsumerWorker",
     "spawn_consumer(",
     "spawn_consumer_ackable(",
@@ -60,6 +61,7 @@ const BYPASS_ALLOWED_PATHS: &[&str] = &[
     "crates/eventexec/src/consumer_worker.rs",
     "adapters/postgres/src/bundle.rs",
     "adapters/postgres/src/inbox.rs",
+    "adapters/redis/src/bundle.rs",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,13 @@ fn scan_runtime_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             ));
         }
     }
+    for forbidden in runtime_redis_inbox_fragments(content) {
+        findings.push(finding(
+            Rule::RedisConsumerClaimer,
+            path.display().to_string(),
+            format!("禁止 runtime event consumer 重新接入 Redis claimer: `{forbidden}`"),
+        ));
+    }
     for required in RUNTIME_REQUIRED {
         if !content.contains(required) {
             findings.push(finding(
@@ -117,6 +126,20 @@ fn scan_runtime_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         }
     }
     findings
+}
+
+fn runtime_redis_inbox_fragments(content: &str) -> BTreeSet<&'static str> {
+    syn::parse_file(content)
+        .map(|file| file_runtime_redis_inbox_fragments(&file))
+        .unwrap_or_else(|_| text_runtime_redis_inbox_fragments(content))
+}
+
+fn text_runtime_redis_inbox_fragments(content: &str) -> BTreeSet<&'static str> {
+    let mut fragments = BTreeSet::new();
+    if content.contains(RUNTIME_REDIS_INBOX_FRAGMENT) {
+        fragments.insert(RUNTIME_REDIS_INBOX_FRAGMENT);
+    }
+    fragments
 }
 
 fn scan_domain_crates(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -236,6 +259,99 @@ fn text_bypass_fragments(content: &str) -> BTreeSet<&'static str> {
         .copied()
         .filter(|forbidden| content.contains(forbidden))
         .collect()
+}
+
+#[derive(Default)]
+struct RuntimeVisitor {
+    forbidden_infra_aliases: BTreeSet<String>,
+    fragments: BTreeSet<&'static str>,
+}
+
+impl<'ast> Visit<'ast> for RuntimeVisitor {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Ident(pat_ident) = &node.pat
+            && let Some(init) = &node.init
+            && let Some(InfraReceiver::Forbidden) = classify_runtime_infra_call(&init.expr)
+        {
+            self.forbidden_infra_aliases
+                .insert(pat_ident.ident.to_string());
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "inbox"
+            && expr_is_runtime_forbidden_inbox_receiver(
+                &node.receiver,
+                &self.forbidden_infra_aliases,
+            )
+        {
+            self.fragments.insert(RUNTIME_REDIS_INBOX_FRAGMENT);
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn file_runtime_redis_inbox_fragments(file: &syn::File) -> BTreeSet<&'static str> {
+    let mut visitor = RuntimeVisitor::default();
+    visitor.visit_file(file);
+    visitor.fragments
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InfraReceiver {
+    Pg,
+    Forbidden,
+}
+
+fn expr_is_runtime_forbidden_inbox_receiver(
+    expr: &syn::Expr,
+    forbidden_aliases: &BTreeSet<String>,
+) -> bool {
+    if let Some(receiver) = classify_runtime_infra_call(expr) {
+        return receiver == InfraReceiver::Forbidden;
+    }
+    matches!(
+        expr,
+        syn::Expr::Path(path)
+            if path.path.segments.len() == 1
+                && forbidden_aliases.contains(&path.path.segments[0].ident.to_string())
+    )
+}
+
+fn classify_runtime_infra_call(expr: &syn::Expr) -> Option<InfraReceiver> {
+    match expr {
+        syn::Expr::MethodCall(call) if call.method == "infra" => {
+            if expr_mentions_ident(&call.receiver, "pg") {
+                Some(InfraReceiver::Pg)
+            } else {
+                Some(InfraReceiver::Forbidden)
+            }
+        }
+        syn::Expr::Paren(paren) => classify_runtime_infra_call(&paren.expr),
+        syn::Expr::Group(group) => classify_runtime_infra_call(&group.expr),
+        syn::Expr::Reference(reference) => classify_runtime_infra_call(&reference.expr),
+        _ => None,
+    }
+}
+
+fn expr_mentions_ident(expr: &syn::Expr, ident: &str) -> bool {
+    match expr {
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .iter()
+            .any(|segment| segment.ident == ident),
+        syn::Expr::Field(field) => {
+            matches!(&field.member, syn::Member::Named(member) if member == ident)
+                || expr_mentions_ident(&field.base, ident)
+        }
+        syn::Expr::MethodCall(call) => expr_mentions_ident(&call.receiver, ident),
+        syn::Expr::Paren(paren) => expr_mentions_ident(&paren.expr, ident),
+        syn::Expr::Group(group) => expr_mentions_ident(&group.expr, ident),
+        syn::Expr::Reference(reference) => expr_mentions_ident(&reference.expr, ident),
+        _ => false,
+    }
 }
 
 #[derive(Default)]
@@ -361,7 +477,7 @@ mod tests {
     fn scan_content_rejects_redis_consumer_claimer_needles() {
         let findings = scan_runtime_content(
             Path::new(TARGET),
-            "let _: RedisIdempotencyStore; let _ = \"RSS_REDIS_CLAIM_TTL_MS\";",
+            "let _: RedisInboxStore; let _ = \"RSS_REDIS_CLAIM_TTL_MS\";",
         );
         assert!(
             findings
@@ -369,6 +485,43 @@ mod tests {
                 .filter(|f| f.rule == Rule::RedisConsumerClaimer)
                 .count()
                 == 2
+        );
+    }
+
+    #[test]
+    fn scan_content_rejects_runtime_redis_inbox_direct_wire() {
+        let findings = scan_runtime_content(
+            Path::new(TARGET),
+            r#"
+            fn wire_consumer_resource_bundle(redis: RedisRuntimeDeps) {
+                let group = subscription.group().clone();
+                let inbox = redis.infra().inbox(group);
+            }
+            "#,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::RedisConsumerClaimer)
+        );
+    }
+
+    #[test]
+    fn scan_content_rejects_runtime_redis_inbox_split_wire() {
+        let findings = scan_runtime_content(
+            Path::new(TARGET),
+            r#"
+            fn wire_consumer_resource_bundle(redis: RedisRuntimeDeps) {
+                let group = subscription.group().clone();
+                let infra = redis.infra();
+                let inbox = infra.inbox(group);
+            }
+            "#,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::RedisConsumerClaimer)
         );
     }
 

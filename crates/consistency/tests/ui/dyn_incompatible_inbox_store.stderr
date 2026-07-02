@@ -1,0 +1,21 @@
+error[E0038]: the trait `InboxStore` is not dyn compatible
+ --> tests/ui/dyn_incompatible_inbox_store.rs:6:25
+  |
+6 |     let _store: Box<dyn InboxStore>;
+  |                         ^^^^^^^^^^ `InboxStore` is not dyn compatible
+  |
+note: for a trait to be dyn compatible it needs to allow building a vtable
+      for more information, visit <https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility>
+ --> src/inbox.rs
+  |
+  |     async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError>;
+  |              ^^^^^^^^^ the trait is not dyn compatible because method `try_claim` is `async`
+...
+  |     async fn extend(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError>;
+  |              ^^^^^^ the trait is not dyn compatible because method `extend` is `async`
+...
+  |     async fn commit(&self, key: &IdemKey, lease: &LeaseToken) -> Result<LeaseOutcome, EngineError>;
+  |              ^^^^^^ the trait is not dyn compatible because method `commit` is `async`
+...
+  |     async fn release(&self, key: &IdemKey, lease: &LeaseToken) -> Result<(), EngineError>;
+  |              ^^^^^^^ the trait is not dyn compatible because method `release` is `async`

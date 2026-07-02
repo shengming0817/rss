@@ -1,8 +1,8 @@
-//! 幂等去重接缝（L0 引擎策略）—— ADR-004 C1 native AFIT 样板源。
+//! 幂等去重词汇类型（L0）。
 //!
-//! `IdempotencyStore` 是 **L0 引擎策略 trait**（native AFIT + 泛型静态分发，零 box，不引 dynosaur）：
-//! 消费方写 `fn run<S: IdempotencyStore>(s: &S)` 单态消费。**非** DI infra port——provider-可换的持久化
-//! claimer（Redis/PG）由组合根经 `bootstrap::replaydeps` 选型注入，那是 diport 的 dyn 端。
+//! 本模块只冻结消费侧 inbox 去重所需的稳定 key / group / lease token / CAS outcome 词汇。
+//! 持久化 claim 接缝归 [`crate::inbox::InboxStore`]，避免把 consumer inbox 的存储端口继续挂在
+//! `idempotency` 模块名下。
 //! ref: kube-rs kube-runtime/src/watcher.rs@main（内部 native AFIT trait `ApiMode` + 泛型 `step<A>` 消费）。
 
 /// 幂等键 newtype（私有字段，构造经 fallible funnel）。
@@ -89,7 +89,7 @@ impl SeenState {
 /// 租约令牌（uuid v4 newtype，私有字段 + 唯一构造入口 [`LeaseToken::mint`]，#1213 / #1354 F4）。
 ///
 /// 消费方每次 claim 前 [`mint`](LeaseToken::mint) 一枚（内部铸 uuid v4 文本），随
-/// [`IdempotencyStore::try_claim`] 传入；store 在 claimed 行 stamp 此 token。后续
+/// [`crate::inbox::InboxStore::try_claim`] 传入；store 在 claimed 行 stamp 此 token。后续
 /// `extend`/`commit`/`release` 凭它做 **CAS 围栏**——令牌不符即判 [`LeaseOutcome::Lost`]
 /// （claim 已被 TTL 重捞、他人接管），触发 hard-fence。
 ///
@@ -145,78 +145,17 @@ impl LeaseOutcome {
     }
 }
 
-/// 幂等去重 + 租约策略（L0 引擎策略 trait，native AFIT）。
-///
-/// trait 内直接 `async fn`——**不** object-safe，故消费方用泛型 `<S: IdempotencyStore>` 静态分发，
-/// 禁 `Box<dyn IdempotencyStore>`。
-///
-/// # 状态机（absent → claimed(token) → done）
-///
-/// - `try_claim`：absent / **TTL 过期的 claimed** → claimed(传入 token)（`Fresh`）；fresh-claimed / done →
-///   `Duplicate`。过期 claim 经 TTL 重捞（claimed 超 `lease_ttl` 未续租即可被新 token 接管），修
-///   crash-after-claim 时 key 永久 `Duplicate` 的丢消息风险（硬崩溃下 `release` 走不到，#1213）。
-/// - `extend`：claimed(token) 续租（刷新 lease 到期点）；token 匹配 → `Held`，不符 → `Lost`（已被重捞）。
-/// - `commit`：claimed(token)→done（CAS）；token 匹配 → `Held`（永久去重），不符 → `Lost`（**hard-fence**）。
-/// - `release`：claimed(token)→absent（CAS）；token 不符为 no-op（不误删他人 claim）。
-///
-/// 长 handler 由消费方后台按 `lease_ttl/3` 周期调 `extend` 续租；租约丢失（`Lost`）触发 cancel + hard-fence
-/// （#1213，对标 gocell ConsumerBase runWithRenewal + leaseLost）。
-#[allow(async_fn_in_trait)]
-// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
-pub trait IdempotencyStore {
-    /// 铸 claim 并查询首见（claim-or-skip + TTL 重捞）。`lease` 由 [`LeaseToken::mint`] 铸出（uuid v4）。
-    ///
-    /// **写副作用（`Fresh` 路径）**：`try_claim` 在 `Fresh` 路径上执行 `INSERT ... ON CONFLICT` / `SET NX`
-    /// 原子操作，将 `lease` token stamp 到后端——**不是只读谓词**；方法名 `try_claim` 即点明 claim 写语义（#1354）。
-    ///
-    /// `Fresh` ⇒ 本消费者持有以 `lease` 标记的 claim，应执行副作用；`Duplicate` ⇒ 幂等短路（他人持有或已 done）。
-    ///
-    /// **`Duplicate` 路径**：传入的 `lease` **不会**写入后端——claim-or-reclaim 是单一原子操作，token 必须
-    /// 在调用前铸出；若返回 `Duplicate`，调用方可丢弃该 token。
-    async fn try_claim(
-        &self,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<SeenState, crate::error::EngineError>;
-
-    /// 续租：刷新 `lease` 标记的 claimed 行到期点。`Held` 仍持有 / `Lost` 已被重捞（hard-fence 信号）。
-    ///
-    /// 对 absent / 他人持有 / 已 done 的行返回 `Lost`（无匹配 CAS）。
-    async fn extend(
-        &self,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<LeaseOutcome, crate::error::EngineError>;
-
-    /// claimed→done（CAS）：仅当 `lease` 仍匹配时标记永久去重。`Held` 提交成功 / `Lost` 租约已失（勿 Ack）。
-    ///
-    /// 对 absent / 已被重捞的行返回 `Lost`（hard-fence：消费方降级 Requeue、不移除 broker 投递）。
-    async fn commit(
-        &self,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<LeaseOutcome, crate::error::EngineError>;
-
-    /// claimed→absent（CAS）：仅当 `lease` 仍匹配时释放 claim，使后续重放可重新得到 `Fresh`。
-    ///
-    /// 令牌不符（已被重捞）为幂等 no-op（`Ok(())`，不误删他人 claim）；对 absent key 同样 no-op。
-    async fn release(
-        &self,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<(), crate::error::EngineError>;
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     use super::{
-        ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, IdempotencyStore, LeaseOutcome,
-        LeaseToken, SeenState,
+        ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, LeaseOutcome, LeaseToken,
+        SeenState,
     };
     use crate::error::EngineError;
+    use crate::inbox::InboxStore;
 
     // ─── in-mem fake（测试专用，覆盖完整 token CAS 状态机）──────────────────────────
 
@@ -240,7 +179,7 @@ mod tests {
         }
     }
 
-    impl IdempotencyStore for FakeStore {
+    impl InboxStore for FakeStore {
         async fn try_claim(
             &self,
             key: &IdemKey,

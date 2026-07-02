@@ -5,7 +5,7 @@
 //! （impl `generated::command::CommandEmit`）委托至此；业务**不直调**本函数（无裸 emit 出口，
 //! COMMAND-SYMMETRY-01 Medium 守）。consistencyLevel = OutboxFact（emit-only 单事实，无 co-tx）。
 //!
-//! **consumer**：[`register_command_handler`] 复用 [`run_consumer`] + [`IdempotencyStore`] claimer 两阶段
+//! **consumer**：[`register_command_handler`] 复用 [`run_consumer`] + [`InboxStore`] claimer 两阶段
 //! 去重（同 DispatchId 二次投递 → `Message.id` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
 //! claimer 拒）；零新去重原语。
 //!
@@ -19,7 +19,8 @@
 use std::sync::Arc;
 
 use consistency::HandleResult;
-use consistency::idempotency::{IdemKey, IdempotencyStore};
+use consistency::InboxStore;
+use consistency::idempotency::IdemKey;
 use consistency::outbox::{Entry, OutboxPayload, PermanentError, PermanentErrorKind, Topic};
 use diport::dead_letter_store::DynDeadLetterStore;
 use diport::{
@@ -108,7 +109,7 @@ pub async fn emit_async(
         })
 }
 
-/// Runtime 命令消费注册 —— 复用 [`run_consumer`] 驱动 + [`IdempotencyStore`] claimer 两阶段去重。
+/// Runtime 命令消费注册 —— 复用 [`run_consumer`] 驱动 + [`InboxStore`] claimer 两阶段去重。
 ///
 /// 消息 `payload` 经 `serde_json` 解码为 typed `R` 后交 `handler`；解码失败 = 永久 `reject`（坏 wire 不可
 /// 恢复 → DLX，不 Requeue 无限重投）。同 DispatchId（`Message.id` = dispatch key）二次投递 → claimer
@@ -138,7 +139,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     handler: H,
     lease_cfg: LeaseConfig,
 ) where
-    S: IdempotencyStore + Send + Sync + 'static,
+    S: InboxStore + Send + Sync + 'static,
     R: for<'de> serde::Deserialize<'de> + Send + 'static,
     H: Fn(R) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = HandleResult> + Send + 'static,
@@ -200,9 +201,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use consistency::HandleResult;
-    use consistency::idempotency::{
-        IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken, SeenState,
-    };
+    use consistency::InboxStore;
+    use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
@@ -433,7 +433,7 @@ mod tests {
         }
     }
 
-    impl IdempotencyStore for FakeStore {
+    impl InboxStore for FakeStore {
         async fn try_claim(
             &self,
             _key: &IdemKey,

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    ConsumerGroup, EngineError, Entry, IdemKey, IdempotencyStore, LeaseOutcome,
+    ConsumerGroup, EngineError, Entry, IdemKey, InboxStore, LeaseOutcome,
     LeaseToken as IdemLeaseToken, Lsn, SeenState,
 };
 
@@ -547,7 +547,7 @@ struct ClaimEntry {
     done: bool,
 }
 
-/// in-mem 幂等 claimer（impl [`consistency::IdempotencyStore`]）：以 `(group, key)` 为复合主键，
+/// in-mem 幂等 claimer（impl [`consistency::InboxStore`]）：以 `(group, key)` 为复合主键，
 /// 记 token-CAS 三态（absent / claimed(token) / done(token)），忠实实现 lease-CAS 围栏语义。
 /// demo / 单进程 / 测试用；生产走 redis/pg claimer。
 ///
@@ -576,7 +576,7 @@ impl InMemClaimer {
     }
 }
 
-impl IdempotencyStore for InMemClaimer {
+impl InboxStore for InMemClaimer {
     async fn try_claim(
         &self,
         key: &IdemKey,

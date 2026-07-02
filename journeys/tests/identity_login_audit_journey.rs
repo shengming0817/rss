@@ -50,8 +50,8 @@ use common::{
     tenant_authority,
 };
 use consistency::{
-    EngineError, Entry, HandleResult, IdemKey, IdempotencyStore, LeaseOutcome, LeaseToken,
-    OutboxPayload, PermanentError, PermanentErrorKind, SeenState,
+    EngineError, Entry, HandleResult, IdemKey, InboxStore, LeaseOutcome, LeaseToken, OutboxPayload,
+    PermanentError, PermanentErrorKind, SeenState,
 };
 use diport::{
     DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
@@ -119,7 +119,7 @@ impl<S> RecordingClaimer<S> {
     }
 }
 
-impl<S: IdempotencyStore + Send + Sync> IdempotencyStore for RecordingClaimer<S> {
+impl<S: InboxStore + Send + Sync> InboxStore for RecordingClaimer<S> {
     async fn try_claim(&self, key: &IdemKey, lease: &LeaseToken) -> Result<SeenState, EngineError> {
         let state = self.inner.try_claim(key, lease).await?;
         self.claim_count.fetch_add(1, Ordering::SeqCst);
@@ -162,7 +162,7 @@ async fn wire_demo_consumer<H, S>(
 ) -> Result<Arc<WorkerHealth>>
 where
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
-    S: IdempotencyStore + Send + Sync + 'static,
+    S: InboxStore + Send + Sync + 'static,
 {
     // 订阅须先于发布（in-mem 无重放）：同步 subscribe 得 stream，再 spawn worker 驱动。
     let stream = bus
