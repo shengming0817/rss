@@ -38,6 +38,7 @@ mod policy_repo;
 mod pool;
 mod projection_events;
 mod readiness;
+mod reconcile;
 mod refresh_token_store;
 mod role_binding_lifecycle;
 mod role_repo;
@@ -74,6 +75,11 @@ pub use policy_repo::PgPolicyRepo;
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
+pub use reconcile::{
+    PgReconcileStore, ReconcileActionErrorKind, ReconcileActionInsert, ReconcileAttemptInsert,
+    ReconcileAttemptTrigger, ReconcileKeyError, ReconcileLease, ReconcileLeaseOutcome,
+    ReconcileLedgerId, ReconcileStoreError, ReconcileTarget, ReconcileTargetKey,
+};
 pub use refresh_token_store::PgRefreshTokenStore;
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;

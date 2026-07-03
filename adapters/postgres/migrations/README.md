@@ -97,6 +97,14 @@ claim/commit 状态，不是 append-only ledger，因此授予 `rss_app` SELECT/
 `0039` 安装 `rss_sweep_inbox_receipts(bigint)` SECURITY DEFINER 保留期维护函数，随后完成 #1650 pre-GA
 runtime receipt storage cutover；不引入 dual write、兼容 shim 或回填迁移。
 
+`0041` 新增 `reconcile_targets` / `reconcile_leases` / `reconcile_attempts` /
+`reconcile_actions` tenant 表，作为 L4 reconcile 的 durable target / lease / append-only ledger schema。
+target 唯一键为 `(tenant_id, reconciler_id, resource_kind, resource_id)`；child 表均带 `tenant_id` 并通过
+composite FK 指回 target。`reconcile_targets` / `reconcile_leases` 是租户内可变状态，授予 `rss_app`
+SELECT/INSERT/UPDATE 且不授 DELETE；`reconcile_attempts` / `reconcile_actions` 是 append-only ledger，仅授
+SELECT/INSERT 并显式 `REVOKE UPDATE, DELETE`。四表均在同一迁移内落 `FORCE RLS` 与标准 tenant policy。
+本切片只提供 schema 与最小 PG API，不接 reconcile runtime worker。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

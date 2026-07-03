@@ -47,6 +47,23 @@ Vault/SoftCA/Redis/PG 类型、HTTP / Kubernetes / MQTT 类型、generated contr
 - `Outcome.requeue_after` 表达健康态稍后复检；result label 值集冻结在
   `ReconcileResultLabel::as_label()`，捕获的 panic（`catch_unwind`）映射 transient。
 
+## Durable PG schema 边界
+
+Postgres adapter 提供 `reconcile_targets` / `reconcile_leases` / `reconcile_attempts` /
+`reconcile_actions` 四表作为 L4 控制环的 durable schema：target 目录、当前 lease、attempt ledger 与
+action/result ledger。该 schema 是 adapter 层持久化能力，不改变 `consistency::Reconciler` trait，也不代表
+runtime worker 已接线；worker 接线仍由后续组合根 / 消费域切片决定。
+
+- target 唯一性由 DB `UNIQUE (tenant_id, reconciler_id, resource_kind, resource_id)` 承载，避免跨租户或跨
+  reconciler 的 resource key 互相阻塞。
+- lease 是 target-local 当前状态，`epoch` 是单调高水位；release 只清 holder/token/expiry，不重置 epoch。
+  extend / release 类写必须以 `target_id + lease_token + epoch` 做 CAS，0 row 是 lost lease 控制流。
+- attempt / action 是 append-only ledger；运行期 `rss_app` 仅有 SELECT/INSERT，无 UPDATE/DELETE。attempt 不做
+  “start row 再 update finish”，action/result 另追加记录。
+- 四表都是 tenant 表，必须同迁移落 `ENABLE ROW LEVEL SECURITY`、`FORCE ROW LEVEL SECURITY` 与标准
+  `tenant_isolation` policy。普通租户内 CAS 走 `PgTenantPool` 注入 `SET LOCAL rss.tenant_id`，不使用
+  `SECURITY DEFINER`。
+
 ## Builder 强制
 
 `reconcile::Builder::new(r, tenancy, trigger).with_*().build()` 是**唯一**公开构造入口（`ReconcileLoop`

@@ -17,7 +17,10 @@ use consistency::{
 use diport::ManagedResource;
 use futures::future::BoxFuture;
 
-use crate::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgStore};
+use crate::{
+    PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgStore, ReconcileLeaseOutcome,
+    ReconcileTargetKey,
+};
 
 // 统一 Send+Sync 错误（= testkit::FixtureError）：sqlx::Error / PgError / FixtureError 均 Send+Sync，
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
@@ -1066,6 +1069,518 @@ async fn inbox_receipts_rls_grants_and_tenant_isolation() -> TestResult {
             cnt.0, 0,
             "missing rss.tenant_id must fail closed for inbox_receipts"
         );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── reconcile target/attempt/action/lease schema (#1629) ─────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_schema_catalog_after_migrations() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT table_name \
+         FROM information_schema.tables \
+         WHERE table_schema = 'public' \
+           AND table_name IN ( \
+             'reconcile_targets', 'reconcile_leases', \
+             'reconcile_attempts', 'reconcile_actions' \
+           ) \
+         ORDER BY table_name",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        tables,
+        vec![
+            ("reconcile_actions".to_string(),),
+            ("reconcile_attempts".to_string(),),
+            ("reconcile_leases".to_string(),),
+            ("reconcile_targets".to_string(),),
+        ],
+        "all reconcile schema tables must exist"
+    );
+
+    let target_unique: (String,) = sqlx::query_as(
+        "SELECT string_agg(a.attname, ',' ORDER BY k.ord) \
+         FROM pg_constraint c \
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+         WHERE c.conrelid = 'reconcile_targets'::regclass \
+           AND c.conname = 'reconcile_targets_tenant_resource_unique'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        target_unique.0, "tenant_id,reconciler_id,resource_kind,resource_id",
+        "target uniqueness must include tenant and full resource identity"
+    );
+
+    let fk_text: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname, pg_get_constraintdef(oid) \
+         FROM pg_constraint \
+         WHERE conrelid IN ( \
+             'reconcile_leases'::regclass, \
+             'reconcile_attempts'::regclass, \
+             'reconcile_actions'::regclass \
+           ) \
+           AND contype = 'f' \
+         ORDER BY conname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let fk_text = fk_text
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for needle in [
+        "FOREIGN KEY (tenant_id, target_id) REFERENCES reconcile_targets(tenant_id, target_id)",
+        "FOREIGN KEY (tenant_id, attempt_id, target_id) REFERENCES reconcile_attempts(tenant_id, attempt_id, target_id)",
+    ] {
+        assert!(
+            fk_text.contains(needle),
+            "missing reconcile composite tenant FK `{needle}` in:\n{fk_text}"
+        );
+    }
+
+    let constraint_text: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname, pg_get_constraintdef(oid) \
+         FROM pg_constraint \
+         WHERE conrelid IN ( \
+             'reconcile_targets'::regclass, \
+             'reconcile_leases'::regclass, \
+             'reconcile_attempts'::regclass, \
+             'reconcile_actions'::regclass \
+           ) \
+         ORDER BY conname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let constraint_text = constraint_text
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for name in [
+        "reconcile_targets_status_valid",
+        "reconcile_leases_state_valid",
+        "reconcile_leases_epoch_non_negative",
+        "reconcile_attempts_trigger_kind_valid",
+        "reconcile_actions_action_kind_valid",
+        "reconcile_actions_result_label_valid",
+    ] {
+        assert!(
+            constraint_text.contains(name),
+            "missing reconcile CHECK `{name}` in:\n{constraint_text}"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_target_unique_key_includes_tenant_resource() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let resource = format!("device-{}", uuid::Uuid::new_v4());
+
+    sqlx::query(
+        "INSERT INTO reconcile_targets \
+         (tenant_id, reconciler_id, resource_kind, resource_id) \
+         VALUES ($1::uuid, 'cert-reconciler', 'device-cert', $2)",
+    )
+    .bind(&tenant_a)
+    .bind(&resource)
+    .execute(&store.pool)
+    .await?;
+
+    let duplicate = sqlx::query(
+        "INSERT INTO reconcile_targets \
+         (tenant_id, reconciler_id, resource_kind, resource_id) \
+         VALUES ($1::uuid, 'cert-reconciler', 'device-cert', $2)",
+    )
+    .bind(&tenant_a)
+    .bind(&resource)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "same tenant/reconciler/resource must be rejected by DB UNIQUE"
+    );
+
+    sqlx::query(
+        "INSERT INTO reconcile_targets \
+         (tenant_id, reconciler_id, resource_kind, resource_id) \
+         VALUES ($1::uuid, 'cert-reconciler', 'device-cert', $2)",
+    )
+    .bind(&tenant_b)
+    .bind(&resource)
+    .execute(&store.pool)
+    .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_rls_grants_and_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let grants: Vec<(String, bool, bool, bool, bool, bool, bool)> = sqlx::query_as(
+        "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, \
+                has_table_privilege('rss_app', c.oid, 'SELECT'), \
+                has_table_privilege('rss_app', c.oid, 'INSERT'), \
+                has_table_privilege('rss_app', c.oid, 'UPDATE'), \
+                has_table_privilege('rss_app', c.oid, 'DELETE') \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' \
+           AND c.relname IN ( \
+             'reconcile_targets', 'reconcile_leases', \
+             'reconcile_attempts', 'reconcile_actions' \
+           ) \
+         ORDER BY c.relname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(grants.len(), 4, "all reconcile tables must be inspected");
+    for (table, rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete) in grants {
+        assert!(rls_enabled, "{table} must ENABLE RLS");
+        assert!(rls_forced, "{table} must FORCE RLS");
+        assert!(can_select, "rss_app must SELECT {table}");
+        assert!(can_insert, "rss_app must INSERT {table}");
+        match table.as_str() {
+            "reconcile_targets" | "reconcile_leases" => {
+                assert!(can_update, "rss_app must UPDATE mutable {table}");
+                assert!(!can_delete, "rss_app must not DELETE mutable {table}");
+            }
+            "reconcile_attempts" | "reconcile_actions" => {
+                assert!(!can_update, "rss_app must not UPDATE append-only {table}");
+                assert!(!can_delete, "rss_app must not DELETE append-only {table}");
+            }
+            _ => unreachable!("query filters table list"),
+        }
+    }
+
+    let policies: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT tablename, qual, with_check \
+         FROM pg_policies \
+         WHERE schemaname = 'public' \
+           AND tablename IN ( \
+             'reconcile_targets', 'reconcile_leases', \
+             'reconcile_attempts', 'reconcile_actions' \
+           ) \
+           AND policyname = 'tenant_isolation' \
+         ORDER BY tablename",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(policies.len(), 4, "all reconcile tables need tenant policy");
+    for (table, qual, with_check) in policies {
+        for body in [qual.as_deref(), with_check.as_deref()] {
+            let body = body.ok_or_else(|| {
+                std::io::Error::other(format!("{table} tenant policy missing USING/WITH CHECK"))
+            })?;
+            assert!(
+                body.to_lowercase().contains("nullif(current_setting"),
+                "{table} tenant policy must use NULLIF(current_setting(...)): {body}"
+            );
+            assert!(
+                body.contains("rss.tenant_id"),
+                "{table} tenant policy must reference rss.tenant_id: {body}"
+            );
+        }
+    }
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let resource = format!("rls-device-{}", uuid::Uuid::new_v4());
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO reconcile_targets \
+             (tenant_id, reconciler_id, resource_kind, resource_id) \
+             VALUES ($1::uuid, 'rls-reconciler', 'device', $2)",
+        )
+        .bind(&tenant_a)
+        .bind(&resource)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    for (tenant, expected, label) in [(&tenant_a, 1_i64, "tenant A"), (&tenant_b, 0, "tenant B")] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM reconcile_targets \
+             WHERE reconciler_id = 'rls-reconciler' AND resource_id = $1",
+        )
+        .bind(&resource)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(cnt.0, expected, "{label} visibility mismatch");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM reconcile_targets \
+             WHERE reconciler_id = 'rls-reconciler' AND resource_id = $1",
+        )
+        .bind(&resource)
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "missing rss.tenant_id must fail closed for reconcile_targets"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_lease_cas_rejects_stale_token_and_epoch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let resource = format!("lease-device-{}", uuid::Uuid::new_v4());
+    let key = ReconcileTargetKey::parse("lease-reconciler", "device", &resource)?;
+    let reconcile = store.reconcile();
+    let target = reconcile.upsert_target(tenant, &key).await?;
+
+    let first = reconcile
+        .acquire_lease(
+            tenant,
+            target.target_id(),
+            "holder-a",
+            std::time::Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("first acquire must win"))?;
+
+    let blocked = reconcile
+        .acquire_lease(
+            tenant,
+            target.target_id(),
+            "holder-b",
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+    assert!(blocked.is_none(), "active lease must block another holder");
+
+    sqlx::query(
+        "UPDATE reconcile_leases \
+         SET acquired_at = now() - make_interval(secs => 120), \
+             heartbeat_at = now() - make_interval(secs => 120), \
+             expires_at = now() - make_interval(secs => 60) \
+         WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(target.target_id())
+    .execute(&store.pool)
+    .await?;
+
+    let second = reconcile
+        .acquire_lease(
+            tenant,
+            target.target_id(),
+            "holder-b",
+            std::time::Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("expired lease must be reclaimed"))?;
+    assert!(
+        second.epoch() > first.epoch(),
+        "lease reclaim must advance epoch high-water"
+    );
+
+    assert_eq!(
+        reconcile
+            .extend_lease(
+                tenant,
+                target.target_id(),
+                first.lease_token(),
+                first.epoch(),
+                std::time::Duration::from_secs(60)
+            )
+            .await?,
+        ReconcileLeaseOutcome::Lost,
+        "stale token/epoch must not extend a reclaimed lease"
+    );
+    assert_eq!(
+        reconcile
+            .release_lease(
+                tenant,
+                target.target_id(),
+                first.lease_token(),
+                first.epoch()
+            )
+            .await?,
+        ReconcileLeaseOutcome::Lost,
+        "stale token/epoch must not release a reclaimed lease"
+    );
+    assert_eq!(
+        reconcile
+            .extend_lease(
+                tenant,
+                target.target_id(),
+                second.lease_token(),
+                second.epoch(),
+                std::time::Duration::from_secs(60)
+            )
+            .await?,
+        ReconcileLeaseOutcome::Held,
+        "current token/epoch must extend"
+    );
+    assert_eq!(
+        reconcile
+            .release_lease(
+                tenant,
+                target.target_id(),
+                second.lease_token(),
+                second.epoch()
+            )
+            .await?,
+        ReconcileLeaseOutcome::Held,
+        "current token/epoch must release"
+    );
+
+    let third = reconcile
+        .acquire_lease(
+            tenant,
+            target.target_id(),
+            "holder-c",
+            std::time::Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("released lease must be acquirable"))?;
+    assert!(
+        third.epoch() > second.epoch(),
+        "released lease must retain and advance epoch high-water"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_attempts_and_actions_are_append_only_for_rss_app() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let target_id: (String,) = sqlx::query_as(
+        "INSERT INTO reconcile_targets \
+         (tenant_id, reconciler_id, resource_kind, resource_id) \
+         VALUES ($1::uuid, 'append-reconciler', 'device', $2) \
+         RETURNING target_id::text",
+    )
+    .bind(&tenant)
+    .bind(format!("append-device-{}", uuid::Uuid::new_v4()))
+    .fetch_one(&store.pool)
+    .await?;
+    let attempt_id: (String,) = sqlx::query_as(
+        "INSERT INTO reconcile_attempts \
+         (tenant_id, target_id, lease_token, epoch, holder_id, trigger_kind) \
+         VALUES ($1::uuid, $2::uuid, gen_random_uuid(), 1, 'holder-a', 'targeted') \
+         RETURNING attempt_id::text",
+    )
+    .bind(&tenant)
+    .bind(&target_id.0)
+    .fetch_one(&store.pool)
+    .await?;
+    let action_id: (String,) = sqlx::query_as(
+        "INSERT INTO reconcile_actions \
+         (tenant_id, attempt_id, target_id, action_kind, result_label) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'noop', 'settled') \
+         RETURNING action_id::text",
+    )
+    .bind(&tenant)
+    .bind(&attempt_id.0)
+    .bind(&target_id.0)
+    .fetch_one(&store.pool)
+    .await?;
+
+    for (table, update_sql, delete_sql, id) in [
+        (
+            "reconcile_attempts",
+            "UPDATE reconcile_attempts SET holder_id = 'tampered' \
+             WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+            "DELETE FROM reconcile_attempts \
+             WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+            &attempt_id.0,
+        ),
+        (
+            "reconcile_actions",
+            "UPDATE reconcile_actions SET result_label = 'transient' \
+             WHERE tenant_id = $1::uuid AND action_id = $2::uuid",
+            "DELETE FROM reconcile_actions \
+             WHERE tenant_id = $1::uuid AND action_id = $2::uuid",
+            &action_id.0,
+        ),
+    ] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant)
+            .execute(&mut *tx)
+            .await?;
+        let update = sqlx::query(update_sql)
+            .bind(&tenant)
+            .bind(id)
+            .execute(&mut *tx)
+            .await;
+        assert!(update.is_err(), "rss_app must not UPDATE {table}");
+        let delete = sqlx::query(delete_sql)
+            .bind(&tenant)
+            .bind(id)
+            .execute(&mut *tx)
+            .await;
+        assert!(delete.is_err(), "rss_app must not DELETE {table}");
         tx.rollback().await?;
     }
 

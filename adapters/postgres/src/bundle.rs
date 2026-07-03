@@ -67,9 +67,9 @@ use crate::{
     PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
     PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgPolicyRepo, PgProjectionEvents,
-    PgReadinessSampler, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal,
-    PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
-    PgStoreGuard,
+    PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo,
+    PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx,
+    PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -757,6 +757,14 @@ impl PgInfraDeps {
     #[must_use]
     pub fn checkpoint(&self) -> PgCheckpointStore {
         self.store.checkpoint()
+    }
+
+    /// reconcile durable target/lease/attempt/action store（schema-level capability，#1629）。
+    ///
+    /// 本 accessor 只暴露最小 PG schema API，不启动 reconcile runtime worker，也不新增 engine/domain trait。
+    #[must_use]
+    pub fn reconcile(&self) -> PgReconcileStore {
+        self.store.reconcile()
     }
 
     /// saga journal（L3 saga 状态）。
