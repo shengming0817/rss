@@ -19,7 +19,10 @@ use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
-use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
+use crate::outbox::{
+    OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient, unix_secs,
+};
+use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL outbox 发射 adapter（impl [`OutboxEmitter`]）。
 ///
@@ -40,9 +43,18 @@ impl PgEmitter {
     /// 时钟、不跨线程共享，无需 `Arc`）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::emitter`] 收口（provider-agnostic 基建，非单域）。
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+    }
+
+    pub(crate) fn new_with_projection_registry(
+        store: &PgStore,
+        clock: Box<dyn Clock>,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantPool::with_projection_registry(store, projection_registry),
             clock,
         }
     }
@@ -72,13 +84,15 @@ impl OutboxEmitter for PgEmitter {
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
         // durable 写入事务内执行；事务打开、SET LOCAL、commit_unknown 与 rollback 统一由 PgTenantPool::write 承载。
+        let projection_registry = self.pool.projection_registry();
         self.pool
             .write(
                 env.tenant(),
                 move |tx| {
                     Box::pin(async move {
-                        append_outbox(tx, &entry, &env)
+                        append_outbox_with_projection(tx, &entry, &env, &projection_registry)
                             .await
+                            .map(|_| ())
                             .map_err(OutboxEmitError::new)
                     })
                 },

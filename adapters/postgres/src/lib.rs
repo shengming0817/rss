@@ -70,8 +70,8 @@ pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use policy_repo::PgPolicyRepo;
-// NewProjectionEvent 不 re-export：写入口经 emit 期 co-tx 双写 decorator 收口（eventbus.md §Projection
-// sealed 写入），外部 crate 不可手写全局 projection journal（#1122 F1）。读路径返回 consistency
+// Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
+// DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
 pub use refresh_token_store::PgRefreshTokenStore;

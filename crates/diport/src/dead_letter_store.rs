@@ -52,6 +52,8 @@ pub enum DeadLetterSource {
     OutboxRelay,
     /// saga 补偿失败进入 DLQ。
     Saga,
+    /// projection poison event 进入 DLQ。
+    Projection,
 }
 
 impl DeadLetterSource {
@@ -62,6 +64,7 @@ impl DeadLetterSource {
             Self::Consumer => "consumer",
             Self::OutboxRelay => "outbox_relay",
             Self::Saga => "saga",
+            Self::Projection => "projection",
         }
     }
 
@@ -72,6 +75,7 @@ impl DeadLetterSource {
             "consumer" => Some(Self::Consumer),
             "outbox_relay" => Some(Self::OutboxRelay),
             "saga" => Some(Self::Saga),
+            "projection" => Some(Self::Projection),
             _ => None,
         }
     }
@@ -89,6 +93,8 @@ pub enum WritableDeadLetterSource {
     OutboxRelay,
     /// saga 补偿失败进入 DLQ。
     Saga,
+    /// projection poison event 进入 DLQ。
+    Projection,
 }
 
 impl WritableDeadLetterSource {
@@ -97,6 +103,7 @@ impl WritableDeadLetterSource {
             Self::Consumer => DeadLetterSource::Consumer,
             Self::OutboxRelay => DeadLetterSource::OutboxRelay,
             Self::Saga => DeadLetterSource::Saga,
+            Self::Projection => DeadLetterSource::Projection,
         }
     }
 }

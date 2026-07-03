@@ -39,6 +39,10 @@ use crate::cotx::{PgTenantPool, TxCapability};
 use crate::dead_letter_payload::{
     DLX_ORIGINAL_ENTRY_ENCODING, DlxPayloadContext, DlxPayloadProtector,
 };
+use crate::projection_events::{
+    ProjectionWriteRegistry, append_projection_event_if_bound,
+    append_replayed_projection_event_if_bound,
+};
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -520,6 +524,12 @@ impl OutboxEnvelope {
 
 // ── append_outbox ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboxAppendOutcome {
+    Inserted,
+    AlreadyExists,
+}
+
 /// DLQ replay 重新创建 outbox 行的受控输入。
 ///
 /// replay 的原始 dead_letter 行只保存 wire 侧字符串字段，无法重建 generated `ContractBinding`；
@@ -556,8 +566,8 @@ pub(crate) async fn append_outbox(
     tx: &mut TxCapability<'_>,
     entry: &Entry,
     env: &OutboxEnvelope,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<OutboxAppendOutcome, sqlx::Error> {
+    let result = sqlx::query(
         r#"
         INSERT INTO outbox (
             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
@@ -581,7 +591,25 @@ pub(crate) async fn append_outbox(
     .bind(env.causation_id())
     .execute(tx.conn())
     .await?;
-    Ok(())
+    Ok(if result.rows_affected() == 1 {
+        OutboxAppendOutcome::Inserted
+    } else {
+        OutboxAppendOutcome::AlreadyExists
+    })
+}
+
+/// Append outbox and mirror to projection_events only for newly inserted generated-bound facts.
+pub(crate) async fn append_outbox_with_projection(
+    tx: &mut TxCapability<'_>,
+    entry: &Entry,
+    env: &OutboxEnvelope,
+    projection_registry: &ProjectionWriteRegistry,
+) -> Result<OutboxAppendOutcome, sqlx::Error> {
+    let outcome = append_outbox(tx, entry, env).await?;
+    if outcome == OutboxAppendOutcome::Inserted {
+        append_projection_event_if_bound(tx, entry, env, projection_registry).await?;
+    }
+    Ok(outcome)
 }
 
 /// 在事务内 replay 一条 dead-letter 消息为新的 outbox 行。
@@ -589,8 +617,8 @@ pub(crate) async fn append_outbox(
 /// 与 [`append_outbox`] 共用同一文件内 SQL 写面；返回插入行数供 caller 区分 `Inserted` / `AlreadyExists`。
 pub(crate) async fn append_replayed_outbox(
     tx: &mut TxCapability<'_>,
-    replay: ReplayedOutboxAppend,
-) -> Result<u64, sqlx::Error> {
+    replay: &ReplayedOutboxAppend,
+) -> Result<OutboxAppendOutcome, sqlx::Error> {
     let result = sqlx::query(
         r#"
         INSERT INTO outbox (
@@ -601,20 +629,36 @@ pub(crate) async fn append_replayed_outbox(
         ON CONFLICT (event_id) DO NOTHING
         "#,
     )
-    .bind(replay.event_id)
+    .bind(&replay.event_id)
     .bind(replay.tenant.to_string())
-    .bind(replay.domain)
-    .bind(replay.topic)
-    .bind(replay.contract_id)
-    .bind(replay.contract_version)
-    .bind(replay.schema_hash)
-    .bind(replay.payload)
-    .bind(replay.metadata_json)
+    .bind(&replay.domain)
+    .bind(&replay.topic)
+    .bind(&replay.contract_id)
+    .bind(&replay.contract_version)
+    .bind(&replay.schema_hash)
+    .bind(&replay.payload)
+    .bind(&replay.metadata_json)
     .bind(STATUS_PENDING)
-    .bind(replay.causation_id)
+    .bind(replay.causation_id.as_deref())
     .execute(tx.conn())
     .await?;
-    Ok(result.rows_affected())
+    Ok(if result.rows_affected() == 1 {
+        OutboxAppendOutcome::Inserted
+    } else {
+        OutboxAppendOutcome::AlreadyExists
+    })
+}
+
+pub(crate) async fn append_replayed_outbox_with_projection(
+    tx: &mut TxCapability<'_>,
+    replay: ReplayedOutboxAppend,
+    projection_registry: &ProjectionWriteRegistry,
+) -> Result<OutboxAppendOutcome, sqlx::Error> {
+    let outcome = append_replayed_outbox(tx, &replay).await?;
+    if outcome == OutboxAppendOutcome::Inserted {
+        append_replayed_projection_event_if_bound(tx, &replay, projection_registry).await?;
+    }
+    Ok(outcome)
 }
 
 // ── PgOutbox ──────────────────────────────────────────────────────────────────

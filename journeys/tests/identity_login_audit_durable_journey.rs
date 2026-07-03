@@ -184,7 +184,12 @@ async fn login_audit_durable_topology() -> Result<()> {
     let owner_config = pg_config(pg.params())?;
     let app_config = pg_config_for(pg.params(), RSS_APP_ROLE, RSS_APP_PASSWORD);
     // postgres capability bundle（#1423）：`setup` 含 connect + run_migrations；identity 域受控句柄派发 repo。
-    let deps = PgRuntimeDeps::setup(&owner_config, &app_config).await?;
+    let deps = PgRuntimeDeps::setup(
+        &owner_config,
+        &app_config,
+        generated::event::PROJECTION_INPUTS,
+    )
+    .await?;
     let id = deps.for_domain::<caps::Identity>();
 
     let bus = MemBus::new();

@@ -37,6 +37,7 @@ use sqlx::{Executor, Postgres, Row};
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
+use crate::projection_events::ProjectionWriteRegistry;
 use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error, run_pg_tx_retry};
 
 #[cfg(all(test, feature = "integration"))]
@@ -316,13 +317,28 @@ impl PgConfigRepo {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(
         store: &PgStore,
         clock: Arc<dyn Clock>,
         protection: ConfigValueProtection,
     ) -> Self {
+        Self::new_with_projection_registry(
+            store,
+            clock,
+            protection,
+            ProjectionWriteRegistry::empty(),
+        )
+    }
+
+    pub(crate) fn new_with_projection_registry(
+        store: &PgStore,
+        clock: Arc<dyn Clock>,
+        protection: ConfigValueProtection,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantPool::with_projection_registry(store, projection_registry),
             clock,
             protection,
         }

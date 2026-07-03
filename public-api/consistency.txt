@@ -1700,14 +1700,65 @@ impl<T> core::clone::CloneToUninit for consistency::projection::ProjectionDeadLe
 pub unsafe fn consistency::projection::ProjectionDeadLetter::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::projection::ProjectionDeadLetter
 pub fn consistency::projection::ProjectionDeadLetter::from(T) -> T
+pub struct consistency::projection::ProjectionEventMetadata
+impl consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::causation_id(&self) -> core::option::Option<&str>
+pub fn consistency::projection::ProjectionEventMetadata::contract_id(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::contract_version(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::domain(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::event_id(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::metadata_json(&self) -> &serde_json::value::Value
+pub fn consistency::projection::ProjectionEventMetadata::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, serde_json::value::Value, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn consistency::projection::ProjectionEventMetadata::partition_key(&self) -> core::option::Option<&str>
+pub fn consistency::projection::ProjectionEventMetadata::schema_hash(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::tenant(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::clone(&self) -> consistency::projection::ProjectionEventMetadata
+impl core::cmp::Eq for consistency::projection::ProjectionEventMetadata
+impl core::cmp::PartialEq for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::eq(&self, &consistency::projection::ProjectionEventMetadata) -> bool
+impl core::fmt::Debug for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::projection::ProjectionEventMetadata
+impl core::marker::Freeze for consistency::projection::ProjectionEventMetadata
+impl core::marker::Send for consistency::projection::ProjectionEventMetadata
+impl core::marker::Sync for consistency::projection::ProjectionEventMetadata
+impl core::marker::Unpin for consistency::projection::ProjectionEventMetadata
+impl core::marker::UnsafeUnpin for consistency::projection::ProjectionEventMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionEventMetadata
+impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionEventMetadata
+impl<T, U> core::convert::Into<U> for consistency::projection::ProjectionEventMetadata where U: core::convert::From<T>
+pub fn consistency::projection::ProjectionEventMetadata::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::projection::ProjectionEventMetadata where U: core::convert::Into<T>
+pub type consistency::projection::ProjectionEventMetadata::Error = core::convert::Infallible
+pub fn consistency::projection::ProjectionEventMetadata::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::projection::ProjectionEventMetadata where U: core::convert::TryFrom<T>
+pub type consistency::projection::ProjectionEventMetadata::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::projection::ProjectionEventMetadata::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::projection::ProjectionEventMetadata where T: core::clone::Clone
+pub type consistency::projection::ProjectionEventMetadata::Owned = T
+pub fn consistency::projection::ProjectionEventMetadata::clone_into(&self, &mut T)
+pub fn consistency::projection::ProjectionEventMetadata::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::projection::ProjectionEventMetadata where T: 'static + ?core::marker::Sized
+pub fn consistency::projection::ProjectionEventMetadata::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::projection::ProjectionEventMetadata where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionEventMetadata::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::projection::ProjectionEventMetadata where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionEventMetadata::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::projection::ProjectionEventMetadata where T: core::clone::Clone
+pub unsafe fn consistency::projection::ProjectionEventMetadata::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::from(T) -> T
 pub struct consistency::projection::ProjectionEventRecord
 impl consistency::projection::ProjectionEventRecord
 pub fn consistency::projection::ProjectionEventRecord::lsn(&self) -> consistency::projection::Lsn
-pub fn consistency::projection::ProjectionEventRecord::new(consistency::projection::Lsn, consistency::outbox::Topic, impl core::convert::Into<alloc::vec::Vec<u8>>) -> Self
+pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
+pub fn consistency::projection::ProjectionEventRecord::with_metadata(consistency::projection::Lsn, consistency::outbox::Topic, impl core::convert::Into<alloc::vec::Vec<u8>>, consistency::projection::ProjectionEventMetadata) -> Self
 impl consistency::projection::ProjectionEvent for consistency::projection::ProjectionEventRecord
 pub fn consistency::projection::ProjectionEventRecord::lsn(&self) -> consistency::projection::Lsn
+pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
 impl core::clone::Clone for consistency::projection::ProjectionEventRecord
@@ -1788,10 +1839,12 @@ pub fn consistency::projection::SerialInOrder::from(T) -> T
 pub trait consistency::projection::PartitionSerialDelivery
 pub trait consistency::projection::ProjectionEvent
 pub fn consistency::projection::ProjectionEvent::lsn(&self) -> consistency::projection::Lsn
+pub fn consistency::projection::ProjectionEvent::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEvent::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEvent::topic(&self) -> &consistency::outbox::Topic
 impl consistency::projection::ProjectionEvent for consistency::projection::ProjectionEventRecord
 pub fn consistency::projection::ProjectionEventRecord::lsn(&self) -> consistency::projection::Lsn
+pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
 pub trait consistency::projection::ProjectionEventSource: consistency::projection::PartitionSerialDelivery
@@ -5544,14 +5597,65 @@ impl<T> core::clone::CloneToUninit for consistency::projection::ProjectionDeadLe
 pub unsafe fn consistency::projection::ProjectionDeadLetter::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::projection::ProjectionDeadLetter
 pub fn consistency::projection::ProjectionDeadLetter::from(T) -> T
+pub struct consistency::ProjectionEventMetadata
+impl consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::causation_id(&self) -> core::option::Option<&str>
+pub fn consistency::projection::ProjectionEventMetadata::contract_id(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::contract_version(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::domain(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::event_id(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::metadata_json(&self) -> &serde_json::value::Value
+pub fn consistency::projection::ProjectionEventMetadata::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, serde_json::value::Value, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn consistency::projection::ProjectionEventMetadata::partition_key(&self) -> core::option::Option<&str>
+pub fn consistency::projection::ProjectionEventMetadata::schema_hash(&self) -> &str
+pub fn consistency::projection::ProjectionEventMetadata::tenant(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::clone(&self) -> consistency::projection::ProjectionEventMetadata
+impl core::cmp::Eq for consistency::projection::ProjectionEventMetadata
+impl core::cmp::PartialEq for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::eq(&self, &consistency::projection::ProjectionEventMetadata) -> bool
+impl core::fmt::Debug for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::projection::ProjectionEventMetadata
+impl core::marker::Freeze for consistency::projection::ProjectionEventMetadata
+impl core::marker::Send for consistency::projection::ProjectionEventMetadata
+impl core::marker::Sync for consistency::projection::ProjectionEventMetadata
+impl core::marker::Unpin for consistency::projection::ProjectionEventMetadata
+impl core::marker::UnsafeUnpin for consistency::projection::ProjectionEventMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionEventMetadata
+impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionEventMetadata
+impl<T, U> core::convert::Into<U> for consistency::projection::ProjectionEventMetadata where U: core::convert::From<T>
+pub fn consistency::projection::ProjectionEventMetadata::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::projection::ProjectionEventMetadata where U: core::convert::Into<T>
+pub type consistency::projection::ProjectionEventMetadata::Error = core::convert::Infallible
+pub fn consistency::projection::ProjectionEventMetadata::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::projection::ProjectionEventMetadata where U: core::convert::TryFrom<T>
+pub type consistency::projection::ProjectionEventMetadata::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::projection::ProjectionEventMetadata::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::projection::ProjectionEventMetadata where T: core::clone::Clone
+pub type consistency::projection::ProjectionEventMetadata::Owned = T
+pub fn consistency::projection::ProjectionEventMetadata::clone_into(&self, &mut T)
+pub fn consistency::projection::ProjectionEventMetadata::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::projection::ProjectionEventMetadata where T: 'static + ?core::marker::Sized
+pub fn consistency::projection::ProjectionEventMetadata::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::projection::ProjectionEventMetadata where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionEventMetadata::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::projection::ProjectionEventMetadata where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionEventMetadata::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::projection::ProjectionEventMetadata where T: core::clone::Clone
+pub unsafe fn consistency::projection::ProjectionEventMetadata::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::projection::ProjectionEventMetadata
+pub fn consistency::projection::ProjectionEventMetadata::from(T) -> T
 pub struct consistency::ProjectionEventRecord
 impl consistency::projection::ProjectionEventRecord
 pub fn consistency::projection::ProjectionEventRecord::lsn(&self) -> consistency::projection::Lsn
-pub fn consistency::projection::ProjectionEventRecord::new(consistency::projection::Lsn, consistency::outbox::Topic, impl core::convert::Into<alloc::vec::Vec<u8>>) -> Self
+pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
+pub fn consistency::projection::ProjectionEventRecord::with_metadata(consistency::projection::Lsn, consistency::outbox::Topic, impl core::convert::Into<alloc::vec::Vec<u8>>, consistency::projection::ProjectionEventMetadata) -> Self
 impl consistency::projection::ProjectionEvent for consistency::projection::ProjectionEventRecord
 pub fn consistency::projection::ProjectionEventRecord::lsn(&self) -> consistency::projection::Lsn
+pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
 impl core::clone::Clone for consistency::projection::ProjectionEventRecord
@@ -6124,10 +6228,12 @@ pub async fn consistency::OutboxSource::poll_pending(&self, &str, usize) -> core
 pub trait consistency::PartitionSerialDelivery
 pub trait consistency::ProjectionEvent
 pub fn consistency::ProjectionEvent::lsn(&self) -> consistency::projection::Lsn
+pub fn consistency::ProjectionEvent::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::ProjectionEvent::payload(&self) -> &[u8]
 pub fn consistency::ProjectionEvent::topic(&self) -> &consistency::outbox::Topic
 impl consistency::projection::ProjectionEvent for consistency::projection::ProjectionEventRecord
 pub fn consistency::projection::ProjectionEventRecord::lsn(&self) -> consistency::projection::Lsn
+pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
 pub trait consistency::ProjectionEventSource: consistency::projection::PartitionSerialDelivery

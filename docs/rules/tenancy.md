@@ -101,8 +101,13 @@ lease/commit 状态；它同样受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_i
 已将运行期 `InboxStore` context fanout、sweeper 与 durable consumer 切到该表；pre-GA 不保留
 dual write、兼容 shim 或回填路径。
 
-saga_journal / projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围；它们依赖
-seq 全局顺序、owner checkpoint / consumer group 隔离与上层 envelope tenant authority，不承载 outbox
+saga_journal / projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围。`projection_events`
+不授 `rss_app` 任何表级 `SELECT/INSERT/UPDATE/DELETE`；runtime 只能执行固定
+`rss_append_projection_event(...)` / `rss_read_projection_events(...)` SECURITY DEFINER 函数。append 函数
+执行时还会校验 metadata `tenantId` 是 canonical non-nil UUID、参数匹配同事务可见 outbox row，且该 row
+命中启动期由 generated `PROJECTION_INPUTS` 刷新的 DB projection binding registry；`rss_app` 不具备
+registry 写权限。旧 `projection_events` 行在 0040 migration fail-fast，不 backfill。它们依赖 seq/LSN
+全局顺序、owner checkpoint / consumer group 隔离与上层 envelope tenant authority，不承载 outbox
 partition liveness 语义。
 
 > partition key（如 sessionId）可能含**凭据级** bearer 标识，故 `PartitionKey` 的 `Debug`

@@ -1,18 +1,15 @@
-//! PostgreSQL projection_events adapter（append-only changelog 源，#1122）。
+//! PostgreSQL projection_events adapter（append-only changelog 源，#1122/#1628）。
 //!
-//! [`PgProjectionEvents`] 提供两条路径：
-//! - `append`（**crate 内 sanctioned 写入入口，非公开**）：生产侧写，INSERT RETURNING id 作 Lsn 源（DB IDENTITY 单调）。
-//! - `read_from`（公开）：replay 读，`id > after ORDER BY id ASC LIMIT limit`，喂投影 harness。
+//! 写路径没有 naked `PgPool` / `PgConnection` append API。生产 outbox 持久化在同一事务内拿
+//! [`crate::cotx::TxCapability`] 调 [`append_projection_event_if_bound`]，该 helper 仅在 outbox `event_id`
+//! 新插入且 `(contract_id, version, schema_hash, topic)` 命中 generated [`ProjectionWriteRegistry`] 时，
+//! 调用 DB 固定 `rss_append_projection_event(...)` 函数写入 projection journal。
 //!
-//! **写入口 sealed（eventbus.md §Projection）**：`projection_events` 须由 emit 期同事务双写装饰器写入、
-//! append 收口单一 sanctioned 路径、双写 topic 集从域投影声明派生（非手写）。本 PR 先把 `append` +
-//! `NewProjectionEvent` 降为 **`pub(crate)` 受控入口**（不 re-export，外部 crate 无法手写全局 journal）；
-//! 完整 co-tx 双写 decorator + 派生 topic 绑定随 bootstrap/emit wiring 落地（GitHub issue 跟踪，本 PR 外）。
+//! 读路径调用 DB 固定 `rss_read_projection_events(...)` 函数。`rss_app` 只拿函数 EXECUTE，不持
+//! `projection_events` 表级 SELECT/INSERT/UPDATE/DELETE 权限。
 //!
-//! **append-only**：当前由 dylint `rss_projection_append_only`（Medium，代码侧 DELETE/TRUNCATE 字面量）守；
-//! DB 引擎 `REVOKE UPDATE, DELETE` 主守卫（Hard）待 dual-pool projection serving role 落地一并接
-//! （projection_events 全局表当前不授任何 serving role，对齐 outbox/saga_journal/checkpoint，见 migration 注释）。
-//! INVARIANT PROJECTION-APPEND-ONLY-01。
+//! **append-only**：DB 层 `REVOKE UPDATE, DELETE` + fixed-shape SECURITY DEFINER functions 是主守卫；
+//! 代码侧不保留裸 append 函数。INVARIANT PROJECTION-APPEND-ONLY-01。
 //!
 //! **全局表**：无 tenant_id / 无 RLS，对标 outbox/saga_journal/checkpoint。
 //!
@@ -29,12 +26,15 @@
 
 use consistency::{
     EngineError, EngineErrorKind, Lsn, PartitionSerialDelivery, ProjectionBatchLimit,
-    ProjectionEventRecord, ProjectionEventSource, Topic,
+    ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource, Topic,
 };
 use diport::RedactedSource;
 use sqlx::PgPool;
+use vocab::ProjectionInputBinding;
 
 use crate::PgStore;
+use crate::cotx::TxCapability;
+use crate::outbox::{OutboxEnvelope, ReplayedOutboxAppend};
 
 /// PostgreSQL projection_events adapter（append-only changelog 源）。
 ///
@@ -42,6 +42,41 @@ use crate::PgStore;
 /// 经 [`crate::PgInfraDeps::projection_events`] 构造（`PgStore::projection_events` 为 `pub(crate)` funnel）。
 pub struct PgProjectionEvents {
     pool: PgPool,
+}
+
+/// Generated projection writer registry.
+///
+/// Constructed only from `generated::event::PROJECTION_INPUTS` (or test fixtures) and consumed by
+/// postgres writer funnels to decide whether an inserted outbox fact is mirrored into
+/// `projection_events`. There is no API to add raw `(contract_id, topic)` pairs.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProjectionWriteRegistry {
+    bindings: &'static [ProjectionInputBinding],
+}
+
+impl ProjectionWriteRegistry {
+    pub(crate) const fn from_generated(bindings: &'static [ProjectionInputBinding]) -> Self {
+        Self { bindings }
+    }
+
+    pub(crate) const fn empty() -> Self {
+        Self { bindings: &[] }
+    }
+
+    pub(crate) fn is_bound(
+        &self,
+        contract_id: &str,
+        contract_version: &str,
+        schema_hash: &str,
+        topic: &str,
+    ) -> bool {
+        self.bindings.iter().any(|binding| {
+            binding.contract_id() == contract_id
+                && binding.version() == contract_version
+                && binding.schema_hash() == schema_hash
+                && binding.topic() == topic
+        })
+    }
 }
 
 impl PgStore {
@@ -53,67 +88,164 @@ impl PgStore {
             pool: self.pool.clone(),
         }
     }
+
+    /// Replace the DB-side projection input registry from generated contract metadata.
+    ///
+    /// This runs during [`crate::PgRuntimeDeps::setup`] on the migrator connection. Runtime
+    /// `rss_app` can execute the fixed append function, but the function only accepts rows whose
+    /// outbox metadata matches this DB-side generated registry.
+    pub(crate) async fn replace_projection_input_bindings(
+        &self,
+        bindings: &'static [ProjectionInputBinding],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM projection_input_bindings")
+            .execute(&mut *tx)
+            .await?;
+        for binding in bindings {
+            sqlx::query(
+                r#"
+                INSERT INTO projection_input_bindings (
+                    contract_id, contract_version, schema_hash, topic
+                )
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (contract_id, contract_version, schema_hash, topic) DO NOTHING
+                "#,
+            )
+            .bind(binding.contract_id())
+            .bind(binding.version())
+            .bind(binding.schema_hash())
+            .bind(binding.topic())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
+    }
 }
 
-/// append 入参（生产侧构造；id 由 DB IDENTITY 自动生成单调序，不在此结构携带）。
+/// Mirror an inserted outbox fact into projection_events when generated workflow metadata binds it.
 ///
-/// **`pub(crate)` 受控入口（eventbus.md §Projection sealed 写入）**：不 re-export，外部 crate 无法命名/构造，
-/// 杜绝任意 caller 手写全局 projection journal。完整派生 topic 绑定随 emit 期 co-tx 双写 decorator 落地（本 PR 外）。
-#[allow(dead_code)]
-// reason: sanctioned 写入入口，当前仅 integration 测试构造；生产 caller = 未来 emit co-tx 双写 decorator
-// （wiring 本 PR 外）。默认 build 无生产 caller，同 tx.rs::run_global_transaction 范式（pub(crate) 受控入口待接线）。
-pub(crate) struct NewProjectionEvent {
-    /// 事件所属域（如 `"identity"`）。
-    pub(crate) domain: String,
-    /// 聚合根标识（如 `"user-uuid"`）。
-    pub(crate) aggregate_id: String,
-    /// 规范 topic（canonical dotted，= `event_type` 列）。
-    pub(crate) event_type: Topic,
-    /// 已编码 payload（投影器解码到读模型；解码不在本接缝）。
-    pub(crate) payload: Vec<u8>,
-    /// 可选关联 ID（tracing / 链路追踪用）。
-    ///
-    /// **PII 边界**：仅限不含 PII 的 trace-span / request ID（如 `X-Request-Id` / `tracing::Span` id）；
-    /// 不得携带用户标识、设备 ID、tenant 凭据等业务数据。
-    pub(crate) correlation_id: Option<String>,
+/// This function accepts only [`TxCapability`], so it can run solely inside the same transaction as
+/// the outbox insert. It intentionally returns `Ok(None)` for unbound facts.
+pub(crate) async fn append_projection_event_if_bound(
+    tx: &mut TxCapability<'_>,
+    entry: &consistency::Entry,
+    env: &OutboxEnvelope,
+    registry: &ProjectionWriteRegistry,
+) -> Result<Option<Lsn>, sqlx::Error> {
+    if !registry.is_bound(
+        env.contract_id(),
+        env.contract_version(),
+        env.schema_hash(),
+        entry.topic().as_str(),
+    ) {
+        return Ok(None);
+    }
+
+    let aggregate_id = env.partition_key().unwrap_or(entry.idem_key().as_str());
+    let metadata_json = env.metadata_json();
+    append_projection_event(
+        tx,
+        ProjectionAppend {
+            event_id: entry.idem_key().as_str(),
+            domain: env.domain(),
+            aggregate_id,
+            topic: entry.topic().as_str(),
+            payload: entry.payload(),
+            correlation_id: env.causation_id(),
+            contract_id: env.contract_id(),
+            contract_version: env.contract_version(),
+            schema_hash: env.schema_hash(),
+            metadata_json: &metadata_json,
+            partition_key: env.partition_key(),
+            causation_id: env.causation_id(),
+        },
+    )
+    .await
+    .map(Some)
+}
+
+pub(crate) async fn append_replayed_projection_event_if_bound(
+    tx: &mut TxCapability<'_>,
+    replay: &ReplayedOutboxAppend,
+    registry: &ProjectionWriteRegistry,
+) -> Result<Option<Lsn>, sqlx::Error> {
+    if !registry.is_bound(
+        &replay.contract_id,
+        &replay.contract_version,
+        &replay.schema_hash,
+        &replay.topic,
+    ) {
+        return Ok(None);
+    }
+
+    append_projection_event(
+        tx,
+        ProjectionAppend {
+            event_id: &replay.event_id,
+            domain: &replay.domain,
+            aggregate_id: &replay.event_id,
+            topic: &replay.topic,
+            payload: &replay.payload,
+            correlation_id: replay.causation_id.as_deref(),
+            contract_id: &replay.contract_id,
+            contract_version: &replay.contract_version,
+            schema_hash: &replay.schema_hash,
+            metadata_json: &replay.metadata_json,
+            partition_key: None,
+            causation_id: replay.causation_id.as_deref(),
+        },
+    )
+    .await
+    .map(Some)
+}
+
+struct ProjectionAppend<'a> {
+    event_id: &'a str,
+    domain: &'a str,
+    aggregate_id: &'a str,
+    topic: &'a str,
+    payload: &'a [u8],
+    correlation_id: Option<&'a str>,
+    contract_id: &'a str,
+    contract_version: &'a str,
+    schema_hash: &'a str,
+    metadata_json: &'a str,
+    partition_key: Option<&'a str>,
+    causation_id: Option<&'a str>,
+}
+
+async fn append_projection_event(
+    tx: &mut TxCapability<'_>,
+    append: ProjectionAppend<'_>,
+) -> Result<Lsn, sqlx::Error> {
+    let (id,): (i64,) = sqlx::query_as(
+        r#"
+        SELECT rss_append_projection_event(
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12
+        )
+        "#,
+    )
+    .bind(append.event_id)
+    .bind(append.domain)
+    .bind(append.aggregate_id)
+    .bind(append.topic)
+    .bind(append.payload)
+    .bind(append.correlation_id)
+    .bind(append.contract_id)
+    .bind(append.contract_version)
+    .bind(append.schema_hash)
+    .bind(append.metadata_json)
+    .bind(append.partition_key)
+    .bind(append.causation_id)
+    .fetch_one(tx.conn())
+    .await?;
+
+    let lsn = u64::try_from(id).map_err(|err| sqlx::Error::Decode(Box::new(err)))?;
+    Ok(Lsn::new(lsn))
 }
 
 impl PgProjectionEvents {
-    /// 追加一条投影事件，RETURNING id → Lsn。
-    ///
-    /// `occurred_at`/`created_at` 走 DB DEFAULT `now()`；id 由 `GENERATED ALWAYS AS IDENTITY`
-    /// 单调自增，直接作 Lsn 源。sqlx 错误不进 Display——经 [`ProjectionEventsError::new`] 包成
-    /// source（PII 边界）。
-    ///
-    /// **`pub(crate)` sanctioned 写入（eventbus.md §Projection sealed 写入入口）**：不 re-export，
-    /// 外部 crate 不可手写全局 journal；emit 期 co-tx 双写 decorator 经此唯一受控路径写入（接线本 PR 外）。
-    #[allow(dead_code)]
-    // reason: 当前仅 integration 测试调用；生产 caller = 未来 emit co-tx 双写 decorator（wiring 本 PR 外）。
-    // 同 tx.rs::run_global_transaction 范式（pub(crate) 受控入口待接线，默认 build 无生产 caller）。
-    pub(crate) async fn append(
-        &self,
-        ev: NewProjectionEvent,
-    ) -> Result<Lsn, ProjectionEventsError> {
-        let (id,): (i64,) = sqlx::query_as(
-            r#"
-            INSERT INTO projection_events (domain, aggregate_id, event_type, payload, correlation_id)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id
-            "#,
-        )
-        .bind(&ev.domain)
-        .bind(&ev.aggregate_id)
-        .bind(ev.event_type.as_str())
-        .bind(ev.payload.as_slice())
-        .bind(ev.correlation_id.as_deref())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(ProjectionEventsError::new)?;
-
-        let lsn_u64 = u64::try_from(id).map_err(ProjectionEventsError::new)?;
-        Ok(Lsn::new(lsn_u64))
-    }
-
     /// 读 `id > after` 的事件，按 id 升序，最多 `limit` 条（replay / tail 喂 harness）。
     ///
     /// sqlx 错误映射为 [`EngineErrorKind::Transient`]；`event_type` / id 解析失败映射为
@@ -130,13 +262,11 @@ impl PgProjectionEvents {
             i64::try_from(after.get()).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
         let limit_i64 = i64::from(limit.get());
 
-        let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
+        let rows: Vec<ProjectionEventRow> = sqlx::query_as(
             r#"
-            SELECT id, event_type, payload
-            FROM projection_events
-            WHERE id > $1
-            ORDER BY id ASC
-            LIMIT $2
+            SELECT id, event_id, domain, event_type, payload, contract_id, contract_version,
+                   schema_hash, metadata, partition_key, causation_id
+            FROM rss_read_projection_events($1, $2::integer)
             "#,
         )
         .bind(after_i64)
@@ -146,17 +276,66 @@ impl PgProjectionEvents {
         .map_err(|_| EngineError::new(EngineErrorKind::Transient))?;
 
         rows.into_iter()
-            .map(|(id, event_type_str, payload)| {
-                let lsn_u64 =
-                    u64::try_from(id).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                let lsn = Lsn::new(lsn_u64);
-                let topic = Topic::parse(&event_type_str)
-                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                Ok(ProjectionEventRecord::new(lsn, topic, payload))
-            })
+            .map(
+                |(
+                    id,
+                    event_id,
+                    domain,
+                    event_type_str,
+                    payload,
+                    contract_id,
+                    contract_version,
+                    schema_hash,
+                    metadata,
+                    partition_key,
+                    causation_id,
+                )| {
+                    let lsn_u64 = u64::try_from(id)
+                        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                    let lsn = Lsn::new(lsn_u64);
+                    let topic = Topic::parse(&event_type_str)
+                        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                    let tenant = metadata
+                        .get(diport::KEY_TENANT_ID)
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))
+                        .and_then(|raw| {
+                            vocab::TenantId::parse(raw)
+                                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))
+                        })?;
+                    let metadata = ProjectionEventMetadata::new(
+                        tenant,
+                        event_id,
+                        domain,
+                        contract_id,
+                        contract_version,
+                        schema_hash,
+                        metadata,
+                        partition_key,
+                        causation_id,
+                    );
+                    Ok(ProjectionEventRecord::with_metadata(
+                        lsn, topic, payload, metadata,
+                    ))
+                },
+            )
             .collect()
     }
 }
+
+type ProjectionEventRow = (
+    i64,
+    String,
+    String,
+    String,
+    Vec<u8>,
+    String,
+    String,
+    String,
+    serde_json::Value,
+    Option<String>,
+    Option<String>,
+);
 
 /// `PgProjectionEvents` 是串行有序 source：`read_from` 以 `ORDER BY id ASC` 全局单调序逐行交付，
 /// 满足 [`PartitionSerialDelivery`] 契约（消费方按此 bound 铸造 `SerialInOrder` witness）。
@@ -275,109 +454,5 @@ mod smoke {
             !MIGRATION.contains("TO rss_app"),
             "projection_events 不得授 serving role rss_app（全局 payload 表跨租读边界，对齐 outbox；#1122 F2）"
         );
-    }
-}
-
-/// 集成测试：`PgProjectionEvents` append → read_from 往返
-/// （`integration` feature 门控；需真实 postgres）。
-#[cfg(all(test, feature = "integration"))]
-mod integration_tests {
-    use consistency::{Lsn, ProjectionBatchLimit, ProjectionEventSource, Topic};
-
-    use super::NewProjectionEvent;
-
-    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    /// append 3 条（不同 domain/aggregate/topic）→ read_from(0,10) 回 3 条 id 升序且单调；
-    /// read_from(第2条 id, 10) 仅回 id > 该值的条目。
-    /// 验证 Topic 往返、payload 往返。
-    #[tokio::test(flavor = "multi_thread")]
-    #[allow(clippy::unwrap_used)]
-    // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out（error-handling.md §Carve-out）。
-    async fn projection_events_append_read_roundtrip() -> TestResult {
-        let (_pg, store) = crate::test_pg::connect_pg().await?;
-        store.run_migrations().await?;
-
-        let pe = store.projection_events();
-
-        // append 3 条事件（新 DB，无先前数据）。
-        let topic1 = Topic::parse("identity.user.created").unwrap();
-        let topic2 = Topic::parse("settings.config.updated").unwrap();
-        let topic3 = Topic::parse("audit.entry.written").unwrap();
-
-        let lsn1 = pe
-            .append(NewProjectionEvent {
-                domain: "identity".to_string(),
-                aggregate_id: "user-001".to_string(),
-                event_type: topic1,
-                payload: b"payload1".to_vec(),
-                correlation_id: None,
-            })
-            .await?;
-        let lsn2 = pe
-            .append(NewProjectionEvent {
-                domain: "settings".to_string(),
-                aggregate_id: "cfg-001".to_string(),
-                event_type: topic2,
-                payload: b"payload2".to_vec(),
-                correlation_id: Some("corr-001".to_string()),
-            })
-            .await?;
-        let lsn3 = pe
-            .append(NewProjectionEvent {
-                domain: "audit".to_string(),
-                aggregate_id: "audit-001".to_string(),
-                event_type: topic3,
-                payload: b"payload3".to_vec(),
-                correlation_id: None,
-            })
-            .await?;
-
-        // id 单调递增。
-        assert!(
-            lsn1.get() < lsn2.get() && lsn2.get() < lsn3.get(),
-            "id 应单调递增: {} < {} < {}",
-            lsn1.get(),
-            lsn2.get(),
-            lsn3.get()
-        );
-
-        // read_from(0) → 3 条，按 id 升序。
-        let limit = ProjectionBatchLimit::new(10)?;
-
-        let all = ProjectionEventSource::read_from(&pe, Lsn::new(0), limit).await?;
-        assert_eq!(all.len(), 3, "应有 3 条事件");
-        assert_eq!(all[0].lsn().get(), lsn1.get(), "第1条 lsn 不符");
-        assert_eq!(all[1].lsn().get(), lsn2.get(), "第2条 lsn 不符");
-        assert_eq!(all[2].lsn().get(), lsn3.get(), "第3条 lsn 不符");
-
-        // Topic 往返。
-        assert_eq!(
-            all[0].topic().as_str(),
-            "identity.user.created",
-            "topic[0] 往返"
-        );
-        assert_eq!(
-            all[1].topic().as_str(),
-            "settings.config.updated",
-            "topic[1] 往返"
-        );
-        assert_eq!(
-            all[2].topic().as_str(),
-            "audit.entry.written",
-            "topic[2] 往返"
-        );
-
-        // payload 往返。
-        assert_eq!(all[0].payload(), b"payload1", "payload[0] 往返");
-        assert_eq!(all[1].payload(), b"payload2", "payload[1] 往返");
-        assert_eq!(all[2].payload(), b"payload3", "payload[2] 往返");
-
-        // read_from(lsn2) → 仅 lsn3。
-        let tail = ProjectionEventSource::read_from(&pe, Lsn::new(lsn2.get()), limit).await?;
-        assert_eq!(tail.len(), 1, "lsn2 之后仅有 1 条");
-        assert_eq!(tail[0].lsn().get(), lsn3.get(), "tail 中仅 lsn3");
-
-        Ok(())
     }
 }

@@ -1,14 +1,15 @@
-error[E0061]: this function takes 5 arguments but 4 arguments were supplied
-  --> tests/ui/projection_missing_guarantor_fail.rs:46:14
+error[E0061]: this function takes 6 arguments but 5 arguments were supplied
+  --> tests/ui/projection_missing_guarantor_fail.rs:56:14
    |
-46 |       let _h = ProjectionHarness::new(
+56 |       let _h = ProjectionHarness::new(
    |  ______________^^^^^^^^^^^^^^^^^^^^^^-
-47 | |         Arc::new(NoopProjector),
-48 | |         Arc::new(NoopCheckpoint),
-49 | |         CheckpointOwner::new("owner"),
-50 | |         CheckpointId::new("proj"),
-51 | |     );
-   | |_____- argument #5 is missing
+57 | |         Arc::new(NoopProjector),
+58 | |         Arc::new(NoopCheckpoint),
+59 | |         CheckpointOwner::new("owner"),
+60 | |         CheckpointId::new("proj"),
+61 | |         Arc::new(NoopDlx),
+62 | |     );
+   | |_____- argument #6 is missing
    |
 note: associated function defined here
   --> src/projection.rs
@@ -17,9 +18,9 @@ note: associated function defined here
    |            ^^^
 help: provide the argument
    |
-46 |     let _h = ProjectionHarness::new(
+56 |     let _h = ProjectionHarness::new(
 ...
-50 |         CheckpointId::new("proj"),
-51 ~         /* _guarantor */,
-52 ~     );
+61 |         Arc::new(NoopDlx),
+62 ~         /* _guarantor */,
+63 ~     );
    |

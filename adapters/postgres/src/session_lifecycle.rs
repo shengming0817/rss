@@ -39,6 +39,7 @@ use sqlx::Row;
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
+use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/revoke 均已交付，#1278）。
 ///
@@ -56,9 +57,18 @@ impl PgSessionLifecycle {
     /// 由 [`PgStore`] 构造（clone 其 `pool`）+ 注入 [`Clock`]（envelope `occurred_at` 时间源）。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::session_lifecycle` 收口。
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+    }
+
+    pub(crate) fn new_with_projection_registry(
+        store: &PgStore,
+        clock: Box<dyn Clock>,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantPool::with_projection_registry(store, projection_registry),
             clock,
         }
     }

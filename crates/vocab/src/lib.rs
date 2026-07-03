@@ -23,7 +23,7 @@ pub(crate) fn is_crate_name(s: &str) -> bool {
 }
 
 pub use authz::{Action, ActionError, Decision};
-pub use contract::binding::ContractBinding;
+pub use contract::binding::{ContractBinding, ProjectionInputBinding};
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};

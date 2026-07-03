@@ -23,7 +23,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use vocab::TenantId;
 
 use crate::PgStore;
-use crate::outbox::{OutboxEnvelope, append_outbox};
+use crate::outbox::{OutboxEnvelope, append_outbox_with_projection};
+use crate::projection_events::ProjectionWriteRegistry;
 
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
 
@@ -51,6 +52,12 @@ pub(crate) fn commit_unknown(source: sqlx::Error) -> sqlx::Error {
 #[derive(Debug, thiserror::Error)]
 #[error("outbox envelope tenant does not match tenant-scoped transaction")]
 struct OutboxTenantMismatch;
+
+struct CoTxOutboxWrite<'a> {
+    tenant: TenantId,
+    entry: &'a Entry,
+    env: &'a OutboxEnvelope,
+}
 
 /// Postgres 事务能力令牌。
 ///
@@ -96,6 +103,7 @@ impl<'tx> TxCapability<'tx> {
 #[derive(Clone)]
 pub(crate) struct PgTenantPool {
     pool: PgPool,
+    projection_registry: ProjectionWriteRegistry,
 }
 
 impl PgTenantPool {
@@ -104,7 +112,22 @@ impl PgTenantPool {
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
+            projection_registry: ProjectionWriteRegistry::empty(),
         }
+    }
+
+    pub(crate) fn with_projection_registry(
+        store: &PgStore,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            pool: store.pool.clone(),
+            projection_registry,
+        }
+    }
+
+    pub(crate) fn projection_registry(&self) -> ProjectionWriteRegistry {
+        self.projection_registry
     }
 
     /// Run a tenant-scoped read transaction.
@@ -174,7 +197,16 @@ impl PgTenantPool {
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
         E: Send,
     {
-        co_tx_with_outbox(&self.pool, tenant, entry, env, business_write, map_storage).await
+        co_tx_with_outbox(
+            &self.pool,
+            self.projection_registry,
+            tenant,
+            entry,
+            env,
+            business_write,
+            map_storage,
+        )
+        .await
     }
 
     /// Run a tenant-scoped co-transaction with a per-attempt lock wait bound.
@@ -192,9 +224,8 @@ impl PgTenantPool {
     {
         co_tx_with_outbox_inner(
             &self.pool,
-            tenant,
-            entry,
-            env,
+            self.projection_registry,
+            CoTxOutboxWrite { tenant, entry, env },
             business_write,
             map_storage,
             true,
@@ -412,6 +443,7 @@ async fn begin_tenant_scoped_write<'p, E>(
 /// ```
 async fn co_tx_with_outbox<F, E>(
     pool: &PgPool,
+    projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
     entry: &Entry,
     env: &OutboxEnvelope,
@@ -422,14 +454,21 @@ where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
     E: Send,
 {
-    co_tx_with_outbox_inner(pool, tenant, entry, env, business_write, map_storage, false).await
+    co_tx_with_outbox_inner(
+        pool,
+        projection_registry,
+        CoTxOutboxWrite { tenant, entry, env },
+        business_write,
+        map_storage,
+        false,
+    )
+    .await
 }
 
 async fn co_tx_with_outbox_inner<F, E>(
     pool: &PgPool,
-    tenant: TenantId,
-    entry: &Entry,
-    env: &OutboxEnvelope,
+    projection_registry: ProjectionWriteRegistry,
+    write: CoTxOutboxWrite<'_>,
     business_write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
     bound_lock_wait: bool,
@@ -439,28 +478,38 @@ where
     E: Send,
 {
     let mut tx = pool.begin().await.map_err(&map_storage)?;
-    match write_in_tx(&mut tx, tenant, entry, env, business_write, bound_lock_wait).await {
+    match write_in_tx(
+        &mut tx,
+        projection_registry,
+        write.tenant,
+        write.entry,
+        write.env,
+        business_write,
+        bound_lock_wait,
+    )
+    .await
+    {
         Ok(()) => tx.commit().await.map_err(|e| {
             tracing::warn!(
                 target: "postgres",
-                event_id = entry.idem_key().as_str(),
-                domain = env.domain(),
-                topic = entry.topic().as_str(),
+                event_id = write.entry.idem_key().as_str(),
+                domain = write.env.domain(),
+                topic = write.entry.topic().as_str(),
                 error = %secure::redact_error(&e),
                 "co-tx: commit failed"
             );
             map_storage(commit_unknown(e))
         }),
         Err(e) => {
-            log_cotx_write_error(entry, env, &e);
+            log_cotx_write_error(write.entry, write.env, &e);
             // rollback 失败是运维高价值事件（连接泄漏 / PG 断线）——补齐 event_id/domain/topic 定位字段
             // （与 commit 分支对齐），便于按域 / 事件排障。
             if let Err(rb) = tx.rollback().await {
                 tracing::warn!(
                     target: "postgres",
-                    event_id = entry.idem_key().as_str(),
-                    domain = env.domain(),
-                    topic = entry.topic().as_str(),
+                    event_id = write.entry.idem_key().as_str(),
+                    domain = write.env.domain(),
+                    topic = write.entry.topic().as_str(),
                     error = %secure::redact_error(&rb),
                     "co-tx: rollback failed after write error"
                 );
@@ -473,6 +522,7 @@ where
 /// 事务体：SET LOCAL tenant → 业务写 → `append_outbox`（任一步 Err 即冒泡，由调用方 rollback）。
 async fn write_in_tx<F, E>(
     tx: &mut Transaction<'_, Postgres>,
+    projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
     entry: &Entry,
     env: &OutboxEnvelope,
@@ -503,8 +553,9 @@ where
         .await
         .map_err(CoTxWriteError::BusinessWrite)?;
     // outbox append（同 tx — co-tx 原子性；复用 append_outbox + OUTBOX-ATOMIC-IDEM-01）。
-    append_outbox(&mut tx_cap, entry, env)
+    append_outbox_with_projection(&mut tx_cap, entry, env, &projection_registry)
         .await
+        .map(|_| ())
         .map_err(CoTxWriteError::AppendOutbox)
 }
 

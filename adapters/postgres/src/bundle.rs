@@ -60,6 +60,7 @@ use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 use tokio_util::sync::CancellationToken;
 
 use crate::consumer_tx::PgAuditConsumerTx;
+use crate::projection_events::ProjectionWriteRegistry;
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections,
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
@@ -111,6 +112,7 @@ impl PgDomain for caps::Audit {}
 pub struct PgRuntimeDeps {
     store: Arc<PgStore>,
     audit_admin_store: Option<Arc<PgStore>>,
+    projection_registry: ProjectionWriteRegistry,
     readiness: Arc<PgDbReadiness>,
     /// 启动期 RLS 能力门结果（true = `verify_rls_capability` 通过）；供 readyz 兜底探针读。setup 失败时进程
     /// 根本不返回 `Self`（fail-fast），故 `Self` 存在即此值为 true——探针把该不变式显式暴露到 readyz。
@@ -146,12 +148,14 @@ impl PgRuntimeDeps {
     pub async fn setup(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
+        projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         Self::setup_with_audit_admin_config(
             migrator_config,
             serving_config,
             None,
             LegacyConfigPlaintextPolicy::Deny,
+            projection_inputs,
         )
         .await
     }
@@ -162,12 +166,14 @@ impl PgRuntimeDeps {
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
+        projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         Self::setup_with_audit_admin_config(
             migrator_config,
             serving_config,
             None,
             legacy_config_plaintext_policy,
+            projection_inputs,
         )
         .await
     }
@@ -179,12 +185,17 @@ impl PgRuntimeDeps {
         serving_config: &PgConfig,
         audit_admin_config: Option<&PgConfig>,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
+        projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
         migrator.run_migrations().await?;
         migrator
             .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
             .await?;
+        migrator
+            .replace_projection_input_bindings(projection_inputs)
+            .await
+            .map_err(PgError::ProjectionBindings)?;
         migrator.shutdown().await.ok();
 
         let store = Arc::new(PgStore::connect(serving_config).await?);
@@ -201,6 +212,7 @@ impl PgRuntimeDeps {
         Ok(Self {
             store,
             audit_admin_store,
+            projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         })
@@ -226,6 +238,7 @@ impl PgRuntimeDeps {
         PgDomainDeps {
             store: Arc::clone(&self.store),
             audit_admin_store: self.audit_admin_store.as_ref().map(Arc::clone),
+            projection_registry: self.projection_registry,
             _marker: PhantomData,
         }
     }
@@ -236,6 +249,7 @@ impl PgRuntimeDeps {
     pub fn infra(&self) -> PgInfraDeps {
         PgInfraDeps {
             store: Arc::clone(&self.store),
+            projection_registry: self.projection_registry,
         }
     }
 
@@ -292,6 +306,7 @@ impl PgRuntimeDeps {
         Self {
             store,
             audit_admin_store: None,
+            projection_registry: ProjectionWriteRegistry::empty(),
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
@@ -395,6 +410,7 @@ pub enum MaintenanceAuditOutcome<'a> {
 pub struct PgDomainDeps<D: PgDomain> {
     store: Arc<PgStore>,
     audit_admin_store: Option<Arc<PgStore>>,
+    projection_registry: ProjectionWriteRegistry,
     _marker: PhantomData<D>,
 }
 
@@ -404,6 +420,7 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
         Self {
             store: Arc::clone(&self.store),
             audit_admin_store: self.audit_admin_store.as_ref().map(Arc::clone),
+            projection_registry: self.projection_registry,
             _marker: PhantomData,
         }
     }
@@ -428,15 +445,17 @@ impl PgDomainDeps<caps::Settings> {
     ) -> PgSettingsBundle {
         let (config_read_protection, config_write_protection) = protections.into_parts();
         PgSettingsBundle {
-            config_repo: DynConfigRepo::new_box(PgConfigRepo::new(
+            config_repo: DynConfigRepo::new_box(PgConfigRepo::new_with_projection_registry(
                 &self.store,
                 Arc::clone(&clock),
                 config_read_protection,
+                self.projection_registry,
             )),
-            config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new(
+            config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new_with_projection_registry(
                 &self.store,
                 clock,
                 config_write_protection,
+                self.projection_registry,
             )),
             secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(&self.store)),
         }
@@ -519,7 +538,11 @@ impl PgDomainDeps<caps::Identity> {
     /// 会话生命周期仓储（co-tx 创建 + durable find/revoke）。`clock` 为 envelope 时间源（构造器位置参）。
     #[must_use]
     pub fn session_lifecycle(&self, clock: Box<dyn Clock>) -> PgSessionLifecycle {
-        PgSessionLifecycle::new(&self.store, clock)
+        PgSessionLifecycle::new_with_projection_registry(
+            &self.store,
+            clock,
+            self.projection_registry,
+        )
     }
 
     /// outbox relay（L2 本地事务 + 发布）。`publisher` 必填（构造器位置参）。
@@ -554,7 +577,11 @@ impl PgDomainDeps<caps::Identity> {
     /// 角色绑定生命周期（binding co-tx + role event outbox）。
     #[must_use]
     pub fn role_binding_lifecycle(&self, clock: Box<dyn Clock>) -> PgRoleBindingLifecycle {
-        PgRoleBindingLifecycle::new(&self.store, clock)
+        PgRoleBindingLifecycle::new_with_projection_registry(
+            &self.store,
+            clock,
+            self.projection_registry,
+        )
     }
 
     /// refresh token store（哈希存储 + CAS rotation + 谱系级联撤销 + RLS）。
@@ -665,13 +692,14 @@ impl PgDomainDeps<caps::Audit> {
 #[derive(Clone)]
 pub struct PgInfraDeps {
     store: Arc<PgStore>,
+    projection_registry: ProjectionWriteRegistry,
 }
 
 impl PgInfraDeps {
     /// outbox emitter（envelope `occurred_at` 时间源经 `clock` 注入，构造器位置参）。
     #[must_use]
     pub fn emitter(&self, clock: Box<dyn Clock>) -> PgEmitter {
-        PgEmitter::new(&self.store, clock)
+        PgEmitter::new_with_projection_registry(&self.store, clock, self.projection_registry)
     }
 
     /// outbox backlog/sweeper maintenance 能力（不持 publisher）。
@@ -703,7 +731,8 @@ impl PgInfraDeps {
     /// 由类型分开，避免把 consumer 重放误当 broker redrive。
     #[must_use]
     pub fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
-        self.store.dlq(payload_protector)
+        self.store
+            .dlq_with_projection_registry(payload_protector, self.projection_registry)
     }
 
     /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。

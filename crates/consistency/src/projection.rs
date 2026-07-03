@@ -6,6 +6,7 @@
 
 use crate::error::{EngineError, EngineErrorKind};
 use crate::outbox::Topic;
+use vocab::TenantId;
 
 /// 日志序号 newtype（私有字段；单调递增，checkpoint 用于断点续投）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,15 +92,22 @@ pub struct ProjectionEventRecord {
     lsn: Lsn,
     topic: Topic,
     payload: Vec<u8>,
+    metadata: ProjectionEventMetadata,
 }
 
 impl ProjectionEventRecord {
-    /// 由已验证 topic + 单调 lsn + encoded payload 构造投影事件记录。
-    pub fn new(lsn: Lsn, topic: Topic, payload: impl Into<Vec<u8>>) -> Self {
+    /// 由已验证 topic + 单调 lsn + encoded payload + 持久化 envelope metadata 构造投影事件记录。
+    pub fn with_metadata(
+        lsn: Lsn,
+        topic: Topic,
+        payload: impl Into<Vec<u8>>,
+        metadata: ProjectionEventMetadata,
+    ) -> Self {
         Self {
             lsn,
             topic,
             payload: payload.into(),
+            metadata,
         }
     }
 
@@ -117,6 +125,11 @@ impl ProjectionEventRecord {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    /// 投影事件持久化 metadata（用于 projection DLQ）。
+    pub fn metadata(&self) -> &ProjectionEventMetadata {
+        &self.metadata
+    }
 }
 
 impl std::fmt::Debug for ProjectionEventRecord {
@@ -126,6 +139,7 @@ impl std::fmt::Debug for ProjectionEventRecord {
             .field("topic", &self.topic)
             .field("payload", &"<redacted>")
             .field("payload_len", &self.payload.len())
+            .field("metadata", &self.metadata)
             .finish()
     }
 }
@@ -142,6 +156,128 @@ impl ProjectionEvent for ProjectionEventRecord {
     fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    fn metadata(&self) -> &ProjectionEventMetadata {
+        &self.metadata
+    }
+}
+
+/// Projection event metadata persisted alongside the encoded payload.
+///
+/// The metadata is copied from the outbox row when an event is mirrored into `projection_events`.
+/// It lets the projection harness write a unified DLQ row without reaching back into adapter DTOs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProjectionEventMetadata {
+    tenant: TenantId,
+    event_id: String,
+    domain: String,
+    contract_id: String,
+    contract_version: String,
+    schema_hash: String,
+    metadata_json: serde_json::Value,
+    partition_key: Option<String>,
+    causation_id: Option<String>,
+}
+
+impl ProjectionEventMetadata {
+    #[allow(clippy::too_many_arguments)]
+    // reason: This is a stored envelope snapshot; splitting into a builder would introduce invalid
+    // intermediate states for mandatory DLQ audit fields.
+    pub fn new(
+        tenant: TenantId,
+        event_id: impl Into<String>,
+        domain: impl Into<String>,
+        contract_id: impl Into<String>,
+        contract_version: impl Into<String>,
+        schema_hash: impl Into<String>,
+        metadata_json: serde_json::Value,
+        partition_key: Option<String>,
+        causation_id: Option<String>,
+    ) -> Self {
+        Self {
+            tenant,
+            event_id: event_id.into(),
+            domain: domain.into(),
+            contract_id: contract_id.into(),
+            contract_version: contract_version.into(),
+            schema_hash: schema_hash.into(),
+            metadata_json,
+            partition_key,
+            causation_id,
+        }
+    }
+
+    /// Test/default metadata for in-memory unit events.
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    // reason: hard-coded canonical tenant fixture; panic would indicate the test fixture literal drifted.
+    fn for_tests() -> Self {
+        Self::new(
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical test tenant"),
+            "projection-test-event",
+            "test",
+            "test.projection-event",
+            "v1",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            serde_json::json!({ "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479" }),
+            None,
+            None,
+        )
+    }
+
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    pub fn contract_id(&self) -> &str {
+        &self.contract_id
+    }
+
+    pub fn contract_version(&self) -> &str {
+        &self.contract_version
+    }
+
+    pub fn schema_hash(&self) -> &str {
+        &self.schema_hash
+    }
+
+    pub fn metadata_json(&self) -> &serde_json::Value {
+        &self.metadata_json
+    }
+
+    pub fn partition_key(&self) -> Option<&str> {
+        self.partition_key.as_deref()
+    }
+
+    pub fn causation_id(&self) -> Option<&str> {
+        self.causation_id.as_deref()
+    }
+}
+
+impl std::fmt::Debug for ProjectionEventMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let partition_key = self.partition_key.as_ref().map(|_| "<redacted>");
+        let causation_id = self.causation_id.as_ref().map(|_| "<redacted>");
+        f.debug_struct("ProjectionEventMetadata")
+            .field("tenant", &self.tenant)
+            .field("event_id", &self.event_id)
+            .field("domain", &self.domain)
+            .field("contract_id", &self.contract_id)
+            .field("contract_version", &self.contract_version)
+            .field("schema_hash", &self.schema_hash)
+            .field("metadata_json", &"<redacted>")
+            .field("partition_key", &partition_key)
+            .field("causation_id", &causation_id)
+            .finish()
+    }
 }
 
 /// 投影事件载体（sync trait；outbox entry / saga journal event 共同实现 —— eventbus.md §Projection）。
@@ -157,6 +293,9 @@ pub trait ProjectionEvent {
 
     /// 已编码 payload（投影器解码到读模型；解码不在本接缝）。
     fn payload(&self) -> &[u8];
+
+    /// Persisted projection event metadata used for unified projection DLQ rows.
+    fn metadata(&self) -> &ProjectionEventMetadata;
 }
 
 /// 投影器策略（L3 引擎策略 trait，native AFIT）。
@@ -356,13 +495,22 @@ mod tests {
     use super::{
         Lsn, ProjectionBatchLimit, ProjectionBatchLimitError, ProjectionCheckpoint,
         ProjectionCheckpointError, ProjectionDeadLetter, ProjectionDeadLetterReason,
-        ProjectionEventRecord,
+        ProjectionEventMetadata, ProjectionEventRecord,
     };
 
     #[allow(clippy::expect_used)]
     // reason: test fixture uses a compile-time known canonical topic.
     fn topic() -> Topic {
         Topic::parse("projection.test.event").expect("valid projection topic")
+    }
+
+    fn record(lsn: Lsn, payload: impl Into<Vec<u8>>) -> ProjectionEventRecord {
+        ProjectionEventRecord::with_metadata(
+            lsn,
+            topic(),
+            payload,
+            ProjectionEventMetadata::for_tests(),
+        )
     }
 
     // Lsn new/get 多值往返（含边界 0 / u64::MAX）。
@@ -384,7 +532,7 @@ mod tests {
 
     #[test]
     fn projection_event_record_round_trips_through_trait() {
-        let record = ProjectionEventRecord::new(Lsn::new(9), topic(), b"secret-payload".to_vec());
+        let record = record(Lsn::new(9), b"secret-payload".to_vec());
 
         assert_eq!(record.lsn(), Lsn::new(9));
         assert_eq!(record.topic().as_str(), "projection.test.event");
@@ -393,12 +541,58 @@ mod tests {
 
     #[test]
     fn projection_event_record_debug_redacts_payload() {
-        let record = ProjectionEventRecord::new(Lsn::new(9), topic(), b"secret-payload".to_vec());
+        let record = record(Lsn::new(9), b"secret-payload".to_vec());
         let debug = format!("{record:?}");
 
         assert!(
             debug.contains("<redacted>"),
             "Debug must include redaction marker: {debug}"
+        );
+        assert!(
+            !debug.contains("secret-payload"),
+            "Debug leaked projection payload: {debug}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: test fixture uses a compile-time known canonical tenant.
+    fn projection_event_metadata_debug_redacts_partition_key_and_causation_id() {
+        let metadata = ProjectionEventMetadata::new(
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("canonical test tenant"),
+            "projection-test-event",
+            "test",
+            "test.projection-event",
+            "v1",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            serde_json::json!({ "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479" }),
+            Some("tenant-7:session-secret".to_string()),
+            Some("SECRET-CAUSATION".to_string()),
+        );
+        let record = ProjectionEventRecord::with_metadata(
+            Lsn::new(9),
+            topic(),
+            b"secret-payload".to_vec(),
+            metadata,
+        );
+        let debug = format!("{record:?}");
+
+        assert!(
+            debug.contains("Some"),
+            "presence should stay visible: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug must include redaction marker: {debug}"
+        );
+        assert!(
+            !debug.contains("session-secret"),
+            "Debug leaked projection partition_key: {debug}"
+        );
+        assert!(
+            !debug.contains("SECRET-CAUSATION"),
+            "Debug leaked projection causation_id: {debug}"
         );
         assert!(
             !debug.contains("secret-payload"),
@@ -446,7 +640,7 @@ mod tests {
 
     #[test]
     fn projection_dead_letter_wraps_event_and_reason() {
-        let event = ProjectionEventRecord::new(Lsn::new(11), topic(), b"bad-event".to_vec());
+        let event = record(Lsn::new(11), b"bad-event".to_vec());
         let dead_letter =
             ProjectionDeadLetter::new(event, ProjectionDeadLetterReason::ApplyPermanent);
 

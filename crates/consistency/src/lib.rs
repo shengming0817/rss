@@ -52,8 +52,8 @@ pub use outbox::{
 pub use projection::{
     Lsn, PartitionSerialDelivery, ProjectionBatchLimit, ProjectionBatchLimitError,
     ProjectionCheckpoint, ProjectionCheckpointError, ProjectionDeadLetter,
-    ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventRecord, ProjectionEventSource,
-    Projector, SerialInOrder, SerialInOrderGuarantor,
+    ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
+    ProjectionEventSource, Projector, SerialInOrder, SerialInOrderGuarantor,
 };
 pub use reconcile::{
     ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,

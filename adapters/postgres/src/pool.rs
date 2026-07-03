@@ -98,6 +98,9 @@ pub enum PgError {
     /// settings ConfigValue maintenance durable audit 写入失败（维护入口 fail-closed）。
     #[error("postgres config value maintenance audit failed")]
     MaintenanceAudit(#[source] sqlx::Error),
+    /// projection input binding registry 刷新失败（启动关键路径）。
+    #[error("postgres projection input binding registry refresh failed")]
+    ProjectionBindings(#[source] sqlx::Error),
 }
 
 /// 启动期 legacy plaintext `ConfigValue` 行策略。

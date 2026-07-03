@@ -76,3 +76,9 @@ pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[
         readiness: "required",
     },
 ];
+
+/// Root projection input registry aggregated from `[capabilities.workflow].inputs`.
+///
+/// Postgres projection writers consume this static registry to decide which outbox facts are also
+/// mirrored into `projection_events`. Runtime code must not enumerate projection topics by hand.
+pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[];

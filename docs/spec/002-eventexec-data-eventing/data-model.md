@@ -20,7 +20,7 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | `Request`/`Outcome`/`Context` | reconcile | struct(私有) | default=resync；Context opaque sealed |
 | `ReconcileError` | reconcile | struct | is_transient/is_permanent |
 | `Lsn` | projection(L3) | newtype(u64) | 单调 |
-| `ProjectionEvent` | projection | sync trait | topic/lsn/payload |
+| `ProjectionEvent` | projection | sync trait | topic/lsn/payload + persisted envelope metadata |
 
 ## Postgres 表
 
@@ -68,9 +68,9 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | id | uuid PK | |
 | tenant_id | uuid | RLS scope（必填） |
 | message_id | text | 原 broker message id / outbox event id |
-| source_kind | text | `legacy` / `consumer` / `outbox_relay` / `saga` |
+| source_kind | text | `legacy` / `consumer` / `outbox_relay` / `saga` / `projection` |
 | domain/contract_id/topic | text | |
-| consumer_group | text NULL | subscription consumer group；非 consumer 来源为 NULL |
+| consumer_group | text NULL | subscription consumer group；projection 来源为 projection id |
 | original_entry | jsonb | 加密原始 entry，唯一允许 shape 为 `{"ciphertext":[...]}` |
 | original_entry_key_ref | text | KeyProvider/Vault transit key reference |
 | original_entry_payload_len | bigint | 解密后 payload 长度；DLQ list 只暴露该长度 |
@@ -122,10 +122,22 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | 列 | 类型 | 说明 |
 |----|------|------|
 | id | bigint PK（单调=Lsn 源） | |
+| event_id | text UNIQUE | outbox event id；duplicate outbox emit 不重复镜像 |
 | domain/aggregate_id/event_type | text | |
 | payload | bytea | |
+| contract_id / contract_version / schema_hash | text | generated projection input binding identity |
+| metadata | jsonb | copied outbox envelope metadata；必须含 canonical non-nil `tenantId` |
+| partition_key / causation_id | text NULL | copied outbox persisted metadata |
 | occurred_at/correlation_id/created_at | | |
 
+- **append-only + hard writer funnel**：生产只在 outbox insert 新增且 `(contract_id, version, schema_hash, topic)` 命中
+  generated `PROJECTION_INPUTS` 时镜像；DB 写/读只经固定 `rss_append_projection_event` /
+  `rss_read_projection_events` 函数，`rss_app` 无直接表权限。
+- **pre-GA breaking migration**：0040 启用前要求旧 `projection_events` 为空，不 backfill。
+- **projection DLQ**：Permanent / Invariant / OutOfOrder 写统一 `dead_letter(source_kind='projection')`
+  后停止当前 projection，不自动 skip checkpoint；projection DLQ message id 为
+  `projection:<owner>:<projection_id>:<lsn>`，replay/redrive 不支持。
+- **checkpoint monotonicity**：`checkpoint.offset_lsn` SQL update path 拒绝 regression，避免把 checkpoint 推过 poison/乱序 LSN。
 - **append-only**：migration 内 `REVOKE UPDATE, DELETE`；代码侧 dylint `rss_projection_append_only` 拒 DELETE/TRUNCATE 字面量（PROJECTION-APPEND-ONLY-01）。
 - Index: `(domain, aggregate_id)`。
 

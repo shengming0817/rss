@@ -9,7 +9,10 @@ use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId};
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
-use crate::outbox::{OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs};
+use crate::outbox::{
+    OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient, unix_secs,
+};
+use crate::projection_events::ProjectionWriteRegistry;
 
 /// PostgreSQL 角色绑定生命周期 adapter。
 pub struct PgRoleBindingLifecycle {
@@ -19,9 +22,18 @@ pub struct PgRoleBindingLifecycle {
 
 impl PgRoleBindingLifecycle {
     /// 由 [`PgStore`] 构造（clone 其 scoped pool）+ 注入 envelope 时间源。
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+    }
+
+    pub(crate) fn new_with_projection_registry(
+        store: &PgStore,
+        clock: Box<dyn Clock>,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
         Self {
-            pool: PgTenantPool::new(store),
+            pool: PgTenantPool::with_projection_registry(store, projection_registry),
             clock,
         }
     }
@@ -100,6 +112,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
             )));
         }
         let tenant_uuid = tenant.as_uuid().to_string();
+        let projection_registry = self.pool.projection_registry();
         self.pool
             .write(
                 tenant,
@@ -121,7 +134,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         if deleted == 0 {
                             return Ok(false);
                         }
-                        append_outbox(conn, &entry, &env)
+                        append_outbox_with_projection(conn, &entry, &env, &projection_registry)
                             .await
                             .map_err(OutboxEmitError::new)?;
                         Ok(true)

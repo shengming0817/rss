@@ -101,6 +101,9 @@ impl DeadLetterStore for PgDeadLetterStore {
                                  original_entry, original_entry_key_ref, original_entry_payload_len,
                                  original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
                             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            ON CONFLICT (tenant_id, source_kind, consumer_group, message_id)
+                            WHERE source_kind = 'projection'
+                            DO NOTHING
                             "#,
                         )
                         .bind(record.tenant().to_string())

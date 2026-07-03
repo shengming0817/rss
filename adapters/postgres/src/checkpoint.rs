@@ -110,7 +110,7 @@ impl OwnerCheckpointStore for PgCheckpointStore {
             .map_err(CheckpointStoreError::new)?
             .rows_affected()
         } else {
-            // 更新分支：WHERE version = expected → rows_affected==1 表 CAS 命中。
+            // 更新分支：WHERE version = expected 且 offset 不回退 → rows_affected==1 表 CAS 命中。
             let expected_ver = i64::try_from(expected.get()).map_err(CheckpointStoreError::new)?;
             sqlx::query(
                 r#"
@@ -121,6 +121,7 @@ impl OwnerCheckpointStore for PgCheckpointStore {
                 WHERE owner = $1
                   AND checkpoint_id = $2
                   AND version = $4
+                  AND offset_lsn <= $3
                 "#,
             )
             .bind(owner.as_str())
@@ -183,7 +184,8 @@ mod integration_tests {
     /// CAS 语义验证：
     /// 1. save v0（首存）→ Saved；
     /// 2. update expected=1（版本 1）→ Saved（版本推进到 2）；
-    /// 3. update expected=1 再次（旧版本）→ StaleVersion。
+    /// 3. update expected=1 再次（旧版本）→ StaleVersion；
+    /// 4. update expected=2 但 offset 回退 → StaleVersion。
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
     // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out（error-handling.md §Carve-out）。
@@ -234,6 +236,16 @@ mod integration_tests {
         let ck3 = cp.get_checkpoint(&owner, &id).await?.unwrap();
         assert_eq!(ck3.offset.get(), 20, "StaleVersion 后 offset 不变");
         assert_eq!(ck3.version.get(), 2, "StaleVersion 后版本不变");
+
+        // update expected=2 但 offset 回退到 10 → StaleVersion（单调性拒绝）。
+        let outcome4 = cp
+            .save_checkpoint(&owner, &id, Lsn::new(10), CheckpointVersion::new(2))
+            .await?;
+        assert_eq!(outcome4, SaveOutcome::StaleVersion, "offset 回退应拒绝");
+
+        let ck4 = cp.get_checkpoint(&owner, &id).await?.unwrap();
+        assert_eq!(ck4.offset.get(), 20, "回退被拒后 offset 不变");
+        assert_eq!(ck4.version.get(), 2, "回退被拒后版本不变");
 
         cp.shutdown().await?;
         store.shutdown().await?;

@@ -17,11 +17,14 @@ use consistency::{
 use diport::ManagedResource;
 use futures::future::BoxFuture;
 
-use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
+use crate::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgStore};
 
 // 统一 Send+Sync 错误（= testkit::FixtureError）：sqlx::Error / PgError / FixtureError 均 Send+Sync，
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+const TEST_APP_ROLE: &str = "rss_app";
+const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 
 use crate::test_pg::{
     connect_pg, connect_pg_audit_admin_role, connect_pg_nobypass_role, connect_pg_rss_app_role,
@@ -77,6 +80,15 @@ fn actor_for(tenant: vocab::TenantId) -> diport::OutboxActor {
 const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
 const TEST_SCHEMA_HASH: &str =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+static TEST_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
+    &[vocab::ProjectionInputBinding::from_static(
+        "test-projection",
+        "test",
+        "projection.bound",
+        "v1",
+        TEST_SCHEMA_HASH,
+        "test.event",
+    )];
 
 fn test_contract() -> vocab::ContractBinding {
     vocab::ContractBinding::from_static("test", "test.contract", "v1", TEST_SCHEMA_HASH)
@@ -135,6 +147,83 @@ fn fixed_clock() -> Box<dyn diport::Clock> {
 /// 构造注入用 clock（`Arc<dyn Clock>`，`PgConfigRepo` 共享扇出约定，固定 [`fixed_clock_time`]，#1424）。
 fn fixed_clock_arc() -> std::sync::Arc<dyn diport::Clock> {
     std::sync::Arc::new(FixedClock(fixed_clock_time()))
+}
+
+fn runtime_pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+    PgConfig::new(
+        p.host.clone(),
+        p.port,
+        p.database.clone(),
+        username.to_string(),
+        PgPassword::new(password.to_string()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(std::time::Duration::from_secs(5))
+}
+
+async fn provision_runtime_rss_app_login(p: &testkit::PgConnParams) -> TestResult {
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(sqlx::postgres::PgSslMode::Prefer);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    sqlx::query(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
+                CREATE ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
+            ELSE
+                ALTER ROLE rss_app LOGIN PASSWORD 'rss_app_test_pw' NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+    pool.close().await;
+    Ok(())
+}
+
+async fn setup_runtime_deps_with_projection_inputs(
+    projection_inputs: &'static [vocab::ProjectionInputBinding],
+) -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
+    let fixture = testkit::env_or_postgres().await?;
+    let p = fixture.params();
+    provision_runtime_rss_app_login(p).await?;
+    let owner_config = runtime_pg_config(p, &p.username, &p.password);
+    let deps = PgRuntimeDeps::setup(
+        &owner_config,
+        &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        projection_inputs,
+    )
+    .await?;
+    Ok((fixture, deps))
+}
+
+async fn runtime_assertion_pool(
+    p: &testkit::PgConnParams,
+) -> Result<sqlx::PgPool, Box<dyn std::error::Error + Send + Sync>> {
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(sqlx::postgres::PgSslMode::Prefer);
+    Ok(sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(options)
+        .await?)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1035,6 +1124,7 @@ use testkit::eventing_conformance as eventconf;
 use crate::dead_letter_payload::tests::test_protector;
 use crate::outbox::{
     MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, PgOutbox, SettleOutcome, append_outbox,
+    append_outbox_with_projection,
 };
 
 static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1047,6 +1137,9 @@ static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 /// 串行组）这条残留路径，隔离不再依赖调度器串行（#1194；nextest 串行组保留作 defense-in-depth）。
 async fn setup_outbox(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     store.run_migrations().await?;
+    store
+        .replace_projection_input_bindings(TEST_PROJECTION_INPUTS)
+        .await?;
     Ok(())
 }
 
@@ -1155,6 +1248,18 @@ fn make_test_env(domain: &str, contract_id: &str) -> OutboxEnvelope {
     )
 }
 
+fn make_test_env_with_contract_metadata(
+    domain: &str,
+    contract_id: &str,
+    metadata_contract: vocab::ContractBinding,
+) -> OutboxEnvelope {
+    OutboxEnvelope::new(
+        domain.to_string(),
+        contract_id.to_string(),
+        OutboxMetadata::new(0, test_tenant(), metadata_contract),
+    )
+}
+
 /// 构造指定租户的测试 envelope，用于跨租 outbox partition/RLS 用例。
 fn make_test_env_for_tenant(
     domain: &str,
@@ -1166,6 +1271,437 @@ fn make_test_env_for_tenant(
         contract_id.to_string(),
         OutboxMetadata::new(0, tenant, test_contract()),
     )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> TestResult {
+    use crate::projection_events::ProjectionWriteRegistry;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let registry = ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS);
+    let domain = unique_domain("projection-funnel");
+    let bound_event_id = unique_event_id("projection-bound");
+    let unbound_event_id = unique_event_id("projection-unbound");
+    let schema_mismatch_event_id = unique_event_id("projection-schema-mismatch");
+    let bound_entry = make_entry(&bound_event_id);
+    let unbound_entry = make_entry(&unbound_event_id);
+    let schema_mismatch_entry = make_entry(&schema_mismatch_event_id);
+    let bound_env = make_test_env(&domain, "projection.bound");
+    let unbound_env = make_test_env(&domain, "projection.unbound");
+    let schema_mismatch_env = make_test_env_with_contract_metadata(
+        &domain,
+        "projection.bound",
+        vocab::ContractBinding::from_static("test", "projection.bound", "v2", TEST_SCHEMA_HASH),
+    );
+
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            let bound_entry = bound_entry.clone();
+            let unbound_entry = unbound_entry.clone();
+            let bound_env = bound_env.clone();
+            let unbound_env = unbound_env.clone();
+            Box::pin(async move {
+                append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry).await?;
+                append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry).await?;
+                append_outbox_with_projection(cap, &unbound_entry, &unbound_env, &registry).await?;
+                append_outbox_with_projection(
+                    cap,
+                    &schema_mismatch_entry,
+                    &schema_mismatch_env,
+                    &registry,
+                )
+                .await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let projection_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT event_id, contract_id, contract_version, schema_hash, metadata ->> 'tenantId'
+        FROM projection_events
+        WHERE event_id = ANY($1)
+        ORDER BY event_id
+        "#,
+    )
+    .bind(vec![
+        bound_event_id.clone(),
+        unbound_event_id.clone(),
+        schema_mismatch_event_id.clone(),
+    ])
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        projection_rows.len(),
+        1,
+        "only generated-bound outbox inserts should mirror to projection_events"
+    );
+    assert_eq!(projection_rows[0].0, bound_event_id);
+    assert_eq!(projection_rows[0].1, "projection.bound");
+    assert_eq!(projection_rows[0].2, "v1");
+    assert_eq!(projection_rows[0].3, TEST_SCHEMA_HASH);
+    assert_eq!(projection_rows[0].4, COTX_TENANT_A);
+
+    let outbox_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = ANY($1)")
+            .bind(vec![
+                bound_event_id,
+                unbound_event_id,
+                schema_mismatch_event_id,
+            ])
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(outbox_count.0, 3, "all outbox rows should exist");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_writer_funnel_runtime_setup_mirrors_generated_bound_emit() -> TestResult {
+    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+
+    let (pg, deps) = setup_runtime_deps_with_projection_inputs(TEST_PROJECTION_INPUTS).await?;
+    let emitter = deps.infra().emitter(fixed_clock());
+    let event_id = unique_event_id("projection-runtime-bound");
+
+    emitter
+        .emit(
+            make_entry(&event_id),
+            OutboxEnvelopeParts::new(
+                vocab::ContractBinding::from_static(
+                    "test",
+                    "projection.bound",
+                    "v1",
+                    TEST_SCHEMA_HASH,
+                ),
+                test_tenant(),
+                subject_id(&event_id),
+                actor_for(test_tenant()),
+            ),
+        )
+        .await?;
+
+    let pool = runtime_assertion_pool(pg.params()).await?;
+    let binding_count: (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*)
+        FROM projection_input_bindings
+        WHERE contract_id = 'projection.bound'
+          AND contract_version = 'v1'
+          AND schema_hash = $1
+          AND topic = 'test.event'
+        "#,
+    )
+    .bind(TEST_SCHEMA_HASH)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        binding_count.0, 1,
+        "PgRuntimeDeps::setup must refresh DB-side projection bindings"
+    );
+
+    let projection_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT event_id, contract_id, contract_version, schema_hash
+        FROM projection_events
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(&event_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        projection_rows,
+        vec![(
+            event_id,
+            "projection.bound".to_string(),
+            "v1".to_string(),
+            TEST_SCHEMA_HASH.to_string(),
+        )],
+        "runtime emitter must mirror generated-bound outbox facts to projection_events"
+    );
+
+    pool.close().await;
+    deps.store_guard().shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResult {
+    use crate::cotx::TxCapability;
+    use crate::projection_events::ProjectionWriteRegistry;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let registry = ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS);
+    let domain = unique_domain("projection-order");
+    let first_event_id = unique_event_id("projection-order-first");
+    let second_event_id = unique_event_id("projection-order-second");
+    let first_entry = make_entry(&first_event_id);
+    let second_entry = make_entry(&second_event_id);
+    let first_env = make_test_env(&domain, "projection.bound");
+    let second_env = make_test_env(&domain, "projection.bound");
+
+    let pool_a = store.pool.clone();
+    let pool_b = store.pool.clone();
+    let (first_appended_tx, first_appended_rx) = tokio::sync::oneshot::channel();
+    let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+    let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+
+    let first = tokio::spawn(async move {
+        let mut tx = pool_a.begin().await?;
+        let mut cap = TxCapability::from_transaction(&mut tx);
+        append_outbox_with_projection(&mut cap, &first_entry, &first_env, &registry).await?;
+        let _ = first_appended_tx.send(());
+        release_first_rx.await.map_err(|err| {
+            Box::new(std::io::Error::other(format!(
+                "release channel closed: {err}"
+            ))) as Box<dyn std::error::Error + Send + Sync>
+        })?;
+        tx.commit().await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+
+    first_appended_rx.await?;
+
+    let second = tokio::spawn(async move {
+        let mut tx = pool_b.begin().await?;
+        let mut cap = TxCapability::from_transaction(&mut tx);
+        let _ = second_started_tx.send(());
+        append_outbox_with_projection(&mut cap, &second_entry, &second_env, &registry).await?;
+        tx.commit().await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let mut second = second;
+
+    second_started_rx.await?;
+    let completed_before_first_commit =
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut second).await;
+    assert!(
+        completed_before_first_commit.is_err(),
+        "second projection-bound append must wait for first transaction's append advisory lock"
+    );
+
+    release_first_tx
+        .send(())
+        .map_err(|()| std::io::Error::other("first transaction task exited before release"))?;
+    first.await??;
+    second.await??;
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT event_id, id
+        FROM projection_events
+        WHERE event_id = ANY($1)
+        ORDER BY id
+        "#,
+    )
+    .bind(vec![first_event_id.clone(), second_event_id.clone()])
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(rows.len(), 2, "both bound events should be projected");
+    assert_eq!(rows[0].0, first_event_id);
+    assert_eq!(rows[1].0, second_event_id);
+    assert!(
+        rows[0].1 < rows[1].1,
+        "projection LSN order must match commit order for concurrent bound writes"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privileges() -> TestResult
+{
+    let (pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let event_id = unique_event_id("projection-fn");
+
+    for sql in [
+        "SELECT count(*) FROM projection_events",
+        "INSERT INTO projection_events \
+             (event_id, domain, aggregate_id, event_type, payload, contract_id, contract_version, schema_hash, metadata) \
+         VALUES ('forbidden', 'test', 'agg', 'test.event', '\\x00'::bytea, 'projection.bound', 'v1', \
+                 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', \
+                 '{\"tenantId\":\"f47ac10b-58cc-4372-a567-0e02b2c3d479\"}'::jsonb)",
+        "UPDATE projection_events SET domain = domain",
+        "DELETE FROM projection_events",
+    ] {
+        let result = sqlx::query(sql).execute(&app.pool).await;
+        assert!(
+            result.is_err(),
+            "rss_app must not have direct projection_events table privilege for: {sql}"
+        );
+    }
+
+    for sql in [
+        "SELECT count(*) FROM projection_input_bindings",
+        "INSERT INTO projection_input_bindings \
+             (contract_id, contract_version, schema_hash, topic) \
+         VALUES ('projection.bound', 'v1', \
+                 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', \
+                 'test.event')",
+        "UPDATE projection_input_bindings SET topic = topic",
+        "DELETE FROM projection_input_bindings",
+    ] {
+        let result = sqlx::query(sql).execute(&app.pool).await;
+        assert!(
+            result.is_err(),
+            "rss_app must not have direct projection_input_bindings table privilege for: {sql}"
+        );
+    }
+
+    let entry = make_entry(&event_id);
+    let env = make_test_env("test", "projection.bound");
+    let metadata = env.metadata_json();
+    let unbound_event_id = unique_event_id("projection-fn-unbound");
+    let unbound_entry = make_entry(&unbound_event_id);
+    let unbound_env = make_test_env("test", "projection.unbound");
+    let unbound_metadata = unbound_env.metadata_json();
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            let entry = entry.clone();
+            let env = env.clone();
+            let unbound_entry = unbound_entry.clone();
+            let unbound_env = unbound_env.clone();
+            Box::pin(async move {
+                append_outbox(cap, &entry, &env).await?;
+                append_outbox(cap, &unbound_entry, &unbound_env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let (lsn,): (i64,) = sqlx::query_as(
+        r#"
+        SELECT rss_append_projection_event(
+            $1, 'test', $1, 'test.event', $2, NULL,
+            'projection.bound', 'v1', $3, $4::jsonb, NULL, NULL
+        )
+        "#,
+    )
+    .bind(&event_id)
+    .bind(b"payload".as_slice())
+    .bind(TEST_SCHEMA_HASH)
+    .bind(&metadata)
+    .fetch_one(&app.pool)
+    .await?;
+    assert!(lsn > 0, "fixed append function must return projection lsn");
+
+    let no_outbox_event_id = unique_event_id("projection-fn-no-outbox");
+    let no_outbox_result = sqlx::query(
+        r#"
+        SELECT rss_append_projection_event(
+            $1, 'test', $1, 'test.event', $2, NULL,
+            'projection.bound', 'v1', $3, $4::jsonb, NULL, NULL
+        )
+        "#,
+    )
+    .bind(&no_outbox_event_id)
+    .bind(b"payload".as_slice())
+    .bind(TEST_SCHEMA_HASH)
+    .bind(&metadata)
+    .execute(&app.pool)
+    .await;
+    assert!(
+        no_outbox_result.is_err(),
+        "fixed append function must reject raw writes without a matching outbox row"
+    );
+
+    let unbound_result = sqlx::query(
+        r#"
+        SELECT rss_append_projection_event(
+            $1, 'test', $1, 'test.event', $2, NULL,
+            'projection.unbound', 'v1', $3, $4::jsonb, NULL, NULL
+        )
+        "#,
+    )
+    .bind(&unbound_event_id)
+    .bind(b"payload".as_slice())
+    .bind(TEST_SCHEMA_HASH)
+    .bind(&unbound_metadata)
+    .execute(&app.pool)
+    .await;
+    assert!(
+        unbound_result.is_err(),
+        "fixed append function must reject outbox rows absent from generated projection bindings"
+    );
+
+    let read_rows: Vec<(i64, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, event_id, metadata ->> 'tenantId'
+        FROM rss_read_projection_events(0, 10)
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(&event_id)
+    .fetch_all(&app.pool)
+    .await?;
+    assert_eq!(read_rows, vec![(lsn, event_id, COTX_TENANT_A.to_string())]);
+
+    for (label, sql) in [
+        (
+            "null-limit",
+            "SELECT * FROM rss_read_projection_events(0, NULL::integer)",
+        ),
+        (
+            "zero-limit",
+            "SELECT * FROM rss_read_projection_events(0, 0)",
+        ),
+        (
+            "too-large-limit",
+            "SELECT * FROM rss_read_projection_events(0, 1001)",
+        ),
+        (
+            "negative-after",
+            "SELECT * FROM rss_read_projection_events(-1, 10)",
+        ),
+        (
+            "null-after",
+            "SELECT * FROM rss_read_projection_events(NULL::bigint, 10)",
+        ),
+    ] {
+        let result = sqlx::query(sql).execute(&app.pool).await;
+        assert!(
+            result.is_err(),
+            "rss_app direct projection read must reject invalid {label} at the fixed function boundary"
+        );
+    }
+
+    for (label, tenant_id) in [
+        ("invalid", "not-a-uuid"),
+        ("nil", "00000000-0000-0000-0000-000000000000"),
+        ("uppercase", "F47AC10B-58CC-4372-A567-0E02B2C3D479"),
+    ] {
+        let result = sqlx::query(
+            r#"
+            SELECT rss_append_projection_event(
+                $1, 'test', $1, 'test.event', $2, NULL,
+                'projection.bound', 'v1', $3, $4::jsonb, NULL, NULL
+            )
+            "#,
+        )
+        .bind(unique_event_id(&format!("projection-fn-{label}")))
+        .bind(b"payload".as_slice())
+        .bind(TEST_SCHEMA_HASH)
+        .bind(serde_json::json!({ "tenantId": tenant_id }).to_string())
+        .execute(&app.pool)
+        .await;
+        assert!(
+            result.is_err(),
+            "fixed append function must reject non-canonical tenantId case {label}"
+        );
+    }
+
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1963,6 +2499,7 @@ async fn conf_duplicate_delivery(
     group: String,
 ) -> Result<eventconf::ConsumerObservation, String> {
     let key = IdemKey::parse(&event_id).map_err(|e| format!("{e:?}"))?;
+    let meta = conf_consumer_meta(&group);
     let ctx = conf_consumer_ctx(&group);
     let lease = LeaseToken::mint();
     let inbox = store.inbox();
@@ -1981,7 +2518,7 @@ async fn conf_duplicate_delivery(
         stream,
         Arc::new(store.inbox()),
         DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
-        conf_consumer_meta(&group),
+        meta,
         conf_ack_handler(Arc::clone(&calls)),
         conf_lease_cfg(),
     )
@@ -3584,17 +4121,21 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         WritableDeadLetterSource,
     };
     use eventexec::{
-        DeadLetterId, DlqCursor, DlqError, DlqListQuery, DlqReplayOutcome, DlqReplayRequest,
-        DlqStore as _, OperatorDlqCapability,
+        DeadLetterId, DlqCursor, DlqEntryKind, DlqError, DlqListQuery, DlqReplayOutcome,
+        DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
     };
 
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
     let dl = store.dead_letter(test_dlx_payload_protector());
-    let dlq = store.dlq(test_dlx_payload_protector());
+    let dlq = store.dlq_with_projection_registry(
+        test_dlx_payload_protector(),
+        crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS),
+    );
     let domain = unique_domain("dlq-replay");
     let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("consumer-msg");
+    let replay_contract_id = "projection.bound";
     let mut metadata = EnvelopeMetadata::empty();
     metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
     metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
@@ -3605,7 +4146,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         tenant,
         &message_id,
         domain.as_str(),
-        "contract-dlq",
+        replay_contract_id,
         "test.event",
         Some("dlq-replay-consumer".to_string()),
         b"consumer-payload".to_vec(),
@@ -3648,7 +4189,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         "contract_id tamper must fail closed during decrypt"
     );
     sqlx::query("UPDATE dead_letter SET contract_id = $1 WHERE id = $2::uuid")
-        .bind("contract-dlq")
+        .bind(replay_contract_id)
         .bind(&dead_letter_id)
         .execute(&store.pool)
         .await?;
@@ -3740,13 +4281,34 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(row.0, domain);
-    assert_eq!(row.1, "contract-dlq");
+    assert_eq!(row.1, replay_contract_id);
     assert_eq!(row.2, "v1");
     assert_eq!(row.3, TEST_SCHEMA_HASH);
     assert_eq!(row.4, b"consumer-payload".to_vec());
     assert_eq!(row.5, COTX_TENANT_A);
     assert_eq!(row.6, dead_letter_id);
     assert_eq!(row.7, message_id);
+
+    let projection_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT event_id, contract_id, contract_version, schema_hash
+        FROM projection_events
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(replay_id.as_str())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        projection_rows,
+        vec![(
+            replay_id.as_str().to_string(),
+            replay_contract_id.to_string(),
+            "v1".to_string(),
+            TEST_SCHEMA_HASH.to_string(),
+        )],
+        "generated-bound DLQ replay must mirror exactly one projection event"
+    );
 
     let duplicate = dlq
         .replay_dead_letter(DlqReplayRequest::new(
@@ -3757,6 +4319,15 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         ))
         .await?;
     assert_eq!(duplicate, DlqReplayOutcome::AlreadyExists);
+    let projection_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM projection_events WHERE event_id = $1")
+            .bind(replay_id.as_str())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        projection_count.0, 1,
+        "duplicate DLQ replay must not insert a second projection event"
+    );
 
     let missing_id = uuid::Uuid::new_v4().to_string();
     let missing_replay_id = IdemKey::parse(&unique_event_id("missing-replay")).unwrap();
@@ -3819,6 +4390,86 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     assert_eq!(
         saga_outbox_count.0, 0,
         "not-replayable saga dead_letter must not write outbox"
+    );
+
+    let projection_message_id = format!("projection:test-owner:test-proj:{}", 77);
+    let projection_replay_id = IdemKey::parse(&unique_event_id("projection-replay")).unwrap();
+    let mut projection_metadata = EnvelopeMetadata::empty();
+    projection_metadata.insert_wire_pair(KEY_TENANT_ID, COTX_TENANT_A);
+    projection_metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+    projection_metadata.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
+    for _ in 0..2 {
+        dl.write_dead_letter(DeadLetterRecord::new(
+            tenant,
+            &projection_message_id,
+            domain.as_str(),
+            "contract-dlq",
+            "test.projection",
+            Some("test-proj".to_string()),
+            b"projection-payload".to_vec(),
+            DeadLetterSummary::new("projection apply permanent"),
+            1,
+            WritableDeadLetterSource::Projection,
+            projection_metadata.clone(),
+        ))
+        .await?;
+    }
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let (projection_dead_letter_id, projection_count): (String, i64) = sqlx::query_as(
+        "SELECT min(id::text), count(*) FROM dead_letter \
+         WHERE tenant_id = $1::uuid AND source_kind = 'projection' AND message_id = $2",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&projection_message_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    assert_eq!(
+        projection_count, 1,
+        "projection DLQ poison rows must be idempotent"
+    );
+    let projection_replay = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&projection_dead_letter_id)?,
+            projection_replay_id.clone(),
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(projection_replay, Err(DlqError::NotReplayable)),
+        "projection dead_letter replay must be explicitly unsupported"
+    );
+    let projection_outbox_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+            .bind(projection_replay_id.as_str())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        projection_outbox_count.0, 0,
+        "not-replayable projection dead_letter must not write outbox"
+    );
+    let projection_list = dlq
+        .list_dlq(
+            DlqListQuery::new(tenant)
+                .with_domain(domain.as_str())
+                .with_source(DeadLetterSource::Projection),
+        )
+        .await?;
+    assert_eq!(projection_list.data().len(), 1);
+    assert_eq!(projection_list.data()[0].kind(), DlqEntryKind::DeadLetter);
+    assert_eq!(
+        projection_list.data()[0].source(),
+        DeadLetterSource::Projection
+    );
+    assert_eq!(
+        projection_list.data()[0].message_id(),
+        projection_message_id
+    );
+    assert_eq!(
+        projection_list.data()[0].consumer_group(),
+        Some("test-proj")
     );
 
     let invalid_payload_id = unique_event_id("invalid-payload-dl");
@@ -5471,6 +6122,43 @@ async fn migration_0031_rejects_outbox_rows_missing_tenant_metadata() -> TestRes
     let rendered = err.to_string();
     assert!(
         rendered.contains("outbox tenant_id backfill requires metadata.tenantId"),
+        "unexpected migration error: {rendered}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0040：旧 projection_events 行不做 backfill，必须 fail-fast。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0040_rejects_non_empty_legacy_projection_events() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0013_create_projection_events.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO projection_events (domain, aggregate_id, event_type, payload) \
+         VALUES ('test', 'agg-1', 'test.event', $1)",
+    )
+    .bind(b"payload".as_slice())
+    .execute(&store.pool)
+    .await?;
+
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0040_projection_events_funnel_and_projection_dlx.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let Err(err) = result else {
+        return Err("0040 must reject non-empty legacy projection_events".into());
+    };
+    let rendered = err.to_string();
+    assert!(
+        rendered
+            .contains("projection_events must be empty before enabling projection writer funnel"),
         "unexpected migration error: {rendered}"
     );
 

@@ -1218,6 +1218,7 @@ dependencies = [
  "ids",
  "runctx",
  "secure",
+ "serde_json",
  "support",
  "thiserror",
  "tokio",

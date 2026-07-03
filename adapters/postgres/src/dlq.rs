@@ -13,7 +13,10 @@ use eventexec::{
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
-use crate::outbox::{ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox};
+use crate::outbox::{
+    OutboxAppendOutcome, ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox_with_projection,
+};
+use crate::projection_events::ProjectionWriteRegistry;
 
 const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
@@ -57,14 +60,25 @@ const LIST_DEAD_LETTER_SQL: &str = r#"
 pub struct PgDlqStore {
     tenant_pool: PgTenantPool,
     payload_protector: DlxPayloadProtector,
+    projection_registry: ProjectionWriteRegistry,
 }
 
 impl PgStore {
     /// 构造 DLQ inspection/replay adapter（pool clone 自 `PgStore`，轻量）。
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
+        self.dlq_with_projection_registry(payload_protector, ProjectionWriteRegistry::empty())
+    }
+
+    pub(crate) fn dlq_with_projection_registry(
+        &self,
+        payload_protector: DlxPayloadProtector,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> PgDlqStore {
         PgDlqStore {
             tenant_pool: PgTenantPool::new(self),
             payload_protector,
+            projection_registry,
         }
     }
 }
@@ -81,6 +95,7 @@ impl DlqStore for PgDlqStore {
         request: DlqReplayRequest,
     ) -> Result<DlqReplayOutcome, DlqError> {
         let payload_protector = self.payload_protector.clone();
+        let projection_registry = self.projection_registry;
         self.tenant_pool
             .write(
                 request.tenant(),
@@ -121,6 +136,7 @@ impl DlqStore for PgDlqStore {
                             DeadLetterSource::Consumer => {}
                             DeadLetterSource::Legacy
                             | DeadLetterSource::OutboxRelay
+                            | DeadLetterSource::Projection
                             | DeadLetterSource::Saga => {
                                 return Err(DlqError::NotReplayable);
                             }
@@ -157,7 +173,7 @@ impl DlqStore for PgDlqStore {
                             &message_id,
                         );
 
-                        let rows = append_replayed_outbox(
+                        let outcome = append_replayed_outbox_with_projection(
                             conn,
                             ReplayedOutboxAppend {
                                 event_id: request.replay_id().as_str().to_string(),
@@ -171,11 +187,12 @@ impl DlqStore for PgDlqStore {
                                 metadata_json: metadata.to_string(),
                                 causation_id: None,
                             },
+                            &projection_registry,
                         )
                         .await
                         .map_err(db_error("replay.insert_outbox"))?;
 
-                        if rows == 1 {
+                        if outcome == OutboxAppendOutcome::Inserted {
                             Ok(DlqReplayOutcome::Inserted)
                         } else {
                             Ok(DlqReplayOutcome::AlreadyExists)

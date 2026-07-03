@@ -276,9 +276,10 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
 
 ## DLX 与幂等
 
-- 永久错误进入 DLX。统一审计表为 `dead_letter`，`source_kind` 闭值集为 `consumer` / `outbox_relay` / `saga`
-  （`legacy` 仅迁移前历史行）。`dead_letter.metadata` 保留 delivery envelope metadata；`consumer`
-  来源必须记录 subscription `consumer_group`，非 consumer 来源写 `NULL`。PG `original_entry` 只允许
+- 永久错误进入 DLX。统一审计表为 `dead_letter`，`source_kind` 闭值集为 `consumer` / `outbox_relay` / `saga` /
+  `projection`（`legacy` 仅迁移前历史行）。`dead_letter.metadata` 保留 delivery envelope metadata；`consumer`
+  来源必须记录 subscription `consumer_group`；`projection` 来源必须记录 projection id 作为 `consumer_group`。
+  PG `original_entry` 只允许
   `KeyProvider`/Vault transit 加密后的 `{"ciphertext":[...]}` shape，并同时写
   `original_entry_key_ref`、`original_entry_payload_len`、`original_entry_encoding='key-provider-v1'`；
   `{"bytes":[...]}` 明文 shape 禁止写入且 replay 必须拒绝。新增 migration 若发现既有 `dead_letter`
@@ -296,8 +297,10 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   不得重置 `inbox_receipts done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
   并写入 outbox `contract_version` / `schema_hash` 物理列；缺失或非法 fail-closed。Outbox relay DLX redrive 同样必须传
   `OperatorDlqCapability`，只恢复原 outbox 行为 `pending`；outbox DLX payload 副本保留在 `dead_letter`
-  用于审计，不参与 redrive。Saga `dead_letter` 只作审计与诊断，不支持 replay 成 outbox；生产 saga DLQ
-  当前没有 contract schema source，强行 replay 会绕过 schema 列权威性。`OperatorDlqCapability::issue_for_authorized_operator()`
+  用于审计，不参与 redrive。Saga 与 projection `dead_letter` 只作审计与诊断，不支持 replay 成 outbox；
+  projection poison `message_id` 固定为 `projection:<owner>:<projection_id>:<lsn>`，重复写入必须幂等。
+  生产 saga/projection DLQ 当前没有可安全重放的 outbox contract source，强行 replay 会绕过 schema 列权威性。
+  `OperatorDlqCapability::issue_for_authorized_operator()`
   只能在 admin/PDP 边界签发，调用点由 dylint `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；
   replay decrypt 只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与
   `Forbidden/NotFound` 保留为 operator 可区分的依赖/配置错误。
@@ -370,11 +373,11 @@ dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx
 
 ## Projection
 
-projection consumer 必须 wire `bootstrap::with_consumer_base`。投影事件载体使用
-`consistency::ProjectionEvent` trait；outbox entry 与 saga journal event 都实现该 trait。
-retained journal、checkpoint、tailer 的完整约束以对应 rustdoc 和 ADR 为准。
+projection consumer 必须 wire durable projection harness。投影事件载体使用
+`consistency::ProjectionEvent` trait，包含 payload、topic、LSN 与持久化 envelope metadata。
+retained journal、checkpoint、tailer、DLQ 的完整约束以对应 rustdoc 和 ADR 为准。
 
-**串行有序门禁（fail-closed by absence，#1211）**：`ProjectionHarness::new` 必填一枚
+**串行有序门禁（fail-closed by absence，#1211）**：`ProjectionHarness::new` 必填 DLQ store 与一枚
 `consistency::SerialInOrderGuarantor` witness——非串行投递路径拿不到 witness ⇒ **编译期**挂不上 projection
 （投影 apply 须按序，乱序会损坏读模型）。witness 唯一经 `SerialInOrder::from_source(&S)` 铸造，`S` 须 impl
 `consistency::PartitionSerialDelivery`（声明其 read/poll 路径串行有序，如 `PgProjectionEvents` 的
@@ -382,11 +385,26 @@ retained journal、checkpoint、tailer 的完整约束以对应 rustdoc 和 ADR 
 `rss_partition_serial_allowlist` 守（仅 allowlist adapter/组合根可 impl `PartitionSerialDelivery`，Medium）。
 INVARIANT: PROJECTION-SERIAL-WITNESS-01 / PARTITION-SERIAL-IMPL-ALLOWLIST-01。
 
-outbox 派生投影的 durable journal（`projection_events`）由 emit 期同事务双写
-装饰器写入：append 收口单一 sanctioned 路径（sealed 写入入口），
-双写 topic 集从域 crate 的投影声明（`contract.toml` / proc-macro 标注）派生、非手写。
-append-only 主守卫是 serving role 的 DB 引擎 `REVOKE UPDATE, DELETE`（migration 内 GRANT 收紧，Hard、不可绕）；
-code-level `DELETE`/`TRUNCATE projection_events` 字面量另由 clippy lint（Medium，含 anti-vacuity + RED/GREEN fixture）守。
+outbox 派生投影的 durable journal（`projection_events`）只由 outbox writer funnel 写入：
+`append_outbox` 返回 `Inserted/AlreadyExists`，仅当 outbox 行新插入且 `(contract_id, version, schema_hash, topic)` 命中 generated
+`generated::event::PROJECTION_INPUTS` 派生的 `ProjectionWriteRegistry` 时，才在同一事务内镜像到
+`projection_events`。registry 只接受 `&'static [vocab::ProjectionInputBinding]`，不提供 raw string topic
+注册 API；生产 projection binding 必须来自 contract metadata/codegen，非手写列表。DLQ replay 写 outbox 时也走
+同一 funnel，duplicate replay 不重复写 projection journal。
+
+`projection_events` 写/读只经固定 `SECURITY DEFINER` 函数：
+`rss_append_projection_event(...)` / `rss_read_projection_events(...)`。`rss_app` 只拿函数 `EXECUTE`，不持
+`projection_events` 表级 `SELECT/INSERT/UPDATE/DELETE`；函数 owner 为 NOLOGIN runtime role，表仍 `REVOKE UPDATE, DELETE`。
+启动期 migrator 用 generated `PROJECTION_INPUTS` 刷新 DB 侧 `projection_input_bindings`，不授 `rss_app`
+写权限；append 函数还要求参数与同事务可见 outbox row 完全匹配，且该 row 命中 DB registry，防止直接 SQL
+绕过 Rust funnel 凭空写 projection journal。append 函数持 xact advisory lock 后插入，使 projection LSN identity 顺序跟随已提交 projection append 顺序。
+0040 migration 是 pre-GA breaking cut：旧 `projection_events` 非空即 fail-fast，不 backfill、不保留裸 append shim。
+Projection harness 对 `Permanent` / `Invariant` / `OutOfOrder` 写 projection DLQ 后停当前 projection，不自动 skip；
+`Transient` 不写 DLQ；DLQ 写失败不推进 checkpoint。`PgCheckpointStore::save_checkpoint` 在 SQL update 路径拒绝
+offset regression。
+append-only 主守卫是 serving role 的 DB 引擎权限与固定函数面（Hard、不可绕）；
+code-level `DELETE`/`TRUNCATE projection_events` 字面量与固定函数 direct callsite 另由 verify guard
+（Medium，含 anti-vacuity + RED/GREEN fixture）守。
 盲区/评级/符号以对应 rustdoc 为准。
 
 ## 命名与 payload

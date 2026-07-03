@@ -3385,6 +3385,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         &build_pg_config()?,
         audit_admin_config.as_ref(),
         legacy_config_plaintext_policy()?,
+        generated::event::PROJECTION_INPUTS,
     )
     .await
     .context("setup postgres deps")?;

@@ -1,9 +1,11 @@
-//! `contract-binding-guard` —— 生产源中禁止裸 mint `vocab::ContractBinding::from_static`。
+//! `contract-binding-guard` —— 生产源中禁止裸 mint generated contract/projection binding，并守
+//! projection DB fixed function callsite 收口。
 //!
 //! `ContractBinding` 的正确生产来源是 `generated::{http,event,command}::*::CONTRACT`。`from_static`
 //! 必须保持 `pub const fn`，否则 codegen 无法跨 crate 发射常量；因此跨 crate sealing 不能做到 Hard。
-//! 本 guard 把残余面收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用
-//! `ContractBinding::from_static` 都 fail-fast。测试 fixture 与 generated/xtask 不在本扫描范围内。
+//! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`。本 guard 把残余面
+//! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 `*Binding::from_static` 都 fail-fast。
+//! 测试 fixture 与 generated/xtask 不在本扫描范围内。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }.
 
@@ -15,8 +17,8 @@ use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprCall, ExprPath, ItemFn, ItemMod, ItemType, ItemUse, Meta, Token, Type,
-    TypePath, UseTree,
+    Attribute, Expr, ExprCall, ExprPath, ItemFn, ItemMod, ItemType, ItemUse, Lit, Meta, Token,
+    Type, TypePath, UseTree,
 };
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
@@ -24,11 +26,16 @@ use crate::src_scan::{member_dirs, rs_files};
 use crate::workspace_root;
 
 const SCAN_ROOTS: &[&str] = &["crates", "adapters", "bins", "assemblies"];
+const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
+const PROJECTION_DB_FUNCTIONS: &[&str] =
+    &["rss_append_projection_event", "rss_read_projection_events"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
     /// 生产代码直接调用 `ContractBinding::from_static`，绕过 generated `CONTRACT` 常量。
     BareFromStatic,
+    /// 生产代码绕过 sanctioned projection_events wrapper 直接调用 DB fixed function。
+    ProjectionDbFunctionCallsite,
 }
 
 pub(crate) struct ContractBindingGuard;
@@ -45,7 +52,7 @@ impl GovernanceCheck for ContractBindingGuard {
         let (scanned, findings) = scan_sources(&root)?;
         Ok((
             format!(
-                "扫描 {scanned} 个生产 Rust 源文件；ContractBinding 生产 mint 仅允许 generated CONTRACT"
+                "扫描 {scanned} 个生产 Rust 源文件；contract/projection binding 生产 mint 仅允许 generated 常量；projection DB functions 仅允许 sanctioned wrapper"
             ),
             findings,
         ))
@@ -58,13 +65,14 @@ fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
     for top in SCAN_ROOTS {
         for member in member_dirs(&root.join(top))? {
             for path in rs_files(&member.join("src"))? {
-                if is_test_file(&path) {
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("contract-binding-guard: read {}", path.display()))?;
+                let relative = root_relative(root, &path);
+                if is_test_file(&path) || is_binding_definition_file(&relative) {
                     continue;
                 }
                 scanned += 1;
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("contract-binding-guard: read {}", path.display()))?;
-                findings.extend(scan_file(&root_relative(root, &path), &content)?);
+                findings.extend(scan_file(&relative, &content)?);
             }
         }
     }
@@ -96,6 +104,27 @@ fn is_test_file(path: &Path) -> bool {
         || path.components().any(|c| c.as_os_str() == "tests")
 }
 
+fn is_binding_definition_file(path: &Path) -> bool {
+    path == Path::new("crates/vocab/src/contract/binding.rs")
+}
+
+fn is_projection_events_wrapper(path: &Path) -> bool {
+    path == Path::new(PROJECTION_EVENTS_WRAPPER)
+}
+
+fn expr_contains_projection_db_function(expr: &Expr) -> bool {
+    let Expr::Lit(lit) = expr else {
+        return false;
+    };
+    let Lit::Str(value) = &lit.lit else {
+        return false;
+    };
+    let sql = value.value().to_ascii_lowercase();
+    PROJECTION_DB_FUNCTIONS
+        .iter()
+        .any(|function| sql.contains(function))
+}
+
 struct BindingVisitor<'a> {
     path: &'a Path,
     aliases: BTreeSet<String>,
@@ -117,14 +146,28 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if self.in_test == 0 && is_contract_binding_from_static(&node.func, &self.aliases) {
+        if self.in_test == 0 && is_binding_from_static(&node.func, &self.aliases) {
             self.findings.push(finding(
                 Rule::BareFromStatic,
                 self.path.display().to_string(),
-                "生产代码不得直接调用 `ContractBinding::from_static`；请使用 generated `CONTRACT` 常量",
+                "生产代码不得直接调用 binding `from_static`；请使用 generated `CONTRACT` / `PROJECTION_INPUTS` 常量",
             ));
         }
         visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if self.in_test == 0
+            && !is_projection_events_wrapper(self.path)
+            && expr_contains_projection_db_function(node)
+        {
+            self.findings.push(finding(
+                Rule::ProjectionDbFunctionCallsite,
+                self.path.display().to_string(),
+                "生产代码不得直接调用 projection DB fixed function；请经 postgres projection_events wrapper",
+            ));
+        }
+        visit::visit_expr(self, node);
     }
 }
 
@@ -161,6 +204,7 @@ impl<'ast> Visit<'ast> for AliasCollector {
 fn collect_contract_binding_aliases(file: &syn::File) -> BTreeSet<String> {
     let mut aliases = BTreeSet::new();
     aliases.insert("ContractBinding".to_string());
+    aliases.insert("ProjectionInputBinding".to_string());
     let mut collector = AliasCollector { aliases };
     collector.visit_file(file);
     collector.aliases
@@ -172,7 +216,13 @@ fn collect_use_tree_aliases(tree: &UseTree, aliases: &mut BTreeSet<String>) {
         UseTree::Name(name) if name.ident == "ContractBinding" => {
             aliases.insert("ContractBinding".to_string());
         }
+        UseTree::Name(name) if name.ident == "ProjectionInputBinding" => {
+            aliases.insert("ProjectionInputBinding".to_string());
+        }
         UseTree::Rename(rename) if rename.ident == "ContractBinding" => {
+            aliases.insert(rename.rename.to_string());
+        }
+        UseTree::Rename(rename) if rename.ident == "ProjectionInputBinding" => {
             aliases.insert(rename.rename.to_string());
         }
         UseTree::Group(group) => {
@@ -188,10 +238,10 @@ fn is_contract_binding_type(ty: &Type) -> bool {
     matches!(ty, Type::Path(TypePath { path, .. }) if path
         .segments
         .last()
-        .is_some_and(|seg| seg.ident == "ContractBinding"))
+        .is_some_and(|seg| seg.ident == "ContractBinding" || seg.ident == "ProjectionInputBinding"))
 }
 
-fn is_contract_binding_from_static(func: &Expr, aliases: &BTreeSet<String>) -> bool {
+fn is_binding_from_static(func: &Expr, aliases: &BTreeSet<String>) -> bool {
     let Expr::Path(ExprPath { path, .. }) = func else {
         return false;
     };
@@ -300,6 +350,28 @@ mod tests {
     }
 
     #[test]
+    fn flags_prod_projection_input_from_static_call() -> anyhow::Result<()> {
+        let src = r#"
+            use vocab::ProjectionInputBinding;
+
+            fn mint() {
+                let _ = ProjectionInputBinding::from_static(
+                    "audit.session-projection",
+                    "identity",
+                    "identity.session-created",
+                    "v1",
+                    "sha256:0123",
+                    "identity.session.created",
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
     fn flags_cfg_not_test_prod_call() -> anyhow::Result<()> {
         let src = r#"
             #[cfg(not(test))]
@@ -380,6 +452,73 @@ mod tests {
     }
 
     #[test]
+    fn flags_projection_db_function_callsite_outside_wrapper() -> anyhow::Result<()> {
+        let src = r#"
+            fn append() {
+                let _sql = "SELECT rss_append_projection_event($1, $2)";
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/outbox.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::ProjectionDbFunctionCallsite);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_projection_db_function_callsite_outside_wrapper_case_insensitive() -> anyhow::Result<()>
+    {
+        let src = r#"
+            fn append() {
+                let _sql = "SELECT RSS_APPEND_PROJECTION_EVENT($1, $2)";
+                let _read = "SELECT * FROM Rss_Read_Projection_Events($1, $2)";
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/outbox.rs"), src)?;
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::ProjectionDbFunctionCallsite),
+            "uppercase/mixed-case fixed function calls must be guarded: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn allows_projection_db_function_callsite_in_wrapper() -> anyhow::Result<()> {
+        let src = r#"
+            fn append() {
+                let _append = "SELECT rss_append_projection_event($1, $2)";
+                let _read = "SELECT * FROM rss_read_projection_events($1, $2)";
+            }
+        "#;
+        let findings = scan_file(Path::new(PROJECTION_EVENTS_WRAPPER), src)?;
+        assert!(
+            findings.is_empty(),
+            "projection_events wrapper is the sanctioned DB function callsite: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_projection_db_function_test_fixture() -> anyhow::Result<()> {
+        let src = r#"
+            #[cfg(test)]
+            mod tests {
+                fn fixture() {
+                    let _sql = "SELECT rss_read_projection_events($1, $2)";
+                }
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/lib.rs"), src)?;
+        assert!(
+            findings.is_empty(),
+            "test fixtures must be allowed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     #[allow(clippy::expect_used)]
     fn real_sources_have_no_bare_contract_binding_mint() {
         let root = workspace_root().expect("workspace root");
@@ -387,7 +526,7 @@ mod tests {
         assert!(scanned >= 10, "至少扫到生产 src，实际 {scanned}");
         assert!(
             findings.is_empty(),
-            "生产 src 不应裸调用 ContractBinding::from_static: {findings:?}"
+            "生产 src 不应裸调用 binding from_static 或 projection DB function: {findings:?}"
         );
     }
 }

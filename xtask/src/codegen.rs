@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
-use crate::contract::manifest::{ContractKind, HttpAuthMode, HttpHeaderMode, Lifecycle};
+use crate::contract::manifest::{
+    ContractKind, HttpAuthMode, HttpHeaderMode, Lifecycle, WorkflowMode,
+};
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
 use crate::contract::{
@@ -115,6 +117,7 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
         let mut mod_rs = render_mod_rs(modules, *mod_kind);
         if *mod_kind == ModKind::Event {
             mod_rs.push_str(&render_event_root_subscriptions(contracts)?);
+            mod_rs.push_str(&render_event_root_projection_inputs(contracts)?);
         }
         files.push((PathBuf::from(kind_dir).join("mod.rs"), mod_rs));
     }
@@ -1262,6 +1265,85 @@ pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[{body}];
     ))
 }
 
+fn render_event_root_projection_inputs(contracts: &[DiscoveredContract]) -> Result<String> {
+    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+        .iter()
+        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .collect();
+    let mut entries = Vec::new();
+    for projection in contracts.iter().filter(|contract| {
+        contract
+            .manifest
+            .capabilities
+            .workflow
+            .as_ref()
+            .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
+    }) {
+        let projection_id = projection.manifest.id.as_str();
+        if !is_safe_codegen_ident(projection_id) {
+            bail!("projection workflow id 含不安全字符（防注入生成字面量）: {projection_id:?}");
+        }
+        let Some(workflow) = projection.manifest.capabilities.workflow.as_ref() else {
+            continue;
+        };
+        for input_id in &workflow.inputs {
+            let input = by_id.get(input_id.as_str()).with_context(|| {
+                format!(
+                    "projection workflow {} input {} 不存在（codegen fail-closed）",
+                    projection.manifest.id, input_id
+                )
+            })?;
+            if input.manifest.kind != ContractKind::Event {
+                bail!(
+                    "projection workflow {} input {} 不是 event contract（codegen fail-closed）",
+                    projection.manifest.id,
+                    input_id
+                );
+            }
+            let domain = input.manifest.domain.as_str();
+            let contract_id = input.manifest.id.as_str();
+            let version = input.manifest.version.as_str();
+            let topic = input.manifest.topic.as_deref().unwrap_or(contract_id);
+            for (field, value) in [
+                ("projection_id", projection_id),
+                ("domain", domain),
+                ("contract_id", contract_id),
+                ("version", version),
+                ("topic", topic),
+            ] {
+                if !is_safe_codegen_ident(value) {
+                    bail!(
+                        "projection input binding 的 {field} 含不安全字符（防注入生成字面量）: {value:?}"
+                    );
+                }
+            }
+            let schema_hash = schema_hash(input)?;
+            if !is_safe_codegen_string(&schema_hash) {
+                bail!(
+                    "projection input binding 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}"
+                );
+            }
+            entries.push(format!(
+                "    ::vocab::ProjectionInputBinding::from_static(\"{projection_id}\", \"{domain}\", \"{contract_id}\", \"{version}\", \"{schema_hash}\", \"{topic}\")"
+            ));
+        }
+    }
+    let body = if entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", entries.join(",\n"))
+    };
+    Ok(format!(
+        r#"
+/// Root projection input registry aggregated from `[capabilities.workflow].inputs`.
+///
+/// Postgres projection writers consume this static registry to decide which outbox facts are also
+/// mirrored into `projection_events`. Runtime code must not enumerate projection topics by hand.
+pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[{body}];
+"#
+    ))
+}
+
 fn render_lib_rs<'a>(kinds: impl Iterator<Item = &'a String>) -> String {
     let mut s = String::new();
     s.push_str("//! generated — 契约派生 wire 类型（committed，一等审查材料）。\n");
@@ -1455,6 +1537,38 @@ mod tests {
         )?;
         let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
         std::fs::write(dir.join("payload.schema.json"), schema)?;
+        Ok(())
+    }
+
+    /// 落一个 projection workflow 契约，input 指向 `seed.happened` event 契约。
+    fn seed_projection_workflow(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/http/audit/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"audit.seed-projection\"\n",
+                "kind = \"http\"\n",
+                "domain = \"audit\"\n",
+                "version = \"v1\"\n",
+                "owner = \"audit\"\n",
+                "consistencyLevel = \"WorkflowEventual\"\n",
+                "lifecycle = \"draft\"\n",
+                "[schemas]\n",
+                "request = \"request.schema.json\"\n",
+                "response = \"response.schema.json\"\n",
+                "[capabilities.workflow]\n",
+                "mode = \"projection\"\n",
+                "inputs = [\"seed.happened\"]\n",
+                "ordering = \"serial-in-order\"\n",
+                "checkpoint = \"required\"\n",
+                "replay = \"required\"\n",
+            ),
+        )?;
+        let request = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"AuditSeedProjectionRequest\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        let response = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"AuditSeedProjectionResponse\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        std::fs::write(dir.join("request.schema.json"), request)?;
+        std::fs::write(dir.join("response.schema.json"), response)?;
         Ok(())
     }
 
@@ -2121,6 +2235,42 @@ mod tests {
         assert!(
             rendered.contains("pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];"),
             "空 subscriptions 应生成空切片:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    /// projection workflow 的 inputs 须派生成根级 `PROJECTION_INPUTS`，且 input metadata 来自目标 event
+    /// contract，而不是运行时手写 topic list。
+    #[test]
+    fn event_root_projection_inputs_emitted_from_workflow_contracts() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_projection_inputs");
+        seed_event_with_subscription(&root)?;
+        seed_projection_workflow(&root)?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let mod_rs = std::fs::read_to_string(gen_src.join("event/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            mod_rs.contains("pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding]"),
+            "event/mod.rs 缺 projection input root registry:\n{mod_rs}"
+        );
+        assert_generated_contains(
+            &mod_rs,
+            "::vocab::ProjectionInputBinding::from_static(",
+            "PROJECTION_INPUTS 应由 ProjectionInputBinding 常量构造",
+        );
+        assert!(
+            mod_rs.contains(r#""audit.seed-projection""#),
+            "projection_id 应来自 workflow contract id:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains(r#""_seed""#)
+                && mod_rs.contains(r#""seed.happened""#)
+                && mod_rs.contains(r#""v1""#)
+                && mod_rs.contains(r#""seed.happened""#)
+                && mod_rs.contains(r#""sha256:"#),
+            "input binding 应包含目标 event 的 domain/id/version/topic/schema_hash:\n{mod_rs}"
         );
         Ok(())
     }

@@ -16,6 +16,7 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }   # LeaseToken::mint 内铸 uuid v4（#1354 F4）
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
