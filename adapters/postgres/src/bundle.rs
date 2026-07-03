@@ -66,10 +66,10 @@ use crate::{
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
     PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
-    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxMaintenance, PgPolicyRepo, PgProjectionEvents,
-    PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo,
-    PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx,
-    PgStore, PgStoreGuard,
+    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance, PgPolicyRepo,
+    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore,
+    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle,
+    PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -700,6 +700,15 @@ impl PgInfraDeps {
     #[must_use]
     pub fn emitter(&self, clock: Box<dyn Clock>) -> PgEmitter {
         PgEmitter::new_with_projection_registry(&self.store, clock, self.projection_registry)
+    }
+
+    /// CDC-facing append-only outbox emitter.
+    ///
+    /// This explicit opt-in mode writes `outbox_log` and does not participate in the relay
+    /// `outbox` status machine.
+    #[must_use]
+    pub fn cdc_emitter(&self, clock: Box<dyn Clock>) -> PgOutboxCdcEmitter {
+        PgOutboxCdcEmitter::new_with_store(&self.store, clock)
     }
 
     /// outbox backlog/sweeper maintenance 能力（不持 publisher）。

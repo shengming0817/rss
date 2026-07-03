@@ -1076,6 +1076,400 @@ async fn inbox_receipts_rls_grants_and_tenant_isolation() -> TestResult {
     Ok(())
 }
 
+// ── outbox_log CDC schema (#1630) ────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let columns: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'outbox_log' \
+         ORDER BY ordinal_position",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        columns,
+        vec![
+            ("event_id".to_string(), "text".to_string(), "NO".to_string()),
+            (
+                "tenant_id".to_string(),
+                "uuid".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "aggregate_type".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "aggregate_id".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            ("topic".to_string(), "text".to_string(), "NO".to_string()),
+            (
+                "contract_id".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "contract_version".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "schema_hash".to_string(),
+                "text".to_string(),
+                "NO".to_string()
+            ),
+            ("payload".to_string(), "bytea".to_string(), "NO".to_string()),
+            (
+                "metadata".to_string(),
+                "jsonb".to_string(),
+                "NO".to_string()
+            ),
+            (
+                "causation_id".to_string(),
+                "text".to_string(),
+                "YES".to_string()
+            ),
+            (
+                "created_at".to_string(),
+                "timestamp with time zone".to_string(),
+                "NO".to_string()
+            ),
+        ],
+        "outbox_log columns must match the CDC append-only contract"
+    );
+
+    let constraint_text: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname, pg_get_constraintdef(oid) \
+         FROM pg_constraint \
+         WHERE conrelid = 'outbox_log'::regclass \
+         ORDER BY conname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let constraint_text = constraint_text
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for name in [
+        "outbox_log_event_id_unique",
+        "outbox_log_event_id_nonempty",
+        "outbox_log_aggregate_type_nonempty",
+        "outbox_log_aggregate_id_nonempty",
+        "outbox_log_contract_version_valid",
+        "outbox_log_schema_hash_valid",
+        "outbox_log_metadata_object",
+        "outbox_log_metadata_tenant_matches_column",
+        "outbox_log_metadata_schema_matches_columns",
+        "outbox_log_causation_id_valid",
+    ] {
+        assert!(
+            constraint_text.contains(name),
+            "missing outbox_log constraint `{name}` in:\n{constraint_text}"
+        );
+    }
+
+    let indexes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname, indexdef \
+         FROM pg_indexes \
+         WHERE schemaname = 'public' AND tablename = 'outbox_log' \
+         ORDER BY indexname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let indexes = indexes
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        indexes.contains("idx_outbox_log_contract_schema"),
+        "outbox_log contract/schema lookup index missing in:\n{indexes}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+async fn insert_outbox_log_with_metadata(
+    store: &PgStore,
+    event_id: &str,
+    tenant: vocab::TenantId,
+    metadata: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO outbox_log \
+         (event_id, tenant_id, aggregate_type, aggregate_id, topic, contract_id, \
+          contract_version, schema_hash, payload, metadata, causation_id) \
+         VALUES \
+         ($1, $2::uuid, 'identity', $1, 'identity.session-created', \
+          'identity.session-created', 'v1', $3, decode('70', 'hex'), $4::jsonb, NULL)",
+    )
+    .bind(event_id)
+    .bind(tenant.to_string())
+    .bind(TEST_SCHEMA_HASH)
+    .bind(metadata.to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = test_tenant();
+    let good_metadata = serde_json::json!({
+        "tenantId": tenant.to_string(),
+        "schemaVersion": "v1",
+        "schemaHash": TEST_SCHEMA_HASH,
+    });
+    insert_outbox_log_with_metadata(
+        &store,
+        &unique_event_id("outbox-log-good-schema"),
+        tenant,
+        good_metadata,
+    )
+    .await?;
+
+    for (label, metadata) in [
+        (
+            "missing schemaVersion",
+            serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "schemaHash": TEST_SCHEMA_HASH,
+            }),
+        ),
+        (
+            "missing schemaHash",
+            serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "schemaVersion": "v1",
+            }),
+        ),
+        (
+            "wrong schemaHash",
+            serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "schemaVersion": "v1",
+                "schemaHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            }),
+        ),
+        (
+            "non-string schemaVersion",
+            serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "schemaVersion": 1,
+                "schemaHash": TEST_SCHEMA_HASH,
+            }),
+        ),
+    ] {
+        let err = insert_outbox_log_with_metadata(
+            &store,
+            &unique_event_id("outbox-log-bad-schema"),
+            tenant,
+            metadata,
+        )
+        .await
+        .expect_err(label);
+        assert!(
+            err.as_database_error().is_some_and(|db| db
+                .message()
+                .contains("outbox_log_metadata_schema_matches_columns")),
+            "{label} should fail the schema metadata CHECK, got: {err:?}"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_log_append_only_grants_and_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let (rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, \
+                has_table_privilege('rss_app', 'outbox_log', 'SELECT'), \
+                has_table_privilege('rss_app', 'outbox_log', 'INSERT'), \
+                has_table_privilege('rss_app', 'outbox_log', 'UPDATE'), \
+                has_table_privilege('rss_app', 'outbox_log', 'DELETE') \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'outbox_log'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(rls_enabled, "outbox_log must ENABLE RLS");
+    assert!(rls_forced, "outbox_log must FORCE RLS");
+    assert!(can_select, "rss_app must SELECT outbox_log");
+    assert!(can_insert, "rss_app must INSERT outbox_log");
+    assert!(
+        !can_update,
+        "rss_app must not UPDATE append-only outbox_log"
+    );
+    assert!(
+        !can_delete,
+        "rss_app must not DELETE append-only outbox_log"
+    );
+
+    let (qual, with_check): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT qual, with_check \
+         FROM pg_policies \
+         WHERE schemaname = 'public' \
+           AND tablename = 'outbox_log' \
+           AND policyname = 'tenant_isolation'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    for body in [qual.as_deref(), with_check.as_deref()] {
+        let body = body.ok_or_else(|| {
+            std::io::Error::other("outbox_log tenant policy must define USING and WITH CHECK")
+        })?;
+        assert!(
+            body.to_lowercase().contains("nullif(current_setting"),
+            "tenant policy must use NULLIF(current_setting(...)): {body}"
+        );
+        assert!(
+            body.contains("rss.tenant_id"),
+            "tenant policy must reference rss.tenant_id: {body}"
+        );
+    }
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let event_id = unique_event_id("outbox-log-rls");
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO outbox_log \
+             (event_id, tenant_id, aggregate_type, aggregate_id, topic, contract_id, \
+              contract_version, schema_hash, payload, metadata, causation_id) \
+             VALUES \
+             ($1, $2::uuid, 'identity', $1, 'identity.session-created', \
+              'identity.session-created', 'v1', $3, decode('70', 'hex'), \
+              jsonb_build_object('tenantId', $2, 'schemaVersion', 'v1', 'schemaHash', $3), NULL)",
+        )
+        .bind(&event_id)
+        .bind(&tenant_a)
+        .bind(TEST_SCHEMA_HASH)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let update =
+            sqlx::query("UPDATE outbox_log SET aggregate_id = 'mutated' WHERE event_id = $1")
+                .bind(&event_id)
+                .execute(&mut *tx)
+                .await;
+        assert!(
+            update.is_err(),
+            "rss_app must not update append-only outbox_log"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let delete = sqlx::query("DELETE FROM outbox_log WHERE event_id = $1")
+            .bind(&event_id)
+            .execute(&mut *tx)
+            .await;
+        assert!(
+            delete.is_err(),
+            "rss_app must not delete append-only outbox_log"
+        );
+        tx.rollback().await?;
+    }
+
+    for (tenant, expected, label) in [(&tenant_a, 1_i64, "tenant A"), (&tenant_b, 0, "tenant B")] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox_log WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(cnt.0, expected, "{label} outbox_log visibility mismatch");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox_log WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "missing rss.tenant_id must fail closed for outbox_log"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 // ── reconcile target/attempt/action/lease schema (#1629) ─────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5464,6 +5858,166 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
             row.8
         );
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// PgOutboxCdcEmitter::emit writes the opt-in append-only CDC table only.
+///
+/// It must not fallback to relay `outbox`, and duplicate event_id emits remain idempotent.
+type OutboxCdcEmitterRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Vec<u8>,
+    serde_json::Value,
+    Option<String>,
+);
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> TestResult {
+    use consistency::PartitionKey;
+    use diport::{EnvelopeCausationId, OutboxEmitter, OutboxEnvelopeParts};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let event_id = unique_event_id("outbox-cdc-emit");
+    let tenant = test_tenant();
+    let make_entry = || {
+        Entry::new(
+            Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+            IdemKey::parse(&event_id).unwrap(),
+            reviewed_payload(br#"{"sessionId":"cdc"}"#),
+        )
+    };
+    let make_envelope = || {
+        OutboxEnvelopeParts::new(
+            session_contract(),
+            tenant,
+            subject_id("cdc-subj-opaque-77"),
+            actor_for(tenant),
+        )
+        .with_partition_key(PartitionKey::parse("tenant-7:session-9").unwrap())
+        .with_causation_id(EnvelopeCausationId::from_opaque("cdc-cause-1").unwrap())
+    };
+    let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
+    emitter.emit(make_entry(), make_envelope()).await?;
+    emitter.emit(make_entry(), make_envelope()).await?;
+
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox_log WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(count.0, 1, "CDC emitter should append idempotently once");
+
+    let row: OutboxCdcEmitterRow = sqlx::query_as(
+        "SELECT tenant_id::text, aggregate_type, aggregate_id, topic, contract_id, \
+                contract_version, schema_hash, payload, metadata, causation_id \
+         FROM outbox_log \
+         WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let tenant_text = tenant.to_string();
+    assert_eq!(row.0, tenant.to_string(), "tenant_id");
+    assert_eq!(row.1, "identity", "aggregate_type");
+    assert_eq!(row.2, "cdc-subj-opaque-77", "aggregate_id");
+    assert_ne!(
+        row.2, "tenant-7:session-9",
+        "CDC aggregate_id must not expose partition_key"
+    );
+    assert_eq!(row.3, SESSION_CREATED_TOPIC, "topic");
+    assert_eq!(row.4, "identity.session-created", "contract_id");
+    assert_eq!(row.5, "v1", "contract_version");
+    assert_eq!(row.6, TEST_SCHEMA_HASH, "schema_hash");
+    assert_eq!(row.7, br#"{"sessionId":"cdc"}"#, "payload");
+    assert_eq!(
+        row.8.get("tenantId").and_then(serde_json::Value::as_str),
+        Some(tenant_text.as_str()),
+        "metadata tenantId"
+    );
+    assert_eq!(
+        row.8
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_str),
+        Some("v1"),
+        "metadata schemaVersion"
+    );
+    assert_eq!(
+        row.8.get("schemaHash").and_then(serde_json::Value::as_str),
+        Some(TEST_SCHEMA_HASH),
+        "metadata schemaHash"
+    );
+    assert_eq!(row.9.as_deref(), Some("cdc-cause-1"), "causation_id");
+
+    let relay_count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        relay_count.0, 0,
+        "CDC emitter must not fallback to relay outbox"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -> TestResult {
+    use diport::{OutboxEmitter, OutboxEnvelopeParts};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let event_id = unique_event_id("outbox-cdc-conflict");
+    let tenant = test_tenant();
+    let make_entry = |payload: &'static [u8]| {
+        Entry::new(
+            Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+            IdemKey::parse(&event_id).unwrap(),
+            reviewed_payload(payload),
+        )
+    };
+    let make_envelope = || {
+        OutboxEnvelopeParts::new(
+            session_contract(),
+            tenant,
+            subject_id("cdc-conflict-subject"),
+            actor_for(tenant),
+        )
+    };
+    let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
+    emitter
+        .emit(make_entry(br#"{"sessionId":"first"}"#), make_envelope())
+        .await?;
+    let conflict = emitter
+        .emit(make_entry(br#"{"sessionId":"second"}"#), make_envelope())
+        .await;
+    assert!(
+        conflict.is_err(),
+        "same event_id with different immutable CDC payload must fail"
+    );
+
+    let row: (i64, Vec<u8>) =
+        sqlx::query_as("SELECT count(*) OVER (), payload FROM outbox_log WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(row.0, 1, "event_id conflict must not append a second row");
+    assert_eq!(
+        row.1, br#"{"sessionId":"first"}"#,
+        "event_id conflict must preserve the original immutable row"
+    );
 
     store.shutdown().await?;
     Ok(())

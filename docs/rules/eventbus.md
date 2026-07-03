@@ -69,6 +69,23 @@ broker-visible delivery envelope header 的标准字段为：
 user property。业务写入口 `EnvelopeMetadata::try_insert` 对所有 reserved key fail-closed；adapter 只在
 outbox relay/subscriber rehydrate 的受控路径调用 `insert_wire_pair`。
 
+## Outbox 写入模式
+
+PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback / 双写兼容：
+
+- **relay mode**：默认 `PgInfraDeps::emitter(clock)` 与各域 `PgDomainDeps::*::outbox(...)` 写 mutable
+  `outbox` 状态表。`PgOutbox` relay / backlog / sweeper / DLX redrive 只读取 `outbox` 与 `rss_outbox_*`
+  SECURITY DEFINER 函数，不读取 `outbox_log`。
+- **CDC mode**：显式 opt-in `PgInfraDeps::cdc_emitter(clock)` 写 `outbox_log` append-only ledger。该表面向
+  logical decoding / CDC adapter，字段包含 `event_id`、`aggregate_type`、`aggregate_id`、contract
+  id/version、`schema_hash`、`payload bytea`、`metadata jsonb`、`tenant_id` 与 `causation_id`。`aggregate_id`
+  取 envelope `subject_id`；`partition_key` 只保留 relay 排序语义，不暴露到 CDC aggregate id。
+
+`outbox_log` 是 tenant-scoped append-only 表：迁移必须同时落 `ENABLE/FORCE RLS`、标准 `rss.tenant_id`
+policy、`rss_app` 最小 `SELECT/INSERT` 授权与 `UPDATE/DELETE` revoke。tenant、contract version 与
+schema hash 只来自 typed `TenantId` + generated `ContractBinding` 写入列和 metadata，不能从 payload 或
+free-form metadata 反推。
+
 ## 复用层选型（claimer / nonce，topology-gated）
 
 组合根的 outbox 消费幂等 claimer + 内部 listener service-token nonce store 同样经

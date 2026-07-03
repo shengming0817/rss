@@ -105,6 +105,13 @@ SELECT/INSERT/UPDATE 且不授 DELETE；`reconcile_attempts` / `reconcile_action
 SELECT/INSERT 并显式 `REVOKE UPDATE, DELETE`。四表均在同一迁移内落 `FORCE RLS` 与标准 tenant policy。
 本切片只提供 schema 与最小 PG API，不接 reconcile runtime worker。
 
+`0042` 新增 `outbox_log` tenant-scoped append-only ledger，供显式 opt-in CDC outbox adapter 写入；
+默认 relay outbox 仍使用 mutable `outbox` 状态表与 `rss_outbox_*` 函数。`outbox_log` 字段按 CDC 消费面固定：
+`event_id`、`aggregate_type`、`aggregate_id`、topic、contract id/version、`schema_hash`、`payload bytea`、
+`metadata jsonb`、`tenant_id` 与 `causation_id`。该表只授 `rss_app` SELECT/INSERT，显式 `REVOKE UPDATE,
+DELETE`，并在建表迁移内落 `FORCE RLS` 与标准 tenant policy。tenant/schema header 与物理列的一致性由
+DB CHECK 强制，不依赖应用约定。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

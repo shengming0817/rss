@@ -338,8 +338,15 @@ fn raw_outbox_insert_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
     if rel == "outbox.rs" {
         return Vec::new();
     }
+    const NEEDLE: &str = "insert into outbox";
     content
-        .match_indices("insert into outbox")
+        .match_indices(NEEDLE)
+        .filter(|(idx, _)| {
+            content[*idx + NEEDLE.len()..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        })
         .map(|(idx, _)| RawOutboxAccess {
             pattern: "INSERT INTO outbox",
             line: line_number(content, idx),
@@ -915,6 +922,27 @@ mod tests {
         );
         assert!(
             findings.iter().any(|f| f.rule == Rule::RawOutboxInsert),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn green_outbox_log_insert_is_not_relay_outbox_bypass() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "outbox_cdc.rs",
+                    "async fn append(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            !findings.iter().any(|f| f.rule == Rule::RawOutboxInsert),
             "{findings:?}"
         );
     }

@@ -34,6 +34,7 @@ mod emitter;
 mod inbox;
 mod migrator;
 mod outbox;
+mod outbox_cdc;
 mod policy_repo;
 mod pool;
 mod projection_events;
@@ -70,6 +71,7 @@ pub use dead_letter_payload::DlxPayloadProtector;
 pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
+pub use outbox_cdc::PgOutboxCdcEmitter;
 pub use policy_repo::PgPolicyRepo;
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
