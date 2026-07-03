@@ -11,18 +11,19 @@
 //! **append-only**：DB 层 `REVOKE UPDATE, DELETE` + fixed-shape SECURITY DEFINER functions 是主守卫；
 //! 代码侧不保留裸 append 函数。INVARIANT PROJECTION-APPEND-ONLY-01。
 //!
-//! **全局表**：无 tenant_id / 无 RLS，对标 outbox/saga_journal/checkpoint。
+//! **全局表**：无 tenant_id / 无 RLS，是 projection changelog 的显式特例；outbox 与 saga journal
+//! 均已 tenant-scoped。
 //!
 //! **事件源接缝**：adapter 实现 `consistency::ProjectionEventSource`，返回 engine-owned
 //! `ProjectionEventRecord`；harness 当前仍不注入源（方案 B）。
 //!
 //! **时间戳**：`occurred_at`/`created_at` 用 DB DEFAULT `now()`（不注入 Clock，
-//! 对标 saga_journal/checkpoint）。
+//! 对标 DB-owned journal/changelog timestamp）。
 //!
 //! **错误 PII 边界**：append 路径 sqlx 错误不进 Display——经 [`ProjectionEventsError::new`] 包成
 //! source；read source 路径只返回 [`EngineError`] 分类（error-handling.md §Message 与 PII）。
 //!
-//! ref: adapters/postgres/src/saga_journal.rs（append-only adapter 范式）。
+//! ref: adapters/postgres/src/saga.rs（tenant-scoped append-only journal 范式）。
 
 use consistency::{
     EngineError, EngineErrorKind, Lsn, PartitionSerialDelivery, ProjectionBatchLimit,
@@ -436,7 +437,7 @@ mod smoke {
             "migration 0010 必须含 REVOKE UPDATE, DELETE（PROJECTION-APPEND-ONLY-01）"
         );
 
-        // 全局表：不含 tenant_id（对标 outbox/saga_journal/checkpoint）。
+        // 全局表：不含 tenant_id（对标 checkpoint；outbox/saga_journal 已 tenant-scoped）。
         assert!(
             !MIGRATION.contains("tenant_id"),
             "projection_events 是全局表，不应含 tenant_id"

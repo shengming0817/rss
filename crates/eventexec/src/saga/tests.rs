@@ -7,15 +7,21 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use super::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaCommand, SagaExecStatus,
-    SagaExecutor, SagaExecutorImpl, SagaId, SagaOutcome, SagaTailer,
+    SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaTailer,
 };
 use consistency::{Lsn, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName};
+use consistency::{
+    SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaInterruption,
+    SagaJournalAppendOutcome, SagaLease, SagaLeaseOutcome,
+};
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, OwnerCheckpointStore, SagaJournal,
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, OwnerCheckpointStore,
+    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaJournal,
     SagaJournalError, SaveOutcome,
 };
 use futures::future::BoxFuture;
@@ -34,8 +40,13 @@ fn saga_id() -> SagaId {
     SagaId::new(uuid::Uuid::from_u128(0x1121))
 }
 
+#[allow(clippy::unwrap_used)]
+fn instance() -> SagaInstanceRef {
+    SagaInstanceRef::new(tenant(), saga_id()).unwrap()
+}
+
 fn checkpoint_id_str() -> String {
-    saga_id().as_uuid().to_string()
+    format!("{}:{}", TENANT, saga_id().as_uuid())
 }
 
 // ── FakeAction ────────────────────────────────────────────────────────────────
@@ -155,35 +166,35 @@ impl SagaActionFactory for FakeFactory {
     }
 }
 
-/// 空 factory（run-only 测试不用 resume，但构造器必填）。
-struct EmptyFactory;
-impl SagaActionFactory for EmptyFactory {
-    fn build(&self) -> Vec<Box<dyn SagaAction>> {
-        Vec::new()
-    }
-}
-
 // ── FakeJournal ───────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct FakeJournal {
-    rows: Mutex<Vec<(uuid::Uuid, u64, String, SagaJournalStatus)>>,
+    rows: Mutex<Vec<(SagaInstanceRef, SagaJournalAppendRecord)>>,
 }
 
 impl FakeJournal {
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
     fn seed(&self, seq: u64, step: &str, status: SagaJournalStatus) {
-        self.rows
-            .lock()
-            .unwrap()
-            .push((saga_id().as_uuid(), seq, step.to_string(), status));
+        let step = StepName::parse(step).unwrap();
+        let entry = match status {
+            SagaJournalStatus::Executing => SagaJournalAppendRecord::executing(seq, step),
+            SagaJournalStatus::Completed => SagaJournalAppendRecord::completed(seq, step),
+            SagaJournalStatus::Compensating => SagaJournalAppendRecord::compensating(seq, step),
+            SagaJournalStatus::Compensated => SagaJournalAppendRecord::compensated(seq, step),
+            SagaJournalStatus::Failed => SagaJournalAppendRecord::failed(seq, step, "failed"),
+            _ => unreachable!("test only seeds known journal statuses"),
+        };
+        self.rows.lock().unwrap().push((instance(), entry));
     }
     /// seq 序的 (step_name, status)，供顺序断言。
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
     fn log(&self) -> Vec<(String, SagaJournalStatus)> {
         let mut rows: Vec<_> = self.rows.lock().unwrap().clone();
-        rows.sort_by_key(|r| r.1);
-        rows.into_iter().map(|r| (r.2, r.3)).collect()
+        rows.sort_by_key(|(_, entry)| entry.seq());
+        rows.into_iter()
+            .map(|(_, entry)| (entry.step_name().as_str().to_string(), entry.status()))
+            .collect()
     }
 }
 
@@ -191,35 +202,44 @@ impl SagaJournal for FakeJournal {
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
     async fn append(
         &self,
-        sid: &SagaId,
+        lease: &SagaLease,
         entry: SagaJournalAppendRecord,
-    ) -> Result<(), SagaJournalError> {
+    ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
         let mut rows = self.rows.lock().unwrap();
-        let key = (sid.as_uuid(), entry.seq());
-        if !rows.iter().any(|r| (r.0, r.1) == key) {
-            rows.push((
-                sid.as_uuid(),
-                entry.seq(),
-                entry.step_name().as_str().to_string(),
-                entry.status(),
-            ));
+        let instance = lease.instance();
+        let key = (instance, entry.seq());
+        if let Some((_, existing)) = rows
+            .iter()
+            .find(|(stored, record)| (*stored, record.seq()) == key)
+        {
+            return if *existing == entry {
+                Ok(SagaJournalAppendOutcome::IdempotentDuplicate)
+            } else {
+                Ok(SagaJournalAppendOutcome::AppendConflict)
+            };
         }
-        Ok(())
+        rows.push((instance, entry));
+        Ok(SagaJournalAppendOutcome::Appended)
     }
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex + 字面 step 名合法，item-level carve-out
-    async fn read(&self, sid: &SagaId) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
+    async fn read(
+        &self,
+        instance: &SagaInstanceRef,
+    ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
         let mut rows: Vec<_> = self
             .rows
             .lock()
             .unwrap()
             .iter()
-            .filter(|r| r.0 == sid.as_uuid())
+            .filter(|r| &r.0 == instance)
             .cloned()
             .collect();
-        rows.sort_by_key(|r| r.1);
+        rows.sort_by_key(|(_, entry)| entry.seq());
         let entries = rows
             .into_iter()
-            .map(|r| SagaJournalRecord::replayed(r.1, StepName::parse(&r.2).unwrap(), r.3))
+            .map(|(_, entry)| {
+                SagaJournalRecord::replayed(entry.seq(), entry.step_name().clone(), entry.status())
+            })
             .collect();
         Ok(entries)
     }
@@ -346,9 +366,155 @@ impl DeadLetterStore for FakeDeadLetterStore {
     }
 }
 
+// ── FakeInstanceStore（lease/CAS）──────────────────────────────────────────────
+
+#[derive(Default)]
+struct FakeInstanceStore {
+    registered: Mutex<HashMap<SagaInstanceRef, SagaInstanceStatus>>,
+    lease_lost: std::sync::atomic::AtomicBool,
+    releases: AtomicU32,
+}
+
+impl FakeInstanceStore {
+    fn lose_lease(&self) {
+        self.lease_lost.store(true, Ordering::SeqCst);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn seed_status(&self, instance: SagaInstanceRef, status: SagaInstanceStatus) {
+        self.registered.lock().unwrap().insert(instance, status);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn status(&self, instance: SagaInstanceRef) -> Option<SagaInstanceStatus> {
+        self.registered.lock().unwrap().get(&instance).copied()
+    }
+
+    fn release_count(&self) -> u32 {
+        self.releases.load(Ordering::SeqCst)
+    }
+}
+
+impl SagaInstanceStore for FakeInstanceStore {
+    #[allow(clippy::unwrap_used)]
+    async fn register(
+        &self,
+        registration: SagaInstanceRegistration,
+    ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
+        let mut rows = self.registered.lock().unwrap();
+        let status = *rows
+            .entry(registration.instance())
+            .or_insert(SagaInstanceStatus::Ready);
+        Ok(SagaInstanceRecord::new(registration.instance(), status))
+    }
+
+    #[allow(clippy::unwrap_used)]
+    async fn get(
+        &self,
+        instance: &SagaInstanceRef,
+    ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
+        Ok(self
+            .registered
+            .lock()
+            .unwrap()
+            .get(instance)
+            .copied()
+            .map(|status| SagaInstanceRecord::new(*instance, status)))
+    }
+
+    #[allow(clippy::unwrap_used)]
+    async fn acquire_lease(
+        &self,
+        instance: &SagaInstanceRef,
+        holder_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<SagaLease>, SagaInstanceStoreError> {
+        if self.lease_lost.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let mut rows = self.registered.lock().unwrap();
+        let Some(status) = rows.get_mut(instance) else {
+            return Ok(None);
+        };
+        *status = SagaInstanceStatus::Running;
+        SagaLease::new(*instance, holder_id, uuid::Uuid::from_u128(1632), 1)
+            .map(Some)
+            .map_err(SagaInstanceStoreError::new)
+    }
+
+    async fn extend_lease(
+        &self,
+        _lease: &SagaLease,
+        _ttl: Duration,
+    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        if self.lease_lost.load(Ordering::SeqCst) {
+            Ok(SagaLeaseOutcome::Lost)
+        } else {
+            Ok(SagaLeaseOutcome::Held)
+        }
+    }
+
+    async fn release_lease(
+        &self,
+        _lease: &SagaLease,
+    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    #[allow(clippy::unwrap_used)]
+    async fn mark_status(
+        &self,
+        lease: &SagaLease,
+        status: SagaInstanceStatus,
+    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        self.registered
+            .lock()
+            .unwrap()
+            .insert(lease.instance(), status);
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
+        Ok(())
+    }
+}
+
 // ── executor 构造 helper ──────────────────────────────────────────────────────
 
-type Exec = SagaExecutorImpl<FakeJournal, FakeCheckpointStore, FakeDeadLetterStore>;
+type Exec =
+    SagaExecutorImpl<FakeJournal, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>;
+
+fn executor_config() -> SagaExecutorConfig {
+    SagaExecutorConfig::new(
+        CheckpointOwner::new(OWNER),
+        CONTRACT,
+        "runner-a",
+        Duration::from_secs(30),
+    )
+}
+
+fn ready_instance_store() -> Arc<FakeInstanceStore> {
+    let store = Arc::new(FakeInstanceStore::default());
+    store.seed_status(instance(), SagaInstanceStatus::Ready);
+    store
+}
+
+fn executor_with_store<J>(
+    journal: Arc<J>,
+    instance_store: Arc<FakeInstanceStore>,
+    cp: Arc<FakeCheckpointStore>,
+    dlx: Arc<FakeDeadLetterStore>,
+    factory: Arc<dyn SagaActionFactory>,
+) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
+where
+    J: SagaJournal + Send + Sync + 'static,
+{
+    SagaExecutorImpl::new(
+        SagaExecutorDeps::new(journal, instance_store, cp, dlx, factory),
+        executor_config(),
+    )
+}
 
 fn executor(
     journal: Arc<FakeJournal>,
@@ -356,15 +522,7 @@ fn executor(
     dlx: Arc<FakeDeadLetterStore>,
     factory: Arc<dyn SagaActionFactory>,
 ) -> Exec {
-    SagaExecutorImpl::new(
-        journal,
-        cp,
-        dlx,
-        factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
-    )
+    executor_with_store(journal, ready_instance_store(), cp, dlx, factory)
 }
 
 // ── FakeJournalFailing（append 注入失败）──────────────────────────────────────────
@@ -377,6 +535,7 @@ struct FakeJournalFailing {
     append_fails: AtomicBool,
     read_fails: AtomicBool,
     fail_status: Option<SagaJournalStatus>,
+    conflict_status: Option<SagaJournalStatus>,
 }
 
 impl FakeJournalFailing {
@@ -386,6 +545,7 @@ impl FakeJournalFailing {
             append_fails: AtomicBool::new(fail),
             read_fails: AtomicBool::new(false),
             fail_status: None,
+            conflict_status: None,
         }
     }
 
@@ -395,6 +555,7 @@ impl FakeJournalFailing {
             append_fails: AtomicBool::new(false),
             read_fails: AtomicBool::new(true),
             fail_status: None,
+            conflict_status: None,
         }
     }
 
@@ -404,6 +565,17 @@ impl FakeJournalFailing {
             append_fails: AtomicBool::new(false),
             read_fails: AtomicBool::new(false),
             fail_status: Some(status),
+            conflict_status: None,
+        }
+    }
+
+    fn conflict_on_status(status: SagaJournalStatus) -> Self {
+        Self {
+            inner: FakeJournal::default(),
+            append_fails: AtomicBool::new(false),
+            read_fails: AtomicBool::new(false),
+            fail_status: None,
+            conflict_status: Some(status),
         }
     }
 
@@ -415,20 +587,25 @@ impl FakeJournalFailing {
 impl SagaJournal for FakeJournalFailing {
     async fn append(
         &self,
-        sid: &SagaId,
+        lease: &SagaLease,
         entry: SagaJournalAppendRecord,
-    ) -> Result<(), SagaJournalError> {
+    ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
         if self.append_fails.load(Ordering::SeqCst) || self.fail_status == Some(entry.status()) {
             Err(SagaJournalError::new(std::io::Error::other("inject")))
+        } else if self.conflict_status == Some(entry.status()) {
+            Ok(SagaJournalAppendOutcome::AppendConflict)
         } else {
-            self.inner.append(sid, entry).await
+            self.inner.append(lease, entry).await
         }
     }
-    async fn read(&self, sid: &SagaId) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
+    async fn read(
+        &self,
+        instance: &SagaInstanceRef,
+    ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
         if self.read_fails.load(Ordering::SeqCst) {
             return Err(SagaJournalError::new(std::io::Error::other("read inject")));
         }
-        self.inner.read(sid).await
+        self.inner.read(instance).await
     }
     async fn shutdown(&self) -> Result<(), SagaJournalError> {
         Ok(())
@@ -445,7 +622,7 @@ async fn run_three_steps_all_succeed_journal_order() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2", "step3"]);
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -491,7 +668,7 @@ async fn step2_failure_reverse_compensates_step1_only() {
     ]);
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, .. } => assert_eq!(failed_node, "step2"),
@@ -540,7 +717,7 @@ async fn resume_from_step2_checkpoint_skips_step1() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2", "step3"]);
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -570,7 +747,7 @@ async fn compensation_failure_writes_dead_letter() {
     let exec = executor(journal.clone(), cp.clone(), dlx.clone(), factory);
     // step1 do ok / undo FAILS；step2 do FAILS → 触发对 step1 的补偿，补偿失败 → dead-letter。
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     match outcome {
         // failed_node = 补偿失败的步（step1），非原始前向失败步（step2）——见 compensate() 语义。
@@ -616,28 +793,43 @@ async fn compensation_failure_writes_dead_letter() {
     );
 }
 
-// ── resume 空 journal → Failed（UNKNOWN_SAGA），非 error 日志（无 journal = 未知 saga）──────
+// ── resume 已注册但空 journal → 从 step0 继续（unknown 只由实例行缺失表达）──────────────
 
 #[tokio::test]
 #[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
-async fn resume_with_empty_journal_returns_failed() {
+async fn resume_ready_instance_with_empty_journal_runs_from_step_zero() {
     let journal = Arc::new(FakeJournal::default());
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
-    // 不 seed 任何 journal 条目（空 journal = 未知 saga）。
-    let exec = executor(journal.clone(), cp, dlx, Arc::new(EmptyFactory));
+    let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
+    // executor(...) seed Ready 实例行；空 journal 表示 first append 前崩溃，不是 unknown saga。
+    let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
-    match outcome {
-        SagaOutcome::Failed { failed_node, .. } => {
-            assert!(
-                failed_node.contains("unknown"),
-                "empty journal should produce unknown failed_node, got: {failed_node}"
-            );
-        }
-        other => panic!("expected Failed for empty journal, got {other:?}"),
-    }
+    assert!(
+        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        "registered saga with empty journal should resume from step0: {outcome:?}"
+    );
+    assert_eq!(
+        counts[0].dos(),
+        1,
+        "step1 should run on empty-journal resume"
+    );
+    assert_eq!(
+        counts[1].dos(),
+        1,
+        "step2 should run on empty-journal resume"
+    );
+    assert_eq!(
+        journal.log(),
+        vec![
+            ("step1".to_string(), SagaJournalStatus::Executing),
+            ("step1".to_string(), SagaJournalStatus::Completed),
+            ("step2".to_string(), SagaJournalStatus::Executing),
+            ("step2".to_string(), SagaJournalStatus::Completed),
+        ]
+    );
 }
 
 // ── F1：Executing journal append 失败 → fail-closed（不执行副作用）─────────────────
@@ -651,17 +843,15 @@ async fn run_with_executing_append_failure_fails_closed() {
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
 
-    let exec = SagaExecutorImpl::new(
+    let exec = executor_with_store(
         journal,
+        Arc::new(FakeInstanceStore::default()),
         cp,
         dlx,
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -673,6 +863,158 @@ async fn run_with_executing_append_failure_fails_closed() {
 }
 
 #[tokio::test]
+async fn run_returns_interrupted_when_lease_busy() {
+    let journal = Arc::new(FakeJournal::default());
+    let instance_store = Arc::new(FakeInstanceStore::default());
+    instance_store.lose_lease();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(journal, instance_store, cp, dlx, factory);
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::LeaseBusy
+            }
+        ),
+        "busy lease must not be a business failure: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 0, "action must not run without lease");
+}
+
+#[tokio::test]
+async fn run_terminal_releases_lease_and_rejects_restart() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
+
+    let outcome = exec.run(instance()).await;
+    assert!(
+        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        store.status(instance()),
+        Some(SagaInstanceStatus::Succeeded)
+    );
+    assert_eq!(
+        store.release_count(),
+        1,
+        "terminal success must release lease"
+    );
+
+    let resumed = exec.resume(instance()).await;
+    assert!(
+        matches!(resumed, SagaOutcome::Succeeded { .. }),
+        "terminal resume should not wait for old TTL: {resumed:?}"
+    );
+    let restarted = exec.run(instance()).await;
+    assert!(
+        matches!(
+            restarted,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::AlreadyStarted
+            }
+        ),
+        "run must not restart terminal instance: {restarted:?}"
+    );
+    assert_eq!(counts[0].dos(), 1, "terminal run must not redo action");
+}
+
+#[tokio::test]
+async fn resume_unknown_instance_does_not_register() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = Arc::new(FakeInstanceStore::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, _counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
+
+    let outcome = exec.resume(instance()).await;
+
+    assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
+    assert_eq!(
+        store.status(instance()),
+        None,
+        "resume of unknown instance must not create saga_instances row"
+    );
+}
+
+#[tokio::test]
+async fn executing_append_conflict_interrupts_and_marks_degraded() {
+    let journal = Arc::new(FakeJournalFailing::conflict_on_status(
+        SagaJournalStatus::Executing,
+    ));
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::JournalConflict
+            }
+        ),
+        "append conflict must be non-business interruption: {outcome:?}"
+    );
+    assert_eq!(
+        counts[0].dos(),
+        0,
+        "action must not run after Executing conflict"
+    );
+    assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
+    assert_eq!(
+        store.release_count(),
+        1,
+        "degraded instance must release lease"
+    );
+}
+
+#[tokio::test]
+async fn resume_append_conflict_interrupts_and_marks_degraded() {
+    let journal = Arc::new(FakeJournalFailing::conflict_on_status(
+        SagaJournalStatus::Executing,
+    ));
+    journal.inner.seed(0, "step1", SagaJournalStatus::Completed);
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
+    let exec = executor_with_store(journal, store.clone(), cp, dlx, factory);
+
+    let outcome = exec.resume(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::JournalConflict
+            }
+        ),
+        "resume append conflict must be non-business interruption: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 0, "completed step must stay skipped");
+    assert_eq!(
+        counts[1].dos(),
+        0,
+        "step2 must not run after Executing conflict"
+    );
+    assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
+}
+
+#[tokio::test]
 async fn run_with_completed_append_failure_compensates_current_step() {
     let journal = Arc::new(FakeJournalFailing::fail_on_status(
         SagaJournalStatus::Completed,
@@ -681,17 +1023,15 @@ async fn run_with_completed_append_failure_compensates_current_step() {
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
 
-    let exec = SagaExecutorImpl::new(
+    let exec = executor_with_store(
         journal.clone(),
+        Arc::new(FakeInstanceStore::default()),
         cp,
         dlx.clone(),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -718,21 +1058,19 @@ async fn run_with_completed_append_failure_compensates_current_step() {
     );
 
     let (factory, replay_counts) = FakeFactory::linear(&["step1", "step2"]);
-    let resume_exec = SagaExecutorImpl::new(
+    let resume_exec = executor_with_store(
         journal.clone(),
+        ready_instance_store(),
         Arc::new(FakeCheckpointStore::default()),
         Arc::new(FakeDeadLetterStore::default()),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
     assert_eq!(
-        resume_exec.status(saga_id()).await,
+        resume_exec.status(instance()).await,
         Some(SagaExecStatus::Done),
         "Executing -> Compensated journal must replay as terminal compensated"
     );
-    let replay_outcome = resume_exec.resume(saga_id()).await;
+    let replay_outcome = resume_exec.resume(instance()).await;
     assert!(
         matches!(replay_outcome, SagaOutcome::Failed { .. }),
         "compensated saga resumes as terminal failed outcome: {replay_outcome:?}"
@@ -757,17 +1095,15 @@ async fn run_with_compensating_append_failure_stops_before_undo() {
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::steps(&[("step1", false, false), ("step2", true, false)]);
-    let exec = SagaExecutorImpl::new(
+    let exec = executor_with_store(
         journal.clone(),
+        Arc::new(FakeInstanceStore::default()),
         cp,
         dlx.clone(),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -796,17 +1132,15 @@ async fn run_with_failed_append_failure_does_not_deadletter() {
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
-    let exec = SagaExecutorImpl::new(
+    let exec = executor_with_store(
         journal,
+        Arc::new(FakeInstanceStore::default()),
         cp,
         dlx.clone(),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -827,17 +1161,15 @@ async fn run_with_compensated_append_failure_marks_terminal_failed() {
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::steps(&[("step1", false, false), ("step2", true, false)]);
-    let exec = SagaExecutorImpl::new(
+    let exec = executor_with_store(
         journal.clone(),
+        Arc::new(FakeInstanceStore::default()),
         cp,
         dlx.clone(),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     assert_eq!(counts[0].undos(), 1, "补偿动作已成功执行一次");
@@ -854,21 +1186,19 @@ async fn run_with_compensated_append_failure_marks_terminal_failed() {
     );
 
     let (factory, replay_counts) = FakeFactory::linear(&["step1", "step2"]);
-    let resume_exec = SagaExecutorImpl::new(
+    let resume_exec = executor_with_store(
         journal.clone(),
+        ready_instance_store(),
         Arc::new(FakeCheckpointStore::default()),
         Arc::new(FakeDeadLetterStore::default()),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
     assert_eq!(
-        resume_exec.status(saga_id()).await,
+        resume_exec.status(instance()).await,
         Some(SagaExecStatus::Done)
     );
-    let replay_outcome = resume_exec.resume(saga_id()).await;
+    let replay_outcome = resume_exec.resume(instance()).await;
     assert!(
         matches!(replay_outcome, SagaOutcome::Failed { .. }),
         "{replay_outcome:?}"
@@ -893,7 +1223,7 @@ async fn run_stops_on_checkpoint_fence() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx, factory);
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Failed { .. }),
@@ -916,7 +1246,7 @@ async fn run_fails_fast_on_duplicate_action_names() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step1"]);
     let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.run(saga_id()).await;
+    let outcome = exec.run(instance()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, error } => {
@@ -944,7 +1274,7 @@ async fn resume_fails_on_unknown_journal_step() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx, factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     match outcome {
         SagaOutcome::Failed { failed_node, .. } => assert_eq!(failed_node, "ghoststep"),
@@ -964,7 +1294,7 @@ async fn resume_retries_step_with_only_executing_journal_record() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal.clone(), cp, dlx, factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -998,7 +1328,7 @@ async fn resume_continues_compensation_after_crash() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx, factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     // 续补偿：逆序对 step2、step1 调 undo_it；终态 Failed（补偿后）。
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
@@ -1019,7 +1349,7 @@ async fn resume_compensation_failure_deadletter_keeps_forward_failed_step() {
     let (factory, _counts) = FakeFactory::steps(&[("step1", false, true), ("step2", false, false)]);
     let exec = executor(journal, cp, dlx.clone(), factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     let records = dlx.records();
@@ -1047,7 +1377,7 @@ async fn resume_terminal_failed_does_not_rerun() {
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
     let exec = executor(journal, cp, dlx.clone(), factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     // 终态：既不前向也不补偿。
@@ -1069,7 +1399,7 @@ async fn resume_terminal_compensated_does_not_rerun_or_deadletter() {
     let (factory, counts) = FakeFactory::linear(&["step1"]);
     let exec = executor(journal, cp, dlx.clone(), factory);
 
-    let outcome = exec.resume(saga_id()).await;
+    let outcome = exec.resume(instance()).await;
 
     assert!(matches!(outcome, SagaOutcome::Failed { .. }), "{outcome:?}");
     assert_eq!(counts[0].dos(), 0);
@@ -1081,17 +1411,21 @@ async fn resume_terminal_compensated_does_not_rerun_or_deadletter() {
 
 #[test]
 #[allow(clippy::expect_used)] // reason: 测试断言（缺事件即失败），item-level carve-out
+#[allow(clippy::unwrap_used)] // reason: 测试 runtime/Mutex 构造，item-level carve-out
 fn compensation_failure_logs_fields() {
     use tracing::field::{Field, Visit};
-    use tracing::subscriber::Interest;
-    use tracing::{Event, Id, Metadata, span};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
 
-    struct Captured {
-        events: Mutex<Vec<HashMap<String, String>>>,
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<HashMap<String, String>>>>,
     }
+
     struct CapVisit {
         current: HashMap<String, String>,
     }
+
     impl Visit for CapVisit {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             self.current
@@ -1102,25 +1436,12 @@ fn compensation_failure_logs_fields() {
                 .insert(field.name().to_string(), value.to_string());
         }
     }
-    struct CapSubscriber {
-        captured: Arc<Captured>,
-    }
-    impl tracing::Subscriber for CapSubscriber {
-        fn register_callsite(&self, _meta: &'static Metadata<'static>) -> Interest {
-            Interest::always()
-        }
-        fn enabled(&self, _meta: &Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &span::Attributes<'_>) -> Id {
-            Id::from_u64(1)
-        }
-        fn record(&self, _span: &Id, _values: &span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-        fn enter(&self, _span: &Id) {}
-        fn exit(&self, _span: &Id) {}
-        #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
-        fn event(&self, event: &Event<'_>) {
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
             if *event.metadata().level() != tracing::Level::ERROR {
                 return;
             }
@@ -1128,22 +1449,20 @@ fn compensation_failure_logs_fields() {
                 current: HashMap::new(),
             };
             event.record(&mut visitor);
-            self.captured.events.lock().unwrap().push(visitor.current);
+            self.events.lock().unwrap().push(visitor.current);
         }
     }
 
-    let captured = Arc::new(Captured {
-        events: Mutex::new(vec![]),
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+        events: Arc::clone(&events),
     });
-    #[allow(clippy::unwrap_used)] // reason: 测试 runtime 构造，item-level carve-out
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let subscriber = CapSubscriber {
-        captured: captured.clone(),
-    };
     tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let journal = Arc::new(FakeJournal::default());
             let cp = Arc::new(FakeCheckpointStore::default());
@@ -1151,16 +1470,16 @@ fn compensation_failure_logs_fields() {
             let (factory, _counts) =
                 FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
             let exec = executor(journal, cp, dlx, factory);
-            let _ = exec.run(saga_id()).await;
+            let _ = exec.run(instance()).await;
         });
+        tracing::callsite::rebuild_interest_cache();
     });
 
-    #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
-    let events = captured.events.lock().unwrap().clone();
+    let events = events.lock().unwrap().clone();
     let comp = events
         .iter()
         .find(|e| e.get("error_summary").is_some_and(|v| !v.is_empty()))
-        .expect("缺补偿失败 error 事件");
+        .expect("compensation failure error event must be captured");
     assert!(
         comp.get("saga_id").is_some_and(|v| !v.is_empty()),
         "缺 saga_id: {comp:?}"
@@ -1177,18 +1496,21 @@ async fn status_reports_none_running_done() {
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, _counts) = FakeFactory::linear(&["step1"]);
-    let exec = executor(journal.clone(), cp, dlx, factory);
+    let store = Arc::new(FakeInstanceStore::default());
+    let exec = executor_with_store(journal.clone(), store.clone(), cp, dlx, factory);
 
-    // 未知 saga（空 journal）→ None。
-    assert_eq!(exec.status(saga_id()).await, None);
+    // 未知 saga（无 instance row、空 journal）→ None。
+    assert_eq!(exec.status(instance()).await, None);
+    store.seed_status(instance(), SagaInstanceStatus::Ready);
+    assert_eq!(exec.status(instance()).await, Some(SagaExecStatus::Ready));
 
     // 在飞（step1 Executing 未完成）→ Running。
     journal.seed(0, "step1", SagaJournalStatus::Executing);
-    assert_eq!(exec.status(saga_id()).await, Some(SagaExecStatus::Running));
+    assert_eq!(exec.status(instance()).await, Some(SagaExecStatus::Running));
 
     // step1 Completed → Done（无在飞）。
     journal.seed(1, "step1", SagaJournalStatus::Completed);
-    assert_eq!(exec.status(saga_id()).await, Some(SagaExecStatus::Done));
+    assert_eq!(exec.status(instance()).await, Some(SagaExecStatus::Done));
 }
 
 #[tokio::test]
@@ -1204,7 +1526,7 @@ async fn status_reports_done_after_forward_failure_is_fully_compensated() {
     journal.seed(2, "step1", SagaJournalStatus::Compensating);
     journal.seed(3, "step1", SagaJournalStatus::Compensated);
 
-    assert_eq!(exec.status(saga_id()).await, Some(SagaExecStatus::Done));
+    assert_eq!(exec.status(instance()).await, Some(SagaExecStatus::Done));
 }
 
 #[tokio::test]
@@ -1219,7 +1541,7 @@ async fn status_reports_degraded_for_definition_or_replay_errors() {
         duplicate_factory,
     );
     assert_eq!(
-        duplicate_exec.status(saga_id()).await,
+        duplicate_exec.status(instance()).await,
         Some(SagaExecStatus::Degraded)
     );
 
@@ -1233,7 +1555,7 @@ async fn status_reports_degraded_for_definition_or_replay_errors() {
         factory,
     );
     assert_eq!(
-        unknown_exec.status(saga_id()).await,
+        unknown_exec.status(instance()).await,
         Some(SagaExecStatus::Degraded)
     );
 
@@ -1248,7 +1570,7 @@ async fn status_reports_degraded_for_definition_or_replay_errors() {
         factory,
     );
     assert_eq!(
-        duplicate_seq_exec.status(saga_id()).await,
+        duplicate_seq_exec.status(instance()).await,
         Some(SagaExecStatus::Degraded)
     );
 }
@@ -1257,17 +1579,38 @@ async fn status_reports_degraded_for_definition_or_replay_errors() {
 async fn status_reports_degraded_on_journal_read_error() {
     let journal = Arc::new(FakeJournalFailing::read_failing());
     let (factory, _counts) = FakeFactory::linear(&["step1"]);
-    let exec = SagaExecutorImpl::new(
+    let exec = executor_with_store(
         journal,
+        Arc::new(FakeInstanceStore::default()),
         Arc::new(FakeCheckpointStore::default()),
         Arc::new(FakeDeadLetterStore::default()),
         factory,
-        tenant(),
-        CheckpointOwner::new(OWNER),
-        CONTRACT,
     );
 
-    assert_eq!(exec.status(saga_id()).await, Some(SagaExecStatus::Degraded));
+    assert_eq!(
+        exec.status(instance()).await,
+        Some(SagaExecStatus::Degraded)
+    );
+}
+
+#[tokio::test]
+async fn status_reports_degraded_from_instance_status_without_journal() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    store.seed_status(instance(), SagaInstanceStatus::Degraded);
+    let (factory, _counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store(
+        journal,
+        store,
+        Arc::new(FakeCheckpointStore::default()),
+        Arc::new(FakeDeadLetterStore::default()),
+        factory,
+    );
+
+    assert_eq!(
+        exec.status(instance()).await,
+        Some(SagaExecStatus::Degraded)
+    );
 }
 
 // ── 冻结接缝 smoke（自 lib.rs 迁入，升级为实测）────────────────────────────────
@@ -1283,7 +1626,9 @@ fn executor_and_tailer_object_safe_send_sync() {
 
 #[test]
 fn saga_action_ctx_funnel_round_trips() {
-    let ctx = SagaActionCtx::new(saga_id().as_uuid(), "reserve_funds");
+    let ctx = SagaActionCtx::new(instance(), "reserve_funds");
+    assert_eq!(ctx.tenant(), tenant());
+    assert_eq!(ctx.instance(), instance());
     assert_eq!(ctx.saga_id().as_uuid(), saga_id().as_uuid());
     assert_eq!(ctx.node_name(), "reserve_funds");
 }
@@ -1297,6 +1642,7 @@ fn saga_outcome_and_command_and_status_exhaustive() {
     let _ = match out {
         SagaOutcome::Succeeded { .. } => "ok",
         SagaOutcome::Failed { .. } => "fail",
+        SagaOutcome::Interrupted { .. } => "interrupted",
     };
     let cmd = SagaCommand::Cancel { saga_id: saga_id() };
     let _ = match cmd {

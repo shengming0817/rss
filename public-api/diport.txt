@@ -957,6 +957,7 @@ pub enum diport::dead_letter_store::DeadLetterSource
 pub diport::dead_letter_store::DeadLetterSource::Consumer
 pub diport::dead_letter_store::DeadLetterSource::Legacy
 pub diport::dead_letter_store::DeadLetterSource::OutboxRelay
+pub diport::dead_letter_store::DeadLetterSource::Projection
 pub diport::dead_letter_store::DeadLetterSource::Saga
 impl diport::dead_letter_store::DeadLetterSource
 pub const fn diport::dead_letter_store::DeadLetterSource::as_str(self) -> &'static str
@@ -1006,6 +1007,7 @@ pub type diport::dead_letter_store::DeadLetterSource::Output = T
 pub enum diport::dead_letter_store::WritableDeadLetterSource
 pub diport::dead_letter_store::WritableDeadLetterSource::Consumer
 pub diport::dead_letter_store::WritableDeadLetterSource::OutboxRelay
+pub diport::dead_letter_store::WritableDeadLetterSource::Projection
 pub diport::dead_letter_store::WritableDeadLetterSource::Saga
 impl diport::dead_letter_store::WritableDeadLetterSource
 pub const fn diport::dead_letter_store::WritableDeadLetterSource::as_source(self) -> diport::dead_letter_store::DeadLetterSource
@@ -4283,6 +4285,245 @@ impl<TraitVariantBlanketType: diport::revocation_store::RevocationStore> diport:
 pub async fn TraitVariantBlanketType::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<bool, diport::revocation_store::RevocationStoreError>
 pub async fn TraitVariantBlanketType::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::revocation_store::RevocationStoreError>
+pub mod diport::saga_instance_store
+#[non_exhaustive] pub enum diport::saga_instance_store::SagaInstanceRegistrationError
+pub diport::saga_instance_store::SagaInstanceRegistrationError::EmptyContractId
+pub diport::saga_instance_store::SagaInstanceRegistrationError::EmptyOwner
+impl core::clone::Clone for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::clone(&self) -> diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::cmp::Eq for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::cmp::PartialEq for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::eq(&self, &diport::saga_instance_store::SagaInstanceRegistrationError) -> bool
+impl core::error::Error for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::fmt::Debug for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Freeze for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Send for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Sync for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Unpin for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::UnsafeUnpin for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::panic::unwind_safe::UnwindSafe for diport::saga_instance_store::SagaInstanceRegistrationError
+impl<T, U> core::convert::Into<U> for diport::saga_instance_store::SagaInstanceRegistrationError where U: core::convert::From<T>
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::saga_instance_store::SagaInstanceRegistrationError where U: core::convert::Into<T>
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Error = core::convert::Infallible
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::saga_instance_store::SagaInstanceRegistrationError where U: core::convert::TryFrom<T>
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::saga_instance_store::SagaInstanceRegistrationError where T: core::clone::Clone
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Owned = T
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::clone_into(&self, &mut T)
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::saga_instance_store::SagaInstanceRegistrationError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::saga_instance_store::SagaInstanceRegistrationError where T: 'static + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::saga_instance_store::SagaInstanceRegistrationError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::saga_instance_store::SagaInstanceRegistrationError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::saga_instance_store::SagaInstanceRegistrationError where T: core::clone::Clone
+pub unsafe fn diport::saga_instance_store::SagaInstanceRegistrationError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::saga_instance_store::SagaInstanceRegistrationError
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Output = T
+#[repr(transparent)] pub struct diport::saga_instance_store::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> diport::DynSagaInstanceStore<'dynosaur_struct>
+pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>
+pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_mut(&mut impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> &mut diport::DynSagaInstanceStore<'dynosaur_struct>
+pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_ref(&impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> &diport::DynSagaInstanceStore<'dynosaur_struct>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_arc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaInstanceStore<'dynosaur_struct>>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_box(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_rc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaInstanceStore<'dynosaur_struct>>
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &mut diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for diport::DynSagaInstanceStore<'dynosaur_struct>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Send for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sized for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sync for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Unpin for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<T> core::any::Any for diport::DynSagaInstanceStore<'dynosaur_struct> where T: 'static + ?core::marker::Sized
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::DynSagaInstanceStore<'dynosaur_struct> where T: ?core::marker::Sized
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::DynSagaInstanceStore<'dynosaur_struct> where T: ?core::marker::Sized
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::borrow_mut(&mut self) -> &mut T
+pub struct diport::saga_instance_store::SagaInstanceRegistration
+impl diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::contract_id(&self) -> &str
+pub fn diport::saga_instance_store::SagaInstanceRegistration::instance(&self) -> consistency::saga::SagaInstanceRef
+pub fn diport::saga_instance_store::SagaInstanceRegistration::new(consistency::saga::SagaInstanceRef, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::saga_instance_store::SagaInstanceRegistrationError>
+pub fn diport::saga_instance_store::SagaInstanceRegistration::owner(&self) -> &str
+impl core::clone::Clone for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::clone(&self) -> diport::saga_instance_store::SagaInstanceRegistration
+impl core::cmp::Eq for diport::saga_instance_store::SagaInstanceRegistration
+impl core::cmp::PartialEq for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::eq(&self, &diport::saga_instance_store::SagaInstanceRegistration) -> bool
+impl core::fmt::Debug for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Freeze for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Send for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Sync for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Unpin for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::UnsafeUnpin for diport::saga_instance_store::SagaInstanceRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_instance_store::SagaInstanceRegistration
+impl core::panic::unwind_safe::UnwindSafe for diport::saga_instance_store::SagaInstanceRegistration
+impl<T, U> core::convert::Into<U> for diport::saga_instance_store::SagaInstanceRegistration where U: core::convert::From<T>
+pub fn diport::saga_instance_store::SagaInstanceRegistration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::saga_instance_store::SagaInstanceRegistration where U: core::convert::Into<T>
+pub type diport::saga_instance_store::SagaInstanceRegistration::Error = core::convert::Infallible
+pub fn diport::saga_instance_store::SagaInstanceRegistration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::saga_instance_store::SagaInstanceRegistration where U: core::convert::TryFrom<T>
+pub type diport::saga_instance_store::SagaInstanceRegistration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::saga_instance_store::SagaInstanceRegistration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::saga_instance_store::SagaInstanceRegistration where T: core::clone::Clone
+pub type diport::saga_instance_store::SagaInstanceRegistration::Owned = T
+pub fn diport::saga_instance_store::SagaInstanceRegistration::clone_into(&self, &mut T)
+pub fn diport::saga_instance_store::SagaInstanceRegistration::to_owned(&self) -> T
+impl<T> core::any::Any for diport::saga_instance_store::SagaInstanceRegistration where T: 'static + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::saga_instance_store::SagaInstanceRegistration where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::saga_instance_store::SagaInstanceRegistration where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::saga_instance_store::SagaInstanceRegistration where T: core::clone::Clone
+pub unsafe fn diport::saga_instance_store::SagaInstanceRegistration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::saga_instance_store::SagaInstanceRegistration
+pub type diport::saga_instance_store::SagaInstanceRegistration::Output = T
+pub struct diport::saga_instance_store::SagaInstanceStoreError
+impl diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
+impl core::error::Error for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::Send for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::Sync for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::Unpin for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::UnsafeUnpin for diport::saga_instance_store::SagaInstanceStoreError
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::saga_instance_store::SagaInstanceStoreError
+impl !core::panic::unwind_safe::UnwindSafe for diport::saga_instance_store::SagaInstanceStoreError
+impl<T, U> core::convert::Into<U> for diport::saga_instance_store::SagaInstanceStoreError where U: core::convert::From<T>
+pub fn diport::saga_instance_store::SagaInstanceStoreError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::saga_instance_store::SagaInstanceStoreError where U: core::convert::Into<T>
+pub type diport::saga_instance_store::SagaInstanceStoreError::Error = core::convert::Infallible
+pub fn diport::saga_instance_store::SagaInstanceStoreError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::saga_instance_store::SagaInstanceStoreError where U: core::convert::TryFrom<T>
+pub type diport::saga_instance_store::SagaInstanceStoreError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::saga_instance_store::SagaInstanceStoreError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for diport::saga_instance_store::SagaInstanceStoreError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::saga_instance_store::SagaInstanceStoreError where T: 'static + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::saga_instance_store::SagaInstanceStoreError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::saga_instance_store::SagaInstanceStoreError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::saga_instance_store::SagaInstanceStoreError
+pub type diport::saga_instance_store::SagaInstanceStoreError::Output = T
+pub trait diport::saga_instance_store::SagaInstanceStore: core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::saga_instance_store::SagaInstanceStore::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &mut diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for diport::DynSagaInstanceStore<'dynosaur_struct>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub trait diport::saga_instance_store::SagaInstanceStoreLocal
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::get(&self, &consistency::saga::SagaInstanceRef) -> core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::release_lease(&self, &consistency::saga::SagaLease) -> core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn diport::saga_instance_store::SagaInstanceStoreLocal::shutdown(&self) -> core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>
+impl<TraitVariantBlanketType: diport::saga_instance_store::SagaInstanceStore> diport::saga_instance_store::SagaInstanceStoreLocal for TraitVariantBlanketType
+pub async fn TraitVariantBlanketType::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn TraitVariantBlanketType::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn TraitVariantBlanketType::get(&self, &consistency::saga::SagaInstanceRef) -> core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn TraitVariantBlanketType::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn TraitVariantBlanketType::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn TraitVariantBlanketType::release_lease(&self, &consistency::saga::SagaLease) -> core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>
+pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>
 pub mod diport::saga_journal
 #[repr(transparent)] pub struct diport::saga_journal::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynSagaJournal<'dynosaur_struct>
@@ -4293,20 +4534,20 @@ pub fn diport::DynSagaJournal<'dynosaur_struct>::new_arc(impl diport::saga_journ
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_box(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_rc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaJournal<'dynosaur_struct>>
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSagaJournal<'dynosaur_struct>
@@ -4359,32 +4600,32 @@ pub fn diport::saga_journal::SagaJournalError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::saga_journal::SagaJournalError
 pub type diport::saga_journal::SagaJournalError::Output = T
 pub trait diport::saga_journal::SagaJournal: core::marker::Send
-pub fn diport::saga_journal::SagaJournal::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::saga_journal::SagaJournal::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::saga_journal::SagaJournal::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::saga_journal::SagaJournal::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::saga_journal::SagaJournal::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub trait diport::saga_journal::SagaJournalLocal
-pub async fn diport::saga_journal::SagaJournalLocal::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
-pub async fn diport::saga_journal::SagaJournalLocal::read(&self, &consistency::saga::SagaId) -> core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>
+pub async fn diport::saga_journal::SagaJournalLocal::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>
+pub async fn diport::saga_journal::SagaJournalLocal::read(&self, &consistency::saga::SagaInstanceRef) -> core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>
 pub async fn diport::saga_journal::SagaJournalLocal::shutdown(&self) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
 impl<TraitVariantBlanketType: diport::saga_journal::SagaJournal> diport::saga_journal::SagaJournalLocal for TraitVariantBlanketType
-pub async fn TraitVariantBlanketType::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
-pub async fn TraitVariantBlanketType::read(&self, &consistency::saga::SagaId) -> core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>
+pub async fn TraitVariantBlanketType::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>
+pub async fn TraitVariantBlanketType::read(&self, &consistency::saga::SagaInstanceRef) -> core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::saga_journal::SagaJournalError>
 pub mod diport::secret_resolver
 #[non_exhaustive] pub enum diport::secret_resolver::SecretResolverError
@@ -5262,6 +5503,7 @@ pub enum diport::DeadLetterSource
 pub diport::DeadLetterSource::Consumer
 pub diport::DeadLetterSource::Legacy
 pub diport::DeadLetterSource::OutboxRelay
+pub diport::DeadLetterSource::Projection
 pub diport::DeadLetterSource::Saga
 impl diport::dead_letter_store::DeadLetterSource
 pub const fn diport::dead_letter_store::DeadLetterSource::as_str(self) -> &'static str
@@ -5793,6 +6035,53 @@ impl<T> core::convert::From<T> for diport::rate_limiter::RateLimitDecision
 pub fn diport::rate_limiter::RateLimitDecision::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::rate_limiter::RateLimitDecision
 pub type diport::rate_limiter::RateLimitDecision::Output = T
+#[non_exhaustive] pub enum diport::SagaInstanceRegistrationError
+pub diport::SagaInstanceRegistrationError::EmptyContractId
+pub diport::SagaInstanceRegistrationError::EmptyOwner
+impl core::clone::Clone for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::clone(&self) -> diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::cmp::Eq for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::cmp::PartialEq for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::eq(&self, &diport::saga_instance_store::SagaInstanceRegistrationError) -> bool
+impl core::error::Error for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::fmt::Debug for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Freeze for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Send for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Sync for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::Unpin for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::marker::UnsafeUnpin for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_instance_store::SagaInstanceRegistrationError
+impl core::panic::unwind_safe::UnwindSafe for diport::saga_instance_store::SagaInstanceRegistrationError
+impl<T, U> core::convert::Into<U> for diport::saga_instance_store::SagaInstanceRegistrationError where U: core::convert::From<T>
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::saga_instance_store::SagaInstanceRegistrationError where U: core::convert::Into<T>
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Error = core::convert::Infallible
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::saga_instance_store::SagaInstanceRegistrationError where U: core::convert::TryFrom<T>
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::saga_instance_store::SagaInstanceRegistrationError where T: core::clone::Clone
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Owned = T
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::clone_into(&self, &mut T)
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for diport::saga_instance_store::SagaInstanceRegistrationError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::saga_instance_store::SagaInstanceRegistrationError where T: 'static + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::saga_instance_store::SagaInstanceRegistrationError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::saga_instance_store::SagaInstanceRegistrationError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::saga_instance_store::SagaInstanceRegistrationError where T: core::clone::Clone
+pub unsafe fn diport::saga_instance_store::SagaInstanceRegistrationError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::saga_instance_store::SagaInstanceRegistrationError
+pub fn diport::saga_instance_store::SagaInstanceRegistrationError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::saga_instance_store::SagaInstanceRegistrationError
+pub type diport::saga_instance_store::SagaInstanceRegistrationError::Output = T
 #[non_exhaustive] pub enum diport::SaveOutcome
 pub diport::SaveOutcome::Saved
 pub diport::SaveOutcome::StaleVersion
@@ -5924,6 +6213,7 @@ pub type diport::pdp::ServiceTokenReplayError::Output = T
 pub enum diport::WritableDeadLetterSource
 pub diport::WritableDeadLetterSource::Consumer
 pub diport::WritableDeadLetterSource::OutboxRelay
+pub diport::WritableDeadLetterSource::Projection
 pub diport::WritableDeadLetterSource::Saga
 impl diport::dead_letter_store::WritableDeadLetterSource
 pub const fn diport::dead_letter_store::WritableDeadLetterSource::as_source(self) -> diport::dead_letter_store::DeadLetterSource
@@ -7332,6 +7622,60 @@ impl<T> core::borrow::Borrow<T> for diport::DynRevocationStore<'dynosaur_struct>
 pub fn diport::DynRevocationStore<'dynosaur_struct>::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for diport::DynRevocationStore<'dynosaur_struct> where T: ?core::marker::Sized
 pub fn diport::DynRevocationStore<'dynosaur_struct>::borrow_mut(&mut self) -> &mut T
+#[repr(transparent)] pub struct diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> diport::DynSagaInstanceStore<'dynosaur_struct>
+pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>
+pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_mut(&mut impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> &mut diport::DynSagaInstanceStore<'dynosaur_struct>
+pub const fn diport::DynSagaInstanceStore<'dynosaur_struct>::from_ref(&impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> &diport::DynSagaInstanceStore<'dynosaur_struct>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_arc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynSagaInstanceStore<'dynosaur_struct>>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_box(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::new_rc(impl diport::saga_instance_store::SagaInstanceStore + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaInstanceStore<'dynosaur_struct>>
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &mut diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for diport::DynSagaInstanceStore<'dynosaur_struct>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Send for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sized for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sync for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Unpin for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynSagaInstanceStore<'dynosaur_struct>
+impl<T> core::any::Any for diport::DynSagaInstanceStore<'dynosaur_struct> where T: 'static + ?core::marker::Sized
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::DynSagaInstanceStore<'dynosaur_struct> where T: ?core::marker::Sized
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::DynSagaInstanceStore<'dynosaur_struct> where T: ?core::marker::Sized
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::borrow_mut(&mut self) -> &mut T
 #[repr(transparent)] pub struct diport::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynSagaJournal<'dynosaur_struct>
 pub const fn diport::DynSagaJournal<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::saga_journal::SagaJournal + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
@@ -7341,20 +7685,20 @@ pub fn diport::DynSagaJournal<'dynosaur_struct>::new_arc(impl diport::saga_journ
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_box(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>
 pub fn diport::DynSagaJournal<'dynosaur_struct>::new_rc(impl diport::saga_journal::SagaJournal + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynSagaJournal<'dynosaur_struct>>
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSagaJournal<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSagaJournal<'dynosaur_struct>
@@ -9057,6 +9401,87 @@ impl<T> core::convert::From<T> for diport::revocation_store::RevocationStoreErro
 pub fn diport::revocation_store::RevocationStoreError::from(T) -> T
 impl<T> typenum::type_operators::Same for diport::revocation_store::RevocationStoreError
 pub type diport::revocation_store::RevocationStoreError::Output = T
+pub struct diport::SagaInstanceRegistration
+impl diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::contract_id(&self) -> &str
+pub fn diport::saga_instance_store::SagaInstanceRegistration::instance(&self) -> consistency::saga::SagaInstanceRef
+pub fn diport::saga_instance_store::SagaInstanceRegistration::new(consistency::saga::SagaInstanceRef, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::saga_instance_store::SagaInstanceRegistrationError>
+pub fn diport::saga_instance_store::SagaInstanceRegistration::owner(&self) -> &str
+impl core::clone::Clone for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::clone(&self) -> diport::saga_instance_store::SagaInstanceRegistration
+impl core::cmp::Eq for diport::saga_instance_store::SagaInstanceRegistration
+impl core::cmp::PartialEq for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::eq(&self, &diport::saga_instance_store::SagaInstanceRegistration) -> bool
+impl core::fmt::Debug for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Freeze for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Send for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Sync for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::Unpin for diport::saga_instance_store::SagaInstanceRegistration
+impl core::marker::UnsafeUnpin for diport::saga_instance_store::SagaInstanceRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_instance_store::SagaInstanceRegistration
+impl core::panic::unwind_safe::UnwindSafe for diport::saga_instance_store::SagaInstanceRegistration
+impl<T, U> core::convert::Into<U> for diport::saga_instance_store::SagaInstanceRegistration where U: core::convert::From<T>
+pub fn diport::saga_instance_store::SagaInstanceRegistration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::saga_instance_store::SagaInstanceRegistration where U: core::convert::Into<T>
+pub type diport::saga_instance_store::SagaInstanceRegistration::Error = core::convert::Infallible
+pub fn diport::saga_instance_store::SagaInstanceRegistration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::saga_instance_store::SagaInstanceRegistration where U: core::convert::TryFrom<T>
+pub type diport::saga_instance_store::SagaInstanceRegistration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::saga_instance_store::SagaInstanceRegistration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for diport::saga_instance_store::SagaInstanceRegistration where T: core::clone::Clone
+pub type diport::saga_instance_store::SagaInstanceRegistration::Owned = T
+pub fn diport::saga_instance_store::SagaInstanceRegistration::clone_into(&self, &mut T)
+pub fn diport::saga_instance_store::SagaInstanceRegistration::to_owned(&self) -> T
+impl<T> core::any::Any for diport::saga_instance_store::SagaInstanceRegistration where T: 'static + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::saga_instance_store::SagaInstanceRegistration where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::saga_instance_store::SagaInstanceRegistration where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceRegistration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for diport::saga_instance_store::SagaInstanceRegistration where T: core::clone::Clone
+pub unsafe fn diport::saga_instance_store::SagaInstanceRegistration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for diport::saga_instance_store::SagaInstanceRegistration
+pub fn diport::saga_instance_store::SagaInstanceRegistration::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::saga_instance_store::SagaInstanceRegistration
+pub type diport::saga_instance_store::SagaInstanceRegistration::Output = T
+pub struct diport::SagaInstanceStoreError
+impl diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
+impl core::error::Error for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::Send for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::Sync for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::Unpin for diport::saga_instance_store::SagaInstanceStoreError
+impl core::marker::UnsafeUnpin for diport::saga_instance_store::SagaInstanceStoreError
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::saga_instance_store::SagaInstanceStoreError
+impl !core::panic::unwind_safe::UnwindSafe for diport::saga_instance_store::SagaInstanceStoreError
+impl<T, U> core::convert::Into<U> for diport::saga_instance_store::SagaInstanceStoreError where U: core::convert::From<T>
+pub fn diport::saga_instance_store::SagaInstanceStoreError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for diport::saga_instance_store::SagaInstanceStoreError where U: core::convert::Into<T>
+pub type diport::saga_instance_store::SagaInstanceStoreError::Error = core::convert::Infallible
+pub fn diport::saga_instance_store::SagaInstanceStoreError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for diport::saga_instance_store::SagaInstanceStoreError where U: core::convert::TryFrom<T>
+pub type diport::saga_instance_store::SagaInstanceStoreError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn diport::saga_instance_store::SagaInstanceStoreError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for diport::saga_instance_store::SagaInstanceStoreError where T: core::fmt::Display + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for diport::saga_instance_store::SagaInstanceStoreError where T: 'static + ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for diport::saga_instance_store::SagaInstanceStoreError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for diport::saga_instance_store::SagaInstanceStoreError where T: ?core::marker::Sized
+pub fn diport::saga_instance_store::SagaInstanceStoreError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for diport::saga_instance_store::SagaInstanceStoreError
+pub fn diport::saga_instance_store::SagaInstanceStoreError::from(T) -> T
+impl<T> typenum::type_operators::Same for diport::saga_instance_store::SagaInstanceStoreError
+pub type diport::saga_instance_store::SagaInstanceStoreError::Output = T
 pub struct diport::SagaJournalError
 impl diport::saga_journal::SagaJournalError
 pub fn diport::saga_journal::SagaJournalError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -9879,25 +10304,65 @@ impl<'dynosaur_struct> diport::revocation_store::RevocationStore for diport::Dyn
 pub fn diport::DynRevocationStore<'dynosaur_struct>::is_revoked(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<bool, diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::revoke(&self, diport::revocation_store::CertSerial, diport::revocation_store::CertScope) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
 pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::revocation_store::RevocationStoreError>> + core::marker::Send
+pub trait diport::SagaInstanceStore: core::marker::Send
+pub fn diport::SagaInstanceStore::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::SagaInstanceStore::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::SagaInstanceStore::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::SagaInstanceStore::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::SagaInstanceStore::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::SagaInstanceStore::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::SagaInstanceStore::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for &mut diport::DynSagaInstanceStore<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaInstanceStore<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+impl<'dynosaur_struct> diport::saga_instance_store::SagaInstanceStore for diport::DynSagaInstanceStore<'dynosaur_struct>
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::acquire_lease(&self, &consistency::saga::SagaInstanceRef, &str, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaLease>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::extend_lease(&self, &consistency::saga::SagaLease, core::time::Duration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::mark_status(&self, &consistency::saga::SagaLease, consistency::saga::SagaInstanceStatus) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::register(&self, diport::saga_instance_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::release_lease(&self, &consistency::saga::SagaLease) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaLeaseOutcome, diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
+pub fn diport::DynSagaInstanceStore<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_instance_store::SagaInstanceStoreError>> + core::marker::Send
 pub trait diport::SagaJournal: core::marker::Send
-pub fn diport::SagaJournal::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::SagaJournal::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::SagaJournal::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::SagaJournal::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::SagaJournal::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for &mut diport::DynSagaJournal<'dynosaur_struct> where Self: core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn &mut diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>> where Self: core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaJournal<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 impl<'dynosaur_struct> diport::saga_journal::SagaJournal for diport::DynSagaJournal<'dynosaur_struct>
-pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaId, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
-pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaId) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::append(&self, &consistency::saga::SagaLease, consistency::saga::SagaJournalAppendRecord) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaJournalAppendOutcome, diport::saga_journal::SagaJournalError>> + core::marker::Send
+pub fn diport::DynSagaJournal<'dynosaur_struct>::read(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<consistency::saga::SagaJournalRecord>, diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub fn diport::DynSagaJournal<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::saga_journal::SagaJournalError>> + core::marker::Send
 pub trait diport::SecretResolver: core::marker::Send
 pub fn diport::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send

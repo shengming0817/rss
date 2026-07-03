@@ -101,7 +101,14 @@ lease/commit 状态；它同样受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_i
 已将运行期 `InboxStore` context fanout、sweeper 与 durable consumer 切到该表；pre-GA 不保留
 dual write、兼容 shim 或回填路径。
 
-saga_journal / projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围。`projection_events`
+saga_instances / saga_journal 是 tenant-scoped saga durable 表：`saga_instances` 持 instance 状态与
+lease token/epoch，`saga_journal` 主键为 `(tenant_id, saga_id, seq)` 且通过 composite FK 指回 instance。
+两表均受 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束；journal 是 append-only，
+`rss_app` 仅有 `SELECT, INSERT`，不得直接 `UPDATE/DELETE`。claim/extend/release/status mark 和 journal
+append 必须经 `PgTenantPool` 注入 `SET LOCAL rss.tenant_id`，并由 DB `WHERE tenant_id + saga_id +
+lease_token + epoch + expires_at` CAS fence，不能依赖调用方约定。
+
+projection_events 仍是无 `tenant_id` 列的全局表，不在 `schema-rls` 检查范围。`projection_events`
 不授 `rss_app` 任何表级 `SELECT/INSERT/UPDATE/DELETE`；runtime 只能执行固定
 `rss_append_projection_event(...)` / `rss_read_projection_events(...)` SECURITY DEFINER 函数。append 函数
 执行时还会校验 metadata `tenantId` 是 canonical non-nil UUID、参数匹配同事务可见 outbox row，且该 row

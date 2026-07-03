@@ -102,13 +102,13 @@
 ## Wave 4 — 高阶机制（W1+T007 后并行）
 
 ### T009 [P] [US7] P9 · saga executor + tailer + journal + 逆序补偿 + checkpoint store
-**触及**: `crates/eventexec/src/saga.rs` · `adapters/postgres/src/{saga_journal,checkpoint}.rs`+migration · `crates/diport/src/checkpoint_store.rs` · `crates/bootstrap/src/sagaprojectiondeps.rs` · `contracts/saga/` · `xtask`(saga governance) · **等级**: L3 · **blocked-by**: T002,T003,T007 · **并行**: 与 T011/T012 并行（T010 依赖本 PR 的 checkpoint）。
+**触及**: `crates/eventexec/src/saga.rs` · `adapters/postgres/src/{saga,checkpoint}.rs`+migration · `crates/diport/src/checkpoint_store.rs` · `crates/bootstrap/src/sagaprojectiondeps.rs` · `contracts/saga/` · `xtask`(saga governance) · **等级**: L3 · **blocked-by**: T002,T003,T007 · **并行**: 与 T011/T012 并行（T010 依赖本 PR 的 checkpoint）。
 
-- [ ] T009.1 [US7] 先写测试：3-step 全成→journal 顺序；step2 失败超预算→逆序 compensate step2/step1；从 step2 checkpoint resume→跳过 step1；kind:saga governance 正/负 —— FAIL
+- [ ] T009.1 [US7] 先写测试：3-step 全成→journal 顺序；step2 返回失败→逆序 compensate step2/step1；从 step2 checkpoint resume→跳过 step1；kind:saga governance 正/负；retry/timeout runtime 策略由 #1651 承接 —— FAIL
 - [ ] T009.2 [US7] `OwnerCheckpointStore`(diport) + postgres checkpoint 表（CAS version）—— **P10 复用**
 - [ ] T009.3 [US7] postgres saga_journal 表 + reader/append
 - [ ] T009.4 [US7] `eventexec/saga.rs`：SagaId/SagaActionCtx body + SagaExecutor run/resume（前向 append + 失败逆序补偿，补偿失败→saga dead-letter）+ SagaTailer status
-- [ ] T009.5 [US7] `bootstrap/sagaprojectiondeps.rs` resolver（demo mem / durable pg journal+checkpoint+tx+locker；fail-closed）
+- [ ] T009.5 [US7] `bootstrap/sagaprojectiondeps.rs` resolver（demo paired mem instance+journal / durable pg tenant-scoped instance+journal+checkpoint；fail-closed）
 - [ ] T009.6 [US7] saga dead-letter observability 字段测试：验证补偿失败写 dead-letter 时 `tracing::error!` 含 saga_id / step_name / error_summary 非空，dead-letter 记录的 contract_id / domain 取 saga owner（refs: SC-006）
 - [ ] T009.7 [US7] `contracts/saga/` kind + xtask SAGA-CONTRACT-01 governance（Medium，正/负用例）；clippy/fmt 绿
 

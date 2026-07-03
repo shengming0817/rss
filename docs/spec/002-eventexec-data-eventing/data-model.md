@@ -93,9 +93,24 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
   plaintext row/shape 必须失败；consumer replay 不删除原死信、不重置 `inbox_receipts done`。
 - 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认/最小 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——`rss_app` 无直接 DELETE，仅可调用 NOLOGIN maintenance owner 承载的 `rss_sweep_dead_letter(bigint)` 固定函数；清理前冷存储导出（合规归档）见 #1536。
 
-### saga_journal（P9）
+### saga_instances / saga_journal（P9 + #1632）
+`saga_instances`:
 | 列 | 类型 | 说明 |
 |----|------|------|
+| tenant_id | uuid | 租户边界 |
+| saga_id | uuid | saga 实例 |
+| owner | text | saga owner/domain |
+| contract_id | text | saga contract |
+| status | text | ready/running/succeeded/compensating/compensated/failed/degraded |
+| lease_token | uuid NULL | 当前 claim token |
+| holder_id | text NULL | 当前 holder |
+| epoch | bigint | 单调 CAS epoch |
+| expires_at / heartbeat_at | timestamptz NULL | lease fencing |
+
+`saga_journal`:
+| 列 | 类型 | 说明 |
+|----|------|------|
+| tenant_id | uuid | 租户边界 |
 | saga_id | uuid | |
 | seq | bigint | append 序（journal 顺序） |
 | step_name | text | |
@@ -103,7 +118,8 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | error_summary | text NULL | 补偿失败安全摘要（静态 summary；read/resume 路径不回传） |
 | occurred_at | timestamptz | |
 
-- PK: `(saga_id, seq)`。append-only。resume = 读 `seq/step_name/status` 后由 `consistency::saga` replay reducer 重建状态。
+- `saga_instances` PK: `(tenant_id, saga_id)`；claim/extend/release/status mark 均用 `lease_token + epoch + expires_at` CAS。
+- `saga_journal` PK: `(tenant_id, saga_id, seq)`，composite FK 指回 `saga_instances`。append-only；同 key exact duplicate 返回 idempotent，内容不同返回 conflict。resume = 读 `seq/step_name/status` 后由 `consistency::saga` replay reducer 重建状态。
 - durable journal 不持久化 step output；末步 output 只在 `run` 内存路径作为即时结果返回。
 - 补偿：失败时按 definition reverse order 对 completed step 调 compensate。
 

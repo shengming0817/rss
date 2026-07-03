@@ -58,8 +58,28 @@ const FORBIDDEN: &[ForbiddenPattern] = &[
     },
     ForbiddenPattern {
         rule: Rule::OutboxTenantScope,
-        needle: "outbox / saga_journal / projection_events 是**无 `tenant_id` 列的全局表**",
-        detail: "outbox 已是 tenant-scoped 表；文档不得回退为 tenantless global outbox",
+        needle: "saga_journal / projection_events 是**无 `tenant_id` 列的全局表**",
+        detail: "saga_journal 已是 tenant-scoped 表；文档不得回退为 tenantless global saga journal",
+    },
+    ForbiddenPattern {
+        rule: Rule::SagaTenantScope,
+        needle: "saga 投影资源选型（journal / checkpoint / dead-letter / locker",
+        detail: "saga runtime 已是 direct tenant-scoped instance/journal path，不得回退为 projection worker + locker 叙述",
+    },
+    ForbiddenPattern {
+        rule: Rule::SagaTenantScope,
+        needle: "bootstrap::sagaprojectiondeps::resolve(ctx, clk, topo, cfg)",
+        detail: "saga 资源文档不得引用旧 sagaprojectiondeps resolver；应描述 instance/journal/checkpoint/dead-letter 注入",
+    },
+    ForbiddenPattern {
+        rule: Rule::SagaTenantScope,
+        needle: "journal::GlobalReader",
+        detail: "saga_journal 已 tenant-scoped，文档不得回退到 GlobalReader 投影输入",
+    },
+    ForbiddenPattern {
+        rule: Rule::SagaTenantScope,
+        needle: "distlock::Locker",
+        detail: "direct saga run/resume/status 不引入 leader locker",
     },
     ForbiddenPattern {
         rule: Rule::OutboxTenantScope,
@@ -115,6 +135,7 @@ pub(crate) enum Rule {
     OutboxEnvelope,
     ProducerSignature,
     OutboxTenantScope,
+    SagaTenantScope,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -275,6 +296,23 @@ issue **#1405**
             findings
                 .iter()
                 .all(|finding| finding.rule == Rule::OutboxTenantScope)
+        );
+    }
+
+    #[test]
+    fn scan_content_reports_legacy_saga_projection_fragments() {
+        let src = "\
+## saga 投影资源选型（journal / checkpoint / dead-letter / locker，topology-gated）
+bootstrap::sagaprojectiondeps::resolve(ctx, clk, topo, cfg)
+journal::GlobalReader
+distlock::Locker
+";
+        let findings = scan_content(Path::new("docs/rules/eventbus.md"), src);
+        assert_eq!(findings.len(), 4);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::SagaTenantScope)
         );
     }
 }

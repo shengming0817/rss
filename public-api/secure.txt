@@ -1474,6 +1474,10 @@ pub type secure::transport_endpoint::PlaintextEndpointPolicy::Output = T
 #[non_exhaustive] pub enum secure::transport_endpoint::TransportEndpointError
 pub secure::transport_endpoint::TransportEndpointError::AmqpHostRequired
 pub secure::transport_endpoint::TransportEndpointError::AmqpVhostRequired
+pub secure::transport_endpoint::TransportEndpointError::FragmentUnsupported
+pub secure::transport_endpoint::TransportEndpointError::FragmentUnsupported::kind: &'static str
+pub secure::transport_endpoint::TransportEndpointError::HostRequired
+pub secure::transport_endpoint::TransportEndpointError::HostRequired::kind: &'static str
 pub secure::transport_endpoint::TransportEndpointError::InsecureScheme
 pub secure::transport_endpoint::TransportEndpointError::InsecureScheme::kind: &'static str
 pub secure::transport_endpoint::TransportEndpointError::InsecureScheme::secure_scheme: &'static str
@@ -1482,9 +1486,13 @@ pub secure::transport_endpoint::TransportEndpointError::PlaintextNotDevContainer
 pub secure::transport_endpoint::TransportEndpointError::PlaintextNotDevContainer::kind: &'static str
 pub secure::transport_endpoint::TransportEndpointError::PlaintextNotLoopback
 pub secure::transport_endpoint::TransportEndpointError::PlaintextNotLoopback::kind: &'static str
+pub secure::transport_endpoint::TransportEndpointError::QueryUnsupported
+pub secure::transport_endpoint::TransportEndpointError::QueryUnsupported::kind: &'static str
 pub secure::transport_endpoint::TransportEndpointError::RedisFragmentUnsupported
 pub secure::transport_endpoint::TransportEndpointError::UnsupportedScheme
 pub secure::transport_endpoint::TransportEndpointError::UnsupportedScheme::kind: &'static str
+pub secure::transport_endpoint::TransportEndpointError::UserInfoUnsupported
+pub secure::transport_endpoint::TransportEndpointError::UserInfoUnsupported::kind: &'static str
 impl core::cmp::Eq for secure::transport_endpoint::TransportEndpointError
 impl core::cmp::PartialEq for secure::transport_endpoint::TransportEndpointError
 pub fn secure::transport_endpoint::TransportEndpointError::eq(&self, &secure::transport_endpoint::TransportEndpointError) -> bool
@@ -1615,6 +1623,54 @@ impl<T> core::convert::From<T> for secure::transport_endpoint::RedisEndpoint
 pub fn secure::transport_endpoint::RedisEndpoint::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::transport_endpoint::RedisEndpoint
 pub type secure::transport_endpoint::RedisEndpoint::Output = T
+pub struct secure::transport_endpoint::S3Endpoint(_)
+impl secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::expose(&self) -> &str
+pub fn secure::transport_endpoint::S3Endpoint::is_plaintext(&self) -> bool
+pub fn secure::transport_endpoint::S3Endpoint::parse(impl core::convert::Into<alloc::string::String>, secure::transport_endpoint::PlaintextEndpointPolicy) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+impl core::clone::Clone for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::clone(&self) -> secure::transport_endpoint::S3Endpoint
+impl core::cmp::Eq for secure::transport_endpoint::S3Endpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::eq(&self, &secure::transport_endpoint::S3Endpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::S3Endpoint
+impl core::marker::Freeze for secure::transport_endpoint::S3Endpoint
+impl core::marker::Send for secure::transport_endpoint::S3Endpoint
+impl core::marker::Sync for secure::transport_endpoint::S3Endpoint
+impl core::marker::Unpin for secure::transport_endpoint::S3Endpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::S3Endpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::S3Endpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::S3Endpoint
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::From<T>
+pub fn secure::transport_endpoint::S3Endpoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::Into<T>
+pub type secure::transport_endpoint::S3Endpoint::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::S3Endpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::S3Endpoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::S3Endpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
+pub type secure::transport_endpoint::S3Endpoint::Owned = T
+pub fn secure::transport_endpoint::S3Endpoint::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::S3Endpoint::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::transport_endpoint::S3Endpoint where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::S3Endpoint where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::S3Endpoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::S3Endpoint
+pub type secure::transport_endpoint::S3Endpoint::Output = T
 #[non_exhaustive] pub enum secure::AadError
 pub secure::AadError::EmptyDimension
 impl core::error::Error for secure::protection::AadError
@@ -2318,6 +2374,10 @@ pub type secure::blind_index::Transform::Output = T
 #[non_exhaustive] pub enum secure::TransportEndpointError
 pub secure::TransportEndpointError::AmqpHostRequired
 pub secure::TransportEndpointError::AmqpVhostRequired
+pub secure::TransportEndpointError::FragmentUnsupported
+pub secure::TransportEndpointError::FragmentUnsupported::kind: &'static str
+pub secure::TransportEndpointError::HostRequired
+pub secure::TransportEndpointError::HostRequired::kind: &'static str
 pub secure::TransportEndpointError::InsecureScheme
 pub secure::TransportEndpointError::InsecureScheme::kind: &'static str
 pub secure::TransportEndpointError::InsecureScheme::secure_scheme: &'static str
@@ -2326,9 +2386,13 @@ pub secure::TransportEndpointError::PlaintextNotDevContainer
 pub secure::TransportEndpointError::PlaintextNotDevContainer::kind: &'static str
 pub secure::TransportEndpointError::PlaintextNotLoopback
 pub secure::TransportEndpointError::PlaintextNotLoopback::kind: &'static str
+pub secure::TransportEndpointError::QueryUnsupported
+pub secure::TransportEndpointError::QueryUnsupported::kind: &'static str
 pub secure::TransportEndpointError::RedisFragmentUnsupported
 pub secure::TransportEndpointError::UnsupportedScheme
 pub secure::TransportEndpointError::UnsupportedScheme::kind: &'static str
+pub secure::TransportEndpointError::UserInfoUnsupported
+pub secure::TransportEndpointError::UserInfoUnsupported::kind: &'static str
 impl core::cmp::Eq for secure::transport_endpoint::TransportEndpointError
 impl core::cmp::PartialEq for secure::transport_endpoint::TransportEndpointError
 pub fn secure::transport_endpoint::TransportEndpointError::eq(&self, &secure::transport_endpoint::TransportEndpointError) -> bool
@@ -3142,6 +3206,54 @@ impl<T> core::convert::From<T> for secure::transport_endpoint::RedisEndpoint
 pub fn secure::transport_endpoint::RedisEndpoint::from(T) -> T
 impl<T> typenum::type_operators::Same for secure::transport_endpoint::RedisEndpoint
 pub type secure::transport_endpoint::RedisEndpoint::Output = T
+pub struct secure::S3Endpoint(_)
+impl secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::expose(&self) -> &str
+pub fn secure::transport_endpoint::S3Endpoint::is_plaintext(&self) -> bool
+pub fn secure::transport_endpoint::S3Endpoint::parse(impl core::convert::Into<alloc::string::String>, secure::transport_endpoint::PlaintextEndpointPolicy) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+impl core::clone::Clone for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::clone(&self) -> secure::transport_endpoint::S3Endpoint
+impl core::cmp::Eq for secure::transport_endpoint::S3Endpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::eq(&self, &secure::transport_endpoint::S3Endpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::S3Endpoint
+impl core::marker::Freeze for secure::transport_endpoint::S3Endpoint
+impl core::marker::Send for secure::transport_endpoint::S3Endpoint
+impl core::marker::Sync for secure::transport_endpoint::S3Endpoint
+impl core::marker::Unpin for secure::transport_endpoint::S3Endpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::S3Endpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::S3Endpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::S3Endpoint
+impl<T, U> core::convert::Into<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::From<T>
+pub fn secure::transport_endpoint::S3Endpoint::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::Into<T>
+pub type secure::transport_endpoint::S3Endpoint::Error = core::convert::Infallible
+pub fn secure::transport_endpoint::S3Endpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::TryFrom<T>
+pub type secure::transport_endpoint::S3Endpoint::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn secure::transport_endpoint::S3Endpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
+pub type secure::transport_endpoint::S3Endpoint::Owned = T
+pub fn secure::transport_endpoint::S3Endpoint::clone_into(&self, &mut T)
+pub fn secure::transport_endpoint::S3Endpoint::to_owned(&self) -> T
+impl<T> alloc::string::ToString for secure::transport_endpoint::S3Endpoint where T: core::fmt::Display + ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for secure::transport_endpoint::S3Endpoint where T: 'static + ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
+pub fn secure::transport_endpoint::S3Endpoint::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
+pub unsafe fn secure::transport_endpoint::S3Endpoint::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for secure::transport_endpoint::S3Endpoint
+pub fn secure::transport_endpoint::S3Endpoint::from(T) -> T
+impl<T> typenum::type_operators::Same for secure::transport_endpoint::S3Endpoint
+pub type secure::transport_endpoint::S3Endpoint::Output = T
 pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>

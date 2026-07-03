@@ -43,7 +43,7 @@ mod reconcile;
 mod refresh_token_store;
 mod role_binding_lifecycle;
 mod role_repo;
-mod saga_journal;
+mod saga;
 mod secret_repo;
 mod session_lifecycle;
 mod session_sweeper;
@@ -85,7 +85,7 @@ pub use reconcile::{
 pub use refresh_token_store::PgRefreshTokenStore;
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;
-pub use saga_journal::PgSagaJournal;
+pub use saga::{PgSagaInstanceStore, PgSagaJournal};
 pub use secret_repo::PgSecretRepo;
 pub use session_lifecycle::PgSessionLifecycle;
 pub use session_sweeper::PgSessionSweeper;
@@ -206,6 +206,7 @@ mod smoke {
     fn assert_retention_sweeper<T: consistency::RetentionSweeper>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
+    fn assert_saga_instance_store<T: diport::SagaInstanceStore>(_: PhantomData<T>) {}
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
     fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
@@ -235,7 +236,9 @@ mod smoke {
         // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。
         assert_config_repo(PhantomData::<super::PgConfigRepo>);
         assert_config_uow(PhantomData::<super::PgConfigRepo>);
-        // `PgSagaJournal: SagaJournal` + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
+        // `PgSagaInstanceStore: SagaInstanceStore` + `PgSagaJournal: SagaJournal`
+        // + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
+        assert_saga_instance_store(PhantomData::<super::PgSagaInstanceStore>);
         assert_saga_journal(PhantomData::<super::PgSagaJournal>);
         assert_cas_store(PhantomData::<super::PgCasStore>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);

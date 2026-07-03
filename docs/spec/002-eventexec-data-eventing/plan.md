@@ -65,7 +65,7 @@ reconcile 的**引擎策略 trait**（`Reconciler` native AFIT）已在 `consist
 
 saga journal resume 与 projection 断点续投都需要 `OwnerCheckpointStore`（owner + checkpoint id + offset + CAS 版本）。
 
-- **裁定**：`OwnerCheckpointStore` trait（diport DI port）+ postgres `checkpoint` 表 migration 落 **P9（saga）**；**P10（projection）直接复用**，不重复定义。`sagaprojectiondeps` resolver 的 checkpoint 分支也在 P9 建好，P10 只接 projection 专属的 TxRunner + projection_events 表。
+- **裁定**：`OwnerCheckpointStore` trait（diport DI port）+ postgres `checkpoint` 表 migration 落 **P9（saga）**；**P10（projection）直接复用**，不重复定义。`sagaprojectiondeps` resolver 的 checkpoint 分支也在 P9 建好，P10 只接 projection 专属的 projection_events 表。
 - 理由：避免 P9/P10 同文件（resolver、checkpoint trait）写冲突；checkpoint 是 saga 的硬前置（resume）、projection 的硬前置（续投），先落于 saga 更贴 journal 语义。
 - **依赖后果**：P10 blocked-by P9（仅就 checkpoint 接缝；projection 其余逻辑独立）。若要 P9/P10 完全并行，备选是单开「P9a checkpoint store」前置 PR——本计划不采（增 PR 数，checkpoint 体量小，并入 P9 更简洁）。
 
@@ -97,7 +97,7 @@ crates/eventexec/src/
 └── command.rs                   # P12：runtime command::emit_async
 crates/diport/src/              # P11：leader_elector.rs / fenced_writer.rs；P9：checkpoint_store.rs（DI port）
 crates/bootstrap/src/           # P5/P6/P9：eventtransport / replaydeps / sagaprojectiondeps resolver（sealed）
-adapters/postgres/              # P3 基座；P4 outbox 表；P5 inbox；P7 dead-letter；P9 journal+checkpoint；P10 projection_events
+adapters/postgres/              # P3 基座；P4 outbox 表；P5 inbox；P7 dead-letter；P9 saga instance+journal+checkpoint；P10 projection_events
 ├── migrations/                 # P3 起：{序号}_{动词}_{对象}.sql（sqlx::migrate!）
 adapters/redis/                 # P5 claimer；P11 leader-elect/fencing
 adapters/amqp/                  # P6：lapin Publisher/Subscriber
@@ -122,7 +122,7 @@ lints/                          # P10：append-only DML dylint（rss_projection_
 | P6 amqp+eventtransport | adapters/amqp + bootstrap eventtransport | — | diport | 800–1200 |
 | P7 ConsumerBase+DLX | eventexec/consumer.rs + dead-letter store | L2 | P4,P5 | 1000–1400 |
 | P8 #1100 identity durable | identity/audit + journey + L2 治理 | L2 | P4,P5,P7 | 600–1000 |
-| P9 saga+journal+checkpoint | eventexec/saga.rs + journal/checkpoint + sagaprojectiondeps + xtask | L3 | P2,P3,P7 | 1200–1800 |
+| P9 saga instance+journal+checkpoint | eventexec/saga.rs + instance/journal/checkpoint + sagaprojectiondeps + xtask | L3 | P2,P3,P7 | 1200–1800 |
 | P10 projection+续投 | eventexec/projection.rs + projection_events + dylint | L3 | P2,P3,P7,P9(checkpoint) | 1000–1500 |
 | P11 reconcile+leader+fencing | eventexec/reconcile.rs + diport + adapters | L4 | P2 | 1200–1800 |
 | P12 command+codegen | eventexec/command.rs + contracts/command + generated + xtask | L2/L3 | P4,P7 | 1000–1500 |

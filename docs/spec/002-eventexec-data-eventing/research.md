@@ -38,7 +38,7 @@
 - **Alternatives**: (a) 独立 `reconcileloop` crate——拒（碎片化，1005 范围外）；(b) 放 consistency——拒（consistency 不依赖服务层、不做 I/O/spawn）。
 
 ### R2. checkpoint store 并入先落的 P9，P10 复用（决策见 plan §决策 2）
-- **Decision**: `OwnerCheckpointStore`(diport) + postgres checkpoint 表 + sagaprojectiondeps 的 checkpoint 分支落 P9；P10 复用，blocked-by P9（仅 checkpoint 接缝）。
+- **Decision**: `OwnerCheckpointStore`(diport) + postgres checkpoint 表 + sagaprojectiondeps 的 checkpoint 分支落 P9；saga instance/journal 另由 tenant-scoped store 承载 lease/CAS；P10 复用 checkpoint，blocked-by P9（仅 checkpoint 接缝）。
 - **Rationale**: 避免 P9/P10 同文件冲突；checkpoint 贴 journal 语义、体量小。
 - **Alternatives**: 单开 P9a checkpoint 前置 PR 使 P9/P10 全并行——拒（增 PR 数，收益小）。
 

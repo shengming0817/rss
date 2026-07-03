@@ -26,6 +26,7 @@
 
 新增 `contracts/saga/<domain>/v1/`：
 - `contract.toml`：`kind="saga"`、`consistencyLevel="WorkflowEventual"`(L3)、非空 `[saga]` block（TOML 键 **camelCase**，`deny_unknown_fields`）：`steps=[{name, outputSchema}...]`（≥1）+ `compensationOrder="reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，**block 级、非 per-step**）。完整形态见 `xtask` 解析测试 `VALID_SAGA` 与 `contracts/README.md` §[saga]。
+- `retryMillis`/`timeoutMillis` 当前只作为 saga 契约治理元数据校验；`eventexec` runtime 不消费这两个字段，runtime retry/timeout 策略由 #1651 承接。
 - step `outputSchema` 引用 `*.schema.json`。
 
 **治理**（xtask，SAGA-CONTRACT-01，对齐 saga.md §Governance）：

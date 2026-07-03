@@ -112,6 +112,12 @@ SELECT/INSERT 并显式 `REVOKE UPDATE, DELETE`。四表均在同一迁移内落
 DELETE`，并在建表迁移内落 `FORCE RLS` 与标准 tenant policy。tenant/schema header 与物理列的一致性由
 DB CHECK 强制，不依赖应用约定。
 
+`0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
+instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
+`saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，
+仅授 `rss_app` SELECT/INSERT 并显式 `REVOKE UPDATE, DELETE`。两表均在迁移内落 `FORCE RLS` 与标准 tenant
+policy。legacy global `saga_journal` 若非空则 fail-fast，不做隐式 backfill。
+
 ## Append-only 表（REVOKE 强制）
 
 append-only 表（如 `projection_events`）在前向迁移内用 `REVOKE UPDATE, DELETE ON <table> FROM <role>` 强制 DB

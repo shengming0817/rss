@@ -68,8 +68,8 @@ use crate::{
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
     PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance, PgPolicyRepo,
     PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore,
-    PgRoleBindingLifecycle, PgRoleRepo, PgSagaJournal, PgSecretRepo, PgSessionLifecycle,
-    PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard,
+    PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo,
+    PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -776,6 +776,12 @@ impl PgInfraDeps {
         self.store.reconcile()
     }
 
+    /// saga instance/lease store（L3 saga claim/fencing）。
+    #[must_use]
+    pub fn saga_instance_store(&self) -> PgSagaInstanceStore {
+        self.store.saga_instance_store()
+    }
+
     /// saga journal（L3 saga 状态）。
     #[must_use]
     pub fn saga_journal(&self) -> PgSagaJournal {
@@ -1029,6 +1035,7 @@ mod tests {
         let _ = infra.inbox_sweeper();
         let _ = infra.session_sweeper();
         let _ = infra.checkpoint();
+        let _ = infra.saga_instance_store();
         let _ = infra.saga_journal();
         let _ = infra.projection_events();
         let _ = infra.cas_store();

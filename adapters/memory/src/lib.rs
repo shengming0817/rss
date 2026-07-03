@@ -20,8 +20,9 @@ use std::time::{Duration, SystemTime};
 
 use consistency::{
     EngineError, Entry, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
-    LeaseToken as IdemLeaseToken, Lsn, SagaId, SagaJournalAppendRecord, SagaJournalRecord,
-    SeenState,
+    LeaseToken as IdemLeaseToken, Lsn, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus,
+    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
+    SagaLeaseOutcome, SeenState,
 };
 
 use diport::{
@@ -32,8 +33,9 @@ use diport::{
     LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore,
     LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
     OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
-    PublisherError, SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate, SecretMaterial,
-    SecretResolver, SecretResolverError, Subscriber, SubscriberError, Topic, WriteOutcome,
+    PublisherError, SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError,
+    SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate, SecretMaterial, SecretResolver,
+    SecretResolverError, Subscriber, SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -954,17 +956,256 @@ impl LockStore for MemLockStore {
     }
 }
 
+// ── MemSagaInstanceStore：saga instance/lease in-mem 替身 ───────────────────────
+
+#[derive(Clone)]
+struct MemSagaInstanceState {
+    status: SagaInstanceStatus,
+    owner: String,
+    contract_id: String,
+    holder_id: Option<String>,
+    lease_token: Option<uuid::Uuid>,
+    epoch: u64,
+    expires_at: Option<SystemTime>,
+}
+
+impl MemSagaInstanceState {
+    fn record(&self, instance: SagaInstanceRef) -> SagaInstanceRecord {
+        let _ = (&self.owner, &self.contract_id);
+        SagaInstanceRecord::new(instance, self.status)
+    }
+
+    fn lease_is_free(&self, now: SystemTime) -> bool {
+        self.lease_token.is_none() || self.expires_at.is_some_and(|expires| expires <= now)
+    }
+
+    fn lease_matches(&self, lease: &SagaLease, now: SystemTime) -> bool {
+        self.lease_token == Some(lease.lease_token())
+            && self.epoch == lease.epoch()
+            && self.holder_id.as_deref() == Some(lease.holder_id())
+            && self.expires_at.is_some_and(|expires| expires > now)
+    }
+}
+
+type SagaInstanceMap = HashMap<(String, uuid::Uuid), MemSagaInstanceState>;
+type SagaJournalRows = Vec<(SagaInstanceRef, SagaJournalAppendRecord)>;
+
+#[derive(Clone, Default)]
+struct MemSagaState {
+    instances: Arc<Mutex<SagaInstanceMap>>,
+    journal: Arc<Mutex<SagaJournalRows>>,
+}
+
+/// in-mem saga instance store（impl [`diport::SagaInstanceStore`]）.
+#[derive(Clone, Default)]
+pub struct MemSagaInstanceStore {
+    inner: MemSagaState,
+}
+
+impl MemSagaInstanceStore {
+    /// 新建空 instance store。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return a journal handle sharing this store's in-memory lease state.
+    pub fn journal(&self) -> MemSagaJournal {
+        MemSagaJournal {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl SagaInstanceStore for MemSagaInstanceStore {
+    async fn register(
+        &self,
+        registration: SagaInstanceRegistration,
+    ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
+        let instance = registration.instance();
+        let key = saga_instance_key(instance);
+        let mut g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let state = g.entry(key).or_insert_with(|| MemSagaInstanceState {
+            status: SagaInstanceStatus::Ready,
+            owner: registration.owner().to_string(),
+            contract_id: registration.contract_id().to_string(),
+            holder_id: None,
+            lease_token: None,
+            epoch: 0,
+            expires_at: None,
+        });
+        Ok(state.record(instance))
+    }
+
+    async fn get(
+        &self,
+        instance: &SagaInstanceRef,
+    ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
+        let g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(g.get(&saga_instance_key(*instance))
+            .map(|state| state.record(*instance)))
+    }
+
+    async fn acquire_lease(
+        &self,
+        instance: &SagaInstanceRef,
+        holder_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<SagaLease>, SagaInstanceStoreError> {
+        validate_saga_holder(holder_id)?;
+        let now = saga_now();
+        let expires_at = checked_expiry(now, ttl)?;
+        let mut g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(state) = g.get_mut(&saga_instance_key(*instance)) else {
+            return Ok(None);
+        };
+        if !state.lease_is_free(now) {
+            return Ok(None);
+        }
+        let token = uuid::Uuid::new_v4();
+        state.epoch = state.epoch.saturating_add(1);
+        state.lease_token = Some(token);
+        state.holder_id = Some(holder_id.to_string());
+        state.expires_at = Some(expires_at);
+        state.status = SagaInstanceStatus::Running;
+        SagaLease::new(*instance, holder_id, token, state.epoch)
+            .map(Some)
+            .map_err(SagaInstanceStoreError::new)
+    }
+
+    async fn extend_lease(
+        &self,
+        lease: &SagaLease,
+        ttl: Duration,
+    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        let now = saga_now();
+        let expires_at = checked_expiry(now, ttl)?;
+        let mut g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(state) = g.get_mut(&saga_instance_key(lease.instance())) else {
+            return Ok(SagaLeaseOutcome::Lost);
+        };
+        if !state.lease_matches(lease, now) {
+            return Ok(SagaLeaseOutcome::Lost);
+        }
+        state.expires_at = Some(expires_at);
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    async fn release_lease(
+        &self,
+        lease: &SagaLease,
+    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        let now = saga_now();
+        let mut g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(state) = g.get_mut(&saga_instance_key(lease.instance())) else {
+            return Ok(SagaLeaseOutcome::Lost);
+        };
+        if !state.lease_matches(lease, now) {
+            return Ok(SagaLeaseOutcome::Lost);
+        }
+        state.lease_token = None;
+        state.holder_id = None;
+        state.expires_at = None;
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    async fn mark_status(
+        &self,
+        lease: &SagaLease,
+        status: SagaInstanceStatus,
+    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        let now = saga_now();
+        let mut g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(state) = g.get_mut(&saga_instance_key(lease.instance())) else {
+            return Ok(SagaLeaseOutcome::Lost);
+        };
+        if !state.lease_matches(lease, now) {
+            return Ok(SagaLeaseOutcome::Lost);
+        }
+        state.status = status;
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
+        Ok(())
+    }
+}
+
+fn saga_instance_key(instance: SagaInstanceRef) -> (String, uuid::Uuid) {
+    (instance.tenant().to_string(), instance.saga_id().as_uuid())
+}
+
+fn validate_saga_holder(holder_id: &str) -> Result<(), SagaInstanceStoreError> {
+    if holder_id.trim().is_empty() {
+        return Err(SagaInstanceStoreError::new(MemSagaInvariant(
+            "saga lease holder id is empty",
+        )));
+    }
+    Ok(())
+}
+
+fn checked_expiry(now: SystemTime, ttl: Duration) -> Result<SystemTime, SagaInstanceStoreError> {
+    if ttl.is_zero() {
+        return Err(SagaInstanceStoreError::new(MemSagaInvariant(
+            "saga lease ttl is zero",
+        )));
+    }
+    now.checked_add(ttl)
+        .ok_or_else(|| SagaInstanceStoreError::new(MemSagaInvariant("saga lease ttl overflow")))
+}
+
+fn saga_now() -> SystemTime {
+    // reason: memory saga store owns an ephemeral process-local lease clock; durable PG uses DB/CAS.
+    #[allow(clippy::disallowed_methods)]
+    {
+        SystemTime::now()
+    }
+}
+
+#[derive(Debug)]
+struct MemSagaInvariant(&'static str);
+
+impl std::fmt::Display for MemSagaInvariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Error for MemSagaInvariant {}
+
 // ── MemSagaJournal：saga 执行日志 in-mem 替身 ────────────────────────────────────
 
-/// in-mem saga journal（impl [`diport::SagaJournal`]）：按 `(saga_id, seq)` 主键幂等 append，
+/// in-mem saga journal（impl [`diport::SagaJournal`]）：按 `(tenant_id, saga_id, seq)` 主键幂等 append，
 /// `read` 返回按 `seq` 升序排列的条目（`error_summary` 恒 `None`，符合 port 契约）。
 ///
 /// 对标 oxidecomputer/steno `SagaLog`（append-only journal，crash-replay 幂等）。
 /// 生产替身走 postgres adapter（`ON CONFLICT (saga_id,seq) DO NOTHING`）；本 crate 仅测试/demo 用。
 #[derive(Clone, Default)]
 pub struct MemSagaJournal {
-    // (saga_id_bytes, entry) — saga_id 以 uuid::Uuid 字节存储，entry 携带 seq/step_name/status。
-    inner: Arc<Mutex<Vec<(uuid::Uuid, SagaJournalAppendRecord)>>>,
+    inner: MemSagaState,
 }
 
 impl MemSagaJournal {
@@ -972,32 +1213,57 @@ impl MemSagaJournal {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// New journal handle sharing lease state with an existing in-memory instance store.
+    pub fn for_instance_store(store: &MemSagaInstanceStore) -> Self {
+        store.journal()
+    }
 }
 
 impl SagaJournal for MemSagaJournal {
     async fn append(
         &self,
-        saga_id: &SagaId,
+        lease: &SagaLease,
         entry: SagaJournalAppendRecord,
-    ) -> Result<(), SagaJournalError> {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // 幂等：同 (saga_id, seq) 已存在则 no-op（对标 postgres ON CONFLICT DO NOTHING）。
-        let id = saga_id.as_uuid();
-        let seq = entry.seq();
-        let already_exists = g.iter().any(|(sid, e)| *sid == id && e.seq() == seq);
-        if !already_exists {
-            g.push((id, entry));
+    ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
+        let instance = lease.instance();
+        let now = saga_now();
+        let instances = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let lease_held = instances
+            .get(&saga_instance_key(instance))
+            .is_some_and(|state| state.lease_matches(lease, now));
+        if !lease_held {
+            return Ok(SagaJournalAppendOutcome::LeaseLost);
         }
-        Ok(())
+        let mut g = self.inner.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = entry.seq();
+        if let Some((_, existing)) = g
+            .iter()
+            .find(|(stored, e)| *stored == instance && e.seq() == seq)
+        {
+            return if *existing == entry {
+                Ok(SagaJournalAppendOutcome::IdempotentDuplicate)
+            } else {
+                Ok(SagaJournalAppendOutcome::AppendConflict)
+            };
+        }
+        g.push((instance, entry));
+        Ok(SagaJournalAppendOutcome::Appended)
     }
 
-    async fn read(&self, saga_id: &SagaId) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
-        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let id = saga_id.as_uuid();
+    async fn read(
+        &self,
+        instance: &SagaInstanceRef,
+    ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
+        let g = self.inner.journal.lock().unwrap_or_else(|e| e.into_inner());
         // 过滤本 saga、按 seq 升序（resume 据此重建执行栈）；strip error_summary（port 契约）。
         let mut entries: Vec<SagaJournalRecord> = g
             .iter()
-            .filter(|(sid, _)| *sid == id)
+            .filter(|(stored, _)| stored == instance)
             .map(|(_, e)| SagaJournalRecord::replayed(e.seq(), e.step_name().clone(), e.status()))
             .collect();
         entries.sort_by_key(SagaJournalRecord::seq);
@@ -2494,8 +2760,19 @@ mod tests {
         use consistency::{SagaId, SagaJournalStatus};
         use uuid::Uuid;
 
-        let journal = MemSagaJournal::new();
-        let saga_id = SagaId::new(Uuid::from_u128(1));
+        let store = MemSagaInstanceStore::new();
+        let journal = store.journal();
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let instance = SagaInstanceRef::new(tenant, SagaId::new(Uuid::from_u128(1))).unwrap();
+        store
+            .register(SagaInstanceRegistration::new(instance, "billing", "checkout").unwrap())
+            .await
+            .unwrap();
+        let lease = store
+            .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
         let steps = [
             consistency::StepName::parse("step0").unwrap(),
             consistency::StepName::parse("step1").unwrap(),
@@ -2528,19 +2805,35 @@ mod tests {
                 }
                 _ => unreachable!("SagaJournalStatus::ALL contains only known statuses"),
             };
-            journal.append(&saga_id, record).await.unwrap();
+            assert!(matches!(
+                journal.append(&lease, record).await.unwrap(),
+                SagaJournalAppendOutcome::Appended
+            ));
         }
 
-        // 重复 append (saga_id, seq=0) → no-op（幂等）。
-        journal
-            .append(
-                &saga_id,
-                SagaJournalAppendRecord::executing(0, steps[0].clone()),
-            )
-            .await
-            .unwrap();
+        // 重复 append exact (instance, seq=0) → idempotent duplicate；不同内容 → conflict。
+        assert!(matches!(
+            journal
+                .append(
+                    &lease,
+                    SagaJournalAppendRecord::executing(0, steps[0].clone()),
+                )
+                .await
+                .unwrap(),
+            SagaJournalAppendOutcome::IdempotentDuplicate
+        ));
+        assert!(matches!(
+            journal
+                .append(
+                    &lease,
+                    SagaJournalAppendRecord::completed(0, steps[0].clone()),
+                )
+                .await
+                .unwrap(),
+            SagaJournalAppendOutcome::AppendConflict
+        ));
 
-        let entries = journal.read(&saga_id).await.unwrap();
+        let entries = journal.read(&instance).await.unwrap();
         assert_eq!(
             entries.len(),
             SagaJournalStatus::ALL.len(),
@@ -2552,6 +2845,180 @@ mod tests {
             assert_eq!(entry.status(), SagaJournalStatus::ALL[idx]);
             // read record 类型不暴露 runtime-only error_summary；resume 只需 seq/step_name/status。
         }
+
+        store.release_lease(&lease).await.unwrap();
+        assert!(matches!(
+            journal
+                .append(
+                    &lease,
+                    SagaJournalAppendRecord::executing(99, steps[0].clone()),
+                )
+                .await
+                .unwrap(),
+            SagaJournalAppendOutcome::LeaseLost
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 canonical tenant literals，item-level carve-out。
+    async fn mem_saga_journal_is_tenant_scoped_for_same_saga_id() {
+        use consistency::SagaId;
+        use uuid::Uuid;
+
+        let store = MemSagaInstanceStore::new();
+        let journal = store.journal();
+        let tenant_a = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let tenant_b = vocab::TenantId::parse("67c5d9c8-b37f-4967-8d31-66e9c0bdf193").unwrap();
+        let saga_id = SagaId::new(Uuid::from_u128(1632));
+        let instance_a = SagaInstanceRef::new(tenant_a, saga_id).unwrap();
+        let instance_b = SagaInstanceRef::new(tenant_b, saga_id).unwrap();
+        for instance in [instance_a, instance_b] {
+            store
+                .register(SagaInstanceRegistration::new(instance, "billing", "checkout").unwrap())
+                .await
+                .unwrap();
+        }
+        let lease_a = store
+            .acquire_lease(&instance_a, "runner-a", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let lease_b = store
+            .acquire_lease(&instance_b, "runner-b", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let step_a = consistency::StepName::parse("tenant_a_step").unwrap();
+        let step_b = consistency::StepName::parse("tenant_b_step").unwrap();
+
+        assert_eq!(
+            journal
+                .append(
+                    &lease_a,
+                    SagaJournalAppendRecord::executing(0, step_a.clone()),
+                )
+                .await
+                .unwrap(),
+            SagaJournalAppendOutcome::Appended
+        );
+        assert_eq!(
+            journal
+                .append(
+                    &lease_b,
+                    SagaJournalAppendRecord::executing(0, step_b.clone()),
+                )
+                .await
+                .unwrap(),
+            SagaJournalAppendOutcome::Appended
+        );
+
+        let rows_a = journal.read(&instance_a).await.unwrap();
+        let rows_b = journal.read(&instance_b).await.unwrap();
+        assert_eq!(rows_a.len(), 1);
+        assert_eq!(rows_b.len(), 1);
+        assert_eq!(rows_a[0].step_name(), &step_a);
+        assert_eq!(rows_b[0].step_name(), &step_b);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 canonical literal 构造，item-level carve-out。
+    async fn mem_saga_instance_store_lease_cas_roundtrip() {
+        use consistency::SagaId;
+
+        let store = MemSagaInstanceStore::new();
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
+        let registration =
+            SagaInstanceRegistration::new(instance, "billing", "billing.checkout").unwrap();
+
+        let record = store.register(registration).await.unwrap();
+        assert_eq!(record.status(), SagaInstanceStatus::Ready);
+
+        let lease = store
+            .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(lease.is_some(), "lease should be acquired");
+        let lease = lease.unwrap();
+        assert!(
+            store
+                .acquire_lease(&instance, "runner-b", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .is_none(),
+            "second holder should be fenced"
+        );
+        assert_eq!(
+            store
+                .extend_lease(&lease, Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SagaLeaseOutcome::Held
+        );
+        assert_eq!(
+            store
+                .mark_status(&lease, SagaInstanceStatus::Succeeded)
+                .await
+                .unwrap(),
+            SagaLeaseOutcome::Held
+        );
+        assert_eq!(
+            store.get(&instance).await.unwrap().map(|row| row.status()),
+            Some(SagaInstanceStatus::Succeeded)
+        );
+        assert_eq!(
+            store.release_lease(&lease).await.unwrap(),
+            SagaLeaseOutcome::Held
+        );
+        assert!(
+            store
+                .acquire_lease(&instance, "runner-b", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .is_some(),
+            "release should free the lease"
+        );
+        assert_eq!(
+            store
+                .extend_lease(&lease, Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SagaLeaseOutcome::Lost,
+            "stale token+epoch must be fenced"
+        );
+
+        let tenant_b = vocab::TenantId::parse("67c5d9c8-b37f-4967-8d31-66e9c0bdf193").unwrap();
+        let instance_b =
+            SagaInstanceRef::new(tenant_b, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
+        store
+            .register(
+                SagaInstanceRegistration::new(instance_b, "billing", "billing.checkout").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get(&instance).await.unwrap().map(|row| row.status()),
+            Some(SagaInstanceStatus::Running)
+        );
+        assert_eq!(
+            store
+                .get(&instance_b)
+                .await
+                .unwrap()
+                .map(|row| row.status()),
+            Some(SagaInstanceStatus::Ready)
+        );
+        assert!(
+            store
+                .acquire_lease(&instance_b, "runner-c", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .is_some(),
+            "same saga UUID in another tenant must acquire independently"
+        );
     }
 
     // ── MemCheckpointStore 测试 ───────────────────────────────────────────────

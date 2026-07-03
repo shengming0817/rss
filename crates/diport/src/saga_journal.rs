@@ -1,9 +1,10 @@
 //! `SagaJournal` —— saga 执行日志 DI port（可替换：prod postgres / test in-mem）。
 //!
-//! append-only：执行器逐步前向 append（`Executing`→`Completed`），失败逆序补偿
+//! tenant-scoped append-only：执行器逐步前向 append（`Executing`→`Completed`），失败逆序补偿
 //! （`Compensating`→`Compensated`），补偿失败写 `Failed`。`read` 按 `seq` 升序回放，执行器用
-//! `consistency::saga` 的 reducer 重建栈供 resume（crash recovery）。主键 `(saga_id, seq)`——`append`
-//! 须幂等（重投同 `(saga_id, seq)` no-op），故崩溃后重 append 安全。
+//! `consistency::saga` 的 reducer 重建栈供 resume（crash recovery）。主键
+//! `(tenant_id, saga_id, seq)`——`append` 须区分 exact duplicate 和 conflicting duplicate，故崩溃后
+//! 重 append 安全，状态机漂移 fail-closed。
 //!
 //! durable record 模型单源在 `consistency::saga`；本 port 只定义 provider 可替换边界。append/read
 //! record 类型分离，record 不承载 step output，`read` 路径亦不回传 runtime-only `error_summary`。
@@ -12,7 +13,10 @@
 
 use dynosaur::dynosaur;
 
-use consistency::{SagaId, SagaJournalAppendRecord, SagaJournalRecord};
+use consistency::{
+    SagaInstanceRef, SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord,
+    SagaLease,
+};
 
 use crate::redacted::RedactedSource;
 
@@ -54,17 +58,22 @@ impl SagaJournalError {
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `SagaJournal` 变体 +
 // dynosaur `DynSagaJournal` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
 pub trait SagaJournalLocal {
-    /// 在 `(saga_id, entry.seq())` append 一条记录。append-only、never UPDATE/DELETE。
-    /// 实现须幂等（同 `(saga_id, seq)` 重 append no-op，崩溃后重放安全）。
+    /// 在 `(tenant_id, saga_id, entry.seq())` append 一条记录。append-only、never UPDATE/DELETE。
+    /// 写入必须由 `lease` 的 token+epoch fence；同 key exact duplicate 返回
+    /// [`SagaJournalAppendOutcome::IdempotentDuplicate`]，不同内容返回
+    /// [`SagaJournalAppendOutcome::AppendConflict`]。
     async fn append(
         &self,
-        saga_id: &SagaId,
+        lease: &SagaLease,
         entry: SagaJournalAppendRecord,
-    ) -> Result<(), SagaJournalError>;
+    ) -> Result<SagaJournalAppendOutcome, SagaJournalError>;
 
     /// 读某 saga 全部 journal 条目，按 `seq` 升序（resume 据此重建栈与阶段）。read record 不回传
     /// runtime-only `error_summary`（resume 不需，见模块 doc）。
-    async fn read(&self, saga_id: &SagaId) -> Result<Vec<SagaJournalRecord>, SagaJournalError>;
+    async fn read(
+        &self,
+        instance: &SagaInstanceRef,
+    ) -> Result<Vec<SagaJournalRecord>, SagaJournalError>;
 
     /// 异步释放 provider 资源（无 async Drop）。有 infra 资源的 adapter 应同时 `impl ManagedResource`。
     async fn shutdown(&self) -> Result<(), SagaJournalError>;
@@ -74,20 +83,23 @@ pub trait SagaJournalLocal {
 mod smoke {
     //! build smoke：async DI port 可 native AFIT impl + 经 `Box<DynSagaJournal>` 跨 spawn 注入。
     use super::{DynSagaJournal, SagaJournal, SagaJournalError};
-    use consistency::{SagaId, SagaJournalAppendRecord, SagaJournalRecord, StepName};
+    use consistency::{
+        SagaId, SagaInstanceRef, SagaJournalAppendOutcome, SagaJournalAppendRecord,
+        SagaJournalRecord, SagaLease, StepName,
+    };
 
     struct NoopJournal;
     impl SagaJournal for NoopJournal {
         async fn append(
             &self,
-            _saga_id: &SagaId,
+            _lease: &SagaLease,
             _entry: SagaJournalAppendRecord,
-        ) -> Result<(), SagaJournalError> {
-            Ok(())
+        ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
+            Ok(SagaJournalAppendOutcome::Appended)
         }
         async fn read(
             &self,
-            _saga_id: &SagaId,
+            _instance: &SagaInstanceRef,
         ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
             Ok(Vec::new())
         }
@@ -101,12 +113,17 @@ mod smoke {
     async fn saga_journal_is_dyn_injectable() {
         let journal: Box<DynSagaJournal> = DynSagaJournal::new_box(NoopJournal);
         let joined = tokio::spawn(async move {
-            let id = SagaId::new(uuid::Uuid::nil());
+            let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+            let instance =
+                SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
+            let lease = SagaLease::new(instance, "runner-a", uuid::Uuid::from_u128(1), 1).unwrap();
             let step = StepName::parse("reserve_funds").unwrap();
             let appended = journal
-                .append(&id, SagaJournalAppendRecord::executing(0, step))
+                .append(&lease, SagaJournalAppendRecord::executing(0, step))
                 .await;
-            appended.is_ok() && journal.read(&id).await.is_ok() && journal.shutdown().await.is_ok()
+            matches!(appended, Ok(SagaJournalAppendOutcome::Appended))
+                && journal.read(&instance).await.is_ok()
+                && journal.shutdown().await.is_ok()
         })
         .await;
         assert!(matches!(joined, Ok(true)));

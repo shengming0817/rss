@@ -107,6 +107,7 @@ mod redacted;
 // `pub`（经下方 re-export 进公开 API 面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
 mod redacted_bytes;
 pub mod revocation_store;
+pub mod saga_instance_store;
 pub mod saga_journal;
 pub mod secret_resolver;
 pub mod signer;
@@ -176,6 +177,10 @@ pub use redacted_bytes::RedactedBytes;
 pub use revocation_store::{
     CertScope, CertSerial, CertSerialError, DynRevocationStore, RevocationStore,
     RevocationStoreError,
+};
+pub use saga_instance_store::{
+    DynSagaInstanceStore, SagaInstanceRegistration, SagaInstanceRegistrationError,
+    SagaInstanceStore, SagaInstanceStoreError,
 };
 pub use saga_journal::{DynSagaJournal, SagaJournal, SagaJournalError};
 pub use secret_resolver::{

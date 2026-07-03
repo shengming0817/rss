@@ -60,8 +60,10 @@ pub use reconcile::{
     Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
 };
 pub use saga::{
-    CompensationOutcome, SagaDefinition, SagaDurableStatus, SagaId, SagaJournalAppendRecord,
-    SagaJournalRecord, SagaJournalStatus, SagaModelError, SagaOutcome, SagaReplayDecision,
+    CompensationOutcome, SagaDefinition, SagaDurableStatus, SagaId, SagaInstanceRecord,
+    SagaInstanceRef, SagaInstanceRefError, SagaInstanceStatus, SagaInterruption,
+    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
+    SagaLease, SagaLeaseError, SagaLeaseOutcome, SagaModelError, SagaOutcome, SagaReplayDecision,
     SagaStep, StepName, StepNameError,
 };
 pub use tx_retry::{

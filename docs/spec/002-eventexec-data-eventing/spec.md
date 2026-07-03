@@ -16,7 +16,7 @@
 
 本 feature 是 GoCell→Rust 迁移 Epic #991 W 阶段对 `consistency` 引擎 + `eventexec` 运行时 + 持久化 adapters 的 body 兑现。G0 阶段（#997）已**冻结全部 trait/type 签名**；默认只在冻结签名内填实现。
 
-#1627 使用 pre-GA breaking window 收口 saga durable model：删除 `diport` 自有 `SagaId` / `JournalStatus` / `JournalEntry`，统一改用 `consistency::saga::{SagaId, SagaJournalStatus, SagaJournalRecord}`；旧类型不保留 alias/shim。`saga_journal` 仍不改 DB schema，journal 不持久化 step output。
+#1627 使用 pre-GA breaking window 收口 saga durable model：删除 `diport` 自有 `SagaId` / `JournalStatus` / `JournalEntry`，统一改用 `consistency::saga::{SagaId, SagaJournalStatus, SagaJournalRecord}`；旧类型不保留 alias/shim。#1632 将 saga durable state 切到 tenant-scoped `saga_instances` + `(tenant_id, saga_id, seq)` append-only `saga_journal`；journal 不持久化 step output。
 
 「用户」= 两类框架消费者：
 
@@ -130,16 +130,16 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 
 ### User Story 7 - Saga 编排与逆序补偿（saga executor / tailer / journal，L3）(Priority: P3)
 
-域 crate 声明 `kind: saga` 契约（非空 saga block、≥1 step、step name 为合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、合法 retry/timeout）；executor 逐步前向执行并 append journal，任一步失败超预算则**逆序**补偿已完成步；tailer 查询执行状态；崩溃后从 journal/checkpoint resume。
+域 crate 声明 `kind: saga` 契约（非空 saga block、≥1 step、step name 为合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、合法 retry/timeout 元数据）；executor 逐步前向执行并 append journal，任一步返回失败则**逆序**补偿已完成步；tailer 查询执行状态；崩溃后从 journal/checkpoint resume。`retryMillis` / `timeoutMillis` 当前仅作为契约治理元数据校验，runtime retry/timeout 策略由 #1651 承接，本轮调用方不得依赖其执行语义。
 
 **Why this priority**: L3 高阶能力，依赖 outbox + ConsumerBase + 持久化 journal。是多步跨聚合一致性的载体，但非地基。
 
-**Independent Test**: 3-step saga 全成→journal 顺序记录；step 2 失败→补偿 step 2、step 1（逆序）journal 记录；从 step 2 checkpoint resume→跳过 step 1；kind:saga 契约 governance（xtask）正/负用例；timeout 触发自动补偿。
+**Independent Test**: 3-step saga 全成→journal 顺序记录；step 2 返回失败→补偿 step 2、step 1（逆序）journal 记录；从 step 2 checkpoint resume→跳过 step 1；kind:saga 契约 governance（xtask）正/负用例；retry/timeout runtime 策略测试随 #1651 落地。
 
 **Acceptance Scenarios**:
 
 1. **Given** 3 步 saga，**When** 全部成功，**Then** journal 按执行序记录 3 条 completed，saga 终态 succeeded。
-2. **Given** 第 2 步失败且超 retry 预算，**When** executor 处理，**Then** 逆序 compensate step2、step1，saga 终态 failed，补偿失败不静默吞（进 saga dead-letter）。
+2. **Given** 第 2 步返回失败，**When** executor 处理，**Then** 逆序 compensate step2、step1，saga 终态 failed，补偿失败不静默吞（进 saga dead-letter）。
 3. **Given** 非法 saga 契约（空 step / compensation 非 reverse / 负 timeout），**When** governance 校验，**Then** 报错拒绝。
 
 ---
@@ -212,13 +212,13 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-004**: relay MUST 以 at-least-once 中继已持久化 entry，发布成功后经 CAS 标记 published；瞬态失败延后重试、永久失败进 DLX；MUST 不丢事件（崩溃重启后复投）。relay 后台 worker MUST 注册运行时操作 health probe `outbox_relay`（**无 `_ready` 后缀**——`_ready` 专属依赖可用性 probe，运行时操作 probe 不带，见 observability.md §Readyz Probe）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
 - **FR-005**: sweeper MUST 周期兜底扫描未发 entry 触发重投，防中断导致 entry 永不发。sweeper 后台 worker MUST 注册运行时操作 health probe `outbox_sweeper`（**无 `_ready` 后缀**，同 observability.md §Readyz Probe 命名约定）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
 - **FR-006**: 消费方 MUST 在副作用前以稳定 key claim-or-skip 幂等去重；重复投递 MUST 不产生重复副作用。
-- **FR-007**: topology-gated resolver（eventtransport / replaydeps / sagaprojectiondeps）MUST 在 demo（in-mem）与 durable 拓扑间单源选型；eventtransport durable = AMQP + PostgreSQL inbox/DLX，Redis 仅用于其它 runtime 原语/历史 replaydeps 后端。durable 拓扑缺对应生产配置 MUST 启动期 fail-closed，MUST NOT 静默降级回 in-mem。
-- **FR-008**: in-mem 原语（claimer / bus / journal / checkpoint / locker）MUST sealed，仅 resolver 的 demo 分支可达，生产代码 MUST 不可直接构造（类型层 Hard）。
+- **FR-007**: topology-gated resolver（eventtransport / replaydeps / sagaprojectiondeps）MUST 在 demo（in-mem）与 durable 拓扑间单源选型；eventtransport durable = AMQP + PostgreSQL inbox/DLX，saga durable = PostgreSQL tenant-scoped instance/journal + checkpoint/DLX，Redis 仅用于其它 runtime 原语/历史 replaydeps 后端。durable 拓扑缺对应生产配置 MUST 启动期 fail-closed，MUST NOT 静默降级回 in-mem。
+- **FR-008**: in-mem 原语（claimer / bus / saga instance+journal / checkpoint）MUST sealed，仅 resolver 的 demo 分支可达，生产代码 MUST 不可直接构造（类型层 Hard）。
 - **FR-009**: 消费框架 MUST 经 `HandleResult` 三路（ack/requeue/reject）收口，瞬态退避有预算上限，耗尽或永久失败 MUST 进 DLX 并结构化记录（不静默丢消息）。DLX 写入 MUST 触发 `tracing::error!` 并带 span 定位字段（domain / contract_id / topic / num_attempts / error_summary，均无 PII）。
 - **FR-010**: 订阅注册 MUST 与域 crate `contract.toml` 同源（codegen 派生 glue），active 事件契约 MUST 至少有一个订阅 handler（死事件守卫）。
 - **FR-011**: `LoginService::login`（#1100）MUST 改为写 durable outbox entry 替换直接 publish；audit 消费 MUST 以 EventId 幂等去重；MUST 通过 L2 原子性 + 幂等治理测试与 replay/投影重建测试。
-- **FR-012**: saga executor MUST 逐步前向执行并 append durable journal，失败超预算 MUST 逆序补偿已完成步；补偿失败 MUST 上报（saga dead-letter）不静默吞；MUST 支持从 journal/checkpoint resume。
-- **FR-013**: `kind: saga` 契约 governance MUST 校验：非空 saga block、≥1 step、step name 合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、retry/timeout 合法非负。
+- **FR-012**: saga executor MUST 逐步前向执行并 append durable journal，action 返回失败 MUST 逆序补偿已完成步；补偿失败 MUST 上报（saga dead-letter）不静默吞；MUST 支持从 journal/checkpoint resume。runtime retry/timeout 策略不在本轮生效，由 #1651 承接。
+- **FR-013**: `kind: saga` 契约 governance MUST 校验：非空 saga block、≥1 step、step name 合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、retry/timeout 合法非负；该校验不代表 runtime 已消费 retry/timeout。
 - **FR-014**: 投影器 MUST 从 checkpoint(Lsn) 断点续投，崩溃重启 MUST 从 checkpoint 继续（不重做不遗漏）；从 offset 0 重放结果 MUST 与增量更新一致；`projection_events` MUST append-only（DML DELETE/TRUNCATE 被守卫拒）。
 - **FR-015**: reconcile Loop MUST 仅经 `Builder`（必填 sealed Tenancy + Trigger）构造，缺 Tenancy MUST 编译错；level-triggered 触发、`Request::default()`=resync 全量、瞬态错误 per-entity 指数退避。
 - **FR-016**: 多副本 reconcile MUST 仅 leader dispatch，丢 lease MUST cancel 在途 reconcile；跨副本正确性 MUST 靠单调 epoch FencedWriter（CAS，旧 epoch 写拒）+ 消费幂等，不靠 lease 本身。旧 epoch 写被 FencedWriter 拒绝时 MUST 产生可观测日志（`tracing::warn!`，带 key / epoch_attempted / current_epoch），便于运维发现脑裂。
@@ -232,12 +232,12 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **Outbox Entry**：已持久化的待发事件——topic + idem_key（EventId）+ 已编码 payload（`OutboxPayload`）+ envelope（transport-safe trace/correlation/tenant authority + persisted-only subject/actor）+ 投递状态（pending/publishing/published/dlx）+ retry 计数 + retry_after + lease/fencing token。
 - **Idempotency / Inbox Record**：消费侧去重记录——idem key + consumer group + lease/done 状态 + 命名空间（per-domain）。
 - **Dead Letter Record**：永久失败或预算耗尽的 entry——原始 entry 引用 + 错误摘要 + 尝试次数 + 首末尝试时间。
-- **Saga Journal Entry**：saga 执行轨迹——saga id + seq + step name + 状态（executing/completed/compensating/compensated/failed）+ 补偿失败安全摘要 + 时间；不持久化 step output。tailer 对 replay / definition drift 返回 `Degraded`，不得把损坏 journal 伪装成 `Done`。
+- **Saga Instance / Journal Entry**：saga instance 以 `(tenant_id, saga_id)` 标识并承载 status、lease token、epoch、expiry；journal entry 以 `(tenant_id, saga_id, seq)` 记录 step name + 状态（executing/completed/compensating/compensated/failed）+ 补偿失败安全摘要 + 时间；不持久化 step output。tailer 对 instance `Degraded`、replay / definition drift 返回 `Degraded`，不得把损坏 journal 伪装成 `Done`。
 - **Checkpoint**：断点位点——owner + checkpoint id + offset(Lsn) + 版本（CAS）；saga 与 projection 共享存储。
-- **Projection Event**：投影输入载体（outbox entry / saga journal event 共同实现）——topic + lsn + payload。
+- **Projection Event**：投影输入载体（outbox entry CDC / projection journal event）——topic + lsn + payload。
 - **Reconcile Request / Outcome**：收敛单元——目标 entity（None=resync 全量）/ 收敛结果（settled / requeue_after）+ fencing epoch。
 - **Command Dispatch**：命令载体——DispatchId（幂等 key）+ 命令 topic + Request payload；与 outbox entry 同表。
-- **Topology Resolver 配置**：拓扑选型输入——transport（demo bus / amqp）、runtime consumer inbox（postgres `inbox_receipts`）、replay/其它 runtime 原语（in-mem / redis 等）、saga-projection（mem / postgres journal+checkpoint+tx + locker）。
+- **Topology Resolver 配置**：拓扑选型输入——transport（demo bus / amqp）、runtime consumer inbox（postgres `inbox_receipts`）、replay/其它 runtime 原语（in-mem / redis 等）、saga instance store/journal（mem paired store / postgres tenant-scoped tables + checkpoint/DLX）。
 
 ## Success Criteria *(mandatory)*
 
@@ -248,7 +248,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **SC-003**: 业务事务回滚时 outbox 无孤立 entry，原子性测试 100% 通过（L1）。
 - **SC-004**: 同一事件/命令重复投递 N 次，副作用仅发生一次（消费幂等），L2 幂等治理测试通过。
 - **SC-005**: durable 拓扑缺对应生产配置时，进程启动 fail-closed 报错，绝不以 in-mem 静默启动；eventtransport consumer 至少要求 broker + PG inbox/DLX，Redis 不再是该路径必需项（100% 的缺配置用例触发启动失败）。
-- **SC-006**: saga 任一步失败超预算时，已完成步按逆序 100% 被补偿（无跳过、无乱序），补偿失败写 saga dead-letter 时产生 `tracing::error!`（含 saga_id / step_name / error_summary）并可经 metric（如 `saga_dead_letters_total{domain}`）计数告警。
+- **SC-006**: saga 任一步返回失败时，已完成步按逆序 100% 被补偿（无跳过、无乱序），补偿失败写 saga dead-letter 时产生 `tracing::error!`（含 saga_id / step_name / error_summary）并可经 metric（如 `saga_dead_letters_total{domain}`）计数告警。
 - **SC-007**: 投影从 checkpoint 续投在崩溃重启后无重复 apply、无遗漏；从 offset 0 重放结果与增量构建逐字段一致。
 - **SC-008**: 多副本 reconcile 在任意时刻至多一个 leader dispatch；旧 epoch 写 100% 被 fencing 拒绝。
 - **SC-009**: 引擎与基础 crate（consistency 等）覆盖率 ≥ 90%，新增/修改代码 ≥ 80%；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --check` 干净。

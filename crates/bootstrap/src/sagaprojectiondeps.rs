@@ -1,9 +1,10 @@
-//! sagaprojectiondeps —— topology-gated saga journal + checkpoint 选型（单源策略，零 adapter 依赖）。
+//! sagaprojectiondeps —— topology-gated saga instance/journal + checkpoint 选型（单源策略，零 adapter 依赖）。
 //!
-//! 组合根经 [`resolve`] 按 [`Topology`] 单源选型 saga 执行的 durable 后端（journal + checkpoint store）：
-//! demo 拓扑用进程内 in-mem 替身（`memory::MemSagaJournal` / `MemCheckpointStore`），durable 拓扑用
-//! postgres（`postgres::PgSagaJournal` / `PgCheckpointStore`，共享 DB）。checkpoint store 由本 resolver
-//! 选型、saga（P9）与 projection（P10）**共享**（plan.md 决策 2）。
+//! 组合根经 [`resolve`] 按 [`Topology`] 单源选型 saga 执行的 durable 后端（instance store + journal +
+//! checkpoint store）：demo 拓扑用进程内 in-mem 替身（`memory::MemSagaInstanceStore` /
+//! `MemSagaJournal` / `MemCheckpointStore`），durable 拓扑用 postgres（`postgres::PgSagaInstanceStore` /
+//! `PgSagaJournal` / `PgCheckpointStore`，共享 DB）。checkpoint store 由本 resolver 选型、saga（P9）与
+//! projection（P10）**共享**（plan.md 决策 2）。
 //!
 //! `Demo` 路径的 in-mem 构造只能在 journeys / xtask 组合根进行（`deny.toml` `memory` wrapper 限定）；
 //! 生产 `bins/server` 的 `Demo` 路径须特殊决策（TOPO-INMEM-SEAL-01）。
@@ -13,13 +14,13 @@
 //! `bootstrap` 是服务层 crate，`deny.toml` + `cargo xtask layer-deps` + cargo 依赖图三道门**禁止
 //! bootstrap 依赖 adapters**（同 [`crate::replaydeps`]）。故本 resolver 是**纯策略函数**：拓扑选型 +
 //! fail-closed 校验 + 凭据 redaction，返回已校验的 [`ResolvedSagaProjection`] 决策；组合根 `match` 该
-//! 决策再构造具体 adapter（`Demo` → in-mem journal+checkpoint；`Durable` → postgres journal+checkpoint），
+//! 决策再构造具体 adapter（`Demo` → in-mem instance+journal+checkpoint；`Durable` → postgres
+//! instance+journal+checkpoint），
 //! 并在组合根层持有 in-mem sealing。
 //!
-//! 「locker」不在选型层：单执行器正确性由 journal `(saga_id,seq)` PK（ON CONFLICT 幂等）+ checkpoint
-//! `version` CAS 保证；多副本 saga 互斥延后到 P11 leader-elect（reconcile.md），故 durable 决策只携
-//! postgres URL，不分叉 locker provider。journal/checkpoint 同事务（tx）由 postgres adapter 内部承担，
-//! 非注入 port（`PgStore::run_global_transaction` 是固有方法，#1116）。
+//! 「locker」不在选型层：saga instance store 已用 tenant-scoped lease token + epoch + expiry CAS 保护
+//! direct `run`/`resume`，journal 以 `(tenant_id,saga_id,seq)` PK 区分 idempotent duplicate 与 conflict；
+//! durable 决策只携 postgres URL，不分叉 locker provider。
 //!
 //! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 postgres URL ⇒ [`resolve`] 返 `Err`，组合根 fail-fast
 //!   拒绝启动，**绝不静默降级回 demo/in-mem**（`Result` + bootstrap fail-fast，Medium；类型层强化：
@@ -30,7 +31,7 @@
 //! 凭据 redaction（Medium）：postgres URL（含 `user:pass`）经 [`PostgresUrl`] 收口，其 `Debug`/`Display`
 //! 走 URL userinfo 抹除；原文仅 [`PostgresUrl::expose`] 受控可达。
 //!
-//! 注：saga journal + checkpoint 是**单一共享 postgres**（无 per-domain 隔离），故 `DurableShared` 与
+//! 注：saga instance/journal + checkpoint 是**单一共享 postgres**（tenant row-scope 隔离），故 `DurableShared` 与
 //! `DurableIsolated` 两 durable 变体都收敛为「需 postgres url」——隔离语义留给 schema / row scope，不在
 //! 本选型层分叉（同 [`crate::replaydeps`] 共享 Redis claimer 的处理）。
 //!
@@ -92,8 +93,8 @@ impl SagaProjectionConfig {
     }
 }
 
-/// 已校验的 saga journal + checkpoint 选型决策。组合根 `match` 本枚举映射到具体 adapter
-/// （`Demo` → in-mem journal+checkpoint；`Durable` → postgres journal+checkpoint）。bootstrap 自身不持
+/// 已校验的 saga instance/journal + checkpoint 选型决策。组合根 `match` 本枚举映射到具体 adapter
+/// （`Demo` → in-mem instance+journal+checkpoint；`Durable` → postgres instance+journal+checkpoint）。bootstrap 自身不持
 /// adapter 类型。
 ///
 /// `#[non_exhaustive]`：加新后端变体不破坏下游。
@@ -102,29 +103,31 @@ impl SagaProjectionConfig {
 pub enum ResolvedSagaProjection {
     /// demo 拓扑：组合根用进程内 in-mem journal + checkpoint。
     Demo,
-    /// durable 拓扑：组合根据此连接 postgres journal + checkpoint（单一共享 DB）。
+    /// durable 拓扑：组合根据此连接 postgres instance/journal + checkpoint（单一共享 DB）。
     Durable {
         /// 已校验的 postgres URL（组合根经 [`PostgresUrl::expose`] 受控取原文）。
         postgres_url: PostgresUrl,
     },
 }
 
-/// saga journal + checkpoint 选型失败（fail-closed 载体，INVARIANT TOPO-FAILCLOSED-01）。
+/// saga instance/journal + checkpoint 选型失败（fail-closed 载体，INVARIANT TOPO-FAILCLOSED-01）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SagaProjectionResolveError {
     /// durable 拓扑缺 postgres URL——**绝不**降级回 in-mem。
-    #[error("durable saga journal/checkpoint requires a postgres url (set RSS_POSTGRES_URL)")]
+    #[error(
+        "durable saga instance/journal/checkpoint requires a postgres url (set RSS_POSTGRES_URL)"
+    )]
     MissingPostgresUrl,
 }
 
-/// topology-gated saga journal + checkpoint 选型（单源）。**纯函数**：不读 env、不做 I/O、不连 postgres。
+/// topology-gated saga instance/journal + checkpoint 选型（单源）。**纯函数**：不读 env、不做 I/O、不连 postgres。
 ///
 /// - [`Topology::Demo`] → `Ok(`[`ResolvedSagaProjection::Demo`]`)`。
 /// - [`Topology::DurableShared`] | [`Topology::DurableIsolated`] → 需 postgres URL；缺则
 ///   `Err(`[`SagaProjectionResolveError::MissingPostgresUrl`]`)`，**绝不**返回 `Demo`。
 ///
-/// 注：saga journal + checkpoint 是单一共享 postgres（无 per-domain 隔离），故两 durable 变体都收敛为
+/// 注：saga instance/journal + checkpoint 是单一共享 postgres（tenant row-scope 隔离），故两 durable 变体都收敛为
 /// 「需 postgres」。
 ///
 /// INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（见模块 rustdoc）。
@@ -135,7 +138,7 @@ pub fn resolve(
     match topo {
         // reason: demo 拓扑无外部依赖，恒成立。
         Topology::Demo => Ok(ResolvedSagaProjection::Demo),
-        // 两个 durable 变体均需 postgres——journal+checkpoint 是共享 DB（无 per-domain 分叉）。
+        // 两个 durable 变体均需 postgres——instance+journal+checkpoint 是共享 DB（无 per-domain 分叉）。
         Topology::DurableShared | Topology::DurableIsolated => cfg
             .postgres_url
             .map(|u| ResolvedSagaProjection::Durable { postgres_url: u })
@@ -251,7 +254,7 @@ mod tests {
         let err = SagaProjectionResolveError::MissingPostgresUrl;
         assert_eq!(
             err.to_string(),
-            "durable saga journal/checkpoint requires a postgres url (set RSS_POSTGRES_URL)"
+            "durable saga instance/journal/checkpoint requires a postgres url (set RSS_POSTGRES_URL)"
         );
     }
 }

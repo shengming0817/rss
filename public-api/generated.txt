@@ -821,6 +821,7 @@ impl<T> core::convert::From<T> for generated::event::SubscriptionSpec
 pub fn generated::event::SubscriptionSpec::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::event::SubscriptionSpec
 pub type generated::event::SubscriptionSpec::Output = T
+pub const generated::event::PROJECTION_INPUTS: &[vocab::contract::binding::ProjectionInputBinding]
 pub const generated::event::SUBSCRIPTIONS: &[generated::event::SubscriptionSpec]
 pub mod generated::http
 pub mod generated::http::_seed_v1

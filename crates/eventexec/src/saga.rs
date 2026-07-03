@@ -17,44 +17,57 @@
 //! ref: oxidecomputer/steno src/saga_log.rs@main（journal event replay 到 load status）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 
 use consistency::{
-    Lsn, SagaDefinition, SagaDurableStatus, SagaJournalAppendRecord, SagaJournalRecord,
-    SagaModelError, SagaReplayDecision, StepName,
+    Lsn, SagaDefinition, SagaDurableStatus, SagaInstanceRef, SagaInstanceStatus,
+    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
+    SagaLeaseOutcome, SagaModelError, SagaReplayDecision, StepName,
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, EnvelopeMetadata, OwnerCheckpointStore, SagaJournal, SaveOutcome,
-    WritableDeadLetterSource,
+    DeadLetterSummary, EnvelopeMetadata, OwnerCheckpointStore, SagaInstanceRegistration,
+    SagaInstanceStore, SagaJournal, SaveOutcome, WritableDeadLetterSource,
 };
 
 /// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
 /// `eventexec::SagaId` 命名。
 pub use consistency::SagaId;
+pub use consistency::SagaInterruption;
 
 // ── 冻结接缝类型（do/undo 动作 + 结论 + 命令 + 执行状态）─────────────────────────
 
 /// saga 动作上下文：标识动作运行所在的 saga + 节点。私有字段（F6 funnel，外部不可字面构造，只经
 /// [`SagaActionCtx::new`]）。journal / checkpoint 句柄归执行器，**不**入 ctx（保单写者不变式）。
 pub struct SagaActionCtx {
-    saga_id: SagaId,
+    instance: SagaInstanceRef,
     node_name: String,
 }
 
 impl SagaActionCtx {
     /// 受控构造（执行器在每次 `do_it`/`undo_it` 前构造并移交动作）。
-    pub fn new(saga_id: uuid::Uuid, node_name: impl Into<String>) -> Self {
+    pub fn new(instance: SagaInstanceRef, node_name: impl Into<String>) -> Self {
         Self {
-            saga_id: SagaId::new(saga_id),
+            instance,
             node_name: node_name.into(),
         }
     }
 
+    /// 所属 tenant-scoped saga 实例。
+    pub fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// 所属租户。
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.instance.tenant()
+    }
+
     /// 所属 saga 实例。
     pub fn saga_id(&self) -> SagaId {
-        self.saga_id
+        self.instance.saga_id()
     }
 
     /// 当前节点（step）名。
@@ -89,6 +102,8 @@ pub enum SagaOutcome {
         failed_node: String,
         error: SagaActionError,
     },
+    /// Non-business interruption: lease contention/loss or durable journal conflict.
+    Interrupted { reason: SagaInterruption },
 }
 
 /// saga 编排控制命令（saga-orchestration control 接缝，非通用命令分发）。
@@ -148,18 +163,14 @@ pub enum SagaActionError {
 
 /// Saga 执行器接缝：驱动 [`SagaAction`] 栈（前向执行 + 失败逆序补偿）。对标 steno SEC。
 pub trait SagaExecutor: Send + Sync {
-    /// 执行 saga：经注入的 [`SagaActionFactory`] 构造 action 序，顺序 `do_it`，失败逆序 `undo_it`。
-    ///
-    /// **WARNING**: 多副本并发 `run` 同一 `saga_id` 的互斥由调用方负责；P9 不提供
-    /// multi-replica guard，P11 leader-elect 落地后由 executor 保证。journal `(saga_id,seq)` PK
-    /// + checkpoint CAS 只防数据竞争，不防重复副作用执行。
-    fn run(&self, saga_id: SagaId) -> BoxFuture<'static, SagaOutcome>;
+    /// 执行 saga：注册 instance、获取 lease，然后经注入的 [`SagaActionFactory`] 顺序驱动动作。
+    fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome>;
 
     /// 从 journal 恢复（crash recovery；经注入 [`SagaActionFactory`] 重物化 action 序续跑 / 续补偿）。
     ///
     /// resume 终态成功时 [`SagaOutcome::Succeeded`]`.output` 恒为空字节——journal `read` 不回传
     /// output；末步 output 仅 `run` 路径可信。consumer 不得依赖 resume 的 output 字节。
-    fn resume(&self, saga_id: SagaId) -> BoxFuture<'static, SagaOutcome>;
+    fn resume(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome>;
 }
 
 /// Saga 进度跟踪接缝：查询执行状态。对标 steno saga status。
@@ -168,7 +179,7 @@ pub trait SagaTailer: Send + Sync {
     ///
     /// 当前 journal-driven 实现**不产出** [`SagaExecStatus::Ready`]（保留给 registry-aware tailer）；
     /// 只返回 `None` / `Running` / `Done` / `Degraded`。
-    fn status(&self, saga_id: SagaId) -> BoxFuture<'static, Option<SagaExecStatus>>;
+    fn status(&self, instance: SagaInstanceRef) -> BoxFuture<'static, Option<SagaExecStatus>>;
 }
 
 /// saga 模板：按声明序产出全部 [`SagaAction`]。resume 用——执行器仅持 `saga_id`，须经此重物化整个
@@ -187,7 +198,7 @@ const SAGA_COMPENSATION_FAILED: &str = "saga compensation step failed";
 const SAGA_COMPENSATION_COMPLETION_LOST: &str =
     "saga compensation completion journal append failed";
 
-/// resume 未知 saga（空 journal）占位 failed_node。
+/// resume 未知 saga（缺失实例行）占位 failed_node。
 const UNKNOWN_SAGA: &str = "<unknown-saga>";
 
 // ── SagaExecutorImpl ──────────────────────────────────────────────────────────
@@ -198,69 +209,121 @@ const UNKNOWN_SAGA: &str = "<unknown-saga>";
 ///
 /// **retry/timeout 策略（F11，未实现）**：`kind:saga` 契约声明 `retryMillis`/`timeoutMillis`（saga 策略
 /// 元数据），但 P9 executor 直接 `action.do_it(ctx).await`，**未实现** retry budget / timeout→超时触发补偿
-/// 的 runtime（T009 未要求；属 future scope，见 issue 跟踪）。consumer 不应依赖契约声明的 retry/timeout
+/// 的 runtime（T009 未要求；属 future scope，见 #1651）。consumer 不应依赖契约声明的 retry/timeout
 /// 在 P9 生效。
-pub struct SagaExecutorImpl<J, C, D> {
+pub struct SagaExecutorImpl<J, C, D, S> {
     journal: Arc<J>,
+    instance_store: Arc<S>,
     checkpoint: Arc<C>,
     dead_letter: Arc<D>,
     factory: Arc<dyn SagaActionFactory>,
-    tenant: vocab::TenantId,
     owner: CheckpointOwner,
     contract_id: String,
+    holder_id: String,
+    lease_ttl: Duration,
 }
 
-impl<J, C, D> SagaExecutorImpl<J, C, D>
-where
-    J: SagaJournal + Send + Sync + 'static,
-    C: OwnerCheckpointStore + Send + Sync + 'static,
-    D: DeadLetterStore + Send + Sync + 'static,
-{
-    /// 构造（全依赖必填位置参）。
-    ///
-    /// 第 5 参 `owner` = DLX domain（如 `"billing"`）；第 6 参 `contract_id` = 契约 id（如
-    /// `"billing.checkout"`）。二者同进 DLX 记录（SC-006），勿传反。
+/// Saga executor durable dependencies.
+pub struct SagaExecutorDeps<J, C, D, S> {
+    journal: Arc<J>,
+    instance_store: Arc<S>,
+    checkpoint: Arc<C>,
+    dead_letter: Arc<D>,
+    factory: Arc<dyn SagaActionFactory>,
+}
+
+impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
     pub fn new(
         journal: Arc<J>,
+        instance_store: Arc<S>,
         checkpoint: Arc<C>,
         dead_letter: Arc<D>,
         factory: Arc<dyn SagaActionFactory>,
-        tenant: vocab::TenantId,
-        owner: CheckpointOwner,
-        contract_id: impl Into<String>,
     ) -> Self {
         Self {
             journal,
+            instance_store,
             checkpoint,
             dead_letter,
             factory,
-            tenant,
-            owner,
-            contract_id: contract_id.into(),
         }
     }
 }
 
-impl<J, C, D> SagaExecutor for SagaExecutorImpl<J, C, D>
+/// Saga executor identity and lease configuration.
+pub struct SagaExecutorConfig {
+    owner: CheckpointOwner,
+    contract_id: String,
+    holder_id: String,
+    lease_ttl: Duration,
+}
+
+impl SagaExecutorConfig {
+    pub fn new(
+        owner: CheckpointOwner,
+        contract_id: impl Into<String>,
+        holder_id: impl Into<String>,
+        lease_ttl: Duration,
+    ) -> Self {
+        Self {
+            owner,
+            contract_id: contract_id.into(),
+            holder_id: holder_id.into(),
+            lease_ttl,
+        }
+    }
+}
+
+impl<J, C, D, S> SagaExecutorImpl<J, C, D, S>
 where
     J: SagaJournal + Send + Sync + 'static,
     C: OwnerCheckpointStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
+    S: SagaInstanceStore + Send + Sync + 'static,
 {
-    fn run(&self, saga_id: SagaId) -> BoxFuture<'static, SagaOutcome> {
+    /// 构造（全依赖必填位置参）。
+    ///
+    /// `config.owner` = DLX domain（如 `"billing"`）；`config.contract_id` = 契约 id（如
+    /// `"billing.checkout"`）。二者同进 DLX 记录（SC-006），勿传反。
+    pub fn new(deps: SagaExecutorDeps<J, C, D, S>, config: SagaExecutorConfig) -> Self {
+        Self {
+            journal: deps.journal,
+            instance_store: deps.instance_store,
+            checkpoint: deps.checkpoint,
+            dead_letter: deps.dead_letter,
+            factory: deps.factory,
+            owner: config.owner,
+            contract_id: config.contract_id,
+            holder_id: config.holder_id,
+            lease_ttl: config.lease_ttl,
+        }
+    }
+}
+
+impl<J, C, D, S> SagaExecutor for SagaExecutorImpl<J, C, D, S>
+where
+    J: SagaJournal + Send + Sync + 'static,
+    C: OwnerCheckpointStore + Send + Sync + 'static,
+    D: DeadLetterStore + Send + Sync + 'static,
+    S: SagaInstanceStore + Send + Sync + 'static,
+{
+    fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
         let journal = self.journal.clone();
+        let instance_store = self.instance_store.clone();
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
-        let tenant = self.tenant;
         let owner = self.owner.clone();
         let contract_id = self.contract_id.clone();
+        let holder_id = self.holder_id.clone();
+        let lease_ttl = self.lease_ttl;
         let factory = self.factory.clone();
         Box::pin(async move {
             let actions = factory.build();
             if let Err(err) = definition_from_actions(&actions) {
                 let failed_node = model_error_node(&err);
                 tracing::error!(
-                    saga_id = %saga_id.as_uuid(),
+                    tenant_id = %instance.tenant(),
+                    saga_id = %instance.saga_id().as_uuid(),
                     failed_node = %failed_node,
                     "saga: action definition invalid"
                 );
@@ -269,59 +332,175 @@ where
                     error: SagaActionError::SerializeFailed,
                 };
             }
+            let lease = match acquire_run_lease(
+                &*instance_store,
+                instance,
+                &owner,
+                &contract_id,
+                &holder_id,
+                lease_ttl,
+            )
+            .await
+            {
+                Ok(lease) => lease,
+                Err(reason) => return SagaOutcome::Interrupted { reason },
+            };
             let ctx = ExecCtx {
                 journal: &*journal,
+                instance_store: &*instance_store,
                 checkpoint: &*checkpoint,
                 dead_letter: &*dead_letter,
-                tenant,
                 owner: &owner,
                 contract_id: &contract_id,
-                saga_id,
-                checkpoint_id: CheckpointId::new(saga_id.as_uuid().to_string()),
+                instance,
+                lease,
+                lease_ttl,
+                checkpoint_id: saga_checkpoint_id(instance),
             };
             ctx.run_forward(&actions, 0, Cursor::new()).await
         })
     }
 
-    fn resume(&self, saga_id: SagaId) -> BoxFuture<'static, SagaOutcome> {
+    fn resume(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
         let journal = self.journal.clone();
+        let instance_store = self.instance_store.clone();
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
-        let tenant = self.tenant;
         let owner = self.owner.clone();
         let contract_id = self.contract_id.clone();
+        let holder_id = self.holder_id.clone();
+        let lease_ttl = self.lease_ttl;
         let factory = self.factory.clone();
         Box::pin(async move {
             let actions = factory.build();
+            let lease =
+                match acquire_resume_lease(&*instance_store, instance, &holder_id, lease_ttl).await
+                {
+                    ResumeLeaseDecision::Acquired(lease) => lease,
+                    ResumeLeaseDecision::Unknown => return unknown_saga_outcome(),
+                    ResumeLeaseDecision::Terminal(status) => {
+                        return outcome_from_instance_status(status);
+                    }
+                    ResumeLeaseDecision::Interrupted(reason) => {
+                        return SagaOutcome::Interrupted { reason };
+                    }
+                };
             let ctx = ExecCtx {
                 journal: &*journal,
+                instance_store: &*instance_store,
                 checkpoint: &*checkpoint,
                 dead_letter: &*dead_letter,
-                tenant,
                 owner: &owner,
                 contract_id: &contract_id,
-                saga_id,
-                checkpoint_id: CheckpointId::new(saga_id.as_uuid().to_string()),
+                instance,
+                lease,
+                lease_ttl,
+                checkpoint_id: saga_checkpoint_id(instance),
             };
             ctx.resume(&actions).await
         })
     }
 }
 
-impl<J, C, D> SagaTailer for SagaExecutorImpl<J, C, D>
+impl<J, C, D, S> SagaTailer for SagaExecutorImpl<J, C, D, S>
 where
     J: SagaJournal + Send + Sync + 'static,
     C: OwnerCheckpointStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
+    S: SagaInstanceStore + Send + Sync + 'static,
 {
-    fn status(&self, saga_id: SagaId) -> BoxFuture<'static, Option<SagaExecStatus>> {
+    fn status(&self, instance: SagaInstanceRef) -> BoxFuture<'static, Option<SagaExecStatus>> {
         let journal = self.journal.clone();
+        let instance_store = self.instance_store.clone();
         let factory = self.factory.clone();
         Box::pin(async move {
             let actions = factory.build();
-            status_of(&*journal, saga_id, &actions).await
+            status_of(&*journal, &*instance_store, instance, &actions).await
         })
     }
+}
+
+async fn acquire_run_lease<S>(
+    store: &S,
+    instance: SagaInstanceRef,
+    owner: &CheckpointOwner,
+    contract_id: &str,
+    holder_id: &str,
+    lease_ttl: Duration,
+) -> Result<SagaLease, SagaInterruption>
+where
+    S: SagaInstanceStore,
+{
+    match store.get(&instance).await {
+        Ok(Some(row)) => match row.status() {
+            SagaInstanceStatus::Ready => {}
+            SagaInstanceStatus::Degraded => return Err(SagaInterruption::InstanceDegraded),
+            _ => return Err(SagaInterruption::AlreadyStarted),
+        },
+        Ok(None) => {
+            let registration = SagaInstanceRegistration::new(instance, owner.as_str(), contract_id)
+                .map_err(|_| SagaInterruption::StoreUnavailable)?;
+            store
+                .register(registration)
+                .await
+                .map_err(|_| SagaInterruption::StoreUnavailable)?;
+        }
+        Err(_) => return Err(SagaInterruption::StoreUnavailable),
+    }
+    store
+        .acquire_lease(&instance, holder_id, lease_ttl)
+        .await
+        .map_err(|_| SagaInterruption::StoreUnavailable)?
+        .ok_or(SagaInterruption::LeaseBusy)
+}
+
+enum ResumeLeaseDecision {
+    Acquired(SagaLease),
+    Unknown,
+    Terminal(SagaInstanceStatus),
+    Interrupted(SagaInterruption),
+}
+
+async fn acquire_resume_lease<S>(
+    store: &S,
+    instance: SagaInstanceRef,
+    holder_id: &str,
+    lease_ttl: Duration,
+) -> ResumeLeaseDecision
+where
+    S: SagaInstanceStore,
+{
+    let row = match store.get(&instance).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return ResumeLeaseDecision::Unknown,
+        Err(_) => return ResumeLeaseDecision::Interrupted(SagaInterruption::StoreUnavailable),
+    };
+    match row.status() {
+        SagaInstanceStatus::Succeeded
+        | SagaInstanceStatus::Compensated
+        | SagaInstanceStatus::Failed => ResumeLeaseDecision::Terminal(row.status()),
+        SagaInstanceStatus::Degraded => {
+            ResumeLeaseDecision::Interrupted(SagaInterruption::InstanceDegraded)
+        }
+        SagaInstanceStatus::Ready
+        | SagaInstanceStatus::Running
+        | SagaInstanceStatus::Compensating => {
+            match store.acquire_lease(&instance, holder_id, lease_ttl).await {
+                Ok(Some(lease)) => ResumeLeaseDecision::Acquired(lease),
+                Ok(None) => ResumeLeaseDecision::Interrupted(SagaInterruption::LeaseBusy),
+                Err(_) => ResumeLeaseDecision::Interrupted(SagaInterruption::StoreUnavailable),
+            }
+        }
+        _ => ResumeLeaseDecision::Interrupted(SagaInterruption::StoreUnavailable),
+    }
+}
+
+fn saga_checkpoint_id(instance: SagaInstanceRef) -> CheckpointId {
+    CheckpointId::new(format!(
+        "{}:{}",
+        instance.tenant(),
+        instance.saga_id().as_uuid()
+    ))
 }
 
 // ── 执行上下文（持运行时句柄引用，方法实现前向 / 补偿 / checkpoint）─────────────
@@ -343,36 +522,157 @@ impl Cursor {
     }
 }
 
-struct ExecCtx<'a, J, C, D> {
+struct ExecCtx<'a, J, C, D, S> {
     journal: &'a J,
+    instance_store: &'a S,
     checkpoint: &'a C,
     dead_letter: &'a D,
-    tenant: vocab::TenantId,
     owner: &'a CheckpointOwner,
     contract_id: &'a str,
-    saga_id: SagaId,
+    instance: SagaInstanceRef,
+    lease: SagaLease,
+    lease_ttl: Duration,
     checkpoint_id: CheckpointId,
 }
 
-impl<J, C, D> ExecCtx<'_, J, C, D>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendFailure {
+    LeaseLost,
+    JournalConflict,
+    Storage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendDecision {
+    Success,
+    LeaseLost,
+    JournalConflict,
+    Storage,
+}
+
+impl<J, C, D, S> ExecCtx<'_, J, C, D, S>
 where
     J: SagaJournal,
     C: OwnerCheckpointStore,
     D: DeadLetterStore,
+    S: SagaInstanceStore,
 {
     /// append 一条 journal，返回是否成功（失败记结构化日志）。
     ///
     /// F1：journal 写是执行状态机**一等边**，不再 best-effort 吞错——前向路径据返回值 fail-closed
     /// （`Executing` 写失败 ⇒ 不执行副作用；`Completed` 写失败 ⇒ 补偿含本步在内的栈）。补偿路径同样
     /// fail-closed：任一 journal 边界写失败即停止后续 undo / DLX 外部副作用。
-    async fn append(&self, entry: SagaJournalAppendRecord) -> bool {
+    async fn append(&self, entry: SagaJournalAppendRecord) -> Result<(), AppendFailure> {
         let seq = entry.seq();
         let status = entry.status().as_str();
-        if self.journal.append(&self.saga_id, entry).await.is_err() {
-            tracing::error!(saga_id = %self.saga_id.as_uuid(), seq, status, "saga: journal append failed");
-            return false;
+        let decision = match self.journal.append(&self.lease, entry).await {
+            Ok(outcome) => Self::append_decision(outcome),
+            Err(_) => {
+                self.error_append_failed(seq, status);
+                AppendDecision::Storage
+            }
+        };
+        self.handle_append_decision(decision, seq, status).await
+    }
+
+    fn append_decision(outcome: SagaJournalAppendOutcome) -> AppendDecision {
+        match outcome {
+            SagaJournalAppendOutcome::Appended | SagaJournalAppendOutcome::IdempotentDuplicate => {
+                AppendDecision::Success
+            }
+            SagaJournalAppendOutcome::LeaseLost => AppendDecision::LeaseLost,
+            SagaJournalAppendOutcome::AppendConflict => AppendDecision::JournalConflict,
+            _ => AppendDecision::Storage,
         }
-        true
+    }
+
+    async fn handle_append_decision(
+        &self,
+        decision: AppendDecision,
+        seq: u64,
+        status: &'static str,
+    ) -> Result<(), AppendFailure> {
+        match decision {
+            AppendDecision::Success => Ok(()),
+            AppendDecision::LeaseLost => {
+                self.warn_append_lease_lost(seq, status);
+                Err(AppendFailure::LeaseLost)
+            }
+            AppendDecision::JournalConflict => {
+                self.mark_status_and_release_best_effort(SagaInstanceStatus::Degraded)
+                    .await;
+                self.error_append_conflict(seq, status);
+                Err(AppendFailure::JournalConflict)
+            }
+            AppendDecision::Storage => Err(AppendFailure::Storage),
+        }
+    }
+
+    fn warn_append_lease_lost(&self, seq: u64, status: &'static str) {
+        tracing::warn!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            seq,
+            status,
+            "saga: journal append lease lost"
+        );
+    }
+
+    fn error_append_conflict(&self, seq: u64, status: &'static str) {
+        tracing::error!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            seq,
+            status,
+            "saga: journal append conflict"
+        );
+    }
+
+    fn error_append_failed(&self, seq: u64, status: &'static str) {
+        tracing::error!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            seq,
+            status,
+            "saga: journal append failed"
+        );
+    }
+
+    async fn refresh_lease(&self) -> bool {
+        matches!(
+            self.instance_store
+                .extend_lease(&self.lease, self.lease_ttl)
+                .await,
+            Ok(SagaLeaseOutcome::Held)
+        )
+    }
+
+    async fn mark_status_best_effort(&self, status: SagaInstanceStatus) {
+        let _ = self.instance_store.mark_status(&self.lease, status).await;
+    }
+
+    async fn release_lease_best_effort(&self) {
+        let _ = self.instance_store.release_lease(&self.lease).await;
+    }
+
+    async fn mark_status_and_release_best_effort(&self, status: SagaInstanceStatus) {
+        self.mark_status_best_effort(status).await;
+        self.release_lease_best_effort().await;
+    }
+
+    fn interrupted(reason: SagaInterruption) -> SagaOutcome {
+        SagaOutcome::Interrupted { reason }
+    }
+
+    fn append_failure_outcome(&self, failure: AppendFailure, failed_node: &str) -> SagaOutcome {
+        match failure {
+            AppendFailure::LeaseLost => Self::interrupted(SagaInterruption::LeaseLost),
+            AppendFailure::JournalConflict => Self::interrupted(SagaInterruption::JournalConflict),
+            AppendFailure::Storage => SagaOutcome::Failed {
+                failed_node: failed_node.to_string(),
+                error: SagaActionError::ActionFailed,
+            },
+        }
     }
 
     /// CAS 推进 checkpoint，返回是否可继续前向。
@@ -418,7 +718,11 @@ where
 
     /// checkpoint 推进告警收口（tracing 宏出 [`ExecCtx::advance_checkpoint`]，控制其复杂度）。
     fn warn_checkpoint(&self, msg: &'static str) {
-        tracing::warn!(saga_id = %self.saga_id.as_uuid(), "{msg}");
+        tracing::warn!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            "{msg}"
+        );
     }
 
     /// 前向执行 `actions[start..]`；失败逆序补偿 `cursor.completed`（含 resume 预填前缀）。
@@ -430,6 +734,9 @@ where
     ) -> SagaOutcome {
         for (i, action) in actions.iter().enumerate().skip(start) {
             let action = action.as_ref();
+            if !self.refresh_lease().await {
+                return Self::interrupted(SagaInterruption::LeaseLost);
+            }
             let Ok(step) = StepName::parse(action.name()) else {
                 // step 名非法标识符 = Invariant（动作未受治理约束）：fail-fast，不 journal。
                 return SagaOutcome::Failed {
@@ -438,17 +745,14 @@ where
                 };
             };
             // F1：Executing append fail-closed —— 写失败则**不执行副作用**（无 journal 无法 durable 恢复）。
-            if !self
+            if let Err(failure) = self
                 .append(SagaJournalAppendRecord::executing(cursor.seq, step.clone()))
                 .await
             {
-                return SagaOutcome::Failed {
-                    failed_node: action.name().to_string(),
-                    error: SagaActionError::ActionFailed,
-                };
+                return self.append_failure_outcome(failure, action.name());
             }
             cursor.seq += 1;
-            let ctx = SagaActionCtx::new(self.saga_id.as_uuid(), action.name());
+            let ctx = SagaActionCtx::new(self.instance, action.name());
             let output = match action.do_it(ctx).await {
                 Ok(o) => o,
                 Err(err) => {
@@ -459,11 +763,17 @@ where
             };
             // 副作用已发生：先入已完成栈（含本步），再写 Completed；写失败 ⇒ 补偿含本步在内的栈（F1）。
             cursor.completed.push((i, step.clone()));
-            let completed_ok = self
+            let completed_result = self
                 .append(SagaJournalAppendRecord::completed(cursor.seq, step))
                 .await;
             cursor.seq += 1;
-            if !completed_ok {
+            if let Err(failure) = completed_result {
+                if matches!(
+                    failure,
+                    AppendFailure::LeaseLost | AppendFailure::JournalConflict
+                ) {
+                    return self.append_failure_outcome(failure, action.name());
+                }
                 return self
                     .compensate(
                         actions,
@@ -483,6 +793,8 @@ where
                 };
             }
         }
+        self.mark_status_and_release_best_effort(SagaInstanceStatus::Succeeded)
+            .await;
         SagaOutcome::Succeeded {
             output: cursor.last_output.unwrap_or_default(),
         }
@@ -517,76 +829,150 @@ where
     ) -> SagaOutcome {
         for (i, step) in pending {
             let action = actions[*i].as_ref();
-            if !self
-                .append(SagaJournalAppendRecord::compensating(seq, step.clone()))
-                .await
-            {
-                return SagaOutcome::Failed {
-                    failed_node: failed_node.to_string(),
-                    error: SagaActionError::ActionFailed,
-                };
-            }
-            seq += 1;
-            let ctx = SagaActionCtx::new(self.saga_id.as_uuid(), action.name());
-            match action.undo_it(ctx).await {
-                Ok(()) => {
-                    if !self
-                        .append(SagaJournalAppendRecord::compensated(seq, step.clone()))
-                        .await
-                    {
-                        if self
-                            .append(SagaJournalAppendRecord::failed(
-                                seq,
-                                step.clone(),
-                                SAGA_COMPENSATION_COMPLETION_LOST,
-                            ))
-                            .await
-                        {
-                            self.dead_letter_compensation_failure(
-                                action.name(),
-                                failed_node,
-                                SAGA_COMPENSATION_COMPLETION_LOST,
-                            )
-                            .await;
-                        }
-                        return SagaOutcome::Failed {
-                            failed_node: action.name().to_string(),
-                            error: SagaActionError::ActionFailed,
-                        };
-                    }
-                    seq += 1;
-                }
-                Err(undo_err) => {
-                    if !self
-                        .append(SagaJournalAppendRecord::failed(
-                            seq,
-                            step.clone(),
-                            SAGA_COMPENSATION_FAILED,
-                        ))
-                        .await
-                    {
-                        return SagaOutcome::Failed {
-                            failed_node: action.name().to_string(),
-                            error: undo_err,
-                        };
-                    }
-                    // F5：DLX 携 saga_id + 原始前向失败步（failed_node）+ 补偿失败步，诊断闭环。
-                    self.dead_letter_compensation_failure(
-                        action.name(),
-                        failed_node,
-                        SAGA_COMPENSATION_FAILED,
-                    )
-                    .await;
-                    return SagaOutcome::Failed {
-                        failed_node: action.name().to_string(),
-                        error: undo_err,
-                    };
-                }
-            }
+            seq = match self.compensate_step(action, step, seq, failed_node).await {
+                Ok(next_seq) => next_seq,
+                Err(outcome) => return outcome,
+            };
         }
+        self.mark_status_and_release_best_effort(SagaInstanceStatus::Compensated)
+            .await;
         SagaOutcome::Failed {
             failed_node: failed_node.to_string(),
             error: original_error,
+        }
+    }
+
+    async fn compensate_step(
+        &self,
+        action: &dyn SagaAction,
+        step: &StepName,
+        seq: u64,
+        failed_node: &str,
+    ) -> Result<u64, SagaOutcome> {
+        if !self.refresh_lease().await {
+            return Err(Self::interrupted(SagaInterruption::LeaseLost));
+        }
+        if let Err(failure) = self
+            .append(SagaJournalAppendRecord::compensating(seq, step.clone()))
+            .await
+        {
+            return Err(self.append_failure_outcome(failure, failed_node));
+        }
+        let undo_seq = seq + 1;
+        let ctx = SagaActionCtx::new(self.instance, action.name());
+        match action.undo_it(ctx).await {
+            Ok(()) => {
+                self.finish_compensation_success(action, step, undo_seq, failed_node)
+                    .await
+            }
+            Err(undo_err) => Err(self
+                .finish_compensation_failure(action, step, undo_seq, failed_node, undo_err)
+                .await),
+        }
+    }
+
+    async fn finish_compensation_success(
+        &self,
+        action: &dyn SagaAction,
+        step: &StepName,
+        seq: u64,
+        failed_node: &str,
+    ) -> Result<u64, SagaOutcome> {
+        if let Err(failure) = self
+            .append(SagaJournalAppendRecord::compensated(seq, step.clone()))
+            .await
+        {
+            return Err(self
+                .compensated_append_failure_outcome(failure, action.name(), step, seq, failed_node)
+                .await);
+        }
+        Ok(seq + 1)
+    }
+
+    async fn compensated_append_failure_outcome(
+        &self,
+        failure: AppendFailure,
+        action_name: &str,
+        step: &StepName,
+        seq: u64,
+        failed_node: &str,
+    ) -> SagaOutcome {
+        if matches!(
+            failure,
+            AppendFailure::LeaseLost | AppendFailure::JournalConflict
+        ) {
+            return self.append_failure_outcome(failure, action_name);
+        }
+        self.record_compensation_completion_lost(step, seq, action_name, failed_node)
+            .await;
+        SagaOutcome::Failed {
+            failed_node: action_name.to_string(),
+            error: SagaActionError::ActionFailed,
+        }
+    }
+
+    async fn record_compensation_completion_lost(
+        &self,
+        step: &StepName,
+        seq: u64,
+        action_name: &str,
+        failed_node: &str,
+    ) {
+        if self
+            .append(SagaJournalAppendRecord::failed(
+                seq,
+                step.clone(),
+                SAGA_COMPENSATION_COMPLETION_LOST,
+            ))
+            .await
+            .is_ok()
+        {
+            self.dead_letter_compensation_failure(
+                action_name,
+                failed_node,
+                SAGA_COMPENSATION_COMPLETION_LOST,
+            )
+            .await;
+            self.mark_status_and_release_best_effort(SagaInstanceStatus::Failed)
+                .await;
+        }
+    }
+
+    async fn finish_compensation_failure(
+        &self,
+        action: &dyn SagaAction,
+        step: &StepName,
+        seq: u64,
+        failed_node: &str,
+        undo_err: SagaActionError,
+    ) -> SagaOutcome {
+        if let Err(failure) = self
+            .append(SagaJournalAppendRecord::failed(
+                seq,
+                step.clone(),
+                SAGA_COMPENSATION_FAILED,
+            ))
+            .await
+        {
+            return match failure {
+                AppendFailure::LeaseLost => Self::interrupted(SagaInterruption::LeaseLost),
+                AppendFailure::JournalConflict => {
+                    Self::interrupted(SagaInterruption::JournalConflict)
+                }
+                AppendFailure::Storage => SagaOutcome::Failed {
+                    failed_node: action.name().to_string(),
+                    error: undo_err,
+                },
+            };
+        }
+        // F5：DLX 携 saga_id + 原始前向失败步（failed_node）+ 补偿失败步，诊断闭环。
+        self.dead_letter_compensation_failure(action.name(), failed_node, SAGA_COMPENSATION_FAILED)
+            .await;
+        self.mark_status_and_release_best_effort(SagaInstanceStatus::Failed)
+            .await;
+        SagaOutcome::Failed {
+            failed_node: action.name().to_string(),
+            error: undo_err,
         }
     }
 
@@ -605,15 +991,15 @@ where
         // identifier，非 PII；Debug 仍按 DeadLetterRecord 脱敏，运维经 DLX store 查询取用）。
         let payload = format!(
             "{{\"sagaId\":\"{}\",\"failedForwardStep\":\"{forward_step}\",\"failedCompensationStep\":\"{comp_step}\"}}",
-            self.saga_id.as_uuid()
+            self.instance.saga_id().as_uuid()
         )
         .into_bytes();
         let record = DeadLetterRecord::new(
-            self.tenant,
-            self.saga_id.as_uuid().to_string(),
+            self.instance.tenant(),
+            self.instance.saga_id().as_uuid().to_string(),
             self.owner.as_str(),
             self.contract_id,
-            self.saga_id.as_uuid().to_string(),
+            self.instance.saga_id().as_uuid().to_string(),
             None,
             payload,
             DeadLetterSummary::new(error_summary),
@@ -634,7 +1020,8 @@ where
         error_summary: &'static str,
     ) {
         tracing::error!(
-            saga_id = %self.saga_id.as_uuid(),
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
             step_name = comp_step,
             failed_forward_step = forward_step,
             error_summary,
@@ -645,48 +1032,57 @@ where
     /// DLX 写失败 error 日志（journal `Failed` 行是 durable 审计兜底）。
     fn error_dlx_write_failed(&self, node_name: &str) {
         tracing::error!(
-            saga_id = %self.saga_id.as_uuid(),
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
             step_name = node_name,
             "saga: dead-letter write failed (journal Failed row is durable audit)"
         );
     }
 
-    /// resume journal 读失败 error 日志（存储故障，与空 journal = 未知 saga 区分）。
+    /// resume journal 读失败 error 日志（存储故障，与空 journal 可从 step0 恢复区分）。
     fn error_resume_read_failed(&self) {
-        tracing::error!(saga_id = %self.saga_id.as_uuid(), "saga: resume journal read failed");
+        tracing::error!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            "saga: resume journal read failed"
+        );
     }
 
     /// resume：读 journal 重建状态，续前向 / 续补偿 / 终态直返。
     async fn resume(&self, actions: &[Box<dyn SagaAction>]) -> SagaOutcome {
         let entries = match self.read_resume_entries().await {
-            Ok(Some(entries)) => entries,
-            Ok(None) => return unknown_saga_outcome(),
-            Err(outcome) => return outcome,
+            Ok(entries) => entries,
+            Err(outcome) => {
+                self.release_lease_best_effort().await;
+                return outcome;
+            }
         };
 
         let definition = match self.definition_for_resume(actions) {
             Ok(definition) => definition,
-            Err(outcome) => return outcome,
+            Err(outcome) => {
+                self.release_lease_best_effort().await;
+                return outcome;
+            }
         };
 
         match definition.replay(&entries) {
             Ok(decision) => self.apply_replay_decision(actions, decision).await,
-            Err(err) => self.replay_error_outcome(&err),
+            Err(err) => {
+                self.release_lease_best_effort().await;
+                self.replay_error_outcome(&err)
+            }
         }
     }
 
-    async fn read_resume_entries(&self) -> Result<Option<Vec<SagaJournalRecord>>, SagaOutcome> {
-        let entries = match self.journal.read(&self.saga_id).await {
-            Ok(e) => e,
+    async fn read_resume_entries(&self) -> Result<Vec<SagaJournalRecord>, SagaOutcome> {
+        match self.journal.read(&self.instance).await {
+            Ok(entries) => Ok(entries),
             Err(_) => {
                 self.error_resume_read_failed();
-                return Err(unknown_saga_outcome());
+                Err(unknown_saga_outcome())
             }
-        };
-        if entries.is_empty() {
-            return Ok(None);
         }
-        Ok(Some(entries))
     }
 
     fn definition_for_resume(
@@ -695,7 +1091,7 @@ where
     ) -> Result<SagaDefinition, SagaOutcome> {
         definition_from_actions(actions).map_err(|err| {
             let failed_node = model_error_node(&err);
-            tracing::error!(saga_id = %self.saga_id.as_uuid(), failed_node = %failed_node, "saga: resume action definition invalid");
+            tracing::error!(tenant_id = %self.instance.tenant(), saga_id = %self.instance.saga_id().as_uuid(), failed_node = %failed_node, "saga: resume action definition invalid");
             SagaOutcome::Failed {
                 failed_node,
                 error: SagaActionError::SerializeFailed,
@@ -740,7 +1136,10 @@ where
                 )
                 .await
             }
-            SagaReplayDecision::Terminal { status } => outcome_from_terminal_status(status),
+            SagaReplayDecision::Terminal { status } => {
+                self.release_lease_best_effort().await;
+                outcome_from_terminal_status(status)
+            }
             _ => SagaOutcome::Failed {
                 failed_node: UNKNOWN_SAGA.to_string(),
                 error: SagaActionError::SerializeFailed,
@@ -750,7 +1149,7 @@ where
 
     fn replay_error_outcome(&self, err: &SagaModelError) -> SagaOutcome {
         let failed_node = model_error_node(err);
-        tracing::error!(saga_id = %self.saga_id.as_uuid(), failed_node = %failed_node, "saga: resume journal replay failed");
+        tracing::error!(tenant_id = %self.instance.tenant(), saga_id = %self.instance.saga_id().as_uuid(), failed_node = %failed_node, "saga: resume journal replay failed");
         SagaOutcome::Failed {
             failed_node,
             error: SagaActionError::SerializeFailed,
@@ -811,53 +1210,133 @@ fn outcome_from_terminal_status(status: SagaDurableStatus) -> SagaOutcome {
     }
 }
 
+fn outcome_from_instance_status(status: SagaInstanceStatus) -> SagaOutcome {
+    match status {
+        SagaInstanceStatus::Succeeded => SagaOutcome::Succeeded { output: Vec::new() },
+        SagaInstanceStatus::Compensated | SagaInstanceStatus::Failed => SagaOutcome::Failed {
+            failed_node: UNKNOWN_SAGA.to_string(),
+            error: SagaActionError::ActionFailed,
+        },
+        SagaInstanceStatus::Degraded => SagaOutcome::Interrupted {
+            reason: SagaInterruption::InstanceDegraded,
+        },
+        SagaInstanceStatus::Ready
+        | SagaInstanceStatus::Running
+        | SagaInstanceStatus::Compensating => SagaOutcome::Interrupted {
+            reason: SagaInterruption::LeaseBusy,
+        },
+        _ => SagaOutcome::Interrupted {
+            reason: SagaInterruption::StoreUnavailable,
+        },
+    }
+}
+
 /// SagaTailer 粗粒度状态（按 factory action definition + durable reducer 判断）。
-async fn status_of<J: SagaJournal>(
+async fn status_of<J: SagaJournal, S: SagaInstanceStore>(
     journal: &J,
-    saga_id: SagaId,
+    instance_store: &S,
+    instance: SagaInstanceRef,
     actions: &[Box<dyn SagaAction>],
 ) -> Option<SagaExecStatus> {
-    let entries = match read_status_entries(journal, saga_id).await {
+    let instance_status = match read_instance_status(instance_store, instance).await {
+        Ok(status) => status,
+        Err(status) => return Some(status),
+    };
+    if instance_status == Some(SagaInstanceStatus::Degraded) {
+        return Some(SagaExecStatus::Degraded);
+    }
+    let entries = match read_status_entries(journal, instance).await {
         Ok(entries) => entries,
         Err(status) => return Some(status),
     };
     if entries.is_empty() {
-        return None;
+        return instance_status.and_then(exec_status_from_instance_status);
     }
-    let Some(definition) = build_status_definition(saga_id, actions) else {
+    let Some(definition) = build_status_definition(instance, actions) else {
         return Some(SagaExecStatus::Degraded);
     };
-    Some(status_from_replay(saga_id, definition.replay(&entries)))
+    let replay_status = status_from_replay(instance, definition.replay(&entries));
+    Some(merge_instance_and_replay_status(
+        instance_status,
+        replay_status,
+    ))
+}
+
+async fn read_instance_status<S: SagaInstanceStore>(
+    store: &S,
+    instance: SagaInstanceRef,
+) -> Result<Option<SagaInstanceStatus>, SagaExecStatus> {
+    store
+        .get(&instance)
+        .await
+        .map(|row| row.map(|r| r.status()))
+        .inspect_err(|_| {
+            tracing::warn!(
+                tenant_id = %instance.tenant(),
+                saga_id = %instance.saga_id().as_uuid(),
+                "saga: status instance read failed"
+            );
+        })
+        .map_err(|_| SagaExecStatus::Degraded)
+}
+
+fn exec_status_from_instance_status(status: SagaInstanceStatus) -> Option<SagaExecStatus> {
+    match status {
+        SagaInstanceStatus::Ready => Some(SagaExecStatus::Ready),
+        SagaInstanceStatus::Running | SagaInstanceStatus::Compensating => {
+            Some(SagaExecStatus::Running)
+        }
+        SagaInstanceStatus::Succeeded
+        | SagaInstanceStatus::Compensated
+        | SagaInstanceStatus::Failed => Some(SagaExecStatus::Done),
+        SagaInstanceStatus::Degraded => Some(SagaExecStatus::Degraded),
+        _ => Some(SagaExecStatus::Degraded),
+    }
+}
+
+fn merge_instance_and_replay_status(
+    instance_status: Option<SagaInstanceStatus>,
+    replay_status: SagaExecStatus,
+) -> SagaExecStatus {
+    match instance_status.and_then(exec_status_from_instance_status) {
+        Some(SagaExecStatus::Degraded) => SagaExecStatus::Degraded,
+        Some(SagaExecStatus::Done) => SagaExecStatus::Done,
+        _ => replay_status,
+    }
 }
 
 async fn read_status_entries<J: SagaJournal>(
     journal: &J,
-    saga_id: SagaId,
+    instance: SagaInstanceRef,
 ) -> Result<Vec<SagaJournalRecord>, SagaExecStatus> {
     journal
-        .read(&saga_id)
+        .read(&instance)
         .await
-        .inspect_err(
-            |_| tracing::warn!(saga_id = %saga_id.as_uuid(), "saga: status journal read failed"),
-        )
+        .inspect_err(|_| {
+            tracing::warn!(
+                tenant_id = %instance.tenant(),
+                saga_id = %instance.saga_id().as_uuid(),
+                "saga: status journal read failed"
+            );
+        })
         .map_err(|_| SagaExecStatus::Degraded)
 }
 
 fn build_status_definition(
-    saga_id: SagaId,
+    instance: SagaInstanceRef,
     actions: &[Box<dyn SagaAction>],
 ) -> Option<SagaDefinition> {
     match definition_from_actions(actions) {
         Ok(definition) => Some(definition),
         Err(err) => {
-            warn_status_model_error(saga_id, &err, "saga: status action definition invalid");
+            warn_status_model_error(instance, &err, "saga: status action definition invalid");
             None
         }
     }
 }
 
 fn status_from_replay(
-    saga_id: SagaId,
+    instance: SagaInstanceRef,
     replay: Result<SagaReplayDecision, SagaModelError>,
 ) -> SagaExecStatus {
     match replay {
@@ -866,16 +1345,17 @@ fn status_from_replay(
         }
         Ok(SagaReplayDecision::Terminal { .. }) | Ok(_) => SagaExecStatus::Done,
         Err(err) => {
-            warn_status_model_error(saga_id, &err, "saga: status journal replay failed");
+            warn_status_model_error(instance, &err, "saga: status journal replay failed");
             SagaExecStatus::Degraded
         }
     }
 }
 
-fn warn_status_model_error(saga_id: SagaId, err: &SagaModelError, message: &'static str) {
+fn warn_status_model_error(instance: SagaInstanceRef, err: &SagaModelError, message: &'static str) {
     let failed_node = model_error_node(err);
     tracing::warn!(
-        saga_id = %saga_id.as_uuid(),
+        tenant_id = %instance.tenant(),
+        saga_id = %instance.saga_id().as_uuid(),
         failed_node = %failed_node,
         "{message}"
     );

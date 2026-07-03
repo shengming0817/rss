@@ -10,6 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use vocab::TenantId;
+
 /// saga step 名 newtype（私有字段；可生成 Rust 标识符且唯一 —— saga.md §Governance）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StepName(String);
@@ -95,6 +97,251 @@ impl SagaId {
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
     }
+}
+
+/// tenant-scoped saga instance identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SagaInstanceRef {
+    tenant: TenantId,
+    saga_id: SagaId,
+}
+
+/// `SagaInstanceRef` parse/validation error.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaInstanceRefError {
+    /// `SagaId` was nil UUID.
+    #[error("saga id is nil uuid")]
+    NilSagaId,
+}
+
+impl SagaInstanceRef {
+    /// Build a tenant-scoped saga identity. Nil saga UUID is rejected so tenant-scoped stores never
+    /// carry a sentinel row key.
+    pub fn new(tenant: TenantId, saga_id: SagaId) -> Result<Self, SagaInstanceRefError> {
+        if saga_id.as_uuid().is_nil() {
+            return Err(SagaInstanceRefError::NilSagaId);
+        }
+        Ok(Self { tenant, saga_id })
+    }
+
+    /// Tenant boundary.
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// Saga UUID newtype.
+    pub fn saga_id(&self) -> SagaId {
+        self.saga_id
+    }
+}
+
+/// Durable saga instance lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaInstanceStatus {
+    /// Registered but not yet running.
+    Ready,
+    /// Forward path is running.
+    Running,
+    /// All steps completed.
+    Succeeded,
+    /// Compensation path is running.
+    Compensating,
+    /// Compensation completed after a forward failure.
+    Compensated,
+    /// Compensation failed and requires manual intervention.
+    Failed,
+    /// Durable state is inconsistent or journal append conflicted.
+    Degraded,
+}
+
+impl SagaInstanceStatus {
+    /// All DB labels.
+    pub const ALL: [Self; 7] = [
+        Self::Ready,
+        Self::Running,
+        Self::Succeeded,
+        Self::Compensating,
+        Self::Compensated,
+        Self::Failed,
+        Self::Degraded,
+    ];
+
+    /// DB/wire label.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Compensating => "compensating",
+            Self::Compensated => "compensated",
+            Self::Failed => "failed",
+            Self::Degraded => "degraded",
+        }
+    }
+
+    /// Parse DB/wire label.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "ready" => Some(Self::Ready),
+            "running" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "compensating" => Some(Self::Compensating),
+            "compensated" => Some(Self::Compensated),
+            "failed" => Some(Self::Failed),
+            "degraded" => Some(Self::Degraded),
+            _ => None,
+        }
+    }
+}
+
+/// Durable saga instance row visible to tailers/executors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaInstanceRecord {
+    instance: SagaInstanceRef,
+    status: SagaInstanceStatus,
+}
+
+impl SagaInstanceRecord {
+    /// Build an instance row value.
+    pub fn new(instance: SagaInstanceRef, status: SagaInstanceStatus) -> Self {
+        Self { instance, status }
+    }
+
+    /// Instance identity.
+    pub fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// Current durable instance status.
+    pub fn status(&self) -> SagaInstanceStatus {
+        self.status
+    }
+}
+
+/// Saga lease CAS state. Journal writes are fenced by this token+epoch pair.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SagaLease {
+    instance: SagaInstanceRef,
+    holder_id: String,
+    lease_token: uuid::Uuid,
+    epoch: u64,
+}
+
+impl std::fmt::Debug for SagaLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SagaLease")
+            .field("instance", &self.instance)
+            .field("holder_id", &self.holder_id)
+            .field("lease_token", &"<redacted>")
+            .field("epoch", &self.epoch)
+            .finish()
+    }
+}
+
+/// `SagaLease` validation error.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaLeaseError {
+    /// Holder id was empty or blank.
+    #[error("saga lease holder id is empty")]
+    EmptyHolder,
+    /// Lease token was nil UUID.
+    #[error("saga lease token is nil uuid")]
+    NilToken,
+    /// Lease epoch must be positive after acquisition.
+    #[error("saga lease epoch must be positive")]
+    ZeroEpoch,
+}
+
+impl SagaLease {
+    /// Build a validated lease value returned by an instance store.
+    pub fn new(
+        instance: SagaInstanceRef,
+        holder_id: impl Into<String>,
+        lease_token: uuid::Uuid,
+        epoch: u64,
+    ) -> Result<Self, SagaLeaseError> {
+        let holder_id = holder_id.into();
+        if holder_id.trim().is_empty() {
+            return Err(SagaLeaseError::EmptyHolder);
+        }
+        if lease_token.is_nil() {
+            return Err(SagaLeaseError::NilToken);
+        }
+        if epoch == 0 {
+            return Err(SagaLeaseError::ZeroEpoch);
+        }
+        Ok(Self {
+            instance,
+            holder_id,
+            lease_token,
+            epoch,
+        })
+    }
+
+    /// Protected saga instance.
+    pub fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// Current holder id.
+    pub fn holder_id(&self) -> &str {
+        &self.holder_id
+    }
+
+    /// Opaque lease token.
+    pub fn lease_token(&self) -> uuid::Uuid {
+        self.lease_token
+    }
+
+    /// Monotonic instance-local epoch.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+/// Lease CAS check outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaLeaseOutcome {
+    /// Token+epoch are still held.
+    Held,
+    /// Token+epoch no longer match or the lease expired.
+    Lost,
+}
+
+/// Saga journal append outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaJournalAppendOutcome {
+    /// New journal row was inserted.
+    Appended,
+    /// Existing `(tenant_id, saga_id, seq)` row exactly matched the append record.
+    IdempotentDuplicate,
+    /// Existing row differs from the append record.
+    AppendConflict,
+    /// Lease token/epoch did not fence the write.
+    LeaseLost,
+}
+
+/// Non-business interruption reason. These outcomes must not trigger compensation or app DLX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaInterruption {
+    /// Another holder owns the instance.
+    LeaseBusy,
+    /// Previously acquired lease was lost or expired.
+    LeaseLost,
+    /// Journal append conflicted with an existing different row.
+    JournalConflict,
+    /// Durable saga instance store returned an infrastructure or invariant error.
+    StoreUnavailable,
+    /// `run` was asked to start an instance that already exists.
+    AlreadyStarted,
+    /// Durable instance status is degraded and requires manual intervention.
+    InstanceDegraded,
 }
 
 /// saga durable journal 条目状态。label 与 postgres `saga_journal.status` CHECK 集合同源。
@@ -762,8 +1009,9 @@ pub trait SagaStep {
 #[cfg(test)]
 mod tests {
     use super::{
-        SagaDefinition, SagaDurableStatus, SagaId, SagaJournalAppendRecord, SagaJournalRecord,
-        SagaJournalStatus, SagaModelError, SagaReplayDecision, StepName, StepNameError,
+        SagaDefinition, SagaDurableStatus, SagaId, SagaInstanceRef, SagaInstanceRefError,
+        SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseError,
+        SagaModelError, SagaReplayDecision, StepName, StepNameError,
     };
 
     #[allow(clippy::unwrap_used)]
@@ -1243,5 +1491,57 @@ mod tests {
         assert!(super::is_rust_ident("function"));
         assert!(super::is_rust_ident("r"));
         assert!(!super::is_rust_ident("r#fn"));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 canonical tenant literal 与 non-nil uuid happy path，item-level carve-out。
+    fn saga_instance_ref_is_tenant_scoped_and_rejects_nil_saga_id() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let id = SagaId::new(uuid::Uuid::from_u128(42));
+
+        let instance = SagaInstanceRef::new(tenant, id).unwrap();
+
+        assert_eq!(instance.tenant(), tenant);
+        assert_eq!(instance.saga_id(), id);
+        assert_eq!(
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::nil())),
+            Err(SagaInstanceRefError::NilSagaId)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 canonical literals，item-level carve-out。
+    fn saga_lease_rejects_empty_holder_nil_token_and_zero_epoch() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(42))).unwrap();
+        let token = uuid::Uuid::from_u128(7);
+
+        assert_eq!(
+            SagaLease::new(instance, " ", token, 1),
+            Err(SagaLeaseError::EmptyHolder)
+        );
+        assert_eq!(
+            SagaLease::new(instance, "runner-a", uuid::Uuid::nil(), 1),
+            Err(SagaLeaseError::NilToken)
+        );
+        assert_eq!(
+            SagaLease::new(instance, "runner-a", token, 0),
+            Err(SagaLeaseError::ZeroEpoch)
+        );
+        let lease = SagaLease::new(instance, "runner-a", token, 1).unwrap();
+        assert_eq!(lease.instance(), instance);
+        assert_eq!(lease.holder_id(), "runner-a");
+        assert_eq!(lease.lease_token(), token);
+        assert_eq!(lease.epoch(), 1);
+
+        let rendered = format!("{lease:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            !rendered.contains(&token.to_string()),
+            "SagaLease Debug must not expose bearer lease token: {rendered}"
+        );
     }
 }

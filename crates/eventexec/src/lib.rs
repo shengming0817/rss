@@ -63,7 +63,8 @@ pub use projection::{ProjectionHarness, ProjectionRun, ProjectionStop};
 pub mod saga;
 pub use saga::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaExecStatus, SagaExecutor,
-    SagaExecutorImpl, SagaId, SagaOutcome, SagaTailer,
+    SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome,
+    SagaTailer,
 };
 
 use std::sync::Arc;

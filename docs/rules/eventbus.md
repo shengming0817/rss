@@ -8,7 +8,7 @@ cargo 依赖图三道门禁其依赖 `adapters/*`），故 resolver 是**纯策�
 校验 + 凭据 redaction，返回**已校验决策** `ResolvedTransport::{Demo | Durable { per_domain }}`，
 **不构造具体 adapter**；组合根 `match` 该决策再构造 `MemBus`（`adapters/memory`）/ amqp
 （`adapters/amqp`）。`clk` 不入 eventtransport `resolve` 签名（传输决策不依赖时钟；replaydeps /
-sagaprojectiondeps 才需 ctx/clk）：
+saga instance 依赖选型才需 ctx/clk）：
 
 - `Topology::Demo`（demo / memory）→ `ResolvedTransport::Demo` → 组合根构造进程内 in-mem bus（Publisher == Subscriber 同实例）。
 - `Topology::DurableShared`（共享 broker）→ `ResolvedTransport::Durable { per_domain }`：每个 required 域
@@ -96,24 +96,23 @@ real multi-pod → Redis-backed（client 作 ManagedResource），缺 Redis 配�
 sealed resolver + `pub(crate)` 构造器从类型层封闭（Hard，编译期不可达）。bus / claimer / nonce 三 funnel 合起来确保组合根内每个 in-memory
 单 pod 原语只经 sealed resolver 可达。权威语义见 `bootstrap::replaydeps` 模块的 rustdoc。
 
-## saga 投影资源选型（journal / checkpoint / dead-letter / locker，topology-gated）
+## saga 实例资源选型（instance / journal / checkpoint / dead-letter，topology-gated）
 
-saga-journal CQRS 投影消费者的运行依赖经 `bootstrap::sagaprojectiondeps::resolve(ctx, clk, topo, cfg)`
-按 `Topology` 单源选型（bootstrap::eventtransport / bootstrap::replaydeps 的第 3 个 sibling resolver）：saga journal（与
-Coordinator 共用，再以 `journal::GlobalReader` 喂投影）+ `projection::OwnerCheckpointStore` +
-`projection::DeadLetterStore`（poison-event sink）+ 投影 `TxRunner` + 每投影 leader `distlock::Locker`：
+L3 saga runtime 是 direct `run` / `resume` / `status` 调用路径，不提供 background 投影 worker、
+resume-all 扫描器或 leader locker。组合根注入的最小资源集合是 tenant-scoped `SagaInstanceStore` +
+tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterStore`：
 
-- demo/memory → `MemJournal` + `MemOwnerCheckpointStore` + `MemDeadLetterStore` + in-process locker + `DemoTxRunner`。
-- postgres → PG `PgJournal` + PG `ProjectionCheckpointStore` + PG `SagaProjectionDeadLetterStore` + PG `TxManager`；单 pod in-process
-  locker，real multi-pod → Redis-backed locker。PG pool / Redis client 由组合根注入
-  （root 已持 pool 跑 migration，避免开第二个 pool）。
-- fail-closed：postgres 缺 pool / multi-pod 缺 Redis → 启动期报错，**不静默降级**回 in-memory
-  journal（丢重启事件）或 in-process locker（多副本各自当 leader 双投影）。
+- demo/memory → paired `MemSagaInstanceStore` / `MemSagaJournal`（共享 lease state）+
+  `MemCheckpointStore` + `MemDeadLetterStore`。
+- postgres → `PgSagaInstanceStore` / `PgSagaJournal`，两者只经 `PgTenantPool` 访问 tenant 表；
+  `saga_instances` 承载 register/claim/extend/release/status CAS，`saga_journal` 承载 durable append-only
+  step facts。
+- fail-closed：tenant scope 缺失、lease token/epoch/expiry 不匹配、或 `(tenant_id, saga_id, seq)` 内容冲突，
+  必须返回 typed interrupted outcome，不触发补偿或 app DLX。
 
-in-process 单 pod 锁原语 `distlock::InProcessDriver::new` 在 wiring 层（`bins/*` / 组合根 crate /
-`examples/*`）**仅** `bootstrap::sagaprojectiondeps::resolve` 的 demo 分支可达——优先用 sealed resolver +
-`pub(crate)` 构造器从类型层封闭 `adapters/*` 的 in-process driver（Hard，编译期不可达）。这是 bus / claimer / nonce 之外**第 4 个**
-sealed 单 pod 原语 funnel。权威语义见 `bootstrap::sagaprojectiondeps` 模块的 rustdoc。
+`saga_instances` 与 `saga_journal` 均为 tenant 表：迁移必须同时落 `ENABLE/FORCE RLS`、标准
+`rss.tenant_id` policy 和 serving role 最小权限；`saga_journal` 仅 `SELECT/INSERT`，撤销 `UPDATE/DELETE`。
+checkpoint 表不改 schema，saga checkpoint id 必须包含 tenant，避免跨租户同 saga UUID 碰撞。
 
 ## ConsumerBase
 

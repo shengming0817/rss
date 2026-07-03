@@ -190,7 +190,7 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
 
 - **组合根 / `module()`**:域 crate 暴露 `pub fn module() -> DomainModule`;adapter↔域绑定在 `bins/server` /
   assembly 用构造器注入完成(无独立组合层)。topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
-  是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖)。
+  是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。
 - **持久化能力分层**:`DomainModuleResult`(域 `module()` 的标准装配出口,聚合 services/routes/probes/resources/workers) / Pg
   capability bundle(`PgRuntimeDeps`·`PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
   (`docs/architecture/202606270148-010-persistence-capability-layering.md`);执行体随 #1419(runtime base) / #1421(settings

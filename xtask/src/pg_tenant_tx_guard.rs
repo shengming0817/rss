@@ -663,7 +663,6 @@ fn is_raw_pool_field_exception(rel: &str) -> bool {
             | "inbox.rs"
             | "outbox.rs"
             | "projection_events.rs"
-            | "saga_journal.rs"
     )
 }
 
